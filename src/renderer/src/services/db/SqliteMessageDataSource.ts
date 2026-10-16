@@ -36,6 +36,8 @@ import type {
   CountFileRefsByFileResponse,
   CreateBranchRequest,
   CreateBranchResponse,
+  CreateReferencedTopicRequest,
+  CreateReferencedTopicResponse,
   DeleteBlocksRequest,
   DeleteBlocksResponse,
   DeleteBranchRequest,
@@ -73,6 +75,7 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  HistoryReferenceMeta,
   ImportTopicDataRequest,
   ImportTopicDataResponse,
   InsertMessageGroup,
@@ -128,6 +131,7 @@ import type {
   TopicBranchWire,
   TopicDataExportPayload,
   TopicExistsRequest,
+  TopicReferenceWire,
   TopicWire,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
@@ -143,7 +147,7 @@ import type {
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
-import type { MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource } from './types'
 
 // ---------------------------------------------------------------------------
 // ChatDbApi — narrow typed interface for the preload bridge
@@ -170,6 +174,7 @@ export interface ChatDbApi {
   importTopicData?(request: ImportTopicDataRequest): Promise<ChatDbResult<ImportTopicDataResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   createBranch?(request: CreateBranchRequest): Promise<ChatDbResult<CreateBranchResponse>>
+  createReferencedTopic?(request: CreateReferencedTopicRequest): Promise<ChatDbResult<CreateReferencedTopicResponse>>
   listBranches?(request: ListBranchesRequest): Promise<ChatDbResult<ListBranchesResponse>>
   renameBranch?(request: RenameBranchRequest): Promise<ChatDbResult<RenameBranchResponse>>
   deleteBranch?(request: DeleteBranchRequest): Promise<ChatDbResult<DeleteBranchResponse>>
@@ -560,12 +565,14 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async updateBlocks(
     blocks: MessageBlock[],
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ): Promise<void> {
     void streamDiag
     const request: UpdateBlocksRequest = {
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.updateBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
@@ -575,29 +582,35 @@ export class SqliteMessageDataSource implements MessageDataSource {
     blockId: string,
     updates: Partial<MessageBlock>,
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ): Promise<void> {
     void streamDiag
     const request: UpdateSingleBlockRequest = {
       blockId,
       updates: cloneForWire(updates as unknown as JsonObject),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.updateSingleBlock(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string): Promise<void> {
+  async bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string, route?: BlockWriteRouteContext): Promise<void> {
     const request: BulkAddBlocksRequest = {
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.bulkAddBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async deleteBlocks(blockIds: string[]): Promise<FileCleanupResult> {
-    const request: DeleteBlocksRequest = cloneForWire({ blockIds })
+  async deleteBlocks(blockIds: string[], route?: BlockWriteRouteContext): Promise<FileCleanupResult> {
+    const request: DeleteBlocksRequest = cloneForWire({
+      blockIds,
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
+    })
     return unwrap(await this.api.deleteBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
@@ -871,6 +884,43 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
   }
 
+  // ============ Cross-topic history references (local-only live prefix) ============
+
+  /**
+   * Create a new target topic that references a source route through a precise
+   * anchor (Reference/Copy = Reference). Atomic in Main (topic + relation);
+   * returns the live foreign prefix for projection. The target topic is
+   * local-only (its foreign prefix is not representable in sync).
+   */
+  async createReferencedTopic(
+    sourceTopicId: string,
+    sourceBranchId: string | null | undefined,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ): Promise<{ topicId: string; reference: TopicReferenceWire; messages: Message[]; blocks: MessageBlock[] }> {
+    if (!this.api.createReferencedTopic) {
+      throw new Error('ChatDb API unavailable: createReferencedTopic not exposed')
+    }
+    const request: CreateReferencedTopicRequest = cloneForWire({
+      sourceTopicId,
+      branchId: sourceBranchId ?? null,
+      targetTopicId,
+      anchorMessageId,
+      assistantId,
+      name
+    })
+    const result = unwrap(await this.api.createReferencedTopic(request))
+    dispatchTopicUpdatedAt(targetTopicId)
+    return {
+      topicId: result.topicId,
+      reference: result.reference,
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[]
+    }
+  }
+
   async listBranches(topicId: string): Promise<ListBranchesResponse> {
     if (!this.api.listBranches) {
       throw new Error('ChatDb API unavailable: listBranches not exposed')
@@ -1073,7 +1123,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       window: result.window,
       mutableMessageIds: Array.isArray((result as { mutableMessageIds?: unknown }).mutableMessageIds)
         ? ((result as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-        : []
+        : [],
+      reference: (result as { reference?: HistoryReferenceMeta | null }).reference ?? null
     } as unknown as FetchMessagesWindowResponse
   }
 

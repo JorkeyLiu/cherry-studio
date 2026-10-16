@@ -8,6 +8,11 @@
  *   values never contradict stored rows. Identity/scope columns (topic id,
  *   assistant bindings, deletedAt) are stripped; attachment payloads, the
  *   Dexie file catalog, and credentials are never included.
+ * - A referenced-history prefix (when the source topic is itself a reference
+ *   target) is MATERIALIZED into the payload as target-MAIN-owned snapshot
+ *   rows, ahead of the topic's own main rows and exactly once. The export is
+ *   standalone: it never records a live source relation. A missing source is
+ *   recorded explicitly (never faked as complete) with no source identity.
  * - Import deep-validates the untrusted payload (format marker, schema
  *   version, unique IDs, referential links, branch parent cycles, anchor
  *   owner relationships) BEFORE any write, allocates fresh IDs for the new
@@ -32,6 +37,7 @@ import type {
   TopicDataExportBlock,
   TopicDataExportBranch,
   TopicDataExportFileReference,
+  TopicDataExportHistorySnapshot,
   TopicDataExportMessage,
   TopicDataExportPayload,
   TopicDataExportSegment,
@@ -65,12 +71,43 @@ const TOPIC_DATA_PAYLOAD_KEYS = new Set([
   'blocks',
   'branches',
   'segments',
-  'fileReferences'
+  'fileReferences',
+  'historySnapshot'
 ])
 
 // ---------------------------------------------------------------------------
 // Export builder (Main domain rows → versioned payload)
 // ---------------------------------------------------------------------------
+
+/**
+ * Materialized referenced-history prefix of a reference-target topic.
+ *
+ * `messages` is the foreign effective prefix (recursive references and source
+ * branch rows already flattened, canonical source-route order through the
+ * anchor inclusive). It is embedded as target-MAIN-owned snapshot rows; no
+ * external source branch id is retained.
+ */
+export interface TopicDataHistoryPrefixInput {
+  /**
+   * Provenance posture of the referenced-history snapshot.
+   * - `materialized` — the complete required prefix is present.
+   * - `missing` — at least one required reference-history segment is missing
+   *   (the source is gone, or a nested reference deeper in the source chain
+   *   could not be resolved), so the history is incomplete.
+   */
+  status: 'materialized' | 'missing'
+  /**
+   * Foreign effective prefix rows available at export time (canonical order).
+   * Carried independently of `status`: a `missing` snapshot still exports any
+   * surviving prefix rows (no partial-prefix loss); it is empty only when no
+   * prefix row survives (e.g. the immediate source is gone).
+   */
+  messages: MessageData[]
+  /** Blocks keyed by owning (foreign) message id. */
+  blocksByMessage: Map<string, MessageBlockData[]>
+  /** File-reference rows for the materialized prefix blocks. */
+  fileReferences: FileReferenceData[]
+}
 
 export interface TopicDataExportInput {
   topic: TopicData
@@ -84,6 +121,13 @@ export interface TopicDataExportInput {
   segments: Array<{ segment: TopicSegmentData; messageIds: string[] }>
   /** File-reference rows for the exported blocks. */
   fileReferences: FileReferenceData[]
+  /**
+   * Referenced-history prefix to materialize when the exported topic is a
+   * reference target (optional/null = ordinary topic). Never a live relation:
+   * the prefix becomes target-owned snapshot rows and a minimal provenance
+   * `historySnapshot` posture is recorded.
+   */
+  historyPrefix?: TopicDataHistoryPrefixInput | null
   exportedAt: string
 }
 
@@ -106,11 +150,57 @@ const SEGMENT_STRIP_KEYS = new Set(['topicId', 'firstMessageId', 'lastMessageId'
 export function buildTopicDataExport(input: TopicDataExportInput): TopicDataExportPayload {
   const topicWire = stripKeys(topicToWireFull(input.topic), TOPIC_STRIP_KEYS) as TopicDataExportTopic
 
-  const messages = input.messages.map(
-    (message) => stripKeys(messageToWire(message), MESSAGE_STRIP_KEYS) as TopicDataExportMessage
-  )
+  const prefix = input.historyPrefix ?? null
+  // Prefix rows are carried whenever they survive, independent of the
+  // provenance `status`: a `missing` snapshot (e.g. a nested reference deeper
+  // in the source chain was unresolvable) still exports the surviving partial
+  // prefix rather than dropping it. An immediate-missing snapshot already
+  // carries an empty array.
+  const prefixMessages = prefix ? prefix.messages : []
+
+  // A materialized prefix is foreign history flattened into the target's MAIN
+  // route. Source-stable ids must never collide with the topic's own rows —
+  // impossible across distinct topics, so a collision is a defect and fails
+  // closed rather than being silently overridden.
+  const prefixIds = new Set<string>()
+  for (const message of prefixMessages) {
+    if (prefixIds.has(message.id)) {
+      throw new ChatDbValidationError(`Duplicate referenced-history message id "${message.id}" in export`)
+    }
+    prefixIds.add(message.id)
+  }
+  for (const message of input.messages) {
+    if (prefixIds.has(message.id)) {
+      throw new ChatDbValidationError(
+        `Referenced-history message id "${message.id}" collides with an owned row in export`
+      )
+    }
+  }
+
+  // Materialize the prefix as MAIN-owned rows with a dense, collision-free
+  // order (0..P-1) that precedes the topic's own main rows; own main rows are
+  // shifted by P (uniform shift preserves their relative order). Branch rows
+  // keep their per-branch orders (an independent ordering scope).
+  const shift = prefixMessages.length
+  const messages: TopicDataExportMessage[] = []
+  for (const [index, message] of prefixMessages.entries()) {
+    const wire = stripKeys(messageToWire(message), MESSAGE_STRIP_KEYS) as TopicDataExportMessage
+    messages.push({ ...wire, branchId: null, sortOrder: index })
+  }
+  for (const message of input.messages) {
+    const wire = stripKeys(messageToWire(message), MESSAGE_STRIP_KEYS) as TopicDataExportMessage
+    if ((message.branchId ?? null) === null && shift > 0) {
+      wire.sortOrder = (wire.sortOrder ?? 0) + shift
+    }
+    messages.push(wire)
+  }
 
   const blocks: TopicDataExportBlock[] = []
+  for (const message of prefixMessages) {
+    for (const block of prefix?.blocksByMessage.get(message.id) ?? []) {
+      blocks.push(blockToWire(block) as TopicDataExportBlock)
+    }
+  }
   for (const message of input.messages) {
     for (const block of input.blocksByMessage.get(message.id) ?? []) {
       blocks.push(blockToWire(block) as TopicDataExportBlock)
@@ -138,12 +228,16 @@ export function buildTopicDataExport(input: TopicDataExportInput): TopicDataExpo
     } as TopicDataExportSegment
   })
 
-  const fileReferences = input.fileReferences.map((ref) => {
+  const toFileRefWire = (ref: FileReferenceData): TopicDataExportFileReference => {
     const wire = fileReferenceToWire(ref) as FileReferenceWire & JsonObject
     return { ...ref.overflow, ...wire } as TopicDataExportFileReference
-  })
+  }
+  const fileReferences: TopicDataExportFileReference[] = [
+    ...(prefix?.fileReferences ?? []).map(toFileRefWire),
+    ...input.fileReferences.map(toFileRefWire)
+  ]
 
-  return {
+  const payload: TopicDataExportPayload = {
     format: TOPIC_DATA_FORMAT,
     version: TOPIC_DATA_VERSION,
     exportedAt: input.exportedAt,
@@ -154,6 +248,15 @@ export function buildTopicDataExport(input: TopicDataExportInput): TopicDataExpo
     segments,
     fileReferences
   }
+
+  // Minimal provenance: only the snapshot posture of the referenced history
+  // (present only for a reference target). Never source ids/names/paths.
+  if (prefix) {
+    const historySnapshot: TopicDataExportHistorySnapshot = { status: prefix.status }
+    payload.historySnapshot = historySnapshot
+  }
+
+  return payload
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +370,12 @@ export interface ValidatedTopicDataImport {
   branches: Array<Record<string, unknown> & { id: string }>
   segments: Array<Record<string, unknown> & { id: string }>
   fileReferences: Array<Record<string, unknown> & { id: string }>
+  /**
+   * Optional provenance posture of the embedded referenced-history snapshot.
+   * Provenance only: the prefix rows are ordinary main-owned rows, so import
+   * never recreates a live relation. Null = field absent (ordinary topic).
+   */
+  historySnapshot: { status: 'materialized' | 'missing' } | null
 }
 
 /**
@@ -554,7 +663,23 @@ export function validateTopicDataImport(payload: unknown): ValidatedTopicDataImp
     }
   }
 
-  return { topic, messages, blocks, branches, segments, fileReferences }
+  // Optional provenance posture of the embedded referenced-history snapshot.
+  // Provenance only: no source ids/names/paths are representable, and it never
+  // recreates a live relation on import (the prefix rows are ordinary
+  // main-owned rows already carried in `messages`).
+  let historySnapshot: ValidatedTopicDataImport['historySnapshot'] = null
+  if (root.historySnapshot !== undefined && root.historySnapshot !== null) {
+    const snap = reqObject(root.historySnapshot, 'payload.historySnapshot')
+    for (const key of Object.keys(snap)) {
+      if (key !== 'status') fail('payload.historySnapshot', `unknown key "${key}"`)
+    }
+    if (snap.status !== 'materialized' && snap.status !== 'missing') {
+      fail('payload.historySnapshot.status', 'expected "materialized" or "missing"')
+    }
+    historySnapshot = { status: snap.status }
+  }
+
+  return { topic, messages, blocks, branches, segments, fileReferences, historySnapshot }
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +783,32 @@ export function planTopicDataImport(
     }
   })
 
-  const branches: TopicBranchData[] = validated.branches.map((record) => {
+  // Branch rows are FK-checked immediately as they are inserted, but the
+  // export orders branches by (createdAt ASC, id ASC) — a child can precede
+  // its parent there when both share a timestamp and the child's id sorts
+  // earlier. Emit parents before children. Validation already rejected
+  // unknown parents and cycles, so ordering by ancestry depth is a bounded,
+  // deterministic topological sort (no new graph subsystem); sibling/cousin
+  // order (equal depth) is preserved from the payload.
+  const branchById = new Map(validated.branches.map((record) => [record.id, record]))
+  const branchDepth = (record: (typeof validated.branches)[number]): number => {
+    let depth = 0
+    let current = record.parentBranchId as string | null
+    const seen = new Set<string>([record.id])
+    while (current !== null) {
+      if (seen.has(current)) break // validation already rejects cycles; defensive only
+      seen.add(current)
+      depth += 1
+      current = (branchById.get(current)?.parentBranchId as string | null) ?? null
+    }
+    return depth
+  }
+  const orderedBranchRecords = validated.branches
+    .map((record, index) => ({ record, index, depth: branchDepth(record) }))
+    .sort((a, b) => (a.depth !== b.depth ? a.depth - b.depth : a.index - b.index))
+    .map((entry) => entry.record)
+
+  const branches: TopicBranchData[] = orderedBranchRecords.map((record) => {
     const oldAnchor = record.anchorMessageId as string
     return {
       id: branchIdMap.get(record.id)!,
@@ -703,5 +853,13 @@ export function planTopicDataImport(
     overflow: splitOverflow(record, FILE_REF_KNOWN_KEYS, 'payload.fileReferences')
   }))
 
-  return { topic, messages, blocks, branches, segments, memberships, fileReferences }
+  return {
+    topic,
+    messages,
+    blocks,
+    branches,
+    segments,
+    memberships,
+    fileReferences
+  }
 }

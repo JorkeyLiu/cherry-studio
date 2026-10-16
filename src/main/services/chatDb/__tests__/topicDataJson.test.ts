@@ -788,4 +788,412 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
       .sort((a, b) => a - b)
     expect(orders).toEqual(sparse.messages.map((m) => m.sortOrder).sort((a, b) => a - b))
   })
+
+  it('orders import branch rows parent-before-child when export id order puts the child first', () => {
+    const assistantId = `assistant-branch-${uid('a')}`
+    const topicId = `t-${uid('t')}`
+    agg.ensureTopic(topicId, assistantId, 'BranchOrder')
+    const repos = createRepositories(db)
+    const ts = '2024-01-01T00:00:00.000Z'
+
+    // Main anchor row for the level-1 parent branch.
+    const m0 = makeMessageJson(topicId, { id: `m-${uid('m')}`, content: 'm0' })
+    append(topicId, m0, [makeBlockJson(m0.id as string)])
+
+    // The parent id sorts AFTER the child id; both share one timestamp, so the
+    // export order (createdAt ASC, id ASC) emits the child before its parent.
+    const parentId = 'br-parent-z'
+    const childId = 'br-child-a'
+    expect(childId < parentId).toBe(true)
+
+    repos.branches.create({
+      id: parentId,
+      topicId,
+      parentBranchId: null,
+      anchorMessageId: m0.id as string,
+      name: 'P',
+      createdAt: ts,
+      updatedAt: ts,
+      overflow: {}
+    })
+    const p0 = makeMessageJson(topicId, { id: `m-${uid('m')}`, content: 'p0' })
+    append(topicId, p0, [makeBlockJson(p0.id as string)], parentId)
+    repos.branches.create({
+      id: childId,
+      topicId,
+      parentBranchId: parentId,
+      anchorMessageId: p0.id as string,
+      name: 'C',
+      createdAt: ts,
+      updatedAt: ts,
+      overflow: {}
+    })
+    const c0 = makeMessageJson(topicId, { id: `m-${uid('m')}`, content: 'c0' })
+    append(topicId, c0, [makeBlockJson(c0.id as string)], childId)
+
+    const payload = exportPayload(topicId)
+    // Hazard reproduced deterministically: the child precedes its parent.
+    expect(payload.branches.map((b) => b.id)).toEqual([childId, parentId])
+
+    // Import must reorder parent-before-child so the immediate self-FK holds.
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    expect(imported.branchCount).toBe(2)
+
+    const newTopicId = imported.topic.id
+    const newBranches = repos.branches.listByTopic(newTopicId)
+    const byName = new Map(newBranches.map((b) => [b.name, b]))
+    const np = byName.get('P')!
+    const nc = byName.get('C')!
+    // Parent/anchor relationships and owners survive the reorder unchanged.
+    expect(np.parentBranchId).toBeNull()
+    expect(nc.parentBranchId).toBe(np.id)
+    const byContent = new Map(repos.messages.listAllByTopic(newTopicId).map((m) => [m.content, m]))
+    expect(np.anchorMessageId).toBe(byContent.get('m0')!.id)
+    expect(nc.anchorMessageId).toBe(byContent.get('p0')!.id)
+    expect(byContent.get('m0')!.branchId).toBeNull()
+    expect(byContent.get('p0')!.branchId).toBe(np.id)
+    expect(byContent.get('c0')!.branchId).toBe(nc.id)
+  })
+})
+
+describe('topic-data JSON exchange — referenced-history snapshot materialization', () => {
+  let tmpDir: string
+  let sqlite: Database.Database
+  let db: BetterSQLite3Database<typeof schema>
+  let agg: ChatDbAggregateService
+
+  beforeEach(() => {
+    tmpDir = makeTempDir()
+    sqlite = openTestDb(realPath.join(tmpDir, 'test.db'))
+    db = wrapDrizzle(sqlite)
+    runMigrations(db, sqlite)
+    agg = new ChatDbAggregateService(db)
+    mockCleanTopic.mockReset().mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    try {
+      sqlite.close()
+    } catch {
+      // ignore
+    }
+    rmrf(tmpDir)
+  })
+
+  function seedSource(sourceId: string, n: number): string[] {
+    const ids: string[] = []
+    agg.ensureTopic(sourceId, 'assistant-src', 'Source')
+    for (let i = 0; i < n; i++) {
+      const msg = makeMessageJson(sourceId, { id: `src-m-${uid('m')}`, content: `s${i}` })
+      const blk = makeBlockJson(msg.id as string)
+      ids.push(msg.id as string)
+      expect(agg.appendMessage(sourceId, msg as any, [blk as any]).ok).toBe(true)
+    }
+    return ids
+  }
+
+  function append(
+    topicId: string,
+    message: Record<string, unknown>,
+    blocks: Record<string, unknown>[],
+    branchId?: string | null
+  ) {
+    const res = agg.appendMessage(topicId, message as any, blocks as any, undefined, undefined, {
+      branchId: branchId ?? null
+    })
+    expect(res.ok).toBe(true)
+  }
+
+  function exportPayload(topicId: string): TopicDataExportPayload {
+    const result = agg.exportTopicData({ topicId })
+    expect(result.ok).toBe(true)
+    const payload = okValue(result).payload
+    expect(() => validateChatDbResult('chatdb:export-topic-data', { ok: true, value: { payload } })).not.toThrow()
+    return JSON.parse(JSON.stringify(payload)) as TopicDataExportPayload
+  }
+
+  function collectKeys(value: unknown, keys: string[]): string[] {
+    if (Array.isArray(value)) {
+      for (const entry of value) collectKeys(entry, keys)
+    } else if (value !== null && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        keys.push(key)
+        collectKeys(entry, keys)
+      }
+    }
+    return keys
+  }
+
+  it('ordinary topics omit the optional historySnapshot field (backward compatible)', () => {
+    const topicId = `t-${uid('t')}`
+    const ids = seedSource(topicId, 2)
+    const payload = exportPayload(topicId)
+    // The old live-relation field is gone; provenance is absent for a topic
+    // that references no history, and the ordinary export is unshifted.
+    expect('historyReference' in payload).toBe(false)
+    expect('historySnapshot' in payload).toBe(false)
+    expect(payload.messages.map((m) => m.id)).toEqual(ids)
+    expect(payload.messages.map((m) => m.sortOrder)).toEqual([0, 1])
+  })
+
+  it('materializes the referenced prefix as main-owned rows ahead of the suffix, standalone', () => {
+    const source = `t-${uid('t')}`
+    const sourceIds = seedSource(source, 3)
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(source, null, target, sourceIds[2], undefined, 'Ref Target'))
+    const suffix = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'suffix' })
+    append(target, suffix, [makeBlockJson(suffix.id as string)])
+
+    const payload = exportPayload(target)
+    expect(payload.historySnapshot).toEqual({ status: 'materialized' })
+    // Canonical source prefix precedes the topic's own main row; both are
+    // main-owned (the source branch owner is never retained).
+    expect(payload.messages.map((m) => m.id)).toEqual([...sourceIds, suffix.id])
+    expect(payload.messages.map((m) => m.branchId)).toEqual([null, null, null, null])
+    expect(payload.messages.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3])
+    // Prefix blocks + owned blocks are all present.
+    expect(payload.blocks).toHaveLength(4)
+    // Provenance records only the posture, never source identity/paths.
+    expect(Object.keys(payload.historySnapshot as object)).toEqual(['status'])
+    const keys = collectKeys(payload, [])
+    expect(keys).not.toContain('historyReference')
+    for (const banned of ['sourceTopicId', 'sourceBranchId', 'anchorMessageId', 'sourceName']) {
+      expect(keys).not.toContain(banned)
+    }
+    expect(JSON.stringify(payload)).not.toContain('assistant-src')
+  })
+
+  it('imports an independent writable target; source deletion has no effect', () => {
+    const source = `t-${uid('t')}`
+    const sourceIds = seedSource(source, 3)
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(source, null, target, sourceIds[2], undefined, 'Ref Target'))
+    const suffix = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'suffix' })
+    append(target, suffix, [])
+
+    const payload = exportPayload(target)
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const newTopicId = imported.topic.id
+    expect(newTopicId).not.toBe(target)
+
+    const repos = createRepositories(db)
+    // The import recreates no live relation: the topic is fully independent.
+    expect(repos.topicReferences.getByTarget(newTopicId).found).toBe(false)
+    const all = repos.messages.listAllByTopic(newTopicId)
+    expect(all).toHaveLength(4)
+    const freshIds = new Set(all.map((m) => m.id))
+    for (const m of all) expect(m.topicId).toBe(newTopicId)
+    for (const sid of sourceIds) expect(freshIds.has(sid)).toBe(false)
+
+    // No reference metadata surfaces; the prefix is ordinary owned content.
+    const win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: newTopicId, limit: 50 }))
+    expect(win.reference).toBeNull()
+    const snap = okValue(agg.fetchWholeTopicSnapshot({ topicId: newTopicId }))
+    expect(snap.messages.map((m: any) => m.content)).toEqual(['s0', 's1', 's2', 'suffix'])
+
+    // Fully writable: formerly foreign prefix rows are ordinary target rows.
+    const first = all.find((m) => m.content === 's0')!
+    expect(agg.updateMessage(newTopicId, first.id, { content: 's0-edited' }, undefined).ok).toBe(true)
+
+    // Deleting the original source leaves the imported topic intact.
+    okValue(agg.hardDeleteTopic(source))
+    const after = okValue(agg.fetchWholeTopicSnapshot({ topicId: newTopicId }))
+    expect(after.messages).toHaveLength(4)
+    expect(repos.topicReferences.getByTarget(newTopicId).found).toBe(false)
+  })
+
+  it('flattens source branch rows selected by the reference into the target main snapshot', () => {
+    const source = `t-${uid('t')}`
+    agg.ensureTopic(source, 'assistant-src', 'Source')
+    const main: Record<string, string> = {}
+    for (const key of ['s0', 's1']) {
+      const msg = makeMessageJson(source, { id: `m-${uid('m')}`, content: key })
+      main[key] = msg.id as string
+      append(source, msg, [makeBlockJson(msg.id as string)])
+    }
+    const sb = okValue(agg.createBranch(source, null, main.s1, 'SB'))
+    const sourceBranchId = (sb.branch as { id: string }).id
+    const sb0 = makeMessageJson(source, { id: `m-${uid('m')}`, content: 'sb0' })
+    append(source, sb0, [makeBlockJson(sb0.id as string)], sourceBranchId)
+
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(source, sourceBranchId, target, sb0.id as string, undefined, 'Ref'))
+    const payload = exportPayload(target)
+    expect(payload.historySnapshot).toEqual({ status: 'materialized' })
+    // The selected branch prefix is flattened to main-owned rows; the external
+    // source branch id is never retained.
+    expect(payload.messages.map((m) => m.id)).toEqual([main.s0, main.s1, sb0.id])
+    expect(payload.messages.map((m) => m.branchId)).toEqual([null, null, null])
+    expect(JSON.stringify(payload)).not.toContain(sourceBranchId)
+
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const snap = okValue(agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id, branchId: null }))
+    expect(snap.messages.map((m: any) => m.content)).toEqual(['s0', 's1', 'sb0'])
+  })
+
+  it('flattens a recursive reference chain into the target main snapshot', () => {
+    const base = `t-${uid('t')}`
+    const baseIds = seedSource(base, 3)
+    const mid = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(base, null, mid, baseIds[2], undefined, 'Mid'))
+    const m0 = makeMessageJson(mid, { id: `m-${uid('m')}`, content: 'm0' })
+    append(mid, m0, [makeBlockJson(m0.id as string)])
+
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(mid, null, target, m0.id as string, undefined, 'Ref'))
+    const payload = exportPayload(target)
+    expect(payload.historySnapshot).toEqual({ status: 'materialized' })
+    expect(payload.messages.map((m) => m.id)).toEqual([...baseIds, m0.id])
+    expect(payload.messages.map((m) => m.branchId)).toEqual([null, null, null, null])
+
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const snap = okValue(agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id }))
+    expect(snap.messages.map((m: any) => m.content)).toEqual(['s0', 's1', 's2', 'm0'])
+    const repos = createRepositories(db)
+    expect(repos.topicReferences.getByTarget(imported.topic.id).found).toBe(false)
+  })
+
+  it('discloses a nested missing reference while keeping surviving prefix and target suffix', () => {
+    // Chain: base (C) <- mid (B) <- target (A). The immediate source (B) still
+    // resolves, but its own referenced history (C) is gone, so the export must
+    // report historySnapshot 'missing' without dropping the surviving rows.
+    const base = `t-${uid('t')}`
+    const baseIds = seedSource(base, 3)
+    const mid = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(base, null, mid, baseIds[2], undefined, 'Mid'))
+    const m0 = makeMessageJson(mid, { id: `m-${uid('m')}`, content: 'm0' })
+    append(mid, m0, [makeBlockJson(m0.id as string)])
+
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(mid, null, target, m0.id as string, undefined, 'Ref'))
+    const suffix = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'suffix' })
+    append(target, suffix, [makeBlockJson(suffix.id as string)])
+
+    // Fully resolvable chain materializes as usual.
+    expect(exportPayload(target).historySnapshot).toEqual({ status: 'materialized' })
+
+    // Remove the deepest ancestor. The immediate source (mid) still survives
+    // through its own rows, but the earlier history is now incomplete.
+    okValue(agg.hardDeleteTopic(base))
+
+    const payload = exportPayload(target)
+    // Nested missing is disclosed, never faked complete.
+    expect(payload.historySnapshot).toEqual({ status: 'missing' })
+    // No partial-prefix loss: the surviving source own row (m0) and the target
+    // own suffix are both exported as main-owned rows; the gone base rows are not.
+    expect(payload.messages.map((m) => m.id)).toEqual([m0.id as string, suffix.id as string])
+    expect(payload.messages.map((m) => m.branchId)).toEqual([null, null])
+    expect(payload.messages.map((m) => m.sortOrder)).toEqual([0, 1])
+    for (const bid of baseIds) expect(payload.messages.some((m) => m.id === bid)).toBe(false)
+
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const snap = okValue(agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id }))
+    expect(snap.messages.map((m: any) => m.content)).toEqual(['m0', 'suffix'])
+    const repos = createRepositories(db)
+    expect(repos.topicReferences.getByTarget(imported.topic.id).found).toBe(false)
+  })
+
+  it('maps prefix file/block/askId and target branch/segment relationships coherently on import', () => {
+    const source = `t-${uid('t')}`
+    agg.ensureTopic(source, 'assistant-src', 'Source')
+    const s0 = makeMessageJson(source, { id: `m-${uid('m')}`, content: 's0' })
+    append(source, s0, [
+      makeBlockJson(s0.id as string, 'main_text', { content: 'text-s0' }),
+      {
+        id: `b-${uid('b')}`,
+        type: 'file',
+        content: null,
+        status: 'success',
+        createdAt: new Date().toISOString(),
+        file: { id: 'file-attach-1', name: 'a.txt', path: '/tmp/a.txt', type: 'text/plain' }
+      }
+    ])
+    const s1 = makeMessageJson(source, { id: `m-${uid('m')}`, content: 's1', role: 'assistant', askId: s0.id })
+    append(source, s1, [
+      makeBlockJson(s1.id as string, 'main_text', { content: 'text-s1' }),
+      {
+        id: `b-${uid('b')}`,
+        type: 'tool',
+        content: { tool: 'search', result: 'ok' },
+        status: 'success',
+        createdAt: new Date().toISOString()
+      }
+    ])
+
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(source, null, target, s1.id as string, undefined, 'Ref'))
+    const t0 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 't0' })
+    append(target, t0, [makeBlockJson(t0.id as string, 'main_text', { content: 'text-t0' })])
+    const t1 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 't1', role: 'assistant', askId: t0.id })
+    append(target, t1, [makeBlockJson(t1.id as string, 'main_text', { content: 'text-t1' })])
+    const tb = okValue(agg.createBranch(target, null, t0.id as string, 'TB'))
+    const tbId = (tb.branch as { id: string }).id
+    const tb0 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'tb0' })
+    append(target, tb0, [makeBlockJson(tb0.id as string, 'main_text', { content: 'text-tb0' })], tbId)
+    const segId = `seg-${uid('s')}`
+    expect(agg.upsertSegment(segId, target, 'Seg', [t0.id as string, t1.id as string], undefined).ok).toBe(true)
+
+    const payload = exportPayload(target)
+    // Own main rows shifted after the materialized prefix; branch rows unshifted.
+    expect(payload.messages.find((m) => m.id === t0.id)!.sortOrder).toBe(2)
+    expect(payload.messages.find((m) => m.id === t1.id)!.sortOrder).toBe(3)
+    expect(payload.messages.find((m) => m.id === tb0.id)!.sortOrder).toBe(0)
+
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const newTopicId = imported.topic.id
+    const repos = createRepositories(db)
+    const newMessages = repos.messages.listAllByTopic(newTopicId)
+    const byContent = new Map(newMessages.map((m) => [m.content, m]))
+
+    // askId remapped across the materialized prefix boundary.
+    expect(byContent.get('s1')!.askId).toBe(byContent.get('s0')!.id)
+    expect(byContent.get('t1')!.askId).toBe(byContent.get('t0')!.id)
+
+    // Prefix file reference preserved on the remapped block.
+    const refs = [...repos.fileRefs.listByMessages(newMessages.map((m) => m.id)).values()].flat()
+    expect(refs).toHaveLength(1)
+    expect(refs[0].fileId).toBe('file-attach-1')
+    const refBlocks = [...repos.blocks.listByMessages([byContent.get('s0')!.id]).values()].flat()
+    expect(refBlocks.find((b) => b.id === refs[0].blockId)?.type).toBe('file')
+
+    // Tool block structured content survives.
+    const s1Blocks = [...repos.blocks.listByMessages([byContent.get('s1')!.id]).values()].flat()
+    const tool = s1Blocks.find((b) => b.type === 'tool')!
+    expect(tool.content).toBeNull()
+    expect(tool.overflow.content).toEqual({ tool: 'search', result: 'ok' })
+
+    // Target branch metadata references the remapped own anchor.
+    const branch = repos.branches.listByTopic(newTopicId).find((b) => b.name === 'TB')!
+    expect(branch.parentBranchId).toBeNull()
+    expect(branch.anchorMessageId).toBe(byContent.get('t0')!.id)
+    // Segment membership remapped to fresh target ids.
+    const segment = repos.segments.listByTopic(newTopicId)[0]
+    expect(repos.segments.getMessageIds(segment.id)).toEqual([byContent.get('t0')!.id, byContent.get('t1')!.id])
+  })
+
+  it('flags a missing source explicitly and still exports the surviving suffix', () => {
+    const source = `t-${uid('t')}`
+    const sourceIds = seedSource(source, 2)
+    const target = `t-${uid('t')}`
+    okValue(agg.createReferencedTopic(source, null, target, sourceIds[1], undefined, 'Ref Target'))
+    const suffix = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'suffix' })
+    append(target, suffix, [makeBlockJson(suffix.id as string)])
+
+    expect(exportPayload(target).historySnapshot).toEqual({ status: 'materialized' })
+
+    // Source disappears; the live relation survives but the export can no
+    // longer materialize the prefix. The omission is recorded explicitly.
+    okValue(agg.hardDeleteTopic(source))
+    const payload = exportPayload(target)
+    expect(payload.historySnapshot).toEqual({ status: 'missing' })
+    expect(payload.messages.map((m) => m.id)).toEqual([suffix.id])
+    expect(payload.messages.map((m) => m.branchId)).toEqual([null])
+    for (const sid of sourceIds) expect(payload.messages.some((m) => m.id === sid)).toBe(false)
+
+    const imported = okValue(agg.importTopicData({ payload, assistantId: `assistant-t-${uid('a')}` }))
+    const snap = okValue(agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id }))
+    expect(snap.messages.map((m: any) => m.content)).toEqual(['suffix'])
+    const repos = createRepositories(db)
+    expect(repos.topicReferences.getByTarget(imported.topic.id).found).toBe(false)
+  })
 })

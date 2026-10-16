@@ -21,6 +21,7 @@ import type {
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
+  CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
   DeleteMessageRequest,
@@ -705,12 +706,14 @@ function validateStreamWriteDiagnostics(diagnostics: unknown, at = 'request.diag
 }
 
 const updateBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks', 'diagnostics', 'resendAttemptId'),
+  allowedKeys: keySet('blocks', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, updateBlocksContract.allowedKeys)
     const req = value as UpdateBlocksRequest
     validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId, reject reparenting
@@ -723,13 +726,15 @@ const updateBlocksContract: ChatDbContract = {
 }
 
 const updateSingleBlockContract: ChatDbContract = {
-  allowedKeys: keySet('blockId', 'updates', 'diagnostics', 'resendAttemptId'),
+  allowedKeys: keySet('blockId', 'updates', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, updateSingleBlockContract.allowedKeys)
     const req = value as UpdateSingleBlockRequest
     validateNonEmptyString(req.blockId, 'request.blockId')
     validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // updates is a partial patch, not a full block — no messageId required
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
@@ -739,11 +744,13 @@ const updateSingleBlockContract: ChatDbContract = {
 }
 
 const bulkAddBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks', 'resendAttemptId'),
+  allowedKeys: keySet('blocks', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, bulkAddBlocksContract.allowedKeys)
     const req = value as BulkAddBlocksRequest
     validateResendAttemptId(req.resendAttemptId)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId
@@ -756,11 +763,13 @@ const bulkAddBlocksContract: ChatDbContract = {
 }
 
 const deleteBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blockIds'),
+  allowedKeys: keySet('blockIds', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, deleteBlocksContract.allowedKeys)
     const req = value as DeleteBlocksRequest
     validateStringArray(req.blockIds, 'request.blockIds')
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult: fileCleanupResultValidator('chatdb:delete-blocks')
 }
@@ -1644,6 +1653,99 @@ const branchMessagesToTopicContract: ChatDbContract = {
           )
         }
       }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+    }
+  }
+}
+
+/**
+ * Cross-topic history reference (Reference/Copy = Reference). Wires:
+ * { targetTopicId, sourceTopicId, sourceBranchId(null ok), anchorMessageId,
+ *   sourceName(null ok), createdAt(null ok), updatedAt(null ok) }.
+ */
+const TOPIC_REFERENCE_WIRE_KEYS = new Set([
+  'targetTopicId',
+  'sourceTopicId',
+  'sourceBranchId',
+  'anchorMessageId',
+  'sourceName',
+  'createdAt',
+  'updatedAt'
+])
+
+function validateTopicReferenceWire(value: unknown, path: string, channel: string): void {
+  validateJsonObject(value, path)
+  const v = value as Record<string, unknown>
+  for (const key of Object.keys(v)) {
+    if (!TOPIC_REFERENCE_WIRE_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in reference wire: "${key}"`)
+    }
+  }
+  validateNonEmptyString(v.targetTopicId, `${path}.targetTopicId`)
+  validateNonEmptyString(v.sourceTopicId, `${path}.sourceTopicId`)
+  if (v.sourceBranchId !== null) {
+    validateNonEmptyString(v.sourceBranchId, `${path}.sourceBranchId`)
+  }
+  validateNonEmptyString(v.anchorMessageId, `${path}.anchorMessageId`)
+  if (v.sourceName !== null) {
+    validateNonEmptyString(v.sourceName, `${path}.sourceName`)
+  }
+  if (v.createdAt !== null && v.createdAt !== undefined) {
+    validateNonEmptyString(v.createdAt, `${path}.createdAt`)
+  }
+  if (v.updatedAt !== null && v.updatedAt !== undefined) {
+    validateNonEmptyString(v.updatedAt, `${path}.updatedAt`)
+  }
+}
+
+const CREATE_REFERENCED_TOPIC_VALUE_KEYS = new Set(['topicId', 'reference', 'messages', 'blocks'])
+
+const createReferencedTopicContract: ChatDbContract = {
+  allowedKeys: keySet('sourceTopicId', 'branchId', 'targetTopicId', 'anchorMessageId', 'assistantId', 'name'),
+  validate(value: unknown): void {
+    validateRequest(value, createReferencedTopicContract.allowedKeys)
+    const req = value as CreateReferencedTopicRequest
+    validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+    if (req.assistantId !== undefined) {
+      validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+    if (req.name !== undefined) {
+      validateNonEmptyString(req.name, 'request.name')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:create-referenced-topic', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:create-referenced-topic] Expected object with topicId, reference, messages, blocks'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:create-referenced-topic] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!CREATE_REFERENCED_TOPIC_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:create-referenced-topic] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateTopicReferenceWire(v.reference, 'result.value.reference', 'chatdb:create-referenced-topic')
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
     }
@@ -2737,7 +2839,7 @@ function validateBoundedCount(value: unknown, path: string): void {
   }
 }
 
-const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds'])
+const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds', 'reference'])
 const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
   'kind',
   'completeness',
@@ -2974,6 +3076,50 @@ const fetchMessagesWindowContract: ChatDbContract = {
             `result.value.mutableMessageIds[${i}]`,
             '[chatdb:fetch-messages-window] mutableMessageIds must be subset of returned messages'
           )
+        }
+      }
+      // Optional history-reference metadata (absent/null for ordinary topics).
+      if (v.reference !== undefined && v.reference !== null) {
+        const ref = v.reference
+        if (typeof ref !== 'object' || Array.isArray(ref)) {
+          throw new ValidationError(
+            'result.value.reference',
+            '[chatdb:fetch-messages-window] Expected reference object or null'
+          )
+        }
+        const r = ref as Record<string, unknown>
+        const REF_KEYS = new Set([
+          'sourceTopicId',
+          'sourceBranchId',
+          'anchorMessageId',
+          'sourceName',
+          'status',
+          'boundaryMessageId'
+        ])
+        for (const key of Object.keys(r)) {
+          if (!REF_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.reference.${key}`,
+              `[chatdb:fetch-messages-window] Unknown key in reference: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(r.sourceTopicId, 'result.value.reference.sourceTopicId')
+        if (r.sourceBranchId !== null) {
+          validateNonEmptyString(r.sourceBranchId, 'result.value.reference.sourceBranchId')
+        }
+        validateNonEmptyString(r.anchorMessageId, 'result.value.reference.anchorMessageId')
+        if (r.sourceName !== null) {
+          validateNonEmptyString(r.sourceName, 'result.value.reference.sourceName')
+        }
+        if (r.status !== 'available' && r.status !== 'missing') {
+          throw new ValidationError(
+            'result.value.reference.status',
+            '[chatdb:fetch-messages-window] Expected reference status "available" or "missing"'
+          )
+        }
+        if (r.boundaryMessageId !== null) {
+          validateNonEmptyString(r.boundaryMessageId, 'result.value.reference.boundaryMessageId')
         }
       }
     }
@@ -4676,7 +4822,8 @@ const TOPIC_DATA_PAYLOAD_KEYS = new Set([
   'blocks',
   'branches',
   'segments',
-  'fileReferences'
+  'fileReferences',
+  'historySnapshot'
 ])
 
 /**
@@ -4718,6 +4865,39 @@ function validateTopicDataPayloadShape(value: unknown, path: string, channel: st
   validateJsonObjectArray(payload.branches, `${path}.branches`)
   validateJsonObjectArray(payload.segments, `${path}.segments`)
   validateJsonObjectArray(payload.fileReferences, `${path}.fileReferences`)
+  // Optional provenance of the embedded referenced-history prefix (present
+  // only for a reference target). Absent = ordinary topic / legacy export.
+  // Records only the snapshot posture — never source ids/names/paths.
+  if (payload.historySnapshot !== undefined) {
+    validateTopicDataHistorySnapshotShape(payload.historySnapshot, `${path}.historySnapshot`, channel)
+  }
+}
+
+/**
+ * Strict shape check of the optional topic-data history-snapshot provenance.
+ * Exactly one key (`status`), one of the two defined postures; no source
+ * identity of any kind is representable.
+ */
+function validateTopicDataHistorySnapshotShape(value: unknown, path: string, channel: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected historySnapshot object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] historySnapshot must be a plain object`)
+  }
+  const snapshot = value as Record<string, unknown>
+  for (const key of Object.keys(snapshot)) {
+    if (key !== 'status') {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in historySnapshot: "${key}"`)
+    }
+  }
+  if (snapshot.status !== 'materialized' && snapshot.status !== 'missing') {
+    throw new ValidationError(
+      `${path}.status`,
+      `[${channel}] historySnapshot.status must be "materialized" or "missing"`
+    )
+  }
 }
 
 const exportTopicDataContract: ChatDbContract = {
@@ -4884,6 +5064,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:rename-branch': renameBranchContract,
   'chatdb:delete-branch': deleteBranchContract,
   'chatdb:move-selected-turns-to-new-branch': moveSelectedTurnsToNewBranchContract,
+  // Cross-topic history references (local-only; Reference/Copy = Reference)
+  'chatdb:create-referenced-topic': createReferencedTopicContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,

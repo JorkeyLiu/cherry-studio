@@ -25,6 +25,7 @@ import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
+import type { BlockWriteRouteContext, BranchRoute } from '@renderer/services/db/types'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
@@ -74,6 +75,7 @@ import type {
   SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
+import type { HistoryReferenceMeta } from '@shared/chatDb'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
@@ -163,7 +165,14 @@ const updateExistingMessageAndBlocksInDB = async (
     const route = branchId === undefined ? activeRouteOf(store.getState, updatedMessage.topicId) : branchId
     // Always update blocks if provided
     if (updatedBlocks.length > 0) {
-      await updateBlocks(updatedBlocks, undefined, resendAttemptId)
+      // The block-only channel is addressed by the same route as the message
+      // patch: an explicitly pinned stream route (source background execution)
+      // is preserved instead of re-resolving the active route at write time,
+      // so Main can verify each block's parent against the addressed tuple.
+      await updateBlocks(updatedBlocks, undefined, resendAttemptId, {
+        topicId: updatedMessage.topicId,
+        branchId: route
+      })
     }
 
     // Check if there are message properties to update beyond id and topicId
@@ -232,6 +241,15 @@ export interface ThrottledBlockWriteContext {
    * Absent = unknown ownership -> deliberate global fallback in middleware.
    */
   topicId?: string
+  /**
+   * Addressed route owner for the block-only DB write, paired with `topicId`.
+   * When set, the throttled write carries `{ topicId, branchId }` so Main can
+   * verify the block's parent belongs to the addressed route instead of
+   * inferring it at write time. The source background stream pins its captured
+   * execution route here (never the active route); an explicit null addresses
+   * the main route. Absent = no addressed tuple (canonical parent resolution).
+   */
+  branchId?: BranchRoute
 }
 
 /**
@@ -272,7 +290,11 @@ const getBlockThrottler = (id: string) => {
       // F1/F2: the DB write carries the calling execution's attempt, and the
       // produced promise is tracked on the calling execution's barrier when
       // present (flush-triggered trailing writes are therefore awaitable).
-      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId)
+      // The addressed route (when known) travels with the write: the source
+      // background execution pins its captured route, so a mid-stream branch
+      // switch can never redirect the write to the active route.
+      const route = ctx?.topicId ? { topicId: ctx.topicId, branchId: ctx.branchId } : undefined
+      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId, route)
       if (ctx?.barrier) {
         await ctx.barrier.track(write)
       } else {
@@ -355,7 +377,8 @@ export const saveUpdatedBlockToDB = async (
   topicId: string,
   getState: () => RootState,
   resendAttemptId?: string,
-  localBlock?: MessageBlock
+  localBlock?: MessageBlock,
+  branchId?: string | null
 ) => {
   if (!blockId) {
     logger.warn('[DB Save Single Block] Received null/undefined blockId. Skipping save.')
@@ -363,7 +386,7 @@ export const saveUpdatedBlockToDB = async (
   }
   const blockToSave = localBlock ?? getState().messageBlocks.entities[blockId]
   if (blockToSave) {
-    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId)
+    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId, branchId)
   } else {
     logger.warn(`[DB Save Single Block] Block ${blockId} not found in state. Cannot save.`)
   }
@@ -797,7 +820,10 @@ const fetchAndProcessAssistantResponseImpl = async (
       execTopicId,
       execGetState,
       resendAttemptId,
-      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined)
+      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined),
+      // Pin the source execution route: a background stream never re-resolves
+      // the active route at write time, so a branch switch cannot redirect it.
+      execRoute
     )
   // F1/Fix B: execution-scoped final atomic persist binding the immutable
   // closure attempt. onComplete's success-final checkpoint carries exactly
@@ -848,7 +874,10 @@ const fetchAndProcessAssistantResponseImpl = async (
           resendAttemptId: attemptId ?? resendAttemptId,
           barrier: barrier ?? writeBarrier,
           shouldMirrorToRedux: shouldMirror ?? isExecLoaded,
-          topicId
+          topicId,
+          // Source background execution: address the captured execution route
+          // explicitly (never the active route re-resolved at write time).
+          branchId: execRoute
         }),
       flushThrottledBlockUpdate,
       cancelThrottledBlockUpdate
@@ -1804,7 +1833,7 @@ export const initiateTranslationThunk =
 
 // --- Thunk to update the translation block with new content ---
 export const updateTranslationBlockThunk =
-  (blockId: string, accumulatedText: string, isComplete: boolean = false) =>
+  (blockId: string, accumulatedText: string, isComplete: boolean = false, route?: BlockWriteRouteContext) =>
   async (dispatch: AppDispatch) => {
     // Logger.log(`[updateTranslationBlockThunk] 更新翻译块 ${blockId}, isComplete: ${isComplete}`)
     try {
@@ -1820,7 +1849,11 @@ export const updateTranslationBlockThunk =
       // middleware invalidates globally rather than inferring from projection.
       dispatch(updateOneBlock({ id: blockId, changes }))
 
-      await updateSingleBlock(blockId, changes)
+      // The translation block belongs to the active topic/route the UI initiated
+      // from (mutability prechecked at initiation); that addressed route rides
+      // with the write when the caller supplies it. Absent = canonical parent
+      // resolution.
+      await updateSingleBlock(blockId, changes, undefined, undefined, route)
       // Logger.log(`[updateTranslationBlockThunk] Successfully updated translation block ${blockId}.`)
     } catch (error) {
       logger.error(`[updateTranslationBlockThunk] Failed to update translation block ${blockId}:`, error as Error)
@@ -2217,6 +2250,73 @@ export const branchMessagesToTopicThunk =
     } catch (error) {
       logger.error(`[branchMessagesToTopicThunk] Failed to branch messages:`, error as Error)
       return false
+    }
+  }
+
+/**
+ * Cross-topic history reference creation (Reference / Copy = Reference).
+ *
+ * READ-ONLY SOURCE operation: Main atomically creates the target topic and its
+ * reference relation to the source route endpoint, returning the live foreign
+ * prefix wire for projection. Never writes the source, never copies
+ * messages/blocks/files, and grants no mutation. The returned prefix messages
+ * keep their canonical SOURCE topicId (never restamped) so `messageIdsByTopic`
+ * shares stable IDs with the source and Main excludes them from the target
+ * route's `mutableMessageIds` (readonly enforced by capability, fail-closed).
+ * Local-only: no sync intent.
+ *
+ * The target topic row is created by Main inside the same transaction — the
+ * caller must NOT pre-create it (no orphan topic on failure).
+ */
+export const createReferencedTopicThunk =
+  (
+    sourceTopicId: string,
+    sourceBranchId: string | null,
+    anchorMessageId: string,
+    newTopic: Topic,
+    assistantId?: string
+  ) =>
+  async (dispatch: AppDispatch, _getState: () => RootState): Promise<{ topicId: string } | null> => {
+    if (!newTopic || !newTopic.id || !sourceTopicId || !anchorMessageId) {
+      logger.error(`[createReferencedTopicThunk] Invalid arguments.`)
+      return null
+    }
+    try {
+      const result = await dbService.createReferencedTopic(
+        sourceTopicId,
+        sourceBranchId,
+        newTopic.id,
+        anchorMessageId,
+        assistantId ?? newTopic.assistantId,
+        newTopic.name
+      )
+      const messages = result.messages as unknown as Message[]
+      const blocks = result.blocks as unknown as MessageBlock[]
+      if (blocks.length > 0) {
+        // Read-only foreign-prefix projection: must not invalidate the closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks), newTopic.id)))
+      }
+      dispatch(newMessagesActions.messagesReceived({ topicId: newTopic.id, messages }))
+      // The target starts with an empty owned suffix, so the last foreign-prefix
+      // message is the divider boundary.
+      const boundaryMessageId = messages.length > 0 ? messages[messages.length - 1].id : null
+      dispatch(
+        newMessagesActions.historyReferenceSet({
+          topicId: newTopic.id,
+          reference: {
+            sourceTopicId: result.reference.sourceTopicId,
+            sourceBranchId: result.reference.sourceBranchId,
+            anchorMessageId: result.reference.anchorMessageId,
+            sourceName: result.reference.sourceName,
+            status: 'available',
+            boundaryMessageId
+          }
+        })
+      )
+      return { topicId: result.topicId }
+    } catch (error) {
+      logger.error(`[createReferencedTopicThunk] Failed to create referenced topic:`, error as Error)
+      return null
     }
   }
 
@@ -3394,7 +3494,13 @@ export const loadTopicMessagesThunk =
           // Read-only window hydration: must not invalidate the semantic closure.
           dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks as any), topicId)))
         }
-        dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
+        dispatch(
+          newMessagesActions.messagesReceived({
+            topicId,
+            messages,
+            reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+          } as any)
+        )
       }
 
       // Anchor/context work is scheduled after interactive completion and never blocks
@@ -3548,7 +3654,15 @@ export const loadRouteMessagesThunk =
       // Atomic conservative rebase with Main-authoritative capability:
       // single commit, no blank, no mixed route. Empty windows publish []
       // (clear). Capability rides atomically; absent clears fail-closed.
-      dispatch(newMessagesActions.rebaseRouteMessages({ topicId, messages: typedMessages, route, mutableMessageIds }))
+      dispatch(
+        newMessagesActions.rebaseRouteMessages({
+          topicId,
+          messages: typedMessages,
+          route,
+          mutableMessageIds,
+          reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+        })
+      )
       return response
     } finally {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -3744,15 +3858,20 @@ export const updateMessage = async (
 
 /**
  * Update a single message block
+ *
+ * `route` is the optional addressed route tuple (`{ topicId, branchId }`); when
+ * supplied, Main verifies the block's parent against it (rejecting a foreign
+ * cross-topic prefix write) instead of inferring the route from the parent.
  */
 export const updateSingleBlock = async (
   blockId: string,
   updates: Partial<MessageBlock>,
   streamDiag?: StreamWriteDiagnostics,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
 ): Promise<void> => {
   try {
-    await dbService.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
+    await dbService.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId, route)
     logger.silly('Updated single block via DbService', { blockId })
   } catch (error) {
     logger.error('Failed to update single block:', { blockId, error })
@@ -3762,10 +3881,17 @@ export const updateSingleBlock = async (
 
 /**
  * Bulk add message blocks (for new blocks)
+ *
+ * `route` addresses the write like `updateSingleBlock`; absent = canonical
+ * parent resolution.
  */
-export const bulkAddBlocks = async (blocks: MessageBlock[], resendAttemptId?: string): Promise<void> => {
+export const bulkAddBlocks = async (
+  blocks: MessageBlock[],
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
+): Promise<void> => {
   try {
-    await dbService.bulkAddBlocks(blocks, resendAttemptId)
+    await dbService.bulkAddBlocks(blocks, resendAttemptId, route)
     logger.silly('Bulk added blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to bulk add blocks:', { count: blocks.length, error })
@@ -3775,14 +3901,18 @@ export const bulkAddBlocks = async (blocks: MessageBlock[], resendAttemptId?: st
 
 /**
  * Update multiple message blocks (upsert operation)
+ *
+ * `route` addresses the write like `updateSingleBlock`; absent = canonical
+ * parent resolution.
  */
 export const updateBlocks = async (
   blocks: MessageBlock[],
   streamDiag?: StreamWriteDiagnostics,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
 ): Promise<void> => {
   try {
-    await dbService.updateBlocks(blocks, streamDiag, resendAttemptId)
+    await dbService.updateBlocks(blocks, streamDiag, resendAttemptId, route)
     logger.silly('Updated blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to update blocks:', { count: blocks.length, error })
@@ -3950,11 +4080,30 @@ export const setupChannelStream = (
       return false
     }
   }
+  // IM channel execution is main-route only (the append above pinned null):
+  // bind the main route explicitly on every write so channel persistence never
+  // falls back to the topic's active branch, and the block-only channel is
+  // addressed with the same tuple Main verifies against each block's parent.
+  const saveUpdatedBlockToDBForChannel = (
+    blockId: string | null,
+    messageId: string,
+    channelTopicId: string,
+    channelGetState: () => RootState,
+    _attemptId?: string,
+    localBlock?: MessageBlock
+  ): Promise<void> =>
+    saveUpdatedBlockToDB(blockId, messageId, channelTopicId, channelGetState, undefined, localBlock, null)
+  const saveUpdatesToDBForChannel = (
+    messageId: string,
+    channelTopicId: string,
+    messageUpdates: Partial<Message>,
+    blocksToUpdate: MessageBlock[]
+  ): Promise<void> => saveUpdatesToDB(messageId, channelTopicId, messageUpdates, blocksToUpdate, undefined, null)
   const blockManager = new BlockManager({
     dispatch,
     getState,
-    saveUpdatedBlockToDB,
-    saveUpdatesToDB,
+    saveUpdatedBlockToDB: saveUpdatedBlockToDBForChannel,
+    saveUpdatesToDB: saveUpdatesToDBForChannel,
     assistantMsgId: assistantMessage.id,
     topicId,
     barrier: channelBarrier,
@@ -3969,7 +4118,8 @@ export const setupChannelStream = (
       throttledBlockUpdate(id, blockUpdate, {
         barrier: barrier ?? channelBarrier,
         shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
-        topicId
+        topicId,
+        branchId: null
       }),
     flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
@@ -3982,16 +4132,17 @@ export const setupChannelStream = (
     topicId,
     assistantMsgId: assistantMessage.id,
     executionState: channelExecutionState,
-    saveUpdatesToDB,
+    saveUpdatesToDB: saveUpdatesToDBForChannel,
     // Ordinary IM channel execution: no resend attempt (carrier omitted), but
-    // the same single-transaction final checkpoint as ordinary chat.
+    // the same single-transaction final checkpoint as ordinary chat, pinned to
+    // the main route.
     saveFinalUpdatesAtomically: (
       messageId: string,
       channelTopicId: string,
       messageUpdates: Partial<Message>,
       blocksToUpdate: MessageBlock[]
     ): Promise<FileCleanupResult> =>
-      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate),
+      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate, undefined, null),
     assistant
   })
 

@@ -16,6 +16,7 @@ import { BlocksRepository } from './BlocksRepository'
 import { BranchesRepository } from './BranchesRepository'
 import { FileReferencesRepository } from './FileReferencesRepository'
 import { MessagesRepository } from './MessagesRepository'
+import { TopicReferencesRepository } from './TopicReferencesRepository'
 import { TopicSegmentsRepository } from './TopicSegmentsRepository'
 import { TopicsRepository } from './TopicsRepository'
 
@@ -30,6 +31,7 @@ export interface ChatDbRepositories {
   segments: TopicSegmentsRepository
   fileRefs: FileReferencesRepository
   branches: BranchesRepository
+  topicReferences: TopicReferencesRepository
 }
 
 /**
@@ -45,6 +47,7 @@ export function createRepositories(db: BetterSQLite3Database<any>): ChatDbReposi
     blocks: new BlocksRepository(db),
     segments: new TopicSegmentsRepository(db),
     fileRefs: new FileReferencesRepository(db),
-    branches: new BranchesRepository(db)
+    branches: new BranchesRepository(db),
+    topicReferences: new TopicReferencesRepository(db)
   }
 }

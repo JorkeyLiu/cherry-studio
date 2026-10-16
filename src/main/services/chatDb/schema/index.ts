@@ -188,6 +188,39 @@ export const topicBranches = sqliteTable(
 )
 
 // ---------------------------------------------------------------------------
+// topic_references — cross-topic history reference (migration 018)
+//
+// One row per reference target topic. The target topic's effective route
+// begins with a LIVE stable-ID prefix of the source topic's effective route
+// through `anchor_message_id`. The prefix is read-only and never copied
+// (canonical source IDs/topicId preserved); the target owns its own suffix.
+// - `target_topic_id` is the target and the PK: one relation per target.
+//   CASCADE on target delete (target-owned cleanup is allowed).
+// - `source_topic_id` is a plain TEXT column — deliberately NOT a foreign
+//   key and NOT CASCADE: deleting the source must never delete the target or
+//   its relation (the relation degrades to status 'missing').
+// - `source_branch_id` is null for the source main route, otherwise the
+//   source topic's branch route.
+// - `anchor_message_id` is the precise endpoint stable ID in the source route.
+// Local-only: never an outbox/frame source; never on the wire.
+// ---------------------------------------------------------------------------
+export const topicReferences = sqliteTable(
+  'topic_references',
+  {
+    targetTopicId: text('target_topic_id')
+      .primaryKey()
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    sourceTopicId: text('source_topic_id').notNull(),
+    sourceBranchId: text('source_branch_id'),
+    anchorMessageId: text('anchor_message_id').notNull(),
+    createdAt: text('created_at'),
+    updatedAt: text('updated_at'),
+    extra: text('extra')
+  },
+  (table) => [index('topic_references_source_topic_id_idx').on(table.sourceTopicId)]
+)
+
+// ---------------------------------------------------------------------------
 // sync metadata — additive, isolated (MVP 005)
 // ---------------------------------------------------------------------------
 export const syncOutbox = sqliteTable(

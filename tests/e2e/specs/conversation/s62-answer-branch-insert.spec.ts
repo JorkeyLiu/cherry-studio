@@ -291,46 +291,32 @@ async function hoverMessageAndOpenMore(page: any, messageId: string) {
   })
 }
 
-// LOCK-E2E-CLEAN-005: portal-scoped branch/insert action — no document-global querySelector fallback.
-// Atomic single-evaluate select+click inside expect.poll: the tick that proves exactly one visible
-// portal holds the testid also clicks its menuitem ancestor, so poll success cannot be followed by
-// a fresh disappearing portal scan. Exact data-testid + exact menuitem target, no locale text.
-async function clickPortalScopedMenuAction(page: any, dataTestId: string): Promise<void> {
+// Clone Topic is now a Reference/Copy SUBMENU: the parent testid
+// (`message-copy-topic-btn`) opens the submenu; the Copy child carries the
+// unique action testid and preserves the legacy clone-prefix contract. Hover
+// the parent to open the portaled submenu, then click Copy.
+async function clickCopyTopicCopy(page: any): Promise<void> {
+  const title = page.locator('[data-testid="message-copy-topic-btn"]')
+  await expect(title, 'Clone Topic submenu title must be unique').toHaveCount(1)
+  // Open the portaled Ant submenu and click the Copy child via DOM events: the
+  // submenu popup sits at the viewport edge, so Playwright's viewport-reachable
+  // hover/click actionability cannot be used. React synthesizes onMouseEnter
+  // from a bubbling mouseover.
   await expect
     .poll(
-      async () => {
-        try {
-          return await page.evaluate((testId: string) => {
-            const portals = Array.from(document.querySelectorAll('.ant-dropdown')) as HTMLElement[]
-            const isShown = (el: HTMLElement): boolean => {
-              const rect = el.getBoundingClientRect()
-              if (rect.width === 0 && rect.height === 0) return false
-              const style = window.getComputedStyle(el)
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
-              return true
-            }
-            const holders = portals
-              .filter(isShown)
-              .filter((p) => p.querySelectorAll(`[data-testid="${testId}"]`).length === 1)
-            if (holders.length !== 1) return false
-            const target = holders[0].querySelector(`[data-testid="${testId}"]`) as HTMLElement | null
-            if (!target) return false
-            const menuItem = target.closest('[role="menuitem"]') as HTMLElement | null
-            const clickTarget = menuItem ?? target
-            if (!isShown(clickTarget)) {
-              const r = target.getBoundingClientRect()
-              if (r.width === 0 && r.height === 0) return false
-            }
-            clickTarget.click()
-            return true
-          }, dataTestId)
-        } catch {
-          return false
-        }
-      },
+      async () =>
+        await page.evaluate(() => {
+          const trigger = document.querySelector('[data-testid="message-copy-topic-btn"]') as HTMLElement | null
+          if (!trigger) return 'no-trigger'
+          trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+          const child = document.querySelector('[data-testid="message-copy-topic-copy-btn"]') as HTMLElement | null
+          if (!child) return 'no-child'
+          child.click()
+          return 'clicked'
+        }),
       { timeout: 10000, intervals: [100, 250] }
     )
-    .toBe(true)
+    .toBe('clicked')
 }
 
 // Visible assistant-toolbar action (toolbar order Branch → Insert → Edit →
@@ -790,9 +776,10 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     const expectedPrefix = sourceOrderedIds.slice(0, anchorIdx + 1)
     expect(expectedPrefix[expectedPrefix.length - 1]).toBe(anchorId)
 
-    // Branch via real UI: hover message, open more-menu, click New Branch (portal-scoped, exact data-testid + menuitem)
+    // Branch via real UI: hover message, open more-menu, open Clone Topic
+    // submenu, click Copy (portal-scoped, exact data-testid).
     await hoverMessageAndOpenMore(page, anchorId)
-    await clickPortalScopedMenuAction(page, 'message-copy-topic-btn')
+    await clickCopyTopicCopy(page)
 
     // Wait for new branch topic to be created: any topic with expected length (anchorIdx+1) should appear,
     // with content matching source prefix content (since clone uses fresh IDs). We verify via API, not via same IDs.

@@ -19,6 +19,11 @@ export const EVENT_NAMES = {
   // ONLY true-branch creation method). NEW_BRANCH keeps its legacy Copy Topic
   // (clone-prefix) semantics for the assistant overflow menu.
   NEW_TRUE_BRANCH: 'NEW_TRUE_BRANCH',
+  // Cross-topic history reference: read-only source action that creates a new
+  // logical topic whose history is a live reference to the clicked source
+  // route endpoint (readonly foreign prefix + writable owned suffix). Distinct
+  // from the clone-prefix NEW_BRANCH copy contract.
+  NEW_REFERENCE_TOPIC: 'NEW_REFERENCE_TOPIC',
   COPY_TOPIC_IMAGE: 'COPY_TOPIC_IMAGE',
   EXPORT_TOPIC_IMAGE: 'EXPORT_TOPIC_IMAGE',
   LOCATE_MESSAGE: 'LOCATE_MESSAGE',

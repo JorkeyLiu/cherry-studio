@@ -60,7 +60,7 @@ afterEach(() => {
 
 describe('016_topic_branches', () => {
   it('is registered as 16th migration after 015 with route-node DDL', () => {
-    expect(MIGRATIONS.length).toBe(17)
+    expect(MIGRATIONS.length).toBe(18)
     expect(MIGRATIONS[15].key).toBe('016_topic_branches')
     expect(MIGRATIONS[16].key).toBe('017_cleanup_route_message_overlay')
     const joined = MIGRATIONS[15].sql.join(' ')
@@ -81,7 +81,7 @@ describe('016_topic_branches', () => {
 
   it('fresh database applies 17 migrations; rerun is idempotent', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(17)
+    expect(runMigrations(db as never, sqlite)).toBe(18)
     const table = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='topic_branches'`).get()
     expect(table).toBeTruthy()
     const cols = sqlite.prepare(`PRAGMA table_info(topic_branches)`).all() as Array<{ name: string }>

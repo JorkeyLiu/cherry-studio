@@ -4,7 +4,7 @@
 > **决策锁**：VIEWPORT-1 … VIEWPORT-16（§3 决策表，durable decision IDs）。
 > **最后更新**：2026-10-13
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份、兼容标识、发布/更新、平台范围由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与 L2 导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，投影完备性与权威意图由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）唯一治理——本文档不改变、不重述这些治理域的边界。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份、兼容标识、发布/更新、平台范围由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与 L2 导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，投影完备性与权威意图由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
 > **去 conflation 链接（不重复决策表）**：视口快照不是上下文锚点（context-window anchor 定义窗口起点，见 [Context window](./context-window.md) CW-2/CW-6）；视口不是完备性能力（`loaded-projection` / `MessageWindow` 的投影性质与能力隔离见 [Projection](./projection-completeness-authority.md) PROJ-2/PROJ-4）；路由切换永不改变 topic 身份、分支锚点定义路由构成（见 [Topic Branches](./topic-branches.md) BRANCH-7/11），本文档只定义视口归属与定位（含同路由在位交互几何与流式跟随语义），不定义分支权限与上下文锚点。
 >
@@ -268,7 +268,7 @@
 - 不定义应用身份、兼容性标识、发布/更新、平台范围——由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理。
 - 不定义 SQLite schema、迁移 mechanics、L2 ZIP 导入管线——由 [SQLite migration governance](../archived/sqlite-migration.md) 治理。
 - 不定义上下文锚点的有效性/默认/继承/修复策略——由 [Context window governance](./context-window.md)（CW-1…CW-8）治理；本文档不移动锚点、不推导窗口、不改变 `contextCount` 语义。
-- 不定义分支构成、分支锚点、变更权限、有效路由算法——由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）治理。
+- 不定义分支构成、分支锚点、变更权限、有效路由算法——由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）治理。
 - 不定义投影完备性能力、稳定 ID 导航/变更、调用者本地读取、请求本地执行覆盖——由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理。
 - 不定义同步收敛（基线/操作日志/帧合并/水位）——现状由 [Personal Multi-Device Sync](../work/multi-device-sync.md) 治理，目标由 [Sync Connection & Channel ADR](./sync-connection-channel.md) 与 [Sync Data Convergence ADR](./sync-data-convergence.md) 治理。
 - 不定义模型元数据、provider/model 解析与缓存——由 [Model Metadata Governance](./model-metadata.md) 治理。

@@ -733,7 +733,7 @@ describe('BetterSqlite3BackupAdapter', () => {
 
 describe('Migration registry', () => {
   it('should have exactly seventeen migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012 + 013 + 014 + 015 + 016 + 017)', () => {
-    expect(MIGRATIONS).toHaveLength(17)
+    expect(MIGRATIONS).toHaveLength(18)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')

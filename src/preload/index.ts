@@ -9,6 +9,7 @@ import type {
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
+  CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
   DeleteMessageRequest,
@@ -29,6 +30,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  HistoryReferenceInvalidationEvent,
   ImportTopicDataRequest,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
@@ -698,6 +700,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),
     // Topic-internal branches (016): local-only, no prefix cloning (only creation method)
     createBranch: (request: CreateBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_CreateBranch, request),
+    createReferencedTopic: (request: CreateReferencedTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_CreateReferencedTopic, request),
     listBranches: (request: ListBranchesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListBranches, request),
     renameBranch: (request: RenameBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_RenameBranch, request),
     deleteBranch: (request: DeleteBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBranch, request),
@@ -733,6 +737,16 @@ const api = {
       ipcRenderer.on(IpcChannel.ChatDb_TopicDeleted, listener)
       return () => {
         ipcRenderer.removeListener(IpcChannel.ChatDb_TopicDeleted, listener)
+      }
+    },
+    // Cross-topic reference invalidation — Main → all renderers (targets to re-read)
+    onHistoryReferenceInvalidated: (callback: (event: HistoryReferenceInvalidationEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: HistoryReferenceInvalidationEvent) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.ChatDb_HistoryReferenceInvalidated, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ChatDb_HistoryReferenceInvalidated, listener)
       }
     }
   }

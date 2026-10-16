@@ -93,7 +93,9 @@ describe('chatDbContracts', () => {
     'chatdb:fetch-topic-activity',
     // Standalone topic JSON data exchange (whole-logical-topic export/import)
     'chatdb:export-topic-data',
-    'chatdb:import-topic-data'
+    'chatdb:import-topic-data',
+    // Cross-topic history references (local-only live shared prefix)
+    'chatdb:create-referenced-topic'
   ]
 
   it('has entries for all expected channels', () => {
@@ -1226,14 +1228,24 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId', 'assistantId', 'name']))
   })
 
-  it('update-blocks has exactly blocks, diagnostics, and resendAttemptId', () => {
+  it('update-blocks has exactly blocks, diagnostics, resendAttemptId, and addressed route context', () => {
     const keys = getContract('chatdb:update-blocks').allowedKeys
-    expect(keys).toEqual(new Set(['blocks', 'diagnostics', 'resendAttemptId']))
+    expect(keys).toEqual(new Set(['blocks', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId']))
   })
 
-  it('update-single-block has exactly blockId, updates, diagnostics, and resendAttemptId', () => {
+  it('update-single-block has exactly blockId, updates, diagnostics, resendAttemptId, and addressed route context', () => {
     const keys = getContract('chatdb:update-single-block').allowedKeys
-    expect(keys).toEqual(new Set(['blockId', 'updates', 'diagnostics', 'resendAttemptId']))
+    expect(keys).toEqual(new Set(['blockId', 'updates', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId']))
+  })
+
+  it('bulk-add-blocks has exactly blocks, resendAttemptId, and addressed route context', () => {
+    const keys = getContract('chatdb:bulk-add-blocks').allowedKeys
+    expect(keys).toEqual(new Set(['blocks', 'resendAttemptId', 'topicId', 'branchId']))
+  })
+
+  it('delete-blocks has exactly blockIds and addressed route context', () => {
+    const keys = getContract('chatdb:delete-blocks').allowedKeys
+    expect(keys).toEqual(new Set(['blockIds', 'topicId', 'branchId']))
   })
 })
 
@@ -4146,7 +4158,9 @@ describe('coverage consistency', () => {
     'chatdb:fetch-topic-activity',
     // Standalone topic JSON data exchange (whole-logical-topic export/import)
     'chatdb:export-topic-data',
-    'chatdb:import-topic-data'
+    'chatdb:import-topic-data',
+    // Cross-topic history references (local-only live shared prefix)
+    'chatdb:create-referenced-topic'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {
@@ -4879,5 +4893,259 @@ describe('search-messages: strict request/cursor/response validation', () => {
         value: { ...validResponse, items: [{ ...validItem, snippet: 'x' }] }
       })
     ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// Cross-topic history reference contract (create-referenced-topic)
+// ===========================================================================
+
+describe('create-referenced-topic contract', () => {
+  const validReference = {
+    targetTopicId: 't-dst',
+    sourceTopicId: 't-src',
+    sourceBranchId: null,
+    anchorMessageId: 'm-a',
+    sourceName: 'Source',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
+
+  it('accepts a minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-referenced-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-a'
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts optional source branch, assistant, and name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-referenced-topic', {
+        sourceTopicId: 't-src',
+        branchId: 'br-1',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-a',
+        assistantId: 'asst-1',
+        name: 'Target'
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects missing sourceTopicId and non-branch branchId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-referenced-topic', { targetTopicId: 't', anchorMessageId: 'm' })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:create-referenced-topic', {
+        sourceTopicId: 't-src',
+        branchId: 42,
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects unknown request keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-referenced-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-a',
+        copyMessages: true
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('accepts a valid result with the reference wire and effective prefix', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:create-referenced-topic', {
+        ok: true,
+        value: { topicId: 't-dst', reference: validReference, messages: [], blocks: [] }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts a null sourceName (source gone) and a branch source', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:create-referenced-topic', {
+        ok: true,
+        value: {
+          topicId: 't-dst',
+          reference: { ...validReference, sourceBranchId: 'br-1', sourceName: null },
+          messages: [],
+          blocks: []
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects result with unknown keys and a bad reference', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:create-referenced-topic', {
+        ok: true,
+        value: { topicId: 't-dst', reference: validReference, messages: [], blocks: [], extra: 1 }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:create-referenced-topic', {
+        ok: true,
+        value: { topicId: 't-dst', reference: { ...validReference, anchorMessageId: '' }, messages: [], blocks: [] }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('fetch-messages-window reference metadata contract', () => {
+  const baseWindow = {
+    kind: 'latest',
+    completeness: 'window',
+    topicId: 't-dst',
+    requested: { limit: 5 },
+    firstMessageId: null,
+    lastMessageId: null,
+    returnedCount: 0,
+    hasMoreBefore: false,
+    hasMoreAfter: false
+  }
+
+  it('accepts an absent reference and a null reference', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages-window', {
+        ok: true,
+        value: { messages: [], blocks: [], window: baseWindow, mutableMessageIds: [] }
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages-window', {
+        ok: true,
+        value: { messages: [], blocks: [], window: baseWindow, mutableMessageIds: [], reference: null }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts available and missing reference metadata', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages-window', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          window: baseWindow,
+          mutableMessageIds: [],
+          reference: {
+            sourceTopicId: 't-src',
+            sourceBranchId: null,
+            anchorMessageId: 'm-a',
+            sourceName: 'Source',
+            status: 'available',
+            boundaryMessageId: 'm-a'
+          }
+        }
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages-window', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          window: baseWindow,
+          mutableMessageIds: [],
+          reference: {
+            sourceTopicId: 't-src',
+            sourceBranchId: null,
+            anchorMessageId: 'm-a',
+            sourceName: null,
+            status: 'missing',
+            boundaryMessageId: null
+          }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects an invalid reference status', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages-window', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          window: baseWindow,
+          mutableMessageIds: [],
+          reference: {
+            sourceTopicId: 't-src',
+            sourceBranchId: null,
+            anchorMessageId: 'm-a',
+            sourceName: 'Source',
+            status: 'stale',
+            boundaryMessageId: 'm-a'
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// Standalone topic-data payload: optional history-snapshot provenance
+// ===========================================================================
+
+describe('topic-data payload historySnapshot validation', () => {
+  function basePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      format: 'cherry-chat-topic-data',
+      version: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      topic: { name: 'T', createdAt: null, updatedAt: null },
+      messages: [],
+      blocks: [],
+      branches: [],
+      segments: [],
+      fileReferences: [],
+      ...overrides
+    }
+  }
+
+  it('accepts an absent historySnapshot (ordinary topic / legacy export)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:import-topic-data', { payload: basePayload(), assistantId: 'a1' })
+    ).not.toThrow()
+  })
+
+  it('accepts both defined historySnapshot statuses', () => {
+    for (const status of ['materialized', 'missing'] as const) {
+      const payload = basePayload({ historySnapshot: { status } })
+      expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload, assistantId: 'a1' })).not.toThrow()
+      // Export result path uses the same payload validator.
+      expect(() => validateChatDbResult('chatdb:export-topic-data', { ok: true, value: { payload } })).not.toThrow()
+    }
+  })
+
+  it('rejects an unknown key inside historySnapshot (no source identity is representable)', () => {
+    const payload = basePayload({
+      historySnapshot: { status: 'materialized', sourceTopicId: 'src-1' }
+    })
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload, assistantId: 'a1' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects an unknown / missing / non-string status', () => {
+    const badStatus = basePayload({ historySnapshot: { status: 'live' } })
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload: badStatus, assistantId: 'a1' })).toThrow(
+      ValidationError
+    )
+    const missingStatus = basePayload({ historySnapshot: {} })
+    expect(() =>
+      validateChatDbRequest('chatdb:import-topic-data', { payload: missingStatus, assistantId: 'a1' })
+    ).toThrow(ValidationError)
+    const nonObject = basePayload({ historySnapshot: 'materialized' })
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload: nonObject, assistantId: 'a1' })).toThrow(
+      ValidationError
+    )
   })
 })

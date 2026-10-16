@@ -1247,6 +1247,23 @@ export const MIGRATIONS: MigrationEntry[] = [
       `DROP INDEX IF EXISTS message_route_overlays_topic_route_idx`,
       `DELETE FROM migration_state WHERE key='017_route_message_overlay'`
     ]
+  },
+  {
+    key: '018_topic_references',
+    description:
+      'Cross-topic history reference (Reference/Copy = Reference): topic_references stores one row per reference target topic (target_topic_id PK, CASCADE on target delete) with the source topic id (plain TEXT, deliberately NOT a FK and NOT CASCADE so deleting the source never deletes the target), nullable source branch route, and the precise anchor endpoint message id. The target effective route begins with a live stable-ID prefix of the source route through the anchor; no message/block/file duplication and no COW. Local-only, never synced. Additive; existing topics/messages are unaffected (no reference rows). FTS/triggers untouched.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS topic_references (
+        target_topic_id TEXT PRIMARY KEY REFERENCES topics(id) ON DELETE CASCADE,
+        source_topic_id TEXT NOT NULL,
+        source_branch_id TEXT,
+        anchor_message_id TEXT NOT NULL,
+        created_at TEXT,
+        updated_at TEXT,
+        extra TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS topic_references_source_topic_id_idx ON topic_references(source_topic_id)`
+    ]
   }
 ]
 

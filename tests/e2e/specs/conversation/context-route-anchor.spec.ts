@@ -712,36 +712,27 @@ async function hoverMessageAndOpenMore(page: any, messageId: string): Promise<vo
 }
 
 async function clickPortalCopyTopic(page: any): Promise<void> {
+  // Clone Topic is now a Reference/Copy submenu. Open the portaled Ant submenu
+  // and click the Copy child via DOM events: the submenu popup sits at the
+  // viewport edge, so Playwright's viewport-reachable hover/click actionability
+  // cannot be used. React synthesizes onMouseEnter from a bubbling mouseover.
+  const title = page.locator('[data-testid="message-copy-topic-btn"]')
+  await expect(title, 'Clone Topic submenu title must be unique').toHaveCount(1)
   await expect
     .poll(
-      async () => {
-        try {
-          return await page.evaluate(() => {
-            const portals = Array.from(document.querySelectorAll('.ant-dropdown')) as HTMLElement[]
-            const isShown = (el: HTMLElement): boolean => {
-              const rect = el.getBoundingClientRect()
-              if (rect.width === 0 && rect.height === 0) return false
-              const style = window.getComputedStyle(el)
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
-              return true
-            }
-            const holders = portals
-              .filter(isShown)
-              .filter((p) => p.querySelectorAll('[data-testid="message-copy-topic-btn"]').length === 1)
-            if (holders.length !== 1) return false
-            const target = holders[0].querySelector('[data-testid="message-copy-topic-btn"]') as HTMLElement | null
-            if (!target) return false
-            const menuItem = target.closest('[role="menuitem"]') as HTMLElement | null
-            ;(menuItem ?? target).click()
-            return true
-          })
-        } catch {
-          return false
-        }
-      },
+      async () =>
+        await page.evaluate(() => {
+          const trigger = document.querySelector('[data-testid="message-copy-topic-btn"]') as HTMLElement | null
+          if (!trigger) return 'no-trigger'
+          trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+          const child = document.querySelector('[data-testid="message-copy-topic-copy-btn"]') as HTMLElement | null
+          if (!child) return 'no-child'
+          child.click()
+          return 'clicked'
+        }),
       { timeout: 10000, intervals: [100, 250] }
     )
-    .toBe(true)
+    .toBe('clicked')
 }
 
 async function getRawTopicIds(page: any, topicId: string): Promise<string[]> {

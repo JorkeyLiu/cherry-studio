@@ -21,8 +21,18 @@ vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
 }))
 
 vi.mock('@renderer/components/dnd', () => ({
-  Sortable: ({ items, renderItem }: { items: { id: string }[]; renderItem: (item: any) => React.ReactNode }) => (
-    <div data-testid="sortable-mock">
+  Sortable: ({
+    items,
+    renderItem,
+    className,
+    listStyle
+  }: {
+    items: { id: string }[]
+    renderItem: (item: any) => React.ReactNode
+    className?: string
+    listStyle?: React.CSSProperties
+  }) => (
+    <div data-testid="sortable-mock" className={className} style={listStyle}>
       {items.map((item) => (
         <span key={item.id}>{renderItem(item)}</span>
       ))}
@@ -46,10 +56,30 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key })
 }))
 
-const { default: MessageGroupModelList } = await import('../MessageGroupModelList')
+const { default: MessageGroupModelList, answerGroupStripLayout } = await import('../MessageGroupModelList')
 
 const makeAssistant = (id: string, askId: string): Message =>
   ({ id, topicId: 'topic-1', role: 'assistant', assistantId: 'asst-1', askId, status: 'success' }) as unknown as Message
+
+/**
+ * Static layout-contract assertion (jsdom cannot compute geometry).
+ *
+ * The enabled Sortable list and the inert disabled list must share ONE
+ * horizontal strip layout primitive: a non-owned group (reference prefix,
+ * inherited branch/fold group) must present model tabs side by side exactly
+ * like an owned group, never stacked full-width rows.
+ */
+function expectHorizontalStripLayout(el: HTMLElement | null): void {
+  expect(el, 'answer strip container must exist').not.toBeNull()
+  const style = (el as HTMLElement).style
+  expect(style.display).toBe(answerGroupStripLayout.display)
+  expect(style.flexDirection).toBe(answerGroupStripLayout.flexDirection)
+  expect(style.alignItems).toBe(answerGroupStripLayout.alignItems)
+  expect(style.flexWrap).toBe(answerGroupStripLayout.flexWrap)
+  // Explicit contract (guards against a shared-constant regression).
+  expect(style.display).toBe('flex')
+  expect(style.flexDirection).toBe('row')
+}
 
 describe('MessageGroupModelList permission gating', () => {
   it('disabled groups render inert selectors and no Sortable', () => {
@@ -122,4 +152,60 @@ describe('MessageGroupModelList permission gating', () => {
       }
     }
   )
+})
+
+/**
+ * Layout regression: a read-only group must keep the SAME horizontal model-tab
+ * strip as an owned group. Before the shared primitive, the inert expanded
+ * list was a plain block div, so `.segmented-list` children stacked as
+ * full-width thin rows (the reported Reference-clone regression).
+ */
+describe('MessageGroupModelList shared strip layout', () => {
+  it.each([
+    { mode: 'expanded', containerSelector: '.segmented-list' },
+    { mode: 'compact', containerSelector: '.avatar-group.ant-avatar-group' }
+  ])(
+    'disabled $mode list applies the shared horizontal strip layout and exposes no mutation path',
+    ({ mode, containerSelector }) => {
+      displayMode.value = mode
+      try {
+        const messages = [makeAssistant('a1', 'u1'), makeAssistant('a2', 'u1')]
+        const setSelectedMessage = vi.fn()
+        const onReorderMessages = vi.fn()
+        const { container } = render(
+          <MessageGroupModelList
+            messages={messages}
+            selectMessageId="a1"
+            setSelectedMessage={setSelectedMessage}
+            onReorderMessages={onReorderMessages}
+            disabled
+          />
+        )
+        expectHorizontalStripLayout(container.querySelector(containerSelector) as HTMLElement | null)
+        // Read-only contract preserved: no sortable surface, and neither the
+        // selection nor the reorder path fires from the inert list.
+        expect(screen.queryByTestId('sortable-mock')).toBeNull()
+        fireEvent.click(screen.getAllByTestId('answer-group-selector')[0])
+        expect(setSelectedMessage).not.toHaveBeenCalled()
+        expect(onReorderMessages).not.toHaveBeenCalled()
+      } finally {
+        displayMode.value = 'compact'
+      }
+    }
+  )
+
+  it('enabled Sortable list receives the identical shared strip layout primitive', () => {
+    displayMode.value = 'expanded'
+    try {
+      const messages = [makeAssistant('a1', 'u1'), makeAssistant('a2', 'u1')]
+      const setSelectedMessage = vi.fn()
+      render(<MessageGroupModelList messages={messages} selectMessageId="a1" setSelectedMessage={setSelectedMessage} />)
+      const list = screen.getByTestId('sortable-mock')
+      expectHorizontalStripLayout(list)
+      // Same mode class as the disabled branch (the layout primitive is shared).
+      expect(list.className).toContain('segmented-list')
+    } finally {
+      displayMode.value = 'compact'
+    }
+  })
 })

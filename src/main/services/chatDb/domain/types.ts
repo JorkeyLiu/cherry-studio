@@ -55,6 +55,16 @@ export interface TopicBranchRow {
   extra: string | null
 }
 
+export interface TopicReferenceRow {
+  target_topic_id: string
+  source_topic_id: string
+  source_branch_id: string | null
+  anchor_message_id: string
+  created_at: string | null
+  updated_at: string | null
+  extra: string | null
+}
+
 export interface MessageBlockRow {
   id: string
   message_id: string
@@ -162,6 +172,17 @@ export interface TopicBranchData {
   parentBranchId: string | null
   anchorMessageId: string
   name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  /** Overflow fields decoded from extra JSON (unknown keys preserved) */
+  overflow: Record<string, unknown>
+}
+
+export interface TopicReferenceData {
+  targetTopicId: string
+  sourceTopicId: string
+  sourceBranchId: string | null
+  anchorMessageId: string
   createdAt: string | null
   updatedAt: string | null
   /** Overflow fields decoded from extra JSON (unknown keys preserved) */

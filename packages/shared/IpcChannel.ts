@@ -336,6 +336,11 @@ export enum IpcChannel {
   ChatDb_DeleteBranch = 'chatdb:delete-branch',
   ChatDb_MoveSelectedTurnsToNewBranch = 'chatdb:move-selected-turns-to-new-branch',
 
+  // Cross-topic history references — local-only live shared prefix (Reference)
+  ChatDb_CreateReferencedTopic = 'chatdb:create-referenced-topic',
+  // Main → renderer invalidation push: a referenced source changed (rename/mutation/delete)
+  ChatDb_HistoryReferenceInvalidated = 'chatdb:history-reference-invalidated',
+
   // S6.2c-2 — Main-authoritative insert after stable anchor
   ChatDb_InsertMessagesAfterAnchor = 'chatdb:insert-messages-after-anchor',
 

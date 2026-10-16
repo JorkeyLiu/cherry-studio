@@ -21,6 +21,7 @@ import { diffRouteRebase } from '@renderer/pages/home/Messages/messageWindow'
 // Separate type-only imports from value imports
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
+import type { HistoryReferenceMeta } from '@shared/chatDb'
 
 import { publishResidentComplete, retentionEvict } from './residentRegistry'
 
@@ -46,6 +47,16 @@ export interface MessagesState extends EntityState<Message, string> {
    */
   mutableMessageIdsByTopic: Record<string, string[]>
   mutableRouteByTopic: Record<string, string | null>
+  /**
+   * Topic-level cross-topic history-reference metadata for the current loaded
+   * window (runtime only, never persisted — this slice is blacklisted).
+   * Present only for reference targets; absent for ordinary topics (stale
+   * values are cleared whenever an authoritative window read reports no
+   * reference). The foreign prefix itself is projected inside `messageIdsByTopic`
+   * under its canonical SOURCE topic IDs; this metadata only carries the source
+   * identity/status and the divider boundary.
+   */
+  historyReferenceByTopic: Record<string, HistoryReferenceMeta>
 }
 
 // 3. Define the Initial State
@@ -56,13 +67,33 @@ const initialState: MessagesState = messagesAdapter.getInitialState({
   fulfilledByTopic: {},
   displayCount: 10,
   mutableMessageIdsByTopic: {},
-  mutableRouteByTopic: {}
+  mutableRouteByTopic: {},
+  historyReferenceByTopic: {}
 })
+
+/**
+ * Defensive accessor for the topic-keyed history-reference metadata map.
+ * Preloaded/persisted slice state (or an older snapshot) may omit the field;
+ * the map is created on demand so a reference write/clear can never throw and
+ * abort the reducer chain, which would skip later slices handling the same
+ * action (e.g. `residentRegistry` on the joint publication).
+ */
+const getHistoryReferenceMap = (state: MessagesState): Record<string, HistoryReferenceMeta> => {
+  if (!state.historyReferenceByTopic || typeof state.historyReferenceByTopic !== 'object') {
+    state.historyReferenceByTopic = {}
+  }
+  return state.historyReferenceByTopic
+}
 
 // Payload for receiving messages (used by loadTopicMessagesThunk)
 interface MessagesReceivedPayload {
   topicId: string
   messages: Message[]
+  /**
+   * Topic-level history-reference metadata when this full publish is an
+   * authority about the relation; absent/null clears (ordinary topics).
+   */
+  reference?: HistoryReferenceMeta | null
 }
 
 /** Payload for atomic route-window rebase with capability. */
@@ -73,6 +104,22 @@ export interface RebaseRouteMessagesPayload {
   route?: string | null
   /** Main-authoritative mutable IDs for THIS window. Absent clears. */
   mutableMessageIds?: string[]
+  /**
+   * Topic-level history-reference metadata carried by the route window read.
+   * Absent = not an authority about the relation (left untouched); null clears
+   * (ordinary topic / no relation metadata).
+   */
+  reference?: HistoryReferenceMeta | null
+}
+
+/**
+ * Payload for a topic-level history-reference metadata commit. `reference`
+ * absent/null clears the topic's metadata (ordinary topics / missing relation
+ * metadata), so a stale reference can never survive an authoritative read.
+ */
+export interface HistoryReferenceSetPayload {
+  topicId: string
+  reference: HistoryReferenceMeta | null
 }
 
 /** Payload for merging an older/newer window capability into the resident set. */
@@ -399,7 +446,7 @@ export const messagesSlice = createSlice({
       state.displayCount = action.payload
     },
     messagesReceived(state, action: PayloadAction<MessagesReceivedPayload>) {
-      const { topicId, messages } = action.payload
+      const { topicId, messages, reference } = action.payload
       // @ts-ignore ts-2589 false positive
       messagesAdapter.upsertMany(state, messages)
       state.messageIdsByTopic[topicId] = messages.map((m) => m.id)
@@ -408,6 +455,29 @@ export const messagesSlice = createSlice({
       // route set can never authorize mutation.
       delete state.mutableRouteByTopic[topicId]
       delete state.mutableMessageIdsByTopic[topicId]
+      // Topic-level reference metadata: set from the authority value, or clear
+      // fail-closed for ordinary topics / non-authority publishes.
+      const receivedReferenceMap = getHistoryReferenceMap(state)
+      if (reference && typeof reference === 'object') {
+        receivedReferenceMap[topicId] = reference
+      } else {
+        delete receivedReferenceMap[topicId]
+      }
+    },
+    /**
+     * Topic-level history-reference metadata commit (set or clear). The
+     * authoritative window read (activation/route load) and reference creation
+     * are the only writers; a null/absent reference clears the topic's
+     * metadata so ordinary topics never retain a stale reference.
+     */
+    historyReferenceSet(state, action: PayloadAction<HistoryReferenceSetPayload>) {
+      const { topicId, reference } = action.payload
+      const setReferenceMap = getHistoryReferenceMap(state)
+      if (!reference || typeof reference !== 'object') {
+        delete setReferenceMap[topicId]
+        return
+      }
+      setReferenceMap[topicId] = reference
     },
     /**
      * Conservative route-window rebase for same-topic branch switches.
@@ -463,6 +533,17 @@ export const messagesSlice = createSlice({
       } else {
         delete state.mutableRouteByTopic[topicId]
         delete state.mutableMessageIdsByTopic[topicId]
+      }
+      // Topic-level history-reference metadata: only when this read is the
+      // authority for the relation (caller always passes it for window reads).
+      if (Object.prototype.hasOwnProperty.call(action.payload, 'reference')) {
+        const reference = action.payload.reference
+        const rebaseReferenceMap = getHistoryReferenceMap(state)
+        if (reference && typeof reference === 'object') {
+          rebaseReferenceMap[topicId] = reference
+        } else {
+          delete rebaseReferenceMap[topicId]
+        }
       }
     },
     /**
@@ -1055,12 +1136,34 @@ export const messagesSlice = createSlice({
         delete state.mutableRouteByTopic[topicId]
         delete state.mutableMessageIdsByTopic[topicId]
       }
+      // Topic-level history-reference metadata rides with the resident window
+      // (absent/null clears fail-closed for ordinary topics).
+      const reference = (windowResponse as unknown as { reference?: HistoryReferenceMeta | null }).reference
+      const residentReferenceMap = getHistoryReferenceMap(state)
+      if (reference && typeof reference === 'object') {
+        residentReferenceMap[topicId] = reference
+      } else {
+        delete residentReferenceMap[topicId]
+      }
     })
     builder.addCase(retentionEvict, (state, action) => {
       const topicId = action.payload
       const messageIds = state.messageIdsByTopic[topicId]
       if (messageIds) {
-        messagesAdapter.removeMany(state as any, [...messageIds] as any)
+        // Cross-topic safety: canonical stable IDs may be shared across topics
+        // (a reference target's read-only foreign prefix reuses the source
+        // topic's message IDs). Never evict an entity another topic still
+        // lists — otherwise the retained projection of that other topic loses
+        // its entities.
+        const stillListedElsewhere = new Set<string>()
+        for (const [tid, ids] of Object.entries(state.messageIdsByTopic)) {
+          if (tid === topicId) continue
+          for (const id of ids as string[]) stillListedElsewhere.add(id)
+        }
+        const exclusive = [...messageIds].filter((id) => !stillListedElsewhere.has(id))
+        if (exclusive.length > 0) {
+          messagesAdapter.removeMany(state as any, exclusive as any)
+        }
         delete state.messageIdsByTopic[topicId]
       }
       // Clear loading/fulfilled markers for evicted topic; active topic is pinned and never evicted
@@ -1069,6 +1172,9 @@ export const messagesSlice = createSlice({
       if (state.currentTopicId === topicId) state.currentTopicId = null
       delete state.mutableRouteByTopic[topicId]
       delete state.mutableMessageIdsByTopic[topicId]
+      if (state.historyReferenceByTopic) {
+        delete state.historyReferenceByTopic[topicId]
+      }
     })
   }
 })
@@ -1214,4 +1320,17 @@ export function selectIsMessageMutable(
   const loaded = state.messages.messageIdsByTopic[topicId]
   if (!Array.isArray(loaded) || !loaded.includes(messageId)) return false
   return true
+}
+
+/**
+ * Topic-level history-reference metadata for the current loaded window.
+ * `undefined` means the topic is not a reference target (ordinary topic) or
+ * no authoritative metadata is resident; callers must fail closed (no divider)
+ * when undefined.
+ */
+export function selectHistoryReferenceForTopic(state: RootState, topicId: string): HistoryReferenceMeta | undefined {
+  const reference = (
+    state as { messages?: { historyReferenceByTopic?: Record<string, HistoryReferenceMeta> } } | null | undefined
+  )?.messages?.historyReferenceByTopic?.[topicId]
+  return reference ?? undefined
 }

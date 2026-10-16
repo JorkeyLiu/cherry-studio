@@ -245,8 +245,8 @@ export interface FlowBodyEntry {
 export interface FlowBoundaryEntry {
   /** Stable divider identity, also used as the React key. */
   boundaryKey: string
-  /** Divider family (fork vs context share the boundary node kind). */
-  boundaryKind: 'fork' | 'context'
+  /** Divider family (fork vs context vs history reference share the boundary node kind). */
+  boundaryKind: 'fork' | 'context' | 'reference'
   /** The ordered rendered divider row(s) at this placement. */
   node: ReactNode
 }

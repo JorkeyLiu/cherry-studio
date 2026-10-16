@@ -83,7 +83,7 @@ import { useTranslation } from 'react-i18next'
 import { shallowEqual, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
-import { emitNewBranch, emitTrueBranch } from './messageBranch'
+import { emitNewBranch, emitReferenceTopic, emitTrueBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
 
 const createTranslationAbortKey = (messageId: string) => `translation-abort-key:${messageId}`
@@ -405,6 +405,13 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     await emitNewBranch(message.id)
   }, [message.id])
 
+  const onReferenceTopic = useCallback(async () => {
+    // NEW_REFERENCE_TOPIC contract is ID-based: the captured source endpoint.
+    // This is a READ-ONLY source action (never writes the source, never grants
+    // mutation); it does not share the true-branch/insert owned-only gate.
+    await emitReferenceTopic(message.id)
+  }, [message.id])
+
   // Bounded true-branch gating (BRANCH-3/7) is computed below from the
   // Main-authoritative capability + branch catalog; these refs let the
   // callbacks fail closed with zero calls when the button would hide.
@@ -568,7 +575,20 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
         label: <span data-testid="message-copy-topic-btn">{t('chat.message.copy_topic.label')}</span>,
         key: 'copy-topic',
         icon: <CopyPlus size={15} />,
-        onClick: onNewBranch
+        children: [
+          {
+            label: <span data-testid="message-copy-topic-copy-btn">{t('chat.message.copy_topic.copy.label')}</span>,
+            key: 'copy-topic-copy',
+            onClick: onNewBranch
+          },
+          {
+            label: (
+              <span data-testid="message-copy-topic-reference-btn">{t('chat.message.copy_topic.reference.label')}</span>
+            ),
+            key: 'copy-topic-reference',
+            onClick: onReferenceTopic
+          }
+        ]
       },
       ...(showUsefulMenuItem
         ? [
@@ -780,6 +800,7 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     messageContainerRef,
     notesPath,
     onNewBranch,
+    onReferenceTopic,
     onUseful,
     t,
     topic.name,

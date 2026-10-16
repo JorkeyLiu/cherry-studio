@@ -32,7 +32,7 @@ import type {
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
-import type { MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource } from './types'
 
 interface FileCountSource {
   updateFileCount(fileId: string, delta: number, deleteIfZero?: boolean): Promise<void>
@@ -224,23 +224,29 @@ class DbService implements MessageDataSource {
     return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
-  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics, resendAttemptId?: string): Promise<void> {
-    return this.ordinarySource.updateBlocks(blocks, streamDiag, resendAttemptId)
+  updateBlocks(
+    blocks: MessageBlock[],
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
+  ): Promise<void> {
+    return this.ordinarySource.updateBlocks(blocks, streamDiag, resendAttemptId, route)
   }
 
   updateSingleBlock(
     blockId: string,
     updates: Partial<MessageBlock>,
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ) {
-    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
+    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId, route)
   }
-  bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string) {
-    return this.ordinarySource.bulkAddBlocks(blocks, resendAttemptId)
+  bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string, route?: BlockWriteRouteContext) {
+    return this.ordinarySource.bulkAddBlocks(blocks, resendAttemptId, route)
   }
-  deleteBlocks(blockIds: string[]) {
-    return this.ordinarySource.deleteBlocks(blockIds)
+  deleteBlocks(blockIds: string[], route?: BlockWriteRouteContext) {
+    return this.ordinarySource.deleteBlocks(blockIds, route)
   }
   updateTopicMetadata(
     topicId: string,
@@ -331,6 +337,24 @@ class DbService implements MessageDataSource {
   createBranch(topicId: string, parentBranchId: string | null | undefined, anchorMessageId: string, name?: string) {
     if (!this.ordinarySource.createBranch) throw new Error('createBranch unavailable')
     return this.ordinarySource.createBranch(topicId, parentBranchId, anchorMessageId, name)
+  }
+  createReferencedTopic(
+    sourceTopicId: string,
+    sourceBranchId: string | null | undefined,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ) {
+    if (!this.ordinarySource.createReferencedTopic) throw new Error('createReferencedTopic unavailable')
+    return this.ordinarySource.createReferencedTopic(
+      sourceTopicId,
+      sourceBranchId,
+      targetTopicId,
+      anchorMessageId,
+      assistantId,
+      name
+    )
   }
   listBranches(topicId: string) {
     if (!this.ordinarySource.listBranches) throw new Error('listBranches unavailable')

@@ -77,7 +77,7 @@ import { dbService } from '@renderer/services/db/DbService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
+import { clearPendingNavigate, getPendingNavigate, locateToMessageTarget } from '@renderer/services/MessagesService'
 import {
   captureResidentGeneration,
   shouldDiscardPaginationForResident
@@ -93,7 +93,11 @@ import { isValidWindowResponse, isWindowCovering } from '@renderer/services/wind
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import {
+  newMessagesActions,
+  selectHistoryReferenceForTopic,
+  selectLoadedMessagesForTopic
+} from '@renderer/store/newMessage'
 import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import {
   activeBranchSet,
@@ -113,9 +117,10 @@ import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
-import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
+import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse, HistoryReferenceMeta } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
+  use,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -126,6 +131,7 @@ import {
   useState
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { UNSAFE_NavigationContext } from 'react-router-dom'
 import styled from 'styled-components'
 
 import { AnchorGroupProvider } from './anchorGroupContext'
@@ -152,7 +158,7 @@ import {
  */
 import MessageContextMenu from './MessageContextMenu'
 import { renderEditFlowNodes } from './messageEditSelectionLayout'
-import { buildMessageFlowNodes, resolveContextDividerGroupKey } from './messageFlowNodes'
+import { buildMessageFlowNodes, resolveContextDividerGroupKey, resolveReferenceBoundary } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
@@ -176,6 +182,7 @@ import {
 } from './messageWindow'
 import { isRestoreTargetValid, isTowardOlderClampedInput, shouldCancelStabilizerForKeyDown } from './positionStabilizer'
 import Prompt from './Prompt'
+import { ReferenceDivider } from './ReferenceDivider'
 import { attemptFirstPosition, isFirstPlacementAwaitingAttempt } from './routeFirstPlacement'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
@@ -551,6 +558,39 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   hasMoreNewer
 }) => {
   const { t } = useTranslation()
+  const dispatch = useAppDispatch()
+  // Router navigate is read from the navigation context directly (tolerating
+  // absence outside a Router, e.g. unit tests) instead of `useNavigate()`,
+  // which throws without a Router provider. Reference-source navigation fails
+  // closed when no router is present.
+  const navigationContext = use(UNSAFE_NavigationContext) as unknown as {
+    navigator?: { push: (to: string, state?: unknown) => void }
+  } | null
+  // Cross-topic history reference (Reference submenu): the active topic's
+  // topic-level reference metadata + live source title + the router navigate
+  // used only to jump to the captured source endpoint.
+  const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topic.id))
+  // Live source title: prefer the current Redux topics (rename reflects
+  // immediately) read inline (never importing `store/assistants`, which pulls
+  // the i18n index); fall back to the metadata's refreshed authoritative name.
+  const referenceSourceName = useAppSelector((state) => {
+    const ref = (
+      state as {
+        messages?: { historyReferenceByTopic?: Record<string, { sourceTopicId: string; sourceName: string | null }> }
+      }
+    )?.messages?.historyReferenceByTopic?.[topic.id]
+    if (!ref) return null
+    const assistants = (
+      state as {
+        assistants?: { assistants?: Array<{ topics?: Array<{ id: string; name?: string }> }> }
+      } | null
+    )?.assistants
+    for (const assistant of assistants?.assistants ?? []) {
+      const name = assistant.topics?.find((candidate) => candidate.id === ref.sourceTopicId)?.name
+      if (typeof name === 'string' && name.length > 0) return name
+    }
+    return ref.sourceName ?? null
+  })
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
@@ -615,6 +655,31 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     [groupedMessages, contextBoundaryMessageId]
   )
 
+  // History-reference divider placement (topic-level; null for ordinary
+  // topics). The divider marks the readonly foreign-prefix / writable
+  // target-owned-suffix boundary; missing sources render at the beginning.
+  const referenceBoundary = useMemo(
+    () => resolveReferenceBoundary(groupedMessages, historyReference, topic.id),
+    [groupedMessages, historyReference, topic.id]
+  )
+
+  const onNavigateReferenceSource = useCallback(() => {
+    if (!historyReference || historyReference.status !== 'available') return
+    const navigator = navigationContext?.navigator
+    if (!navigator) return
+    // Retain the captured source branch + exact stable anchor: select the
+    // captured route on the source topic BEFORE navigating so the topic-default
+    // active branch never wins, then navigate the stable ID cross-topic.
+    dispatch(activeBranchSet({ topicId: historyReference.sourceTopicId, branchId: historyReference.sourceBranchId }))
+    const navigateCompat = ((to: string, opts?: { state?: unknown }) => navigator.push(to, opts?.state)) as Parameters<
+      typeof locateToMessageTarget
+    >[0]
+    void locateToMessageTarget(navigateCompat, {
+      topicId: historyReference.sourceTopicId,
+      messageId: historyReference.anchorMessageId
+    })
+  }, [dispatch, historyReference, navigationContext])
+
   const renderMessageSegments = () => {
     // Mounted message flow in newest→oldest render order: turn bodies and
     // independent boundary nodes as siblings. Turn runs are grouped
@@ -627,6 +692,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     const nodes = buildMessageFlowNodes({
       layerRuns,
       contextDividerGroupKey,
+      referenceBoundary,
       forkAnchorIds,
       childrenByAnchor: branchTree.childrenByAnchor,
       branchPath: branchTree.path,
@@ -669,7 +735,15 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
           <ContextWindowDividerLine />
         </ContextWindowDivider>
-      )
+      ),
+      renderReferenceBoundary: () =>
+        historyReference ? (
+          <ReferenceDivider
+            reference={historyReference}
+            sourceName={referenceSourceName}
+            onNavigateSource={onNavigateReferenceSource}
+          />
+        ) : null
     })
 
     // Turn runs group adjacent mounted bodies of one Q&A turn under a
@@ -793,6 +867,10 @@ const Messages = ({
   const viewportCtx = useOptionalRouteViewport()
   const [, setLocalViewportVersion] = useState(0)
   const [localConnectionGeneration, setLocalConnectionGeneration] = useState(0)
+  // Bumped when an authoritative history-reference invalidation arrives for
+  // the active topic; the route effect depends on it and re-reads the window
+  // with the existing viewport-intent-preserving external-invalidation path.
+  const [referenceRefreshToken, setReferenceRefreshToken] = useState(0)
   const localControllerRef = useRef<RouteViewportController | null>(null)
   if (!localControllerRef.current && !viewportCtx) {
     localControllerRef.current = new RouteViewportController({ topicId: topic.id, route: activeBranchId })
@@ -912,7 +990,8 @@ const Messages = ({
   const loadedMessages = useLoadedTopicMessages(topic.id)
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranchByAnchor, createBranch } = useMessageOperations(topic)
+  const { displayCount, createTopicBranchByAnchor, createBranch, createReferencedTopicByAnchor } =
+    useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
@@ -1028,6 +1107,35 @@ const Messages = ({
   const unmountedRef = useRef(false)
   // In-flight top fetch pipeline marker (same-session duplicate-run guard).
   const routeFetchEpochRef = useRef<number | null>(null)
+  // Authoritative Main→renderer history-reference invalidation: a SOURCE topic
+  // that this target references changed (rename/mutation/delete/restore). For
+  // the ACTIVE target only, mark the loaded route + DOM provenance stale and
+  // bump the refresh token so the existing route effect re-reads the window
+  // with its viewport-intent-preserving external-invalidation path (no new
+  // lifecycle subsystem). Non-active targets converge on next activation
+  // (pull), so a missed push is harmless.
+  useEffect(() => {
+    const subscribe = window.api?.chatDb?.onHistoryReferenceInvalidated
+    if (typeof subscribe !== 'function') return
+    const unsubscribe = subscribe((event) => {
+      try {
+        if (!event || !Array.isArray(event.targetTopicIds)) return
+        const activeTopicId = topicIdRef.current
+        if (!activeTopicId || !event.targetTopicIds.includes(activeTopicId)) return
+        loadedRouteRef.current = markLoadedRouteFailed(routeRef.current)
+        try {
+          controller.markRenderedUnknown()
+        } catch {
+          // fail-closed: the reload below still republishes capability/metadata
+        }
+        routeFetchEpochRef.current = null
+        setReferenceRefreshToken((n) => n + 1)
+      } catch {
+        // fail-closed: metadata still refreshes on the next activation
+      }
+    })
+    return unsubscribe
+  }, [controller])
   // First-position plan payload for the pre-paint layout reveal. Single
   // writer (the arm helpers below), never decision truth: every reader
   // re-gates on `controller.isSessionCurrent(epoch)`. Cleared only after the
@@ -3145,6 +3253,27 @@ const Messages = ({
           }
         })
       }),
+      // Cross-topic history reference creation (Reference submenu). READ-ONLY
+      // SOURCE operation: Main atomically creates the target topic + its live
+      // foreign prefix, so the DB row is NOT pre-created here (no orphan topic
+      // on failure). The captured source route + endpoint ride as stable IDs.
+      // Only after atomic creation succeeds is the target registered in Redux
+      // and activated; the existing activation flow loads the window + Main
+      // capability, which excludes the foreign prefix from mutation fail-closed.
+      EventEmitter.on(EVENT_NAMES.NEW_REFERENCE_TOPIC, async (messageId: string) => {
+        const capturedRoute = routeRef.current
+        const newTopic = getDefaultTopic(assistant.id)
+        newTopic.name = topic.name
+        const created = await createReferencedTopicByAnchor(topic.id, capturedRoute, messageId, newTopic, assistant.id)
+        if (!created) {
+          logger.error(`[NEW_REFERENCE_TOPIC] Failed to create reference topic for ${messageId}`)
+          window.toast.error(t('chat.message.reference.error'))
+          return
+        }
+        addTopic(newTopic)
+        setActiveTopic(newTopic)
+        window.toast.success(t('chat.message.reference.created'))
+      }),
       // Distinct TRUE branch creation (the ONLY true-branch creation method).
       // Forks one internal branch node at an anchor message owned by the
       // ACTIVE route (BRANCH-7 owner-only; inherited references reject
@@ -3340,7 +3469,18 @@ const Messages = ({
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, autoScrollToBottom, navigate, savePosition, topic])
+  }, [
+    assistant,
+    dispatch,
+    scrollToBottom,
+    autoScrollToBottom,
+    navigate,
+    savePosition,
+    topic,
+    createReferencedTopicByAnchor,
+    addTopic,
+    setActiveTopic
+  ])
 
   /**
    * Unified topic bootstrap: determines the initial navigation intent with strict priority.
@@ -6000,6 +6140,7 @@ const Messages = ({
       let deferredBlocks: MessageBlock[] = []
       let deferredMessages: Message[] = []
       let deferredMutable: string[] = []
+      let deferredReference: HistoryReferenceMeta | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
         const aroundOpts = {
@@ -6037,6 +6178,7 @@ const Messages = ({
         deferredMutable = Array.isArray((routeWindow as unknown as { mutableMessageIds?: unknown }).mutableMessageIds)
           ? ((routeWindow as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
           : []
+        deferredReference = (routeWindow as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -6073,7 +6215,8 @@ const Messages = ({
             topicId: topicIdAtStart,
             messages: deferredMessages,
             route: branchId,
-            mutableMessageIds: deferredMutable
+            mutableMessageIds: deferredMutable,
+            reference: deferredReference
           })
         )
       }
@@ -7855,6 +7998,7 @@ const Messages = ({
     failVisibleTransition,
     getLegacyMainSavedPosition,
     readTargetSnapshot,
+    referenceRefreshToken,
     saveDisplayedSnapshot,
     selectMessageForFold,
     t,

@@ -29,6 +29,19 @@ export const emitTrueBranch = async (messageId: string): Promise<void> => {
   await EventEmitter.emit(EVENT_NAMES.NEW_TRUE_BRANCH, messageId)
 }
 
+/**
+ * Emit the NEW_REFERENCE_TOPIC event for a cross-topic history reference.
+ *
+ * Same ID-based contract as NEW_BRANCH / NEW_TRUE_BRANCH: the payload is the
+ * source message's string ID (the captured endpoint). Unlike true-branch
+ * creation, this is a READ-ONLY SOURCE operation — it may be emitted from any
+ * visible source route message (even an inherited reference), never writes the
+ * source, and never grants mutation.
+ */
+export const emitReferenceTopic = async (messageId: string): Promise<void> => {
+  await EventEmitter.emit(EVENT_NAMES.NEW_REFERENCE_TOPIC, messageId)
+}
+
 export interface BranchFromMessageCallbacks {
   /** Perform the actual branch creation for the resolved endpoint. (legacy, window-relative) */
   createBranch: (branchEndpoint: number) => Promise<boolean>

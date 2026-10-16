@@ -1071,8 +1071,14 @@
     },
     "message": {
       "copy_topic": {
+        "copy": {
+          "label": "Copy"
+        },
         "created": "Topic cloned",
-        "label": "Clone Topic"
+        "label": "Clone Topic",
+        "reference": {
+          "label": "Reference"
+        }
       },
       "insert": {
         "label": "Insert Messages",
@@ -1088,6 +1094,14 @@
         "context": "New Context"
       },
       "quote": "Quote",
+      "reference": {
+        "created": "Reference topic created",
+        "error": "Failed to create reference topic"
+      },
+      "reference_divider": {
+        "label": "History referenced from: {{name}}",
+        "missing": "Referenced history is missing"
+      },
       "regenerate": {
         "model": "Switch Model"
       },
@@ -1311,6 +1325,8 @@
         "json": {
           "error": "Failed to export topic data",
           "label": "Export as JSON",
+          "referenceExplanation": "Includes referenced history; after import it becomes an independent copy",
+          "referenceMissing": "Referenced history is unavailable; only the existing content is exported",
           "success": "Topic data exported"
         },
         "md": {

@@ -27,6 +27,26 @@ function isNativeSaveCancellation(error: unknown): boolean {
   return /cancel/i.test(message)
 }
 
+/**
+ * Informative follow-up after a successful save, driven ONLY by the exported
+ * payload's `historySnapshot` posture (never loaded topic metadata/Redux):
+ * - `materialized` — the referenced history is embedded, so the file is
+ *   standalone; state that import yields an independent copy.
+ * - `missing` — the referenced source was unavailable at export time; warn
+ *   explicitly that only the surviving content was written and the history is
+ *   absent (never present an incomplete file as complete).
+ * An ordinary topic carries no `historySnapshot` and stays silent beyond the
+ * standard success toast.
+ */
+function notifyHistorySnapshot(historySnapshot: TopicDataExportPayload['historySnapshot']): void {
+  if (!historySnapshot) return
+  if (historySnapshot.status === 'materialized') {
+    window.toast.info(i18n.t('chat.topics.export.json.referenceExplanation'))
+  } else if (historySnapshot.status === 'missing') {
+    window.toast.warning(i18n.t('chat.topics.export.json.referenceMissing'))
+  }
+}
+
 export const exportTopicDataToFile = async (topic: Pick<Topic, 'id' | 'name'>): Promise<boolean> => {
   try {
     const payload = await dbService.exportTopicData(topic.id)
@@ -38,6 +58,7 @@ export const exportTopicDataToFile = async (topic: Pick<Topic, 'id' | 'name'>): 
     const result = await window.api.file.save(fileName, json)
     if (result) {
       window.toast.success(i18n.t('chat.topics.export.json.success'))
+      notifyHistorySnapshot(payload.historySnapshot)
       return true
     }
     // Native dialog cancellation stays silent.

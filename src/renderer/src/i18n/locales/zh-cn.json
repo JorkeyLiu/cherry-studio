@@ -1071,8 +1071,14 @@
     },
     "message": {
       "copy_topic": {
+        "copy": {
+          "label": "复制"
+        },
         "created": "话题已克隆",
-        "label": "克隆话题"
+        "label": "克隆话题",
+        "reference": {
+          "label": "引用"
+        }
       },
       "insert": {
         "label": "插入消息",
@@ -1088,6 +1094,14 @@
         "context": "清除上下文"
       },
       "quote": "引用",
+      "reference": {
+        "created": "已创建引用话题",
+        "error": "创建引用话题失败"
+      },
+      "reference_divider": {
+        "label": "历史消息引用自：{{name}}",
+        "missing": "历史消息引用不存在"
+      },
       "regenerate": {
         "model": "切换模型"
       },
@@ -1311,6 +1325,8 @@
         "json": {
           "error": "导出话题数据失败",
           "label": "导出为 JSON",
+          "referenceExplanation": "包含引用历史；导入后成为独立副本",
+          "referenceMissing": "引用历史不可用，仅导出已有内容",
           "success": "话题数据已导出"
         },
         "md": {

@@ -1,6 +1,6 @@
 # 投影完备性与权威意图（Projection Completeness and Authority Intents）
 
-> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
+> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
 > **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
 > **最后更新**：2026-09-28
 > **Owner**：Personal fork（jorkeyliu）
@@ -176,7 +176,7 @@
 ## 11. 测试与证据契约（Test/Evidence Contract）
 
 - **单元测试**：已加载投影判别（`'loaded-projection'`、空与未加载区分）、稳定 ID 合并与确定性排序、回答组选择/重排的已加载交集提交、删除展开的已加载交集与 Segment 目录替换、稳定插入的锚点解析、调用者本地读取不进 Redux、暂定候选三用途边界。
-- **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§15 测试契约）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
+- **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§8 验证与验收）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
 - **投影组件测试（Renderer）**：MessageMenubar/ MessageGroup / EditMode / Clipboard 的预检与 UI 门禁行为（能力未知 fail-closed、路由切换清选择、copy 允许而 cut/delete/segment 按能力禁用）仍按投影收敛语义覆盖；分支权限的允许/拒绝语义以 Branch ADR 为准，不在本文档重复矩阵。
 - **组件测试**：窗口装配与分页边界保留、窗口外导航装配、回答选择可见折叠、删除后锚点转移展示。传输中状态不作为回归证据。
 - **证据层级**：按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`。跨组件/IPC/持久化/生命周期行为的合同级回归以 Playwright E2E 为准；隔离的稳定展示/逻辑以 Vitest/组件测试为先。
