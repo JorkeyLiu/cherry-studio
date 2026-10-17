@@ -163,7 +163,7 @@ import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
 import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
-import { useCrossMessageSelectionGuard, useEditModeNativeSelectionSuppression } from './messageSelectionGuard'
+import { useCrossMessageSelectionGuard } from './messageSelectionGuard'
 import {
   buildRouteViewport,
   canonicalSavedAnchorId,
@@ -596,10 +596,12 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
   // Boundary-aware native selection: ordinary within-message selection is
-  // preserved; cross-message native ranges are cleared. In edit mode native
-  // text selection inside messages is suppressed (selection-only semantics).
+  // preserved; cross-message native ranges are cleared. Edit-mode native
+  // text-selection suppression is owned by the interactive turn itself
+  // (EditTurn), not by this list-level guard, so the list never forbids
+  // selection across its whole subtree (segment chrome/rename field and
+  // ordinary controls keep native selection).
   useCrossMessageSelectionGuard()
-  useEditModeNativeSelectionSuppression(isEditMode, scrollContainerRef)
 
   // Branch fork dividers for the active route: catalog for the logical
   // topic, breadcrumb path, and direct children across the addressed route

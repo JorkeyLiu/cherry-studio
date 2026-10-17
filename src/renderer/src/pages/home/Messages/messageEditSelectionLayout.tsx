@@ -1,5 +1,13 @@
 import type { TopicSegment } from '@renderer/types/topicSegment'
-import { Fragment, memo, type MouseEvent as ReactMouseEvent, type ReactNode, useCallback } from 'react'
+import {
+  Fragment,
+  memo,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef
+} from 'react'
 import styled from 'styled-components'
 
 /**
@@ -137,9 +145,35 @@ export interface EditTurnProps {
  * ancestor batch context menu. Boundaries are siblings of turns, so
  * divider controls (branch switcher, context UI) never pass through this
  * capture.
+ *
+ * Edit-mode native text selection is suppressed HERE, scoped to this
+ * turn's own subtree: a native `selectstart` inside the turn (inert
+ * content or its cover) is canceled, and a primary-button `mousedown`
+ * inside the turn cannot open a native range (the click capture still
+ * performs whole-turn selection). The suppression is owned by the actual
+ * turn node — added only in edit mode and removed on mode change or
+ * unmount — so the message list keeps native selection everywhere else:
+ * the RunHost's sibling segment chrome, its rename field, and ordinary
+ * non-message controls keep native Cmd+A / drag selection with no
+ * label-specific branch or whitelist.
  */
 export const EditTurn = memo(
   ({ turnAskId, isEditMode = false, isSelected = false, onTurnClick, children }: EditTurnProps) => {
+    const containerRef = useRef<HTMLDivElement | null>(null)
+
+    // Native `selectstart` has no React prop: bind it directly to the real
+    // turn node in edit mode only (no per-turn document/window listener).
+    useEffect(() => {
+      if (!isEditMode) return
+      const el = containerRef.current
+      if (!el) return
+      const onSelectStart = (e: Event) => {
+        e.preventDefault()
+      }
+      el.addEventListener('selectstart', onSelectStart)
+      return () => el.removeEventListener('selectstart', onSelectStart)
+    }, [isEditMode])
+
     const handleClickCapture = useCallback(
       (e: ReactMouseEvent) => {
         if (!isEditMode || !onTurnClick) return
@@ -150,6 +184,15 @@ export const EditTurn = memo(
       },
       [isEditMode, onTurnClick, turnAskId]
     )
+
+    // Primary-button only: stop a native range from opening on Shift+click
+    // or drag inside the turn (group selection flows through the click
+    // capture). Right/middle button stay untouched so the batch context
+    // menu is preserved.
+    const handleMouseDown = useCallback((e: ReactMouseEvent) => {
+      if (e.button !== 0) return
+      e.preventDefault()
+    }, [])
 
     const handleContextMenu = useCallback(() => {
       if (!isEditMode || !onTurnClick) return
@@ -166,10 +209,12 @@ export const EditTurn = memo(
 
     return (
       <EditTurnContainer
+        ref={containerRef}
         data-testid="edit-turn"
         data-turn-ask={turnAskId || undefined}
         className={className}
         onClickCapture={isEditMode ? handleClickCapture : undefined}
+        onMouseDown={isEditMode ? handleMouseDown : undefined}
         onContextMenu={isEditMode ? handleContextMenu : undefined}>
         <EditTurnContent inert={isEditMode ? true : undefined}>{children}</EditTurnContent>
         {isEditMode && <EditTurnCover data-testid="edit-turn-cover" aria-hidden="true" />}

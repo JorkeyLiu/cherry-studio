@@ -1207,3 +1207,129 @@ describe('segment-homogeneous run invariant', () => {
     expect(split.filter((i) => i.kind === 'turn-run').length).toBe(2)
   })
 })
+
+describe('edit-mode native selection suppression owned by the turn', () => {
+  // One segmented run (renders sibling chrome) + one plain turn. The chrome
+  // sits beside the turn inside RunHost, never inside it.
+  const chromeSegment = { id: 'seg-chrome', topicId: 't1', name: 'Chrome', messageIds: ['u1'], messageCount: 4 } as any
+
+  const suppressionNodes = (): FlowNode[] => [
+    {
+      kind: 'turn',
+      entry: {
+        groupKey: 'g-chrome',
+        turnAskId: 'ask-chrome',
+        selected: false,
+        segmentId: 'seg:chrome',
+        segmentIsLive: false,
+        kind: 'history',
+        layerRunId: 'layer:x',
+        segment: chromeSegment,
+        segmentIsFirst: true,
+        segmentIsLast: true,
+        bodyNode: bodyDiv('g-chrome')
+      }
+    },
+    turnNode('g-plain', 'ask-plain')
+  ]
+
+  function renderFlowWithSiblingChrome(isEditMode: boolean) {
+    return render(
+      <div>
+        <button type="button" data-testid="plain-sibling-control">
+          ordinary non-message control
+        </button>
+        {renderEditFlowNodes({
+          nodes: suppressionNodes(),
+          isEditMode,
+          onTurnClick: vi.fn(),
+          renderSegmentChrome: () => (
+            <div data-testid="segment-chrome">
+              <input data-testid="segment-rename-input" defaultValue="Seg" />
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  function dispatchSelectStart(el: Element): Event {
+    const ev = new Event('selectstart', { bubbles: true, cancelable: true })
+    el.dispatchEvent(ev)
+    return ev
+  }
+
+  it('cancels selectstart inside the edit turn (inert content and cover)', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const body = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(dispatchSelectStart(body).defaultPrevented).toBe(true)
+    expect(dispatchSelectStart(cover).defaultPrevented).toBe(true)
+  })
+
+  it('keeps native selectstart on the sibling segment chrome/rename field and ordinary non-message controls', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const chrome = container.querySelector('[data-testid="segment-chrome"]') as HTMLElement
+    const input = container.querySelector('[data-testid="segment-rename-input"]') as HTMLElement
+    const sibling = container.querySelector('[data-testid="plain-sibling-control"]') as HTMLElement
+    // None of these live inside a turn, so the turn-scoped listener never
+    // sees (or cancels) their native selection.
+    expect(chrome.closest('[data-testid="edit-turn"]')).toBeNull()
+    expect(input.closest('[data-testid="edit-turn"]')).toBeNull()
+    for (const el of [chrome, input, sibling]) {
+      expect(dispatchSelectStart(el).defaultPrevented).toBe(false)
+    }
+  })
+
+  it('keeps the native mousedown boundary scoped to the turn, leaving right/secondary and outside untouched', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const body = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    const sibling = container.querySelector('[data-testid="plain-sibling-control"]') as HTMLElement
+    // Primary button inside the turn is blocked (no native range; the click
+    // capture still performs group selection).
+    expect(fireEvent.mouseDown(body, { button: 0 })).toBe(false)
+    expect(fireEvent.mouseDown(cover, { button: 0 })).toBe(false)
+    // Secondary button inside the turn is untouched so the batch context
+    // menu is preserved.
+    expect(fireEvent.mouseDown(cover, { button: 2 })).toBe(true)
+    // Primary button outside any turn is untouched.
+    expect(fireEvent.mouseDown(sibling, { button: 0 })).toBe(true)
+  })
+
+  it('restores native selection on mode exit without remounting the turn or its content', () => {
+    const { container, rerender } = render(
+      <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>
+    )
+    const turnBefore = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    const bodyBefore = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    expect(dispatchSelectStart(bodyBefore).defaultPrevented).toBe(true)
+    expect(fireEvent.mouseDown(bodyBefore, { button: 0 })).toBe(false)
+
+    rerender(<>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: false, onTurnClick: vi.fn() })}</>)
+    // Same turn/body node identity: suppression toggles without a remount.
+    expect(container.querySelector('[data-testid="edit-turn"]')).toBe(turnBefore)
+    expect(container.querySelector('[data-testid="body-g-plain"]')).toBe(bodyBefore)
+    // Normal mode: neither selectstart nor mousedown is canceled.
+    expect(dispatchSelectStart(bodyBefore).defaultPrevented).toBe(false)
+    expect(fireEvent.mouseDown(bodyBefore, { button: 0 })).toBe(true)
+  })
+
+  it('attaches the turn selectstart listener in edit mode and detaches it on unmount', () => {
+    const addSpy = vi.spyOn(HTMLElement.prototype, 'addEventListener')
+    const removeSpy = vi.spyOn(HTMLElement.prototype, 'removeEventListener')
+    try {
+      const { unmount } = render(
+        <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>
+      )
+      const added = addSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
+      expect(added).toBeGreaterThan(0)
+      unmount()
+      const removed = removeSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
+      expect(removed).toBeGreaterThanOrEqual(added)
+    } finally {
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    }
+  })
+})
