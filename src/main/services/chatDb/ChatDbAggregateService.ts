@@ -1124,12 +1124,17 @@ export class ChatDbAggregateService {
           const backMerged = backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
           const backBeyond = backMerged ? backGroups.slice(0, -1) : backGroups
           const backStartGroupIdx = Math.max(0, backBeyond.length - request.before)
-          const backStartMsgIdx = backBeyond.length === 0 ? backSlice.length : backBeyond[backStartGroupIdx].start
+          // No beyond group on a side ⇒ every row on that side of the anchor
+          // belongs to the anchor's own group, so the whole slice must be kept
+          // (the anchor group is always returned complete). A non-empty beyond
+          // set means the retained frontier group is the first complete
+          // beyond-group, never a partial one.
+          const backStartMsgIdx = backBeyond.length === 0 ? 0 : backBeyond[backStartGroupIdx].start
           const fwdGroups = computeGroups(fwdSlice)
           const fwdMerged = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
           const fwdBeyond = fwdMerged ? fwdGroups.slice(1) : fwdGroups
           const fwdEndGroupIdx = Math.min(fwdBeyond.length - 1, request.after - 1)
-          const fwdEndExclusive = fwdBeyond.length === 0 ? 0 : fwdBeyond[fwdEndGroupIdx].end + 1
+          const fwdEndExclusive = fwdBeyond.length === 0 ? fwdSlice.length : fwdBeyond[fwdEndGroupIdx].end + 1
           const windowMessages = [...backSlice.slice(backStartMsgIdx), anchorMsg, ...fwdSlice.slice(0, fwdEndExclusive)]
           return buildWindowResponse(windowMessages, {
             kind: 'around',

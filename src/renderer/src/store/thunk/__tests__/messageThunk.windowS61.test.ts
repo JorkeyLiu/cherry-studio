@@ -530,7 +530,9 @@ describe('S6.1 Messages merge helpers — production path', () => {
     const existing: Message[] = [{ id: 'm2' } as Message, { id: 'm3' } as Message, { id: 'm4' } as Message]
     const incoming: Message[] = [{ id: 'm1' } as Message, { id: 'm2' } as Message, { id: 'm3' } as Message]
     const merged = mergeWindowIntoTopic(existing, incoming, 'm2')
-    expect(merged.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4'])
+    expect(merged.status).toBe('merged')
+    if (merged.status !== 'merged') throw new Error('unreachable')
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4'])
   })
 
   it('clampWindowCount respects 1..100 bounds (production helper)', async () => {

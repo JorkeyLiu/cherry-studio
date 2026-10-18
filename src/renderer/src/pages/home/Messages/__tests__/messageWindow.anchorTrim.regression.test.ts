@@ -17,12 +17,15 @@ import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMe
 import { describe, expect, it } from 'vitest'
 
 import {
+  canAdvancePaginationWindow,
   createLatestMessageWindow,
   createOldestMessageWindow,
   createTargetMessageWindow,
+  derivePaginationWindow,
   expandMessageWindowNewer,
   expandMessageWindowOlder,
-  MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+  type MessageWindow
 } from '../messageWindow'
 
 const CAL = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
@@ -295,5 +298,306 @@ describe('B-06 anchor-preserving trim regression — 200-group cap with opposite
     // Observability lightweight
     expect(older.boundedViewportObservability?.calibrationDefault).toBe(CAL)
     expect(typeof older.boundedViewportObservability?.trimmedGroups).toBe('number')
+  })
+})
+
+describe('direction-parameterized pagination window transition (one derivation, both directions)', () => {
+  /** Assert an ACCEPTED transition and return its window. */
+  const accept = (input: Parameters<typeof derivePaginationWindow>[0]): MessageWindow => {
+    const outcome = derivePaginationWindow(input)
+    expect(outcome.status, `transition must be accepted (got ${JSON.stringify(outcome)})`).toBe('accepted')
+    if (outcome.status !== 'accepted') throw new Error('unreachable')
+    return outcome.window
+  }
+
+  it('grows the loaded edge only, and takes the response completeness flag for that edge alone', () => {
+    const messages = users(300)
+    const latest = createLatestMessageWindow(messages, CAL) // 100..299
+    const older = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: false, hasMoreAfter: false }
+    })
+    expect(older.range).toEqual({ oldestGroupIndex: 80, newestGroupIndex: 279 })
+    expect(older.groupCount).toBe(CAL)
+    // Loaded edge carries the validated response truth…
+    expect(older.hasMoreOlder).toBe(false)
+    expect(older.authoritativeHasMoreBefore).toBe(false)
+    // …and the untouched edge keeps the current window's own traversability:
+    // trimming the newer edge made rows newer than the window locally reachable.
+    expect(older.hasMoreNewer).toBe(true)
+
+    const oldest = createOldestMessageWindow(messages, CAL) // 0..199
+    const newer = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: false, hasMoreAfter: false }
+    })
+    expect(newer.range).toEqual({ oldestGroupIndex: 20, newestGroupIndex: 219 })
+    expect(newer.groupCount).toBe(CAL)
+    expect(newer.hasMoreNewer).toBe(false)
+    expect(newer.authoritativeHasMoreAfter).toBe(false)
+    expect(newer.hasMoreOlder).toBe(true)
+  })
+
+  it('keeps the derived window in route order for both directions (never a global re-sort)', () => {
+    const messages = users(300)
+    for (const [direction, start] of [
+      ['older', createLatestMessageWindow(messages, CAL)],
+      ['newer', createOldestMessageWindow(messages, CAL)]
+    ] as const) {
+      const next = accept({
+        direction,
+        messages,
+        currentWindow: start,
+        additionalGroupCount: 20,
+        responseWindow: {}
+      })
+      const chronological = next.displayGroups.flatMap((group) => group.messages.map((m) => m.id))
+      expect(next.displayMessages.map((m) => m.id)).toEqual([...chronological].reverse())
+      expect(next.groupCount).toBe(next.displayGroups.length)
+    }
+  })
+
+  it('never trims the retained live reading row away (bounded by calibration + one page)', () => {
+    const messages = users(400)
+    // Older page with the reading row near the NEWER edge: the exact-capacity
+    // trim would drop it, so the trim is reduced instead of unmounting the row
+    // the stable-anchor keeper holds.
+    const latest = createLatestMessageWindow(messages, CAL) // 200..399
+    const retained = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm385'
+    })
+    expect(retained.range).toEqual({ oldestGroupIndex: 150, newestGroupIndex: 385 })
+    expect(retained.groupCount).toBe(236)
+    expect(retained.boundedViewportObservability?.retentionClamped).toBe(true)
+    expect(retained.boundedViewportObservability?.didTrim).toBe(true)
+    expect(retained.boundedViewportObservability?.trimmedGroups).toBe(14)
+    expect(retained.displayMessages.map((m) => m.id)).toContain('m385')
+    expect(retained.oldestMessageId).toBe('m150')
+    // Never beyond the provisional range (current window + this page).
+    expect(retained.groupCount).toBeLessThanOrEqual(CAL + 50)
+
+    // Without a retained row the trim is exact and the row leaves the window —
+    // the retention is the only reason the trim is clamped.
+    const dropped = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 50,
+      responseWindow: {}
+    })
+    expect(dropped.range).toEqual({ oldestGroupIndex: 150, newestGroupIndex: 349 })
+    expect(dropped.boundedViewportObservability?.retentionClamped).toBe(false)
+    expect(dropped.displayMessages.map((m) => m.id)).not.toContain('m385')
+
+    // Mirror for the newer direction (opposite edge is the older one).
+    const oldest = createOldestMessageWindow(messages, CAL) // 0..199
+    const newerRetained = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm15'
+    })
+    expect(newerRetained.range).toEqual({ oldestGroupIndex: 15, newestGroupIndex: 249 })
+    expect(newerRetained.groupCount).toBe(235)
+    expect(newerRetained.boundedViewportObservability?.retentionClamped).toBe(true)
+    expect(newerRetained.displayMessages.map((m) => m.id)).toContain('m15')
+
+    const newerDropped = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 50,
+      responseWindow: {}
+    })
+    expect(newerDropped.range).toEqual({ oldestGroupIndex: 50, newestGroupIndex: 249 })
+    expect(newerDropped.boundedViewportObservability?.retentionClamped).toBe(false)
+  })
+
+  it('an unresolvable retained row degrades to the exact bounded trim (no fake anchor)', () => {
+    const messages = users(400)
+    const latest = createLatestMessageWindow(messages, CAL)
+    const next = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'not-resident'
+    })
+    expect(next.range).toEqual({ oldestGroupIndex: 150, newestGroupIndex: 349 })
+    expect(next.boundedViewportObservability?.retentionClamped).toBe(false)
+  })
+
+  it('repeated same-direction paging at the bound with the reading row on the trimmed edge stays bounded and resident', () => {
+    const messages = users(900)
+    // Latest window 700..899 with the reading row parked at the NEWEST row:
+    // every older page would trim exactly that row away, so retention clamps
+    // each page's trim — the hard case for the cap.
+    const latest = createLatestMessageWindow(messages, CAL) // 700..899
+    const reading = 'm899'
+
+    // Page 1: accepted — the row stays resident and the window grows to exactly
+    // one page over the calibration default (never more).
+    const first = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: reading
+    })
+    expect(first.range).toEqual({ oldestGroupIndex: 650, newestGroupIndex: 899 })
+    expect(first.groupCount).toBe(CAL + 50)
+    expect(first.displayMessages.map((m) => m.id)).toContain(reading)
+    expect(first.boundedViewportObservability?.retentionClamped).toBe(true)
+
+    // Page 2 with the SAME reading row still on the trimmed edge: keeping the row
+    // and staying bounded cannot both hold, so the transition is DECLINED — no
+    // window is produced at all, so the caller can publish nothing. The reading
+    // row is never unmounted and the bound is never exceeded.
+    const second = derivePaginationWindow({
+      direction: 'older',
+      messages,
+      currentWindow: first,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: reading
+    })
+    expect(second).toEqual({ status: 'declined', reason: 'retention-exceeds-bound' })
+
+    // Same verdict from the pre-fetch guard, which is why no read is issued for
+    // a provably un-honorable page.
+    expect(
+      canAdvancePaginationWindow({
+        direction: 'older',
+        messages,
+        currentWindow: first,
+        additionalGroupCount: 50,
+        retainMessageId: reading
+      })
+    ).toEqual({ allowed: false, reason: 'retention-exceeds-bound' })
+
+    // The user then advances (the reading row moves toward the loaded edge, i.e.
+    // away from the trimmed edge): the SAME bound is now satisfiable, so paging
+    // resumes, the row stays resident, and the accumulated overshoot is reclaimed
+    // back to the exact calibration default.
+    const advancedReading = 'm700'
+    const third = accept({
+      direction: 'older',
+      messages,
+      currentWindow: first,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: advancedReading
+    })
+    expect(third.groupCount).toBe(CAL)
+    expect(third.range).toEqual({ oldestGroupIndex: 600, newestGroupIndex: 799 })
+    expect(third.displayMessages.map((m) => m.id)).toContain(advancedReading)
+    expect(third.boundedViewportObservability?.retentionClamped).toBe(false)
+    // The declined step left the committed window's traversability intact: the
+    // accepted step still reports the older edge from the response and keeps the
+    // newer edge locally traversable (the trim made rows newer than the window
+    // reachable again).
+    expect(third.hasMoreNewer).toBe(true)
+  })
+
+  it('the newer direction mirrors the same decline/advance/resume contract', () => {
+    const messages = users(900)
+    const oldest = createOldestMessageWindow(messages, CAL) // 0..199
+    const reading = 'm0'
+
+    const first = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: reading
+    })
+    expect(first.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 249 })
+    expect(first.groupCount).toBe(CAL + 50)
+    expect(first.displayMessages.map((m) => m.id)).toContain(reading)
+
+    const second = derivePaginationWindow({
+      direction: 'newer',
+      messages,
+      currentWindow: first,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: reading
+    })
+    expect(second).toEqual({ status: 'declined', reason: 'retention-exceeds-bound' })
+
+    const advanced = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: first,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm199'
+    })
+    expect(advanced.groupCount).toBe(CAL)
+    expect(advanced.displayMessages.map((m) => m.id)).toContain('m199')
+    expect(advanced.hasMoreOlder).toBe(true)
+  })
+
+  it('an ordinary reading position keeps the trim exact AND keeps the row resident', () => {
+    const messages = users(900)
+    // Reading row near the LOADED edge of the window (the real older-paging
+    // position): retention has nothing to clamp and the cap is met exactly.
+    const latest = createLatestMessageWindow(messages, CAL) // 700..899
+    const older = accept({
+      direction: 'older',
+      messages,
+      currentWindow: latest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm705'
+    })
+    expect(older.range).toEqual({ oldestGroupIndex: 650, newestGroupIndex: 849 })
+    expect(older.groupCount).toBe(CAL)
+    expect(older.displayMessages.map((m) => m.id)).toContain('m705')
+    expect(older.boundedViewportObservability?.retentionClamped).toBe(false)
+
+    // Newer direction mirror: exact cap, retained row resident.
+    const oldest = createOldestMessageWindow(messages, CAL) // 0..199
+    const newer = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm195'
+    })
+    expect(newer.range).toEqual({ oldestGroupIndex: 50, newestGroupIndex: 249 })
+    expect(newer.groupCount).toBe(CAL)
+    expect(newer.displayMessages.map((m) => m.id)).toContain('m195')
+    expect(newer.boundedViewportObservability?.retentionClamped).toBe(false)
+
+    // Same mirror on the trimmed edge: clamped once, still inside one page.
+    const newerClamped = accept({
+      direction: 'newer',
+      messages,
+      currentWindow: oldest,
+      additionalGroupCount: 50,
+      responseWindow: {},
+      retainMessageId: 'm15'
+    })
+    expect(newerClamped.groupCount).toBe(CAL + 35)
+    expect(newerClamped.groupCount).toBeLessThanOrEqual(CAL + 50)
+    expect(newerClamped.boundedViewportObservability?.retentionClamped).toBe(true)
   })
 })

@@ -19,7 +19,14 @@
  * become stable.
  */
 
-import { COLUMN_REVERSE_BOTTOM_THRESHOLD_PX, isAtBottom } from '@renderer/pages/home/Messages/columnReverseGeometry'
+import {
+  COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
+  isAtBottom,
+  LAYOUT_HOLD_TOLERANCE_PX,
+  type LayoutHoldSample,
+  rebaseLayoutHold,
+  resolveLayoutHold
+} from '@renderer/pages/home/Messages/columnReverseGeometry'
 import { handleScrollSnapshotRead, handleScrollSnapshotSaved } from '@renderer/services/scrollSnapshotCache'
 import { isScrollSnapshotInvalidated } from '@renderer/services/scrollSnapshotCache'
 import { useAppDispatch } from '@renderer/store'
@@ -38,10 +45,12 @@ import {
 
 import { findViewportTopAnchorWithOffset } from './domVisibility'
 import {
+  declareUserIntentSession,
   displayedRouteKey,
   type RouteId,
   type RouteRef,
   RouteViewportController,
+  routeViewportKey,
   type RouteViewportSnapshot,
   type RouteVisualAnchor
 } from './routeViewportController'
@@ -137,8 +146,33 @@ export interface RouteViewportContextValue {
 
 const RouteViewportContext = createContext<RouteViewportContextValue | null>(null)
 
+/**
+ * Stable imperative command surface (route viewport).
+ *
+ * The full context value carries the versioned projection (`version`,
+ * `viewportPhaseAttr`, `connectionGeneration`) and therefore changes identity
+ * on every controller notification. That is correct for the few surfaces that
+ * RENDER the phase/version, but it is the wrong subscription for the rows:
+ * every `Message`/`MessageGroup`/editor row only needs the stable controller
+ * and the stable imperative commands. Consuming the versioned value there
+ * re-rendered the whole mounted conversation (message subtree + menubars +
+ * antd cssinjs style re-registration) on every notify — including repeated
+ * native key repeats that change no message, config or window.
+ *
+ * This context holds exactly the stable members: the controller instance and
+ * the `useCallback`-stable commands. Its value identity never changes across
+ * notifications, so a row subscribing here re-renders only when its own props
+ * change (message/config/window), never because the viewport notified.
+ */
+export type RouteViewportCommands = Pick<
+  RouteViewportContextValue,
+  'controller' | 'notifyChanged' | 'freezeDisplayed' | 'readSnapshot' | 'requestTopRoute' | 'registerCapturer'
+>
+
+const RouteViewportCommandsContext = createContext<RouteViewportCommands | null>(null)
+
 /** Exported for focused behavior tests (production uses the provider). */
-export { RouteViewportContext }
+export { RouteViewportCommandsContext, RouteViewportContext }
 
 export const useRouteViewport = (): RouteViewportContextValue => {
   const value = use(RouteViewportContext)
@@ -148,6 +182,22 @@ export const useRouteViewport = (): RouteViewportContextValue => {
 
 /** Optional access for hooks that must keep working outside the provider (tests). */
 export const useOptionalRouteViewport = (): RouteViewportContextValue | null => use(RouteViewportContext)
+
+/**
+ * Row-level consumption of the route viewport: stable controller + stable
+ * imperative commands, no version subscription. A row that only needs to
+ * capture an interaction intent or read the controller must use this instead
+ * of the versioned context, so a viewport notification (however frequent)
+ * never re-renders the mounted conversation.
+ */
+export const useOptionalRouteViewportCommands = (): RouteViewportCommands | null => use(RouteViewportCommandsContext)
+
+/** Required variant for surfaces that must live inside the provider. */
+export const useRouteViewportCommands = (): RouteViewportCommands => {
+  const value = use(RouteViewportCommandsContext)
+  if (!value) throw new Error('useRouteViewportCommands must be used inside RouteViewportProvider')
+  return value
+}
 
 export const viewportPhaseAttrFor = (
   phase: string,
@@ -397,8 +447,21 @@ export function RouteViewportProvider({
     ]
   )
 
+  // Stable command surface for the rows: identity is pinned to the stable
+  // callbacks + controller instance, so it is NOT recreated by the versioned
+  // `value` above. Rows subscribe to this, the phase/version readers stay on
+  // the full context (Messages/TopicContent).
+  const commands = useMemo<RouteViewportCommands>(
+    () => ({ controller, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer }),
+    [controller, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer]
+  )
+
   void topicId
-  return <RouteViewportContext value={value}>{children}</RouteViewportContext>
+  return (
+    <RouteViewportContext value={value}>
+      <RouteViewportCommandsContext value={commands}>{children}</RouteViewportCommandsContext>
+    </RouteViewportContext>
+  )
 }
 
 // --- Keeper device-pixel geometry unit (fractional-zoom pause hold) ---------
@@ -537,9 +600,34 @@ export const buildContainerCapturer = (
 
 // --- Persistent stable anchoring ------------------------------------------------
 
+/**
+ * Transactional anchor sample: one anchor row's viewport offset together with
+ * the container `scrollTop` read at the SAME instant. Only the component that
+ * measures and publishes an anchor can produce a true pair; the keeper uses it
+ * as a hold baseline when it has no observation of its own for that row, so the
+ * layout metric never pairs a stale offset with a later scroll position (which
+ * would charge unknown user movement to layout and rewind it).
+ */
+export interface ViewportAnchorSample {
+  topicId: string
+  route: RouteId
+  messageId: string
+  /** Row top − scroll-container top at the instant `scrollTop` was read. */
+  viewportOffset: number
+  /** Container `scrollTop` read in the same synchronous block. */
+  scrollTop: number
+}
+
 export interface StableVisualAnchorMaintainer {
   /** Visual hold plus validated fold-reconciliation snapshot sync (never takeover/release/epoch change). */
   requestHold: (reason: string) => void
+  /**
+   * Publish the transactional pair for a just-published anchor (offset +
+   * scrollTop from the same instant). Purely a baseline source: the keeper owns
+   * the hold, the controller owns the anchor, and a null/invalid sample simply
+   * leaves the keeper with its own observation.
+   */
+  publishAnchorSample: (sample: ViewportAnchorSample | null) => void
 }
 
 /**
@@ -1380,9 +1468,40 @@ export const captureAnswerTabSwitchIntent = (
   }
 }
 
+/**
+ * Layout-hold baseline provenance: one row's `viewportOffset` + `scrollTop`
+ * pair together with the route key and anchor identity it belongs to. A pair is
+ * only ever usable for the identity it was measured on.
+ */
+interface LayoutHoldBaseline {
+  routeKey: string
+  anchorKey: string
+  viewportOffset: number
+  scrollTop: number
+}
+
 export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement | null>): StableVisualAnchorMaintainer {
   const viewport = useOptionalRouteViewport()
   const compensatingRef = useRef<{ expected: number } | null>(null)
+  // Layout-space hold baseline for the live anchor row (route + anchor identity
+  // provenance). The keeper's OWN observation is always a true pair (offset +
+  // scrollTop read in one synchronous block), so it is the preferred baseline;
+  // a refused/cold observation drops it and the next observation re-seeds.
+  const layoutHoldRef = useRef<LayoutHoldBaseline | null>(null)
+  // The pair dropped when the live anchor row's own geometry became unreadable
+  // (row detached or hidden — a window rebuild in flight). The row usually
+  // returns one frame later with the reflowed geometry, and the dropped pair
+  // still describes the reading position while the container's OWN scroll
+  // position has not moved: that position is the witness that no user input
+  // happened in between, so it is what makes the pair usable again (fail-closed
+  // as soon as it moved). Never used across an anchor identity change, and
+  // cleared by the next concluded observation.
+  const droppedLayoutHoldRef = useRef<LayoutHoldBaseline | null>(null)
+  // Transactional pair published by the anchor owner at its measurement instant
+  // (see `publishAnchorSample`). Used as a baseline only when the keeper has no
+  // observation of its own for that route + row; never paired with a scroll
+  // position read at a different time.
+  const publishedSampleRef = useRef<LayoutHoldBaseline | null>(null)
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
   const holdRef = useRef<(reason: string) => void>(() => {})
@@ -1456,12 +1575,19 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         viewportRef.current?.notifyChanged()
       } catch {}
     }
+    // Shared input adapter (single owner of the capture-phase declaration):
+    // genuine input opens/refreshes the controller's user-interaction session.
+    // ONLY the session-open transition (idle → live) is an observable state
+    // change for the projection: it is the one declaration that publishes a
+    // viewport notification. A repeat inside the same live session refreshes
+    // counters the rendered projection does not read, so it publishes nothing —
+    // otherwise every native key/wheel repeat re-rendered the whole mounted
+    // conversation. The session itself is still opened/refreshed/superseding
+    // exactly as before (no gate, no timer, no input interception).
     const declare = () => {
-      try {
-        controller.declareUserIntent()
-      } catch {}
+      const openedSession = declareUserIntentSession(controller)
       compensatingRef.current = null
-      notify()
+      if (openedSession) notify()
     }
     // Layout-control press (resize handle): same-arbiter LAYOUTCONTROL, not
     // user-scroll — never opens/refreshes the genuine session and never
@@ -2247,6 +2373,17 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     try {
       scheduleValidationRef.current = scheduleTabValidation
     } catch {}
+    // A baseline dropped because the live anchor row's geometry itself became
+    // unreadable (row absent/hidden) is REMEMBERED rather than forgotten: the
+    // row usually returns one frame later with the reflowed geometry, and the
+    // dropped pair still describes the reading position as long as the
+    // container's own scroll position is unchanged (see
+    // `droppedLayoutHoldRef`). Every other refusal (phase, programmatic
+    // ownership, foreign provenance, intent-owned frame) drops it for good.
+    const rememberUnreadableHold = (): void => {
+      if (layoutHoldRef.current !== null) droppedLayoutHoldRef.current = layoutHoldRef.current
+      layoutHoldRef.current = null
+    }
     const hold = (reason: string): void => {
       void reason
       // Geometry-only quantum sync BEFORE every guard: a DPR change inside
@@ -2258,33 +2395,34 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         if (live instanceof Element) syncMessagesPixelQuantum(live)
       } catch {}
       const vp = viewportRef.current
-      if (!vp) return
-      const phase = vp.controller.currentPhase
-      if (phase !== 'stable' && phase !== 'aligned') return
-      if (vp.controller.programmaticOwned) return
-      if (vp.controller.hasActiveUserInteraction()) {
-        // Ordinary-pagination commit scope only, and ONLY on the
-        // generation-layout commit (`reason === 'generation'`, the layout
-        // effect after the matching DOM update): the keeper holds the LIVE
-        // anchor (already refreshed to the precommit reading identity by
-        // adoptOrdinaryPaginationWindow) across the prepend instant even
-        // while the user's session is live. Scroll/resize/mutate callbacks
-        // firing before the layout commit (pre-growth DOM) must never consume
-        // the one-shot — the controller rejects non-generation consumers
-        // without consuming, so an early observer leaves the arm intact for
-        // the matching commit. Later takeovers stay authoritative — the hold
-        // below always measures the live anchor, never a stale capture — and
-        // the permission is generation-bound, so any newer window update
-        // invalidates it naturally.
-        let commitHold = false
-        try {
-          commitHold = vp.controller.consumePaginationHold(reason === 'generation' ? 'generation-layout' : reason)
-        } catch {
-          commitHold = false
-        }
-        if (!commitHold) return
+      if (!vp) {
+        layoutHoldRef.current = null
+        return
       }
-      if (!vp.controller.isDomProvenanceClean) return
+      const phase = vp.controller.currentPhase
+      if (phase !== 'stable' && phase !== 'aligned') {
+        layoutHoldRef.current = null
+        return
+      }
+      if (vp.controller.programmaticOwned) {
+        layoutHoldRef.current = null
+        return
+      }
+      // A live user gesture no longer vetoes the anchor hold. The hold below
+      // measures the row's LAYOUT displacement (content growth) with the
+      // container's own scrolling removed (`resolveLayoutHold`), so it can never
+      // cancel the user's movement — the only reason the previous gate refused
+      // every non-armed observation. Continuous paging across fetch flight and
+      // any later row growth during the same browse session therefore hold on
+      // the one live anchor, at any observer trigger (layout commit, RO, MO,
+      // scroll), instead of a single generation-bound hold followed by vetoes.
+      // The pagination commit's arm is left to the controller (it publishes the
+      // precommit reading identity as the live anchor); the keeper no longer
+      // needs a per-generation permission to hold it.
+      if (!vp.controller.isDomProvenanceClean) {
+        layoutHoldRef.current = null
+        return
+      }
       // Shared interaction hold: a pending interaction intent (answer tab,
       // message controls, fold controls, …) owns same-route geometry. Hold
       // the captured region at its declared visual baseline — re-resolved by
@@ -2386,6 +2524,9 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                 try {
                   scheduleTabValidation()
                 } catch {}
+                // The region hold owns this frame's geometry: the next ordinary
+                // observation re-seeds the layout baseline from the live anchor.
+                layoutHoldRef.current = null
                 return
               }
             }
@@ -2405,6 +2546,13 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       const displayed = vp.controller.displayedRoute
       const anchor = vp.controller.getAnchorFor(displayed)
       if (!anchor) {
+        // Bottom semantic: pin the column-reverse bottom through layout growth.
+        // During a live gesture the pin only applies while the viewport is STILL
+        // at the genuine bottom (a gesture that left the bottom published its own
+        // row anchor/offset through its takeover); an absolute scrollTop write
+        // must never pull a scrolling user back.
+        layoutHoldRef.current = null
+        if (vp.controller.hasActiveUserInteraction() && Math.abs(container.scrollTop) > 1) return
         try {
           if (Math.abs(container.scrollTop) > 1) {
             container.scrollTop = 0
@@ -2414,7 +2562,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         return
       }
       const el = resolveRow(anchor)
-      if (!el) return
+      if (!el) {
+        rememberUnreadableHold()
+        return
+      }
       // A hidden/collapsed row is never measurable stable geometry: hold
       // nothing (fail-closed). Same-route answer-tab switches are owned by
       // the tab-switch intent above — never by a body-anchor transfer to a
@@ -2422,8 +2573,12 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       // snapshot; the departure freeze captures the converged tab-stable
       // geometry.
       try {
-        if (isKeeperAnchorRowHidden(el, container)) return
+        if (isKeeperAnchorRowHidden(el, container)) {
+          rememberUnreadableHold()
+          return
+        }
       } catch {
+        rememberUnreadableHold()
         return
       }
       // Rebind the row observation to the live anchor element (React may
@@ -2438,21 +2593,74 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {}
       }
       let current = 0
+      let currentScrollTop = 0
       try {
+        // ONE synchronous read: the row's viewport offset and the container's
+        // own scroll position must describe the same instant, otherwise the
+        // layout/scroll separation below mixes two frames.
         current = el.getBoundingClientRect().top - container.getBoundingClientRect().top
+        currentScrollTop = container.scrollTop
       } catch {
+        rememberUnreadableHold()
         return
       }
-      const delta = current - anchor.offset
-      if (Math.abs(delta) > 1) {
-        try {
-          container.scrollTop += delta
-          compensatingRef.current = { expected: container.scrollTop }
-        } catch {}
+      const sample: LayoutHoldSample = { viewportOffset: current, scrollTop: currentScrollTop }
+      // Layout-space hold: the keeper owns the LIVE anchor row's layout
+      // displacement (content growth above/below it) and nothing else. Every
+      // trigger is admissible — pagination commit, later RO/MO growth, scroll
+      // echo — because the user's own scroll is subtracted out, so the hold can
+      // never cancel the movement and needs no per-generation permission.
+      const routeKey = displayedRouteKey(displayed)
+      const anchorKey = anchor.kind === 'message' ? `message:${anchor.messageId}` : `divider:${anchor.dividerKey}`
+      const base = layoutHoldRef.current
+      const baseMatches = base !== null && base.routeKey === routeKey && base.anchorKey === anchorKey
+      const published = publishedSampleRef.current
+      const publishedMatches =
+        published !== null && published.routeKey === routeKey && published.anchorKey === anchorKey
+      const dropped = droppedLayoutHoldRef.current
+      // A pair remembered from a frame whose row geometry was unreadable is
+      // admissible only for the SAME route + row and only while the container's
+      // own scroll position still matches the one it was measured with: that
+      // unchanged position is the witness that no input moved the viewport in
+      // between, so the offset difference is layout and nothing else.
+      const droppedUsable =
+        dropped !== null &&
+        dropped.routeKey === routeKey &&
+        dropped.anchorKey === anchorKey &&
+        Math.abs(sample.scrollTop - dropped.scrollTop) <= LAYOUT_HOLD_TOLERANCE_PX
+      // Baseline resolution — only TRUE pairs are admissible:
+      // 1. the keeper's own last observation of this route + row (offset and
+      //    scrollTop measured together, re-based by the write it authorized);
+      // 2. else the pair the anchor owner published at its measurement instant;
+      // 3. else the pair remembered from an unreadable-geometry frame while its
+      //    scroll position witness still holds (see `droppedLayoutHoldRef`);
+      // 4. else NOTHING is provable, so this observation holds nothing and only
+      //    seeds the baseline. Pairing the published `anchor.offset` with a
+      //    later `scrollTop` would charge every pixel the user scrolled in
+      //    between to layout and write it back — a rewind of genuine input.
+      const baseline: LayoutHoldSample | null = baseMatches
+        ? { viewportOffset: base.viewportOffset, scrollTop: base.scrollTop }
+        : publishedMatches
+          ? { viewportOffset: published.viewportOffset, scrollTop: published.scrollTop }
+          : droppedUsable
+            ? { viewportOffset: dropped.viewportOffset, scrollTop: sample.scrollTop }
+            : null
+      const displacement = baseline === null ? null : resolveLayoutHold(baseline, sample)
+      // The remembered pair is a one-shot recovery: this observation — held or
+      // merely seeding — concludes it.
+      droppedLayoutHoldRef.current = null
+      if (displacement === null) {
+        layoutHoldRef.current = { routeKey, anchorKey, ...sample }
+        return
       }
-      // Ordinary body hold converges here: no snapshot write, no pending
-      // queue. A hidden row above already returned fail-closed; the
-      // tab-switch intent above owns switch geometry.
+      try {
+        container.scrollTop += displacement
+        compensatingRef.current = { expected: container.scrollTop }
+      } catch {}
+      // Ordinary layout hold converges here: no snapshot write, no pending
+      // queue, no anchor/token/phase change. A hidden row above already returned
+      // fail-closed; the tab-switch intent above owns switch geometry.
+      layoutHoldRef.current = { routeKey, anchorKey, ...rebaseLayoutHold(sample, displacement) }
     }
     holdRef.current = hold
     // Observer creation precedes the first rebind/hold (no TDZ swallow):
@@ -2505,7 +2713,26 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       holdRef.current(reason)
     } catch {}
   }, [])
-  return useMemo<StableVisualAnchorMaintainer>(() => ({ requestHold }), [requestHold])
+  // Transactional baseline source (see `ViewportAnchorSample`): validated, then
+  // stored as-is. Invalid/empty samples are ignored so the keeper keeps its own
+  // observation instead of adopting a fabricated pair.
+  const publishAnchorSample = useCallback((sample: ViewportAnchorSample | null): void => {
+    try {
+      if (!sample) return
+      if (typeof sample.messageId !== 'string' || sample.messageId.length === 0) return
+      if (!Number.isFinite(sample.viewportOffset) || !Number.isFinite(sample.scrollTop)) return
+      publishedSampleRef.current = {
+        routeKey: routeViewportKey(sample.topicId, sample.route),
+        anchorKey: `message:${sample.messageId}`,
+        viewportOffset: sample.viewportOffset,
+        scrollTop: sample.scrollTop
+      }
+    } catch {}
+  }, [])
+  return useMemo<StableVisualAnchorMaintainer>(
+    () => ({ requestHold, publishAnchorSample }),
+    [requestHold, publishAnchorSample]
+  )
 }
 
 export type { RouteRef, RouteViewportSnapshot, RouteVisualAnchor }

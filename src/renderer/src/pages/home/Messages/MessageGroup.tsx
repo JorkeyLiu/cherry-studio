@@ -17,7 +17,7 @@ import MessageItem from './Message'
 import MessageGroupMenuBar from './MessageGroupMenuBar'
 import { deriveStableGroupId } from './messageRenderLayers'
 import { areProjectedMessagesEqual, areTopicsViewportEqual } from './messageViewportProjection'
-import { useOptionalRouteViewport } from './routeViewportContext'
+import { useOptionalRouteViewportCommands } from './routeViewportContext'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
@@ -40,7 +40,10 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const { selectAnswer, selectUseful } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
   const dispatch = useAppDispatch()
-  const tabViewport = useOptionalRouteViewport()
+  // Stable commands only: the answer-tab intent capture needs the controller,
+  // never the versioned projection, so a viewport notification must not
+  // re-render every mounted group (menubars + cssinjs included).
+  const tabViewport = useOptionalRouteViewportCommands()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 

@@ -534,6 +534,96 @@ async function wheelToMiddle(page: Page, ids: string[]): Promise<Anchor> {
   expect(await isMiddle(), 'must reach a verified middle reading position (|st|>500 from both extremes)').toBe(true)
   return settledOrThrow(page)
 }
+/**
+ * Ordinary wheel to a verified middle position proven by the SCROLL RANGE
+ * itself, for fixtures that are not a list of indexable rows (e.g. one tall
+ * long-markdown answer): the viewport must sit at least four client heights
+ * away from BOTH physical extremes, so three full native pages in each
+ * direction have real room before any clamped edge is reached. Never writes
+ * scrollTop.
+ */
+async function wheelToMiddleByRange(page: Page): Promise<ScrollState> {
+  const focusMessages = async (): Promise<void> => {
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  }
+  const wheel = async (dy: number): Promise<void> => {
+    await focusMessages()
+    await page.mouse.wheel(0, dy)
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    )
+    await page.waitForTimeout(220)
+  }
+  const clearance = 4
+  const isMiddle = async (): Promise<boolean> => {
+    const st = await readScrollState(page)
+    const range = st.scrollHeight - st.clientHeight
+    if (!Number.isFinite(range) || range < (2 * clearance + 1) * st.clientHeight) return false
+    return (
+      Math.abs(st.scrollTop) >= clearance * st.clientHeight &&
+      range - Math.abs(st.scrollTop) >= clearance * st.clientHeight
+    )
+  }
+  // Sweep one sign fully first (accumulating travel), then the reverse sweep.
+  for (let i = 0; i < 40; i++) {
+    if (await isMiddle()) break
+    await wheel(-560)
+  }
+  if (!(await isMiddle())) {
+    for (let i = 0; i < 40; i++) {
+      if (await isMiddle()) break
+      await wheel(560)
+    }
+  }
+  const reached = await readScrollState(page)
+  // eslint-disable-next-line no-console
+  console.log(
+    `[E2E] kb-range-middle st=${Math.round(reached.scrollTop)} sh=${Math.round(reached.scrollHeight)} ch=${Math.round(reached.clientHeight)} range=${Math.round(reached.scrollHeight - reached.clientHeight)}`
+  )
+  expect(
+    await isMiddle(),
+    `must reach a verified middle scroll range (>= ${clearance} client heights from both extremes; st=${Math.round(reached.scrollTop)} range=${Math.round(reached.scrollHeight - reached.clientHeight)} ch=${Math.round(reached.clientHeight)})`
+  ).toBe(true)
+  return reached
+}
+
+/**
+ * Test-setup focus for the long-markdown fixture (NOT product compensation): a
+ * real pointer click on the real visible centre of `#messages` (nudged off any
+ * link/button), then an explicit container focus, then a readback proving focus
+ * landed inside `#messages` — native PageUp/PageDown page the focused scroll
+ * host, so without this the keys never reach the message viewport.
+ */
+async function focusMessagesForNativePaging(page: Page): Promise<string> {
+  const point = await page.evaluate(() => {
+    const c = document.querySelector('#messages') as HTMLElement | null
+    if (!c) return null
+    const r = c.getBoundingClientRect()
+    let x = r.x + r.width / 2
+    let y = r.y + r.height / 2
+    try {
+      const hit = document.elementFromPoint(x, y) as HTMLElement | null
+      if (hit && hit.closest && hit.closest('a,button')) y = r.y + r.height * 0.35
+    } catch {}
+    return { x, y }
+  })
+  expect(point, 'long-topic #messages visible centre must be clickable').not.toBeNull()
+  await page.mouse.click(point!.x, point!.y)
+  await page.waitForTimeout(200)
+  await page.evaluate(() => {
+    const c = document.querySelector('#messages') as HTMLElement | null
+    try {
+      c?.focus({ preventScroll: true } as FocusOptions)
+    } catch {
+      c?.focus()
+    }
+  })
+  await page.waitForTimeout(300)
+  const focus = await describeActiveElement(page)
+  expect(focus, 'keyboard paging setup must focus inside #messages').toMatch(/:in-messages/)
+  return focus
+}
 
 async function installKeyProbe(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -1013,6 +1103,63 @@ async function pressKeyAndSample(page: Page, key: 'PageDown' | 'PageUp'): Promis
     maxExcursion: peak - start.msg,
     finalFromPeak: endTop - peak
   }
+}
+
+/**
+ * Diagnostic-only per-leg record for ONE native paging leg. Answers WHERE the
+ * press landed and what the app did with it: focus target sampled before the
+ * press and again after it, the key sighting from the existing key probe
+ * (target + defaultPrevented), the #messages scroll timeline edges, the
+ * per-leg app-write delta, and the boundary the leg ended at. Never asserts
+ * and never changes input, so the record is emitted before any assertion and
+ * survives a failing one. Bounded one-line [E2E] output, no message content.
+ */
+async function describePagingLeg(
+  page: Page,
+  label: string,
+  leg: KeyLeg,
+  focusBefore: string,
+  beforeProbe: ProbeReport | null,
+  beforeWrites: number
+): Promise<void> {
+  const focusAfter = await describeActiveElement(page).catch(() => '(err)')
+  const afterProbe = await readProbe(page).catch(() => null)
+  const afterWrites = await readWriteCount(page).catch(() => -1)
+  const state = await readScrollState(page).catch(() => null)
+  const bubbleNew = afterProbe && beforeProbe ? afterProbe.bubble.slice(beforeProbe.bubble.length) : []
+  const captureNew = afterProbe && beforeProbe ? afterProbe.capture.slice(beforeProbe.capture.length) : []
+  const endsNew = afterProbe && beforeProbe ? afterProbe.scrollEndTimes.slice(beforeProbe.scrollEndTimes.length) : []
+  const firstBubble = bubbleNew[0] ?? null
+  const firstCapture = captureNew[0] ?? null
+  const writeDelta = beforeWrites >= 0 && afterWrites >= 0 ? afterWrites - beforeWrites : NaN
+  const range = state ? state.scrollHeight - state.clientHeight : NaN
+  const excursion = Math.abs(leg.maxExcursion)
+  const motion =
+    excursion <= 1
+      ? 'never-moved'
+      : Math.abs(leg.finalFromPeak) >= excursion * 0.5
+        ? 'moved-then-reverted'
+        : 'moved-persisted'
+  const boundary =
+    Number.isFinite(range) && range > 0
+      ? Math.abs(leg.endTop) <= OFFSET_TOL
+        ? 'newest-edge(clamped)'
+        : range - Math.abs(leg.endTop) <= OFFSET_TOL
+          ? 'oldest-edge(clamped)'
+          : 'interior'
+      : 'unknown-range'
+  // eslint-disable-next-line no-console
+  console.log(
+    `[E2E] kb-leg ${label} key=${leg.key} focusBefore=${focusBefore} focusAfter=${focusAfter} ` +
+      `keyTarget=${firstBubble ? `${firstBubble.key}@${firstBubble.target} prevented=${firstBubble.defaultPrevented}` : 'none'} ` +
+      `captureTarget=${firstCapture ? firstCapture.target : 'none'} ` +
+      `st=${Math.round(leg.startTop)}->${Math.round(leg.endTop)} min=${Math.round(leg.minTop)} max=${Math.round(leg.maxTop)} ` +
+      `delta=${Math.round(leg.delta)} excursion=${Math.round(leg.maxExcursion)} fromPeak=${Math.round(leg.finalFromPeak)} ` +
+      `ch=${Math.round(leg.clientHeight)} sh=${state ? Math.round(state.scrollHeight) : 'NaN'} range=${Math.round(range)} ` +
+      `distOldest=${Math.round(range - Math.abs(leg.endTop))} distNewest=${Math.round(Math.abs(leg.endTop))} ` +
+      `docDelta=${Math.round(leg.docDelta)} motion=${motion} boundary=${boundary} ` +
+      `keyEvents=${captureNew.length}/${bubbleNew.length} scrollEnds=${endsNew.length} writesDelta=${Number.isFinite(writeDelta) ? writeDelta : '?'}`
+  )
 }
 
 async function waitScrollQuiescence(page: Page): Promise<number> {
@@ -2171,5 +2318,135 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
       Math.abs(restored.offset - middle.offset),
       'control roundtrip must restore the anchor offset'
     ).toBeLessThanOrEqual(OFFSET_TOL)
+  })
+})
+
+test.describe('Keyboard native paging — continuous presses and clamped-edge paging', () => {
+  test('consecutive PageUp/PageDown presses each page natively (no stall) and clamped-edge presses stay native', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'INTEGRATED UI: from a verified middle position (proven by the scroll range, >500px from both physical extremes), consecutive native PageDown presses must each move #messages by a full page (~0.9 x clientHeight, monotonic, never a truncated stub or a stall at the same position), the same must hold for consecutive PageUp presses back up, a press at the clamped newest edge must stay honestly clamped (no fabricated motion) while the opposite direction still pages natively, and the reading row must stay inside the offset tolerance across the whole sequence (app holds the reading position, it never cancels or reverts native keyboard motion).'
+    })
+    const page: Page = mainWindow
+    await waitForAppReady(page)
+    await waitForChatReady(page)
+    const assistantId = await prepareAssistant(page, TOTAL)
+    const topicId = `kb-continuous-${uuidLike(Date.now() % 100000)}`
+    const ids = await seedLongMarkdownTopic(page, assistantId, topicId)
+    await activateTopic(page, topicId, Math.min(TOTAL, ids.length))
+
+    // Multi-screen precondition: three full native pages in EACH direction must
+    // have real room (range > 8 client heights), so no press inside the sequence
+    // can be clamped at an edge and read as a stall.
+    const rangeSt = await readScrollState(page)
+    expect(
+      rangeSt.scrollHeight - rangeSt.clientHeight,
+      'long Markdown must span more than eight screens so both three-press sequences have room'
+    ).toBeGreaterThan(8 * rangeSt.clientHeight)
+
+    // Setup focus first (native paging needs the scroll host focused), then the
+    // verified middle, then cursor hygiene — all real input, no scrollTop write.
+    const setupFocus = await focusMessagesForNativePaging(page)
+    await wheelToMiddleByRange(page)
+    await parkCursorOnDeadSpot(page)
+    const anchor = await settledOrThrow(page)
+
+    // Diagnostic-only instruments (existing test seams; no input or
+    // precondition change): key probe for key target/defaultPrevented, write
+    // counter for per-leg app writes. Every record is emitted BEFORE its
+    // assertion so a failing leg still reports where the press landed.
+    await installKeyProbe(page)
+    await installWriteCounter(page)
+    const snapBefore = await readSnapId(page, topicId)
+    const startSt = await readScrollState(page)
+    // eslint-disable-next-line no-console
+    console.log(
+      `[E2E] kb-leg-start focus=${setupFocus} snap=${snapBefore.slice(0, 8)} anchorRow=${anchor.id.slice(0, 8)}@${Math.round(anchor.offset)} ` +
+        `st=${Math.round(startSt.scrollTop)} ch=${Math.round(startSt.clientHeight)} sh=${Math.round(startSt.scrollHeight)} ` +
+        `range=${Math.round(startSt.scrollHeight - startSt.clientHeight)}`
+    )
+
+    // --- Consecutive PageDown: every press must page a full native amount -----
+    const downDeltas: number[] = []
+    for (let i = 0; i < 3; i += 1) {
+      const focusBefore = await describeActiveElement(page)
+      const beforeProbe = await readProbe(page).catch(() => null)
+      const beforeWrites = await readWriteCount(page).catch(() => -1)
+      const leg = await pressKeyAndSample(page, 'PageDown')
+      await describePagingLeg(page, `down${i + 1}`, leg, focusBefore, beforeProbe, beforeWrites)
+      await waitScrollQuiescence(page)
+      downDeltas.push(leg.delta)
+      expect(leg.docDelta, 'the document must not scroll instead of #messages').toBeLessThanOrEqual(4)
+      expect(
+        Math.abs(leg.delta),
+        `PageDown leg ${i + 1} must move #messages by a full native page, not a stub (delta=${leg.delta})`
+      ).toBeGreaterThan(leg.clientHeight * 0.5)
+    }
+    // Every press moved the SAME direction: no stall, no reversal.
+    expect(downDeltas.every((d) => d * downDeltas[0] >= 0)).toBe(true)
+    expect(Math.abs(downDeltas[0])).toBeGreaterThan(0)
+
+    // --- Consecutive PageUp back up: symmetric, no stall ---------------------
+    const upDeltas: number[] = []
+    for (let i = 0; i < 3; i += 1) {
+      const focusBefore = await describeActiveElement(page)
+      const beforeProbe = await readProbe(page).catch(() => null)
+      const beforeWrites = await readWriteCount(page).catch(() => -1)
+      const leg = await pressKeyAndSample(page, 'PageUp')
+      await describePagingLeg(page, `up${i + 1}`, leg, focusBefore, beforeProbe, beforeWrites)
+      await waitScrollQuiescence(page)
+      upDeltas.push(leg.delta)
+      expect(leg.docDelta, 'the document must not scroll instead of #messages').toBeLessThanOrEqual(4)
+      expect(
+        Math.abs(leg.delta),
+        `PageUp leg ${i + 1} must move #messages by a full native page, not a stub (delta=${leg.delta})`
+      ).toBeGreaterThan(leg.clientHeight * 0.5)
+    }
+    expect(upDeltas.every((d) => d * upDeltas[0] >= 0)).toBe(true)
+    expect(Math.sign(upDeltas[0]), 'PageUp must move opposite to PageDown').toBe(-Math.sign(downDeltas[0]))
+    // eslint-disable-next-line no-console
+    console.log(
+      `[E2E] kb-leg-seq downDeltas=${downDeltas.map((d) => Math.round(d)).join(',')} upDeltas=${upDeltas.map((d) => Math.round(d)).join(',')} ` +
+        `snapAfterUp=${(await readSnapId(page, topicId)).slice(0, 8)}`
+    )
+
+    // --- The reading row survives the whole sequence (no revert, no cancel) ---
+    const afterSeq = await measureTargetRow(page, anchor.id)
+    expect(afterSeq?.found, 'the live reading row must stay mounted across native paging').toBe(true)
+    const afterSeqOffset = afterSeq?.offset ?? anchor.offset
+    expect(
+      Math.abs(afterSeqOffset - anchor.offset),
+      'app holds must not fight native keyboard paging (reading row offset bounded)'
+    ).toBeLessThanOrEqual(OFFSET_TOL * 12)
+
+    // --- Clamped newest edge: honest clamp, opposite direction still pages ----
+    // Real wheel to the physical newest edge (never a scrollTop write).
+    await wheelToBottomEdge(page)
+    const clampedDownBefore = await describeActiveElement(page)
+    const clampedDownProbe = await readProbe(page).catch(() => null)
+    const clampedDownWrites = await readWriteCount(page).catch(() => -1)
+    const clampedDown = await pressKeyAndSample(page, 'PageDown')
+    await describePagingLeg(page, 'clampedDown', clampedDown, clampedDownBefore, clampedDownProbe, clampedDownWrites)
+    expect(
+      Math.abs(clampedDown.delta),
+      `a PageDown at the clamped newest edge must stay honestly clamped (no fabricated motion, delta=${clampedDown.delta})`
+    ).toBeLessThanOrEqual(OFFSET_TOL)
+    expect(clampedDown.docDelta, 'the document must not scroll instead of #messages').toBeLessThanOrEqual(4)
+    const beforeClampedUp = await readScrollState(page)
+    const clampedUpBefore = await describeActiveElement(page)
+    const clampedUpProbe = await readProbe(page).catch(() => null)
+    const clampedUpWrites = await readWriteCount(page).catch(() => -1)
+    const clampedUp = await pressKeyAndSample(page, 'PageUp')
+    await describePagingLeg(page, 'clampedUp', clampedUp, clampedUpBefore, clampedUpProbe, clampedUpWrites)
+    expect(
+      Math.abs(clampedUp.delta),
+      `PageUp at the clamped edge must page natively (delta=${clampedUp.delta}, ch=${clampedUp.clientHeight})`
+    ).toBeGreaterThan(clampedUp.clientHeight * 0.5)
+    expect(clampedUp.endTop).not.toBe(beforeClampedUp.scrollTop)
+    await removeKeyProbe(page).catch(() => {})
   })
 })

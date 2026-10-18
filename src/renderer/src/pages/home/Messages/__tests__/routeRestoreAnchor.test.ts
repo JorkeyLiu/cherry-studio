@@ -76,14 +76,18 @@ describe('pagination compensation (single keeper owner, no second writer)', () =
     const code = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
     const ownedIdx = code.indexOf('A route transition in flight owns compensation')
     expect(ownedIdx).toBeGreaterThan(-1)
-    const branch = code.slice(ownedIdx, ownedIdx + 2200)
+    // Scope to the branch itself (its own end marker), never a fixed character
+    // budget that could spill into the ordinary keeper publication below.
+    const branchEnd = code.indexOf('Ordinary same-route window growth', ownedIdx)
+    expect(branchEnd).toBeGreaterThan(ownedIdx)
+    const branch = code.slice(ownedIdx, branchEnd)
     expect(branch).toMatch(/controller\.programmaticOwned/)
-    expect(branch).toMatch(/live\.scrollTop \+= decision\.delta/)
+    expect(branch).toMatch(/applyOwnedDirectDelta\(\)/)
     expect(branch).not.toMatch(/beginScroll/)
     expect(branch).not.toMatch(/adoptOrdinaryPaginationWindow/)
   })
 
-  it('ordinary older pagination publishes the precommit identity to the keeper (no rAF writer, no token)', () => {
+  it('ordinary pagination (both directions) publishes the precommit identity to the keeper (no rAF writer, no token)', () => {
     const code = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
     // Single owner: the precommit identity + offset is captured BEFORE the
     // merge dispatch and published through the existing same-route API, so
@@ -105,10 +109,13 @@ describe('pagination compensation (single keeper owner, no second writer)', () =
 describe('production wiring (behavior-adjacent guards)', () => {
   const src = (): string => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
 
-  it('older paging is app-owned: edge trigger from live geometry, no external latch or replay', () => {
+  it('browse paging is app-owned in both directions: edge trigger from live geometry, no external latch or replay', () => {
     const code = src()
-    expect(code).toMatch(/maybeLoadOlderAtEdge/)
+    expect(code).toMatch(/maybePageAtEdge/)
     expect(code).toMatch(/isColumnReverseAtOldest/)
+    expect(code).toMatch(/isColumnReverseAtNewest/)
+    expect(code).toMatch(/isExactlyAtOldest/)
+    expect(code).toMatch(/isExactlyAtNewest/)
     expect(code).toMatch(/hasActiveUserInteraction/)
     expect(code).toMatch(/data-older-paging="app-owned"/)
     expect(code).not.toMatch(/react-infinite-scroll-component/)

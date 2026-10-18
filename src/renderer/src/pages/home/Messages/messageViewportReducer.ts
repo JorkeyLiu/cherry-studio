@@ -134,10 +134,14 @@ export const messageViewportReducer = (
     case 'load/cancel': {
       const load = state.loads[action.direction]
       if (load.token !== action.token || load.topicGeneration !== action.topicGeneration || !load.active) return state
+      // A cancelled attempt keeps NO publishable ownership: the ownership token
+      // is dropped with the activity flag, so a late continuation of the
+      // cancelled attempt can never match a current load again (and a successor
+      // attempt is the only thing that can own this direction afterwards).
       return {
         ...state,
         loading: { ...state.loading, [action.direction]: false },
-        loads: { ...state.loads, [action.direction]: { ...load, active: false } }
+        loads: { ...state.loads, [action.direction]: { ...load, active: false, token: null } }
       }
     }
     case 'navigation/begin':

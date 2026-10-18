@@ -87,6 +87,66 @@ describe('messageViewportReducer', () => {
     expect(state.window).toBeNull()
   })
 
+  it('drops publishable ownership on cancel: a cancelled load can never finish or cancel a successor', () => {
+    const cancelled = {}
+    const successor = {}
+    let state = messageViewportReducer(createMessageViewportState(), {
+      type: 'load/start',
+      direction: 'older',
+      token: cancelled
+    })
+    state = messageViewportReducer(state, {
+      type: 'load/cancel',
+      direction: 'older',
+      token: cancelled,
+      topicGeneration: 0
+    })
+    // The cancelled attempt retains no ownership token.
+    expect(state.loads.older).toEqual({ active: false, token: null, topicGeneration: 0 })
+    expect(state.loading.older).toBe(false)
+
+    // Its later continuation cannot publish a window through `load/finish`.
+    const afterLateFinish = messageViewportReducer(state, {
+      type: 'load/finish',
+      direction: 'older',
+      token: cancelled,
+      topicGeneration: 0,
+      window: emptyWindow
+    })
+    expect(afterLateFinish.window).toBeNull()
+
+    // A successor owns the direction; the cancelled attempt cannot release it.
+    state = messageViewportReducer(state, { type: 'load/start', direction: 'older', token: successor })
+    state = messageViewportReducer(state, {
+      type: 'load/cancel',
+      direction: 'older',
+      token: cancelled,
+      topicGeneration: 0
+    })
+    expect(state.loads.older).toEqual({ active: true, token: successor, topicGeneration: 0 })
+    expect(state.loading.older).toBe(true)
+  })
+
+  it('keeps completion identity after finish so post-commit compensation can re-validate itself', () => {
+    const token = {}
+    let state = messageViewportReducer(createMessageViewportState(), {
+      type: 'load/start',
+      direction: 'older',
+      token
+    })
+    state = messageViewportReducer(state, {
+      type: 'load/finish',
+      direction: 'older',
+      token,
+      topicGeneration: 0,
+      window: emptyWindow
+    })
+    expect(state.window).toBe(emptyWindow)
+    // Token identity survives the completion (only `active` clears); that is the
+    // completion identity the pagination compensation re-gate reads.
+    expect(state.loads.older).toEqual({ active: false, token, topicGeneration: 0 })
+  })
+
   it('enforces last-navigation-wins generation and cancellation', () => {
     const firstToken = {}
     const secondToken = {}

@@ -1978,3 +1978,32 @@ export class RouteViewportController {
 
 /** Displayed-route key helper for outgoing freeze (always the DISPLAYED route). */
 export const displayedRouteKey = (displayed: RouteRef): string => routeViewportKey(displayed.topicId, displayed.route)
+
+/** Minimal session surface the shared input-declaration helper needs. */
+export type UserIntentDeclarer = Pick<RouteViewportController, 'hasActiveUserInteraction' | 'declareUserIntent'>
+
+/**
+ * Shared input-adapter declaration (ONE implementation for every genuine-input
+ * boundary: the capture-phase adapter on the message container and the React
+ * bubble handler for the same gesture).
+ *
+ * Both boundaries observe the same input: capture runs first and opens the
+ * session, the bubble call then refreshes that live session. Genuine repeats
+ * (native key auto-repeat, wheel momentum, a drag's scrolls) only refresh the
+ * session counters, which no projection surface renders; the ONLY observable
+ * transition is idle → live, when a session is opened. The helper performs the
+ * unchanged open/refresh/supersede declaration and reports that transition, so
+ * callers publish exactly one projection notification per gesture instead of
+ * one per repeat (a repeat notification re-rendered the whole mounted
+ * conversation for no visible change). No gate, no timer, no keyboard
+ * interception, no lifecycle change: declaration semantics are untouched.
+ */
+export const declareUserIntentSession = (controller: UserIntentDeclarer): boolean => {
+  try {
+    const wasLive = controller.hasActiveUserInteraction()
+    controller.declareUserIntent()
+    return !wasLive
+  } catch {
+    return false
+  }
+}

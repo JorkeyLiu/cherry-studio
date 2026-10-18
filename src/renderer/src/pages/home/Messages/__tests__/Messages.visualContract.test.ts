@@ -64,7 +64,7 @@ describe('visual position contracts', () => {
     // own search state, never from a foreign live anchor.
     // (Behavioral coverage lives in the routeRestoreAnchor smoke + controller
     // provenance unit; no duplicated spelling assertion here.)
-    expect(src).toMatch(/startOlderWindowLoad\(decision\.preferred\)/)
+    expect(src).toMatch(/startWindowPageLoad\('older', decision\.preferred\)/)
     expect(src).not.toMatch(/activeRestoreAnchorRef/)
     expect(src).not.toMatch(/snapshotRestoreAnchor\(/)
     // Terminal paths release exactly once with NO divider-position commit:
@@ -85,7 +85,7 @@ describe('visual position contracts', () => {
     // Restore-owned pages are driven explicitly from window state (a short
     // window parked at edge=0 never reaches the app-owned user trigger); the
     // user trigger explicitly yields while the search session owns the route.
-    expect(src).toMatch(/maybeLoadOlderAtEdge/)
+    expect(src).toMatch(/maybePageAtEdge/)
     expect(src).toMatch(/ownerEpoch === controller\.currentEpoch/)
     expect(src).toMatch(/drivenWindowKey/)
     // No diagnostic probes, no fence/user-input gating, no wheel dependence.

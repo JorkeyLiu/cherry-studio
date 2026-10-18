@@ -1275,6 +1275,25 @@ export function selectLoadedMessagesForTopic(state: RootState, topicId: string):
     .messages
 }
 
+/**
+ * Current ordered messages of the store's loaded projection for one topic,
+ * read directly from the slice (id list + entities) WITHOUT the residency
+ * marker gate.
+ *
+ * Purpose: a pagination merge must read the CURRENT store projection in the
+ * same synchronous block as its commit — never a captured component array
+ * (e.g. an effect-mirrored ref) that can lag one commit behind — and it must
+ * do so even while the residency marker is not published yet. The result is
+ * still `'loaded-projection'` completeness: it is a projection, never a claim
+ * about the whole topic.
+ */
+export function readLoadedProjectionMessages(state: RootState, topicId: string): Message[] {
+  const ids = state.messages.messageIdsByTopic[topicId]
+  if (!Array.isArray(ids) || ids.length === 0) return []
+  const entities = state.messages.entities as Record<string, Message | undefined>
+  return ids.map((id) => entities[id]).filter((message): message is Message => !!message)
+}
+
 export function selectLoadedTopicProjection(
   state: RootState,
   topicId: string

@@ -125,7 +125,9 @@ vi.mock('../../Inputbar/tools/components/AttachmentButton', () => ({
 }))
 
 vi.mock('../routeViewportContext', () => ({
-  useOptionalRouteViewport: () => ({ controller: {} }),
+  // The editor row consumes the stable command surface (never the versioned
+  // projection): the mock mirrors the production hook it is replacing.
+  useOptionalRouteViewportCommands: () => ({ controller: {} }),
   captureInteractionIntent: (...args: unknown[]) => {
     void args
     return mocks.captureIntent()

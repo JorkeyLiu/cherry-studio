@@ -77,7 +77,11 @@ import {
   MESSAGE_EDITOR_MEASURED_CHROME_PX,
   resolveMessageEditorHeight
 } from './messageEditorHeight'
-import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
+import {
+  captureInteractionIntent,
+  INTERACTION_REGION_CONTROLS,
+  useOptionalRouteViewportCommands
+} from './routeViewportContext'
 
 interface Props {
   message: Message
@@ -173,7 +177,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   onSaveKey
 }) => {
   const { t } = useTranslation()
-  const routeViewport = useOptionalRouteViewport()
+  const routeViewport = useOptionalRouteViewportCommands()
   const [viewMode, setViewMode] = useState<MainTextViewMode>('source')
   const [expanded, setExpanded] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
@@ -1222,7 +1226,7 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
   } = useSettings()
   const { t } = useTranslation()
   const isUserMessage = message.role === 'user'
-  const routeViewport = useOptionalRouteViewport()
+  const routeViewport = useOptionalRouteViewportCommands()
 
   // Unit B: edit attachments are never gated by vision metadata. All ordinary
   // attachment kinds stay selectable; endpoint/adapter encodability is decided

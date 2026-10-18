@@ -16,7 +16,7 @@ import { Fragment, memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { captureAnswerTabSwitchIntent, useOptionalRouteViewport } from './routeViewportContext'
+import { captureAnswerTabSwitchIntent, useOptionalRouteViewportCommands } from './routeViewportContext'
 
 /**
  * Shared horizontal answer-strip layout primitive.
@@ -57,7 +57,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
   const { foldDisplayMode } = useSettings()
-  const viewport = useOptionalRouteViewport()
+  // Stable commands only (tab-switch intent capture needs the controller).
+  const viewport = useOptionalRouteViewportCommands()
   const isCompact = foldDisplayMode === 'compact'
 
   const isMessageProcessing = useCallback((message: Message) => {

@@ -27,7 +27,11 @@ import MessageErrorBoundary from './MessageErrorBoundary'
 import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
 import { areProjectedMessagesEqual, areTopicsViewportEqual, isSameViewportPosition } from './messageViewportProjection'
-import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
+import {
+  captureInteractionIntent,
+  INTERACTION_REGION_CONTROLS,
+  useOptionalRouteViewportCommands
+} from './routeViewportContext'
 
 interface Props {
   message: Message
@@ -93,9 +97,11 @@ const MessageItem: FC<Props> = ({
   const isEditing = editingMessageId === message.id
   const editMode = useOptionalEditMode()
   const selectedGroupIds = editMode?.selectedGroupIds ?? EMPTY_SELECTED_GROUP_IDS
-  const routeViewport = useOptionalRouteViewport()
-  // Stable controller identity: the context value versions on every notify,
-  // but the controller instance is stable — depend on it, never the version.
+  // Stable command surface (NOT the versioned context): a row renders its own
+  // message/config/window, never the viewport version, so subscribing to the
+  // versioned value would re-render every mounted row on every viewport
+  // notification (native key repeats included) for no rendered output.
+  const routeViewport = useOptionalRouteViewportCommands()
   const viewportController = routeViewport?.controller ?? null
 
   // Edit open/cancel never smooth-centers: the shared interaction hold keeps

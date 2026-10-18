@@ -109,9 +109,12 @@ describe('messageNavigationLoader', () => {
     expect(result.status).toBe('loaded')
   })
 
-  it('disjoint union is ordered without duplicates and contains target', async () => {
+  it('disjoint window never fabricates a route order: authoritative rebase replaces the projection', async () => {
     const existing = Array.from({ length: 5 }, (_, i) => msg(`m-${30 + i}`, 30 + i))
-    const incoming = Array.from({ length: 5 }, (_, i) => msg(`m-${i}`, i))
+    // Adversarial owner-local sortOrder: a global sortOrder sort would reorder
+    // this window, so the assertion below proves the window's own route order
+    // is what gets published.
+    const incoming = [msg('m-2', 90), msg('m-1', 12), msg('m-0', 77)]
     const read = vi.fn(
       async () =>
         makeWindowResponse(
@@ -125,20 +128,21 @@ describe('messageNavigationLoader', () => {
     })
     expect(result.status).toBe('loaded')
     if (result.status !== 'loaded') return
-    const ids = result.messages.map((m) => m.id)
-    expect(ids).toContain('m-2')
-    for (const e of existing) expect(ids).toContain(e.id)
-    for (const inc of incoming) expect(ids).toContain(inc.id)
-    expect(new Set(ids).size).toBe(ids.length)
-    const orders = result.messages.map((m) => (m as any).sortOrder as number)
-    for (let i = 1; i < orders.length; i++) expect(orders[i]).toBeGreaterThan(orders[i - 1])
+    expect(result.rebased).toBe(true)
+    // Exactly Main's window order — never a sortOrder/id sort, never a
+    // concatenation with the disjoint resident run at a guessed end.
+    expect(result.messages.map((m) => m.id)).toEqual(['m-2', 'm-1', 'm-0'])
+    // The disjoint resident run is not retained: the read took the existing
+    // authoritative route-window rebase, whose contract is that resident
+    // coverage is exactly the window (nothing outside it is provable).
+    for (const e of existing) expect(result.messages.some((m) => m.id === e.id)).toBe(false)
   })
-
-  it('overlapping around window for a missing target unions without duplicates', async () => {
-    // Existing lacks m-9 but shares neighbours with the around window.
-    // Non-resident targets always use the canonical sorted union.
+  it('overlapping around window for a missing target splices in route order, never sorted', async () => {
+    // Route-order splice, never a sort: adversarial owner-local sortOrder values
+    // (6, 9, 8) would reorder the union, while the resident order and the
+    // window's own run order are preserved verbatim.
     const tail = [msg('m-6', 6), msg('m-7', 7)]
-    const windowAroundMissing = [msg('m-7', 7), msg('m-8', 8), msg('m-9', 9)]
+    const windowAroundMissing = [msg('m-7', 9), msg('m-8', 8), msg('m-9', 90)]
     const read = vi.fn(
       async () =>
         makeWindowResponse(
@@ -152,9 +156,10 @@ describe('messageNavigationLoader', () => {
     })
     expect(loaded.status).toBe('loaded')
     if (loaded.status !== 'loaded') return
-    const ids = loaded.messages.map((m) => m.id)
-    expect(ids).toContain('m-9')
-    expect(new Set(ids).size).toBe(ids.length)
+    expect(loaded.rebased).toBeUndefined()
+    // m-8/m-9 splice immediately after their shared resident neighbour m-7.
+    expect(loaded.messages.map((m) => m.id)).toEqual(['m-6', 'm-7', 'm-8', 'm-9'])
+    expect(new Set(loaded.messages.map((m) => m.id)).size).toBe(loaded.messages.length)
   })
 
   it('malformed/topic/kind/anchor mismatch fails closed as error (retryable)', async () => {
