@@ -518,11 +518,12 @@ export function registerChatDbIpc(): () => void {
     })
   })
 
-  // 6. update-message
+  // 6. update-message (optional conditional usage mode threaded through)
   handleCommand(IpcChannel.ChatDb_UpdateMessage, (agg, req: UpdateMessageRequest) => {
     return agg.updateMessage(req.topicId, req.messageId, req.updates, {
       resendAttemptId: req.resendAttemptId,
-      branchId: req.branchId
+      branchId: req.branchId,
+      usageCondition: req.usageCondition
     })
   })
 

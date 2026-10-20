@@ -2,9 +2,12 @@
  * Anchor establishment + compatibility-repair hooks in the message thunks.
  *
  * First establishment (docs/adr/context-window.md §6): ordinary `sendMessage`
- * persists the topic anchor idempotently AFTER the user message is persisted
- * and added to Redux and BEFORE the assistant response is queued, so the first
- * request resolves the same position.
+ * establishes the topic anchor AFTER the user message is persisted and added to
+ * Redux and BEFORE the assistant response is queued, so the first request
+ * resolves the same position — but only for a route that has no anchor yet. An
+ * already anchored route is skipped at this callsite (no authority round trip
+ * per send); the service itself keeps its original behavior for activation and
+ * explicit repair.
  *
  * Compatibility repair (docs/adr/context-window.md §10): `loadTopicMessagesThunk`
  * initializes a missing/unresolvable anchor exactly once AFTER a successful
@@ -18,6 +21,7 @@
  * `messageThunk.cachedAnchorRepair.test.ts`; this file proves the call
  * sequence with the hook mocked.
  */
+import type * as AnchorServiceModule from '@renderer/services/anchorService'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -58,11 +62,17 @@ vi.mock('@logger', () => ({
   }
 }))
 
-vi.mock('@renderer/services/anchorService', () => ({
-  ensureTopicAnchorEstablished: mocks.ensureTopicAnchorEstablished,
-  buildGroupList: vi.fn(() => []),
-  transferAnchorsAfterDeletion: vi.fn()
-}))
+// Only the establishment hook is stubbed. The route-key helper stays REAL (the
+// send callsite reads it), so the key derivation is never duplicated in tests.
+vi.mock('@renderer/services/anchorService', async () => {
+  const actual = await vi.importActual<typeof AnchorServiceModule>('@renderer/services/anchorService')
+  return {
+    anchorKeyForRoute: actual.anchorKeyForRoute,
+    ensureTopicAnchorEstablished: mocks.ensureTopicAnchorEstablished,
+    buildGroupList: vi.fn(() => []),
+    transferAnchorsAfterDeletion: vi.fn()
+  }
+})
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
@@ -323,8 +333,40 @@ describe('messageThunk anchor hooks', () => {
 
         // Response is queued (not started) after establishment.
         expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
+
+        // Ordering contract (docs/adr/context-window.md §6): the assistant stub
+        // is appended only AFTER the anchor work, so the first request resolves
+        // the just-established anchor even though its assistant snapshot
+        // predates this dispatch.
+        const assistantAppendCall = mocks.appendMessage.mock.invocationCallOrder[1]
+        const queueCall = mocks.queueAdd.mock.invocationCallOrder[0]
+        expect(establishCall).toBeLessThan(assistantAppendCall)
+        expect(establishCall).toBeLessThan(queueCall)
       }
     )
+
+    it('never queues the response while first establishment is still pending', { timeout: 60_000 }, async () => {
+      let releaseEstablishment!: () => void
+      mocks.ensureTopicAnchorEstablished.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseEstablishment = resolve
+          })
+      )
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+      const getState = () => storeState as never
+
+      const send = sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
+      // Give the send every chance to run ahead while establishment is held.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
+      expect(mocks.queueAdd).not.toHaveBeenCalled()
+
+      releaseEstablishment()
+      await send
+      expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
+    })
 
     it('passes the active branch route to anchor establishment', { timeout: 60_000 }, async () => {
       ;(storeState as StoreState & { topicBranch?: unknown }).topicBranch = {
@@ -339,6 +381,88 @@ describe('messageThunk anchor hooks', () => {
 
       await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
 
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.any(Function),
+        'asst-1',
+        'topic-1',
+        'branch-7'
+      )
+    })
+
+    it('never re-establishes an already anchored route on an ordinary send (no authority call)', async () => {
+      // The store already owns an established anchor for this route (e.g. an
+      // earlier send in this session); the captured send snapshot predates it.
+      storeState.assistants.assistants = [
+        {
+          id: 'asst-1',
+          settings: { contextCount: 5, contextWindowAnchor: { 'topic-1': { kind: 'active', groupKey: 'u1' } } },
+          topics: [{ id: 'topic-1' }]
+        }
+      ]
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+      const getState = () => storeState as never
+
+      await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
+
+      // No establishment query at all — the anchor is a one-time command and the
+      // guard reads the LATEST store settings, not the captured snapshot.
+      expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
+      // The send itself is completely unaffected.
+      expect(mocks.appendMessage).toHaveBeenCalledTimes(2)
+      expect(mocks.applyAppendAck).toHaveBeenCalledTimes(2)
+      expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
+    })
+
+    it('a stored-but-not-established entry still goes through the service (repair stays reachable)', async () => {
+      // Only an active non-empty group key counts as established. Anything else
+      // is left to `ensureTopicAnchorEstablished`, whose resolver keeps repairing
+      // an unusable anchor (docs/adr/context-window.md §10).
+      storeState.assistants.assistants = [
+        {
+          id: 'asst-1',
+          settings: { contextCount: 5, contextWindowAnchor: { 'topic-1': { kind: 'inactive', groupKey: 'u1' } } },
+          topics: [{ id: 'topic-1' }]
+        }
+      ]
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+      const getState = () => storeState as never
+
+      await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
+
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.any(Function),
+        'asst-1',
+        'topic-1',
+        null
+      )
+    })
+
+    it('anchors are per route: a main-route anchor does not satisfy the active branch route', async () => {
+      storeState.assistants.assistants = [
+        {
+          id: 'asst-1',
+          settings: { contextCount: 5, contextWindowAnchor: { 'topic-1': { kind: 'active', groupKey: 'u1' } } },
+          topics: [{ id: 'topic-1' }]
+        }
+      ]
+      ;(storeState as StoreState & { topicBranch?: unknown }).topicBranch = {
+        branchesByTopic: {},
+        activeBranchIdByTopic: { 'topic-1': 'branch-7' },
+        routeGenerationByTopic: {}
+      }
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+      const getState = () => storeState as never
+
+      await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
+
+      // The branch route key has no anchor yet → establishment still runs for it.
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
         expect.any(Function),
         expect.any(Function),

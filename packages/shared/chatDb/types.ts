@@ -196,6 +196,51 @@ export interface AppendMessageResponse {
   mutableMessageIds: string[]
 }
 
+/**
+ * Renderer-captured estimate source for the conditional usage write.
+ *
+ * The user-prompt token estimate is optional display metadata that is computed
+ * AFTER the user message has been persisted, so by the time the result comes back
+ * the prompt may have been edited, re-estimated by an edit/resend path, or
+ * deleted. Main therefore compares this snapshot — exactly the inputs the
+ * estimate consumed — against the authority blocks inside the same write
+ * transaction, and applies the usage only when the prompt still has the same text
+ * content and the same attachments.
+ *
+ * Comparison is order-insensitive (multiset): only the SET of estimated inputs
+ * affects the token total, block ordering is a rendering detail. Empty text
+ * contents are omitted on both sides (they contribute no tokens).
+ */
+export interface UpdateMessageUsageSource {
+  /** MAIN_TEXT block contents the estimate consumed. */
+  textContents: string[]
+  /** FILE/IMAGE attachment IDs the estimate consumed. */
+  fileIds: string[]
+}
+
+/**
+ * Why a conditional usage write was rejected. A rejection is a successful
+ * no-op: nothing is written, nothing is emitted, the row is left exactly as it
+ * was (deleted target, a non-user row, an already-owned usage, or a prompt whose
+ * estimated inputs changed since the estimate started).
+ */
+export type UpdateMessageUsageRejection = 'target-missing' | 'not-user-message' | 'usage-present' | 'source-changed'
+
+/** Outcome of a conditional usage write. */
+export interface UpdateMessageUsageResult {
+  /** True only when Main applied the usage patch in the same transaction. */
+  applied: boolean
+  /** Present exactly when `applied === false`. */
+  rejection?: UpdateMessageUsageRejection
+}
+
+/**
+ * Result of `chatdb:update-message`: `null` for an ordinary unconditional patch
+ * (unchanged behavior), or the conditional usage outcome when the request
+ * carried `usageCondition`.
+ */
+export type UpdateMessageResult = UpdateMessageUsageResult | null
+
 /** @see IpcChannel.ChatDb_UpdateMessage */
 export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
@@ -208,6 +253,15 @@ export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
    * Must NOT change id or topicId.
    */
   updates: JsonObject
+  /**
+   * Optional conditional metadata mode. When present, `updates` must contain
+   * exactly one key — `usage` — and Main applies it only if, inside the same
+   * transaction: the target still exists in this topic/route, it is a user
+   * message, it has no usage yet, and its MAIN_TEXT/FILE/IMAGE blocks still
+   * match {@link UpdateMessageUsageSource}. Ordinary requests omit it and keep
+   * the unconditional behavior.
+   */
+  usageCondition?: UpdateMessageUsageSource
 }
 
 /** @see IpcChannel.ChatDb_UpdateMessageAndBlocks */
@@ -2048,7 +2102,7 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:topic-exists': { request: TopicExistsRequest; response: boolean }
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }
   'chatdb:append-message': { request: AppendMessageRequest; response: AppendMessageResponse }
-  'chatdb:update-message': { request: UpdateMessageRequest; response: null }
+  'chatdb:update-message': { request: UpdateMessageRequest; response: UpdateMessageResult }
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
   // Cross-process authority answer selection (Main-resolved full group)
   'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }

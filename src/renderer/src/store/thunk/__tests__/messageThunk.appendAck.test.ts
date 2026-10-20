@@ -306,6 +306,35 @@ describe('sendMessage append acknowledgment publication', () => {
 
     expect(mocks.applyAppendAck).not.toHaveBeenCalled()
     expect(mocks.addMessage).not.toHaveBeenCalled()
+    // An unacknowledged assistant stub has no authority row: no provider
+    // execution may target it.
+    expect(mocks.queueAdd).not.toHaveBeenCalled()
+  })
+
+  it('an unacknowledged assistant stub never launches a provider request', { timeout: 60_000 }, async () => {
+    // The user append is acknowledged; only the assistant stub comes back
+    // without an ack (a real write-level failure, not a projection filter).
+    mocks.appendMessage.mockImplementation((async (...args: unknown[]) => {
+      const message = args[1] as { id: string }
+      if (message.id.startsWith('asst-')) return undefined
+      return (echoAck as (...a: never[]) => unknown)(...(args as never[]))
+    }) as never)
+    const { sendMessage } = await import('../messageThunk')
+    const dispatch = vi.fn()
+
+    await sendMessage(createUserMessage(), [], makeAssistant() as never, 't-1')(dispatch, () => storeState as never)
+
+    // The user row still published (authoritative echo unchanged) ...
+    expect(mocks.applyAppendAck).toHaveBeenCalledTimes(1)
+    expect(mocks.applyAppendAck.mock.calls[0][0]).toEqual({
+      topicId: 't-1',
+      route: null,
+      message: expect.objectContaining({ id: 'user-1' }),
+      createdMessageIds: ['user-1'],
+      mutableMessageIds: ['user-1']
+    })
+    // ... but nothing is queued against the phantom stub.
+    expect(mocks.queueAdd).not.toHaveBeenCalled()
   })
 
   it('rejected/stale ack emits no orphan blocks (send user blocks gated)', { timeout: 60_000 }, async () => {

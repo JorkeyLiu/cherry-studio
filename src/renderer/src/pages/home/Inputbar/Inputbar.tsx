@@ -21,7 +21,6 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
-import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
@@ -252,8 +251,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({
           baseUserMessage.mentions = mentionedModels
         }
 
-        baseUserMessage.usage = await estimateUserPromptUsage(baseUserMessage)
-
+        // The optional prompt-token estimate is NOT computed here: it must never
+        // delay the authoritative user echo. The send thunk persists and
+        // publishes the user message first, then fills `usage` as best-effort
+        // display metadata on the pinned route (the message simply carries no
+        // usage until that lands). Files are already uploaded above, so the
+        // deferred estimate still sees stored file metadata.
         const { message, blocks } = getUserMessage(baseUserMessage)
         message.traceId = parent?.spanContext().traceId
 

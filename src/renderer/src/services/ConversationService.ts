@@ -2,7 +2,7 @@ import { loggerService } from '@logger'
 import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { isValidContextClosureResponse } from '@renderer/services/contextClosure'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { computeContextInfo, filterContextUiMessages } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { buildBlockOverlay, mergeBlockOverlays } from '@renderer/services/requestBlockOverlay'
@@ -174,20 +174,25 @@ export class ConversationService {
       requestMessages = closureMessages.slice(0, triggerIndex + 1)
     }
 
+    // Message conversion boundary: the validated closure is already the
+    // authoritative anchor-to-end slice, and the trigger clip above already
+    // bounded it. Only the shared message-level filter pipeline runs here — no
+    // turn regrouping, no anchor re-resolution, no window re-derivation from
+    // this bounded slice, and no token-estimation list (never consumed on the
+    // request path).
     let uiMessages: Message[]
     if (preAnchorAvailability) {
       const nonEmpty = filterEmptyMessages(requestMessages, overlay)
       uiMessages = nonEmpty.length > 0 ? nonEmpty : requestMessages
     } else {
-      const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(
-        requestMessages,
-        assistant,
-        topicId,
-        overlay,
-        pinnedRoute
+      // Turn participation: context turns are built from user/assistant/system
+      // rows, so a row with a nullable/unknown role is in authority order but in
+      // no turn and is never part of the request window.
+      const contextTurnMessages = requestMessages.filter(
+        (m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system'
       )
-      uiMessages = uiMessagesFromPipeline
-      if (!uiMessages || uiMessages.length === 0) {
+      uiMessages = filterContextUiMessages(contextTurnMessages, overlay)
+      if (uiMessages.length === 0) {
         const triggerMessage = requestMessages.find((m) => m?.id === triggerId)
         if (triggerMessage) {
           uiMessages = [triggerMessage]

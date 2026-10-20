@@ -424,8 +424,10 @@ describe('multi-model stub batch publication', () => {
       entries: Array<{ message: { id: string } }>
     }
     expect(batch.entries.map((e) => e.message.id)).toEqual(['asst-t-1-2'])
-    // All successful writes still queue their fetches.
-    expect(mocks.queueAdd).toHaveBeenCalledTimes(2)
+    // Only the acknowledged stub queues a fetch: the unacknowledged stub has no
+    // authority row, so a request against it could only write into a phantom
+    // message. Valid siblings are unaffected.
+    expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
   })
 
   it('a mixed-topic ack is rejected while valid siblings publish', { timeout: 60_000 }, async () => {
@@ -448,7 +450,9 @@ describe('multi-model stub batch publication', () => {
     }
     expect(batch.topicId).toBe('t-1')
     expect(batch.entries.map((e) => e.message.id)).toEqual(['asst-t-1-1'])
-    expect(mocks.queueAdd).toHaveBeenCalledTimes(2)
+    // Same provider gate: the mixed-topic ack is rejected, so its stub has no
+    // row in this topic and queues no fetch; the valid sibling still executes.
+    expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
   })
 
   it('single-model send keeps the singular path (no plural commit)', { timeout: 60_000 }, async () => {

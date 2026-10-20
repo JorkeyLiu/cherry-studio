@@ -248,16 +248,36 @@ export const createTargetMessageWindow = (
   return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, boundedCapacity, 'fixed', authoritative)
 }
 
-const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
-  const groupIndexes = displayMessages.flatMap((message) => {
-    const group = model.messageIdToGroup.get(message.id)
-    return group ? [model.groups.indexOf(group)] : []
+/**
+ * Group-index lookup built once per derived range. `model.groups.indexOf(group)`
+ * is a linear scan, so resolving every displayed message that way costs
+ * O(displayed messages × groups) on a long topic. The identity-keyed map
+ * resolves each message in O(1) and is built in O(groups); `messageIdToGroup`
+ * only ever holds groups from the same `groups` array, so both forms always
+ * yield the same index.
+ */
+const buildGroupIndexes = (model: MessageViewportGroupModel): ReadonlyMap<MessageViewportGroup, number> => {
+  const groupIndexes = new Map<MessageViewportGroup, number>()
+  model.groups.forEach((group, index) => {
+    groupIndexes.set(group, index)
   })
-  if (groupIndexes.length === 0) return null
+  return groupIndexes
+}
+
+const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
+  // Nothing displayed → no range, and no need to build the lookup at all.
+  if (displayMessages.length === 0) return null
+  const groupIndexes = buildGroupIndexes(model)
+  const displayGroupIndexes = displayMessages.flatMap((message) => {
+    const group = model.messageIdToGroup.get(message.id)
+    const index = group ? groupIndexes.get(group) : undefined
+    return index === undefined ? [] : [index]
+  })
+  if (displayGroupIndexes.length === 0) return null
 
   return {
-    oldestGroupIndex: Math.min(...groupIndexes),
-    newestGroupIndex: Math.max(...groupIndexes)
+    oldestGroupIndex: Math.min(...displayGroupIndexes),
+    newestGroupIndex: Math.max(...displayGroupIndexes)
   }
 }
 
@@ -643,14 +663,15 @@ export const reconcileMessageWindow = (
   }
 
   const model = createMessageViewportGroupModel(messages)
-  const retainedIndexes = currentWindow.displayMessages.flatMap((message) => {
-    const group = model.messageIdToGroup.get(message.id)
-    return group ? [model.groups.indexOf(group)] : []
-  })
-  if (retainedIndexes.length === 0) {
-    const previousModel = createMessageViewportGroupModel(previousMessages)
+  // Same id-keyed resolution used by every other derived range (one group-index
+  // lookup built once) instead of a linear group scan per displayed message.
+  const retainedRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  if (!retainedRange) {
     const previousRange = currentWindow.range
-    if (!previousRange || previousModel.groups.length === 0) {
+    // The group builder emits at least one group for every message, so an empty
+    // group list is exactly an empty previous projection — no need to build the
+    // previous model just to read its group count.
+    if (!previousRange || previousMessages.length === 0) {
       return createWindowFromRange(model, null, capacity, 'fixed', cleanAuth)
     }
     // Clamp previous range to bounded capacity deterministically (trim newer edge if needed).
@@ -674,8 +695,8 @@ export const reconcileMessageWindow = (
     return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth)
   }
 
-  let oldestGroupIndex = Math.min(...retainedIndexes)
-  let newestGroupIndex = Math.max(...retainedIndexes)
+  let oldestGroupIndex = retainedRange.oldestGroupIndex
+  let newestGroupIndex = retainedRange.newestGroupIndex
   let didTrim = false
   let trimmedGroups = 0
   let trimmedEdge: 'older' | 'newer' | null = null

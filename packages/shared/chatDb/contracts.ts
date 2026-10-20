@@ -399,8 +399,103 @@ function validateAppendMessageResult(result: unknown): void {
   }
 }
 
+/**
+ * Keys allowed on the conditional usage source.
+ */
+const UPDATE_MESSAGE_USAGE_SOURCE_KEYS = new Set(['textContents', 'fileIds'])
+
+/**
+ * Rejection codes a conditional usage write may report.
+ */
+const UPDATE_MESSAGE_USAGE_REJECTIONS = new Set([
+  'target-missing',
+  'not-user-message',
+  'usage-present',
+  'source-changed'
+])
+
+/**
+ * Validate the optional conditional usage mode of `chatdb:update-message`.
+ *
+ * Absent → nothing to check (ordinary unconditional patch, unchanged). Present →
+ * the condition must be exactly `{textContents, fileIds}` string arrays AND the
+ * patch must contain exactly one key, `usage`: the conditional mode exists only
+ * to land the optional prompt-token estimate, so any other patch shape is
+ * rejected rather than silently extended into a general CAS protocol.
+ */
+function validateUpdateMessageUsageCondition(req: UpdateMessageRequest): void {
+  const condition = req.usageCondition
+  if (condition === undefined) return
+  if (condition === null || typeof condition !== 'object' || Array.isArray(condition)) {
+    throw new ValidationError('request.usageCondition', '[chatdb:update-message] Expected an object')
+  }
+  const source = condition as unknown as Record<string, unknown>
+  for (const key of Object.keys(source)) {
+    if (!UPDATE_MESSAGE_USAGE_SOURCE_KEYS.has(key)) {
+      throw new ValidationError(
+        `request.usageCondition.${key}`,
+        `[chatdb:update-message] Unknown condition key: "${key}"`
+      )
+    }
+  }
+  // Non-empty strings only: both sides omit empty text blocks (they estimate to
+  // zero tokens), so an empty entry can never carry a meaningful difference.
+  validateStringArray(source.textContents, 'request.usageCondition.textContents')
+  validateStringArray(source.fileIds, 'request.usageCondition.fileIds')
+  const patchKeys = Object.keys(req.updates)
+  if (patchKeys.length !== 1 || patchKeys[0] !== 'usage') {
+    throw new ValidationError(
+      'request.updates',
+      '[chatdb:update-message] Conditional usage mode accepts exactly one "usage" update'
+    )
+  }
+  validateJsonObject(req.updates.usage, 'request.updates.usage')
+}
+
+/**
+ * Result validator for `chatdb:update-message`.
+ *
+ * `null` is the ordinary unconditional patch result (unchanged). A conditional
+ * usage write returns exactly one `{applied, rejection?}` outcome: applied →
+ * boolean true with no rejection; rejected → boolean false plus a known rejection
+ * code.
+ */
+function updateMessageResult(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true || obj.value === null) return
+    const value = obj.value
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError(`result.value`, `[${channel}] Expected null or a usage outcome object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Usage outcome must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (key !== 'applied' && key !== 'rejection') {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in usage outcome: "${key}"`)
+      }
+    }
+    if (typeof v.applied !== 'boolean') {
+      throw new ValidationError('result.value.applied', `[${channel}] Expected a boolean "applied"`)
+    }
+    if (v.applied === true) {
+      if (v.rejection !== undefined) {
+        throw new ValidationError('result.value.rejection', `[${channel}] Rejection must be absent when applied`)
+      }
+      return
+    }
+    if (typeof v.rejection !== 'string' || !UPDATE_MESSAGE_USAGE_REJECTIONS.has(v.rejection)) {
+      throw new ValidationError('result.value.rejection', `[${channel}] Expected a known rejection code`)
+    }
+  }
+}
+
 const updateMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'branchId', 'messageId', 'updates', 'resendAttemptId'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageId', 'updates', 'resendAttemptId', 'usageCondition'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageContract.allowedKeys)
     const req = value as UpdateMessageRequest
@@ -411,8 +506,9 @@ const updateMessageContract: ChatDbContract = {
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
     validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'branchId', 'sortOrder']), 'request.updates')
+    validateUpdateMessageUsageCondition(req)
   },
-  validateResult: voidResult('chatdb:update-message')
+  validateResult: updateMessageResult('chatdb:update-message')
 }
 
 /**

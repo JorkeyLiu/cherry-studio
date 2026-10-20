@@ -315,4 +315,81 @@ describe('ConversationService actual outbound window (authority closure)', () =>
     ).rejects.toThrow('missing persisted context anchor')
     expect(fetchClosureMock).not.toHaveBeenCalled()
   })
+
+  it('request conversion applies only the shared pipeline to the anchor-clipped slice (unknown-role rows stay out)', async () => {
+    // Authority route: anchor u2 .. trigger u4, with a queued future user and
+    // the trigger's assistant stub after it, plus a non-turn row inside the
+    // window (unknown role — in authority order but in no context turn).
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const strayRow = userMsg('stray', 'stray-unknown-role')
+    const stray = { ...strayRow.message, role: 'tool' } as unknown as Message
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    const a4stub = assistantMsg('a4-stub', 'u4', 'stub-a4')
+    const u5future = userMsg('u5-future', 'future-u5')
+    const closure = makeClosureResponse(
+      [u2, a2, { message: stray, block: strayRow.block }, u3, a3, u4, a4stub, u5future],
+      {
+        topicId: 't1',
+        anchorGroupKey: 'u2',
+        totalTurnCount: 4,
+        selectedTurnCount: 4
+      }
+    )
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      'b1'
+    )
+
+    // Anchor inclusive through the trigger only; non-turn rows and everything
+    // after the trigger are excluded.
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['hist-u2', 'hist-u3', 'trigger-u4'])
+    expect(sdkTexts(result.modelMessages, 'assistant')).toEqual(['hist-a2', 'hist-a3'])
+  })
+
+  it('the request window comes from the validated closure alone (contextCount never re-derives it)', async () => {
+    // Three anchor-to-trigger turns; a small contextCount must not shrink the
+    // already-authoritative slice (the window is the persisted anchor to the
+    // trigger, never a "last N turns" re-derivation over this bounded slice).
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    const closure = makeClosureResponse([u2, a2, u3, a3, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 1,
+      contextWindowAnchor: { t1: { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1', 'u2')
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      null
+    )
+
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+  })
 })

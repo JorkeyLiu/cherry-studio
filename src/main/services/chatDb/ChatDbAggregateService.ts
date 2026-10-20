@@ -72,6 +72,7 @@ import type {
   TopicReferenceWire,
   TopicWire
 } from '@shared/chatDb'
+import type { UpdateMessageResult, UpdateMessageUsageResult, UpdateMessageUsageSource } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
@@ -92,6 +93,7 @@ import {
 } from '../sync/syncResendAttempt'
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
 import type {
+  EntityPatchInput,
   FileReferenceData,
   MessageBlockData,
   MessageData,
@@ -180,6 +182,63 @@ export interface BlockRouteContext {
   resendAttemptId?: string
   topicId?: string
   branchId?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Conditional usage-estimate source (optional display metadata)
+// ---------------------------------------------------------------------------
+
+/**
+ * The estimate source of one user prompt, derived from its blocks: the MAIN_TEXT
+ * contents and the FILE/IMAGE attachment IDs the local estimator consumes.
+ *
+ * Both arrays are canonicalized (empty entries dropped, sorted) so the renderer
+ * snapshot and the authority rows compare as multisets: block order is a rendering
+ * detail and never changes the token total.
+ */
+function usageSourceOfBlocks(blocks: MessageBlockData[]): UpdateMessageUsageSource {
+  const textContents: string[] = []
+  const fileIds: string[] = []
+  for (const block of blocks) {
+    if (block.type === 'main_text') {
+      const content = block.content ?? ''
+      if (content.length > 0) textContents.push(content)
+      continue
+    }
+    if (block.type !== 'file' && block.type !== 'image') continue
+    const fileId = attachmentIdOfBlock(block)
+    if (fileId) fileIds.push(fileId)
+  }
+  return { textContents: textContents.sort(), fileIds: fileIds.sort() }
+}
+
+/**
+ * Attachment ID of a FILE/IMAGE block row. The renderer persists its
+ * `FileMetadata` object at `overflow.file` (with a `fileId` fallback) — the same
+ * shape the read adapters resolve, read here without re-deriving metadata.
+ */
+function attachmentIdOfBlock(block: MessageBlockData): string | null {
+  const overflowFile = block.overflow?.file
+  if (overflowFile && typeof overflowFile === 'object' && !Array.isArray(overflowFile)) {
+    const file = overflowFile as Record<string, unknown>
+    const id = file.id ?? file.fileId
+    if (typeof id === 'string' && id.length > 0) return id
+  }
+  const directId = block.overflow?.fileId ?? block.overflow?.file_id
+  return typeof directId === 'string' && directId.length > 0 ? directId : null
+}
+
+/** Multiset equality of two canonicalized estimate sources. */
+function sameUsageSource(a: UpdateMessageUsageSource, b: UpdateMessageUsageSource): boolean {
+  if (a.textContents.length !== b.textContents.length) return false
+  if (a.fileIds.length !== b.fileIds.length) return false
+  for (let i = 0; i < a.textContents.length; i++) {
+    if (a.textContents[i] !== b.textContents[i]) return false
+  }
+  for (let i = 0; i < a.fileIds.length; i++) {
+    if (a.fileIds[i] !== b.fileIds[i]) return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -2044,11 +2103,8 @@ export class ChatDbAggregateService {
 
         let resolvedIdx = -1
         if (request.intent === 'establish') {
-          if (currentKey !== null && resolveAnchorIndex(turns, currentKey) !== -1) {
-            resolvedIdx = resolveAnchorIndex(turns, currentKey)
-          } else {
-            resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
-          }
+          const currentIdx = currentKey !== null ? resolveAnchorIndex(turns, currentKey) : -1
+          resolvedIdx = currentIdx !== -1 ? currentIdx : resolveDefaultIndex(total, request.contextCount ?? null)
         } else if (request.intent === 'reanchor-default') {
           resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
         } else if (request.intent === 'move') {
@@ -4341,13 +4397,28 @@ export class ChatDbAggregateService {
    * Identity/reparenting fields rejected at contract level.
    * Supported stable field patches enqueue sync intent atomically in the
    * same tx (field patch only; transient statuses skip capture, no failure).
+   *
+   * Optional conditional usage mode (`options.usageCondition`, from the optional
+   * user-prompt token estimate): the patch must be exactly `{usage}` and Main
+   * decides INSIDE one transaction whether to apply it. It applies only when the
+   * target still exists in this topic/route, is a user message, owns no usage
+   * yet, and its estimate source (MAIN_TEXT contents + FILE/IMAGE IDs) still
+   * equals the renderer snapshot. Everything else is a successful no-op carrying
+   * a rejection code, so an estimate that lost the race to an edit/resend/delete
+   * can never overwrite newer metadata. `usage` is not a synced field (not in the
+   * sync patch allowlist), so the conditional path skips the sync frame/rescan
+   * work entirely and emits nothing on rejection or apply.
    */
   updateMessage(
     topicId: string,
     messageId: string,
     updatesJson: JsonObject,
-    options?: { resendAttemptId?: string; branchId?: string | null }
-  ): ChatDbResult<null> {
+    options?: {
+      resendAttemptId?: string
+      branchId?: string | null
+      usageCondition?: UpdateMessageUsageSource
+    }
+  ): ChatDbResult<UpdateMessageResult> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(options?.branchId)
       const patch = wireToMessagePatch(updatesJson)
@@ -4360,6 +4431,10 @@ export class ChatDbAggregateService {
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx([messageId], resendAttemptId)
+
+      if (options?.usageCondition) {
+        return this.applyConditionalUsageEstimate(topicId, messageId, patch, route, options.usageCondition)
+      }
 
       const ctx = this.syncCtxForTopic('updateMessage', topicId, route)
       // Empty patch (no mutable keys): no mutation intent; keep read-only.
@@ -4553,6 +4628,67 @@ export class ChatDbAggregateService {
       this.recordUnsupportedBlocksAfterCommit('updateMessage', unsupportedBlockIds)
       return result
     }, `updateMessage(${topicId}, ${messageId})`)
+  }
+
+  /**
+   * Conditional usage-only write (optional prompt-token estimate).
+   *
+   * One Main transaction: ownership/route guard (foreign route and non-owned rows
+   * fail closed with the ordinary BRANCH-4 error), then the condition — target
+   * present, user row, no usage yet, and the authority estimate source equal to the
+   * renderer snapshot — and only then the usage patch. A failed condition returns
+   * a rejection code without mutating anything; it never throws and never emits.
+   *
+   * The patch is exactly `{usage}`: the conditional mode is a display-metadata
+   * mode, not a general compare-and-swap. `usage` is not in the sync field
+   * allowlist, so this path deliberately bypasses the sync capture machinery —
+   * an applied usage write enqueues no operation (identical outcome to the
+   * ordinary path for a usage-only patch) and a rejected one can emit nothing.
+   */
+  private applyConditionalUsageEstimate(
+    topicId: string,
+    messageId: string,
+    patch: EntityPatchInput<MessageData>,
+    route: string | null,
+    source: UpdateMessageUsageSource
+  ): UpdateMessageUsageResult {
+    // Defensive mirror of the contract: exactly the usage overflow key.
+    const patchKeys = Object.keys(patch).filter((key) => key !== 'overflow')
+    const overflowKeys = Object.keys(patch.overflow ?? {})
+    if (patchKeys.length > 0 || overflowKeys.length !== 1 || overflowKeys[0] !== 'usage') {
+      throw new ChatDbValidationError('Conditional usage mode accepts exactly one "usage" update (defensive check)')
+    }
+    return this.db.transaction((tx): UpdateMessageUsageResult => {
+      const repos = createRepositories(tx)
+      const row = repos.messages.getInTopic(messageId, topicId)
+      if (!row.found) return { applied: false, rejection: 'target-missing' }
+      // Ownership/route guard: a row owned by another route is immutable through
+      // this one — fail closed exactly like the ordinary update path.
+      this.assertMutableMessageInTx(
+        repos,
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        topicId,
+        route,
+        messageId
+      )
+      if (row.data.role !== 'user') return { applied: false, rejection: 'not-user-message' }
+      // Usage already owned (edit / resend / an earlier estimate): never overwrite.
+      const existingUsage = (row.data.overflow as Record<string, unknown> | undefined)?.usage
+      if (existingUsage !== undefined && existingUsage !== null) {
+        return { applied: false, rejection: 'usage-present' }
+      }
+      const authoritySource = usageSourceOfBlocks(repos.blocks.listByMessage(messageId))
+      const requestedSource: UpdateMessageUsageSource = {
+        textContents: [...source.textContents].sort(),
+        fileIds: [...source.fileIds].sort()
+      }
+      if (!sameUsageSource(authoritySource, requestedSource)) {
+        return { applied: false, rejection: 'source-changed' }
+      }
+      const applied = repos.messages.update(topicId, messageId, patch)
+      if (applied.affected === 0) return { applied: false, rejection: 'target-missing' }
+      return { applied: true }
+    })
   }
 
   /**
@@ -7629,7 +7765,12 @@ export class ChatDbAggregateService {
   ): { messages: MessageData[]; forkBoundaryIndex: number } {
     const owner = this.normalizeBranchId(branchId)
     const messages = this.resolveRouteMessagesGuardedInTx(repos, topicId, owner, new Set<string>(), 0)
-    const ownCount = repos.messages.listByTopic(topicId, owner).length
+    // Boundary only needs the owned-row count: the route above already
+    // materialized the ancestor/reference prefix plus these same own rows, so
+    // a second full materialization of the owner route is pure overhead. The
+    // count uses the identical route-owner predicate (branch_id IS NULL for
+    // the main route, branch_id = owner otherwise).
+    const ownCount = repos.messages.countByTopic(topicId, owner)
     return { messages, forkBoundaryIndex: messages.length - ownCount }
   }
 

@@ -212,6 +212,103 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
+  // --- update-message: optional conditional usage mode ----------------------
+
+  it('update-message: accepts a conditional usage request with exactly the usage patch', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 'topic-1',
+        messageId: 'msg-1',
+        updates: { usage: { prompt_tokens: 3, completion_tokens: 3, total_tokens: 5 } },
+        usageCondition: { textContents: ['hello'], fileIds: ['file-1'] }
+      })
+    ).not.toThrow()
+    // Empty snapshot arrays are the legitimate "no text / no attachment" case.
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 'topic-1',
+        messageId: 'msg-1',
+        updates: { usage: { total_tokens: 0 } },
+        usageCondition: { textContents: [], fileIds: [] }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-message: conditional mode rejects any patch other than exactly usage', () => {
+    const condition = { textContents: ['hello'], fileIds: [] }
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 'topic-1',
+        messageId: 'msg-1',
+        updates: { usage: { total_tokens: 5 }, content: 'edited' },
+        usageCondition: condition
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 'topic-1',
+        messageId: 'msg-1',
+        updates: { content: 'edited' },
+        usageCondition: condition
+      })
+    ).toThrow(ValidationError)
+    // `usage` must be a JSON object, not a scalar.
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 'topic-1',
+        messageId: 'msg-1',
+        updates: { usage: 5 },
+        usageCondition: condition
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-message: conditional mode validates the condition shape', () => {
+    const usagePatch = { updates: { usage: { total_tokens: 5 } }, topicId: 'topic-1', messageId: 'msg-1' }
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', { ...usagePatch, usageCondition: { textContents: ['a'] } })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        ...usagePatch,
+        usageCondition: { textContents: ['a'], fileIds: [], extra: true }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        ...usagePatch,
+        usageCondition: { textContents: [''], fileIds: [] }
+      })
+    ).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:update-message', { ...usagePatch, usageCondition: null })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('update-message: accepts a null result (ordinary) and a conditional usage outcome', () => {
+    expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value: null })).not.toThrow()
+    expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value: { applied: true } })).not.toThrow()
+    for (const rejection of ['target-missing', 'not-user-message', 'usage-present', 'source-changed']) {
+      expect(() =>
+        validateChatDbResult('chatdb:update-message', { ok: true, value: { applied: false, rejection } })
+      ).not.toThrow()
+    }
+  })
+
+  it('update-message: rejects malformed conditional usage outcomes', () => {
+    const bad = [
+      { applied: true, rejection: 'usage-present' }, // rejection must be absent when applied
+      { applied: false }, // rejection required when rejected
+      { applied: false, rejection: 'unknown-code' },
+      { applied: 'yes' },
+      { applied: true, extra: 1 },
+      'applied'
+    ]
+    for (const value of bad) {
+      expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value })).toThrow(ValidationError)
+    }
+  })
+
   it('update-message-and-blocks: minimal', () => {
     expect(() =>
       validateChatDbRequest('chatdb:update-message-and-blocks', {

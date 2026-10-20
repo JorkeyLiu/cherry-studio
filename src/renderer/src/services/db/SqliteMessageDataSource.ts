@@ -20,6 +20,7 @@
 import { invalidateTopicsDeletion } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
+import type { Usage } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { cloneForWire } from '@renderer/utils/jsonWire'
 import type {
@@ -136,6 +137,9 @@ import type {
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
+  UpdateMessageResult,
+  UpdateMessageUsageResult,
+  UpdateMessageUsageSource,
   UpdateSegmentMetadataRequest,
   UpdateSegmentMetadataResponse,
   UpdateSingleBlockRequest,
@@ -189,7 +193,7 @@ export interface ChatDbApi {
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<AppendMessageResponse>>
-  updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
+  updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<UpdateMessageResult>>
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   // Cross-process authority answer selection (Main-resolved full group)
   selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
@@ -477,6 +481,38 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
     unwrap(await this.api.updateMessage(request))
     dispatchTopicUpdatedAt(topicId)
+  }
+
+  /**
+   * Conditional usage-only write for the OPTIONAL user-prompt token estimate.
+   *
+   * A narrow wrapper over the same `chatdb:update-message` command: it adds the
+   * `usageCondition` source snapshot so Main can decide inside one transaction
+   * whether the estimate still describes the prompt. It returns Main's outcome
+   * (`applied` / rejection) instead of void so the caller projects only a write
+   * that actually landed; a rejected condition is a normal, non-throwing no-op.
+   *
+   * `dispatchTopicUpdatedAt` is deliberately NOT dispatched: this is background
+   * display metadata, not user activity, and it must never reorder topic lists.
+   */
+  async updateMessageUsageIfUnchanged(
+    topicId: string,
+    messageId: string,
+    usage: Usage,
+    source: UpdateMessageUsageSource,
+    branchId?: string | null
+  ): Promise<UpdateMessageUsageResult | null> {
+    const request: UpdateMessageRequest = {
+      topicId,
+      branchId: branchId ?? null,
+      messageId,
+      updates: { usage: cloneForWire(usage as unknown as JsonObject) },
+      usageCondition: {
+        textContents: [...source.textContents],
+        fileIds: [...source.fileIds]
+      }
+    }
+    return unwrap(await this.api.updateMessage(request))
   }
 
   async updateMessageAndBlocks(

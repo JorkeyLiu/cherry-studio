@@ -1,4 +1,5 @@
 import db from '@renderer/databases'
+import type { Usage } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   DeleteMessagesWithDependentsResponse,
@@ -26,7 +27,8 @@ import type {
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics,
-  TopicDataExportPayload
+  TopicDataExportPayload,
+  UpdateMessageUsageSource
 } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
@@ -168,6 +170,20 @@ class DbService implements MessageDataSource {
     branchId?: string | null
   ) {
     return this.ordinarySource.updateMessage(topicId, messageId, updates, resendAttemptId, branchId)
+  }
+  /**
+   * Conditional usage-only write (optional prompt-token estimate). Delegates to
+   * the ordinary SQLite source; Main decides inside one transaction whether the
+   * estimate still describes the prompt and returns the outcome.
+   */
+  updateMessageUsageIfUnchanged(
+    topicId: string,
+    messageId: string,
+    usage: Usage,
+    source: UpdateMessageUsageSource,
+    branchId?: string | null
+  ) {
+    return this.ordinarySource.updateMessageUsageIfUnchanged(topicId, messageId, usage, source, branchId)
   }
   updateMessageAndBlocks(
     topicId: string,

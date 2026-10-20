@@ -18,8 +18,13 @@ import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import { INITIAL_MESSAGES_COUNT } from '@renderer/config/constant'
 import { getModel } from '@renderer/hooks/useModel'
-import { ensureTopicAnchorEstablished, transferAnchorsWithAuthorityGroupKeys } from '@renderer/services/anchorService'
+import {
+  anchorKeyForRoute,
+  ensureTopicAnchorEstablished,
+  transferAnchorsWithAuthorityGroupKeys
+} from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
@@ -39,6 +44,7 @@ import {
 } from '@renderer/services/residentReadDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
+import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import {
   captureDeletionGeneration,
   getDeletionGeneration,
@@ -73,7 +79,8 @@ import type {
   JsonObject,
   SemanticModelSnapshot,
   SemanticResendResponse,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  UpdateMessageUsageSource
 } from '@shared/chatDb'
 import type { HistoryReferenceMeta } from '@shared/chatDb'
 import { defaultAppHeaders } from '@shared/utils'
@@ -643,7 +650,21 @@ const dispatchMultiModelResponses = async (
   publishConfirmedAppendAcks(dispatch, getState, topicId, confirmed, stubRoute, stubGeneration)
 
   const queue = getTopicQueue(topicId)
+  // Provider gating follows the ACKNOWLEDGMENT of each stub (the authority row
+  // fact), never the projection currency: a stub Main never confirmed has no row
+  // to fill, so its request is skipped, while confirmed siblings are unaffected
+  // and a currency-only publication rejection still executes (the owned row
+  // exists on the pinned route; only the late projection publication is
+  // filtered).
+  const acknowledgedStubIds = new Set(confirmed.map((entry) => entry.message.id))
   for (const task of tasksToQueue) {
+    if (!acknowledgedStubIds.has(task.messageStub.id)) {
+      logger.warn('Multi-model response stub was not acknowledged; provider request skipped', {
+        topicId,
+        messageId: task.messageStub.id
+      })
+      continue
+    }
     void queue.add(async () => {
       await fetchAndProcessAssistantResponseImpl(
         dispatch,
@@ -987,6 +1008,137 @@ const fetchAndProcessAssistantResponseImpl = async (
 }
 
 /**
+ * Inputs the OPTIONAL user-prompt estimate consumes, plus the exact source
+ * snapshot Main re-checks before accepting the result: the MAIN_TEXT contents and
+ * the FILE/IMAGE attachment IDs.
+ *
+ * Files are uploaded before the user message is built, so the estimate always
+ * sees stored file metadata. Both snapshot arrays are canonicalized the same way
+ * Main canonicalizes the authority rows (empty text dropped, sorted) so the two
+ * sides compare as multisets — block order is a rendering detail and never changes
+ * the token total.
+ */
+const collectUsageEstimateInputs = (
+  blocks: MessageBlock[]
+): { content: string; files: FileMetadata[]; source: UpdateMessageUsageSource } => {
+  let content = ''
+  const files: FileMetadata[] = []
+  const textContents: string[] = []
+  const fileIds: string[] = []
+  for (const block of blocks) {
+    if (block.type === MessageBlockType.MAIN_TEXT) {
+      const blockContent = block.content ?? ''
+      content += blockContent
+      if (blockContent.length > 0) textContents.push(blockContent)
+      continue
+    }
+    if ((block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) && block.file) {
+      files.push(block.file)
+      if (block.file.id) fileIds.push(block.file.id)
+    }
+  }
+  return { content, files, source: { textContents: textContents.sort(), fileIds: fileIds.sort() } }
+}
+
+/**
+ * Deliberate TASK boundary (macrotask), not a microtask: the continuation runs
+ * after the current task's microtask queue drained, so the estimator's own
+ * synchronous tokenization can never execute inside the send/echo task. This is a
+ * scheduling boundary only — it makes no guarantee about a paint having happened.
+ * The repository's established pattern for "let the current work finish first"
+ * (`NotesService` batching) is the same zero-delay timeout.
+ */
+const yieldToNextTask = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+/**
+ * Best-effort persistence of the OPTIONAL user-prompt token estimate.
+ *
+ * The estimate is display metadata only: request token math derives from message
+ * content, nothing reads `message.usage` to build a request, and no part of the
+ * send waits for it. It is scheduled on a later task (see the caller), and the
+ * result goes through the conditional usage mode of `updateMessage`: Main applies
+ * it only inside one transaction when the row still exists on the pinned route, is
+ * a user message, has no usage yet, and its blocks still match this estimate's
+ * source — so an estimate that lost the race to an edit, resend, or delete can
+ * never overwrite newer metadata.
+ *
+ * Fire-and-forget by contract: failures are logged and dropped (a message without
+ * usage is a valid state). The projection is enriched only for an `applied`
+ * outcome, and only when the message is still loaded — an unloaded (windowed-out)
+ * message keeps its authority value and is never resurrected into the projection.
+ */
+const runDeferredUsageEstimate = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  userMessage: Message,
+  userMessageBlocks: MessageBlock[],
+  sendRoute: string | null
+): Promise<void> => {
+  try {
+    await yieldToNextTask()
+    const { content, files, source } = collectUsageEstimateInputs(userMessageBlocks)
+    const usage = await estimateUserPromptUsage({ content, files })
+    const outcome = await dbService.updateMessageUsageIfUnchanged(topicId, userMessage.id, usage, source, sendRoute)
+    if (!outcome?.applied) return
+    if (!getState().messages.entities[userMessage.id]) return
+    dispatch(newMessagesActions.updateMessage({ topicId, messageId: userMessage.id, updates: { usage } }))
+  } catch (error) {
+    logger.warn('Deferred user prompt usage estimate skipped (best effort):', error as Error)
+  }
+}
+
+/**
+ * Schedule the deferred estimate without letting scheduling itself affect the
+ * send: a throwing scheduler (or a missing timer implementation) is swallowed.
+ */
+const scheduleDeferredUsageEstimate = (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  userMessage: Message,
+  userMessageBlocks: MessageBlock[],
+  sendRoute: string | null
+): void => {
+  try {
+    void runDeferredUsageEstimate(dispatch, getState, topicId, userMessage, userMessageBlocks, sendRoute)
+  } catch (error) {
+    logger.warn('Failed to schedule user prompt usage estimate (best effort):', error as Error)
+  }
+}
+
+/**
+ * Does this route already own an ESTABLISHED context-window anchor?
+ *
+ * Ordinary-send callsite read only — `ensureTopicAnchorEstablished` keeps its
+ * original behavior everywhere else (topic activation and every explicit repair
+ * flow still resolve even an existing key, so an unresolvable anchor is still
+ * repaired there, docs/adr/context-window.md §10). Establishment is a one-time
+ * command (§6): an ordinary send only has to establish a route that has no
+ * anchor yet, so it does not pay an authority round trip per send.
+ *
+ * Reads the LATEST store assistant — the captured send snapshot may predate an
+ * establishment earlier in this session — and builds the route key with the
+ * shared `anchorKeyForRoute`. Unreadable state answers `false`, i.e. the ordinary
+ * establishment call runs (fail-open to the unchanged behavior).
+ */
+const hasEstablishedRouteAnchor = (
+  getState: () => RootState,
+  assistantId: string,
+  topicId: string,
+  route: string | null
+): boolean => {
+  try {
+    const freshAssistant = getState().assistants.assistants.find((asst) => asst.id === assistantId)
+    if (!freshAssistant) return false
+    const anchor = getAssistantSettings(freshAssistant).contextWindowAnchor?.[anchorKeyForRoute(topicId, route)]
+    return anchor?.kind === 'active' && typeof anchor.groupKey === 'string' && anchor.groupKey.length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
  * 发送消息并处理助手回复
  * @param userMessage 已创建的用户消息
  * @param userMessageBlocks 用户消息关联的消息块
@@ -1012,6 +1164,10 @@ export const sendMessage =
     } catch {
       sendGeneration = 0
     }
+    // Set once the user echo was published; the OPTIONAL usage estimate is
+    // scheduled from `finally` only then (nothing authoritative to enrich
+    // otherwise).
+    let usageEstimateEligible = false
     try {
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
@@ -1041,16 +1197,27 @@ export const sendMessage =
         dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
+      // The OPTIONAL prompt-token estimate is display metadata only: it is never a
+      // request input (request token math derives from message content) and never a
+      // precondition of the authoritative user echo. It is scheduled in `finally`
+      // below — after the user echo, the anchor step, the assistant stub and the
+      // provider queue — on a fresh task, so nothing above waits for it.
+      usageEstimateEligible = userPublished
 
       // First establishment: after the user message is persisted and added to
-      // Redux, idempotently persist the topic anchor when it is absent or
-      // unresolvable (docs/adr/context-window.md §6). A valid anchor is never
-      // recalculated; an empty topic never receives an anchor. This runs
-      // BEFORE the assistant response is queued so the first request resolves
-      // the same persisted anchor even though its captured assistant snapshot
-      // predates this dispatch. Route-scoped: branch routes anchor under
-      // their own route key.
-      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, sendRoute)
+      // Redux, persist the topic anchor when this route has none
+      // (docs/adr/context-window.md §6). Only a route WITHOUT an established
+      // anchor reaches the authority command here — an ordinary send never
+      // re-resolves an existing anchor. Establishment (and, on the topic
+      // activation / explicit repair paths, unresolvable-anchor repair, §10) is
+      // untouched: this is a send-callsite guard, not a service change. It runs
+      // AFTER the user echo and BEFORE the assistant append + queue so the first
+      // request resolves the same persisted anchor even though its captured
+      // assistant snapshot predates this dispatch. Route-scoped: branch routes
+      // anchor under their own route key.
+      if (!hasEstablishedRouteAnchor(getState, assistant.id, topicId, sendRoute)) {
+        await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, sendRoute)
+      }
 
       const queue = getTopicQueue(topicId)
 
@@ -1075,7 +1242,22 @@ export const sendMessage =
           traceId: userMessage.traceId
         })
         const assistantAck = await saveMessageAndBlocksToDB(topicId, assistantMessage, [], -1, sendContext, sendRoute)
+        // `publishAppendAck` reports PROJECTION publication (route/generation
+        // currency). The provider gate is the acknowledgment itself: an
+        // unacknowledged stub has no authority row, so a request against it
+        // could only write into a phantom message. A currency-only rejection
+        // still executes: the owned row exists on the pinned route, the
+        // projection filters the late publication, and the pinned request fills
+        // the row (reload-recoverable) exactly as before.
+        const assistantAcknowledged = toValidAppendEntry(topicId, assistantMessage, assistantAck, sendRoute) !== null
         publishAppendAck(dispatch, getState, topicId, assistantMessage, assistantAck, sendRoute, sendGeneration)
+        if (!assistantAcknowledged) {
+          logger.warn('sendMessage: assistant response stub was not acknowledged; provider request skipped', {
+            topicId,
+            messageId: assistantMessage.id
+          })
+          return
+        }
 
         void queue.add(async () => {
           await fetchAndProcessAssistantResponseImpl(
@@ -1093,6 +1275,12 @@ export const sendMessage =
     } catch (error) {
       logger.error('Error in sendMessage thunk:', error as Error)
     } finally {
+      // The OPTIONAL estimate is scheduled LAST, on its own task: the user echo is
+      // published, the anchor step ran, and the assistant stub + provider queue were
+      // dispatched above. A scheduler failure is contained (best effort).
+      if (usageEstimateEligible) {
+        scheduleDeferredUsageEstimate(dispatch, getState, topicId, userMessage, userMessageBlocks, sendRoute)
+      }
       void finishTopicLoading(topicId)
     }
   }

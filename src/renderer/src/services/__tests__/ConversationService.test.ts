@@ -18,7 +18,8 @@ vi.mock('@renderer/services/contextInfoService', () => ({
     boundaryMessageId: null,
     contextCount: { current: 0, max: null },
     anchorGroupKey: null
-  }))
+  })),
+  filterContextUiMessages: vi.fn(() => [])
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({

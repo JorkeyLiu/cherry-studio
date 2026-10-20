@@ -62,12 +62,10 @@ import type { FetchContextClosureResponse } from '@shared/chatDb'
  *   1. buildContextTurns — groups all topic turns into semantic turns
  *   2. Turn selection — anchor-to-end, or default derivation when no anchor
  *   3. turnsToMessages — expands selected turns to Message[]
- *   4. filterUsefulMessages — deduplicates retries within assistant groups
- *   5. filterErrorOnlyMessagesWithRelated — removes error-only pairs
- *   6. filterLastAssistantMessage — removes trailing assistant message
- *   7. filterAdjacentUserMessaegs — removes adjacent duplicate user messages
- *   8. filterEmptyMessages — removes messages without content blocks
- *   9. filterUserRoleStartMessages — trims leading non-user messages
+ *   4-9. Message-level model/token filters — implemented ONCE in
+ *        {@link filterContextMessages} and shared with the authoritative
+ *        closure projection and request preparation (that helper's doc lists
+ *        the exact filter order and the single trailing-assistant divergence)
  *
  * N+2 compensation is removed: selection is by whole turns, so post-selection
  * model filters (steps 4–7) cannot create partial turn boundaries that would
@@ -96,6 +94,71 @@ export type ContextInfo = {
    * explicitly allowed availability fallback separately and never set this.
    */
   isAuthoritativePending?: boolean
+}
+
+/**
+ * The single message-level filter pipeline shared by every context consumer.
+ *
+ * Input boundary: `anchorClippedMessages` is ALREADY the authoritative
+ * anchor-to-trigger message slice in authority order. This pipeline never
+ * groups turns, never resolves the anchor, and never selects a window — that is
+ * decided once upstream:
+ *   - bounded fallback (`computeContextInfo`): the turns of the resolved anchor
+ *     window expanded back to messages;
+ *   - authoritative closure (`deriveContextInfoFromClosure`): the Main
+ *     anchor-to-end closure;
+ *   - request preparation (`ConversationService`): the validated Main closure
+ *     clipped through the triggering user.
+ *
+ * One shared prefix, then the two consumers:
+ *   prefix       filterUsefulMessages -> filterErrorOnlyMessagesWithRelated
+ *   model-facing prefix -> filterLastAssistantMessage -> filterAdjacentUserMessaegs
+ *                -> filterEmptyMessages -> filterUserRoleStartMessages
+ *   token        prefix -> filterAdjacentUserMessaegs -> filterEmptyMessages
+ *                -> filterUserRoleStartMessages
+ *
+ * The only divergence is trailing-assistant removal on the model branch (a
+ * request must not end on an assistant message, while token estimation keeps
+ * it). Ordering is preserved: adjacent-user collapsing runs after that removal
+ * on the model branch, so a user pair exposed by dropping the trailing
+ * assistant is still collapsed.
+ */
+export function filterContextMessages(
+  anchorClippedMessages: Message[],
+  overlay?: BlockOverlay
+): { uiMessages: Message[]; tokenEstimationMessages: Message[] } {
+  const modelCandidates = toModelCandidates(anchorClippedMessages, overlay)
+  return {
+    uiMessages: toUiMessages(modelCandidates, overlay),
+    tokenEstimationMessages: toTokenEstimationMessages(modelCandidates, overlay)
+  }
+}
+
+/**
+ * Model-facing messages of the shared pipeline. Request preparation consumes
+ * only this half, so it never builds the token-estimation list it would
+ * discard.
+ */
+export function filterContextUiMessages(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
+  return toUiMessages(toModelCandidates(anchorClippedMessages, overlay), overlay)
+}
+
+/** Shared prefix: retry dedup inside assistant groups, then error-only pairs. */
+function toModelCandidates(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
+  return filterErrorOnlyMessagesWithRelated(filterUsefulMessages(anchorClippedMessages), overlay)
+}
+
+/** Model-facing branch: drops the trailing assistant before final cleanup. */
+function toUiMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+  const withoutTrailingAssistant = filterLastAssistantMessage(modelCandidates)
+  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
+}
+
+/** Token-estimation branch: retains the trailing assistant. */
+function toTokenEstimationMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+  const withoutAdjacentUsers = filterAdjacentUserMessaegs(modelCandidates)
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
 }
 
 export function computeContextInfo(
@@ -163,22 +226,8 @@ export function computeContextInfo(
   // --- Step 3: Expand selected real turns to Message[] ---
   const expandedMessages = turnsToMessages(selectedRealTurns)
 
-  // --- Steps 4-7: Model filters ---
-  const usefulMessages = filterUsefulMessages(expandedMessages)
-  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages, overlay)
-
-  // uiMessages: model-facing — trailing assistant removed
-  const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
-  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
-
-  // --- Steps 8-9: Post-filter cleanup ---
-  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers, overlay)
-  const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
-
-  // tokenEstimationMessages: retains trailing assistant for token estimation.
-  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers, overlay)
-  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+  // --- Steps 4-9: The one shared message-level model/token filter pipeline ---
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(expandedMessages, overlay)
 
   return {
     uiMessages,
@@ -259,20 +308,11 @@ export function resolveSharedContextInfo(
 }
 
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
-  // Filter pipeline on authoritative closure messages (anchor-to-end)
-  const expandedMessages = closure.messages as unknown as Message[]
-  const usefulMessages = filterUsefulMessages(expandedMessages)
-  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages)
-
-  const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
-  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
-
-  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers)
-  const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
-
-  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers)
-  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+  // Closure messages are already the authoritative anchor-to-end slice, so only
+  // the shared message-level pipeline applies — no turn grouping, no anchor
+  // resolution. No overlay is passed (unchanged): this projection keeps
+  // resolving blocks from the store rather than from closure blocks.
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(closure.messages as unknown as Message[])
 
   return {
     uiMessages,
