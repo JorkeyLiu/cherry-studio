@@ -4,6 +4,11 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { isValidContextClosureResponse } from '@renderer/services/contextClosure'
 import { computeContextInfo, filterContextUiMessages } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db'
+import {
+  notifyUnavailableAttachmentsSkipped,
+  type RequestAttachmentFilter,
+  resolveRequestAttachmentAvailability
+} from '@renderer/services/requestAttachmentAvailability'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { buildBlockOverlay, mergeBlockOverlays } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
@@ -27,6 +32,21 @@ export interface AuthorityUserSnapshot {
   blocks: BlockOverlay
 }
 
+/**
+ * Outcome of one request preparation.
+ *
+ * `nothingSendable` is set when the triggering message provably has nothing
+ * left to send (every attachment it carries is unavailable on this device and
+ * it has no other content). The caller ends the operation as an explicit no-op:
+ * no provider request and no request-error chunk, so no assistant/error block
+ * is produced. The trigger-scoped top notice has already been emitted here.
+ */
+export interface PrepareMessagesResult {
+  modelMessages: ModelMessage[]
+  uiMessages: Message[]
+  nothingSendable?: boolean
+}
+
 export class ConversationService {
   static async prepareMessagesForModel(
     messages: Message[],
@@ -34,7 +54,7 @@ export class ConversationService {
     topicId?: string,
     authorityUser?: AuthorityUserSnapshot,
     branchId?: string | null
-  ): Promise<{ modelMessages: ModelMessage[]; uiMessages: Message[] }> {
+  ): Promise<PrepareMessagesResult> {
     // Trigger boundary: the initiating last-user request. The caller slice is
     // already clipped to the triggering user (messageThunk); the full
     // authority closure below must never include later queued user turns or
@@ -94,8 +114,21 @@ export class ConversationService {
       if ((!uiMessages || uiMessages.length === 0) && lastUserMessage) {
         uiMessages = [lastUserMessage]
       }
+      // Request-local attachment availability: imported/degraded attachments
+      // whose payload is missing never abort this request; only provably
+      // unavailable attachments are excluded, and the trigger-scoped notice is
+      // emitted once. Nothing is persisted.
+      const attachmentView = await ConversationService.applyAttachmentAvailability(
+        uiMessages,
+        overlay,
+        lastUserMessage.id
+      )
+      uiMessages = attachmentView.uiMessages
+      if (attachmentView.nothingSendable) {
+        return { modelMessages: [], uiMessages, nothingSendable: true }
+      }
       return {
-        modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay),
+        modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay, attachmentView.attachmentFilter),
         uiMessages
       }
     }
@@ -209,9 +242,50 @@ export class ConversationService {
     }
     logger.debug('uiMessagesFromPipeline', uiMessages)
 
+    // Request-local attachment availability (same boundary as the local-helper
+    // path): imported/degraded attachments whose payload is missing are excluded
+    // from this request only, with a single trigger-scoped notice. Genuine
+    // failures of present attachments keep aborting in the converter.
+    const attachmentView = await ConversationService.applyAttachmentAvailability(uiMessages, overlay, triggerId)
+    uiMessages = attachmentView.uiMessages
+    if (attachmentView.nothingSendable) {
+      return { modelMessages: [], uiMessages, nothingSendable: true }
+    }
+
     return {
-      modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay),
+      modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay, attachmentView.attachmentFilter),
       uiMessages
+    }
+  }
+
+  /**
+   * Resolve the request-local attachment availability view for one conversion.
+   *
+   * Attachments that provably have no payload on this device are excluded from
+   * the request (never deleted, repaired, or persisted) and the triggering
+   * message's skipped attachments produce exactly one aggregated notice.
+   * Anything that merely fails to convert stays in the request and keeps the
+   * existing attachment error behavior.
+   *
+   * A triggering message left with nothing to send is reported as
+   * `nothingSendable` rather than thrown: an empty provider request must not be
+   * issued, and the outcome must not travel the request-error channel (that is
+   * what produces an inline failed answer). The caller ends the operation
+   * quietly; the top notice above is the whole user-visible result.
+   */
+  private static async applyAttachmentAvailability(
+    uiMessages: Message[],
+    overlay: BlockOverlay | undefined,
+    triggerId: string | undefined
+  ): Promise<{ uiMessages: Message[]; attachmentFilter: RequestAttachmentFilter; nothingSendable: boolean }> {
+    const availability = await resolveRequestAttachmentAvailability(uiMessages, overlay, triggerId)
+    if (availability.triggerUnavailableAttachmentCount > 0) {
+      notifyUnavailableAttachmentsSkipped(availability.triggerUnavailableAttachmentCount)
+    }
+    return {
+      uiMessages: availability.messages,
+      attachmentFilter: availability.filter,
+      nothingSendable: !availability.triggerHasSendableContent
     }
   }
 

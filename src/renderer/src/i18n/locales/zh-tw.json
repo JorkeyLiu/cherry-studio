@@ -2232,7 +2232,9 @@
         "attach_failed": "無法附加「{{name}}」（{{type}}）：{{reason}}",
         "encode_unsupported": "無法附加「{{name}}」（{{type}}）：目前端點無法編碼此格式",
         "image_url_failed": "附加圖片（連結）失敗：{{reason}}",
-        "text_extraction_failed": "無法從附件「{{name}}」（{{type}}）中擷取文字：{{reason}}"
+        "text_extraction_failed": "無法從附件「{{name}}」（{{type}}）中擷取文字：{{reason}}",
+        "unavailable_skipped_one": "已略過 1 個附件：檔案在目前裝置上無法使用",
+        "unavailable_skipped_other": "已略過 {{count}} 個附件：檔案在目前裝置上無法使用"
       },
       "chunk_overlap_too_large": "分段重疊不能大於分段大小",
       "copy": "複製失敗",

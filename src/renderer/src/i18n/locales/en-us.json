@@ -2232,7 +2232,9 @@
         "attach_failed": "Failed to attach \"{{name}}\" ({{type}}): {{reason}}",
         "encode_unsupported": "Failed to attach \"{{name}}\" ({{type}}): the current endpoint cannot encode this format",
         "image_url_failed": "Failed to attach image (url): {{reason}}",
-        "text_extraction_failed": "Failed to extract text from attachment \"{{name}}\" ({{type}}): {{reason}}"
+        "text_extraction_failed": "Failed to extract text from attachment \"{{name}}\" ({{type}}): {{reason}}",
+        "unavailable_skipped_one": "1 attachment was skipped: the file is unavailable on this device",
+        "unavailable_skipped_other": "{{count}} attachments were skipped: the files are unavailable on this device"
       },
       "chunk_overlap_too_large": "Chunk overlap cannot be greater than chunk size",
       "copy": "Copy failed",

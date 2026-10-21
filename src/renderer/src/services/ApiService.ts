@@ -94,13 +94,24 @@ export async function transformMessagesAndFetch(
   const { messages, assistant, topicId } = request
 
   try {
-    const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(
+    const { modelMessages, uiMessages, nothingSendable } = await ConversationService.prepareMessagesForModel(
       messages,
       assistant,
       topicId,
       request.authorityUser,
       request.branchId
     )
+
+    // Nothing sendable for this turn (every attachment it carries is
+    // unavailable on this device and no other content is left): the
+    // trigger-scoped top notice was already emitted during preparation, and the
+    // operation ends here as an explicit no-op. No provider request is issued
+    // and NO chunk is emitted — in particular no ERROR chunk — so no
+    // assistant/error block is created and the surrounding lifecycle simply
+    // finishes. This resets no persisted answer and writes nothing.
+    if (nothingSendable) {
+      return
+    }
 
     // replace prompt variables
     assistant.prompt = await replacePromptVariables(assistant.prompt, assistant.model?.name)

@@ -35,6 +35,10 @@ import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
+import {
+  notifyUnavailableAttachmentsSkipped,
+  resolveTriggerAttachmentAvailability
+} from '@renderer/services/requestAttachmentAvailability'
 import { buildBlockOverlay } from '@renderer/services/requestBlockOverlay'
 import {
   recordResidentReadDiscard,
@@ -1139,6 +1143,45 @@ const hasEstablishedRouteAnchor = (
 }
 
 /**
+ * Attachment-only end of one operation, decided before any assistant row,
+ * Main reset, or provider request exists.
+ *
+ * Returns true when the triggering user message provably has nothing to send:
+ * every attachment it carries is unavailable on this device (imported without
+ * payload bytes, file removed outside the app) and it holds no other content.
+ * The existing top notice explains the skipped attachments once, and the caller
+ * finishes the operation as a clean no-op — the same shape as the existing
+ * empty-send guard in `sendMessage` — instead of issuing a request that could
+ * only fail into an inline assistant/error block.
+ *
+ * Never a general "drop hard messages" gate: attachments that merely fail to
+ * read, encode, or extract are not classified here and keep the existing
+ * atomic attachment-error behavior. Messages whose blocks are not resolvable
+ * (window-outside projection) stay unclassifiable and proceed unchanged.
+ */
+const endsWithoutSendableAttachments = async (
+  trigger: Message | undefined,
+  blocks: MessageBlock[] | undefined
+): Promise<boolean> => {
+  if (!trigger || !Array.isArray(blocks)) return false
+  const availability = await resolveTriggerAttachmentAvailability(trigger, blocks)
+  if (availability.unavailableAttachmentCount === 0 || availability.hasSendableContent) return false
+  notifyUnavailableAttachmentsSkipped(availability.unavailableAttachmentCount)
+  return true
+}
+
+/**
+ * Loaded blocks of a message, for the attachment gate above. Window-outside
+ * references stay unresolved (no request-local overlay is invented here), which
+ * keeps the gate inert rather than letting it decide on partial knowledge.
+ */
+const loadedBlocksOf = (state: RootState, message: Message | undefined): MessageBlock[] | undefined => {
+  if (!message || !Array.isArray(message.blocks)) return undefined
+  const entities = state.messageBlocks?.entities ?? {}
+  return message.blocks.map((blockId) => entities[blockId]).filter((block): block is MessageBlock => Boolean(block))
+}
+
+/**
  * 发送消息并处理助手回复
  * @param userMessage 已创建的用户消息
  * @param userMessageBlocks 用户消息关联的消息块
@@ -1203,6 +1246,17 @@ export const sendMessage =
       // below — after the user echo, the anchor step, the assistant stub and the
       // provider queue — on a fresh task, so nothing above waits for it.
       usageEstimateEligible = userPublished
+
+      // Attachment-only end of send: when every attachment of this message is
+      // provably unavailable on this device and nothing else is left, the top
+      // notice has already explained it once and the send finishes here — like
+      // the empty-send guard above. The user message stays persisted and
+      // visible, but no assistant stub is created, no provider request is
+      // issued, and no failed/inline answer is produced. Text and usable
+      // attachments never reach this branch.
+      if (await endsWithoutSendableAttachments(userMessage, userMessageBlocks)) {
+        return
+      }
 
       // First establishment: after the user message is persisted and added to
       // Redux, persist the topic anchor when this route has none
@@ -1668,6 +1722,14 @@ export const resendMessageThunk =
       // members are decided by the Main guard.
       requireLoadedAnswerMembersMutable(state, topicId, userMessageToResend.id)
 
+      // Attachment-only end of resend: nothing of this user turn can be sent,
+      // so the existing answers are left exactly as they are and the top notice
+      // is the whole result — no Main reset, no empty assistant row, no
+      // failed/inline answer.
+      if (await endsWithoutSendableAttachments(localUser, loadedBlocksOf(state, localUser))) {
+        return
+      }
+
       // Clear cached search results for the user message being resent
       // This ensures that the regenerated responses will not use stale search results
       try {
@@ -1850,6 +1912,18 @@ export const regenerateAssistantResponseThunk =
           `[appendAssistantResponseThunk] Existing assistant message ${assistantMessageToRegenerate.id} does not have an askId.`
         )
         return
+      }
+      // Attachment-only end of regenerate: the addressed answer's user turn has
+      // nothing sendable, so the existing answer is preserved untouched and the
+      // top notice is the whole result — no reset, no empty row, no inline
+      // failed answer. An unloaded user turn stays undecidable here and is
+      // decided by the request boundary instead.
+      const regeneratedUserAskId = localSelected.askId ?? assistantMessageToRegenerate.askId
+      if (regeneratedUserAskId) {
+        const regeneratedUser = state.messages.entities[regeneratedUserAskId]
+        if (await endsWithoutSendableAttachments(regeneratedUser, loadedBlocksOf(state, regeneratedUser))) {
+          return
+        }
       }
       // Self-model compat: a truthy selected `modelId` preserves the old
       // retain-model path without requiring a configured assistant model.
@@ -2112,6 +2186,16 @@ export const appendAssistantResponseThunk =
           precheck as Error
         )
         return
+      }
+
+      // Attachment-only end of append: the addressed user turn has nothing
+      // sendable, so no new answer row is created and no request is issued — the
+      // existing answers stand and the top notice is the whole result.
+      {
+        const appendedUser = state.messages.entities[askId]
+        if (await endsWithoutSendableAttachments(appendedUser, loadedBlocksOf(state, appendedUser))) {
+          return
+        }
       }
 
       // 2. Create the new assistant message stub
