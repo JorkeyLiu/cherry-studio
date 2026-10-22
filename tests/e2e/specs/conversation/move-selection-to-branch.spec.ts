@@ -327,6 +327,155 @@ function requireRows(
   return outcome.rows
 }
 
+// ---------------------------------------------------------------------------
+// Context-window anchor helpers (route-scoped, renderer-persisted settings)
+// ---------------------------------------------------------------------------
+
+function routeKeyFor(topicId: string, branchId: string | null): string {
+  return typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
+}
+
+async function setAssistantContextCount(page: Page, contextCount: number | null): Promise<void> {
+  const assistantId = await page.evaluate(
+    () => (window as unknown as { store: { getState: () => any } }).store.getState().assistants?.assistants?.[0]?.id
+  )
+  expect(assistantId, 'live assistant id must exist').toBeTruthy()
+  await page.evaluate(
+    ({ assistantId, contextCount }: { assistantId: string; contextCount: number | null }) => {
+      ;(window as unknown as { store: { dispatch: (a: unknown) => void } }).store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: { assistantId, settings: { contextCount } }
+      })
+    },
+    { assistantId, contextCount }
+  )
+}
+
+async function setRouteAnchor(page: Page, topicId: string, branchId: string | null, groupKey: string): Promise<void> {
+  const routeKey = routeKeyFor(topicId, branchId)
+  await page.evaluate(
+    ({ routeKey, groupKey }: { routeKey: string; groupKey: string }) => {
+      const store = (window as unknown as { store: { getState: () => any; dispatch: (a: unknown) => void } }).store
+      const assistant = store.getState().assistants.assistants[0]
+      const current = assistant?.settings?.contextWindowAnchor ?? {}
+      store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: {
+          assistantId: assistant.id,
+          settings: { contextWindowAnchor: { ...current, [routeKey]: { kind: 'active', groupKey } } }
+        }
+      })
+    },
+    { routeKey, groupKey }
+  )
+}
+
+async function readRouteAnchor(page: Page, topicId: string, branchId: string | null): Promise<string | null> {
+  const routeKey = routeKeyFor(topicId, branchId)
+  return page.evaluate((key: string) => {
+    const assistant = (window as unknown as { store: { getState: () => any } }).store.getState().assistants
+      ?.assistants?.[0]
+    const anchor = assistant?.settings?.contextWindowAnchor?.[key]
+    return anchor?.kind === 'active' ? (anchor.groupKey as string) : null
+  }, routeKey)
+}
+
+async function expectTokenCount(page: Page, current: number, max: number, timeout = 45000): Promise<void> {
+  await expect(page.locator('[data-testid="token-count-context"]').first()).toHaveText(
+    new RegExp(`^\\s*${current}\\s*\\/\\s*${max}\\s*$`),
+    { timeout }
+  )
+}
+
+async function setActiveRoute(page: Page, topicId: string, branchId: string | null): Promise<void> {
+  await page.evaluate(
+    ({ tid, bid }: { tid: string; bid: string | null }) => {
+      ;(window as unknown as { store: { dispatch: (a: unknown) => void } }).store.dispatch({
+        type: 'topicBranch/activeBranchSet',
+        payload: { topicId: tid, branchId: bid }
+      })
+    },
+    { tid: topicId, bid: branchId }
+  )
+  await page.waitForFunction(
+    ({ tid, bid }: { tid: string; bid: string | null }) => {
+      const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+      return (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid && s.messages?.loadingByTopic?.[tid] !== true
+    },
+    { tid: topicId, bid: branchId },
+    { timeout: 30000 }
+  )
+}
+
+async function loadedMessageIds(page: Page, topicId: string): Promise<string[]> {
+  return page.evaluate(
+    (tid: string) =>
+      ((window as unknown as { store: { getState: () => any } }).store.getState().messages?.messageIdsByTopic?.[tid] ??
+        []) as string[],
+    topicId
+  )
+}
+
+async function wheelLoadOlder(page: Page, topicId: string): Promise<{ before: number; after: number }> {
+  // Genuine wheel input toward the oldest edge (the inverse InfiniteScroll only
+  // fires within ~2px of the absolute top), then a deterministic convergence
+  // poll for the async load — no scrollTop writes, no synthetic scroll events.
+  const before = (await loadedMessageIds(page, topicId)).length
+  // Re-arm the inverse sentinel first: a container already resting at the very
+  // top can ignore the first upward gesture, so leave the edge with a genuine
+  // small downward gesture, then drive upward in smaller steps with a rAF +
+  // settle between each (no scrollTop writes, no synthetic scroll events).
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.wheel(0, 240)
+  await page.waitForTimeout(200)
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const now = (await loadedMessageIds(page, topicId)).length
+    if (now > before) break
+    const live = await page.locator('#messages').first().boundingBox()
+    if (live) await page.mouse.move(live.x + live.width / 2, live.y + live.height / 2)
+    await page.mouse.wheel(0, -420)
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    )
+    await page.waitForTimeout(250)
+  }
+  try {
+    await page.waitForFunction(
+      ({ tid, len }: { tid: string; len: number }) => {
+        const ids = (window as unknown as { store: { getState: () => any } }).store.getState().messages
+          ?.messageIdsByTopic?.[tid]
+        return Array.isArray(ids) && ids.length > len
+      },
+      { tid: topicId, len: before },
+      { timeout: 30000, polling: 250 }
+    )
+  } catch {
+    // Fall through: the caller's own growth assertion reports truthfully.
+  }
+  return { before, after: (await loadedMessageIds(page, topicId)).length }
+}
+
+async function uiSendMessage(page: Page, text: string): Promise<void> {
+  const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+  await textarea.waitFor({ state: 'visible', timeout: 15000 })
+  await textarea.click()
+  await page.evaluate(
+    ({ selector, content }: { selector: string; content: string }) => {
+      const el = document.querySelector(selector) as HTMLTextAreaElement | null
+      if (!el) throw new Error('Textarea not found')
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+      if (!nativeSetter) throw new Error('No native textarea setter')
+      nativeSetter.call(el, content)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    { selector: '.inputbar textarea, textarea[placeholder]', content: text }
+  )
+  await expect(textarea).toHaveValue(text, { timeout: 5000 })
+  await textarea.press('Enter')
+}
+
 test.describe('Move selected turns to new branch (focused)', () => {
   test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
   test('actual edit selection + right-click menu moves B,C to a new branch with stable IDs and relaunch persistence', async ({
@@ -527,5 +676,270 @@ test.describe('Move selected turns to new branch (focused)', () => {
     const anchorItem = moveMenuItem(page)
     await expect(anchorItem).toBeVisible({ timeout: 15000 })
     await expect(anchorItem).toBeDisabled({ timeout: 15000 })
+  })
+
+  /**
+   * Context-window inheritance across a move of the latest turn.
+   *
+   * Real turn semantics drive the numbers (no hardcoded window): a 49-turn
+   * source route with the assistant default contextCount=25 and a custom
+   * source anchor whose window is 34 turns (anchor turn index 49-34=15). After
+   * sending one more turn the route has 50 turns and its window grows to 35.
+   * Moving the newest turn to a new branch must inherit the SAME anchor by
+   * index on the new route (window 35/50), survive older pagination, route
+   * switching, and a full renderer reload — never silently falling back to the
+   * contextCount default (25) or to viewport-derived counts.
+   */
+  test('moving the latest turn keeps the inherited context anchor (window) on the new branch across pagination, route switch, and reload', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(420000)
+    const page = mainWindow
+    await waitForAppReady(page)
+    const assistantId = await prepareAssistant(page, 20)
+    const topicId = `move-anchor-e2e-${Date.now()}`
+    const TOTAL_MESSAGES = 98 // 49 whole turns (user+assistant pairs)
+    const SOURCE_TURNS = TOTAL_MESSAGES / 2
+    const CUSTOM_WINDOW_TURNS = 34
+    const ids = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: 'Move Anchor E2E',
+      total: TOTAL_MESSAGES,
+      messageIdForIndex: (i: number) => `${topicId}-msg-${pad(i, 5)}`,
+      contentPrefix: 'moveanchor-'
+    })
+    await activateTopic(page, topicId, 20)
+    // Assistant default window size stays at the product default 25; the
+    // custom source anchor below fixes the actual window at 34 turns.
+    await setAssistantContextCount(page, 25)
+    // Anchor turn index = SOURCE_TURNS - CUSTOM_WINDOW_TURNS = 15 → message 30.
+    const anchorTurnIndex = SOURCE_TURNS - CUSTOM_WINDOW_TURNS
+    const sourceAnchorGroupKey = ids[anchorTurnIndex * 2]
+    await setRouteAnchor(page, topicId, null, sourceAnchorGroupKey)
+    await expectTokenCount(page, CUSTOM_WINDOW_TURNS, SOURCE_TURNS)
+
+    // Send one more turn: 50 turns, window = 50 - 15 = 35.
+    await uiSendMessage(page, 'anchor move latest turn')
+    const turnsAfterSend = SOURCE_TURNS + 1
+    const windowAfterSend = turnsAfterSend - anchorTurnIndex
+    await expectTokenCount(page, windowAfterSend, turnsAfterSend)
+
+    // The newest whole turn (its user message is the group key).
+    const latestGroupKey = await page.evaluate((tid: string) => {
+      const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+      const loaded: string[] = s.messages?.messageIdsByTopic?.[tid] ?? []
+      for (let i = loaded.length - 1; i >= 0; i--) {
+        const entity = s.messages?.entities?.[loaded[i]]
+        if (entity?.role === 'user') return loaded[i] as string
+      }
+      return null
+    }, topicId)
+    expect(latestGroupKey, 'latest user turn must be resident').toBeTruthy()
+
+    // Real edit-mode selection + context menu move of the latest turn.
+    await enableEditMode(page)
+    await clickGroup(page, latestGroupKey as string)
+    await page.waitForFunction(
+      ({ gid }: { gid: string }) => {
+        const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+        return (s.editMode?.selectedGroupIds ?? []).includes(gid)
+      },
+      { gid: latestGroupKey as string },
+      { timeout: 15000 }
+    )
+    await openEditMenu(page, latestGroupKey as string)
+    const item = moveMenuItem(page)
+    await expect(item).toBeVisible({ timeout: 15000 })
+    await expect(item).toBeEnabled({ timeout: 15000 })
+    // Real pointer click; the portal item is routinely reported as intercepted
+    // by the floating edit action-bar/portal wrapper when the target row sits at
+    // the bottom edge, so the established DOM-click fallback applies only after
+    // visibility + enabled (the menu is genuinely offered) and only on viewport
+    // flake — never a second item, never an IPC shortcut.
+    try {
+      await item.click({ timeout: 10000 })
+    } catch {
+      await item.evaluate((el: HTMLElement) => el.click())
+    }
+
+    // New branch activates with exactly one catalog node.
+    await page.waitForFunction(
+      (tid: string) => {
+        const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+        const list = s.topicBranch?.branchesByTopic?.[tid]
+        return Array.isArray(list) && list.length === 1 ? list[0].id : null
+      },
+      topicId,
+      { timeout: 30000 }
+    )
+    const branchId = await page.evaluate((tid: string) => {
+      const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+      return (s.topicBranch?.branchesByTopic?.[tid]?.[0]?.id ?? null) as string | null
+    }, topicId)
+    expect(branchId, 'new branch id must exist').toBeTruthy()
+    await setActiveRoute(page, topicId, branchId as string)
+
+    // The inherited anchor is the ORIGINAL source anchor, not the default.
+    expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
+    // Window stays 35/50 on the new branch (regression: 25/50 or viewport counts).
+    await expectTokenCount(page, windowAfterSend, turnsAfterSend)
+
+    // Older pagination must not move or recompute the anchor.
+    const older = await wheelLoadOlder(page, topicId)
+    expect(older.before, 'branch route starts from a bounded latest window').toBeGreaterThanOrEqual(20)
+    expect(older.after, 'wheel must strictly increase the resident window').toBeGreaterThan(older.before)
+    await expectTokenCount(page, windowAfterSend, turnsAfterSend)
+    expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
+
+    // Switch away to the parent route and back: the parent keeps its own
+    // window (49 turns after the move) and the branch keeps 35/50.
+    await setActiveRoute(page, topicId, null)
+    await expectTokenCount(page, CUSTOM_WINDOW_TURNS, SOURCE_TURNS)
+    expect(await readRouteAnchor(page, topicId, null)).toBe(sourceAnchorGroupKey)
+    await setActiveRoute(page, topicId, branchId as string)
+    await expectTokenCount(page, windowAfterSend, turnsAfterSend)
+
+    // Full renderer reload: the persisted route anchor survives, so the branch
+    // still resolves 35/50 (contextCount=25 alone could only ever give 25/50).
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => Boolean((window as unknown as { store?: { getState?: () => any } }).store?.getState?.()?.assistants),
+      { timeout: 30000 }
+    )
+    const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+    await topicItem.waitFor({ state: 'visible', timeout: 30000 })
+    await topicItem.click()
+    await page.waitForFunction(
+      (tid: string) => {
+        const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+        const loaded = s.messages?.messageIdsByTopic?.[tid]
+        return Array.isArray(loaded) && loaded.length > 0 && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      topicId,
+      { timeout: 30000 }
+    )
+    await setActiveRoute(page, topicId, branchId as string)
+    expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
+    await expectTokenCount(page, windowAfterSend, turnsAfterSend)
+    // The parent route's own anchor is still independent and unchanged.
+    expect(await readRouteAnchor(page, topicId, null)).toBe(sourceAnchorGroupKey)
+    expect(assistantId).toBeTruthy()
+  })
+
+  /**
+   * Source-route anchor inside a MULTI-TURN moved selection (context-window
+   * ADR §9 deterministic delete transfer).
+   *
+   * 8 turns; the selection covers turns 3..5 and the anchor sits at the END of
+   * that selection (turn 5), so turns 6,7 survive and are NEWER than the
+   * anchor. The transfer must land on the nearest surviving OLDER turn (turn 2,
+   * window 3/5) — never on turn 7 (post-index arithmetic `oldIndex - 1`) and
+   * never on the `contextCount` default. The destination still inherits the
+   * anchor's pre-move index (window 1/6).
+   */
+  test('a source anchor at the end of a multi-turn selection transfers to the nearest surviving older turn, never a newer one', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    await waitForAppReady(page)
+    const assistantId = await prepareAssistant(page, 20)
+    const topicId = `move-anchor-src-${Date.now()}`
+    const TOTAL_MESSAGES = 16 // 8 whole turns
+    const TURNS = TOTAL_MESSAGES / 2
+    const ids = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: 'Move Anchor Source E2E',
+      total: TOTAL_MESSAGES,
+      messageIdForIndex: (i: number) => `${topicId}-msg-${pad(i, 5)}`,
+      contentPrefix: 'movesrc-'
+    })
+    await activateTopic(page, topicId, TOTAL_MESSAGES)
+    await setAssistantContextCount(page, 25)
+    // Selection = turns 3..5 (mid-route, so turns 6,7 survive and are NEWER
+    // than the anchor). The anchor sits at the END of the selection, i.e. the
+    // multi-turn-removal case where post-index arithmetic picks a newer turn.
+    const selectionStart = 3
+    const selectionEnd = 5
+    const anchorTurnIndex = selectionEnd
+    const sourceAnchorGroupKey = ids[anchorTurnIndex * 2]
+    await setRouteAnchor(page, topicId, null, sourceAnchorGroupKey)
+    await expectTokenCount(page, TURNS - anchorTurnIndex, TURNS)
+
+    await enableEditMode(page)
+    await clickGroup(page, ids[selectionStart * 2])
+    await clickGroup(page, ids[selectionEnd * 2], { shift: true })
+    await page.waitForFunction(
+      ({ a, b }: { a: string; b: string }) => {
+        const sel = (window as unknown as { store: { getState: () => any } }).store.getState().editMode
+          ?.selectedGroupIds as string[]
+        return Array.isArray(sel) && sel.includes(a) && sel.includes(b)
+      },
+      { a: ids[selectionStart * 2], b: ids[selectionEnd * 2] },
+      { timeout: 15000 }
+    )
+    await openEditMenu(page, ids[selectionStart * 2])
+    const item = moveMenuItem(page)
+    await expect(item).toBeVisible({ timeout: 15000 })
+    await expect(item).toBeEnabled({ timeout: 15000 })
+    try {
+      await item.click({ timeout: 10000 })
+    } catch {
+      await item.evaluate((el: HTMLElement) => el.click())
+    }
+    await page.waitForFunction(
+      (tid: string) => {
+        const list = (window as unknown as { store: { getState: () => any } }).store.getState().topicBranch
+          ?.branchesByTopic?.[tid]
+        return Array.isArray(list) && list.length === 1 ? list[0].id : null
+      },
+      topicId,
+      { timeout: 30000 }
+    )
+    const branchId: string = await page.evaluate(
+      (tid: string) =>
+        (window as unknown as { store: { getState: () => any } }).store.getState().topicBranch?.branchesByTopic?.[
+          tid
+        ]?.[0]?.id as string,
+      topicId
+    )
+    expect(branchId).toBeTruthy()
+    // Post-commit settle: the destination anchor is written before the thunk's
+    // own activation, so observing it on the store proves the side effect
+    // landed, and the in-flight window load settled before any route switch.
+    await page.waitForFunction(
+      ({ tid, bid, gk }: { tid: string; bid: string; gk: string }) => {
+        const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+        const a = s.assistants?.assistants?.[0]?.settings?.contextWindowAnchor?.[`${tid}:${bid}`]
+        return a?.groupKey === gk && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      { tid: topicId, bid: branchId, gk: sourceAnchorGroupKey },
+      { timeout: 30000 }
+    )
+    // The destination still inherits the pre-move index (turn 3) unchanged.
+    expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
+    // Source route keeps turns 0..2 plus the surviving newer turns 6,7. The
+    // deleted anchor (turn 5) must fall to the nearest SURVIVING OLDER turn —
+    // turn 2. Post-index arithmetic would land on turn 7 (newer than the anchor),
+    // which is exactly the defect this test guards.
+    const survivingOlderIndex = selectionStart - 1
+    const expectedSourceAnchor = ids[survivingOlderIndex * 2]
+    const sourceTurnsRemaining = selectionStart + (TURNS - 1 - selectionEnd)
+    await setActiveRoute(page, topicId, null)
+    expect(await readRouteAnchor(page, topicId, null)).toBe(expectedSourceAnchor)
+    // Window = transferred anchor turn to route end (never the contextCount
+    // default, never the whole remaining route).
+    await expectTokenCount(page, sourceTurnsRemaining - survivingOlderIndex, sourceTurnsRemaining)
+
+    // The destination still inherits the pre-move index turn unchanged.
+    // The destination route is the prefix through the preceding anchor plus the
+    // moved selection (turns 0..selectionEnd), and it inherits the anchor at its
+    // pre-move index — so its window is that turn to the route end.
+    await setActiveRoute(page, topicId, branchId)
+    expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
+    const destinationTurns = selectionEnd + 1
+    await expectTokenCount(page, destinationTurns - anchorTurnIndex, destinationTurns)
   })
 })

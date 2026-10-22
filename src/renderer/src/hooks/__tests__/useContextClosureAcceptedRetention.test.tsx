@@ -266,7 +266,7 @@ describe('accepted complete-route projection retention (root regression correcti
     expect(result.current.closure?.closure.selectedTurnCount).toBe(3)
   })
 
-  it('cold/new route with no accepted projection stays pending (no viewport counts), anchorless uses fallback', async () => {
+  it('cold/new route with no accepted projection stays pending (no viewport counts), anchorless empty route uses fallback', async () => {
     const viewport = [
       { id: 'u1', role: 'user', topicId: 't-cold', blocks: [] },
       { id: 'a1', role: 'assistant', askId: 'u1', topicId: 't-cold', blocks: [] }
@@ -277,15 +277,25 @@ describe('accepted complete-route projection retention (root regression correcti
     expect(pending.contextCount).toEqual({ current: 0, max: null })
     expect(pending.boundaryMessageId).toBeNull()
     expect(pending.uiMessages).toEqual([])
-    // Anchorless (empty/uninitialized) → bounded fallback, not pending.
-    const fallback = resolveSharedContextInfo(
+    // NON-EMPTY route without any persisted anchor (branch-establishment
+    // transition): the loaded viewport must never become the authoritative
+    // current/max (it would report e.g. 7/7 for a 49-turn route).
+    const anchorlessNonEmpty = resolveSharedContextInfo(
       viewport as any,
       assistantWithAnchor('t-cold', null),
       't-cold',
       null,
       null
     )
-    expect(fallback.isAuthoritativePending).toBe(false)
+    expect(anchorlessNonEmpty.isAuthoritativePending).toBe(true)
+    expect(anchorlessNonEmpty.contextCount).toEqual({ current: 0, max: null })
+    expect(anchorlessNonEmpty.boundaryMessageId).toBeNull()
+    expect(anchorlessNonEmpty.anchorGroupKey).toBeNull()
+    // EMPTY route keeps the legitimate anchorless 0/0 fallback (I-1).
+    const emptyRoute = resolveSharedContextInfo([], assistantWithAnchor('t-cold', null), 't-cold', null, null)
+    expect(emptyRoute.isAuthoritativePending).toBe(false)
+    expect(emptyRoute.contextCount).toEqual({ current: 0, max: 0 })
+    expect(emptyRoute.anchorGroupKey).toBeNull()
   })
 
   it('route/anchor rapid change never leaks previous-route counts (fail-closed)', async () => {

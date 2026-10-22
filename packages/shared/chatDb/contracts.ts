@@ -2064,11 +2064,80 @@ const MOVE_SELECTED_TURNS_VALUE_KEYS = new Set([
   'parentMessages',
   'parentBlocks',
   'messages',
-  'blocks'
+  'blocks',
+  'resolvedContextAnchorGroupKey',
+  'sourceContextAnchorTransfer'
 ])
+const MOVE_CONTEXT_ANCHOR_INHERITANCE_KEYS = new Set(['sourceAnchorGroupKey', 'contextCount'])
+const MOVE_SOURCE_ANCHOR_TRANSFER_KEYS = new Set(['fromGroupKey', 'toGroupKey'])
+
+/**
+ * Optional renderer-owned context-window inheritance input for a move.
+ *
+ * Strict shape: a plain object with only the two known keys; the anchor key is
+ * `null`/absent or a non-empty string, the window size is `null`/absent or a
+ * finite number. Values are facts from the renderer's own assistant settings —
+ * Main reads no assistant configuration.
+ */
+function validateMoveContextAnchorInheritance(value: unknown): void {
+  if (value === undefined) return
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance',
+      '[chatdb:move-selected-turns] contextAnchorInheritance must be a plain object'
+    )
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance',
+      '[chatdb:move-selected-turns] contextAnchorInheritance must be a plain object'
+    )
+  }
+  const rec = value as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (!MOVE_CONTEXT_ANCHOR_INHERITANCE_KEYS.has(key)) {
+      throw new ValidationError(
+        `request.contextAnchorInheritance.${key}`,
+        `[chatdb:move-selected-turns] Unknown key in contextAnchorInheritance: "${key}"`
+      )
+    }
+  }
+  const anchorKey = rec.sourceAnchorGroupKey
+  if (anchorKey !== undefined && anchorKey !== null && typeof anchorKey !== 'string') {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.sourceAnchorGroupKey',
+      '[chatdb:move-selected-turns] Expected string sourceAnchorGroupKey or null'
+    )
+  }
+  if (typeof anchorKey === 'string' && anchorKey.length === 0) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.sourceAnchorGroupKey',
+      '[chatdb:move-selected-turns] sourceAnchorGroupKey must be non-empty or null'
+    )
+  }
+  const contextCount = rec.contextCount
+  if (
+    contextCount !== undefined &&
+    contextCount !== null &&
+    (typeof contextCount !== 'number' || !Number.isFinite(contextCount))
+  ) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.contextCount',
+      '[chatdb:move-selected-turns] Expected finite number contextCount or null'
+    )
+  }
+}
 
 const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'sourceBranchId', 'selectedGroupIds', 'expectedSelectedMessageIds', 'name'),
+  allowedKeys: keySet(
+    'topicId',
+    'sourceBranchId',
+    'selectedGroupIds',
+    'expectedSelectedMessageIds',
+    'name',
+    'contextAnchorInheritance'
+  ),
   validate(value: unknown): void {
     validateRequest(value, moveSelectedTurnsToNewBranchContract.allowedKeys)
     const req = value as MoveSelectedTurnsToNewBranchRequest
@@ -2094,6 +2163,7 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
     if (req.name !== undefined) {
       validateNonEmptyString(req.name, 'request.name')
     }
+    validateMoveContextAnchorInheritance(req.contextAnchorInheritance)
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:move-selected-turns-to-new-branch', { skipValueValidation: true })
@@ -2129,6 +2199,62 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
       validateJsonObjectArrayBlock(v.parentBlocks, 'result.value.parentBlocks', BLOCK_JSON_PROFILE)
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      // Optional, explicitly nullable: absent means Main produced no fact.
+      const anchor = v.resolvedContextAnchorGroupKey
+      if (anchor !== undefined) {
+        if (anchor !== null && typeof anchor !== 'string') {
+          throw new ValidationError(
+            'result.value.resolvedContextAnchorGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] Expected string resolvedContextAnchorGroupKey or null'
+          )
+        }
+        if (typeof anchor === 'string' && anchor.length === 0) {
+          throw new ValidationError(
+            'result.value.resolvedContextAnchorGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] resolvedContextAnchorGroupKey must be non-empty or null'
+          )
+        }
+      }
+      // Optional source-anchor transfer fact (absent = nothing moved).
+      const transfer = v.sourceContextAnchorTransfer
+      if (transfer !== undefined) {
+        if (transfer === null || typeof transfer !== 'object' || Array.isArray(transfer)) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer',
+            '[chatdb:move-selected-turns-to-new-branch] sourceContextAnchorTransfer must be a plain object'
+          )
+        }
+        const transferProto = Object.getPrototypeOf(transfer)
+        if (transferProto !== Object.prototype && transferProto !== null) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer',
+            '[chatdb:move-selected-turns-to-new-branch] sourceContextAnchorTransfer must be a plain object'
+          )
+        }
+        const rec = transfer as Record<string, unknown>
+        for (const key of Object.keys(rec)) {
+          if (!MOVE_SOURCE_ANCHOR_TRANSFER_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.sourceContextAnchorTransfer.${key}`,
+              `[chatdb:move-selected-turns-to-new-branch] Unknown key in sourceContextAnchorTransfer: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(rec.fromGroupKey, 'result.value.sourceContextAnchorTransfer.fromGroupKey')
+        const to = rec.toGroupKey
+        if (to !== null && typeof to !== 'string') {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer.toGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] Expected string toGroupKey or null'
+          )
+        }
+        if (typeof to === 'string' && to.length === 0) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer.toGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] toGroupKey must be non-empty or null'
+          )
+        }
+      }
     }
   }
 }

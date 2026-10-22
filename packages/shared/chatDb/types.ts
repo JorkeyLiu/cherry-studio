@@ -1541,9 +1541,41 @@ export interface MoveSelectedTurnsToNewBranchRequest {
    */
   expectedSelectedMessageIds: string[]
   name?: string
+  /**
+   * Optional renderer-owned context-window inheritance input.
+   *
+   * When present, Main resolves the DESTINATION route's context anchor inside
+   * the same root transaction, against the PRE-MOVE source route (the
+   * destination's inherited prefix plus the selection in its original
+   * positions), and returns it as a fact in
+   * {@link MoveSelectedTurnsToNewBranchResponse.resolvedContextAnchorGroupKey}.
+   * A post-commit resolution would read the already-mutated source route and
+   * silently fall back to the default window position.
+   *
+   * Main owns no assistant configuration: it only maps the renderer-supplied
+   * index into the destination and reports the result; the renderer persists it.
+   */
+  contextAnchorInheritance?: MoveContextAnchorInheritanceInput
 }
 
-/** @see IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch */
+/**
+ * Renderer-supplied context-window inheritance facts for a move.
+ *
+ * Both fields are renderer-owned persisted configuration, never chat
+ * authority: `sourceAnchorGroupKey` is the source route's persisted anchor
+ * (canonical turn group key) and `contextCount` is the assistant window size
+ * at commit time (turns; null = unlimited).
+ */
+export interface MoveContextAnchorInheritanceInput {
+  /** Source route anchor group key; null/absent = the source route has no anchor. */
+  sourceAnchorGroupKey?: string | null
+  /** Assistant default/initial window size in turns; null/absent = unlimited. */
+  contextCount?: number | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch
+ */
 export interface MoveSelectedTurnsToNewBranchResponse {
   branch: TopicBranchWire
   /** Stable IDs of the moved messages in display order. */
@@ -1556,6 +1588,49 @@ export interface MoveSelectedTurnsToNewBranchResponse {
   /** Effective wire messages of the new branch route. */
   messages: JsonObject[]
   blocks: JsonObject[]
+  /**
+   * Destination route context-window anchor resolved by Main inside the same
+   * atomic move transaction (pre-move inheritance source).
+   *
+   * - non-empty string: the destination's inherited anchor group key;
+   * - `null`: the destination route is empty, so it has no anchor (I-1);
+   * - absent: Main was not asked to resolve it (no
+   *   {@link MoveSelectedTurnsToNewBranchRequest.contextAnchorInheritance})
+   *   or did not produce a fact — the caller must not invent one.
+   *
+   * Main never persists this value; it is a fact the renderer writes into its
+   * own per-route anchor map.
+   */
+  resolvedContextAnchorGroupKey?: string | null
+  /**
+   * Source route context-window anchor repair resolved by Main inside the same
+   * atomic move transaction.
+   *
+   * Present ONLY when the request supplied an active source anchor
+   * ({@link MoveContextAnchorInheritanceInput.sourceAnchorGroupKey}) whose turn
+   * was part of the moved selection, so the source route no longer holds it.
+   * Main then applies the deterministic delete-transfer rule of the
+   * context-window governance ADR §9 against the PRE-move and POST-move source
+   * routes: the previous surviving older turn, the new first turn when the
+   * deleted turn was the first one, or `null` when the source route became
+   * empty (an empty route has no anchor).
+   *
+   * Absent means nothing moved: the request carried no active source anchor,
+   * the key names no source turn, or the anchor still exists in the source
+   * route. Callers must NOT rebuild or rewrite the source anchor in that case.
+   */
+  sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
+}
+
+/** Deterministic source-route anchor transfer produced by a move. */
+export interface MoveSourceContextAnchorTransfer {
+  /** Source anchor group key as supplied with the request (pre-move truth). */
+  fromGroupKey: string
+  /**
+   * Replacement source anchor group key, or `null` when the source route is
+   * empty after the move (no anchor).
+   */
+  toGroupKey: string | null
 }
 
 // ---------------------------------------------------------------------------

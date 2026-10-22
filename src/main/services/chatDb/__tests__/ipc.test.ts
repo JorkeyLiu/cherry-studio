@@ -794,9 +794,45 @@ describe('ChatDb IPC Registration', () => {
         }
       )
 
-      expect(spy).toHaveBeenCalledWith('t-1', null, ['g1'], 'Moved', ['m1', 'm2'])
+      expect(spy).toHaveBeenCalledWith('t-1', null, ['g1'], 'Moved', ['m1', 'm2'], undefined)
       expect(result.ok).toBe(false)
       expect(result.error.code).toBe('NOT_FOUND')
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  it('move-selected-turns-to-new-branch forwards the optional context-anchor inheritance input', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'moveSelectedTurnsToNewBranch')
+    try {
+      spy.mockReturnValueOnce({
+        ok: false as const,
+        error: { code: 'NOT_FOUND', message: 'Topic t-1 does not exist', retryable: false }
+      } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch)!
+      const result = await handler({}, {
+        topicId: 't-1',
+        sourceBranchId: null,
+        selectedGroupIds: ['g1'],
+        expectedSelectedMessageIds: ['m1'],
+        name: 'Moved',
+        contextAnchorInheritance: { sourceAnchorGroupKey: 'm1', contextCount: 25 }
+      } as any)
+
+      expect(spy).toHaveBeenCalledWith('t-1', null, ['g1'], 'Moved', ['m1'], {
+        sourceAnchorGroupKey: 'm1',
+        contextCount: 25
+      })
+      expect(result.ok).toBe(false)
     } finally {
       spy.mockRestore()
       mockIsInitialised.mockReturnValue(false)

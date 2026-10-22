@@ -487,4 +487,395 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
     expect(res).not.toBeNull()
     expect(res?.branchId).toBe('nb')
   })
+
+  // ---------------------------------------------------------------------------
+  // Context-window anchor persistence on the committed move
+  //
+  // The destination anchor is a Main-resolved fact returned with the committed
+  // move. It is written into the correct route key BEFORE the thunk's own
+  // activeBranchSet and regardless of what the viewport load does afterwards
+  // (superseded/void, throw, or the user switching route).
+  // ---------------------------------------------------------------------------
+
+  type MoveStateOpts = Parameters<typeof moveState>[0]
+
+  function stateWithOwner(
+    opts: MoveStateOpts,
+    settings?: { contextWindowAnchor?: Record<string, unknown>; contextCount?: number | null }
+  ) {
+    const state = moveState(opts) as unknown as Record<string, any>
+    state.assistants = {
+      assistants: [
+        {
+          id: 'asst-1',
+          topics: [{ id: 't-1' }],
+          settings: { contextCount: 25, ...settings }
+        }
+      ]
+    }
+    return state
+  }
+
+  function actionsOfType(dispatchMock: { mock: { calls: unknown[][] } }, type: string): unknown[] {
+    return dispatchMock.mock.calls
+      .map((c) => c[0])
+      .filter((a) => a && typeof a === 'object' && (a as { type?: string }).type === type)
+  }
+
+  function indexOfFirstAction(dispatchMock: { mock: { calls: unknown[][] } }, type: string): number {
+    return dispatchMock.mock.calls.findIndex(
+      (c) => c[0] && typeof c[0] === 'object' && ((c[0] as { type?: string }).type ?? '') === type
+    )
+  }
+
+  describe('moveSelectedTurnsToNewBranchThunk context-anchor inheritance', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mocks.listBranches.mockResolvedValue({ branches: [] })
+      mocks.fetchMessagesWindow.mockResolvedValue({
+        messages: [],
+        blocks: [],
+        window: { kind: 'latest' },
+        mutableMessageIds: []
+      })
+    })
+
+    it('sends the pre-commit source anchor and contextCount with the move request', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: [],
+        resolvedContextAnchorGroupKey: 'uA'
+      })
+      const state = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uA' } }, contextCount: 25 }
+      )
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(mocks.dispatch as any, (() => state) as any)
+      const args = mocks.moveSelectedTurnsToNewBranch.mock.calls[0] as unknown[]
+      expect(args[5]).toEqual({ sourceAnchorGroupKey: 'uA', contextCount: 25 })
+    })
+
+    it('writes the committed destination anchor before activating the new route when the viewport load is superseded (void)', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: [],
+        resolvedContextAnchorGroupKey: 'uD'
+      })
+      let current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uD' } }, contextCount: 25 }
+      )
+      const localDispatch = vi.fn((action: unknown) => {
+        // Superseded viewport read: resolves void, no rebase (the deterministic
+        // reproduction of the reported lost-inheritance path).
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        const type = (action as { type?: string })?.type
+        if (type === 'assistants/updateAssistantSettings') {
+          const payload = (action as { payload: any }).payload
+          current.assistants.assistants[0].settings = {
+            ...current.assistants.assistants[0].settings,
+            ...payload.settings
+          }
+        }
+        if (type === 'topicBranch/activeBranchSet') {
+          const branchId = (action as { payload: { branchId: string } }).payload.branchId
+          current = {
+            ...current,
+            topicBranch: {
+              ...current.topicBranch,
+              activeBranchIdByTopic: { 't-1': branchId },
+              routeGenerationByTopic: { 't-1': 2 }
+            }
+          }
+        }
+        return action
+      })
+      const res = (await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)) as unknown as { branchId: string } | null
+      expect(res?.branchId).toBe('nb')
+      const anchorWrites = actionsOfType(localDispatch, 'assistants/updateAssistantSettings')
+      expect(anchorWrites).toHaveLength(1)
+      const write = anchorWrites[0] as { payload: { settings: { contextWindowAnchor: Record<string, unknown> } } }
+      // Correct route key, Main-resolved value, source key untouched.
+      expect(write.payload.settings.contextWindowAnchor['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uD' })
+      expect(write.payload.settings.contextWindowAnchor['t-1']).toEqual({ kind: 'active', groupKey: 'uD' })
+      // Written BEFORE the thunk's own activeBranchSet.
+      const anchorIdx = indexOfFirstAction(localDispatch, 'assistants/updateAssistantSettings')
+      const activeIdx = indexOfFirstAction(localDispatch, 'topicBranch/activeBranchSet')
+      expect(activeIdx).toBeGreaterThan(-1)
+      expect(anchorIdx).toBeGreaterThan(-1)
+      expect(anchorIdx).toBeLessThan(activeIdx)
+    })
+
+    it('writes against the latest owner map so a concurrent write to another route survives the await gap', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      let current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: {}, contextCount: 25 }
+      )
+      mocks.moveSelectedTurnsToNewBranch.mockImplementationOnce(() => {
+        // Another route's anchor lands while the commit is in flight.
+        current.assistants.assistants[0].settings = {
+          ...current.assistants.assistants[0].settings,
+          contextWindowAnchor: { 't-1:b-other': { kind: 'active', groupKey: 'uX' } }
+        }
+        return Promise.resolve({
+          branch: { id: 'nb', anchorMessageId: 'aA' },
+          movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+          anchorMessageId: 'aA',
+          messages: [],
+          blocks: [],
+          resolvedContextAnchorGroupKey: 'uA'
+        })
+      })
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        const type = (action as { type?: string })?.type
+        if (type === 'assistants/updateAssistantSettings') {
+          const payload = (action as { payload: any }).payload
+          current.assistants.assistants[0].settings = {
+            ...current.assistants.assistants[0].settings,
+            ...payload.settings
+          }
+        }
+        if (type === 'topicBranch/activeBranchSet') {
+          current = {
+            ...current,
+            topicBranch: {
+              ...current.topicBranch,
+              activeBranchIdByTopic: { 't-1': (action as { payload: { branchId: string } }).payload.branchId },
+              routeGenerationByTopic: { 't-1': 2 }
+            }
+          }
+        }
+        return action
+      })
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)
+      const anchorWrites = actionsOfType(localDispatch, 'assistants/updateAssistantSettings')
+      expect(anchorWrites).toHaveLength(1)
+      const write = anchorWrites[0] as { payload: { settings: { contextWindowAnchor: Record<string, unknown> } } }
+      // No skipped anchor, no clobbered foreign route key.
+      expect(write.payload.settings.contextWindowAnchor['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uA' })
+      expect(write.payload.settings.contextWindowAnchor['t-1:b-other']).toEqual({ kind: 'active', groupKey: 'uX' })
+    })
+
+    it('writes the destination anchor even when the user switched route during the commit', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      let current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: {}, contextCount: 25 }
+      )
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: [],
+        resolvedContextAnchorGroupKey: 'uA'
+      })
+      // User moves to another branch while the commit IPC is in flight.
+      const originalImpl = mocks.moveSelectedTurnsToNewBranch.getMockImplementation()
+      mocks.moveSelectedTurnsToNewBranch.mockImplementationOnce(() => {
+        current = {
+          ...current,
+          topicBranch: {
+            ...current.topicBranch,
+            activeBranchIdByTopic: { 't-1': 'b-user' },
+            routeGenerationByTopic: { 't-1': 2 }
+          }
+        }
+        return (originalImpl as () => Promise<unknown>)()
+      })
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        return action
+      })
+      const res = (await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)) as unknown as { branchId: string } | null
+      expect(res?.branchId).toBe('nb')
+      const anchorWrites = actionsOfType(localDispatch, 'assistants/updateAssistantSettings')
+      expect(anchorWrites).toHaveLength(1)
+      const write = anchorWrites[0] as { payload: { settings: { contextWindowAnchor: Record<string, unknown> } } }
+      expect(write.payload.settings.contextWindowAnchor['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uA' })
+      // No forced navigation back to the moved-to branch.
+      expect(actionsOfType(localDispatch, 'topicBranch/activeBranchSet')).toHaveLength(0)
+    })
+
+    it('invents no anchor when Main returns no fact (absent)', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: []
+      })
+      const state = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: {}, contextCount: 25 }
+      )
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        return action
+      })
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => state) as any)
+      expect(actionsOfType(localDispatch, 'assistants/updateAssistantSettings')).toHaveLength(0)
+    })
+
+    it('applies Main source-anchor transfer and the destination anchor in ONE settings update', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: [],
+        resolvedContextAnchorGroupKey: 'uB',
+        sourceContextAnchorTransfer: { fromGroupKey: 'uB', toGroupKey: 'uA' }
+      })
+      const current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uB' } }, contextCount: 25 }
+      )
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        const type = (action as { type?: string })?.type
+        if (type === 'assistants/updateAssistantSettings') {
+          const payload = (action as { payload: any }).payload
+          current.assistants.assistants[0].settings = {
+            ...current.assistants.assistants[0].settings,
+            ...payload.settings
+          }
+        }
+        return action
+      })
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)
+      const anchorWrites = actionsOfType(localDispatch, 'assistants/updateAssistantSettings')
+      // One atomic map update carrying both route keys.
+      expect(anchorWrites).toHaveLength(1)
+      const map = (anchorWrites[0] as { payload: { settings: { contextWindowAnchor: Record<string, unknown> } } })
+        .payload.settings.contextWindowAnchor
+      expect(map['t-1']).toEqual({ kind: 'active', groupKey: 'uA' })
+      expect(map['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uB' })
+    })
+
+    it('does not overwrite a source anchor the user explicitly re-anchored during the commit wait', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      const current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uB' } }, contextCount: 25 }
+      )
+      mocks.moveSelectedTurnsToNewBranch.mockImplementationOnce(() => {
+        // Explicit user re-anchor of the source route while the IPC is in flight.
+        current.assistants.assistants[0].settings = {
+          ...current.assistants.assistants[0].settings,
+          contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uD' } }
+        }
+        return Promise.resolve({
+          branch: { id: 'nb', anchorMessageId: 'aA' },
+          movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+          anchorMessageId: 'aA',
+          messages: [],
+          blocks: [],
+          resolvedContextAnchorGroupKey: 'uB',
+          sourceContextAnchorTransfer: { fromGroupKey: 'uB', toGroupKey: 'uA' }
+        })
+      })
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        return action
+      })
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)
+      const anchorWrites = actionsOfType(localDispatch, 'assistants/updateAssistantSettings')
+      // The destination write still happens (no skipping), and the source key is
+      // left exactly as the user set it.
+      expect(anchorWrites).toHaveLength(1)
+      const map = (anchorWrites[0] as { payload: { settings: { contextWindowAnchor: Record<string, unknown> } } })
+        .payload.settings.contextWindowAnchor
+      expect(map['t-1']).toEqual({ kind: 'active', groupKey: 'uD' })
+      expect(map['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uB' })
+    })
+
+    it('writes nothing for the source route when Main reports no transfer (anchor survived)', async () => {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
+      mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
+        branch: { id: 'nb', anchorMessageId: 'aA' },
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        anchorMessageId: 'aA',
+        messages: [],
+        blocks: [],
+        resolvedContextAnchorGroupKey: 'uA'
+      })
+      const current = stateWithOwner(
+        { active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'], catalog: [] },
+        { contextWindowAnchor: { 't-1': { kind: 'active', groupKey: 'uA' } }, contextCount: 25 }
+      )
+      const localDispatch = vi.fn((action: unknown) => {
+        if (typeof action === 'function') return Promise.resolve(undefined)
+        const type = (action as { type?: string })?.type
+        if (type === 'assistants/updateAssistantSettings') {
+          const payload = (action as { payload: any }).payload
+          current.assistants.assistants[0].settings = {
+            ...current.assistants.assistants[0].settings,
+            ...payload.settings
+          }
+        }
+        return action
+      })
+      await moveSelectedTurnsToNewBranchThunk(
+        't-1',
+        null,
+        ['uB', 'uC'],
+        'Moved'
+      )(localDispatch as any, (() => current) as any)
+      const map = (
+        actionsOfType(localDispatch, 'assistants/updateAssistantSettings')[0] as {
+          payload: { settings: { contextWindowAnchor: Record<string, unknown> } }
+        }
+      ).payload.settings.contextWindowAnchor
+      expect(map['t-1']).toEqual({ kind: 'active', groupKey: 'uA' })
+      expect(map['t-1:nb']).toEqual({ kind: 'active', groupKey: 'uA' })
+    })
+  })
 })

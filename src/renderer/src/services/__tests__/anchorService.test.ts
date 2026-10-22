@@ -192,6 +192,42 @@ describe('transferAnchorOnDeletion', () => {
     const newList = ['u0', 'u1']
     expect(transferAnchorOnDeletion(g('ux'), oldList, newList)).toEqual(g('ux'))
   })
+
+  // Batch removal (one deletion/move removing several contiguous groups):
+  // the post list compresses, so the transfer must compare stable group
+  // identity against the PRE order — never index the post list with
+  // `oldIndex - 1`.
+
+  it('batch-remove a contiguous middle range with the anchor inside it → nearest surviving OLDER group, never a newer one', () => {
+    const oldList = ['u0', 'u1', 'u2', 'u3', 'u4', 'u5']
+    // Anchor u4 (index 4); u3,u4 removed → post = [u0,u1,u2,u5]. `oldIndex - 1`
+    // = 3 would return u5, which is NEWER than the deleted anchor.
+    const newList = ['u0', 'u1', 'u2', 'u5']
+    expect(transferAnchorOnDeletion(g('u4'), oldList, newList)).toEqual(g('u2'))
+  })
+
+  it('batch-remove the tail with the anchor last → nearest surviving older group, no out-of-range index', () => {
+    const oldList = ['u0', 'u1', 'u2', 'u3', 'u4']
+    const newList = ['u0', 'u1', 'u2']
+    // `oldIndex - 1` = 3 indexes past the 3-element post list.
+    expect(transferAnchorOnDeletion(g('u4'), oldList, newList)).toEqual(g('u2'))
+  })
+
+  it('batch-remove everything older too → falls to the post first group', () => {
+    const oldList = ['u0', 'u1', 'u2']
+    const newList = ['u0']
+    // Anchor u2 removed together with u1; no older group survives (u1 gone),
+    // so the transfer lands on the post route's first group.
+    expect(transferAnchorOnDeletion(g('u2'), oldList, newList)).toEqual(g('u0'))
+  })
+
+  it('single-group deletion semantics are unchanged by the batch rule', () => {
+    const oldList = ['u0', 'u1', 'u2', 'u3']
+    // Deleting only the anchor keeps the immediately-previous group.
+    expect(transferAnchorOnDeletion(g('u2'), oldList, ['u0', 'u1', 'u3'])).toEqual(g('u1'))
+    // Deleting a group BELOW the anchor never moves it.
+    expect(transferAnchorOnDeletion(g('u3'), oldList, ['u0', 'u2', 'u3'])).toEqual(g('u3'))
+  })
 })
 
 // --- transferAnchorsAfterDeletion (contextWindowAnchor field) ---

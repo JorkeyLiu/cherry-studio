@@ -55,6 +55,8 @@ import type {
   JsonObject,
   JsonValue,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
+  MoveSourceContextAnchorTransfer,
   PurgeExpiredTopicsResponse,
   ReorderAnswerGroupResponse,
   ResendAttemptMapping,
@@ -239,6 +241,65 @@ function sameUsageSource(a: UpdateMessageUsageSource, b: UpdateMessageUsageSourc
     if (a.fileIds[i] !== b.fileIds[i]) return false
   }
   return true
+}
+
+/**
+ * Canonical context-window turn derivation over one route's ordered messages.
+ *
+ * A `system` or `user` message starts a turn keyed by its own ID; an assistant
+ * joins the turn named by its `askId`; an assistant whose `askId` names no
+ * current turn starts a turn keyed by that `askId` (or by its own ID when
+ * `askId` is absent). Ignored roles are skipped. Turn keys are stable message
+ * IDs, so the same derivation serves the pre-move source route, the
+ * post-move destination route, and index-preserving inheritance between them.
+ */
+type ContextAnchorTurn = { key: string; messages: MessageData[] }
+
+function buildContextAnchorTurns(rows: MessageData[]): ContextAnchorTurn[] {
+  const turns: ContextAnchorTurn[] = []
+  let currentKey: string | null = null
+  for (const msg of rows) {
+    const askId = (msg as unknown as { askId: string | null }).askId
+    if (msg.role === 'system' || msg.role === 'user') {
+      currentKey = msg.id
+      turns.push({ key: currentKey, messages: [msg] })
+    } else if (msg.role === 'assistant') {
+      if (askId && askId === currentKey) {
+        turns[turns.length - 1].messages.push(msg)
+      } else {
+        currentKey = askId ? askId : msg.id
+        turns.push({ key: currentKey, messages: [msg] })
+      }
+    }
+  }
+  return turns
+}
+
+/**
+ * Canonical 3-step group-key match inside one turn list: the user message's
+ * own ID, then the assistant `askId` owner, then any non-user message ID.
+ * Returns -1 when the key names no turn.
+ */
+function resolveContextAnchorTurnIndex(turns: ContextAnchorTurn[], groupKey: string): number {
+  let idx = turns.findIndex((t) => t.messages.some((m) => m.role === 'user' && m.id === groupKey))
+  if (idx !== -1) return idx
+  idx = turns.findIndex((t) =>
+    t.messages.some((m) => m.role === 'assistant' && (m as unknown as { askId: string | null }).askId === groupKey)
+  )
+  if (idx !== -1) return idx
+  return turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+}
+
+/**
+ * Default window start index (never a clamp): `null` => the first turn,
+ * finite N => `max(0, total - max(1, floor(N)))` — the same position a
+ * TokenCount re-anchor uses.
+ */
+function resolveContextAnchorDefaultIndex(total: number, contextCount: number | null | undefined): number {
+  if (total <= 0) return -1
+  if (contextCount === null || contextCount === undefined) return 0
+  const n = Math.max(1, Math.floor(contextCount))
+  return Math.max(0, total - n)
 }
 
 // ---------------------------------------------------------------------------
@@ -8533,13 +8594,23 @@ export class ChatDbAggregateService {
    * Local-only: no sync outbox/membership/frame writes; pre-existing main
    * sync artifacts for moved IDs are deliberately left untouched (caveat,
    * outside claim).
+   *
+   * Context-window inheritance (optional): when the caller supplies the
+   * source route's anchor and the assistant window size, the destination
+   * anchor is resolved INSIDE this transaction from the PRE-MOVE source route
+   * (index-preserving map, default position when the source anchor is missing
+   * or out of the destination's range, no anchor for an empty destination).
+   * A post-commit resolution would read the already-mutated source route. The
+   * resolved key is returned as a fact only; Main never persists renderer
+   * assistant settings.
    */
   moveSelectedTurnsToNewBranch(
     topicId: string,
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput | null
   ): ChatDbResult<{
     branch: TopicBranchWire
     movedMessageIds: string[]
@@ -8548,6 +8619,8 @@ export class ChatDbAggregateService {
     parentBlocks: JsonObject[]
     messages: JsonObject[]
     blocks: JsonObject[]
+    resolvedContextAnchorGroupKey?: string | null
+    sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
   }> {
     return wrapResult(
       () => {
@@ -8767,6 +8840,78 @@ export class ChatDbAggregateService {
           const parentWireBlocks = blocksToWire(parentBlocks)
           const childWireMessages = messagesToWire(childEffective)
           const childWireBlocks = blocksToWire(childBlocks)
+          // Context-window inheritance fact (optional): resolved from the
+          // PRE-MOVE source route (`effective`, captured before any write) into
+          // the destination route (`childEffective`) by index. A post-commit
+          // resolution would read the mutated source route and silently fall
+          // back to the default window position.
+          let resolvedContextAnchorGroupKey: string | null | undefined
+          let sourceContextAnchorTransfer: { fromGroupKey: string; toGroupKey: string | null } | undefined
+          if (contextAnchorInheritance) {
+            const sourceAnchorGroupKey =
+              typeof contextAnchorInheritance.sourceAnchorGroupKey === 'string' &&
+              contextAnchorInheritance.sourceAnchorGroupKey.length > 0
+                ? contextAnchorInheritance.sourceAnchorGroupKey
+                : null
+            const contextCount =
+              typeof contextAnchorInheritance.contextCount === 'number' ? contextAnchorInheritance.contextCount : null
+            const sourceTurnsBefore = buildContextAnchorTurns(effective)
+            const destinationTurns = buildContextAnchorTurns(childEffective)
+            if (destinationTurns.length === 0) {
+              // Empty destination route has no anchor (I-1).
+              resolvedContextAnchorGroupKey = null
+            } else {
+              const sourceIdx =
+                sourceAnchorGroupKey !== null
+                  ? resolveContextAnchorTurnIndex(sourceTurnsBefore, sourceAnchorGroupKey)
+                  : -1
+              resolvedContextAnchorGroupKey =
+                sourceIdx !== -1 && sourceIdx < destinationTurns.length
+                  ? // In range: index map only, never a `contextCount` recompute.
+                    destinationTurns[sourceIdx].key
+                  : // Missing/invalid source anchor or out of range: the CURRENT
+                    // `contextCount` default position, never clamped to last.
+                    destinationTurns[resolveContextAnchorDefaultIndex(destinationTurns.length, contextCount)].key
+            }
+            // Source-route anchor repair (context-window governance §9,
+            // deterministic delete transfer). Only when the caller supplied an
+            // ACTIVE source anchor that the move actually removed from the
+            // source route: the anchor turn was part of the selection. A
+            // surviving anchor (or a key that names no source turn) produces NO
+            // fact — the caller must never rebuild/rewrite the source anchor.
+            if (sourceAnchorGroupKey !== null) {
+              const sourceTurnsAfter = buildContextAnchorTurns(parentEffective)
+              const beforeIdx = resolveContextAnchorTurnIndex(sourceTurnsBefore, sourceAnchorGroupKey)
+              const survives = resolveContextAnchorTurnIndex(sourceTurnsAfter, sourceAnchorGroupKey) !== -1
+              if (beforeIdx !== -1 && !survives) {
+                // Deleted anchor turn: fall to the nearest SURVIVING OLDER turn
+                // by stable group identity — scan the PRE-move order backwards
+                // from the anchor and pick the first turn that still exists in
+                // the post-move source route. Index arithmetic against the
+                // post list is wrong: removing a contiguous range compresses
+                // it, so `beforeIdx - 1` can run past the end (throw/rollback)
+                // or land on a NEWER turn (before=[A..F], anchor E, moved D,E
+                // → after=[A,B,C,F]; index 3 would wrongly pick F).
+                const survivingAfter = new Set(sourceTurnsAfter.map((t) => t.key))
+                let toGroupKey: string | null = null
+                for (let i = beforeIdx - 1; i >= 0; i--) {
+                  const candidate = sourceTurnsBefore[i].key
+                  if (survivingAfter.has(candidate)) {
+                    toGroupKey = candidate
+                    break
+                  }
+                }
+                // No older surviving turn (deleted first group, or every older
+                // turn was moved too): the post-route's first turn; an emptied
+                // source route loses its anchor. Never the `contextCount`
+                // default — an anchor migration is not a re-anchoring.
+                if (toGroupKey === null) {
+                  toGroupKey = sourceTurnsAfter.length > 0 ? sourceTurnsAfter[0].key : null
+                }
+                sourceContextAnchorTransfer = { fromGroupKey: sourceAnchorGroupKey, toGroupKey }
+              }
+            }
+          }
           return {
             branch: this.branchToWire(created),
             movedMessageIds: [...movedIds],
@@ -8774,7 +8919,9 @@ export class ChatDbAggregateService {
             parentMessages: reconstructMessageBlockRelations(parentWireMessages, parentWireBlocks),
             parentBlocks: parentWireBlocks,
             messages: reconstructMessageBlockRelations(childWireMessages, childWireBlocks),
-            blocks: childWireBlocks
+            blocks: childWireBlocks,
+            ...(contextAnchorInheritance ? { resolvedContextAnchorGroupKey } : {}),
+            ...(sourceContextAnchorTransfer ? { sourceContextAnchorTransfer } : {})
           }
         })
         return result

@@ -184,7 +184,30 @@ describe('viewport-independent context display', () => {
     expect(pending.uiMessages).toEqual([])
     // Pending counts are explicitly non-viewport (never the bounded 1/2 etc.).
     expect(pending.contextCount).toEqual({ current: 0, max: null })
-
+    // No persisted anchor at all on a NON-EMPTY route (branch-establishment
+    // transition) must never fall back to the loaded projection: its bounded
+    // counts would report the window as the whole route (e.g. 7/7 of 49 turns).
+    const viewport = [
+      { id: 'u5', role: 'user', topicId, blocks: [] },
+      { id: 'a5', role: 'assistant', askId: 'u5', topicId, blocks: [] }
+    ] as never
+    const anchorlessNonEmpty = resolveSharedContextInfo(
+      viewport,
+      assistantWithAnchor('unused-route', null),
+      topicId,
+      null,
+      branchId
+    )
+    expect(anchorlessNonEmpty.isAuthoritativePending).toBe(true)
+    expect(anchorlessNonEmpty.contextCount).toEqual({ current: 0, max: null })
+    expect(anchorlessNonEmpty.boundaryMessageId).toBeNull()
+    expect(anchorlessNonEmpty.anchorGroupKey).toBeNull()
+    expect(anchorlessNonEmpty.uiMessages).toEqual([])
+    // An EMPTY route keeps the legitimate anchorless 0/0 shape (I-1).
+    const emptyRoute = resolveSharedContextInfo([], assistantWithAnchor('unused-route', null), topicId, null, branchId)
+    expect(emptyRoute.isAuthoritativePending).toBe(false)
+    expect(emptyRoute.contextCount).toEqual({ current: 0, max: 0 })
+    expect(emptyRoute.anchorGroupKey).toBeNull()
     // Once the authoritative closure arrives, TokenCount/anchor/boundary share
     // the same full-route result.
     const closure = makeClosure(topicId, 'u5', ['u5', 'a5', 'u6', 'a6'], { total: 12, selected: 4 })

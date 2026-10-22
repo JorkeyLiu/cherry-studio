@@ -17,6 +17,7 @@ import type {
   ImportTopicDataResponse,
   InsertMessageGroup,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
@@ -389,7 +390,8 @@ class DbService implements MessageDataSource {
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ) {
     if (!this.ordinarySource.moveSelectedTurnsToNewBranch) throw new Error('moveSelectedTurnsToNewBranch unavailable')
     return this.ordinarySource.moveSelectedTurnsToNewBranch(
@@ -397,7 +399,8 @@ class DbService implements MessageDataSource {
       sourceBranchId,
       selectedGroupIds,
       name,
-      expectedSelectedMessageIds
+      expectedSelectedMessageIds,
+      contextAnchorInheritance
     )
   }
   insertMessagesAfterAnchor(

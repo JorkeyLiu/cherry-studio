@@ -20,6 +20,7 @@ import type {
   InsertMessagesAfterAnchorResponse,
   ListBranchesResponse,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   MoveSelectedTurnsToNewBranchResponse,
   RegenerateAssistantMessageRequest,
   RenameBranchResponse,
@@ -372,7 +373,8 @@ export interface MessageDataSource {
     sourceBranchId: BranchRoute,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ): Promise<MoveSelectedTurnsToNewBranchResponse>
 
   // ============ Insert after stable anchor (S6.2c-2) ============

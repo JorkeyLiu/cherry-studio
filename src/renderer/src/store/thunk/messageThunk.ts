@@ -56,8 +56,8 @@ import {
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse } from '@renderer/services/windowCoverage'
 import store from '@renderer/store'
-import { updateTopicUpdatedAt } from '@renderer/store/assistants'
-import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
+import { updateAssistantSettings, updateTopicUpdatedAt } from '@renderer/store/assistants'
+import { type Assistant, type ContextWindowAnchor, type FileMetadata, type Model, type Topic } from '@renderer/types'
 import { ChunkType } from '@renderer/types/chunk'
 import type { GroupAnchor, StagedCutSourceProjection } from '@renderer/types/editMode'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -81,6 +81,7 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   JsonObject,
+  MoveContextAnchorInheritanceInput,
   SemanticModelSnapshot,
   SemanticResendResponse,
   StreamWriteDiagnostics,
@@ -2792,6 +2793,65 @@ export const fetchTopicBranchesThunk =
   }
 
 /**
+ * Persist Main-resolved context-window anchor facts into the assistant's
+ * per-route anchor map, atomically in ONE settings update.
+ *
+ * Each entry is a Main-resolved fact: a non-empty `groupKey` writes that
+ * route's anchor, `null` removes it (empty route, no anchor), and `undefined`
+ * means no fact was produced — nothing is written and no anchor is invented
+ * locally.
+ *
+ * `onlyIfCurrentGroupKey` makes the write conditional: it applies only while
+ * that route's persisted anchor still equals the pre-commit value the request
+ * carried. A concurrent explicit change during the IPC await therefore wins and
+ * is never overwritten by a stale fact.
+ *
+ * The owner's anchor map is re-read from the LATEST store state at dispatch
+ * time, so a write that follows an await gap can never re-publish a stale map
+ * and clobber another route's anchor. Only the addressed route keys are
+ * touched; the active route is never changed here.
+ */
+type RouteAnchorWrite = {
+  routeKey: string
+  groupKey: string | null | undefined
+  /** Apply only while the route's current anchor equals this value. */
+  onlyIfCurrentGroupKey?: string
+}
+
+function persistRouteContextAnchors(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  assistantId: string,
+  writes: RouteAnchorWrite[]
+): void {
+  const owner = getState().assistants.assistants.find((a) => a.id === assistantId)
+  if (!owner) return
+  const settings = getAssistantSettings(owner)
+  let next: Record<string, ContextWindowAnchor | undefined> | null = null
+  const mutable = (): Record<string, ContextWindowAnchor | undefined> => {
+    if (!next) next = { ...settings.contextWindowAnchor }
+    return next
+  }
+  for (const write of writes) {
+    if (write.groupKey === undefined) continue
+    const current = (next ?? settings.contextWindowAnchor)?.[write.routeKey]
+    if (write.onlyIfCurrentGroupKey !== undefined) {
+      const currentKey = current?.kind === 'active' ? current.groupKey : null
+      if (currentKey !== write.onlyIfCurrentGroupKey) continue
+    }
+    if (write.groupKey === null) {
+      if (!current) continue
+      delete mutable()[write.routeKey]
+      continue
+    }
+    if (current?.kind === 'active' && current.groupKey === write.groupKey) continue
+    mutable()[write.routeKey] = { kind: 'active', groupKey: write.groupKey }
+  }
+  if (!next) return
+  dispatch(updateAssistantSettings({ assistantId, settings: { contextWindowAnchor: next } }))
+}
+
+/**
  * Move selected whole turns to a newly created child branch.
  *
  * Purpose-specific ownership move: the edit-mode whole-turn selection
@@ -2849,7 +2909,14 @@ export const moveSelectedTurnsToNewBranchThunk =
       entryGeneration = 0
     }
     const editSel = await import('../editSelection')
-    const runMovePrechecks = (state: RootState): { expectedDisplayOrdered: string[]; precedingId: string } | null => {
+    const runMovePrechecks = (
+      state: RootState
+    ): {
+      expectedDisplayOrdered: string[]
+      precedingId: string
+      ownerAssistantId?: string
+      contextAnchorInheritance?: MoveContextAnchorInheritanceInput
+    } | null => {
       const active = selectActiveBranchId(state, topicId)
       if ((active ?? null) !== normalizedSource) {
         logger.error(`[moveSelectedTurnsToNewBranchThunk] Source route mismatch; failing closed without IPC.`)
@@ -2977,7 +3044,30 @@ export const moveSelectedTurnsToNewBranchThunk =
         logger.error(`[moveSelectedTurnsToNewBranchThunk] Segment check failed; failing closed.`)
         return null
       }
-      return { expectedDisplayOrdered, precedingId }
+      // Pre-commit capture of the renderer-owned context-window facts: the
+      // source route anchor and the assistant window size at commit time ride
+      // WITH the move request, so Main resolves the destination anchor inside
+      // the same transaction against the PRE-MOVE source route. Reading them
+      // after the commit would resolve against the already-mutated source and
+      // silently land on the default window position.
+      const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
+      if (!owner) {
+        // No owner assistant → nothing could persist a destination anchor;
+        // request no fact and never invent one.
+        return { expectedDisplayOrdered, precedingId }
+      }
+      const preCommitSettings = getAssistantSettings(owner)
+      const parentRouteKey = anchorKeyForRoute(topicId, normalizedSource)
+      const parentAnchor = preCommitSettings.contextWindowAnchor?.[parentRouteKey]
+      return {
+        expectedDisplayOrdered,
+        precedingId,
+        ownerAssistantId: owner.id,
+        contextAnchorInheritance: {
+          sourceAnchorGroupKey: parentAnchor?.kind === 'active' ? parentAnchor.groupKey : null,
+          contextCount: preCommitSettings.contextCount ?? null
+        }
+      }
     }
     // Fresh pre-IPC gate: current route/generation must still match the
     // caller's addressed source; zero IPC on any change before the call
@@ -3004,7 +3094,8 @@ export const moveSelectedTurnsToNewBranchThunk =
         sourceBranchId,
         selectedGroupIds,
         name,
-        precheck.expectedDisplayOrdered
+        precheck.expectedDisplayOrdered,
+        precheck.contextAnchorInheritance
       )
     } catch (error) {
       logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to move turns:`, error as Error)
@@ -3018,7 +3109,30 @@ export const moveSelectedTurnsToNewBranchThunk =
       anchorMessageId: result.anchorMessageId,
       movedMessageIds: result.movedMessageIds
     }
-    const effectiveMessages = result.messages as unknown as Message[]
+    // Write the committed destination anchor (and the deterministic source
+    // transfer, when Main reported one) BEFORE this thunk's own
+    // activeBranchSet and before any await gap: the commit is durable, so the
+    // routes must carry their Main-resolved anchors whether or not the viewport
+    // load below publishes, is superseded, or the user switches away. Both keys
+    // ride ONE settings update built from the latest owner map, so an
+    // unrelated route key is never clobbered.
+    if (precheck.ownerAssistantId) {
+      const writes: RouteAnchorWrite[] = [
+        { routeKey: anchorKeyForRoute(topicId, result.branch.id), groupKey: result.resolvedContextAnchorGroupKey }
+      ]
+      const transfer = result.sourceContextAnchorTransfer
+      if (transfer) {
+        // Conditional: only while the source route still carries the anchor the
+        // request was built from. An explicit user re-anchor during the commit
+        // await wins; the destination write still happens.
+        writes.push({
+          routeKey: anchorKeyForRoute(topicId, normalizedSource),
+          groupKey: transfer.toGroupKey,
+          onlyIfCurrentGroupKey: transfer.fromGroupKey
+        })
+      }
+      persistRouteContextAnchors(dispatch, getState, precheck.ownerAssistantId, writes)
+    }
     const effectiveBlocks = result.blocks as unknown as MessageBlock[]
     if (effectiveBlocks.length > 0) {
       try {
@@ -3140,79 +3254,6 @@ export const moveSelectedTurnsToNewBranchThunk =
         // committed success stands; the route effect reloads on demand.
         return committed
       }
-    }
-    try {
-      const state = getState()
-      const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
-      if (owner) {
-        const { getAssistantSettings } = await import('@renderer/services/AssistantService')
-        const { anchorKeyForRoute } = await import('@renderer/services/anchorService')
-        const parentRoute = typeof sourceBranchId === 'string' && sourceBranchId.length > 0 ? sourceBranchId : null
-        const parentKey = anchorKeyForRoute(topicId, parentRoute)
-        const targetKey = anchorKeyForRoute(topicId, newBranchId)
-        const parentAnchor =
-          (getAssistantSettings(owner).contextWindowAnchor?.[parentKey] as
-            | { kind: string; groupKey: string }
-            | undefined) ?? null
-        const sourceKey =
-          parentAnchor && (parentAnchor as { kind: string }).kind === 'active'
-            ? (parentAnchor as { groupKey: string }).groupKey
-            : null
-        const contextCount = getAssistantSettings(owner).contextCount ?? null
-        try {
-          const inheritRes = await dbService.resolveContextClosure({
-            topicId,
-            branchId: newBranchId,
-            intent: 'inherit',
-            sourceTopicId: topicId,
-            sourceBranchId: parentRoute,
-            sourceAnchorGroupKey: sourceKey,
-            contextCount,
-            currentAnchorGroupKey: null,
-            detail: 'anchor'
-          })
-          const resolved = (inheritRes as { resolvedAnchorGroupKey: string | null }).resolvedAnchorGroupKey
-          const fresh = getState()
-          const freshOwner = fresh.assistants.assistants.find((a) => a.id === owner.id)
-          const freshSettings = freshOwner ? getAssistantSettings(freshOwner) : getAssistantSettings(owner)
-          const existing =
-            (freshSettings.contextWindowAnchor?.[targetKey] as { kind: string; groupKey: string } | undefined) ?? null
-          if (resolved !== null && resolved !== undefined) {
-            if (!existing || (existing as { kind: string }).kind !== 'active') {
-              const { updateAssistantSettings } = await import('../assistants')
-              dispatch(
-                updateAssistantSettings({
-                  assistantId: owner.id,
-                  settings: {
-                    contextWindowAnchor: {
-                      ...freshSettings.contextWindowAnchor,
-                      [targetKey]: { kind: 'active', groupKey: resolved }
-                    }
-                  }
-                }) as any
-              )
-            }
-          } else if (existing) {
-            const { updateAssistantSettings } = await import('../assistants')
-            const next = { ...freshSettings.contextWindowAnchor }
-            delete next[targetKey]
-            dispatch(
-              updateAssistantSettings({
-                assistantId: owner.id,
-                settings: { contextWindowAnchor: next }
-              }) as any
-            )
-          }
-        } catch {
-          if (effectiveMessages.length > 0) {
-            try {
-              await ensureTopicAnchorEstablished(dispatch, getState, owner.id, topicId, newBranchId)
-            } catch {}
-          }
-        }
-      }
-    } catch {
-      // Best-effort inheritance; never break the move.
     }
     return committed
   }

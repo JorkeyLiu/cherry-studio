@@ -96,6 +96,7 @@ import type {
   ListTrashTopicsRequest,
   ListTrashTopicsResponse,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   MoveSelectedTurnsToNewBranchRequest,
   MoveSelectedTurnsToNewBranchResponse,
   PasteMessagesToTopicRequest,
@@ -990,7 +991,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ): Promise<MoveSelectedTurnsToNewBranchResponse> {
     if (!this.api.moveSelectedTurnsToNewBranch) {
       throw new Error('ChatDb API unavailable: moveSelectedTurnsToNewBranch not exposed')
@@ -1000,7 +1002,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
       sourceBranchId: sourceBranchId ?? null,
       selectedGroupIds: [...selectedGroupIds],
       expectedSelectedMessageIds: [...(expectedSelectedMessageIds ?? [])],
-      name
+      name,
+      ...(contextAnchorInheritance
+        ? {
+            contextAnchorInheritance: {
+              sourceAnchorGroupKey: contextAnchorInheritance.sourceAnchorGroupKey ?? null,
+              contextCount: contextAnchorInheritance.contextCount ?? null
+            }
+          }
+        : {})
     })
     const result = unwrap(await this.api.moveSelectedTurnsToNewBranch(request))
     dispatchTopicUpdatedAt(topicId)

@@ -404,4 +404,230 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(snapshotDbState()).toEqual(before)
     expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD'])
   })
+
+  // =========================================================================
+  // Context-window anchor inheritance resolved inside the atomic move
+  //
+  // The destination anchor must be resolved from the PRE-MOVE source route:
+  // the index of the renderer-supplied source anchor maps into the destination
+  // route's turn list, a missing/out-of-range source anchor falls back to the
+  // CURRENT contextCount default position (never a clamp to last), and the
+  // fact is returned only when the caller supplied the inheritance input.
+  // =========================================================================
+  function seedABCDE(agg2: ChatDbAggregateService, topicId: string): void {
+    seedABCD(agg2, topicId)
+    seedTurn(agg2, topicId, 'uE', ['aE'])
+  }
+  function seedABCDEF(agg2: ChatDbAggregateService, topicId: string): void {
+    seedABCDE(agg2, topicId)
+    seedTurn(agg2, topicId, 'uF', ['aF'])
+  }
+
+  it('returns NO anchor fact when the caller supplies no inheritance input', () => {
+    seedABCD(agg, 't1')
+    const v = okValue(agg.moveSelectedTurnsToNewBranch('t1', null, ['uB'], 'Moved', ['uB', 'aB']))
+    expect('resolvedContextAnchorGroupKey' in (v as Record<string, unknown>)).toBe(false)
+  })
+
+  it('inherits the stable original anchor by index (never the contextCount default)', () => {
+    seedABCDE(agg, 't1')
+    // Source anchor uB is turn index 1 of the pre-move route (A,B,C,D,E) and
+    // stays index 1 in the destination A,B,C,D. contextCount=1 would put the
+    // default at index 3 (uD), so only an index map yields uB.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uC', 'uD'], 'Moved', ['uC', 'aC', 'uD', 'aD'], {
+        sourceAnchorGroupKey: 'uB',
+        contextCount: 1
+      })
+    )
+    expect(v.resolvedContextAnchorGroupKey).toBe('uB')
+    const branchId = (v.branch as { id: string }).id
+    expect(effIds(agg, 't1', branchId)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD'])
+  })
+
+  it('inherits by index when the source anchor is inside the moved range', () => {
+    seedABCDE(agg, 't1')
+    // uC (index 2) is part of the moved selection; the destination keeps the
+    // turn at the same index, so the anchor maps there without recomputation.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uC'], 'Moved', ['uC', 'aC'], {
+        sourceAnchorGroupKey: 'uC',
+        contextCount: 5
+      })
+    )
+    expect(v.resolvedContextAnchorGroupKey).toBe('uC')
+  })
+
+  it('falls back to the current-contextCount default when the source anchor is out of the destination range', () => {
+    seedABCDE(agg, 't1')
+    // Source anchor uE is turn index 4 of the pre-move route (A,B,C,D,E); the
+    // destination keeps only A,B,C,D (4 turns), so index 4 is out of range.
+    // contextCount=2 puts the default at index 2 (uC) — never a clamp to the
+    // last turn (uD). Resolving against the POST-move source route instead
+    // would find uE at index 3 and wrongly return uD.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Moved', ['uD', 'aD'], {
+        sourceAnchorGroupKey: 'uE',
+        contextCount: 2
+      })
+    )
+    expect(v.resolvedContextAnchorGroupKey).toBe('uC')
+  })
+
+  it('falls back to the default when the source route has no anchor', () => {
+    seedABCDE(agg, 't1')
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uC'], 'Moved', ['uC', 'aC'], {
+        sourceAnchorGroupKey: null,
+        contextCount: 2
+      })
+    )
+    // Destination A,B,C (3 turns); contextCount=2 → default index 1 → uB.
+    expect(v.resolvedContextAnchorGroupKey).toBe('uB')
+  })
+
+  // =========================================================================
+  // Source-route anchor delete transfer (context-window governance §9)
+  //
+  // When the source anchor's turn is part of the moved selection, the anchor
+  // deterministically falls to the previous surviving older turn (the new
+  // first turn when the deleted turn was the first, and `null` when the source
+  // route becomes empty). A surviving anchor produces NO fact at all — the
+  // caller must never rebuild or rewrite the source anchor.
+  // =========================================================================
+
+  it('multi-turn move with the anchor in the middle of the selection picks the nearest surviving OLDER turn, never a newer one', () => {
+    seedABCDEF(agg, 't1')
+    // Pre route A..F; anchor uE (index 4); moving the contiguous D,E leaves
+    // after = [A,B,C,F]. Nearest surviving older turn is uC (uD moved away).
+    // uF survives and is NEWER — index arithmetic (`beforeIdx - 1 = 3`) would
+    // wrongly return uF.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD', 'uE'], 'Moved', ['uD', 'aD', 'uE', 'aE'], {
+        sourceAnchorGroupKey: 'uE',
+        contextCount: 1
+      })
+    )
+    expect(v.sourceContextAnchorTransfer).toEqual({ fromGroupKey: 'uE', toGroupKey: 'uC' })
+    expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uF', 'aF'])
+    // Destination inherits the anchor's PRE-move index (5 turns: A..E).
+    const branchId = (v.branch as { id: string }).id
+    expect(effIds(agg, 't1', branchId)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD', 'uE', 'aE'])
+    expect(v.resolvedContextAnchorGroupKey).toBe('uE')
+  })
+
+  it('multi-turn move whose selection runs to the route end transfers to the nearest surviving older turn without throwing', () => {
+    seedABCDE(agg, 't1')
+    // Pre route A..E, anchor uE (LAST, index 4), selection D,E reaches the end.
+    // After = [A,B,C]; nearest surviving older is uC. `beforeIdx - 1 = 3` used to
+    // run past the 3-element post list and roll the whole transaction back.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD', 'uE'], 'Moved', ['uD', 'aD', 'uE', 'aE'], {
+        sourceAnchorGroupKey: 'uE',
+        contextCount: 2
+      })
+    )
+    expect(v.sourceContextAnchorTransfer).toEqual({ fromGroupKey: 'uE', toGroupKey: 'uC' })
+    expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC'])
+    // Durable: the move really committed (not a rolled-back transaction).
+    const branchId = (v.branch as { id: string }).id
+    expect(branchOf(sqlite, 'uD')).toBe(branchId)
+    expect(branchOf(sqlite, 'uE')).toBe(branchId)
+  })
+
+  it('3-turn route, anchor last, move the last two: transfers to the sole post turn without throwing', () => {
+    // Exactly the reported compression case: pre = [A,B,C], anchor uC (last),
+    // move the contiguous B,C → after = [A]. No OLDER turn survives (uB moved),
+    // so the transfer lands on the post route's first turn (uA). The old
+    // `beforeIdx - 1 = 1` indexed past the 1-element post list and rolled the
+    // whole transaction back.
+    seedTurn(agg, 't1', 'uA', ['aA'])
+    seedTurn(agg, 't1', 'uB', ['aB'])
+    seedTurn(agg, 't1', 'uC', ['aC'])
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uB', 'uC'], 'Moved', ['uB', 'aB', 'uC', 'aC'], {
+        sourceAnchorGroupKey: 'uC',
+        contextCount: 1
+      })
+    )
+    expect(v.sourceContextAnchorTransfer).toEqual({ fromGroupKey: 'uC', toGroupKey: 'uA' })
+    // The move really committed: the source route keeps only turn A.
+    expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA'])
+    const branchId = (v.branch as { id: string }).id
+    expect(effIds(agg, 't1', branchId)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC'])
+  })
+
+  it('transfers a source anchor that the selection removed to the previous surviving turn', () => {
+    seedABCDE(agg, 't1')
+    // Source turns A,B,C,D,E; the anchor uD (index 3) is moved away, so the
+    // source route keeps A,B,C and the anchor falls to index 2 (uC).
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Moved', ['uD', 'aD'], {
+        sourceAnchorGroupKey: 'uD',
+        contextCount: 1
+      })
+    )
+    expect(v.sourceContextAnchorTransfer).toEqual({ fromGroupKey: 'uD', toGroupKey: 'uC' })
+    // The destination still inherits by pre-move index (uD stayed at index 3).
+    expect(v.resolvedContextAnchorGroupKey).toBe('uD')
+    expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uE', 'aE'])
+  })
+
+  it('keeps a first-turn source anchor intact (the first turn can never be part of a move)', () => {
+    seedABCDE(agg, 't1')
+    // A move always keeps a preceding anchor, so the source route's first turn
+    // survives: the anchor is unchanged and NO transfer fact is produced. The
+    // `newIndex < 0 → new first group` guard stays defensive for that reason.
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uC'], 'Moved', ['uC', 'aC'], {
+        sourceAnchorGroupKey: 'uA',
+        contextCount: 2
+      })
+    )
+    expect('sourceContextAnchorTransfer' in (v as Record<string, unknown>)).toBe(false)
+    expect(agg.moveSelectedTurnsToNewBranch('t1', null, ['uA'], 'X', ['uA', 'aA']).ok).toBe(false)
+  })
+
+  it('never produces an empty-source transfer through a legal move (a preceding anchor always survives)', () => {
+    // A move requires a preceding anchor in the source route, so the source
+    // route always keeps at least one turn and the `null` (empty-route) branch
+    // stays defensive. The single-turn case is rejected outright.
+    expect(agg.ensureTopic('t-empty-src', 'assistant-1', 'empty-src').ok).toBe(true)
+    seedTurn(agg, 't-empty-src', 'uOnly', ['aOnly'])
+    expect(agg.moveSelectedTurnsToNewBranch('t-empty-src', null, ['uOnly'], 'X', ['uOnly', 'aOnly']).ok).toBe(false)
+  })
+
+  it('produces NO source transfer when the anchor survives the move', () => {
+    seedABCDE(agg, 't1')
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Moved', ['uD', 'aD'], {
+        sourceAnchorGroupKey: 'uB',
+        contextCount: 2
+      })
+    )
+    expect('sourceContextAnchorTransfer' in (v as Record<string, unknown>)).toBe(false)
+    expect(v.resolvedContextAnchorGroupKey).toBe('uB')
+  })
+
+  it('produces NO source transfer when no active source anchor was supplied', () => {
+    seedABCDE(agg, 't1')
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Moved', ['uD', 'aD'], {
+        sourceAnchorGroupKey: null,
+        contextCount: 2
+      })
+    )
+    expect('sourceContextAnchorTransfer' in (v as Record<string, unknown>)).toBe(false)
+  })
+
+  it('produces NO source transfer when the supplied key names no source turn', () => {
+    seedABCDE(agg, 't1')
+    const v = okValue(
+      agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Moved', ['uD', 'aD'], {
+        sourceAnchorGroupKey: 'u-missing',
+        contextCount: 2
+      })
+    )
+    expect('sourceContextAnchorTransfer' in (v as Record<string, unknown>)).toBe(false)
+  })
 })

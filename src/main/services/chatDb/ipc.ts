@@ -714,7 +714,8 @@ export function registerChatDbIpc(): () => void {
       req.sourceBranchId,
       req.selectedGroupIds,
       req.name,
-      req.expectedSelectedMessageIds
+      req.expectedSelectedMessageIds,
+      req.contextAnchorInheritance
     )
   })
 

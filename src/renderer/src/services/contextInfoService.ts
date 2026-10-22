@@ -84,14 +84,16 @@ export type ContextInfo = {
    *  empty/undefined window. Sole expression of the effective window start. */
   anchorGroupKey: string | null
   /**
-   * Authority-pending marker (UI only): true when a persisted route anchor
-   * exists but no fresh authoritative closure is available yet (initial fetch
-   * or pending branch switch). Consumers must NOT substitute viewport-derived
+   * Authority-pending marker (UI only): true when the route cannot be
+   * described authoritatively yet — a persisted route anchor without a fresh
+   * authoritative closure (initial fetch or pending branch switch), or a
+   * non-empty route with no persisted anchor at all (establishment
+   * transition). Consumers must NOT substitute viewport-derived
    * counts/anchor/boundary in this state — use existing optional/loading
    * rendering (hide TokenCount, no divider) rather than misleading partial
-   * counts. False/undefined means the result is authoritative (closure) or
-   * the legitimate empty/no-anchor fallback. Request paths keep their
-   * explicitly allowed availability fallback separately and never set this.
+   * counts. False/undefined means the result is authoritative (closure) or the
+   * legitimate empty-route fallback. Request paths keep their explicitly
+   * allowed availability fallback separately and never set this.
    */
   isAuthoritativePending?: boolean
 }
@@ -262,10 +264,14 @@ export function computeContextInfo(
  * is available but a persisted route anchor exists, returns an
  * authority-pending result (persisted anchor, no divider, empty lists,
  * `isAuthoritativePending: true`) — callers must NOT substitute
- * viewport-derived counts/anchor/boundary in this state. Only when no
- * persisted anchor exists (empty route / uninitialized legacy) does the
- * bounded fallback derive from loaded viewport messages. No timing, no
- * diagnostics, no side effects — Chat wraps this with phase-timing only.
+ * viewport-derived counts/anchor/boundary in this state. The same pending
+ * result applies when NO persisted anchor exists on a non-empty route (branch
+ * establishment transition, stripped/invalid anchor): the loaded projection is
+ * a window, never the route's turn set, so it must not become the authoritative
+ * `current/max`. Only an EMPTY route (empty topic / empty branch / fresh
+ * anchorless route, I-1) uses the bounded fallback's legitimate 0/0 shape.
+ * No timing, no diagnostics, no side effects — Chat wraps this with
+ * phase-timing only.
  * Extracted so the TokenCount re-anchor committed-render regression
  * constrains the exact product semantics. Actual provider requests never
  * consume the pending marker or the bounded fallback as authority: they read
@@ -298,6 +304,22 @@ export function resolveSharedContextInfo(
       boundaryMessageId: null,
       contextCount: { current: 0, max: null },
       anchorGroupKey: persistedKey,
+      isAuthoritativePending: true
+    }
+  }
+  // No persisted anchor. Only an EMPTY route may use the bounded fallback:
+  // a non-empty route without an anchor is not authority, because the loaded
+  // projection is a bounded window and its counts would report the viewport as
+  // if it were the whole route (e.g. 7/7 for a 49-turn branch). Keep it
+  // authority-pending until the route's anchor is established (or a closure
+  // arrives). Empty routes keep the legitimate 0/0 anchorless shape (I-1).
+  if (topicMessages.length > 0) {
+    return {
+      uiMessages: [],
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: null,
       isAuthoritativePending: true
     }
   }

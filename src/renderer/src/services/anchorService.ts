@@ -43,10 +43,15 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
  *   - 若锚点 groupKey 仍在 newGroupList 中，返回原 active（不动）
  *   - 若锚点 groupKey 已被删除：
  *       - oldGroupList 中找不到 groupKey → 返回原锚点（异常保护）
- *       - newIndex = oldIndex - 1（落到更旧的组）
  *       - newGroupList 为空（topic 变空）→ undefined（空 topic 无锚点，I-1）
- *       - newIndex < 0（删首组）且 newGroupList 非空 → active(newGroupList[0])
- *       - newIndex >= 0 → active(newGroupList[newIndex])
+ *       - 否则取「oldGroupList 中锚点之前、且在 newGroupList 中仍存活的最近一组」
+ *         （按稳定 group 身份比对，从新到旧扫描）
+ *       - 没有更旧的存活组（删首组，或更旧的组也一并被删）→ active(newGroupList[0])
+ *
+ * 关键：绝不用 `oldIndex - 1` 直接索引 newGroupList。批量删除会压缩 post
+ * 列表的索引，`oldIndex - 1` 可能越过末尾（越界）或指向一个**更新**的组
+ * （例如 old=[A,B,C,D,E,F], anchor=E, 删 D,E → new=[A,B,C,F]，`oldIndex-1=3`
+ * 会错选 F）。稳定存活组扫描对单组删除与批量删除是同一条规则。
  * 本函数不读 redux，纯函数。
  */
 export function transferAnchorOnDeletion(
@@ -76,13 +81,16 @@ export function transferAnchorOnDeletion(
     return undefined
   }
 
-  // 落到更旧的组（oldIndex - 1）
-  const newIndex = oldIndex - 1
-  if (newIndex < 0) {
-    // 删的是首组，没有更旧的组，落到新首组
-    return { kind: 'active', groupKey: newGroupList[0] }
+  // 更旧一侧最近的**存活**组：按 pre 顺序从锚点前一位起向更旧扫描，
+  // 以稳定 group 身份判定存活（不是 post 索引运算）。
+  const surviving = new Set(newGroupList)
+  for (let i = oldIndex - 1; i >= 0; i--) {
+    if (surviving.has(oldGroupList[i])) {
+      return { kind: 'active', groupKey: oldGroupList[i] }
+    }
   }
-  return { kind: 'active', groupKey: newGroupList[newIndex] }
+  // 没有更旧的存活组（删首组，或更旧的组也一并被删）→ 新首组
+  return { kind: 'active', groupKey: newGroupList[0] }
 }
 
 /**
