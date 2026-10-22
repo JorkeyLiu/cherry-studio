@@ -43,6 +43,7 @@ import {
 import { type AuthorityUserSnapshot, ConversationService } from './ConversationService'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
+import type { RequestAttachmentFilter } from './requestAttachmentAvailability'
 import type { StreamProcessorCallbacks } from './StreamProcessingService'
 
 // FIXME: 这里太多重复逻辑，需要重构
@@ -94,13 +95,14 @@ export async function transformMessagesAndFetch(
   const { messages, assistant, topicId } = request
 
   try {
-    const { modelMessages, uiMessages, nothingSendable } = await ConversationService.prepareMessagesForModel(
-      messages,
-      assistant,
-      topicId,
-      request.authorityUser,
-      request.branchId
-    )
+    const { modelMessages, uiMessages, nothingSendable, attachmentFilter } =
+      await ConversationService.prepareMessagesForModel(
+        messages,
+        assistant,
+        topicId,
+        request.authorityUser,
+        request.branchId
+      )
 
     // Nothing sendable for this turn (every attachment it carries is
     // unavailable on this device and no other content is left): the
@@ -122,7 +124,13 @@ export async function transformMessagesAndFetch(
       await fetchImageGeneration({
         messages: uiMessages,
         assistant,
-        onChunkReceived
+        onChunkReceived,
+        // The dedicated path reads attachment blocks directly from the request
+        // view, so it must receive the very same request-local filter the
+        // conversion used — otherwise a block excluded from this request (for
+        // example historical media the user turned off) would still be read and
+        // sent as edit input.
+        attachmentFilter
       })
       return
     }
@@ -256,10 +264,19 @@ export async function fetchChatCompletion({
  * 从消息中收集图像（用于图像编辑）
  * 收集用户消息中上传的图像和助手消息中生成的图像
  *
+ * `attachmentFilter` 是本次请求的 request-local 附件视图（与请求转换使用的是
+ * 同一个对象）：其中的块被排除于本次请求之外（载荷缺失，或历史媒体被用户关闭），
+ * 因此在读取任何载荷之前跳过 —— 既不做 IO，也不把被排除的历史图像当作编辑输入。
+ * 未提供过滤器时保持既有行为。
+ *
  * @internal 导出仅为聚焦测试（image collection 的 LOCK-UI-2 覆盖）；
  *           生产调用方仍只有 fetchImageGeneration。
  */
-export async function collectImagesFromMessages(userMessage: Message, assistantMessage?: Message): Promise<string[]> {
+export async function collectImagesFromMessages(
+  userMessage: Message,
+  assistantMessage?: Message,
+  attachmentFilter?: RequestAttachmentFilter
+): Promise<string[]> {
   const images: string[] = []
 
   // 收集用户消息中的图像
@@ -277,6 +294,10 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
     if (isBlockAttachmentUnavailable(block)) {
       continue
     }
+    // Request-local exclusion (same view the request conversion used).
+    if (attachmentFilter?.unavailableBlockIds.has(block.id)) {
+      continue
+    }
     if (block.file) {
       const { data } = await window.api.file.base64Image(block.file.name)
       images.push(data)
@@ -290,6 +311,11 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
       // LOCK-UI-2: degraded imported image — omitted from generation input,
       // no base64Image IPC and no url reuse (the attachment is unavailable).
       if (isBlockAttachmentUnavailable(block)) {
+        continue
+      }
+      // Request-local exclusion: a historical image omitted from this request
+      // (media context off) is neither read nor reused as edit input.
+      if (attachmentFilter?.unavailableBlockIds.has(block.id)) {
         continue
       }
       if (block.file) {
@@ -318,11 +344,17 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
 export async function fetchImageGeneration({
   messages,
   assistant,
-  onChunkReceived
+  onChunkReceived,
+  attachmentFilter
 }: {
   messages: Message[]
   assistant: Assistant
   onChunkReceived: (chunk: Chunk) => void
+  /**
+   * The request-local attachment view `messages` was prepared with. Blocks it
+   * excludes are never read as generation/edit input for this request.
+   */
+  attachmentFilter?: RequestAttachmentFilter
 }) {
   // Resolve the model and its provider. Throws before any provider/API/network
   // access when the model slot is unconfigured.
@@ -353,7 +385,10 @@ export async function fetchImageGeneration({
     }
 
     const prompt = getMainTextContent(lastUserMessage)
-    const inputImages = await collectImagesFromMessages(lastUserMessage, lastAssistantMessage)
+    // Same request-local filter the messages were prepared with: excluded
+    // blocks (unavailable payload, or historical media omitted by the media
+    // context switch) must not become edit input.
+    const inputImages = await collectImagesFromMessages(lastUserMessage, lastAssistantMessage, attachmentFilter)
 
     // 调用 generateImage 或 editImage
     // 使用默认图像生成配置

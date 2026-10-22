@@ -1,11 +1,13 @@
 import ComposerIconButton from '@renderer/components/Buttons/ComposerIconButton'
 import EditableNumber from '@renderer/components/EditableNumber'
 import Selector from '@renderer/components/Selector'
+import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { SettingDivider, SettingRow, SettingRowTitle } from '@renderer/pages/settings'
 import { useAppDispatch } from '@renderer/store'
 import type { SendMessageShortcut } from '@renderer/store/settings'
 import {
+  setIncludeHistoryMediaContext,
   setPasteLongTextAsFile,
   setPasteLongTextThreshold,
   setRenderInputMessageAsMarkdown
@@ -25,6 +27,7 @@ const InputbarSettings: FC = () => {
     pasteLongTextAsFile,
     pasteLongTextThreshold,
     renderInputMessageAsMarkdown,
+    includeHistoryMediaContext,
     sendMessageShortcut,
     setSendMessageShortcut
   } = useSettings()
@@ -63,6 +66,26 @@ const InputbarSettings: FC = () => {
           size="small"
           checked={renderInputMessageAsMarkdown}
           onChange={(checked) => dispatch(setRenderInputMessageAsMarkdown(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <SettingRowTitle>
+          <span>{t('settings.messages.input.include_history_media_context')}</span>
+          {/* Visible help affordance: the switch scope (history-only omission,
+              the current turn always sent, ON restoring normal history) is not
+              derivable from the label alone. */}
+          <HelpTooltip
+            title={t('settings.messages.input.include_history_media_context_tooltip')}
+            placement="left"
+            mouseLeaveDelay={0}
+            iconStyle={{ marginLeft: 4, cursor: 'help' }}
+          />
+        </SettingRowTitle>
+        <Switch
+          size="small"
+          checked={includeHistoryMediaContext !== false}
+          onChange={(checked) => dispatch(setIncludeHistoryMediaContext(checked))}
         />
       </SettingRow>
       <SettingDivider />

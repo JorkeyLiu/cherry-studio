@@ -4611,6 +4611,8 @@
         "confirm_delete_message": "Confirm before deleting messages",
         "confirm_regenerate_message": "Confirm before regenerating messages",
         "enable_quick_triggers": "Enable / and @ triggers",
+        "include_history_media_context": "History media context",
+        "include_history_media_context_tooltip": "On: requests include images, audio and video from earlier messages. Off: only that earlier media is left out — the message you are sending now is still included. Turning it back on includes your normal history media again.",
         "paste_long_text_as_file": "Paste long text as file",
         "paste_long_text_threshold": "Paste long text length",
         "send_shortcuts": "Send shortcuts"

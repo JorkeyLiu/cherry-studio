@@ -4611,6 +4611,8 @@
         "confirm_delete_message": "删除消息前确认",
         "confirm_regenerate_message": "重新生成消息前确认",
         "enable_quick_triggers": "启用 / 和 @ 触发快捷菜单",
+        "include_history_media_context": "媒体上下文",
+        "include_history_media_context_tooltip": "开启：请求包含历史消息中的图片、音频和视频。关闭：仅不再发送这些历史媒体，当前正在发送的消息仍会包含。再次开启后恢复正常包含历史媒体。",
         "paste_long_text_as_file": "长文本粘贴为文件",
         "paste_long_text_threshold": "长文本长度",
         "send_shortcuts": "发送快捷键"

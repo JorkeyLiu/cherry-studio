@@ -8,21 +8,29 @@ import {
 } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { fetchClosureMock, getSettingsMock, getDefaultModelMock, blockEntities, existsMock, base64ImageMock } =
-  vi.hoisted(() => ({
-    fetchClosureMock: vi.fn(),
-    getSettingsMock: vi.fn(),
-    getDefaultModelMock: vi.fn(() => ({ id: 'm', provider: 'p', name: 'm', group: 'g' }) as any),
-    blockEntities: {} as Record<string, any>,
-    existsMock: vi.fn(),
-    base64ImageMock: vi.fn()
-  }))
+const {
+  fetchClosureMock,
+  getSettingsMock,
+  getDefaultModelMock,
+  blockEntities,
+  existsMock,
+  base64ImageMock,
+  settingsState
+} = vi.hoisted(() => ({
+  fetchClosureMock: vi.fn(),
+  getSettingsMock: vi.fn(),
+  getDefaultModelMock: vi.fn(() => ({ id: 'm', provider: 'p', name: 'm', group: 'g' }) as any),
+  blockEntities: {} as Record<string, any>,
+  existsMock: vi.fn(),
+  base64ImageMock: vi.fn(),
+  settingsState: { injectContextTimestamp: false } as Record<string, unknown>
+}))
 
 vi.mock('@renderer/i18n', () => ({ default: { t: (k: string) => k } }))
 vi.mock('@renderer/store', () => ({
   default: {
     getState: () => ({
-      settings: { injectContextTimestamp: false },
+      settings: settingsState,
       messageBlocks: { entities: blockEntities },
       messages: { entities: {}, messageIdsByTopic: {} }
     }),
@@ -39,6 +47,7 @@ vi.mock('@renderer/services/db', () => ({
 }))
 
 import { ConversationService } from '../ConversationService'
+import { buildBlockOverlay } from '../requestBlockOverlay'
 
 const TS = '2026-01-01T00:00:00.000Z'
 
@@ -177,6 +186,8 @@ describe('ConversationService request-local attachment availability', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     blockSeq = 0
+    for (const key of Object.keys(settingsState)) delete settingsState[key]
+    settingsState.injectContextTimestamp = false
     for (const key of Object.keys(blockEntities)) delete blockEntities[key]
     getDefaultModelMock.mockReturnValue({ id: 'm', provider: 'p', name: 'm', group: 'g' } as any)
     getSettingsMock.mockReturnValue({
@@ -321,5 +332,222 @@ describe('ConversationService request-local attachment availability', () => {
       ConversationService.prepareMessagesForModel([u2], assistantWithAnchor('u1'), 't1', undefined, null)
     ).rejects.toThrow(/Failed to attach/)
     expect((window as any).toast.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConversationService — media context switch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    blockSeq = 0
+    for (const key of Object.keys(blockEntities)) delete blockEntities[key]
+    getDefaultModelMock.mockReturnValue({ id: 'm', provider: 'p', name: 'm', group: 'g' } as any)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { t1: { kind: 'active', groupKey: 'u1' } }
+    })
+    ;(window as any).toast = { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() }
+    ;(window as any).api = {
+      file: { exists: existsMock, base64Image: base64ImageMock }
+    }
+    existsMock.mockResolvedValue(true)
+    // Distinct payload per stored name so the test can tell which image was
+    // actually read and encoded for the request.
+    base64ImageMock.mockImplementation(async (storedName: string) => ({
+      mime: 'image/png',
+      base64: `BASE64:${storedName}`,
+      data: `data:image/png;base64,BASE64:${storedName}`
+    }))
+  })
+
+  it('OFF omits history media from the request and keeps the triggering turn media and all text', async () => {
+    settingsState.includeHistoryMediaContext = false
+    const historyText = mainTextBlock('u1', 'history text')
+    const historyImage = imageBlock('u1', storedFile({ id: 'history-image' }))
+    const u1 = message('u1', 'user', [historyText, historyImage])
+    const answerText = mainTextBlock('a1', 'history answer')
+    const a1 = message('a1', 'assistant', [answerText])
+    const triggerText = mainTextBlock('u2', 'current question')
+    const triggerImage = imageBlock('u2', storedFile({ id: 'trigger-image' }))
+    const u2 = message('u2', 'user', [triggerText, triggerImage])
+
+    fetchClosureMock.mockResolvedValue(
+      closureResponse([u1, a1, u2], [historyText, historyImage, answerText, triggerText, triggerImage], 'u1')
+    )
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      undefined,
+      null
+    )
+
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['history text', 'current question'])
+    expect(sdkTexts(result.modelMessages, 'assistant')).toEqual(['history answer'])
+    expect(sdkPartsOfType(result.modelMessages, 'user', 'image')).toEqual([
+      { type: 'image', image: 'BASE64:trigger-image.png', mediaType: 'image/png' }
+    ])
+    // The omitted history image was never read from disk.
+    expect(base64ImageMock).toHaveBeenCalledTimes(1)
+    expect(base64ImageMock).toHaveBeenCalledWith('trigger-image.png')
+    // A deliberate omission is not a missing attachment: no user-facing warning.
+    expect((window as any).toast.error).not.toHaveBeenCalled()
+  })
+
+  it('ON sends the same history media again (no persisted change)', async () => {
+    settingsState.includeHistoryMediaContext = true
+    const historyText = mainTextBlock('u1', 'history text')
+    const historyImage = imageBlock('u1', storedFile({ id: 'history-image' }))
+    const u1 = message('u1', 'user', [historyText, historyImage])
+    const answerText = mainTextBlock('a1', 'history answer')
+    const a1 = message('a1', 'assistant', [answerText])
+    const triggerText = mainTextBlock('u2', 'current question')
+    const triggerImage = imageBlock('u2', storedFile({ id: 'trigger-image' }))
+    const u2 = message('u2', 'user', [triggerText, triggerImage])
+
+    fetchClosureMock.mockResolvedValue(
+      closureResponse([u1, a1, u2], [historyText, historyImage, answerText, triggerText, triggerImage], 'u1')
+    )
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      undefined,
+      null
+    )
+
+    expect(sdkPartsOfType(result.modelMessages, 'user', 'image')).toEqual([
+      { type: 'image', image: 'BASE64:history-image.png', mediaType: 'image/png' },
+      { type: 'image', image: 'BASE64:trigger-image.png', mediaType: 'image/png' }
+    ])
+    // Persisted messages are untouched: the request view is request-local only.
+    expect(u1.blocks).toEqual([historyText.id, historyImage.id])
+    expect(historyImage).not.toHaveProperty('l2AttachmentUnavailable')
+  })
+
+  it('OFF keeps the regenerated triggering user media at the trigger boundary', async () => {
+    settingsState.includeHistoryMediaContext = false
+    const historyText = mainTextBlock('u1', 'history text')
+    const historyImage = imageBlock('u1', storedFile({ id: 'history-image' }))
+    const u1 = message('u1', 'user', [historyText, historyImage])
+    const answerText = mainTextBlock('a1', 'history answer')
+    const a1 = message('a1', 'assistant', [answerText])
+    const triggerText = mainTextBlock('u2', 'regenerated question')
+    const triggerImage = imageBlock('u2', storedFile({ id: 'trigger-image' }))
+    const u2 = message('u2', 'user', [triggerText, triggerImage])
+
+    fetchClosureMock.mockResolvedValue(
+      closureResponse([u1, a1, u2], [historyText, historyImage, answerText, triggerText, triggerImage], 'u1')
+    )
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      { message: u2, blocks: buildBlockOverlay([triggerText, triggerImage]) },
+      null
+    )
+
+    expect(sdkPartsOfType(result.modelMessages, 'user', 'image')).toEqual([
+      { type: 'image', image: 'BASE64:trigger-image.png', mediaType: 'image/png' }
+    ])
+    expect(base64ImageMock).toHaveBeenCalledWith('trigger-image.png')
+    expect(base64ImageMock).not.toHaveBeenCalledWith('history-image.png')
+  })
+
+  it('OFF drops a media-only history turn instead of sending an empty wire message', async () => {
+    settingsState.includeHistoryMediaContext = false
+    const historyImage = imageBlock('u1', storedFile({ id: 'history-only-image' }))
+    const u1 = message('u1', 'user', [historyImage])
+    const answerText = mainTextBlock('a1', 'history answer')
+    const a1 = message('a1', 'assistant', [answerText])
+    const triggerText = mainTextBlock('u2', 'current question')
+    const u2 = message('u2', 'user', [triggerText])
+
+    fetchClosureMock.mockResolvedValue(closureResponse([u1, a1, u2], [historyImage, answerText, triggerText], 'u1'))
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      undefined,
+      null
+    )
+
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['a1', 'u2'])
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['current question'])
+    expect(sdkPartsOfType(result.modelMessages, 'user', 'image')).toEqual([])
+    expect(base64ImageMock).not.toHaveBeenCalled()
+    expect((window as any).toast.error).not.toHaveBeenCalled()
+  })
+
+  it('OFF leaves the dedicated image-generation trigger media collectable', async () => {
+    settingsState.includeHistoryMediaContext = false
+    const historyText = mainTextBlock('u1', 'history text')
+    const historyImage = imageBlock('u1', storedFile({ id: 'history-image' }))
+    const u1 = message('u1', 'user', [historyText, historyImage])
+    const answerText = mainTextBlock('a1', 'history answer')
+    const a1 = message('a1', 'assistant', [answerText])
+    const triggerText = mainTextBlock('u2', 'edit this image')
+    const triggerImage = imageBlock('u2', storedFile({ id: 'trigger-image' }))
+    const u2 = message('u2', 'user', [triggerText, triggerImage])
+
+    fetchClosureMock.mockResolvedValue(
+      closureResponse([u1, a1, u2], [historyText, historyImage, answerText, triggerText, triggerImage], 'u1')
+    )
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      undefined,
+      null
+    )
+
+    // The dedicated image path collects images from the returned uiMessages, so
+    // the triggering user message (with its own image blocks) must survive.
+    const triggerUserMessage = result.uiMessages.filter((m) => m.role === 'user').at(-1)
+    expect(triggerUserMessage?.id).toBe('u2')
+    expect(triggerUserMessage?.blocks).toEqual([triggerText.id, triggerImage.id])
+  })
+
+  it('OFF returns the request filter covering historical images of a mixed text+image assistant message', async () => {
+    settingsState.includeHistoryMediaContext = false
+    const historyText = mainTextBlock('u1', 'history text')
+    const u1 = message('u1', 'user', [historyText])
+    const answerText = mainTextBlock('a1', 'here is your image')
+    const answerImage = imageBlock('a1', storedFile({ id: 'history-generated-image' }))
+    const answerUrlImage = imageBlock('a1', undefined, { url: 'https://example.com/generated.png' })
+    const a1 = message('a1', 'assistant', [answerText, answerImage, answerUrlImage])
+    const triggerText = mainTextBlock('u2', 'make it blue')
+    const triggerImage = imageBlock('u2', storedFile({ id: 'trigger-image' }))
+    const u2 = message('u2', 'user', [triggerText, triggerImage])
+
+    fetchClosureMock.mockResolvedValue(
+      closureResponse(
+        [u1, a1, u2],
+        [historyText, answerText, answerImage, answerUrlImage, triggerText, triggerImage],
+        'u1'
+      )
+    )
+
+    const result = await ConversationService.prepareMessagesForModel(
+      [u2],
+      assistantWithAnchor('u1'),
+      't1',
+      undefined,
+      null
+    )
+
+    // The mixed assistant message survives pruning (it carries text), so the
+    // dedicated image path can still see it — the exclusion must travel in the
+    // request filter instead.
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+    expect(result.attachmentFilter?.unavailableBlockIds.has(answerImage.id)).toBe(true)
+    expect(result.attachmentFilter?.unavailableBlockIds.has(answerUrlImage.id)).toBe(true)
+    expect(result.attachmentFilter?.unavailableBlockIds.has(triggerImage.id)).toBe(false)
+    expect(base64ImageMock).toHaveBeenCalledWith('trigger-image.png')
+    expect(base64ImageMock).not.toHaveBeenCalledWith('history-generated-image.png')
   })
 })

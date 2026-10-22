@@ -4611,6 +4611,8 @@
         "confirm_delete_message": "刪除訊息前確認",
         "confirm_regenerate_message": "重新產生訊息前確認",
         "enable_quick_triggers": "啟用 / 和 @ 觸發快捷選單",
+        "include_history_media_context": "媒體上下文",
+        "include_history_media_context_tooltip": "開啟：請求包含歷史訊息中的圖片、音訊和影片。關閉：僅不再傳送這些歷史媒體，目前正在傳送的訊息仍會包含。再次開啟後恢復正常包含歷史媒體。",
         "paste_long_text_as_file": "將長文字貼上為檔案",
         "paste_long_text_threshold": "長文字長度",
         "send_shortcuts": "傳送快捷鍵"

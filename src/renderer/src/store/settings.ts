@@ -208,6 +208,14 @@ export interface SettingsState {
   enableSpellCheck: boolean
   spellCheckLanguages: string[]
   injectContextTimestamp: boolean
+  /**
+   * Media-context switch (global, default ON). When ON, historical
+   * image/audio/video attachments stay part of the outbound request; when OFF
+   * those historical payloads are omitted from the request only. The current
+   * triggering turn's media is always sent, and persisted messages/history UI
+   * are never touched. A missing persisted key means ON.
+   */
+  includeHistoryMediaContext: boolean
   // 硬件加速设置
   disableHardwareAcceleration: boolean
   // 使用系统标题栏 (仅Linux)
@@ -367,6 +375,8 @@ export const initialState: SettingsState = {
   enableSpellCheck: false,
   spellCheckLanguages: [],
   injectContextTimestamp: false,
+  // Default ON: historical media stays part of the request context.
+  includeHistoryMediaContext: true,
   // 消息操作确认设置
   confirmDeleteMessage: true,
   confirmRegenerateMessage: true,
@@ -684,6 +694,9 @@ const settingsSlice = createSlice({
     setInjectContextTimestamp: (state, action: PayloadAction<boolean>) => {
       state.injectContextTimestamp = action.payload
     },
+    setIncludeHistoryMediaContext: (state, action: PayloadAction<boolean>) => {
+      state.includeHistoryMediaContext = action.payload
+    },
     setConfirmDeleteMessage: (state, action: PayloadAction<boolean>) => {
       state.confirmDeleteMessage = action.payload
     },
@@ -846,6 +859,7 @@ export const {
   setSpellCheckLanguages,
   setExportMenuOptions,
   setInjectContextTimestamp,
+  setIncludeHistoryMediaContext,
   setConfirmDeleteMessage,
   setConfirmRegenerateMessage,
   setDisableHardwareAcceleration,

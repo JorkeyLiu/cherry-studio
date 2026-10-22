@@ -9,6 +9,7 @@ import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
+import { isMediaContextAttachmentBlock } from '@renderer/utils/mediaContext'
 
 const logger = loggerService.withContext('requestAttachmentAvailability')
 
@@ -34,7 +35,12 @@ const logger = loggerService.withContext('requestAttachmentAvailability')
  *   permission failures keep aborting through the existing attachment errors.
  */
 export interface RequestAttachmentFilter {
-  /** Attachment blocks excluded from this request (payload unavailable). */
+  /**
+   * Attachment blocks excluded from this request. Two distinct reasons land
+   * here, and both mean exactly "never encode this block for this request":
+   * the payload is provably unavailable on this device, or the block is a
+   * historical media payload deliberately omitted by the media-context switch.
+   */
   readonly unavailableBlockIds: ReadonlySet<string>
   /** Image blocks kept via their `url` because the local payload is absent. */
   readonly urlFallbackBlockIds: ReadonlySet<string>
@@ -51,7 +57,7 @@ export interface RequestAttachmentAvailability {
 }
 
 type PayloadProbe = 'available' | 'unavailable' | 'unknown'
-type BlockAvailability = 'usable' | 'url-fallback' | 'unavailable'
+type BlockAvailability = 'usable' | 'url-fallback' | 'unavailable' | 'omitted'
 
 function fileExistsCapability(): ((storedFileName: string) => Promise<boolean>) | undefined {
   // Accessed through a narrow cast: the capability is optional at runtime (older
@@ -107,7 +113,8 @@ function resolveBlock(blockId: string, overlay?: BlockOverlay): MessageBlock | u
 
 interface MessageClassification {
   message: Message
-  unavailableBlockIds: string[]
+  /** Blocks excluded from this request (missing payload or deliberate omission). */
+  excludedBlockIds: string[]
   urlFallbackBlockIds: string[]
   /** False only when this message provably has nothing left to send. */
   hasSendableContent: boolean
@@ -119,7 +126,24 @@ function hasNonEmptyText(block: MessageBlock): boolean {
   return typeof content === 'string' && content.trim().length > 0
 }
 
-async function classifyMessage(message: Message, overlay?: BlockOverlay): Promise<MessageClassification> {
+/**
+ * Global media-context switch, read once per request.
+ *
+ * A missing persisted key means ON (the feature default), so an older persisted
+ * settings object — or a settings slice synced from a window that predates the
+ * field — keeps the existing behavior instead of silently dropping history
+ * media.
+ */
+function isHistoryMediaContextEnabled(): boolean {
+  const settings = store.getState().settings as { includeHistoryMediaContext?: boolean } | undefined
+  return settings?.includeHistoryMediaContext !== false
+}
+
+async function classifyMessage(
+  message: Message,
+  overlay?: BlockOverlay,
+  omitMediaBlocks = false
+): Promise<MessageClassification> {
   const blockIds = Array.isArray(message.blocks) ? message.blocks : []
   const resolved = blockIds.map((blockId) => resolveBlock(blockId, overlay))
 
@@ -127,9 +151,9 @@ async function classifyMessage(message: Message, overlay?: BlockOverlay): Promis
   // request view at all) make the message unclassifiable: keep it in the
   // request unchanged and let the existing conversion decide.
   if (blockIds.length === 0 || resolved.some((block) => !block)) {
-    return { message, unavailableBlockIds: [], urlFallbackBlockIds: [], hasSendableContent: true }
+    return { message, excludedBlockIds: [], urlFallbackBlockIds: [], hasSendableContent: true }
   }
-  return classifyResolvedBlocks(message, resolved as MessageBlock[])
+  return classifyResolvedBlocks(message, resolved as MessageBlock[], omitMediaBlocks)
 }
 
 /**
@@ -138,19 +162,33 @@ async function classifyMessage(message: Message, overlay?: BlockOverlay): Promis
  * Split from the overlay lookup so the pre-request entry gate can classify a
  * message from explicitly supplied blocks only — never reading Redux as a
  * fallback for references it was not given.
+ *
+ * `omitMediaBlocks` is the media-context switch applied to THIS message: its
+ * image/audio/video attachments are excluded before any payload probe, so a
+ * deliberate omission never costs IO and can never be reported as a missing
+ * file.
  */
-async function classifyResolvedBlocks(message: Message, blocks: MessageBlock[]): Promise<MessageClassification> {
-  const availabilities = await Promise.all(blocks.map((block) => classifyAttachmentBlock(block)))
+async function classifyResolvedBlocks(
+  message: Message,
+  blocks: MessageBlock[],
+  omitMediaBlocks = false
+): Promise<MessageClassification> {
+  const availabilities = await Promise.all(
+    blocks.map(async (block): Promise<BlockAvailability | null> => {
+      if (omitMediaBlocks && isMediaContextAttachmentBlock(block)) return 'omitted'
+      return classifyAttachmentBlock(block)
+    })
+  )
 
-  const unavailableBlockIds: string[] = []
+  const excludedBlockIds: string[] = []
   const urlFallbackBlockIds: string[] = []
   let hasUsableAttachment = false
   let hasOtherContent = false
 
   blocks.forEach((block, index) => {
     const availability = availabilities[index]
-    if (availability === 'unavailable') {
-      unavailableBlockIds.push(block.id)
+    if (availability === 'unavailable' || availability === 'omitted') {
+      excludedBlockIds.push(block.id)
       return
     }
     if (availability === 'url-fallback') {
@@ -174,7 +212,7 @@ async function classifyResolvedBlocks(message: Message, blocks: MessageBlock[]):
 
   return {
     message,
-    unavailableBlockIds,
+    excludedBlockIds,
     urlFallbackBlockIds,
     hasSendableContent: hasOtherContent || hasUsableAttachment
   }
@@ -183,16 +221,29 @@ async function classifyResolvedBlocks(message: Message, blocks: MessageBlock[]):
 /**
  * Resolve the request-local attachment availability of one outbound conversion.
  *
+ * Media-context switch: when OFF, image/audio/video attachments of every
+ * message except the triggering one are omitted from this request. The switch
+ * is request-local — nothing is deleted, rewritten, or persisted, so turning it
+ * ON again restores the exact same history payloads.
+ *
  * @param messages  The bounded request view (trigger inclusive).
  * @param overlay   The request-local block overlay the conversion will read.
- * @param triggerId Stable ID of the triggering user message (notification scope).
+ * @param triggerId Stable ID of the triggering user message; it scopes the
+ *                  unavailable-attachment notice AND is the media-context
+ *                  boundary, because the triggering turn's media is part of the
+ *                  current request rather than of history.
  */
 export async function resolveRequestAttachmentAvailability(
   messages: Message[],
   overlay?: BlockOverlay,
   triggerId?: string
 ): Promise<RequestAttachmentAvailability> {
-  const classifications = await Promise.all(messages.map((message) => classifyMessage(message, overlay)))
+  // Without a stable trigger identity there is no history boundary to apply, so
+  // the switch is never applied blindly.
+  const excludeHistoryMedia = !isHistoryMediaContextEnabled() && triggerId !== undefined
+  const classifications = await Promise.all(
+    messages.map((message) => classifyMessage(message, overlay, excludeHistoryMedia && message.id !== triggerId))
+  )
 
   const unavailableBlockIds = new Set<string>()
   const urlFallbackBlockIds = new Set<string>()
@@ -202,17 +253,17 @@ export async function resolveRequestAttachmentAvailability(
   let triggerFound = false
 
   for (const classification of classifications) {
-    for (const blockId of classification.unavailableBlockIds) unavailableBlockIds.add(blockId)
+    for (const blockId of classification.excludedBlockIds) unavailableBlockIds.add(blockId)
     for (const blockId of classification.urlFallbackBlockIds) urlFallbackBlockIds.add(blockId)
-    // A history message whose attachments are all unavailable and that carries
-    // no sendable content of its own is dropped from the request instead of
-    // becoming an empty wire message.
-    if (classification.hasSendableContent || classification.unavailableBlockIds.length === 0) {
+    // A history message whose attachments are all unavailable or deliberately
+    // omitted, and that carries no sendable content of its own, is dropped from
+    // the request instead of becoming an empty wire message.
+    if (classification.hasSendableContent || classification.excludedBlockIds.length === 0) {
       requestMessages.push(classification.message)
     }
     if (triggerId && classification.message.id === triggerId) {
       triggerFound = true
-      triggerUnavailableAttachmentCount = classification.unavailableBlockIds.length
+      triggerUnavailableAttachmentCount = classification.excludedBlockIds.length
       triggerHasSendableContent = classification.hasSendableContent
     }
   }
@@ -254,7 +305,7 @@ export async function resolveTriggerAttachmentAvailability(
   }
   const classification = await classifyResolvedBlocks(message, resolved as MessageBlock[])
   return {
-    unavailableAttachmentCount: classification.unavailableBlockIds.length,
+    unavailableAttachmentCount: classification.excludedBlockIds.length,
     hasSendableContent: classification.hasSendableContent
   }
 }

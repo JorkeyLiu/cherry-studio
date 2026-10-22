@@ -45,6 +45,14 @@ export interface PrepareMessagesResult {
   modelMessages: ModelMessage[]
   uiMessages: Message[]
   nothingSendable?: boolean
+  /**
+   * The request-local attachment view this preparation resolved. Every consumer
+   * of the returned `uiMessages` that reads attachment payloads itself (the
+   * dedicated image-generation path collects images straight from these
+   * messages) MUST apply the same filter, otherwise a block excluded from the
+   * request view would still be read and sent through that side path.
+   */
+  attachmentFilter?: RequestAttachmentFilter
 }
 
 export class ConversationService {
@@ -129,7 +137,8 @@ export class ConversationService {
       }
       return {
         modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay, attachmentView.attachmentFilter),
-        uiMessages
+        uiMessages,
+        attachmentFilter: attachmentView.attachmentFilter
       }
     }
 
@@ -254,7 +263,8 @@ export class ConversationService {
 
     return {
       modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay, attachmentView.attachmentFilter),
-      uiMessages
+      uiMessages,
+      attachmentFilter: attachmentView.attachmentFilter
     }
   }
 

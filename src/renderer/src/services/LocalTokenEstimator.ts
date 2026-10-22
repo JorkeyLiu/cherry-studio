@@ -23,6 +23,7 @@ import type { FileMetadata } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { ImageMessageBlock, Message } from '@renderer/types/newMessage'
 import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
+import { isMediaContextAttachmentBlock } from '@renderer/utils/mediaContext'
 import {
   findFileBlocks,
   findImageBlocks,
@@ -388,15 +389,26 @@ export async function estimateDraftTokens({
 /**
  * 估算完整消息的 token 数：正文 + 推理内容 + 文件块 + 图片块。
  * FileMessageBlock 与 ImageMessageBlock 均被识别；独立附件并发估算。
+ *
+ * `includeMedia: false` 只保留“该媒体不会被发送”的场景（媒体上下文开关关闭时
+ * 的历史消息）：图片/音频/视频附件不计入估算，正文与其他附件（文档/PDF/文本）
+ * 照常估算。默认 true，保持既有调用方行为不变。
  */
-export async function estimateMessageTokens(message: Message): Promise<LocalTokenEstimate> {
+export async function estimateMessageTokens(
+  message: Message,
+  options: { includeMedia?: boolean } = {}
+): Promise<LocalTokenEstimate> {
   const content = getMainTextContent(message)
   const reasoningContent = getThinkingContent(message)
   const combinedContent = [content, reasoningContent].filter((s) => s !== undefined).join(' ')
   const textTokens = estimateTextTokens(combinedContent)
 
-  const fileBlocks = findFileBlocks(message)
-  const imageBlocks = findImageBlocks(message)
+  const includeMedia = options.includeMedia !== false
+  const allFileBlocks = findFileBlocks(message)
+  const fileBlocks = includeMedia
+    ? allFileBlocks
+    : allFileBlocks.filter((block) => !isMediaContextAttachmentBlock(block))
+  const imageBlocks = includeMedia ? findImageBlocks(message) : []
 
   const [fileBlockTokens, imageBlockTokens] = await Promise.all([
     Promise.all(fileBlocks.map((block) => estimateFileTokens(block.file))),
