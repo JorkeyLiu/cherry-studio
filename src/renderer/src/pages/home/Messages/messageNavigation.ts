@@ -378,12 +378,17 @@ export const chooseNavigationWindow = (
 }
 
 interface MessageNavigationTransactionDependencies {
+  /**
+   * `true` may be returned synchronously by a caller that already owns the
+   * navigation without an observable commit (resident selection follow); the
+   * runner only ever `await`s the value.
+   */
   begin: (
     token: MessageViewportNavigationToken,
     targetId: string | null,
     source: MessageViewportNavigationSource,
     alignment: MessageNavigationAlignment
-  ) => Promise<boolean>
+  ) => boolean | Promise<boolean>
   isCurrent: (token: MessageViewportNavigationToken) => boolean
   cancelLoadsAndTimers: () => void
   resolve: (intent: MessageNavigationIntent) => ResolvedMessageNavigation | null
@@ -392,12 +397,19 @@ interface MessageNavigationTransactionDependencies {
   getTargetStatus: (targetId: string) => 'visible' | 'hidden' | 'missing'
   revealTarget: (targetId: string) => Promise<void>
   settleDom: () => Promise<void>
-  beginProgrammaticScroll: (token: MessageViewportNavigationToken) => Promise<boolean>
+  /* Same as `begin`: `true` may be reported synchronously (resident follow). */
+  beginProgrammaticScroll: (token: MessageViewportNavigationToken) => boolean | Promise<boolean>
   scroll: (resolved: ResolvedMessageNavigation) => MessageNavigationScrollOutcome | void
   finish: (token: MessageViewportNavigationToken) => void
   cancel: (token: MessageViewportNavigationToken) => void
+  /**
+   * Resident-follow shape: the resolved endpoint row is already resident and
+   * visible, so the geometry write runs first and the navigation state machine
+   * is told afterwards (dispatch-only). No commit, frame, timer or reveal is
+   * awaited on this path.
+   */
+  resident?: boolean
 }
-
 // ---------------------------------------------------------------------------
 // Pending event coordination
 // ---------------------------------------------------------------------------
@@ -465,7 +477,20 @@ export const handlePendingNavigateEvent = async (
 // Transaction runner
 // ---------------------------------------------------------------------------
 
-/** Runs every message/restoration navigation through one last-navigation-wins transaction. */
+/**
+ * Runs every message/restoration navigation through one last-navigation-wins
+ * transaction.
+ *
+ * `dependencies.resident` selects the resident-follow shape: the caller proved
+ * the endpoint row is already resident and visible, so the geometry write is
+ * the FIRST thing this transaction does — before any dispatch, commit, frame,
+ * timer or reveal. Nothing a repeat key can outrun therefore stands between the
+ * input and the scroll write. The navigation state machine is then told about
+ * the same navigation (begin + finish/cancel, both dispatch-only) so an older
+ * in-flight navigation is still superseded. Currency is unchanged: the
+ * caller's `scroll` callback owns the topic/route/epoch/interaction gates and
+ * the controller adoption, exactly as in the generic path.
+ */
 export const runMessageNavigationTransaction = async (
   intent: MessageNavigationIntent,
   dependencies: MessageNavigationTransactionDependencies
@@ -473,6 +498,25 @@ export const runMessageNavigationTransaction = async (
   const token: MessageViewportNavigationToken = {}
   const requestedTarget = intent.kind === 'message' ? intent.targetId : null
   const alignment = 'alignment' in intent ? (intent.alignment ?? 'start') : 'start'
+
+  if (dependencies.resident === true) {
+    const residentResolved = dependencies.resolve(intent)
+    if (!residentResolved) {
+      dependencies.cancel(token)
+      return 'not-found'
+    }
+    const residentOutcome = dependencies.scroll(residentResolved)
+    const outcome: MessageNavigationScrollOutcome =
+      residentOutcome === 'cancelled' || residentOutcome === 'not-found' ? residentOutcome : 'success'
+    // State coherence only: the geometry above is already written.
+    void dependencies.begin(token, requestedTarget, intent.source, alignment)
+    if (outcome === 'success') {
+      dependencies.finish(token)
+      return 'success'
+    }
+    dependencies.cancel(token)
+    return outcome
+  }
 
   if (!(await dependencies.begin(token, requestedTarget, intent.source, alignment))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'

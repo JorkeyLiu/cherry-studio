@@ -96,6 +96,49 @@ export const browseDirectionForClampedInput = (input: BrowsePagingInput): Browse
 }
 
 /**
+ * Edit-selection boundary page intent.
+ *
+ * An editable selection whose endpoint cannot advance sits on the displayed
+ * (rendered) edge — a SELECTION position, not a physical scroll position — so
+ * neither a live user scroll session nor exact clamped-edge geometry exists
+ * there. The selection therefore names only the browse DIRECTION it needs, and
+ * that direction is served by the same bounded message-window channel:
+ *
+ * - history must still exist in that direction (the committed window's
+ *   authoritative completeness flag);
+ * - one ordinary page read at a time: a page already in flight (loading flag or
+ *   the single-flight fetch lease) absorbs repeat key auto-repeat instead of
+ *   starting a second copy of the same read;
+ * - no route navigation and no restore-owned divider search may own the
+ *   viewport, because both cancel in-flight page timers.
+ *
+ * No session, no geometry and no synthesized scroll is consulted here; those
+ * belong to the input path, never to a selection edge.
+ */
+export type SelectionBoundaryPageInput = {
+  direction: BrowseInputDirection
+  hasMoreOlder: boolean
+  hasMoreNewer: boolean
+  loading: boolean
+  paginationLeaseFree: boolean
+  programmaticOwned: boolean
+  restoreSearchOwned: boolean
+}
+
+export type SelectionBoundaryPageDecision =
+  | { start: true }
+  | { start: false; reason: 'no-more-history' | 'page-in-flight' | 'navigation-owned' | 'restore-owned' }
+
+export const decideSelectionBoundaryPage = (input: SelectionBoundaryPageInput): SelectionBoundaryPageDecision => {
+  const hasMore = input.direction === 'older' ? input.hasMoreOlder : input.hasMoreNewer
+  if (!hasMore) return { start: false, reason: 'no-more-history' }
+  if (input.loading || !input.paginationLeaseFree) return { start: false, reason: 'page-in-flight' }
+  if (input.programmaticOwned) return { start: false, reason: 'navigation-owned' }
+  if (input.restoreSearchOwned) return { start: false, reason: 'restore-owned' }
+  return { start: true }
+}
+
+/**
  * One viewport geometry sample of a row: its viewport-relative offset (row top
  * minus scroll-container top, the same coordinate the stable anchor records)
  * together with the container `scrollTop` measured at the SAME instant.

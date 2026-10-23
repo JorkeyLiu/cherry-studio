@@ -58,7 +58,10 @@ function Harness() {
   return null
 }
 
-function keyOnBody(key: string, opts: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean } = {}) {
+function keyOnBody(
+  key: string,
+  opts: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; repeat?: boolean } = {}
+) {
   fireEvent.keyDown(document.body, { key, ...opts })
 }
 
@@ -126,6 +129,16 @@ describe('useClipboardKeyboard entry mapping', () => {
     expect(spies.handleDelete).not.toHaveBeenCalled()
   })
 
+  it('routes every repeated Shift+Arrow keydown to one selection extension', () => {
+    render(<Harness />)
+    keyOnBody('ArrowDown', { shiftKey: true })
+    keyOnBody('ArrowDown', { shiftKey: true, repeat: true })
+    keyOnBody('ArrowDown', { shiftKey: true, repeat: true })
+    expect(spies.handleExtendSelection).toHaveBeenNthCalledWith(1, 'down')
+    expect(spies.handleExtendSelection).toHaveBeenNthCalledWith(2, 'down')
+    expect(spies.handleExtendSelection).toHaveBeenNthCalledWith(3, 'down')
+    expect(spies.handleExtendSelection).toHaveBeenCalledTimes(3)
+  })
   it('registers no entries while edit mode is disabled', () => {
     spies.isEnabled.current = false
     render(<Harness />)

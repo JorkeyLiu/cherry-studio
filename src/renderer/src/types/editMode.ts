@@ -76,10 +76,29 @@ export interface ClipboardState {
 export interface EditModeState {
   enabled: boolean
   selectedGroupIds: string[] // askId 列表
-  lastSelectedIndex: number | null // Shift 区域选的锚点
-  focusedIndex: number | null // 当前焦点位置
+  lastSelectedIndex: number | null // 当前已加载组顺序中的 Shift 锚点索引（兼容派生）
+  focusedIndex: number | null // 当前已加载组顺序中的活动端点索引（兼容派生）
+  anchorGroupId?: string | null // 稳定 Shift 锚点 askId
+  focusedGroupId?: string | null // 稳定活动端点 askId
   isProcessing: boolean // 全局操作锁
 }
+
+/**
+ * Direction of the bounded message-window page an edit-selection edge needs.
+ * `older` is toward earlier messages (visual up), `newer` toward later ones.
+ */
+export type EditSelectionBoundaryDirection = 'older' | 'newer'
+
+/**
+ * Selection-boundary page request provided by the chat viewport owner.
+ *
+ * Resolves `true` once an ordinary bounded page attempt for that direction
+ * settled (its window commit or its cancellation) and `false` when no attempt
+ * was started — no history left, one already in flight, or another owner holds
+ * the viewport. Repeat key auto-repeat must therefore be safe to issue: a
+ * request never starts a second copy of an in-flight read.
+ */
+export type EditSelectionBoundaryPageRequest = (direction: EditSelectionBoundaryDirection) => Promise<boolean>
 
 /**
  * Snapshot of a TopicSegment before message deletion.

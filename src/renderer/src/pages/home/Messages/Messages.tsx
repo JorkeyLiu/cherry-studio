@@ -115,6 +115,7 @@ import {
   selectDeletionFallbackIntent
 } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
+import type { EditSelectionBoundaryDirection } from '@renderer/types/editMode'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
 import {
@@ -191,6 +192,7 @@ import {
 } from './messageWindow'
 import {
   browseDirectionForClampedInput,
+  decideSelectionBoundaryPage,
   isRestoreTargetValid,
   shouldCancelStabilizerForKeyDown
 } from './positionStabilizer'
@@ -794,11 +796,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         id="messages"
         className="messages-container"
         data-viewport-phase={viewportPhase}
-        // Keyboard-focusable scroll host: ordinary click/tab navigation reaches
-        // the container so native PageUp/PageDown page #messages directly.
-        // No autofocus, no focus theft, no custom scroll arithmetic — the
-        // existing container-scoped key handler only observes the native keys.
-        tabIndex={0}
+        // Keyboard-focusable scroll host in normal mode: ordinary click/tab navigation reaches
+        // the container so native PageUp/PageDown page #messages directly. Edit mode keeps it
+        // programmatically focusable as the stable message-selection focus target.
+        // No autofocus or custom scroll arithmetic — the existing container-scoped key handler observes native keys.
+        tabIndex={isEditMode ? -1 : 0}
         ref={scrollContainerRef}
         onScroll={handleScrollPosition}
         onWheel={onStabilizerWheel}
@@ -2598,8 +2600,50 @@ const Messages = ({
     cancelActiveLoads()
   }, [cancelActiveLoads, clearTimeoutTimer])
 
+  /**
+   * Edit-selection follow eligibility: the resolved physical row of a `group`
+   * intent is already resident AND visible in the displayed window, and the
+   * controller would accept an interaction adoption right now (unowned, clean
+   * DOM provenance, adoptable phase).
+   *
+   * This is exactly the condition under which the generic navigation
+   * transaction has nothing left to do but wait: no window change is needed
+   * (`chooseNavigationWindow` returns null for a displayed target), no fold
+   * reveal is needed (visible), and no DOM settle is needed (already rendered).
+   * Everything else — a target outside the displayed window, a collapsed row,
+   * a detached container, an owned/dirty controller — keeps the existing
+   * asynchronous navigation unchanged.
+   */
+  const canFollowResidentSelectionEndpoint = useCallback(
+    (intent: Extract<MessageNavigationIntent, { kind: 'group' }>): boolean => {
+      try {
+        if (unmountedRef.current) return false
+        if (!controller.canAcceptUserScrollWrite()) return false
+        const resolved = resolveMessageNavigation(messagesRef.current, intent)
+        if (!resolved || resolved.kind !== 'message') return false
+        if (checkElement(resolved.targetId) !== 'visible') return false
+        const live = scrollContainerRef.current
+        return Boolean(live && live.isConnected)
+      } catch {
+        return false
+      }
+    },
+    [checkElement, controller, scrollContainerRef]
+  )
+
   const runTransaction = useCallback(
-    (intent: MessageNavigationIntent) => {
+    /**
+     * `residentFollow` selects the resident-follow transaction shape: the
+     * endpoint row is already resident and visible, so the geometry write runs
+     * before any dispatch, commit, frame, timer or reveal — nothing a repeat key
+     * can outrun stands between the input and the scroll. Currency gates,
+     * controller adoption and the keeper handoff are the SAME code as the
+     * ordinary transaction; everything that needs a window change, a fold reveal
+     * or a settle is gated out by `canFollowResidentSelectionEndpoint` and keeps
+     * the unchanged asynchronous path.
+     */
+    (intent: MessageNavigationIntent, options?: { residentFollow?: boolean }) => {
+      const residentFollow = options?.residentFollow === true
       // Route/epoch currency bound at call time: the actual DOM scroll below
       // rechecks topic/route/controller-epoch/unmounted plus a new genuine
       // interaction before mutating, so a topic/branch swap or a later real
@@ -2623,6 +2667,15 @@ const Messages = ({
       }
       return runMessageNavigationTransaction(intent, {
         begin: (token, targetId, source, alignment) => {
+          // Resident selection follow reports its own completion synchronously:
+          // the geometry is already written by the time this runs (see
+          // `resident`), so it only has to dispatch the same navigation state an
+          // ordinary transaction would, and needs no commit to prove currency —
+          // the begin dispatch itself supersedes any older navigation.
+          if (residentFollow) {
+            viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
+            return true
+          }
           const generation = viewportStateRef.current.navigation.generation
           const committed = waitForNavigationCommit(token, generation)
           viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
@@ -2860,7 +2913,10 @@ const Messages = ({
           return 'success' as const
         },
         finish: (token) => viewportDispatch({ type: 'navigation/finish', token }),
-        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
+        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token }),
+        // Resident follow shape: geometry first, state dispatch afterwards (see
+        // the transaction runner). The ordinary path keeps every barrier.
+        resident: residentFollow
       })
     },
     [
@@ -2925,6 +2981,19 @@ const Messages = ({
       try {
         controller.clearInteractionIntent()
       } catch {}
+      if (intent.kind === 'group') {
+        // Edit-selection follow (Shift+Arrow / single-cursor movement): the
+        // endpoint is a resident visible row in every ordinary case, and the
+        // generic transaction's commit/frame/scroll barrier is what a repeat key
+        // outruns. Resident endpoints therefore take the same transaction with
+        // its barrier dependencies resolved synchronously; everything the
+        // barrier exists for (window load, fold reveal, settle) is gated out by
+        // `canFollowResidentSelectionEndpoint` and falls back to the unchanged
+        // asynchronous navigation below.
+        return runTransaction(intent, {
+          residentFollow: canFollowResidentSelectionEndpoint(intent)
+        })
+      }
       if (intent.kind !== 'message') return runTransaction(intent)
       const targetId = intent.targetId
       if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent)
@@ -3023,7 +3092,7 @@ const Messages = ({
         return runTransaction(intent)
       })()
     },
-    [controller, dispatch, runTransaction, waitForProjectionCommit]
+    [canFollowResidentSelectionEndpoint, controller, dispatch, runTransaction, waitForProjectionCommit]
   )
 
   /**
@@ -3973,7 +4042,7 @@ const Messages = ({
   // terminal outcome, so the next edge event (or the restore owner's next step)
   // starts the next page.
   const startWindowPageLoad = useCallback(
-    (direction: MessageViewportLoadDirection, preferred?: PreferredRestoreAnchorSnapshot | null) => {
+    (direction: MessageViewportLoadDirection, preferred?: PreferredRestoreAnchorSnapshot | null): Promise<boolean> => {
       const preferredSnapshot: PreferredRestoreAnchorSnapshot | null = preferred
         ? preferred.kind === 'divider-row'
           ? { kind: 'divider-row', dividerKey: preferred.dividerKey, targetOffset: preferred.targetOffset }
@@ -3986,7 +4055,7 @@ const Messages = ({
         currentState.loading[direction] ||
         !isPaginationFetchLeaseFree(paginationFetchLeaseRef.current)
       ) {
-        return
+        return Promise.resolve(false)
       }
 
       // Boundedness/retention pre-check (pure, cheap under capacity): when the
@@ -4004,7 +4073,7 @@ const Messages = ({
       }
       // The early gate above already refused a missing window; this is the
       // type-level confirmation for the pure guard.
-      if (!currentWindow) return
+      if (!currentWindow) return Promise.resolve(false)
       const advanceGuard = canAdvancePaginationWindow({
         direction,
         messages: readLoadedProjectionMessages(store.getState(), topic.id),
@@ -4014,7 +4083,7 @@ const Messages = ({
       })
       if (!advanceGuard.allowed) {
         logger.silly(`[windowPage:${direction}] edge page declined: ${advanceGuard.reason}` as never)
-        return
+        return Promise.resolve(false)
       }
       // The request anchor is the loaded edge of the committed window: the
       // response is guaranteed to carry it (window validation), which is what
@@ -4022,7 +4091,7 @@ const Messages = ({
       const anchorId = direction === 'older' ? currentWindow?.oldestMessageId : currentWindow?.newestMessageId
       if (!anchorId) {
         logger.warn(`[windowPage:${direction}] missing stable anchor for R-03 around`)
-        return
+        return Promise.resolve(false)
       }
 
       const loadToken = {}
@@ -4036,8 +4105,16 @@ const Messages = ({
       // Single-flight ownership: the claim IS the gate, so an attempt that was
       // superseded or cancelled can never free the lease of the attempt that
       // replaced it (a bare boolean could, letting a third read start).
-      if (!claimPaginationFetchLease(paginationFetchLeaseRef.current, loadToken)) return
+      if (!claimPaginationFetchLease(paginationFetchLeaseRef.current, loadToken)) return Promise.resolve(false)
       viewportDispatch({ type: 'load/start', direction, token: loadToken })
+      // Awaitable attempt handle: settles `true` once this exact attempt reached
+      // a terminal outcome (commit, cancellation or refusal after the claim), so
+      // a selection-edge caller can await the window it asked for instead of
+      // guessing. `false` below means no attempt was started at all.
+      let settleAttempt: (started: boolean) => void = () => {}
+      const attemptSettled = new Promise<boolean>((resolve) => {
+        settleAttempt = resolve
+      })
 
       const container = scrollContainerRef.current
 
@@ -4086,7 +4163,12 @@ const Messages = ({
           // Ownership-scoped release: only the attempt that still owns the
           // lease (this token) can free it, so a cancelled/superseded attempt
           // never releases a successor's in-flight ownership.
-          const releaseOwned = () => releasePaginationFetchLease(lease, loadToken)
+          const releaseOwned = () => {
+            // Every terminal outcome releases ownership exactly once, so the
+            // attempt handle settles even when a publication gate refused it.
+            settleAttempt(true)
+            return releasePaginationFetchLease(lease, loadToken)
+          }
           if (!isCurrentLoad(direction, loadToken, topicGeneration)) {
             // Externally cancelled before the fetch ran (topic reset,
             // explicit cancel): release this attempt's ownership only.
@@ -4407,6 +4489,9 @@ const Messages = ({
             }
             releaseOwned()
           } catch (err) {
+            // Settle the attempt handle on EVERY terminal outcome, including the
+            // superseded case whose release is owned by a successor.
+            settleAttempt(true)
             logger.error(`[windowPage:${direction}] window fetch failed, fail-closed`, err as Error)
             if (isCurrentLoad(direction, loadToken, topicGeneration)) {
               markRestoreLoadFailed()
@@ -4417,6 +4502,7 @@ const Messages = ({
         },
         50
       )
+      return attemptSettled
     },
     [
       controller,
@@ -4500,7 +4586,7 @@ const Messages = ({
         return
       }
       if (!atEdge) return
-      startWindowPageLoad(direction)
+      void startWindowPageLoad(direction)
     },
     [controller, startWindowPageLoad, topic.id]
   )
@@ -4524,6 +4610,54 @@ const Messages = ({
       maybePageAtEdge(direction)
     },
     [maybePageAtEdge, scrollContainerRef]
+  )
+
+  // Edit-selection boundary intent (Shift+arrow selection edge). A selection
+  // endpoint that cannot advance is parked on the DISPLAYED (rendered) edge —
+  // a selection position, not a physical scroll position — so it has neither a
+  // live user scroll session nor exact clamped-edge geometry. The selection
+  // therefore names only the browse DIRECTION it needs (older for ArrowUp,
+  // newer for ArrowDown) and that direction is served by the SAME ordinary
+  // bounded page path (shared lease, token/generation guards, bounded-window
+  // derivation, keeper compensation). Nothing here synthesizes a scroll, waits
+  // for geometry or fakes a user gesture; a page already in flight absorbs
+  // repeat auto-repeat instead of starting a second read, and an owned
+  // navigation (which cancels in-flight page timers) or restore-owned divider
+  // search is never fought. Resolves with the attempt handle so a caller can
+  // await the committed window rather than guess.
+  const requestSelectionBoundaryPage = useCallback(
+    (direction: EditSelectionBoundaryDirection): Promise<boolean> => {
+      const currentState = viewportStateRef.current
+      const currentWindow = currentState.window
+      if (!currentWindow) return Promise.resolve(false)
+      let restoreSearchOwned = false
+      try {
+        const liveSearch = dividerProgressRef.current
+        restoreSearchOwned = Boolean(
+          liveSearch &&
+            liveSearch.topicId === topic.id &&
+            liveSearch.routeId === routeRef.current &&
+            liveSearch.ownerEpoch === controller.currentEpoch
+        )
+      } catch {
+        restoreSearchOwned = false
+      }
+      const decision = decideSelectionBoundaryPage({
+        direction,
+        hasMoreOlder: currentWindow.hasMoreOlder ?? false,
+        hasMoreNewer: currentWindow.hasMoreNewer ?? false,
+        loading: currentState.loading[direction] === true,
+        paginationLeaseFree: isPaginationFetchLeaseFree(paginationFetchLeaseRef.current),
+        programmaticOwned: controller.programmaticOwned,
+        restoreSearchOwned
+      })
+      if (!decision.start) {
+        logger.silly(`[editSelection:${direction}] boundary page declined: ${decision.reason}` as never)
+        return Promise.resolve(false)
+      }
+      return startWindowPageLoad(direction)
+    },
+    [controller, startWindowPageLoad, topic.id]
   )
 
   // Capture-phase declaration (interaction token/session): genuine user
@@ -5446,7 +5580,7 @@ const Messages = ({
       search.drivenWindowKey = key
       search.pagesDriven += 1
       search.lastLoadFailed = false
-      startWindowPageLoad('older', decision.preferred)
+      void startWindowPageLoad('older', decision.preferred)
       return
     }
     if (decision.action === 'wait-load') {
@@ -8072,7 +8206,11 @@ const Messages = ({
   ])
 
   return (
-    <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
+    <EditModeProvider
+      topicId={topic.id}
+      scrollToGroup={scrollToGroup}
+      visibleGroupIds={visibleGroupIds}
+      requestBoundaryPage={requestSelectionBoundaryPage}>
       <AnchorGroupProvider anchorGroupKey={anchorGroupKey}>
         <MessagesContent
           assistant={assistant}

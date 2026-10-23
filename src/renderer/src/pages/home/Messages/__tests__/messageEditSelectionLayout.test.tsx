@@ -1297,6 +1297,39 @@ describe('edit-mode native selection suppression owned by the turn', () => {
     expect(fireEvent.mouseDown(sibling, { button: 0 })).toBe(true)
   })
 
+  it('moves focus from an editable to the stable message viewport on primary mousedown', () => {
+    const onTurnClick = vi.fn()
+    const makeNodes = (selected: boolean): FlowNode[] => [
+      turnNode('g-plain', 'ask-plain', { selected, segmentId: 'seg:plain' })
+    ]
+    const { container, rerender } = render(
+      <div id="messages" tabIndex={-1}>
+        <textarea data-testid="composer" />
+        {renderEditFlowNodes({ nodes: makeNodes(false), isEditMode: true, onTurnClick })}
+      </div>
+    )
+    const viewport = container.querySelector('#messages') as HTMLElement
+    const composer = container.querySelector('[data-testid="composer"]') as HTMLTextAreaElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    composer.focus()
+    expect(document.activeElement).toBe(composer)
+
+    expect(fireEvent.mouseDown(cover, { button: 0 })).toBe(false)
+    expect(document.activeElement).toBe(viewport)
+    fireEvent.click(cover)
+    expect(onTurnClick).toHaveBeenCalledWith('ask-plain', false, false)
+
+    rerender(
+      <div id="messages" tabIndex={-1}>
+        <textarea data-testid="composer" />
+        {renderEditFlowNodes({ nodes: makeNodes(true), isEditMode: true, onTurnClick })}
+      </div>
+    )
+    expect(container.querySelector('#messages')).toBe(viewport)
+    expect(document.activeElement).toBe(viewport)
+    expect(container.querySelector('[data-stable-segment-id="seg:plain"]')).not.toBeNull()
+  })
+
   it('restores native selection on mode exit without remounting the turn or its content', () => {
     const { container, rerender } = render(
       <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>

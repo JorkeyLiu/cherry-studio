@@ -14,7 +14,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { distanceFromOldest, isAtNewest, isExactlyAtNewest, isExactlyAtOldest } from '../columnReverseGeometry'
-import { browseDirectionForClampedInput } from '../positionStabilizer'
+import { browseDirectionForClampedInput, decideSelectionBoundaryPage } from '../positionStabilizer'
 
 describe('browseDirectionForClampedInput (semantic direction only, no thresholds)', () => {
   it('reads the wheel sign in both directions, any magnitude', () => {
@@ -98,5 +98,57 @@ describe('clamped-edge primitives are symmetric (exact edge, not vicinity prefet
     expect(isExactlyAtOldest(insideOldest)).toBe(false)
     expect(isAtNewest({ scrollTop: -100, scrollHeight: 4000, clientHeight: 600 })).toBe(true)
     expect(isExactlyAtNewest({ scrollTop: -100, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
+  })
+})
+
+describe('decideSelectionBoundaryPage (selection edge names a direction, never a scroll)', () => {
+  const base = {
+    direction: 'older' as const,
+    hasMoreOlder: true,
+    hasMoreNewer: true,
+    loading: false,
+    paginationLeaseFree: true,
+    programmaticOwned: false,
+    restoreSearchOwned: false
+  }
+
+  it('starts one bounded page when the direction still has history and nothing owns it', () => {
+    expect(decideSelectionBoundaryPage(base)).toEqual({ start: true })
+    expect(decideSelectionBoundaryPage({ ...base, direction: 'newer' })).toEqual({ start: true })
+  })
+
+  it('never starts without history in the selection direction', () => {
+    expect(decideSelectionBoundaryPage({ ...base, hasMoreOlder: false })).toEqual({
+      start: false,
+      reason: 'no-more-history'
+    })
+    expect(decideSelectionBoundaryPage({ ...base, direction: 'newer', hasMoreNewer: false })).toEqual({
+      start: false,
+      reason: 'no-more-history'
+    })
+  })
+
+  it('merges repeat auto-repeat into the page already in flight (one ordinary read at a time)', () => {
+    expect(decideSelectionBoundaryPage({ ...base, loading: true })).toEqual({
+      start: false,
+      reason: 'page-in-flight'
+    })
+    expect(decideSelectionBoundaryPage({ ...base, paginationLeaseFree: false })).toEqual({
+      start: false,
+      reason: 'page-in-flight'
+    })
+  })
+
+  it('never competes with an owner of the viewport', () => {
+    // A route navigation cancels in-flight page timers, so a selection page must
+    // not start underneath it.
+    expect(decideSelectionBoundaryPage({ ...base, programmaticOwned: true })).toEqual({
+      start: false,
+      reason: 'navigation-owned'
+    })
+    expect(decideSelectionBoundaryPage({ ...base, restoreSearchOwned: true })).toEqual({
+      start: false,
+      reason: 'restore-owned'
+    })
   })
 })

@@ -189,9 +189,13 @@ export const EditTurn = memo(
     // or drag inside the turn (group selection flows through the click
     // capture). Right/middle button stay untouched so the batch context
     // menu is preserved.
-    const handleMouseDown = useCallback((e: ReactMouseEvent) => {
+    const handleMouseDown = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
       e.preventDefault()
+      // Selection may reparent/remount this turn under SelectionBlock. Hand
+      // focus to the stable message viewport so editable composer shortcuts
+      // stop intercepting edit-mode clipboard keys after a turn click.
+      e.currentTarget.closest<HTMLElement>('#messages')?.focus({ preventScroll: true })
     }, [])
 
     const handleContextMenu = useCallback(() => {

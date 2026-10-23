@@ -929,3 +929,109 @@ describe('transaction scroll outcome — production no-op skip contract', () => 
     expect(deps.finish).toHaveBeenCalledOnce()
   })
 })
+
+describe('resident selection follow through the transaction', () => {
+  const resolved = resolveMessageNavigation(messages, {
+    kind: 'message',
+    targetId: 'm31',
+    source: 'group'
+  })!
+
+  it('writes the geometry before any dispatch and never touches window/reveal/settle', async () => {
+    const order: string[] = []
+    const spies = {
+      scroll: vi.fn(() => {
+        order.push('scroll')
+        return 'success' as const
+      }),
+      begin: vi.fn(() => {
+        order.push('begin')
+        return true
+      }),
+      finish: vi.fn(() => order.push('finish')),
+      cancel: vi.fn(() => order.push('cancel')),
+      prepareWindow: vi.fn(() => ({ displayMessages: messages }) as unknown as MessageWindow),
+      applyWindow: vi.fn(async () => true),
+      getTargetStatus: vi.fn(() => 'visible' as const),
+      revealTarget: vi.fn(async () => {}),
+      settleDom: vi.fn(async () => {}),
+      beginProgrammaticScroll: vi.fn(() => true),
+      cancelLoadsAndTimers: vi.fn()
+    }
+
+    const result = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm31', source: 'group' },
+      {
+        resident: true,
+        isCurrent: () => {
+          order.push('isCurrent')
+          return true
+        },
+        resolve: () => resolved,
+        ...spies
+      }
+    )
+
+    expect(result).toBe('success')
+    // The write is the first thing that happens in the whole transaction.
+    expect(order).toEqual(['scroll', 'begin', 'finish'])
+    expect(spies.scroll).toHaveBeenCalledOnce()
+    // Nothing the barrier exists for is even consulted.
+    expect(spies.prepareWindow).not.toHaveBeenCalled()
+    expect(spies.applyWindow).not.toHaveBeenCalled()
+    expect(spies.getTargetStatus).not.toHaveBeenCalled()
+    expect(spies.revealTarget).not.toHaveBeenCalled()
+    expect(spies.settleDom).not.toHaveBeenCalled()
+    expect(spies.beginProgrammaticScroll).not.toHaveBeenCalled()
+    expect(spies.cancelLoadsAndTimers).not.toHaveBeenCalled()
+  })
+
+  it('reports the truthful outcome of the write (cancelled keeps no finish, missing target cancels)', async () => {
+    const cancel = vi.fn()
+    const finish = vi.fn()
+
+    const cancelled = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm31', source: 'group' },
+      {
+        resident: true,
+        begin: () => true,
+        cancel,
+        finish,
+        isCurrent: () => true,
+        resolve: () => resolved,
+        prepareWindow: () => null,
+        applyWindow: async () => true,
+        getTargetStatus: () => 'visible',
+        revealTarget: async () => {},
+        settleDom: async () => {},
+        beginProgrammaticScroll: () => true,
+        cancelLoadsAndTimers: () => {},
+        scroll: () => 'cancelled'
+      }
+    )
+    expect(cancelled).toBe('cancelled')
+    expect(finish).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledOnce()
+
+    const missing = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm31', source: 'group' },
+      {
+        resident: true,
+        begin: () => true,
+        cancel: vi.fn(),
+        finish: vi.fn(),
+        isCurrent: () => true,
+        resolve: () => null,
+        prepareWindow: () => null,
+        applyWindow: async () => true,
+        getTargetStatus: () => 'missing',
+        revealTarget: async () => {},
+        settleDom: async () => {},
+        beginProgrammaticScroll: () => true,
+        cancelLoadsAndTimers: () => {},
+        scroll: vi.fn(() => 'success' as const)
+      }
+    )
+    expect(missing).toBe('not-found')
+  })
+})

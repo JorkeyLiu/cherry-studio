@@ -6,8 +6,11 @@ const logger = loggerService.withContext('useEditMode')
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   clearSelection,
+  extendSelectionRange,
   finishProcessing,
   moveFocusSelection,
+  setAnchorGroupId,
+  setFocusedGroupId,
   setFocusedIndex,
   setLastSelectedIndex,
   setSelectedGroupIds,
@@ -17,6 +20,7 @@ import {
 import { requireEditSelectionMutable, selectIsEditSelectionMutable } from '@renderer/store/editSelection'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
+import type { EditSelectionBoundaryPageRequest } from '@renderer/types/editMode'
 import type { Message } from '@renderer/types/newMessage'
 import i18n from 'i18next'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -26,7 +30,8 @@ import { getGroupIndex, useMessageGroups } from './useMessageGroup'
 export function useCreateEditMode(
   topicId: string,
   scrollToGroup?: (askId: string) => void,
-  visibleGroupIds?: Set<string>
+  visibleGroupIds?: Set<string>,
+  requestBoundaryPage?: EditSelectionBoundaryPageRequest
 ) {
   const dispatch = useAppDispatch()
 
@@ -35,6 +40,8 @@ export function useCreateEditMode(
   const isProcessing = useAppSelector((state) => state.editMode.isProcessing)
   const selectedGroupIds = useAppSelector((state) => state.editMode.selectedGroupIds)
   const lastSelectedIndex = useAppSelector((state) => state.editMode.lastSelectedIndex)
+  const anchorGroupId = useAppSelector((state) => state.editMode.anchorGroupId)
+  const focusedGroupId = useAppSelector((state) => state.editMode.focusedGroupId)
   const focusedIndex = useAppSelector((state) => state.editMode.focusedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
@@ -90,10 +97,13 @@ export function useCreateEditMode(
       const groupIndex = getGroupIndex(groups, askId)
       if (groupIndex === -1) return
 
-      if (isShift && lastSelectedIndex !== null) {
+      const resolvedAnchorIndex = anchorGroupId ? getGroupIndex(groups, anchorGroupId) : -1
+      if (isShift && (!anchorGroupId || resolvedAnchorIndex < 0)) return
+
+      if (isShift && resolvedAnchorIndex !== -1) {
         // Shift 区域选
-        const start = Math.min(lastSelectedIndex, groupIndex)
-        const end = Math.max(lastSelectedIndex, groupIndex)
+        const start = Math.min(resolvedAnchorIndex, groupIndex)
+        const end = Math.max(resolvedAnchorIndex, groupIndex)
         const rangeAskIds = groups.slice(start, end + 1).map((g) => g.askId)
 
         if (isCtrl) {
@@ -109,6 +119,8 @@ export function useCreateEditMode(
         const index = selectedGroupIds.indexOf(askId)
         if (index >= 0) {
           dispatch(setSelectedGroupIds(selectedGroupIds.filter((id) => id !== askId)))
+          if (anchorGroupId === askId) dispatch(setAnchorGroupId(null))
+          if (focusedGroupId === askId) dispatch(setFocusedGroupId(null))
         } else {
           dispatch(setSelectedGroupIds([...selectedGroupIds, askId]))
         }
@@ -127,9 +139,11 @@ export function useCreateEditMode(
       if (!isShift) {
         dispatch(setLastSelectedIndex(groupIndex))
         dispatch(setFocusedIndex(groupIndex))
+        dispatch(setAnchorGroupId(askId))
+        dispatch(setFocusedGroupId(askId))
       }
     },
-    [dispatch, groups, selectedGroupIds, lastSelectedIndex, isEnabled]
+    [dispatch, groups, selectedGroupIds, anchorGroupId, focusedGroupId, isEnabled]
   )
 
   // 复制
@@ -243,7 +257,7 @@ export function useCreateEditMode(
     } finally {
       dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 撤销
   const handleUndo = useCallback(async () => {
@@ -277,7 +291,8 @@ export function useCreateEditMode(
   const handleMoveFocus = useCallback(
     (direction: 'up' | 'down') => {
       if (groups.length === 0) return
-      const currentIndex = focusedIndex ?? lastSelectedIndex ?? -1
+      const resolvedFocusIndex = focusedGroupId ? getGroupIndex(groups, focusedGroupId) : -1
+      const currentIndex = resolvedFocusIndex >= 0 ? resolvedFocusIndex : (focusedIndex ?? lastSelectedIndex ?? -1)
       const maxIndex = groups.length - 1
 
       let newIndex: number
@@ -297,15 +312,18 @@ export function useCreateEditMode(
         scrollToGroup?.(targetGroup.askId)
       }
     },
-    [dispatch, groups, lastSelectedIndex, focusedIndex, scrollToGroup]
+    [dispatch, groups, lastSelectedIndex, focusedIndex, focusedGroupId, scrollToGroup]
   )
 
   // 扩展选区（Shift+箭头）
   const handleExtendSelection = useCallback(
     (direction: 'up' | 'down') => {
       if (groups.length === 0) return
-      const anchorIndex = lastSelectedIndex ?? 0
-      const currentFocus = focusedIndex ?? anchorIndex
+      const resolvedAnchorIndex = anchorGroupId ? getGroupIndex(groups, anchorGroupId) : -1
+      const resolvedFocusIndex = focusedGroupId ? getGroupIndex(groups, focusedGroupId) : -1
+      if ((anchorGroupId && resolvedAnchorIndex < 0) || (focusedGroupId && resolvedFocusIndex < 0)) return
+      const anchorIndex = resolvedAnchorIndex >= 0 ? resolvedAnchorIndex : (lastSelectedIndex ?? 0)
+      const currentFocus = resolvedFocusIndex >= 0 ? resolvedFocusIndex : (focusedIndex ?? anchorIndex)
 
       let newFocus: number
       if (direction === 'up') {
@@ -314,15 +332,38 @@ export function useCreateEditMode(
         newFocus = Math.min(currentFocus + 1, groups.length - 1)
       }
 
-      if (newFocus === currentFocus) return
+      if (newFocus === currentFocus) {
+        // 端点已到已显示窗口边界：无法继续推进。把选择自身的编辑方向表达为
+        // 一次有界窗口分页请求（方向本身即意图，不合成 scroll、不伪造用户
+        // 手势），下一次真实按键重复再推进。分页结果不驱动任何后续选区写入，
+        // 因此松开按键 / 反向 / 焦点转入输入框都不会事后篡改选区；按键自动
+        // 重复期间的在途请求由分页通道的 single-flight 认领合并。
+        if (!requestBoundaryPage) return
+        try {
+          void requestBoundaryPage(direction === 'up' ? 'older' : 'newer').catch(() => {})
+        } catch {
+          // fail-closed：分页是选区边界的增强能力，请求失败不得中断按键处理
+        }
+        return
+      }
 
       // 从 anchor 到新焦点的范围
       const start = Math.min(anchorIndex, newFocus)
       const end = Math.max(anchorIndex, newFocus)
       const rangeAskIds = groups.slice(start, end + 1).map((g) => g.askId)
 
-      dispatch(setSelectedGroupIds(rangeAskIds))
-      dispatch(setFocusedIndex(newFocus))
+      // One atomic range step: a repeat key must not publish an intermediate
+      // selection (old endpoint id with the new range) to context consumers —
+      // the arrangement reads only ever observe one consistent step.
+      dispatch(
+        extendSelectionRange({
+          rangeGroupIds: rangeAskIds,
+          anchorGroupId: groups[anchorIndex]?.askId ?? null,
+          focusedGroupId: groups[newFocus]?.askId ?? null,
+          anchorIndex,
+          focusedIndex: newFocus
+        })
+      )
 
       // 滚动到新扩展的边界
       const boundaryGroup = groups[newFocus]
@@ -330,7 +371,16 @@ export function useCreateEditMode(
         scrollToGroup?.(boundaryGroup.askId)
       }
     },
-    [dispatch, groups, lastSelectedIndex, focusedIndex, scrollToGroup]
+    [
+      dispatch,
+      groups,
+      anchorGroupId,
+      lastSelectedIndex,
+      focusedIndex,
+      focusedGroupId,
+      scrollToGroup,
+      requestBoundaryPage
+    ]
   )
 
   // 清除选区（不退出编辑模式）
