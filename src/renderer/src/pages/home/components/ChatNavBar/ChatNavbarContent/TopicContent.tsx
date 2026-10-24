@@ -313,6 +313,13 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
     }
   }
 
+  // Escape leaves the editor without writing anything: the draft is dropped
+  // and the next edit starts over from the branch's stored name.
+  const cancelRename = (): void => {
+    setRenamingId(null)
+    setDraft('')
+  }
+
   const confirmDelete = async (branchId: string): Promise<void> => {
     setDeletingId(branchId)
     try {
@@ -353,6 +360,7 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
                 draft={draft}
                 onDraftChange={setDraft}
                 onCommitRename={() => void commitRename(opt.branchId as string)}
+                onCancelRename={cancelRename}
                 onStartRename={() => {
                   const node = byId.get(opt.branchId as string)
                   setDraft(node?.name ?? '')

@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { findAnchorsWithChildren, ForkDivider, forkRouteOptions, takenChildAtAnchor } from '../BranchDividers'
+import { BranchRouteOptionRow } from '../branchRouteOption'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -247,6 +248,34 @@ describe('ForkDivider', () => {
     expect(requestBranchesMock).toHaveBeenCalledWith(expect.anything(), 't-1')
   })
 
+  it('Escape cancels the divider rename: editor closes, nothing is written, re-entry starts from the original name', async () => {
+    const onSelectRoute = vi.fn()
+    render(
+      <ForkDivider
+        anchorMessageId="m1"
+        taken={undefined}
+        children={[b1(), b2()]}
+        onSelectRoute={onSelectRoute}
+        {...baseProps}
+      />
+    )
+    fireEvent.click(screen.getByTestId('branch-fork-toggle-m1'))
+    await waitFor(() => expect(screen.getByTestId('branch-fork-list-m1')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('branch-fork-rename-btn-b-1'))
+    const input = screen.getByTestId('branch-fork-rename-input')
+    fireEvent.change(input, { target: { value: 'Discarded draft' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    // The editor is gone, the option row is back ...
+    expect(screen.queryByTestId('branch-fork-rename-input')).toBeNull()
+    expect(screen.getByTestId('branch-fork-item-b-1')).toHaveTextContent('B1')
+    // ... nothing was written and the catalog was not refreshed ...
+    expect(renameBranchMock).not.toHaveBeenCalled()
+    expect(requestBranchesMock).not.toHaveBeenCalled()
+    // ... and re-entering starts from the stored name, not the discarded draft.
+    fireEvent.click(screen.getByTestId('branch-fork-rename-btn-b-1'))
+    expect(screen.getByTestId('branch-fork-rename-input')).toHaveValue('B1')
+  })
+
   it('delete via the divider popup removes the subtree and refreshes the catalog', async () => {
     deleteBranchSubtreeMock.mockResolvedValue({ deletedBranchIds: ['b-1'], fallbackBranchId: null })
     const onSelectRoute = vi.fn()
@@ -333,5 +362,60 @@ describe('ForkDivider', () => {
       'm0',
       expect.objectContaining({ anchorMessageId: 'm0', dividerKey: 'm0::main', parentBranchId: null })
     )
+  })
+})
+
+describe('BranchRouteOptionRow rename cancel guard', () => {
+  const rowProps = {
+    branchId: 'b-1' as string | null,
+    label: 'B1',
+    selected: false,
+    testIdPrefix: 'branch-fork' as const,
+    anchorMessageId: 'm1',
+    draft: 'Draft',
+    onDraftChange: () => {},
+    onStartRename: () => {},
+    onConfirmDelete: () => {},
+    deleting: false,
+    renameLabel: 'rename',
+    deleteLabel: 'delete',
+    deleteConfirmTitle: 'confirm',
+    onSelect: () => {}
+  }
+
+  it('Escape cancels without committing, and the blur that follows never writes the draft', () => {
+    const onCommitRename = vi.fn()
+    const onCancelRename = vi.fn()
+    const { rerender } = render(
+      <BranchRouteOptionRow {...rowProps} renaming onCommitRename={onCommitRename} onCancelRename={onCancelRename} />
+    )
+    const input = screen.getByTestId('branch-fork-rename-input')
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(onCancelRename).toHaveBeenCalledTimes(1)
+    expect(onCommitRename).not.toHaveBeenCalled()
+    // The editor can still emit a blur after cancel: it must not write.
+    fireEvent.blur(input)
+    expect(onCommitRename).not.toHaveBeenCalled()
+    // A later edit session blurs-and-saves exactly as before.
+    rerender(
+      <BranchRouteOptionRow
+        {...rowProps}
+        renaming={false}
+        draft=""
+        onCommitRename={onCommitRename}
+        onCancelRename={onCancelRename}
+      />
+    )
+    rerender(
+      <BranchRouteOptionRow
+        {...rowProps}
+        renaming
+        draft="Renamed"
+        onCommitRename={onCommitRename}
+        onCancelRename={onCancelRename}
+      />
+    )
+    fireEvent.blur(screen.getByTestId('branch-fork-rename-input'))
+    expect(onCommitRename).toHaveBeenCalledTimes(1)
   })
 })

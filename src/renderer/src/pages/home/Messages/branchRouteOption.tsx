@@ -1,5 +1,7 @@
 import { Button, Input, Popconfirm } from 'antd'
 import { Pencil, Trash2 } from 'lucide-react'
+import type { KeyboardEvent } from 'react'
+import { useEffect, useRef } from 'react'
 
 /**
  * Shared visual primitive for branch route options (top global selector and
@@ -8,6 +10,8 @@ import { Pencil, Trash2 } from 'lucide-react'
  * - Option row styling/highlight: selected uses `primary`, others `text`
  *   (highlighted background is sufficient — no checkmark icons).
  * - Rename/delete controls for non-main branch options.
+ * - Rename editing: Enter or blur commits the draft, Escape cancels it. The
+ *   blur that can follow the editor's removal on cancel must never commit.
  * - No data logic: the caller owns flat vs cascader structure. Dividers pass
  *   a flat peer set only; multi-column cascading stays in the top selector.
  */
@@ -22,6 +26,8 @@ export interface BranchRouteOptionRowProps {
   draft: string
   onDraftChange: (value: string) => void
   onCommitRename: () => void
+  /** Escape while editing: leave the editor without writing the draft. */
+  onCancelRename: () => void
   onStartRename: () => void
   onConfirmDelete: () => void
   deleting: boolean
@@ -44,6 +50,7 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
     draft,
     onDraftChange,
     onCommitRename,
+    onCancelRename,
     onStartRename,
     onConfirmDelete,
     deleting,
@@ -54,6 +61,26 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
     onSelect,
     onHover
   } = props
+  // Cancelling unmounts the editor, which can still emit a blur. The cancel
+  // path arms this guard first so that blur never reaches `onCommitRename`;
+  // starting a new edit disarms it again.
+  const renameCancelled = useRef(false)
+  useEffect(() => {
+    if (renaming) renameCancelled.current = false
+  }, [renaming])
+  const handleRenameKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== 'Escape') return
+    // Cancelling the edit is the whole intent: keep the surrounding popover
+    // open (Escape would otherwise also close it).
+    event.preventDefault()
+    event.stopPropagation()
+    renameCancelled.current = true
+    onCancelRename()
+  }
+  const handleRenameBlur = (): void => {
+    if (renameCancelled.current) return
+    onCommitRename()
+  }
   const isBranch = branchId !== null
   const rowTestId =
     testIdPrefix === 'branch-cascader'
@@ -86,7 +113,8 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           onPressEnter={onCommitRename}
-          onBlur={onCommitRename}
+          onBlur={handleRenameBlur}
+          onKeyDown={handleRenameKeyDown}
           autoFocus
         />
       ) : (
