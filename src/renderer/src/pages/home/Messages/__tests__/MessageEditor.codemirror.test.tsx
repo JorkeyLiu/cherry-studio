@@ -1,7 +1,8 @@
+import type * as PasteServiceModule from '@renderer/services/PasteService'
 import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import React, { useCallback, useEffect, useReducer, useRef } from 'react'
@@ -23,6 +24,12 @@ const mocks = vi.hoisted(() => ({
   sendKeyPressed: vi.fn(() => false),
   captureIntent: vi.fn(() => true),
   settings: { renderInputMessageAsMarkdown: true },
+  pasteLongTextAsFile: false,
+  pasteCalls: [] as unknown[][],
+  onEditorPaste: null as null | ((event: ClipboardEvent) => void),
+  createTempFile: vi.fn(),
+  writeTempFile: vi.fn(),
+  getTempFile: vi.fn(),
   citationTags: [] as unknown[],
   liveViewEnabled: false,
   liveView: null as {
@@ -46,7 +53,7 @@ vi.mock('@renderer/services/FileManager', () => ({
 
 vi.mock('@renderer/hooks/useSettings', () => ({
   useSettings: () => ({
-    pasteLongTextAsFile: false,
+    pasteLongTextAsFile: mocks.pasteLongTextAsFile,
     pasteLongTextThreshold: 1000,
     fontSize: 14,
     sendMessageShortcut: 'Enter',
@@ -77,14 +84,23 @@ vi.mock('@renderer/utils/input', () => ({
   isSendMessageKeyPressed: mocks.sendKeyPressed
 }))
 
-vi.mock('@renderer/services/PasteService', () => ({
-  default: {
-    handlePaste: vi.fn(),
-    registerHandler: vi.fn(),
-    unregisterHandler: vi.fn(),
-    setLastFocusedComponent: vi.fn()
+// The shared paste service runs behind a recording proxy: the editor's
+// role-gated arguments are observable, and the REAL service effect (native
+// paste interception, temp-file creation) is exercised rather than stubbed.
+vi.mock('@renderer/services/PasteService', async () => {
+  const actual = await vi.importActual<typeof PasteServiceModule>('@renderer/services/PasteService')
+  return {
+    default: {
+      handlePaste: (...args: Parameters<typeof actual.handlePaste>) => {
+        mocks.pasteCalls.push(args)
+        return actual.handlePaste(...args)
+      },
+      registerHandler: vi.fn(),
+      unregisterHandler: vi.fn(),
+      setLastFocusedComponent: vi.fn()
+    }
   }
-}))
+})
 
 vi.mock('@renderer/utils/messageUtils/find', () => ({
   findAllBlocks: (message: Message) => (message as Message & { initialBlocks?: MessageBlock[] }).initialBlocks ?? [],
@@ -222,6 +238,7 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     onChange,
     onHeightChange,
     onEditorKeyDown,
+    onEditorPaste,
     onEditorReady,
     onHistoryChange,
     historySnapshot,
@@ -237,6 +254,7 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     onChange?: (value: string) => void
     onHeightChange?: (height: number) => void
     onEditorKeyDown?: (event: KeyboardEvent) => boolean
+    onEditorPaste?: (event: ClipboardEvent) => void
     onEditorReady?: () => void
     onHistoryChange?: (depths: { undo: number; redo: number }) => void
     historySnapshot?: { json?: { history?: { done?: string[]; undone?: string[] } } } | null
@@ -247,6 +265,7 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     // `mocks.autoHeightCallback`. The expanded modal engine mounts with
     // onHeightChange undefined (production never measures there).
     mocks.autoHeightCallback = onHeightChange ?? null
+    mocks.onEditorPaste = onEditorPaste ?? null
     const initial = value ?? ''
     const docRef = useRef(initial)
     const selRef = useRef({ anchor: initial.length, head: initial.length })
@@ -417,7 +436,11 @@ vi.mock('@renderer/components/CodeEditor', () => ({
 
     return (
       <div>
-        <div className="cm-content" contentEditable={true} />
+        <div
+          className="cm-content"
+          contentEditable={true}
+          onPaste={(e) => onEditorPaste?.(e.nativeEvent as unknown as ClipboardEvent)}
+        />
         {mocks.liveViewEnabled && <div data-testid="mock-cm-doc">{docRef.current}</div>}
         <textarea
           aria-label="message-editor-source"
@@ -484,6 +507,18 @@ const mainTextBlock: MessageBlock = {
   status: MessageBlockStatus.SUCCESS
 }
 
+const pastedTextFile = {
+  id: 'pasted-text-file',
+  name: 'pasted_text.txt',
+  origin_name: 'pasted_text.txt',
+  path: '/tmp/pasted_text.txt',
+  ext: '.txt',
+  type: 'text',
+  count: 1,
+  size: 1200,
+  created_at: '2026-07-30T00:00:00.000Z'
+} as FileMetadata
+
 const makeMessage = (role: 'user' | 'assistant' = 'user', blocks?: MessageBlock[]) =>
   ({
     id: 'message-1',
@@ -543,6 +578,16 @@ beforeEach(() => {
   mocks.liveView = null
   mocks.commandCalls = []
   mocks.autoHeightCallback = null
+  mocks.pasteLongTextAsFile = false
+  mocks.pasteCalls = []
+  mocks.onEditorPaste = null
+  mocks.createTempFile.mockReset().mockResolvedValue('/tmp/pasted_text.txt')
+  mocks.writeTempFile.mockReset().mockResolvedValue(undefined)
+  mocks.getTempFile.mockReset().mockResolvedValue(pastedTextFile)
+  const fileApi = (window as unknown as { api: { file: Record<string, unknown> } }).api.file
+  fileApi.createTempFile = mocks.createTempFile
+  fileApi.write = mocks.writeTempFile
+  fileApi.get = mocks.getTempFile
   localStorage.clear()
 })
 
@@ -1418,5 +1463,86 @@ describe('MessageEditor expanded modal correction', () => {
     expect(screen.getByTestId('message-editor-undo-btn')).toBeEnabled()
     await userEvent.click(screen.getByTestId('message-editor-undo-btn'))
     expect(screen.getByLabelText('message-editor-source')).toHaveValue(RAW_MARKDOWN)
+  })
+})
+
+describe('MessageEditor long-text paste role gate', () => {
+  // Above the mocked 1000-character pasteLongTextThreshold.
+  const LONG_TEXT = `pasted-${'x'.repeat(1200)}`
+
+  /** Paste plain clipboard text into the editor surface the way CodeMirror does. */
+  const pasteText = (text: string) => {
+    const surface = document.querySelector('.message-editor-area .cm-content')
+    expect(surface, 'editor surface must be mounted').not.toBeNull()
+    const event = createEvent.paste(surface as Element, {
+      clipboardData: {
+        getData: (type: string) => (type === 'text' ? text : ''),
+        files: [],
+        types: ['text/plain']
+      }
+    }) as ClipboardEvent
+    fireEvent(surface as Element, event)
+    return event
+  }
+
+  it('keeps over-threshold assistant paste as body text and never converts it to a file', async () => {
+    mocks.pasteLongTextAsFile = true
+    renderEditor('assistant')
+
+    const event = pasteText(LONG_TEXT)
+    await waitFor(() => expect(mocks.pasteCalls).toHaveLength(1))
+
+    // The effective flag handed to the shared paste service is role-gated off…
+    expect(mocks.pasteCalls[0][4]).toBe(false)
+    // …so the native text paste is not intercepted (CodeMirror inserts the body
+    // text itself) and no attachment is produced for the model's own message.
+    expect(event.defaultPrevented).toBe(false)
+    expect(mocks.createTempFile).not.toHaveBeenCalled()
+    expect(mocks.writeTempFile).not.toHaveBeenCalled()
+    expect(mocks.getTempFile).not.toHaveBeenCalled()
+    expect(screen.queryByText('pasted_text.txt')).toBeNull()
+    expect(screen.getByLabelText('message-editor-source')).toHaveValue(RAW_MARKDOWN)
+  })
+
+  it('keeps over-threshold assistant paste as body text in the expanded editor', async () => {
+    mocks.pasteLongTextAsFile = true
+    renderEditor('assistant')
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    expect(screen.getByTestId('message-editor-expanded')).toBeInTheDocument()
+
+    const event = pasteText(LONG_TEXT)
+    await waitFor(() => expect(mocks.pasteCalls).toHaveLength(1))
+
+    expect(mocks.pasteCalls[0][4]).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+    expect(mocks.createTempFile).not.toHaveBeenCalled()
+    expect(screen.queryByText('pasted_text.txt')).toBeNull()
+  })
+
+  it('still converts over-threshold user paste to a file while the setting is enabled', async () => {
+    mocks.pasteLongTextAsFile = true
+    renderEditor('user')
+
+    const event = pasteText(LONG_TEXT)
+
+    expect(event.defaultPrevented).toBe(true)
+    await waitFor(() => expect(mocks.getTempFile).toHaveBeenCalledTimes(1))
+    expect(mocks.pasteCalls[0][4]).toBe(true)
+    expect(mocks.createTempFile).toHaveBeenCalledWith('pasted_text.txt')
+    expect(mocks.writeTempFile).toHaveBeenCalledWith('/tmp/pasted_text.txt', LONG_TEXT)
+    expect(await screen.findByText('pasted_text.txt')).toBeInTheDocument()
+    expect(screen.getByLabelText('message-editor-source')).toHaveValue(RAW_MARKDOWN)
+  })
+
+  it('leaves user paste as body text while the setting is disabled', async () => {
+    renderEditor('user')
+
+    const event = pasteText(LONG_TEXT)
+    await waitFor(() => expect(mocks.pasteCalls).toHaveLength(1))
+
+    expect(mocks.pasteCalls[0][4]).toBe(false)
+    expect(event.defaultPrevented).toBe(false)
+    expect(mocks.createTempFile).not.toHaveBeenCalled()
+    expect(screen.queryByText('pasted_text.txt')).toBeNull()
   })
 })

@@ -1237,6 +1237,13 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
     return [...imageExts, ...audioExts, ...videoExts, ...documentExts, ...textExts]
   }, [])
 
+  // Long-text-as-file conversion is a composer affordance for user-authored
+  // messages. Assistant message bodies are the model's own source text, so
+  // pasted text always lands as body content there and is never converted into
+  // an attachment, even when the setting is enabled. Other clipboard
+  // attachments keep flowing through the same handler for both roles.
+  const effectivePasteLongTextAsFile = isUserMessage && pasteLongTextAsFile
+
   useEffect(() => {
     return () => {
       isMountedRef.current = false
@@ -1252,14 +1259,14 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
         extensions,
         setFiles,
         undefined, // 不需要setText
-        pasteLongTextAsFile,
+        effectivePasteLongTextAsFile,
         pasteLongTextThreshold,
         undefined, // 不需要text
         undefined, // 不需要 resizeTextArea
         t
       )
     },
-    [extensions, pasteLongTextThreshold, t, pasteLongTextAsFile]
+    [effectivePasteLongTextAsFile, extensions, pasteLongTextThreshold, t]
   )
 
   // 添加全局粘贴事件处理
