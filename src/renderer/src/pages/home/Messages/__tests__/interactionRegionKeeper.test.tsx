@@ -1325,3 +1325,208 @@ describe('visual baseline edge: default TOP vs declared BOTTOM share one helper'
     keeper.unmount()
   })
 })
+
+describe('deferred (asynchronous) layout mutation: mid-list insertion', () => {
+  /**
+   * Mid-list chat geometry under column-reverse: the DOM is newest-first, so
+   * `m3` (newer) sits visually BELOW the clicked row `m1` and `m4` (older)
+   * above it. Inserting the user/assistant pair after `m1` therefore places it
+   * directly below `m1` and, at an unchanged scroll position, pushes `m1` and
+   * everything above it UP by the inserted height while the newer rows below
+   * keep their distance from the content bottom.
+   */
+  const buildMidList = (): {
+    container: HTMLDivElement
+    ref: { current: HTMLDivElement | null }
+    below: HTMLDivElement
+  } => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: -1500, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 9000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const make = (id: string): HTMLDivElement => {
+      const el = document.createElement('div')
+      el.id = `message-${id}`
+      el.setAttribute('data-message-id', id)
+      mockRect(el, `row-${id}`)
+      return el
+    }
+    const below = make('m3')
+    const row = make('m1')
+    const footer = document.createElement('div')
+    footer.setAttribute('data-interaction-region', 'message-controls')
+    footer.setAttribute('data-viewport-baseline-edge', 'end')
+    mockRect(footer, 'footer-m1')
+    row.append(footer)
+    const above = make('m4')
+    container.append(below, row, above)
+    document.body.append(container)
+    return { container, ref: { current: container }, below }
+  }
+
+  const seedMidListRects = (): void => {
+    rects.set('row-m3', { top: 400, height: 200 })
+    rects.set('row-m1', { top: 100, height: 300 })
+    rects.set('footer-m1', { top: 300, height: 26 })
+    rects.set('row-m4', { top: -200, height: 300 })
+  }
+
+  it('holds the clicked region and the content above it while the inserted pair extends downward', async () => {
+    // The reported bug: the insert command's rows land only after the
+    // authority round-trip, so the DOM is unchanged far longer than the
+    // quiet-read bound and the gesture was dropped as a "no-effect click";
+    // the arriving rows then displaced the clicked region and the content
+    // above it by the inserted height. Declaring the gesture deferred keeps
+    // the SAME shared hold armed across the gap, so the first frame that
+    // shows the rows is already compensated.
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', 300)
+    seedMidListRects()
+    containerRect.top = 0
+    const { container, ref } = buildMidList()
+    expect(mod.captureInteractionIntent(controller, { kind: 'message', id: 'm1' }, 'message-controls', container)).toBe(
+      true
+    )
+    expect(controller.activeInteractionIntent).toMatchObject({ region: 'message-controls', offset: 326 })
+    const token = mod.markInteractionLayoutDeferred(controller, { kind: 'message', id: 'm1' }, 'message-controls')
+    expect(typeof token).toBe('number')
+    expect(controller.activeInteractionIntent?.pendingLayoutMutation).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // Async gap far past the quiet-read bound: still armed, nothing written and
+    // no false "no effect" verdict.
+    await act(async () => {
+      for (let i = 0; i < 14; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).not.toBeNull()
+    expect(controller.activeInteractionIntent?.pendingLayoutMutation).toBe(true)
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    // Rows land: below m1 stays put, m1 and everything above move up by 110.
+    act(() => {
+      rects.set('row-m1', { top: -10, height: 300 })
+      rects.set('footer-m1', { top: 190, height: 26 })
+      rects.set('row-m4', { top: -310, height: 300 })
+      keeper.rerender(1)
+    })
+    // Same frame, before any convergence: the region is held at its captured
+    // baseline by moving the viewport up (away from the bottom) by the
+    // inserted height.
+    expect(container.scrollTop).toBe(-1610)
+    expect(mod.settleInteractionLayoutDeferred(controller, token, 'applied')).toBe(true)
+    // Converged frame: compensation shifted every offset back down by 110, so
+    // the clicked region and the content above keep their exact viewport
+    // positions while the newer row below moved down (expanded downward).
+    act(() => {
+      rects.set('row-m1', { top: 100, height: 300 })
+      rects.set('footer-m1', { top: 300, height: 26 })
+      rects.set('row-m4', { top: -200, height: 300 })
+      rects.set('row-m3', { top: 510, height: 200 })
+    })
+    await act(async () => {
+      for (let i = 0; i < 8; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm1',
+      offset: 100
+    })
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('m1')
+    expect(stored?.intraRowOffset).toBe(100)
+    expect(stored?.isAtBottom).toBe(false)
+    keeper.unmount()
+  })
+
+  it('a command that never lands drops the deferred gesture fail-closed (no adopt, no snapshot)', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', 300)
+    seedMidListRects()
+    containerRect.top = 0
+    const { container, ref } = buildMidList()
+    expect(mod.captureInteractionIntent(controller, { kind: 'message', id: 'm1' }, 'message-controls', container)).toBe(
+      true
+    )
+    const token = mod.markInteractionLayoutDeferred(controller, { kind: 'message', id: 'm1' }, 'message-controls')
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).not.toBeNull()
+    // The insert rejected: nothing will land, so the gesture is released.
+    expect(mod.settleInteractionLayoutDeferred(controller, token, 'failed')).toBe(true)
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm1',
+      offset: 300
+    })
+    keeper.unmount()
+  })
+
+  it('genuine user scroll during the gap wins: the deferred hold never pulls the user back', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', 300)
+    seedMidListRects()
+    containerRect.top = 0
+    const { container, ref } = buildMidList()
+    expect(mod.captureInteractionIntent(controller, { kind: 'message', id: 'm1' }, 'message-controls', container)).toBe(
+      true
+    )
+    expect(
+      mod.markInteractionLayoutDeferred(controller, { kind: 'message', id: 'm1' }, 'message-controls')
+    ).not.toBeNull()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    await act(async () => {
+      for (let i = 0; i < 3; i++) await flushFrame()
+    })
+    // Genuine input supersedes the pending local hold (position-intent
+    // priority) and the user scrolls to a new position of their own.
+    act(() => {
+      controller.declareUserIntent()
+      container.scrollTop = -1300
+    })
+    await act(async () => {
+      for (let i = 0; i < 3; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    // Rows land afterwards: the deferred region hold must not restore the
+    // pre-click baseline over the user's own scroll position.
+    act(() => {
+      rects.set('row-m1', { top: -10, height: 300 })
+      rects.set('footer-m1', { top: 190, height: 26 })
+      rects.set('row-m4', { top: -310, height: 300 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).not.toBe(-1610)
+    keeper.unmount()
+  })
+
+  it('true bottom keeps its ownership: no deferred gesture can be declared there', async () => {
+    // Bottom behaviour is unchanged: at the natural bottom the bottom pin owns
+    // geometry, capture refuses, and the dispatching call site's declaration
+    // finds no armed gesture (returns null) instead of inventing one.
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    expect(controller.beginSendBottom({ topicId: 't1', route: null })).toBe(true)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toBeNull()
+    seedMidListRects()
+    containerRect.top = 0
+    const { container } = buildMidList()
+    expect(mod.captureInteractionIntent(controller, { kind: 'message', id: 'm1' }, 'message-controls', container)).toBe(
+      false
+    )
+    expect(mod.markInteractionLayoutDeferred(controller, { kind: 'message', id: 'm1' }, 'message-controls')).toBeNull()
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(mod.settleInteractionLayoutDeferred(controller, null, 'applied')).toBe(false)
+    document.body.innerHTML = ''
+  })
+})

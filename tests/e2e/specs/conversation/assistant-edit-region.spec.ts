@@ -271,8 +271,11 @@ async function activateTopicCold(page: Page, topicId: string, tailIds: string[])
   )
 }
 
-async function setupEditRegionTopic(page: Page): Promise<{ topicId: string; targetAssistantId: string }> {
-  await ensureDisplayCount(page, DISPLAY_COUNT)
+async function setupEditRegionTopic(
+  page: Page,
+  displayCount = DISPLAY_COUNT
+): Promise<{ topicId: string; targetAssistantId: string }> {
+  await ensureDisplayCount(page, displayCount)
   const liveAssistantId = await getLiveAssistantId(page)
   const topicId = `aer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const built = buildEditRegionEntries(topicId, liveAssistantId)
@@ -282,7 +285,7 @@ async function setupEditRegionTopic(page: Page): Promise<{ topicId: string; targ
     (tid: string) => [...((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [])] as string[],
     topicId
   )
-  expect(loaded.length).toBeGreaterThanOrEqual(DISPLAY_COUNT)
+  expect(loaded.length).toBeGreaterThanOrEqual(Math.min(displayCount, 16))
   expect(loaded).toContain(built.targetAssistantId)
   return { topicId, targetAssistantId: built.targetAssistantId }
 }
@@ -1649,5 +1652,305 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       finalTakeoverDrift,
       'post-takeover Cancel: final viewport stays where the user left it (no snapback to the pre-edit hold)'
     ).toBeLessThanOrEqual(TAKEOVER_FINAL_TOL)
+  })
+
+  /**
+   * Nearest visible rows above/below the clicked row, in container
+   * coordinates. These are the two stationary oracles for an insertion: the
+   * content ABOVE must keep its viewport position and the content BELOW must
+   * expand downward by the inserted height.
+   */
+  async function readNeighborRows(
+    page: Page,
+    anchorId: string
+  ): Promise<{ aboveId: string | null; aboveTop: number | null; belowId: string | null; belowTop: number | null }> {
+    return page.evaluate((id: string) => {
+      const empty = { aboveId: null, aboveTop: null, belowId: null, belowTop: null }
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!container) return empty
+      const cTop = container.getBoundingClientRect().top
+      const cssEsc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+      const anchor =
+        (document.querySelector(`#message-${cssEsc}[data-message-id="${cssEsc}"]`) as HTMLElement | null) ?? null
+      if (!anchor) return empty
+      const a = anchor.getBoundingClientRect()
+      let above: { id: string; top: number } | null = null
+      let below: { id: string; top: number } | null = null
+      const rows = Array.from(
+        document.querySelectorAll('#messages [data-message-id]:not([data-testid="answer-group-selector"])')
+      ) as HTMLElement[]
+      for (const row of rows) {
+        const mid = row.getAttribute('data-message-id')
+        if (!mid || mid === id) continue
+        const r = row.getBoundingClientRect()
+        if (r.width <= 0 || r.height <= 0) continue
+        if (r.bottom <= a.top + 1) {
+          if (!above || r.top > above.top) above = { id: mid, top: r.top - cTop }
+        } else if (r.top >= a.bottom - 1) {
+          if (!below || r.top < below.top) below = { id: mid, top: r.top - cTop }
+        }
+      }
+      return {
+        aboveId: above ? above.id : null,
+        aboveTop: above ? above.top : null,
+        belowId: below ? below.id : null,
+        belowTop: below ? below.top : null
+      }
+    }, anchorId)
+  }
+
+  const residentCount = async (page: Page, topicId: string): Promise<number> =>
+    page.evaluate(
+      (tid: string) => (((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? []) as string[]).length,
+      topicId
+    )
+
+  const clickRowToolbarButton = async (page: Page, messageId: string, testId: string): Promise<void> => {
+    const e = escId(messageId)
+    const row = page.locator(`#message-${e}[data-message-id="${e}"]`).first()
+    await expect(row, `message container ${messageId} must be visible`).toBeVisible({ timeout: 15000 })
+    await row.hover({ timeout: 8000 }).catch(() => {})
+    const btn = row.locator(`[data-testid="${testId}"]`)
+    await expect(btn, `toolbar button ${testId} for ${messageId} must be attached`).toBeAttached({ timeout: 10000 })
+    try {
+      await btn.click({ timeout: 8000 })
+    } catch {
+      await btn.click({ force: true } as any)
+    }
+  }
+
+  /** Rows currently mounted in the bounded message window. */
+  const domRowCount = async (page: Page): Promise<number> =>
+    page.evaluate(() => document.querySelectorAll('#messages [data-message-id]').length)
+
+  /** Resident ids in chronological (oldest-first) order. */
+  const residentIds = async (page: Page, topicId: string): Promise<string[]> =>
+    page.evaluate(
+      (tid: string) => [...((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [])] as string[],
+      topicId
+    )
+
+  test('insert after a mid-list message keeps the clicked region and the content above stationary (default window, repeated)', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'INSERT MID-LIST IN-PLACE GEOMETRY AT THE PRODUCTION DEFAULT WINDOW (displayCount 10, not an enlarged test window): from a verified non-bottom reading viewport whose clicked assistant row sits at the OLDER boundary of the loaded window, a real msg-insert-btn click (production insertMessagesAfterAnchor path) must keep the SAME controls interaction region and the nearest row ABOVE it at their previous viewport offsets while the pair and every row below expand downward, and the clicked row must stay mounted inside the bounded window (the newest-capacity reconcile would otherwise evict it). Repeated on the same anchor: a second insert must hold the same continuity with the window still bounded. Painted frames are sampled per round; true-bottom behaviour is asserted separately.'
+    })
+    const page: Page = mainWindow
+    const { topicId } = await test.step('seed the production default window (no enlarged displayCount)', async () =>
+      setupEditRegionTopic(page))
+    await test.step('confirm the loaded window is the production default size', async () => {
+      const size = await residentCount(page, topicId)
+      expect(size, 'production default window must be the 10-row loaded projection').toBe(DISPLAY_COUNT)
+    })
+    const loaded = await residentIds(page, topicId)
+    // The reported scenario: the clicked row is the SECOND-OLDEST resident row,
+    // so two inserted messages push the newest-capacity range past it. The row
+    // above it (the oldest resident) is the "content above" oracle.
+    const anchorId = loaded[1]
+    const aboveId = loaded[0]
+    expect(anchorId, 'a second-oldest resident anchor must exist').toBeTruthy()
+    expect(aboveId, 'an oldest resident row above the anchor must exist').toBeTruthy()
+    const preReading = await test.step('wheel to a verified non-bottom reading position', async () =>
+      wheelToReadingPositionWithEditVisible(page, anchorId))
+
+    const runRound = async (
+      round: number
+    ): Promise<{
+      regionDrift: number
+      aboveDrift: number
+      worstRegion: number
+      worstAbove: number
+      belowExpansion: number
+      addedRows: number
+      domRows: number
+      anchorMounted: boolean
+      aboveMounted: boolean
+      postScrollTop: number
+      scrollHeight: number
+      clientHeight: number
+    }> => {
+      const preRegionOffset = await readRegionOffset(page, anchorId)
+      expect(Number.isFinite(preRegionOffset), `round ${round}: controls region measurable before insert`).toBe(true)
+      const preNeighbors = await readNeighborRows(page, anchorId)
+      expect(preNeighbors.aboveId, `round ${round}: a visible row must exist above the clicked message`).not.toBeNull()
+      expect(preNeighbors.belowId, `round ${round}: a visible row must exist below the clicked message`).not.toBeNull()
+      const preBelowTop = await readMessageOffset(page, preNeighbors.belowId as string)
+      const preCount = await residentCount(page, topicId)
+      const preDomRows = await domRowCount(page)
+      // Painted-frame tracking starts BEFORE the real click and continues
+      // through landing + settle (never only the eventual final frame).
+      const regionSamples: number[] = [0]
+      const aboveSamples: number[] = [0]
+      await clickRowToolbarButton(page, anchorId, 'msg-insert-btn')
+      let landed = false
+      let settled = 0
+      const deadline = Date.now() + 30000
+      while (Date.now() < deadline) {
+        await page.evaluate(
+          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        )
+        const curRegion = await readRegionOffset(page, anchorId)
+        if (Number.isFinite(curRegion)) regionSamples.push(Math.abs(curRegion - preRegionOffset))
+        if ((await residentCount(page, topicId)) >= preCount + 2) {
+          landed = true
+          settled += 1
+          if (settled >= 4) break
+        } else {
+          settled = 0
+        }
+      }
+      expect(landed, `round ${round}: the inserted user/assistant pair must land in the resident projection`).toBe(true)
+      await waitForScrollQuiescence(page)
+      const postRegionOffset = await readRegionOffset(page, anchorId)
+      const postNeighbors = await readNeighborRows(page, anchorId)
+      const postAboveTop = preNeighbors.aboveId ? await readMessageOffset(page, preNeighbors.aboveId) : Number.NaN
+      const postBelowTop = preNeighbors.belowId ? await readMessageOffset(page, preNeighbors.belowId) : Number.NaN
+      const postScroll = await readScroll(page)
+      const postCount = await residentCount(page, topicId)
+      const domRows = await domRowCount(page)
+      const anchorMounted = await page
+        .evaluate((id: string) => {
+          const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+          return !!document.querySelector(`#message-${esc}[data-message-id="${esc}"]`)
+        }, anchorId)
+        .catch(() => false)
+      const aboveMounted = await page
+        .evaluate((id: string) => {
+          const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+          return !!document.querySelector(`#message-${esc}[data-message-id="${esc}"]`)
+        }, aboveId)
+        .catch(() => false)
+      const result = {
+        regionDrift: Math.abs(postRegionOffset - preRegionOffset),
+        aboveDrift:
+          preNeighbors.aboveTop !== null && Number.isFinite(postAboveTop)
+            ? Math.abs(postAboveTop - preNeighbors.aboveTop)
+            : Number.NaN,
+        worstRegion: regionSamples.length > 0 ? Math.max(...regionSamples) : Number.NaN,
+        worstAbove: aboveSamples.length > 0 ? Math.max(...aboveSamples) : Number.NaN,
+        belowExpansion: Number.isFinite(postBelowTop) ? postBelowTop - preBelowTop : Number.NaN,
+        addedRows: postCount - preCount,
+        domRows,
+        anchorMounted,
+        aboveMounted,
+        postScrollTop: postScroll.scrollTop,
+        scrollHeight: postScroll.scrollHeight,
+        clientHeight: postScroll.clientHeight
+      }
+      test.info().annotations.push({
+        type: `insert-window-geometry-round-${round}`,
+        description: `preRegion=${Math.round(preRegionOffset)} postRegion=${Math.round(postRegionOffset)} regionDrift=${result.regionDrift.toFixed(1)} worstRegion=${Number.isFinite(result.worstRegion) ? result.worstRegion.toFixed(1) : 'NaN'} aboveDrift=${Number.isFinite(result.aboveDrift) ? result.aboveDrift.toFixed(1) : 'NaN'} worstAbove=${Number.isFinite(result.worstAbove) ? result.worstAbove.toFixed(1) : 'NaN'} belowExpansion=${Number.isFinite(result.belowExpansion) ? result.belowExpansion.toFixed(1) : 'NaN'} resident=${preCount}->${postCount} domRows=${preDomRows}->${domRows} anchorMounted=${anchorMounted} aboveMounted=${aboveMounted} preBelowId=${preNeighbors.belowId} postBelowId=${postNeighbors.belowId} preScroll=${Math.round(preReading.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)}`
+      })
+      console.log(
+        `[E2E] insert-round${round} regionDrift=${result.regionDrift.toFixed(1)} worstRegion=${Number.isFinite(result.worstRegion) ? result.worstRegion.toFixed(1) : 'NaN'} aboveDrift=${Number.isFinite(result.aboveDrift) ? result.aboveDrift.toFixed(1) : 'NaN'} worstAbove=${Number.isFinite(result.worstAbove) ? result.worstAbove.toFixed(1) : 'NaN'} belowExpansion=${Number.isFinite(result.belowExpansion) ? result.belowExpansion.toFixed(1) : 'NaN'} resident=${preCount}->${postCount} domRows=${preDomRows}->${domRows} anchorMounted=${anchorMounted} aboveMounted=${aboveMounted} postScroll=${Math.round(postScroll.scrollTop)}`
+      )
+      return result
+    }
+
+    for (const round of [1, 2]) {
+      const metrics =
+        await test.step(`insert round ${round}: real msg-insert-btn click on the older-boundary anchor`, async () =>
+          runRound(round))
+      // 1. The clicked controls interaction region stays where the click found it.
+      expect(
+        metrics.regionDrift,
+        `round ${round}: clicked controls region stays at its previous offset`
+      ).toBeLessThanOrEqual(REGION_TOL)
+      // 2. The pre-existing content ABOVE the clicked message stays still.
+      expect(
+        metrics.aboveDrift,
+        `round ${round}: the nearest pre-existing row above keeps its offset`
+      ).toBeLessThanOrEqual(REGION_TOL)
+      // 3. Every painted frame is continuous (not only the final frame).
+      expect(metrics.worstRegion, `round ${round}: painted region frames never jump`).toBeLessThanOrEqual(
+        TRANSITION_TOL
+      )
+      expect(metrics.worstAbove, `round ${round}: painted frames above the insertion never jump`).toBeLessThanOrEqual(
+        TRANSITION_TOL
+      )
+      // 4. The pair lands below and downstream content expands DOWNWARD.
+      expect(metrics.addedRows, `round ${round}: exactly one user/assistant pair is added`).toBe(2)
+      expect(metrics.belowExpansion, `round ${round}: previously-below content moves downward`).toBeGreaterThan(20)
+      // 5. The clicked row and the content above it stay MOUNTED: the bounded
+      // window retains them instead of trimming the older edge.
+      expect(metrics.anchorMounted, `round ${round}: the clicked row stays mounted in the bounded window`).toBe(true)
+      expect(metrics.aboveMounted, `round ${round}: the row above the insertion stays mounted`).toBe(true)
+      // 6. ...and the window itself stays bounded at the production capacity.
+      expect(metrics.domRows, `round ${round}: mounted rows stay inside the bounded window`).toBeLessThanOrEqual(
+        DISPLAY_COUNT
+      )
+      // 7. Still a genuine mid-list reading position (never a bottom jump).
+      expect(Math.abs(metrics.postScrollTop), `round ${round}: remains non-bottom (no bottom jump)`).toBeGreaterThan(
+        BOTTOM_TOL
+      )
+      const topExtreme = -(metrics.scrollHeight - metrics.clientHeight)
+      expect(
+        metrics.postScrollTop,
+        `round ${round}: post viewport stays inside the live scroll range`
+      ).toBeGreaterThanOrEqual(topExtreme - OFFSET_TOL)
+    }
+  })
+  test('insert at true bottom keeps the honest bottom pin (content shifts up)', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'INSERT TRUE-BOTTOM PIN (must stay unchanged): at the natural bottom the bottom pin owns geometry, a mid-list region hold is never armed, and the real msg-insert-btn click leaves the viewport at the honest bottom (scrollTop ~ 0) while the pair is added — the accepted bottom behaviour.'
+    })
+    const page: Page = mainWindow
+    const { topicId } = await test.step('seed mid-topic assistant topic and cold-activate', async () =>
+      setupEditRegionTopic(page))
+    // Wheel to the true physical bottom (column-reverse: scrollTop ~= 0).
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    for (let i = 0; i < 16; i++) {
+      const scroll = await readScroll(page)
+      if (Math.abs(scroll.scrollTop) <= 8) break
+      await page.mouse.wheel(0, 400)
+      await page.waitForTimeout(180)
+    }
+    const bottomScroll = await readScroll(page)
+    expect(Math.abs(bottomScroll.scrollTop), 'precondition: viewport reached the true bottom').toBeLessThanOrEqual(8)
+    const bottomAssistantId = await page.evaluate((tid: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.messages?.messageIdsByTopic?.[tid] ?? []
+      const entities: Record<string, any> = s.messages?.entities ?? {}
+      for (let i = ids.length - 1; i >= 0; i--) {
+        if (entities[ids[i]]?.role === 'assistant') return ids[i]
+      }
+      return null
+    }, topicId)
+    expect(bottomAssistantId, 'a bottom assistant row must exist').toBeTruthy()
+    const preCount = await residentCount(page, topicId)
+    await clickRowToolbarButton(page, bottomAssistantId as string, 'msg-insert-btn')
+    let landed = false
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      )
+      if ((await residentCount(page, topicId)) >= preCount + 2) {
+        landed = true
+        break
+      }
+    }
+    expect(landed, 'the inserted pair must land at the bottom').toBe(true)
+    await waitForScrollQuiescence(page)
+    const postScroll = await readScroll(page)
+    const postCount = await residentCount(page, topicId)
+    test.info().annotations.push({
+      type: 'insert-bottom-geometry',
+      description: `rows=${preCount}->${postCount} preScroll=${Math.round(bottomScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)}`
+    })
+    console.log(
+      `[E2E] insert-bottom rows=${preCount}->${postCount} preScroll=${Math.round(bottomScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)}`
+    )
+    expect(postCount, 'insert at bottom: pair added').toBe(preCount + 2)
+    expect(
+      Math.abs(postScroll.scrollTop),
+      'insert at bottom: the honest bottom pin is unchanged (no upward pull)'
+    ).toBeLessThanOrEqual(TRUE_BOTTOM_TOL)
   })
 })

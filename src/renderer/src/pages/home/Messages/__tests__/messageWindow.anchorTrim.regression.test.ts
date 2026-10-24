@@ -25,7 +25,8 @@ import {
   expandMessageWindowNewer,
   expandMessageWindowOlder,
   MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
-  type MessageWindow
+  type MessageWindow,
+  reconcileMessageWindow
 } from '../messageWindow'
 
 const CAL = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
@@ -599,5 +600,137 @@ describe('direction-parameterized pagination window transition (one derivation, 
     expect(newerClamped.groupCount).toBe(CAL + 35)
     expect(newerClamped.groupCount).toBeLessThanOrEqual(CAL + 50)
     expect(newerClamped.boundedViewportObservability?.retentionClamped).toBe(true)
+  })
+})
+
+/**
+ * Same-route insertion reconcile: the loaded projection grows while the shared
+ * viewport keeper holds a clicked interaction region or the user's reading row.
+ * The newest-capacity derivation alone would slide past that row and unmount it
+ * (the region hold then fails closed and the arriving rows displace the view).
+ * Retention keeps it resident inside the SAME bounded capacity by trimming the
+ * opposite (newer) edge — the established retention-wins rule, now applied to
+ * the latest-edge reconcile. Production capacity: one group per message, so
+ * `displayCount` ten is a ten-group window.
+ */
+describe('latest-edge reconcile retains the held row across insertion (bounded)', () => {
+  const DISPLAY_COUNT = 10
+  const latest = (ids: string[], capacity = DISPLAY_COUNT): MessageWindow =>
+    createLatestMessageWindow(
+      ids.map((id) => message(id)),
+      capacity
+    )
+
+  /** Splice a user/assistant insertion pair directly after `afterIndex`. */
+  const insertPairAfter = (ids: string[], afterIndex: number, tag: string): string[] => {
+    const next = [...ids]
+    next.splice(afterIndex + 1, 0, `${tag}-user`, `${tag}-assistant`)
+    return next
+  }
+
+  it('keeps the older-boundary held row resident at the same bounded capacity (trim moves to the newer edge)', () => {
+    const loaded = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+    const initial = latest(loaded)
+    expect(initial.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 9 })
+    const heldId = 'm02' // second-oldest resident row (the clicked/reading row)
+
+    const grown = insertPairAfter(loaded, 1, 'ins1') // 12 groups now
+    // Unretained reconcile is the reported failure: the held row is evicted.
+    const evicted = reconcileMessageWindow(
+      grown.map((id) => message(id)),
+      loaded.map((id) => message(id)),
+      initial
+    )
+    expect(evicted.displayMessages.map((m) => m.id)).not.toContain(heldId)
+    expect(evicted.range).toEqual({ oldestGroupIndex: 2, newestGroupIndex: 11 })
+
+    // Retained reconcile: same bounded capacity, held row still resident.
+    const kept = reconcileMessageWindow(
+      grown.map((id) => message(id)),
+      loaded.map((id) => message(id)),
+      initial,
+      { retainMessageId: heldId }
+    )
+    expect(kept.displayMessages.map((m) => m.id)).toContain(heldId)
+    expect(kept.groupCount).toBe(DISPLAY_COUNT)
+    expect(kept.groupCapacity).toBe(DISPLAY_COUNT)
+    // The older context already on screen (m01) is kept too: only the newer
+    // edge moves, by exactly the inserted group count.
+    expect(kept.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 9 })
+    // The trim is honestly reported on the newer edge and stays traversable.
+    expect(kept.boundedViewportObservability?.didTrim).toBe(true)
+    expect(kept.boundedViewportObservability?.trimmedEdge).toBe('newer')
+    expect(kept.boundedViewportObservability?.trimmedGroups).toBe(2)
+    expect(kept.hasMoreNewer).toBe(true)
+    // Nothing older than the resident oldest row exists, so the retained window
+    // still starts at the projection's oldest row.
+    expect(kept.hasMoreOlder).toBe(false)
+    // The inserted pair is resident and the pre-existing rows above the held row
+    // are untouched (nothing older than the held row was dropped).
+    expect(kept.displayMessages.map((m) => m.id)).toEqual(
+      expect.arrayContaining(['ins1-user', 'ins1-assistant', 'm01', 'm02'])
+    )
+  })
+
+  it('repeated insertions keep the same held row without growing the window', () => {
+    let loaded = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+    let window = latest(loaded)
+    const heldId = 'm03'
+    for (let round = 0; round < 4; round++) {
+      const anchorIndex = loaded.indexOf(heldId)
+      expect(anchorIndex).toBeGreaterThanOrEqual(0)
+      const previous = loaded
+      loaded = insertPairAfter(loaded, anchorIndex, `ins${round}`)
+      window = reconcileMessageWindow(
+        loaded.map((id) => message(id)),
+        previous.map((id) => message(id)),
+        window,
+        { retainMessageId: heldId }
+      )
+      expect(
+        window.displayMessages.map((m) => m.id),
+        `round ${round}`
+      ).toContain(heldId)
+      // Bounded: capacity never grows with the projection.
+      expect(window.groupCount).toBe(DISPLAY_COUNT)
+      expect(window.groupCapacity).toBe(DISPLAY_COUNT)
+    }
+    // Every inserted pair from the retention rounds is resident alongside it.
+    const ids = window.displayMessages.map((m) => m.id)
+    expect(ids).toEqual(expect.arrayContaining([heldId, 'ins0-user', 'ins0-assistant']))
+  })
+
+  it('a held row already inside the newest-capacity range changes nothing', () => {
+    const loaded = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+    const initial = latest(loaded)
+    const grown = insertPairAfter(loaded, loaded.indexOf('m09'), 'ins1')
+    const plain = reconcileMessageWindow(
+      grown.map((id) => message(id)),
+      loaded.map((id) => message(id)),
+      initial
+    )
+    const retained = reconcileMessageWindow(
+      grown.map((id) => message(id)),
+      loaded.map((id) => message(id)),
+      initial,
+      { retainMessageId: 'm10' }
+    )
+    expect(retained.range).toEqual(plain.range)
+    expect(retained.displayMessages.map((m) => m.id)).toEqual(plain.displayMessages.map((m) => m.id))
+    expect(retained.boundedViewportObservability?.didTrim).toBe(false)
+  })
+
+  it('an unretainable id degrades to the plain bounded latest window (fail-closed)', () => {
+    const loaded = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+    const initial = latest(loaded)
+    const grown = insertPairAfter(loaded, 1, 'ins1')
+    const window = reconcileMessageWindow(
+      grown.map((id) => message(id)),
+      loaded.map((id) => message(id)),
+      initial,
+      { retainMessageId: 'not-resident' }
+    )
+    expect(window.range).toEqual({ oldestGroupIndex: 2, newestGroupIndex: 11 })
+    expect(window.groupCount).toBe(DISPLAY_COUNT)
   })
 })

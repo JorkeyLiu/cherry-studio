@@ -1469,6 +1469,113 @@ export const captureAnswerTabSwitchIntent = (
 }
 
 /**
+ * Gesture identity returned by `markInteractionLayoutDeferred`: the armed
+ * shared interaction gesture the caller must settle when its asynchronous
+ * command resolves. Purely a handle — never geometry, never a snapshot.
+ */
+export type DeferredLayoutGestureToken = number
+
+/**
+ * Declaration entry for a gesture whose layout effect is ASYNCHRONOUS: the
+ * command dispatched by the clicked control commits its rows only after an
+ * authority round-trip, so the DOM is still unchanged while the command is in
+ * flight. Identifies the already-armed shared gesture by scope + region (the
+ * same structural keys the capture used) and flags it as deferred on the
+ * shared owner, so the keeper keeps arbitration: the captured region stays the
+ * hold baseline, an unchanged DOM is no longer mistaken for a no-effect click,
+ * and the arriving rows are compensated into the same in-place hold. Only
+ * flags an existing gesture — it never arms, re-measures, or invents one, so a
+ * refused capture (e.g. true bottom, where the bottom pin owns geometry) stays
+ * refused. Returns null when no gesture is armed for this scope + region.
+ */
+export const markInteractionLayoutDeferred = (
+  controller:
+    | {
+        activeInteractionIntent: {
+          scopeKind: 'message' | 'group'
+          scopeId: string
+          region: string
+          gestureId: number
+        } | null
+        declareDeferredLayoutMutation: (gestureId: number) => boolean
+      }
+    | null
+    | undefined,
+  scope: { kind: 'message' | 'group'; id: string },
+  region: string
+): DeferredLayoutGestureToken | null => {
+  try {
+    if (!controller) return null
+    const live = controller.activeInteractionIntent
+    if (!live) return null
+    if (live.scopeKind !== scope.kind || live.scopeId !== scope.id || live.region !== region) return null
+    return controller.declareDeferredLayoutMutation(live.gestureId) ? live.gestureId : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Settle a deferred-layout gesture when its asynchronous command resolves.
+ * `applied`: the rows landed (or are landing), so the ordinary quiet-verified
+ * handoff completes on the live gesture. `failed`: nothing will land, so the
+ * gesture is dropped fail-closed with no adopt and no snapshot. Stale tokens
+ * never touch a newer gesture.
+ */
+export const settleInteractionLayoutDeferred = (
+  controller:
+    | { settleDeferredLayoutMutation: (gestureId: number, outcome: 'applied' | 'failed') => boolean }
+    | null
+    | undefined,
+  token: DeferredLayoutGestureToken | null,
+  outcome: 'applied' | 'failed'
+): boolean => {
+  try {
+    if (!controller || typeof token !== 'number' || !Number.isFinite(token)) return false
+    return controller.settleDeferredLayoutMutation(token, outcome)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The message row the shared viewport currently holds and a bounded window
+ * reconcile must therefore keep resident.
+ *
+ * Priority: the armed interaction intent's message scope (the row whose region
+ * is being held stationary through a control mutation) first, then the live
+ * reading anchor row (what the user is visually reading). Reading it is a
+ * renderer-local projection read: it never declares ownership, never writes a
+ * snapshot and never invents an anchor. At the true bottom neither exists (the
+ * bottom pin owns geometry), so the derivation stays the plain latest window.
+ */
+export const resolveRetainedViewportMessageId = (
+  controller:
+    | {
+        activeInteractionIntent: { scopeKind: 'message' | 'group'; scopeId: string } | null
+        getAnchorFor: (target: RouteRef) => { kind: string; messageId?: string } | null
+        displayedRoute: RouteRef
+      }
+    | null
+    | undefined
+): string | null => {
+  try {
+    if (!controller) return null
+    const intent = controller.activeInteractionIntent
+    if (intent && intent.scopeKind === 'message' && typeof intent.scopeId === 'string' && intent.scopeId.length > 0) {
+      return intent.scopeId
+    }
+    const anchor = controller.getAnchorFor(controller.displayedRoute)
+    if (anchor && anchor.kind === 'message' && typeof anchor.messageId === 'string' && anchor.messageId.length > 0) {
+      return anchor.messageId
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Layout-hold baseline provenance: one row's `viewportOffset` + `scrollTop`
  * pair together with the route key and anchor identity it belongs to. A pair is
  * only ever usable for the identity it was measured on.
@@ -1902,6 +2009,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           gestureId: number
           fingerprint?: { scopeH: number; scopeW: number }
           capturedAt: number
+          pendingLayoutMutation?: boolean
         } | null
         if (!intent) return
         const clearGuarded = (): void => {
@@ -2097,6 +2205,29 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           effect = false
           replaced = false
         }
+        // Stillness is evidence only for gestures whose effect is already
+        // decided: a gesture whose layout mutation is produced by an
+        // asynchronous authority round-trip (declared by its dispatching call
+        // site) has an unchanged DOM precisely BECAUSE the mutation has not
+        // landed. Dropping it here would strand the pre-click geometry and let
+        // the arriving rows displace the clicked region. It therefore stays
+        // armed through the existing pending path — the same bounded
+        // correspondence deadline a hidden/unlanded target already uses — and
+        // ordinary completion resumes once the layout change is observed.
+        const deferredUnsettled = intent.pendingLayoutMutation === true
+        const pendingOrDrop = (): void => {
+          if (deferredUnsettled) {
+            rearmPending()
+            return
+          }
+          if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+            clearGuarded()
+            return
+          }
+          try {
+            scheduleTabValidation()
+          } catch {}
+        }
         const proven = layoutChanged || effect || !hasFingerprint
         // Structural proof for rebasing away from the live reading row:
         // scope-owner dimension change or a replaced region node under the
@@ -2186,25 +2317,13 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
             // Without structural proof, sustained stillness drops with no
             // adopt instead (same as the below-row path underneath).
             if (!structuralProven) {
-              if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
-                clearGuarded()
-                return
-              }
-              try {
-                scheduleTabValidation()
-              } catch {}
+              pendingOrDrop()
               return
             }
             return
           }
           if (!structuralProven) {
-            if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
-              clearGuarded()
-              return
-            }
-            try {
-              scheduleTabValidation()
-            } catch {}
+            pendingOrDrop()
             return
           }
           if (hasFingerprint && quiet < INTERACTION_QUIET_READS_FOR_ADOPT) {
@@ -2227,13 +2346,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           // structural correspondence never reaches here (pending with the
           // correspondence deadline above).
           if (!provenForHandoff) {
-            if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
-              clearGuarded()
-              return
-            }
-            try {
-              scheduleTabValidation()
-            } catch {}
+            pendingOrDrop()
             return
           }
           return
@@ -2246,13 +2359,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           // is never rebased and no stale snapshot is written. A hidden
           // target never reaches here (pending above), so a deliberately
           // delayed async mutation is never mistaken for a no-effect click.
-          if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
-            clearGuarded()
-            return
-          }
-          try {
-            scheduleTabValidation()
-          } catch {}
+          pendingOrDrop()
           return
         } else if (hasFingerprint && quiet < INTERACTION_QUIET_READS_FOR_ADOPT) {
           // Effect observed but not yet provably quiet: one more frame.
@@ -2526,7 +2633,14 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                 } catch {}
                 // The region hold owns this frame's geometry: the next ordinary
                 // observation re-seeds the layout baseline from the live anchor.
+                // Every competing baseline is dropped with it — a pair measured
+                // BEFORE this compensation describes the pre-compensation scroll
+                // position, so adopting it would charge the region hold's own
+                // scroll write to layout and immediately undo the compensation
+                // (the ordinary hold would fight the region hold forever).
                 layoutHoldRef.current = null
+                publishedSampleRef.current = null
+                droppedLayoutHoldRef.current = null
                 return
               }
             }

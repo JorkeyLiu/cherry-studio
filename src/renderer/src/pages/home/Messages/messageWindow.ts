@@ -642,11 +642,23 @@ export const derivePaginationWindow = (input: PaginationWindowTransitionInput): 
   return { status: 'accepted', window }
 }
 
-/** Refreshes a historical range, or follows the latest edge, at the same group capacity. */
+/**
+ * Refreshes a historical range, or follows the latest edge, at the same group
+ * capacity.
+ *
+ * `options.retainMessageId` is the row the shared viewport keeper currently holds
+ * (active interaction region owner, else the live reading anchor). A latest-edge
+ * reconcile that would slide the newest-capacity range past it keeps it — and the
+ * older context already on screen — resident inside the same bounded capacity,
+ * trimming the newer edge instead. Without that, an insertion inside the resident
+ * span unmounts the held region, its hold fails closed, and the arriving rows
+ * displace the view.
+ */
 export const reconcileMessageWindow = (
   messages: Message[],
   previousMessages: Message[],
-  currentWindow: MessageWindow
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
 ): MessageWindow => {
   const rawCapacity = currentWindow.groupCapacity
   const capacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
@@ -659,7 +671,38 @@ export const reconcileMessageWindow = (
       : undefined
   const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
   if (currentWindow.edge === 'latest') {
-    return createLatestMessageWindow(messages, capacity, cleanAuth)
+    const boundedCapacity = Math.min(Math.max(0, capacity), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+    const model = boundedCapacity === 0 ? null : createMessageViewportGroupModel(messages)
+    const retainedIndex = model ? resolveRetainedGroupIndex(model, options) : null
+    const latestOldest = model ? Math.max(0, model.groups.length - boundedCapacity) : 0
+    if (!model || retainedIndex === null || retainedIndex >= latestOldest) {
+      return createLatestMessageWindow(messages, capacity, cleanAuth)
+    }
+    // Retention: the newest-capacity range would evict the held row. Keep the
+    // older context the current window already shows (never less than the held
+    // row) and trim the OPPOSITE (newer) edge by exactly the growth, so the
+    // mounted region and the content above it stay put while the window stays
+    // inside the same bounded capacity. The trim is reported honestly on the
+    // newer edge, which then reads as traversable (`hasMoreNewer`).
+    const previousRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+    const oldest = Math.max(0, Math.min(retainedIndex, previousRange?.oldestGroupIndex ?? retainedIndex))
+    const newest = Math.min(model.groups.length - 1, oldest + boundedCapacity - 1)
+    const trimmedGroups = Math.max(0, model.groups.length - 1 - newest)
+    const observability: MessageWindow['boundedViewportObservability'] = {
+      calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+      boundedCapacity,
+      didTrim: trimmedGroups > 0,
+      trimmedGroups,
+      trimmedEdge: 'newer'
+    }
+    return createWindowFromRange(
+      model,
+      { oldestGroupIndex: oldest, newestGroupIndex: newest },
+      boundedCapacity,
+      'latest',
+      cleanAuth,
+      observability
+    )
   }
 
   const model = createMessageViewportGroupModel(messages)

@@ -85,6 +85,12 @@ import styled from 'styled-components'
 
 import { emitNewBranch, emitReferenceTopic, emitTrueBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
+import {
+  INTERACTION_REGION_CONTROLS,
+  markInteractionLayoutDeferred,
+  settleInteractionLayoutDeferred,
+  useOptionalRouteViewportCommands
+} from './routeViewportContext'
 
 const createTranslationAbortKey = (messageId: string) => `translation-abort-key:${messageId}`
 
@@ -363,6 +369,11 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
 
   const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
   const dispatch = useAppDispatch()
+  // Stable shared viewport command surface (never the versioned value): the
+  // insert gesture's deferred-layout declaration/settlement goes to the SAME
+  // in-place keeper that already arbitrates this row's region, so the row
+  // never subscribes to viewport notifications.
+  const viewportCommands = useOptionalRouteViewportCommands()
   // const processedMessage = useMemo(() => {
   //   if (message.role === 'assistant' && message.model && isReasoningModel(message.model)) {
   //     return withMessageThought(message)
@@ -431,9 +442,28 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     // Defense in depth: inherited non-fork-anchor messages never dispatch
     // (the button hides; the thunk precheck + Main guard reject).
     if (!insertGateRef.current) return
-    await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))
-    window.toast.success(t('chat.message.insert.success'))
-  }, [dispatch, topic.id, message.id, assistant.id, t])
+    // The durable rows land only after the authority round-trip below, so the
+    // gesture's layout effect is DECLARED deferred on the shared viewport
+    // owner: the same in-place keeper that holds this row's region then keeps
+    // arbitration through the gap (an unchanged DOM is not a no-effect click)
+    // and holds the clicked region when the pair arrives. No per-button
+    // scrolling: the declaration only identifies the already-armed gesture.
+    const deferred = markInteractionLayoutDeferred(
+      viewportCommands?.controller,
+      { kind: 'message', id: message.id },
+      INTERACTION_REGION_CONTROLS
+    )
+    let applied = false
+    try {
+      await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))
+      applied = true
+      window.toast.success(t('chat.message.insert.success'))
+    } finally {
+      // `failed` drops the gesture fail-closed (no adopt, no snapshot); a
+      // stale token never touches a newer gesture.
+      settleInteractionLayoutDeferred(viewportCommands?.controller, deferred, applied ? 'applied' : 'failed')
+    }
+  }, [dispatch, topic.id, message.id, assistant.id, t, viewportCommands])
 
   const handleResendUserMessage = useCallback(async () => {
     // Event-time resend failures must never escape as unhandled rejections

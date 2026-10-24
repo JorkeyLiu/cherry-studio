@@ -213,6 +213,7 @@ import {
   isCaptureContainerHidden,
   isViewportLayoutControlTarget,
   isViewportLayoutResizeKey,
+  resolveRetainedViewportMessageId,
   useOptionalRouteViewport,
   useStableVisualAnchor,
   viewportPhaseAttrFor
@@ -2557,7 +2558,20 @@ const Messages = ({
       const currentWindow = viewportStateRef.current.window
       if (!currentWindow) return
       const currentDisplayMessages = currentWindow.displayMessages
-      const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
+      // Same-route insertion/append retention: the loaded projection can grow
+      // while the shared keeper holds a clicked interaction region or the user's
+      // reading row. A plain newest-capacity derivation would slide the window
+      // past that row, unmount it, and let the arriving rows displace the view
+      // (the region hold then fails closed with nothing to compensate). Naming
+      // the held row keeps it resident inside the same bounded capacity by
+      // trimming the far (newer) edge instead — see `createLatestMessageWindow`.
+      const retainMessageId = resolveRetainedViewportMessageId(controller)
+      const reconciledWindow = reconcileMessageWindow(
+        messages,
+        previousMessagesRef.current,
+        currentWindow,
+        retainMessageId ? { retainMessageId } : undefined
+      )
       const newDisplayMessages = reconciledWindow.displayMessages
 
       if (

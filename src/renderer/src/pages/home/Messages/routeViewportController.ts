@@ -373,6 +373,16 @@ export class RouteViewportController {
     gestureId: number
     fingerprint?: InteractionFingerprint
     capturedAt: number
+    /** Declared by the dispatching call site when this gesture's layout
+     * effect is produced by an asynchronous authority round-trip (rows land
+     * only after the IPC/Main commit) instead of by the click itself, and
+     * settled when that command resolves. While pending, an unchanged DOM
+     * cannot disprove the gesture — an un-landed insert looks exactly like a
+     * no-effect click — so it stays armed through the existing bounded
+     * pending path instead of the quiet-read drop. The hold baseline is
+     * unchanged: the captured region offset, which is why a deferred
+     * mutation needs no separate geometry. */
+    pendingLayoutMutation?: boolean
   } | null = null
   private interactionGestureSeq = 0
   /**
@@ -497,6 +507,7 @@ export class RouteViewportController {
     gestureId: number
     fingerprint?: InteractionFingerprint
     capturedAt: number
+    pendingLayoutMutation?: boolean
   } | null {
     const it = this.interactionIntent
     if (!it) return null
@@ -598,6 +609,45 @@ export class RouteViewportController {
     if (typeof expectedGestureId === 'number' && this.interactionIntent.gestureId !== expectedGestureId) return false
     if (typeof expectedRegion === 'string' && this.interactionIntent.region !== expectedRegion) return false
     this.interactionIntent = null
+    return true
+  }
+
+  /**
+   * Declare that the armed gesture's layout effect is produced by an
+   * asynchronous authority round-trip (the dispatching command's rows land
+   * only after the IPC/Main commit). Identifies the LIVE gesture by its own
+   * identity: a stale declaration never marks a newer gesture, so the shared
+   * owner keeps one arbitration point. Currency (route + epoch) is required,
+   * exactly like the read view. Does not modify geometry, phase, anchor,
+   * ownership or snapshot; it only forbids treating an unchanged DOM as proof
+   * that this gesture had no effect.
+   */
+  declareDeferredLayoutMutation(expectedGestureId: number): boolean {
+    const live = this.interactionIntent
+    if (!live) return false
+    if (live.gestureId !== expectedGestureId) return false
+    if (live.epoch !== this.epoch) return false
+    if (live.topicId !== this.displayed.topicId || live.route !== this.displayed.route) return false
+    live.pendingLayoutMutation = true
+    return true
+  }
+
+  /**
+   * Settle a deferred-layout gesture. `applied`: the authoritative command
+   * resolved, so ordinary completion (observed layout change + quiet) resumes
+   * on the live intent. `failed`: nothing will land, so the gesture is dropped
+   * fail-closed — no adopt, no snapshot, never a stale hold. A stale settle
+   * (older gesture identity) never touches the newer gesture.
+   */
+  settleDeferredLayoutMutation(expectedGestureId: number, outcome: 'applied' | 'failed'): boolean {
+    const live = this.interactionIntent
+    if (!live || live.gestureId !== expectedGestureId) return false
+    if (outcome === 'failed') {
+      this.interactionIntent = null
+      return true
+    }
+    if (live.pendingLayoutMutation !== true) return false
+    live.pendingLayoutMutation = false
     return true
   }
 
