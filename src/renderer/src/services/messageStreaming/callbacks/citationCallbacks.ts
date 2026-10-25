@@ -49,7 +49,6 @@ export const createCitationCallbacks = (deps: CitationCallbacksDependencies) => 
     onExternalToolComplete: (externalToolResult: ExternalToolResult) => {
       if (citationBlockId) {
         const changes: Partial<CitationMessageBlock> = {
-          response: externalToolResult.webSearch,
           knowledge: externalToolResult.knowledge,
           status: MessageBlockStatus.SUCCESS
         }

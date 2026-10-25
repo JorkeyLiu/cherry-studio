@@ -15,6 +15,10 @@ const { mocks } = vi.hoisted(() => ({
       type: 'newMessages/messagesReceived',
       payload: p
     })),
+    applyInsertedMessageGroups: vi.fn((p: unknown) => ({
+      type: 'newMessages/applyInsertedMessageGroups',
+      payload: p
+    })),
     removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p })),
@@ -56,7 +60,11 @@ vi.mock('@renderer/store/clipboard', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  newMessagesActions: { messagesReceived: mocks.messagesReceived, removeMessages: mocks.removeMessages },
+  newMessagesActions: {
+    messagesReceived: mocks.messagesReceived,
+    applyInsertedMessageGroups: mocks.applyInsertedMessageGroups,
+    removeMessages: mocks.removeMessages
+  },
   selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
@@ -80,7 +88,59 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
   syncSegmentsAfterMessageDeletion: mocks.syncSegmentsAfterMessageDeletion
 }))
 
-const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
+let currentState: any = null
+
+/** Build a Main-style batch ack echoing the request groups (flat ids + per-group stable neighbors). */
+function ackFromRequest(
+  topicId: string,
+  groups: Array<{ entries: Array<{ message: { id: string } }>; intent?: { kind: string; messageId?: string } }>,
+  branchId: string | null
+) {
+  const flatIds = groups.flatMap((g) => g.entries.map((e) => e.message.id))
+  const loadedIds = new Set<string>(currentState?.messages?.messageIdsByTopic?.[topicId] ?? [])
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {} as Record<string, number>,
+    topicId,
+    branchId,
+    insertedMessages: flatIds.map((id) => ({ id, topicId })),
+    insertedBlocks: [],
+    insertedMessageIds: flatIds,
+    mutableMessageIds: [...flatIds],
+    groups: groups.map((g) => {
+      const intent = g.intent as { kind: string; messageId?: string } | undefined
+      if (!intent || intent.kind === 'topic-tail') {
+        return { insertedMessageIds: g.entries.map((e) => e.message.id), beforeMessageId: null, nextMessageId: null }
+      }
+      const anchor = intent.messageId ?? null
+      if (anchor && loadedIds.has(anchor)) {
+        if (intent.kind === 'before-message') {
+          return {
+            insertedMessageIds: g.entries.map((e) => e.message.id),
+            beforeMessageId: null,
+            nextMessageId: anchor
+          }
+        }
+        return { insertedMessageIds: g.entries.map((e) => e.message.id), beforeMessageId: anchor, nextMessageId: null }
+      }
+      return {
+        insertedMessageIds: g.entries.map((e) => e.message.id),
+        beforeMessageId: anchor,
+        nextMessageId: 'ghost-nonresident'
+      }
+    })
+  }
+}
+
+function mockInsertAck() {
+  mocks.insertMessageGroups.mockImplementation(
+    async (
+      topicId: string,
+      groups: Array<{ entries: Array<{ message: { id: string } }>; intent?: { kind: string; messageId?: string } }>,
+      branchId?: string | null
+    ) => ackFromRequest(topicId, groups, branchId ?? null)
+  )
+}
 
 function makeMsg(id: string): Message {
   return {
@@ -109,6 +169,7 @@ function baseState(items: any[], segmentSnapshots: any[]) {
 }
 
 function mockTargetMessages(state: any) {
+  currentState = state
   mocks.selectLoadedMessagesForTopic.mockImplementation((_s: unknown, topicId: string) => {
     const ids = state.messages.messageIdsByTopic[topicId] ?? []
     return ids.map((id: string) => state.messages.entities[id]).filter(Boolean)
@@ -134,10 +195,11 @@ function wire(id: string, topicId: string, sortOrder: number, messageIds: string
 describe('ClipboardService segment batch convergence', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
+    currentState = null
+    mockInsertAck()
   })
 
-  it('multi-segment rebuild converges with exactly one list+replace, no per-item stale adds', async () => {
+  it('multi-segment rebuild converges with exactly one preserving publication, no per-item stale adds', async () => {
     const origA = makeMsg('orig-a')
     const origB = makeMsg('orig-b')
     const state = baseState(
@@ -165,7 +227,7 @@ describe('ClipboardService segment batch convergence', () => {
     expect(mocks.upsertSegment).toHaveBeenCalledTimes(2)
     expect(mocks.listSegments).toHaveBeenCalledTimes(1)
     expect(mocks.listSegments).toHaveBeenCalledWith('topic-1')
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/replaceSegmentsForTopic')
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'resident/segmentCatalogPublishComplete')
     expect(replaces).toHaveLength(1)
     expect(replaces[0][0].payload.topicId).toBe('topic-1')
     // No per-item stale catalog adds on the success path.
@@ -189,7 +251,7 @@ describe('ClipboardService segment batch convergence', () => {
     expect(mocks.listSegments).not.toHaveBeenCalled()
   })
 
-  it('list failure fallback keeps per-wire adds so pasted segments stay visible', async () => {
+  it('list failure surfaces without fabricating per-wire catalog (fail closed)', async () => {
     const origA = makeMsg('orig-a')
     const state = baseState(
       [{ originalAskId: 'orig-a', messages: [origA], blocks: [] as MessageBlock[], positionIndex: 0 }],
@@ -203,14 +265,15 @@ describe('ClipboardService segment batch convergence', () => {
 
     const { pasteMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
-    await pasteMessages(dispatch, () => state as any, 'topic-1', 'm1')
+    await expect(pasteMessages(dispatch, () => state as any, 'topic-1', 'm1')).rejects.toThrow('list failed')
 
     expect(mocks.upsertSegment).toHaveBeenCalledTimes(1)
     expect(mocks.listSegments).toHaveBeenCalledTimes(1)
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/replaceSegmentsForTopic')
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'resident/segmentCatalogPublishComplete')
     expect(replaces).toHaveLength(0)
+    // No fabricated per-wire success on list failure.
     const adds = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/addSegment')
-    expect(adds).toHaveLength(1)
-    expect(adds[0][0].payload.messageIds).toHaveLength(1)
+    expect(adds).toHaveLength(0)
+    expect(mocks.addSegment).not.toHaveBeenCalled()
   })
 })

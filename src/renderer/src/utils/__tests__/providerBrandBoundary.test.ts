@@ -140,9 +140,4 @@ describe('active-runtime brand boundary', () => {
       ).size
     ).toBe(1)
   })
-
-  it('routes Gemini websearch by protocol only', () => {
-    expect(providerUtils.isGeminiWebSearchProvider(makeProvider({ id: 'whatever', type: 'gemini' }))).toBe(true)
-    expect(providerUtils.isGeminiWebSearchProvider(makeProvider({ id: 'gemini', type: 'openai' }))).toBe(false)
-  })
 })

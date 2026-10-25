@@ -237,6 +237,13 @@ export const ForkDivider = ({
     }
   }
 
+  // Escape leaves the editor without writing anything: the draft is dropped
+  // and the next edit starts over from the branch's stored name.
+  const cancelRename = (): void => {
+    setRenamingId(null)
+    setDraft('')
+  }
+
   const confirmDelete = async (branchId: string): Promise<void> => {
     setDeletingId(branchId)
     try {
@@ -269,6 +276,7 @@ export const ForkDivider = ({
             draft={draft}
             onDraftChange={setDraft}
             onCommitRename={() => void commitRename(opt.branchId as string)}
+            onCancelRename={cancelRename}
             onStartRename={() => {
               const node = opt.branchId !== null ? byId.get(opt.branchId) : undefined
               setDraft(node?.name ?? '')

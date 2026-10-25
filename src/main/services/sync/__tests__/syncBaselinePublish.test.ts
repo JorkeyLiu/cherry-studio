@@ -42,7 +42,7 @@ import {
   verifyEnvelopeDigest,
   WIRE_VERSION,
   WIRE_VERSION_V2,
-  WIRE_VERSION_V5
+  WIRE_VERSION_V6
 } from '@shared/sync'
 import { eq } from 'drizzle-orm'
 
@@ -323,7 +323,7 @@ describe('publishBaseline barrier', () => {
       payload: never
     }
     expect(Object.keys(env)).toEqual(['wireVersion', 'channelId', 'watermark', 'digestScheme', 'digest', 'payload'])
-    expect(env.wireVersion).toBe(WIRE_VERSION_V5)
+    expect(env.wireVersion).toBe(WIRE_VERSION_V6)
     expect(env.channelId).toBe(CHANNEL)
     expect(env.watermark).toBe(CURSOR_N)
     expect(env.digestScheme).toBe(DIGEST_SCHEME)

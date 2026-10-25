@@ -5,9 +5,8 @@
  */
 
 import { loggerService } from '@logger'
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { processKnowledgeReferences } from '@renderer/services/KnowledgeService'
-import type { BaseTool, MCPTool, MCPToolResponse, NormalToolResponse } from '@renderer/types'
+import type { BaseTool, MCPToolResponse, NormalToolResponse } from '@renderer/types'
 import type { Chunk } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
 import type { ProviderMetadata, ToolSet, TypedToolCall, TypedToolError, TypedToolResult } from 'ai'
@@ -32,7 +31,7 @@ export class ToolCallChunkHandler {
   private activeToolCalls = ToolCallChunkHandler.globalActiveToolCalls
   constructor(
     private onChunk: (chunk: Chunk) => void,
-    private mcpTools: MCPTool[]
+    _mcpTools: unknown[] = []
   ) {}
 
   /**
@@ -71,7 +70,6 @@ export class ToolCallChunkHandler {
    * 根据工具名称确定工具类型
    */
   private determineToolType(toolName: string, toolCallId: string): BaseTool {
-    let mcpTool: MCPTool | undefined
     if (toolName.startsWith('builtin_')) {
       return {
         id: toolCallId,
@@ -79,8 +77,6 @@ export class ToolCallChunkHandler {
         description: toolName,
         type: 'builtin'
       } as BaseTool
-    } else if ((mcpTool = this.mcpTools.find((t) => t.id === toolName) as MCPTool)) {
-      return mcpTool
     } else {
       return {
         id: toolCallId,
@@ -256,10 +252,8 @@ export class ToolCallChunkHandler {
     }
 
     let tool: BaseTool
-    let mcpTool: MCPTool | undefined
-    // 根据 providerExecuted 标志区分处理逻辑
+    // 根据 providerExecuted 标志区分处理逻辑（MCP 执行已移除：非 builtin 一律按 provider 工具处理）
     if (providerExecuted) {
-      // 如果是 Provider 执行的工具（如 web_search）
       logger.info(`[ToolCallChunkHandler] Handling provider-executed tool: ${toolName}`)
       tool = {
         id: toolCallId,
@@ -268,7 +262,6 @@ export class ToolCallChunkHandler {
         type: 'provider'
       } as BaseTool
     } else if (toolName.startsWith('builtin_')) {
-      // 如果是内置工具，沿用现有逻辑
       logger.info(`[ToolCallChunkHandler] Handling builtin tool: ${toolName}`)
       tool = {
         id: toolCallId,
@@ -276,11 +269,6 @@ export class ToolCallChunkHandler {
         description: toolName,
         type: 'builtin'
       } as BaseTool
-    } else if ((mcpTool = this.mcpTools.find((t) => t.id === toolName) as MCPTool)) {
-      // 如果是客户端执行的 MCP 工具，沿用现有逻辑
-      // toolName is mcpTool.id (registered with id as key in convertMcpToolsToAiSdkTools)
-      logger.info(`[ToolCallChunkHandler] Handling client-side MCP tool: ${toolName}`)
-      tool = mcpTool
     } else {
       tool = {
         id: toolCallId,
@@ -417,19 +405,34 @@ export class ToolCallChunkHandler {
 export const addActiveToolCall = ToolCallChunkHandler.addActiveToolCall.bind(ToolCallChunkHandler)
 
 /**
- * 从工具输出中提取图片（使用 MCP SDK 类型安全验证）
+ * 从工具输出中提取图片（本地结构校验，不依赖 MCP SDK）。
  */
 function extractImagesFromToolOutput(output: unknown): string[] {
-  if (!output) {
+  if (!output || typeof output !== 'object') {
     return []
   }
 
-  const result = CallToolResultSchema.safeParse(output)
-  if (result.success) {
-    return result.data.content
-      .filter((c) => c.type === 'image')
-      .map((content) => `data:${content.mimeType ?? 'image/png'};base64,${content.data}`)
+  const content = (output as { content?: unknown }).content
+  if (!Array.isArray(content)) {
+    return []
   }
 
-  return []
+  const images: string[] = []
+  for (const item of content) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      (item as { type?: unknown }).type === 'image' &&
+      typeof (item as { data?: unknown }).data === 'string'
+    ) {
+      const data = (item as { data: string; mimeType?: unknown }).data
+      const mimeType =
+        typeof (item as { mimeType?: unknown }).mimeType === 'string'
+          ? (item as { mimeType: string }).mimeType
+          : 'image/png'
+      images.push(`data:${mimeType};base64,${data}`)
+    }
+  }
+
+  return images
 }

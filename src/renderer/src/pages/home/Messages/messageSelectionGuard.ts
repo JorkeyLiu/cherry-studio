@@ -7,9 +7,12 @@ import { useEffect } from 'react'
  *   is preserved.
  * - A native range spanning multiple message containers is cleared, so Shift
  *   multi-select (and Shift+drag) never leaves a native text selection behind.
- * - In edit mode selection-only semantics take precedence: native text
- *   selection inside messages is suppressed at `selectstart`/`mousedown`
- *   time (the click-capture path still performs group selection).
+ *
+ * This is the only always-on, list-level responsibility. Edit-mode native
+ * text-selection suppression is not a list-level concern: it is owned by the
+ * actual interactive turn (`EditTurn` in `messageEditSelectionLayout`), which
+ * cancels native selection inside its own subtree only, leaving the sibling
+ * segment chrome, its rename field, and ordinary controls free to select.
  */
 
 const MESSAGE_SELECTOR = '[data-message-id]'
@@ -62,37 +65,4 @@ export function useCrossMessageSelectionGuard(): void {
     document.addEventListener('selectionchange', onSelectionChange)
     return () => document.removeEventListener('selectionchange', onSelectionChange)
   }, [])
-}
-
-/**
- * Edit-mode suppression: while enabled, prevent native text-range creation
- * inside message containers (including Shift multi-select mousedowns).
- * Group selection still flows through the click-capture path.
- */
-export function useEditModeNativeSelectionSuppression(
-  isEditMode: boolean,
-  scrollContainerRef: React.RefObject<HTMLElement | null>
-): void {
-  useEffect(() => {
-    if (!isEditMode) return
-    const el = scrollContainerRef.current
-    if (!el) return
-    const onSelectStart = (e: Event) => {
-      e.preventDefault()
-    }
-    const onMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null
-      if (target?.closest?.(MESSAGE_SELECTOR)) {
-        // Stop the browser from opening a native text range (Shift+click /
-        // drag); the subsequent click-capture performs group selection.
-        e.preventDefault()
-      }
-    }
-    el.addEventListener('selectstart', onSelectStart)
-    el.addEventListener('mousedown', onMouseDown)
-    return () => {
-      el.removeEventListener('selectstart', onSelectStart)
-      el.removeEventListener('mousedown', onMouseDown)
-    }
-  }, [isEditMode, scrollContainerRef])
 }

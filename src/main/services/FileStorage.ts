@@ -973,8 +973,7 @@ class FileStorage {
    *
    * Uses sharp's header-level metadata (no full decode, no base64 transport) so
    * token estimation can size images without shipping image bytes over IPC.
-   * Sharp is imported lazily, mirroring {@link file:../../utils/ocr.ts}, to keep
-   * it off the app startup path.
+   * Sharp is imported lazily to keep it off the app startup path.
    */
   private imageSizeCore = async (filePath: string): Promise<{ width: number; height: number }> => {
     const sharp = (await import('sharp')).default

@@ -137,6 +137,15 @@ export interface UseScrollPositionOptions {
    * stable. Omitted = always writable (tests / non-route surfaces).
    */
   canWrite?: () => boolean
+  /**
+   * Cached visible visual anchor rows (oldest-first, one canonical element
+   * per visible message id) for the viewport-top anchor lookup. Supplied by
+   * the message list from its visible-row cache; the anchor then resolves
+   * through the exact ordered core (binary lower-bound on live tops + O(1)
+   * neighbour validation). Omitted = exact full-list DOM scan (identical
+   * semantics; exceptional no-registry path only).
+   */
+  getOrderedRows?: () => readonly HTMLElement[]
 }
 
 /**
@@ -174,7 +183,16 @@ export default function useScrollPosition(key: string, throttleWaitOrOptions?: n
     const container = containerRef.current
     if (!container) return null
     const scrollTop = container.scrollTop
-    const anchor = findViewportTopAnchorWithOffset(container)
+    let orderedRows: readonly HTMLElement[] | null = null
+    try {
+      orderedRows = optionsRef.current.getOrderedRows?.() ?? null
+    } catch {
+      orderedRows = null
+    }
+    const anchor =
+      orderedRows && orderedRows.length > 0
+        ? findViewportTopAnchorWithOffset(container, { orderedRows })
+        : findViewportTopAnchorWithOffset(container)
     const messageId = anchor?.messageId ?? null
     return {
       scrollTop,

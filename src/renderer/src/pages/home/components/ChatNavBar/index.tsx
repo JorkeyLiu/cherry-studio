@@ -18,7 +18,11 @@ const HeaderNavbar: FC<Props> = ({ activeAssistant, activeTopic, setActiveTopic 
 
   return (
     <NavbarHeader className="home-navbar" style={{ height: 'var(--navbar-height)' }}>
-      <div className="flex h-full min-w-0 flex-1 shrink items-center overflow-auto">
+      {/* Container for the branch crumb's cqw-based cap below: cqw resolves
+        against this visible column width, not the scrolled content width. */}
+      <div
+        className="flex h-full min-w-0 flex-1 shrink items-center overflow-auto"
+        style={{ containerType: 'inline-size' }}>
         <ChatNavbarContent assistant={assistant} activeTopic={activeTopic} setActiveTopic={setActiveTopic} />
       </div>
     </NavbarHeader>

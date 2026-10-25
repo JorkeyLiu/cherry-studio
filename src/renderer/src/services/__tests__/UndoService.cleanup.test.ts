@@ -70,7 +70,18 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
   executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
-  saveMessageAndBlocksToDB: mocks.saveMessageAndBlocksToDB
+  saveMessageAndBlocksToDB: mocks.saveMessageAndBlocksToDB,
+  publishDeleteAuthorityCatalog: vi.fn((dispatch: unknown, topicId: string, response: any) => {
+    const d = dispatch as (a: unknown) => void
+    d(mocks.newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
+    if (Array.isArray(response.deletedBlockIds) && response.deletedBlockIds.length > 0) {
+      d(mocks.removeManyBlocks(response.deletedBlockIds))
+    }
+    d({
+      ...(mocks.replaceSegmentsForTopic({ topicId, segments: response.segments }) as object),
+      meta: { isDeletePairedFollowUp: true }
+    })
+  })
 }))
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({

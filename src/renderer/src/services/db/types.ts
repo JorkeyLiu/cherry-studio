@@ -14,10 +14,13 @@ import type {
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
+  ImportTopicDataResponse,
   InsertMessageGroup,
+  InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   ListBranchesResponse,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   MoveSelectedTurnsToNewBranchResponse,
   RegenerateAssistantMessageRequest,
   RenameBranchResponse,
@@ -29,12 +32,14 @@ import type {
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics,
-  TopicBranchWire
+  TopicBranchWire,
+  TopicDataExportPayload,
+  TopicReferenceWire
 } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 
-export type { TopicBranchWire }
+export type { TopicBranchWire, TopicReferenceWire }
 
 /**
  * Route owner for branch-aware reads/writes: null/undefined = main route,
@@ -42,6 +47,19 @@ export type { TopicBranchWire }
  * Switching branches never changes the active topic.
  */
 export type BranchRoute = string | null | undefined
+
+/**
+ * Optional addressed route context for block-only writes. When supplied, Main
+ * enforces each block's parent ownership against this route so a cross-topic
+ * foreign-prefix row (a history-reference prefix) cannot be written through a
+ * target topic. Absent = the route is resolved from the block's committed
+ * parent row (canonical source stream).
+ */
+export interface BlockWriteRouteContext {
+  topicId: string
+  /** Route owner: null/undefined = main route, else that branch. */
+  branchId?: BranchRoute
+}
 
 /**
  * Message exchange data structure for persisting user-assistant conversations
@@ -239,7 +257,12 @@ export interface MessageDataSource {
    * `streamDiag` is optional measurement-only correlation metadata
    * (PERF-STREAM-ATTR-001); never affects persistence.
    */
-  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics, resendAttemptId?: string): Promise<void>
+  updateBlocks(
+    blocks: MessageBlock[],
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
+  ): Promise<void>
 
   /**
    * Update single block
@@ -251,18 +274,19 @@ export interface MessageDataSource {
     blockId: string,
     updates: Partial<MessageBlock>,
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ): Promise<void>
 
   /**
    * Bulk add blocks (for cloning operations)
    */
-  bulkAddBlocks?(blocks: MessageBlock[]): Promise<void>
+  bulkAddBlocks?(blocks: MessageBlock[], resendAttemptId?: string, route?: BlockWriteRouteContext): Promise<void>
 
   /**
    * Delete multiple blocks
    */
-  deleteBlocks(blockIds: string[]): Promise<FileCleanupResult>
+  deleteBlocks(blockIds: string[], route?: BlockWriteRouteContext): Promise<FileCleanupResult>
 
   // ============ Branch by stable anchor (S6.2c-1) ============
   /**
@@ -315,6 +339,28 @@ export interface MessageDataSource {
    */
   deleteBranch?(topicId: string, branchId: string): Promise<DeleteBranchResponse>
 
+  // ============ Cross-topic history references (local-only live prefix) ============
+  /**
+   * Create a new target topic that references a source route through a precise
+   * anchor (Reference/Copy = Reference). Atomic in Main (topic + relation, no
+   * orphan on failure); returns the live foreign prefix for projection. The
+   * foreign prefix is read-only; the target owns its own writable suffix. The
+   * target topic is local-only (its foreign prefix is not representable in sync).
+   */
+  createReferencedTopic?(
+    sourceTopicId: string,
+    sourceBranchId: BranchRoute,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ): Promise<{
+    topicId: string
+    reference: TopicReferenceWire
+    messages: Message[]
+    blocks: MessageBlock[]
+  }>
+
   /**
    * Move selected whole turns to a newly created child branch (purpose-specific
    * ownership move). The selection is addressed by stable group IDs and the
@@ -327,7 +373,8 @@ export interface MessageDataSource {
     sourceBranchId: BranchRoute,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ): Promise<MoveSelectedTurnsToNewBranchResponse>
 
   // ============ Insert after stable anchor (S6.2c-2) ============
@@ -357,7 +404,7 @@ export interface MessageDataSource {
     topicId: string,
     groups: InsertMessageGroup[],
     branchId?: BranchRoute
-  ): Promise<FileCleanupResult>
+  ): Promise<InsertMessageGroupsResponse>
 
   // ============ Batch Operations ============
   /**
@@ -455,6 +502,22 @@ export interface MessageDataSource {
    * Missing topic → throws ChatDbResultError (NOT_FOUND).
    */
   fetchTopicActivity?(topicId: string, branchId?: BranchRoute): Promise<FetchTopicActivityResponse>
+
+  /**
+   * Standalone JSON export READ — ONE ENTIRE logical topic.
+   * Returns the versioned topic-data payload covering the main route plus
+   * ALL branches (never one effective route, never the loaded projection).
+   * Missing topic → throws ChatDbResultError (NOT_FOUND).
+   */
+  exportTopicData?(topicId: string): Promise<TopicDataExportPayload>
+
+  /**
+   * Standalone JSON import WRITE — creates a new topic from an untrusted
+   * payload under the target assistant. Always allocates fresh IDs
+   * (no dedup/merge/overwrite). Dispatches `updateTopicUpdatedAt` exactly
+   * once after success for the new topic.
+   */
+  importTopicData?(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse>
 
   // ============ File Operations (Optional) ============
 

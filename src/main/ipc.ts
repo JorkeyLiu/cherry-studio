@@ -21,7 +21,7 @@ import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
 import { getCanonicalLabs } from '@shared/modelMetadata'
 import { extractPdfText } from '@shared/utils/pdf'
-import type { FileMetadata, Notification, OcrProvider, Provider, Shortcut, SupportedOcrFile, ThemeMode } from '@types'
+import type { FileMetadata, Notification, Provider, Shortcut, ThemeMode } from '@types'
 import checkDiskSpace from 'check-disk-space'
 import type { ProxyConfig } from 'electron'
 import { BrowserWindow, dialog, ipcMain, session, shell, systemPreferences, webContents } from 'electron'
@@ -36,27 +36,22 @@ import { registerChatDbIpc } from './services/chatDb/ipc'
 import { registerChatImportIpc } from './services/chatDbImport'
 import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import { ConfigKeys, configManager } from './services/ConfigManager'
-import DxtService from './services/DxtService'
 import { ExportService } from './services/ExportService'
 import { externalAppsService } from './services/ExternalAppsService'
 import { fileStorage as fileManager } from './services/FileStorage'
 import FileService from './services/FileSystemService'
 import KnowledgeService from './services/KnowledgeService'
-import mcpService from './services/MCPService'
-import MemoryService from './services/memory/MemoryService'
 import { modelMetadataService, registerModelMetadataIpc } from './services/ModelMetadataService'
 import { openTraceWindow, setTraceWindowTitle } from './services/NodeTraceService'
 import NotificationService from './services/NotificationService'
 import * as NutstoreService from './services/NutstoreService'
 import ObsidianVaultService from './services/ObsidianVaultService'
-import { ocrService } from './services/ocr/OcrService'
 import powerMonitorService from './services/PowerMonitorService'
 import { providerLogoService, registerProviderLogoIpc } from './services/ProviderLogoService'
 import { proxyManager } from './services/ProxyManager'
 import { pythonService } from './services/PythonService'
 import { FileServiceManager } from './services/remotefile/FileServiceManager'
 import { saveDataHandshake } from './services/SaveDataHandshake'
-import { searchService } from './services/SearchService'
 import { isSafeExternalUrl } from './services/security'
 import { registerShortcuts, unregisterAllShortcuts } from './services/ShortcutService'
 import {
@@ -96,8 +91,6 @@ const logger = loggerService.withContext('IPC')
 const backupManager = new BackupManager()
 const exportService = new ExportService()
 const obsidianVaultService = new ObsidianVaultService()
-const memoryService = MemoryService.getInstance()
-const dxtService = new DxtService()
 
 export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) {
   const appUpdater = new AppUpdater()
@@ -678,21 +671,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.KnowledgeBase_Search, KnowledgeService.search.bind(KnowledgeService))
   ipcMain.handle(IpcChannel.KnowledgeBase_Rerank, KnowledgeService.rerank.bind(KnowledgeService))
 
-  // memory
-  ipcMain.handle(IpcChannel.Memory_Add, (_, messages, config) => memoryService.add(messages, config))
-  ipcMain.handle(IpcChannel.Memory_Search, (_, query, config) => memoryService.search(query, config))
-  ipcMain.handle(IpcChannel.Memory_List, (_, config) => memoryService.list(config))
-  ipcMain.handle(IpcChannel.Memory_Delete, (_, id) => memoryService.delete(id))
-  ipcMain.handle(IpcChannel.Memory_Update, (_, id, memory, metadata) => memoryService.update(id, memory, metadata))
-  ipcMain.handle(IpcChannel.Memory_Get, (_, memoryId) => memoryService.get(memoryId))
-  ipcMain.handle(IpcChannel.Memory_SetConfig, (_, config) => memoryService.setConfig(config))
-  ipcMain.handle(IpcChannel.Memory_DeleteUser, (_, userId) => memoryService.deleteUser(userId))
-  ipcMain.handle(IpcChannel.Memory_DeleteAllMemoriesForUser, (_, userId) =>
-    memoryService.deleteAllMemoriesForUser(userId)
-  )
-  ipcMain.handle(IpcChannel.Memory_GetUsersList, () => memoryService.getUsersList())
-  ipcMain.handle(IpcChannel.Memory_MigrateMemoryDb, () => memoryService.migrateMemoryDb())
-
   // window
   ipcMain.handle(IpcChannel.Windows_SetMinimumSize, (_, width: number, height: number) => {
     checkMainWindow()
@@ -758,45 +736,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
     decrypt(encryptedData, iv, secretKey)
   )
 
-  // Register MCP handlers
-  ipcMain.handle(IpcChannel.Mcp_RemoveServer, mcpService.removeServer)
-  ipcMain.handle(IpcChannel.Mcp_RestartServer, mcpService.restartServer)
-  ipcMain.handle(IpcChannel.Mcp_StopServer, mcpService.stopServer)
-  ipcMain.handle(IpcChannel.Mcp_ListTools, mcpService.listTools)
-  ipcMain.handle(IpcChannel.Mcp_CallTool, mcpService.callTool)
-  ipcMain.handle(IpcChannel.Mcp_ListPrompts, mcpService.listPrompts)
-  ipcMain.handle(IpcChannel.Mcp_GetPrompt, mcpService.getPrompt)
-  ipcMain.handle(IpcChannel.Mcp_ListResources, mcpService.listResources)
-  ipcMain.handle(IpcChannel.Mcp_GetResource, mcpService.getResource)
-  ipcMain.handle(IpcChannel.Mcp_GetInstallInfo, mcpService.getInstallInfo)
-  ipcMain.handle(IpcChannel.Mcp_CheckConnectivity, mcpService.checkMcpConnectivity)
-  ipcMain.handle(IpcChannel.Mcp_AbortTool, mcpService.abortTool)
-  ipcMain.handle(IpcChannel.Mcp_ResolveHubTool, async (_event, nameOrId: string) => {
-    const { resolveHubToolName } = await import('@main/mcpServers/hub/mcp-bridge')
-    return resolveHubToolName(nameOrId)
-  })
-  ipcMain.handle(IpcChannel.Mcp_GetServerVersion, mcpService.getServerVersion)
-  ipcMain.handle(IpcChannel.Mcp_GetServerLogs, mcpService.getServerLogs)
-
-  // DXT upload handler
-  ipcMain.handle(IpcChannel.Mcp_UploadDxt, async (event, fileBuffer: ArrayBuffer, fileName: string) => {
-    try {
-      // Create a temporary file with the uploaded content
-      const tempPath = await fileManager.createTempFile(event, fileName)
-      await fileManager.writeFile(event, tempPath, Buffer.from(fileBuffer))
-
-      // Process DXT file using the temporary path
-      return await dxtService.uploadDxt(event, tempPath)
-    } catch (error) {
-      logger.error('DXT upload error:', error as Error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to upload DXT file'
-      }
-    }
-  })
-
-  // Register Python execution handler
+  // Register Python execution handler (generic script channel, independent of MCP/DXT)
   ipcMain.handle(
     IpcChannel.Python_Execute,
     async (_, script: string, context?: Record<string, any>, timeout?: number) => {
@@ -824,17 +764,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Nutstore_GetDirectoryContents, (_, token: string, path: string) =>
     NutstoreService.getDirectoryContents(token, path)
   )
-
-  // search window
-  ipcMain.handle(IpcChannel.SearchWindow_Open, async (_, uid: string, show?: boolean) => {
-    await searchService.openSearchWindow(uid, show)
-  })
-  ipcMain.handle(IpcChannel.SearchWindow_Close, async (_, uid: string) => {
-    await searchService.closeSearchWindow(uid)
-  })
-  ipcMain.handle(IpcChannel.SearchWindow_OpenUrl, async (_, uid: string, url: string) => {
-    return await searchService.openUrlInSearchWindow(uid, url)
-  })
 
   // webview
   ipcMain.handle(IpcChannel.Webview_SetOpenLinkExternal, (_, webviewId: number, isExternal: boolean) =>
@@ -947,12 +876,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // ExternalApps
   ipcMain.handle(IpcChannel.ExternalApps_DetectInstalled, () => externalAppsService.detectInstalledApps())
-
-  // OCR
-  ipcMain.handle(IpcChannel.OCR_ocr, (_, file: SupportedOcrFile, provider: OcrProvider) =>
-    ocrService.ocr(file, provider)
-  )
-  ipcMain.handle(IpcChannel.OCR_ListProviders, () => ocrService.listProviderIds())
 
   ipcMain.handle(IpcChannel.APP_CrashRenderProcess, () => {
     mainWindow.webContents.forcefullyCrashRenderer()

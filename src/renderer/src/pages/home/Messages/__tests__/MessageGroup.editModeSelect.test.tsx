@@ -4,10 +4,9 @@
  *   (EditTurn): the group owns no click capture, no hover reporting, no
  *   hover state/timers, and no geometry query attribute. Clicking nested
  *   content at this level toggles nothing.
- * - The grouped model/reorder/retry bar keeps its DOM mount in edit mode
- *   (force-hidden/inert by the real bar — see
- *   MessageGroupMenuBar.editModeHidden); ordinary actions run outside edit
- *   mode unchanged.
+ * - The grouped model/reorder/retry bar renders identically in all modes
+ *   behind the outer EditTurn shield (no edit branches in the bar — see
+ *   messageEditSelectionLayout); ordinary actions run unchanged.
  * - MessageItem keeps only the right-click auto-select path via
  *   onGroupClick (covered at Message level); the group forwards the prop.
  */
@@ -225,14 +224,18 @@ describe('MessageGroup edit-mode passivity', () => {
     expect(container.querySelector('[data-testid="mock-message-a1"]')).not.toBeNull()
   })
 
-  it('group menu bar stays mounted in edit mode', () => {
+  it('group menu bar stays mounted in edit mode with no edit plumbing', () => {
     const messages = [assistantMessage('a1', 0), assistantMessage('a2', 1)]
     const { container } = render(
       <MessageGroup messages={messages} topic={topic} isEditMode onGroupClick={spies.onGroupClick} />
     )
-    // Layout mount preserved; the real bar force-hides itself (proven in
-    // MessageGroupMenuBar.editModeHidden against the real component).
-    expect(container.querySelector('.group-menu-bar')).not.toBeNull()
+    // Identical mount in all modes: the bar owns no edit branches — the
+    // outer EditTurn shield covers it (proven in
+    // messageEditSelectionLayout).
+    const bar = container.querySelector('.group-menu-bar') as HTMLElement | null
+    expect(bar).not.toBeNull()
+    expect(bar?.hasAttribute('inert')).toBe(false)
+    expect(bar?.getAttribute('aria-hidden')).toBeNull()
   })
 
   it('outside edit mode the menu bar renders and ordinary actions run with no selection', () => {

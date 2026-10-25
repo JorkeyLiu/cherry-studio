@@ -70,10 +70,10 @@ describe('promptToolUsePlugin', () => {
       expect(result.tools).toHaveProperty('provider_tool')
       expect(result.tools).not.toHaveProperty('prompt_tool')
 
-      // Prompt tools should be moved to context.mcpTools
-      expect(context.mcpTools).toBeDefined()
-      expect(context.mcpTools).toHaveProperty('prompt_tool')
-      expect(context.mcpTools).not.toHaveProperty('provider_tool')
+      // Prompt tools should be moved to context.promptTools
+      expect(context.promptTools).toBeDefined()
+      expect(context.promptTools).toHaveProperty('prompt_tool')
+      expect(context.promptTools).not.toHaveProperty('provider_tool')
     })
 
     it('should handle only provider tools', async () => {
@@ -89,7 +89,7 @@ describe('promptToolUsePlugin', () => {
       const result = await Promise.resolve(plugin.transformParams!(params, context))
 
       expect(result.tools).toEqual(params.tools)
-      expect(context.mcpTools).toBeUndefined()
+      expect(context.promptTools).toBeUndefined()
     })
 
     it('should handle only prompt tools', async () => {
@@ -105,7 +105,7 @@ describe('promptToolUsePlugin', () => {
       const result = await Promise.resolve(plugin.transformParams!(params, context))
 
       expect(result.tools).toBeUndefined()
-      expect(context.mcpTools).toEqual(params.tools)
+      expect(context.promptTools).toEqual(params.tools)
     })
 
     it('should build system prompt for prompt tools', async () => {
@@ -156,7 +156,7 @@ describe('promptToolUsePlugin', () => {
       const result = await Promise.resolve(plugin.transformParams!(params, context))
 
       expect(result).toEqual(params)
-      expect(context.mcpTools).toBeUndefined()
+      expect(context.promptTools).toBeUndefined()
     })
 
     it('should skip when no tools provided', async () => {
@@ -284,10 +284,10 @@ describe('promptToolUsePlugin', () => {
       expect(result).toEqual(inputChunks)
     })
 
-    it('should return identity transform when no mcpTools in context', async () => {
+    it('should return identity transform when no promptTools in context', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      // Don't set context.mcpTools
+      // Don't set context.promptTools
 
       const inputChunks: Array<{ type: 'text-delta'; text: string }> = [
         { type: 'text-delta', text: 'Hello' },
@@ -309,7 +309,7 @@ describe('promptToolUsePlugin', () => {
     it('should initialize accumulatedUsage in context', () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -328,7 +328,7 @@ describe('promptToolUsePlugin', () => {
     it('should filter tool tags from text-delta chunks', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -366,7 +366,7 @@ describe('promptToolUsePlugin', () => {
     it('should hold text-start until non-tag content appears', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -397,7 +397,7 @@ describe('promptToolUsePlugin', () => {
     it('should send text-start when non-tag content appears', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -425,7 +425,7 @@ describe('promptToolUsePlugin', () => {
     it('should pass through non-text events', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -448,7 +448,7 @@ describe('promptToolUsePlugin', () => {
     it('should accumulate usage from finish-step events', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 
@@ -483,7 +483,7 @@ describe('promptToolUsePlugin', () => {
     it('should include accumulated usage in finish event', async () => {
       const plugin = createPromptToolUsePlugin()
       const context = createMockContext()
-      context.mcpTools = {
+      context.promptTools = {
         test: createMockTool('test')
       }
 

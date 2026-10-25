@@ -1,12 +1,17 @@
 import {
+  bumpAndInvalidate,
   bumpAndInvalidateAll,
   computeClosureFingerprint,
+  ensureClosureGeneration,
   getCachedContextClosure,
   getClosureLoadGeneration,
+  getFreshValidatedClosure,
   getGlobalBlockGeneration,
   resetAllClosureStateForTests,
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
+import { closureInvalidationMiddleware } from '@renderer/store'
+import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -125,5 +130,92 @@ describe('uncached in-flight block mutation race (LOCK-R06-006 global epoch)', (
     // Second bump also advances
     bumpAndInvalidateAll()
     expect(getGlobalBlockGeneration()).toBe(before + 2)
+  })
+
+  it('fresh branch race: bare-topic mutation rejects original uncached in-flight, post-mutation fetch accepted; sibling invalidated, unrelated + read-only retained', async () => {
+    const topicId = 't-parent-race'
+    const freshBranch = 'b-fresh'
+    const sibBranch = 'b-sib'
+    const anchor = 'u1'
+    const otherTopic = 't-unrelated'
+
+    // Fresh branch has never been cached; authority read registers its generation (init-only).
+    expect(getCachedContextClosure(topicId, freshBranch)).toBeNull()
+    ensureClosureGeneration(topicId, freshBranch)
+    const generationAtFetch = getClosureLoadGeneration(topicId, freshBranch)
+    const globalAtFetch = getGlobalBlockGeneration()
+    expect(generationAtFetch).toBe(0)
+    // Read-start path also registers (miss, but tracked for later bare-topic bump).
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, freshBranch)).toBeNull()
+    expect(getClosureLoadGeneration(topicId, freshBranch)).toBe(0)
+
+    // Seed cached sibling routes + unrelated topic (all fresh before mutation).
+    const fp = computeClosureFingerprint([{ id: 'u1', role: 'user', blocks: [] }] as any)
+    setCachedContextClosureWithFingerprint(topicId, makeResp(topicId, anchor), fp, null)
+    setCachedContextClosureWithFingerprint(topicId, makeResp(topicId, anchor), fp, sibBranch)
+    setCachedContextClosureWithFingerprint(otherTopic, makeResp(otherTopic, anchor), fp)
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, null)).not.toBeNull()
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, sibBranch)).not.toBeNull()
+    expect(getFreshValidatedClosure(otherTopic, anchor, undefined, null)).not.toBeNull()
+
+    // Uncached branch in-flight fetch dispatched after the read.
+    let resolveFetch: (v: FetchContextClosureResponse) => void
+    const deferred = new Promise<FetchContextClosureResponse>((res) => {
+      resolveFetch = res
+    })
+    const fetchPromise = deferred.then((response) => {
+      if (getClosureLoadGeneration(topicId, freshBranch) !== generationAtFetch) {
+        return { published: false, reason: 'generation' }
+      }
+      if (getGlobalBlockGeneration() !== globalAtFetch) return { published: false, reason: 'global' }
+      setCachedContextClosureWithFingerprint(topicId, response as any, fp, freshBranch)
+      return { published: true }
+    })
+
+    // Parent-prefix mutation between dispatch and publication (bare-topic).
+    bumpAndInvalidate(topicId)
+
+    // Original snapshot must be rejected (branch bumped 0 -> 1 even though never cached).
+    expect(getClosureLoadGeneration(topicId, freshBranch)).not.toBe(generationAtFetch)
+    resolveFetch!(makeResp(topicId, anchor) as any)
+    const staleResult = await fetchPromise
+    expect(staleResult.published).toBe(false)
+    expect(getCachedContextClosure(topicId, freshBranch)).toBeNull()
+
+    // Parent mutation invalidates cached sibling routes, not unrelated topics.
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, null)).toBeNull()
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, sibBranch)).toBeNull()
+    expect(getFreshValidatedClosure(otherTopic, anchor, undefined, null)).not.toBeNull()
+
+    // Post-mutation fetch for the same branch is accepted.
+    const genAfter = getClosureLoadGeneration(topicId, freshBranch)
+    const globAfter = getGlobalBlockGeneration()
+    const freshResp = makeResp(topicId, anchor)
+    // Simulate second fetch publication guard passing.
+    expect(getClosureLoadGeneration(topicId, freshBranch)).toBe(genAfter)
+    expect(getGlobalBlockGeneration()).toBe(globAfter)
+    setCachedContextClosureWithFingerprint(topicId, freshResp as any, fp, freshBranch)
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, freshBranch)).not.toBeNull()
+
+    // Read-only publication never invalidates: same-topic read-only hydration retains.
+    const runMiddleware = (action: unknown) =>
+      (closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(action)
+    const genOtherBefore = getClosureLoadGeneration(otherTopic)
+    runMiddleware(
+      markClosureReadOnly(
+        withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [{ id: 'b-ro' }] }, otherTopic)
+      )
+    )
+    expect(getClosureLoadGeneration(otherTopic)).toBe(genOtherBefore)
+    expect(getFreshValidatedClosure(otherTopic, anchor, undefined, null)).not.toBeNull()
+    // Read-only for the parent topic would likewise retain the fresh branch (no bump).
+    const genBranchBeforeRO = getClosureLoadGeneration(topicId, freshBranch)
+    runMiddleware(
+      markClosureReadOnly(
+        withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [{ id: 'b-ro2' }] }, topicId)
+      )
+    )
+    expect(getClosureLoadGeneration(topicId, freshBranch)).toBe(genBranchBeforeRO)
+    expect(getFreshValidatedClosure(topicId, anchor, undefined, freshBranch)).not.toBeNull()
   })
 })

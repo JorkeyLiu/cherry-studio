@@ -60,10 +60,10 @@ export const isMutableForActiveRoute = (state: RootState, topicId: string, messa
     const storedRoute = slice.mutableRouteByTopic?.[topicId] ?? null
     if (storedRoute !== route) return false
     const mutable = slice.mutableMessageIdsByTopic?.[topicId]
-    if (!Array.isArray(mutable) || !mutable.includes(messageId)) return false
     const loaded = slice.messageIdsByTopic?.[topicId]
-    if (!Array.isArray(loaded) || !loaded.includes(messageId)) return false
-    return true
+    if (!Array.isArray(mutable) || !Array.isArray(loaded)) return false
+    const membership = routeMembership(loaded, mutable)
+    return membership.mutable.has(messageId) && membership.loaded.has(messageId)
   } catch {
     return false
   }
@@ -120,21 +120,69 @@ export function resolveLoadedAnswerGroup(
       }
     }
     if (!askId) return null
-    const loadedSet = new Set(loaded)
-    const memberIds: string[] = []
-    for (const id of loaded) {
-      const m = entities[id]
-      if (m && m.role === 'assistant' && m.askId === askId) memberIds.push(id)
-    }
-    if (memberIds.length === 0) return null
-    void loadedSet
-    const root = entities[askId]
-    const userRootId = root && loaded.includes(askId) ? askId : null
-    const allIds = userRootId ? [userRootId, ...memberIds] : [...memberIds]
-    return { askId, userRootId, memberIds, allIds }
+    const index = answerGroupIndex(loaded, entities)
+    return index.groups.get(askId) ?? null
   } catch {
     return null
   }
+}
+
+interface AnswerGroupIndex {
+  groups: Map<string, LoadedAnswerGroup>
+  membersByAskId: Map<string, string[]>
+}
+
+const answerGroupIndexes = new WeakMap<object, WeakMap<object, AnswerGroupIndex>>()
+
+function answerGroupIndex(loaded: string[], entities: Record<string, Message | undefined>): AnswerGroupIndex {
+  let byLoadedIds = answerGroupIndexes.get(entities)
+  if (!byLoadedIds) {
+    byLoadedIds = new WeakMap()
+    answerGroupIndexes.set(entities, byLoadedIds)
+  }
+  const cached = byLoadedIds.get(loaded)
+  if (cached) return cached
+
+  const membersByAskId = new Map<string, string[]>()
+  const loadedIds = new Set(loaded)
+  for (const id of loaded) {
+    const message = entities[id]
+    if (!message || message.role !== 'assistant' || typeof message.askId !== 'string') continue
+    const members = membersByAskId.get(message.askId) ?? []
+    members.push(id)
+    membersByAskId.set(message.askId, members)
+  }
+
+  const groups = new Map<string, LoadedAnswerGroup>()
+  for (const [askId, memberIds] of membersByAskId) {
+    const root = entities[askId]
+    const userRootId = root && loadedIds.has(askId) ? askId : null
+    groups.set(askId, {
+      askId,
+      userRootId,
+      memberIds,
+      allIds: userRootId ? [userRootId, ...memberIds] : [...memberIds]
+    })
+  }
+  const index = { groups, membersByAskId }
+  byLoadedIds.set(loaded, index)
+  return index
+}
+
+const routeMemberships = new WeakMap<object, WeakMap<object, { loaded: Set<string>; mutable: Set<string> }>>()
+
+function routeMembership(loaded: string[], mutable: string[]): { loaded: Set<string>; mutable: Set<string> } {
+  let byMutableIds = routeMemberships.get(loaded)
+  if (!byMutableIds) {
+    byMutableIds = new WeakMap()
+    routeMemberships.set(loaded, byMutableIds)
+  }
+  let membership = byMutableIds.get(mutable)
+  if (!membership) {
+    membership = { loaded: new Set(loaded), mutable: new Set(mutable) }
+    byMutableIds.set(mutable, membership)
+  }
+  return membership
 }
 
 /**
@@ -184,12 +232,7 @@ export function loadedAnswerMemberIds(state: RootState, topicId: string, askId: 
     const entities = (state as unknown as { messages?: { entities?: Record<string, Message | undefined> } }).messages
       ?.entities
     if (!entities) return []
-    const out: string[] = []
-    for (const id of loaded) {
-      const m = entities[id]
-      if (m && m.role === 'assistant' && m.askId === askId) out.push(id)
-    }
-    return out
+    return answerGroupIndex(loaded, entities).membersByAskId.get(askId) ?? []
   } catch {
     return []
   }

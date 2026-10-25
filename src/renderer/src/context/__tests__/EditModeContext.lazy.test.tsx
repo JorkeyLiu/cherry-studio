@@ -142,7 +142,20 @@ describe('S3.5 EditMode lazy activation', () => {
     expect(screen.getByTestId('can-undo').textContent).toBe('true')
     // Heavy hook must instantiate when enabled (at least one call, may re-render)
     expect(useCreateEditModeSpy).toHaveBeenCalled()
-    expect(useCreateEditModeSpy).toHaveBeenCalledWith('t1', undefined, undefined)
+    expect(useCreateEditModeSpy).toHaveBeenCalledWith('t1', undefined, undefined, undefined)
+  })
+
+  it('forwards the selection-boundary page request to the heavy hook', () => {
+    const store = makeStore(true)
+    const requestBoundaryPage = vi.fn(async () => true)
+    render(
+      <Provider store={store}>
+        <EditModeProvider topicId="t1" requestBoundaryPage={requestBoundaryPage}>
+          <Consumer />
+        </EditModeProvider>
+      </Provider>
+    )
+    expect(useCreateEditModeSpy).toHaveBeenLastCalledWith('t1', undefined, undefined, requestBoundaryPage)
   })
 
   it('activates heavy on enable and deactivates on disable (toggle lifecycle)', async () => {

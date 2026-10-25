@@ -555,6 +555,108 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'A' }, wid('4'))).toBe(false)
   })
 
+  it('ordinary pagination commit publishes the precommit anchor + windowId with a one-shot hold', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    c.declareUserIntent()
+    c.userTakeover({ messageId: 'm9', intraRowOffset: -40, scrollTop: -900, isAtBottom: false })
+    c.noteInteractionScrollEnd()
+    const genBefore = c.windowGeneration
+    // Same-route older growth: precommit reading row m9 at offset -40.
+    expect(
+      c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('30'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    expect(c.windowGeneration).toBeGreaterThan(genBefore)
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'm9', offset: -40 })
+    expect(c.renderedProvenance).toMatchObject({ routeId: 'A', windowId: wid('30') })
+    // Single owner: no phase/epoch/ownership change, still stable + unowned.
+    expect(c.currentPhase).toBe('stable')
+    expect(c.programmaticOwned).toBe(false)
+    expect(c.isDomProvenanceClean).toBe(true)
+    // Commit-scoped hold: consumable exactly once at this generation, and
+    // only by the generation-layout commit — scroll/resize/mutate observers
+    // firing on pre-growth DOM must never steal it.
+    expect(c.consumePaginationHold('scroll')).toBe(false)
+    expect(c.consumePaginationHold('mutate')).toBe(false)
+    expect(c.consumePaginationHold('generation-layout')).toBe(true)
+    expect(c.consumePaginationHold('generation-layout')).toBe(false)
+  })
+
+  it('ordinary pagination commit hold survives a live user session but a newer window invalidates it', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    c.declareUserIntent()
+    c.userTakeover({ messageId: 'm9', intraRowOffset: -40, scrollTop: -900, isAtBottom: false })
+    // New input arrives for the continuous upward gesture (same live session).
+    c.declareUserIntent()
+    expect(c.hasActiveUserInteraction()).toBe(true)
+    expect(
+      c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('31'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    // Still consumable while the session is live: the keeper may hold the
+    // commit instant without the session gate dropping it — but only from the
+    // generation-layout commit, never from pre-commit scroll/mutation.
+    expect(c.consumePaginationHold('scroll')).toBe(false)
+    expect(c.consumePaginationHold('resize')).toBe(false)
+    expect(c.consumePaginationHold('generation-layout')).toBe(true)
+    // A newer same-route window update naturally invalidates any stale arm:
+    // re-arm, advance the generation, then the old arm is gone.
+    expect(
+      c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('32'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'A' }, wid('33'))).toBe(true)
+    expect(c.consumePaginationHold('generation-layout')).toBe(false)
+  })
+
+  it('route request/invalidation/rendered-unknown clear an armed pagination hold (no cross-session reuse)', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    expect(
+      c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('40'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    // A route transition request supersedes the armed hold (no generation
+    // bump on request itself, so the clear is explicit).
+    c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: null })
+    expect(c.consumePaginationHold('generation-layout')).toBe(false)
+
+    const d = new RouteViewportController(displayed('t1', 'A'))
+    expect(
+      d.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('41'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    d.invalidateAll()
+    expect(d.consumePaginationHold('generation-layout')).toBe(false)
+
+    const e = new RouteViewportController(displayed('t1', 'A'))
+    expect(
+      e.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('42'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    e.markRenderedUnknown()
+    expect(e.consumePaginationHold('generation-layout')).toBe(false)
+
+    const f = new RouteViewportController(displayed('t1', 'A'))
+    expect(
+      f.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('43'), { messageId: 'm9', offset: -40 })
+    ).toBe(true)
+    f.syncDisplayed({ topicId: 't2', route: 'A' })
+    expect(f.consumePaginationHold('generation-layout')).toBe(false)
+  })
+
+  it('ordinary pagination commit refuses owned/dirty/foreign states and never fabricates an anchor', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    // Owned (route transition in flight): restore/transition paths own it.
+    const { epoch } = c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: null })
+    expect(c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('2'), null)).toBe(false)
+    expect(c.consumePaginationHold('generation-layout')).toBe(false)
+    // Foreign route never publishes.
+    c.applyTransitionWindow(epoch, { topicId: 't1', route: 'B' }, wid('B-1'))
+    expect(c.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'B' }, wid('B-2'), null)).toBe(false)
+    // Null anchor on the clean route still refreshes the window identity
+    // without fabricating a row anchor.
+    const d = new RouteViewportController(displayed('t1', 'A'))
+    expect(d.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'B' }, wid('5'), null)).toBe(false)
+    expect(d.adoptOrdinaryPaginationWindow({ topicId: 't1', route: 'A' }, wid('5'), null)).toBe(true)
+    expect(d.getAnchorFor(displayed('t1', 'A'))).toBeNull()
+    expect(d.renderedProvenance).toMatchObject({ windowId: wid('5') })
+    expect(d.consumePaginationHold('generation-layout')).toBe(true)
+  })
+
   it('rapid A→B→A: second request supersedes, preserves A anchor, never captures B DOM as A', () => {
     // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))

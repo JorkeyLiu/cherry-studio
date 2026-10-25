@@ -116,6 +116,239 @@ async function isVisibleInMessagesViewport(page: any, messageId: string): Promis
 }
 
 /**
+ * Genuine-user divider-toggle reveal (test-side only, no production change).
+ *
+ * The route-stable keeper compensates programmatic scrolls (scrollIntoView /
+ * scrollTop writes carry no interaction token), so only a real
+ * `page.mouse.wheel` over #messages owns the viewport. Before a physical
+ * divider-toggle click at risk of starting offscreen, wheel the toggle into
+ * the #messages viewport and prove settling: visible inside the container
+ * bounds, toggle box stable across 3 consecutive rAF frames (same
+ * stableFrames=3 as tests/e2e/utils/viewport-scroll-sync.ts), and the
+ * toggle-center hit point resolving through elementFromPoint to the toggle
+ * (or a descendant) with no overlay. Wheel direction follows the toggle rect
+ * relative to the container (above -> negative deltaY toward history, below ->
+ * positive) with regress-flip, bounded steps, and scrollTop-progress checks.
+ * No fixed delays, no force/DOM clicks, no keeper changes. Failure attaches a
+ * minimal geometry snapshot (IDs + rects only, never message text) and throws.
+ */
+async function readDividerToggleState(
+  page: any,
+  anchorMsgId: string
+): Promise<{
+  found: boolean
+  testId: string | null
+  toggleRect: { top: number; bottom: number; left: number; right: number } | null
+  containerRect: { top: number; bottom: number; left: number; right: number } | null
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  phase: string
+  visible: boolean
+  hitTestId: string | null
+  hitOk: boolean
+}> {
+  return page.evaluate((anchor: string) => {
+    const toggle = document.querySelector(
+      `[data-testid="branch-fork-toggle-${anchor}"], [data-testid="branch-fork-selected-${anchor}"]`
+    ) as HTMLElement | null
+    const container = document.querySelector('#messages') as HTMLElement | null
+    if (!toggle || !container) {
+      return {
+        found: false,
+        testId: null,
+        toggleRect: null,
+        containerRect: null,
+        scrollTop: -1,
+        scrollHeight: -1,
+        clientHeight: -1,
+        phase: '',
+        visible: false,
+        hitTestId: null,
+        hitOk: false
+      }
+    }
+    const t = toggle.getBoundingClientRect()
+    const c = container.getBoundingClientRect()
+    const cx = t.left + t.width / 2
+    const cy = t.top + t.height / 2
+    const hitInside = cx > c.left && cx < c.right && cy > c.top && cy < c.bottom
+    let hitTestId: string | null = null
+    let hitOk = false
+    try {
+      const hit = document.elementFromPoint(cx, cy) as HTMLElement | null
+      hitTestId = hit?.getAttribute?.('data-testid') ?? (hit ? hit.tagName : null)
+      hitOk = hitInside && !!hit && !!toggle.contains(hit)
+    } catch {
+      hitOk = false
+    }
+    return {
+      found: true,
+      testId: toggle.getAttribute('data-testid'),
+      toggleRect: { top: t.top, bottom: t.bottom, left: t.left, right: t.right },
+      containerRect: { top: c.top, bottom: c.bottom, left: c.left, right: c.right },
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+      phase: container.getAttribute('data-viewport-phase') ?? '',
+      visible: t.bottom > c.top && t.top < c.bottom && t.right > c.left && t.left < c.right,
+      hitTestId,
+      hitOk
+    }
+  }, anchorMsgId)
+}
+
+async function isDividerToggleBoxStable(
+  page: any,
+  anchorMsgId: string,
+  tol = 2
+): Promise<{ stable: boolean; maxDelta: number }> {
+  return page.evaluate(
+    ({ anchor, tolPx }: { anchor: string; tolPx: number }) =>
+      new Promise<{ stable: boolean; maxDelta: number }>((resolve) => {
+        const sel = `[data-testid="branch-fork-toggle-${anchor}"], [data-testid="branch-fork-selected-${anchor}"]`
+        const read = (): { top: number; left: number; bottom: number; right: number } | null => {
+          const el = document.querySelector(sel) as HTMLElement | null
+          if (!el) return null
+          const r = el.getBoundingClientRect()
+          return { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
+        }
+        const frames: Array<{ top: number; left: number; bottom: number; right: number } | null> = []
+        const step = (): void => {
+          frames.push(read())
+          if (frames.length < 3) {
+            requestAnimationFrame(step)
+            return
+          }
+          let maxDelta = 0
+          for (let i = 1; i < frames.length; i++) {
+            const a = frames[i - 1]
+            const b = frames[i]
+            if (!a || !b) {
+              resolve({ stable: false, maxDelta: -1 })
+              return
+            }
+            maxDelta = Math.max(
+              maxDelta,
+              Math.abs(a.top - b.top),
+              Math.abs(a.left - b.left),
+              Math.abs(a.bottom - b.bottom),
+              Math.abs(a.right - b.right)
+            )
+          }
+          resolve({ stable: maxDelta <= tolPx, maxDelta: Math.round(maxDelta * 10) / 10 })
+        }
+        requestAnimationFrame(step)
+      }),
+    { anchor: anchorMsgId, tolPx: tol }
+  )
+}
+
+async function wheelDividerToggleIntoView(page: any, anchorMsgId: string, maxSteps = 24): Promise<void> {
+  const focusMessages = async (): Promise<void> => {
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  }
+  const frameSettle = async (): Promise<void> => {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        })
+    )
+  }
+  const fail = async (reason: string, extra: Record<string, unknown>): Promise<never> => {
+    try {
+      await test.info().attach('divider-toggle-wheel-failure', {
+        body: JSON.stringify({ anchor: anchorMsgId, reason, ...extra }, null, 2),
+        contentType: 'application/json'
+      })
+    } catch {
+      // Best-effort diagnostic only; never masks the original failure.
+    }
+    throw new Error(`divider toggle ${anchorMsgId} not wheel-reachable: ${reason}`)
+  }
+  await focusMessages()
+  let flip = 1
+  let regress = 0
+  let lastGap: number | null = null
+  let lastScrollTop: number | null = null
+  let still = 0
+  let wheels = 0
+  for (let i = 0; i < maxSteps; i++) {
+    const st = await readDividerToggleState(page, anchorMsgId)
+    if (!st.found || !st.toggleRect || !st.containerRect) {
+      await fail('toggle-not-attached', { wheels, testId: st.testId })
+      throw new Error(`divider toggle ${anchorMsgId} not attached`)
+    }
+    const t = st.toggleRect
+    const c = st.containerRect
+    let gap: number
+    let want: number
+    if (t.bottom <= c.top) {
+      gap = c.top - t.bottom
+      want = -480
+    } else if (t.top >= c.bottom) {
+      gap = t.top - c.bottom
+      want = 480
+    } else {
+      gap = 0
+      const mid = (t.top + t.bottom) / 2
+      const center = (c.top + c.bottom) / 2
+      want = mid < center ? -240 : 240
+    }
+    if (st.visible && st.hitOk) {
+      const boxStable = await isDividerToggleBoxStable(page, anchorMsgId)
+      if (boxStable.stable) {
+        test.info().annotations.push({
+          type: 'divider-toggle-wheel',
+          description: `anchor=${anchorMsgId} wheels=${wheels} maxDelta=${boxStable.maxDelta} testId=${st.testId}`
+        })
+        return
+      }
+    }
+    if (lastGap !== null && gap > lastGap + 2) regress += 1
+    else regress = 0
+    if (regress >= 2) {
+      flip *= -1
+      regress = 0
+    }
+    const dy = want * flip
+    lastGap = gap
+    await focusMessages()
+    await page.mouse.wheel(0, dy)
+    wheels += 1
+    await frameSettle()
+    const after = await readDividerToggleState(page, anchorMsgId)
+    if (lastScrollTop !== null && Math.abs(after.scrollTop - lastScrollTop) <= 2) still += 1
+    else still = 0
+    lastScrollTop = after.scrollTop
+    if (still >= 8) {
+      await fail('no-scroll-progress', {
+        wheels,
+        dy,
+        scrollTop: after.scrollTop,
+        scrollHeight: after.scrollHeight,
+        clientHeight: after.clientHeight,
+        gap
+      })
+    }
+  }
+  const st = await readDividerToggleState(page, anchorMsgId)
+  await fail('max-steps-exhausted', {
+    wheels,
+    maxSteps,
+    testId: st.testId,
+    toggleRect: st.toggleRect,
+    containerRect: st.containerRect,
+    scrollTop: st.scrollTop,
+    phase: st.phase,
+    visible: st.visible,
+    hitTestId: st.hitTestId
+  })
+}
+
+/**
  * Same-profile relaunch race guards (poll-based, never fixed-sleep-gated).
  *
  * Production close path (existing contract): window `close` runs the
@@ -938,6 +1171,10 @@ test.describe('Topic-internal branches end-to-end', () => {
     await test.step('divider switch back to L2', async () => {
       const backMainToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorId}"]`).first()
       await expect(backMainToggle, 'main untaken fork must be visible').toBeVisible({ timeout: 30000 })
+      // Genuine-user reveal: the prior owner-anchor hover can leave this toggle
+      // offscreen, and synthetic scrolls carry no interaction token, so wheel it
+      // into the viewport stable before the physical click.
+      await wheelDividerToggleIntoView(page, anchorId)
       await backMainToggle.click()
       const backMainList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
       await expect(backMainList, 'main divider popup must open').toBeVisible({ timeout: 15000 })
@@ -954,6 +1191,8 @@ test.describe('Topic-internal branches end-to-end', () => {
       )
       const backL1Toggle = page.locator(`[data-testid="branch-fork-toggle-${l2AnchorId}"]`).first()
       await expect(backL1Toggle, 'L1 untaken l2Anchor fork must be visible').toBeVisible({ timeout: 30000 })
+      // Same offscreen risk after the route switch: genuine-wheel reveal first.
+      await wheelDividerToggleIntoView(page, l2AnchorId)
       await backL1Toggle.click()
       const backL2List = page.locator(`[data-testid="branch-fork-list-${l2AnchorId}"]`).first()
       await expect(backL2List, 'l2Anchor divider popup must open').toBeVisible({ timeout: 15000 })
@@ -3740,6 +3979,170 @@ test.describe('Ordinary send immediate mutability (no-reload)', () => {
       expect((branchWin2.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds2)
       expect(new Set(branchWin2.value.mutableMessageIds as string[])).toEqual(new Set([...firstFresh, ...secondFresh]))
       await expectFreshPairEditable(page, secondFresh)
+    })
+  })
+})
+
+test.describe('Branch-route automatic naming preservation (bounded naming)', () => {
+  test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
+
+  async function uiSendMessageLocal(page: any, text: string): Promise<void> {
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await textarea.waitFor({ state: 'visible', timeout: 15000 })
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, content }: { selector: string; content: string }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement | null
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, content)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', content: text }
+    )
+    await expect(textarea).toHaveValue(text, { timeout: 5000 })
+    await textarea.press('Enter')
+  }
+
+  async function waitAssistant(page: any, topicId: string, prev: number): Promise<void> {
+    await page.waitForFunction(
+      ({ tid, p }: { tid: string; p: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let n = 0
+        for (const id of ids) if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+        return n > p
+      },
+      { tid: topicId, p: prev },
+      { timeout: 60000 }
+    )
+    await page.waitForFunction(
+      ({ tid }: { tid: string }) => {
+        const s = (window as any).store?.getState()
+        if (!s || s.messages?.loadingByTopic?.[tid] === true) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let latest: string | null = null
+        for (let i = ids.length - 1; i >= 0; i--) {
+          if (s.messages?.entities?.[ids[i]]?.role === 'assistant') {
+            latest = ids[i]
+            break
+          }
+        }
+        if (!latest) return false
+        const msg = s.messages.entities[latest]
+        if (msg.status !== 'success' && msg.status !== 'error') return false
+        for (const b of (msg.blocks ?? []) as string[]) {
+          const block = s.messageBlocks?.entities?.[b]
+          if (!block || (block.status !== 'success' && block.status !== 'error')) return false
+        }
+        return true
+      },
+      { tid: topicId },
+      { timeout: 60000 }
+    )
+  }
+
+  test('branch-route send preserves a non-default logical topic title (shared topic, no branch-row rename)', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'BRANCH NAMING PRESERVATION: one logical topic with a non-default title; fork L1 via toolbar; ordinary send on the branch route completes via the mock provider; the shared logical Topic.name stays the manual title (no mock marker, no branch-row rename); post-exit SQLite proves the durable name plus branch-row integrity.'
+    })
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page, TOTAL)
+    const topicId = `brname-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const manualTitle = `Branch Manual Title ${topicId}`
+    const seedIds = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: manualTitle,
+      total: 4,
+      messageIdForIndex: (i: number) => letterMessageId(topicId, i),
+      contentPrefix: 'brname-'
+    })
+    await activateTopic(page, topicId, 4)
+    const anchorId = seedIds[1]
+
+    await test.step('fork L1 via toolbar (same logical topic)', async () => {
+      await clickToolbarBranch(page, anchorId)
+      await page.waitForFunction(
+        ({ tid, len }: { tid: string; len: number }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[tid]
+          return Array.isArray(ids) && ids.length === len
+        },
+        { tid: topicId, len: 2 },
+        { timeout: 30000 }
+      )
+    })
+    const branches = await listBranches(page, topicId)
+    expect(branches).toHaveLength(1)
+    const branchId = branches[0].id as string
+
+    await test.step('ordinary send on the branch route preserves the logical title', async () => {
+      const prev = await page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let n = 0
+        for (const id of ids) if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+        return n
+      }, topicId)
+      clearRequestLog()
+      const seq = getRequestSequence()
+      await uiSendMessageLocal(page, 'branch naming preservation probe message')
+      await waitAssistant(page, topicId, prev)
+      const productReq: any = findProductRequestAfter(seq)
+      expect(productReq, 'mock must observe the branch send').not.toBeNull()
+      // Allow the fire-and-forget auto-naming attempt to settle; the
+      // non-default logical title must survive it.
+      await page.waitForTimeout(8000)
+      const reduxName: string = await page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        return s.assistants.assistants.flatMap((a: any) => a.topics).find((t: any) => t.id === tid)?.name ?? ''
+      }, topicId)
+      expect(reduxName).toBe(manualTitle)
+      expect(reduxName).not.toContain('[Mock mock-model] You said:')
+      // Still exactly one sidebar topic; branch catalog holds the single L1.
+      const sidebarIds: string[] = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        return s.assistants.assistants.flatMap((a: any) => (a.topics ?? []).map((t: any) => t.id))
+      })
+      expect(sidebarIds).toContain(topicId)
+      const afterBranches = await listBranches(page, topicId)
+      expect(afterBranches).toHaveLength(1)
+      expect(afterBranches[0].id).toBe(branchId)
+      const activeRoute: string | null = await page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicId
+      )
+      expect(activeRoute).toBe(branchId)
+    })
+
+    await test.step('post-exit SQLite: logical name durable, branch row intact, no extra topics', async () => {
+      const chatDbPath = getChatDbPath()
+      expect(chatDbPath).not.toBeNull()
+      await electronApp.close()
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      const esc = (v: string): string => v.replace(/'/g, "''")
+      const tRes = queryChatDbViaElectron(chatDbPath!, `SELECT id, name FROM topics WHERE id = '${esc(topicId)}'`)
+      if (!tRes.ok) throw new Error(`topics query failed: ${tRes.code}`)
+      const tRows = tRes.rows as any[]
+      expect(tRows).toHaveLength(1)
+      expect(tRows[0].name).toBe(manualTitle)
+      const bRes = await queryChatDbViaElectronWithRetry(
+        chatDbPath!,
+        `SELECT id, topic_id FROM topic_branches WHERE topic_id = '${esc(topicId)}'`
+      )
+      if (!bRes.ok) throw new Error(`branches query failed: ${bRes.code}`)
+      expect((bRes.rows as any[]).map((r: any) => r.id)).toEqual([branchId])
     })
   })
 })

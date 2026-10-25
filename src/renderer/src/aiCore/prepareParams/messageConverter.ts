@@ -6,6 +6,7 @@
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
 import { isGenerateImageModel, isImageEnhancementModel } from '@renderer/config/models/vision'
+import type { RequestAttachmentFilter } from '@renderer/services/requestAttachmentAvailability'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { resolveOverlayBlock } from '@renderer/services/requestBlockOverlay'
 import store from '@renderer/store'
@@ -87,7 +88,8 @@ export async function convertMessageToSdkParam(
   message: Message,
   isVisionModel = false,
   model?: Model,
-  overlay?: BlockOverlay
+  overlay?: BlockOverlay,
+  attachmentFilter?: RequestAttachmentFilter
 ): Promise<ModelMessage | ModelMessage[]> {
   let content = mainTextContentWithOverlay(message, overlay)
 
@@ -102,7 +104,7 @@ export async function convertMessageToSdkParam(
   const reasoningBlocks = findBlocksWithOverlay(message, overlay, 'thinking', findThinkingBlocks)
   const mainTextBlocks = findBlocksWithOverlay(message, overlay, 'main_text', findMainTextBlocks)
   if (message.role === 'user' || message.role === 'system') {
-    return convertMessageToUserModelMessage(content, fileBlocks, imageBlocks, isVisionModel, model)
+    return convertMessageToUserModelMessage(content, fileBlocks, imageBlocks, isVisionModel, model, attachmentFilter)
   } else {
     return convertMessageToAssistantModelMessage(
       content,
@@ -110,18 +112,33 @@ export async function convertMessageToSdkParam(
       imageBlocks,
       reasoningBlocks,
       mainTextBlocks,
-      model
+      model,
+      attachmentFilter
     )
   }
 }
 
-async function convertImageBlockToImagePart(imageBlocks: ImageMessageBlock[]): Promise<Array<ImagePart>> {
+/**
+ * Encode image blocks into image parts.
+ *
+ * `attachmentFilter` is the request-local availability view: blocks excluded
+ * for this request (payload provably unavailable) are skipped, and blocks kept
+ * via their `url` because the local payload is absent are encoded from that url
+ * instead of the stale file metadata. Anything not in the filter keeps the
+ * existing behavior, including aborting on read/encode failure.
+ */
+async function convertImageBlockToImagePart(
+  imageBlocks: ImageMessageBlock[],
+  attachmentFilter?: RequestAttachmentFilter
+): Promise<Array<ImagePart>> {
   const parts: Array<ImagePart> = []
   for (const imageBlock of imageBlocks) {
-    if (imageBlock.file) {
+    if (attachmentFilter?.unavailableBlockIds.has(imageBlock.id)) continue
+    const file = attachmentFilter?.urlFallbackBlockIds.has(imageBlock.id) ? undefined : imageBlock.file
+    if (file) {
       try {
-        const ext = imageBlock.file.ext.startsWith('.') ? imageBlock.file.ext : `.${imageBlock.file.ext}`
-        const image = await window.api.file.base64Image(imageBlock.file.id + ext)
+        const ext = file.ext.startsWith('.') ? file.ext : `.${file.ext}`
+        const image = await window.api.file.base64Image(file.id + ext)
         if (!image?.base64 || !image?.mime || !image.mime.startsWith('image/')) {
           throw new Error(`unreliable image payload (mime "${image?.mime}")`)
         }
@@ -132,7 +149,7 @@ async function convertImageBlockToImagePart(imageBlocks: ImageMessageBlock[]): P
         })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
-        throw attachmentFailedError(imageBlock.file.origin_name, 'image', reason)
+        throw attachmentFailedError(file.origin_name, 'image', reason)
       }
     } else if (imageBlock.url) {
       const url = imageBlock.url
@@ -162,7 +179,8 @@ async function convertMessageToUserModelMessage(
   fileBlocks: FileMessageBlock[],
   imageBlocks: ImageMessageBlock[],
   _isVisionModel = false,
-  model?: Model
+  model?: Model,
+  attachmentFilter?: RequestAttachmentFilter
 ): Promise<UserModelMessage | (UserModelMessage | SystemModelMessage)[]> {
   const parts: Array<TextPart | FilePart | ImagePart> = []
   if (content) {
@@ -172,9 +190,13 @@ async function convertMessageToUserModelMessage(
   // Unit B: ordinary chat is user-intent driven. Images are always encoded when
   // the endpoint/SDK can carry them; model vision metadata never gates sending.
   // Read/encode failures abort via convertImageBlockToImagePart (never omitted).
-  parts.push(...(await convertImageBlockToImagePart(imageBlocks)))
+  parts.push(...(await convertImageBlockToImagePart(imageBlocks, attachmentFilter)))
   // 处理文件（原子性：任何附件失败中止请求，绝不省略后发纯文本）
   for (const fileBlock of fileBlocks) {
+    // Request-local availability: an attachment whose payload provably does not
+    // exist on this device is excluded from this request only. Every attachment
+    // that is present keeps the existing atomic failure behavior below.
+    if (attachmentFilter?.unavailableBlockIds.has(fileBlock.id)) continue
     const file = fileBlock.file
     let processed = false
 
@@ -276,7 +298,8 @@ async function convertMessageToAssistantModelMessage(
   imageBlocks: ImageMessageBlock[],
   thinkingBlocks: ThinkingMessageBlock[],
   mainTextBlocks: MainTextMessageBlock[],
-  model?: Model
+  model?: Model,
+  attachmentFilter?: RequestAttachmentFilter
 ): Promise<AssistantModelMessage> {
   const parts: Array<TextPart | ReasoningPart | FilePart> = []
 
@@ -310,6 +333,10 @@ async function convertMessageToAssistantModelMessage(
   }
 
   for (const fileBlock of fileBlocks) {
+    // Request-local availability: an attachment whose payload provably does not
+    // exist on this device is excluded from this request only; a present
+    // attachment keeps aborting on failure below.
+    if (attachmentFilter?.unavailableBlockIds.has(fileBlock.id)) continue
     // 优先尝试原生文件支持（PDF等）；失败时中止而非静默省略
     if (model) {
       const filePart = await convertFileBlockToFilePart(fileBlock, model)
@@ -348,18 +375,24 @@ async function convertMessageToAssistantModelMessage(
  * metadata gate). History image merging is preserved ONLY for the dedicated
  * image-editing path (enhancement / generate-image models), never as a
  * vision authorization.
+ *
+ * `attachmentFilter` carries the request-local attachment availability view
+ * resolved for this exact request: attachments whose payload does not exist on
+ * this device are excluded, while every present attachment keeps the existing
+ * atomic failure behavior.
  */
 export async function convertMessagesToSdkMessages(
   messages: Message[],
   model: Model,
-  overlay?: BlockOverlay
+  overlay?: BlockOverlay,
+  attachmentFilter?: RequestAttachmentFilter
 ): Promise<ModelMessage[]> {
   const sdkMessages: ModelMessage[] = []
   // `isVisionModel` is kept only as a legacy call signature slot; sending no
   // longer depends on it. Pass `true` so per-message conversion always encodes
   // images when the endpoint/SDK can carry them.
   for (const message of messages) {
-    const sdkMessage = await convertMessageToSdkParam(message, true, model, overlay)
+    const sdkMessage = await convertMessageToSdkParam(message, true, model, overlay, attachmentFilter)
     sdkMessages.push(...(Array.isArray(sdkMessage) ? sdkMessage : [sdkMessage]))
   }
   // History image merge stays scoped to the dedicated image-editing path.
@@ -389,7 +422,7 @@ export async function convertMessagesToSdkMessages(
 
     // Check if there are images from the previous assistant message
     const imageBlocks = prevAssistant ? findBlocksWithOverlay(prevAssistant, overlay, 'image', findImageBlocks) : []
-    const imageParts = await convertImageBlockToImagePart(imageBlocks)
+    const imageParts = await convertImageBlockToImagePart(imageBlocks, attachmentFilter)
 
     // If no images to merge, return messages as-is
     if (imageParts.length === 0) {

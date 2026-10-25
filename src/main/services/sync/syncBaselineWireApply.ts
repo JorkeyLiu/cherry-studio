@@ -206,6 +206,28 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
         .sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0))
     })
   }
+  // v6 cross-topic history references: ONE coherent relation tuple per target
+  // topic, entity-clock only. The referenced prefix is never on the wire.
+  for (const r of ((payload as { topicReferences?: unknown }).topicReferences as Array<{
+    targetTopicId: string
+    sourceTopicId: string
+    sourceBranchId: string | null
+    anchorMessageId: string
+    entityClock: { timestamp: number; operationId: string }
+  }>) ?? []) {
+    entities.push({
+      entityType: 'topic_reference',
+      entityId: r.targetTopicId,
+      payload: {
+        targetTopicId: r.targetTopicId,
+        sourceTopicId: r.sourceTopicId,
+        sourceBranchId: r.sourceBranchId ?? null,
+        anchorMessageId: r.anchorMessageId
+      },
+      entityClock: { timestamp: r.entityClock.timestamp, operationId: r.entityClock.operationId },
+      fieldClocks: []
+    })
+  }
   for (const b of payload.messageBlocks) {
     const assetIds = (b as { assetIds?: unknown }).assetIds ?? []
     const payloadWithAsset: Record<string, unknown> = {
@@ -247,7 +269,9 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
           ? 'topic_branch'
           : t.entityType === 'fileAsset'
             ? 'file_asset'
-            : t.entityType,
+            : t.entityType === 'topicReference'
+              ? 'topic_reference'
+              : t.entityType,
     entityId: t.entityId,
     timestamp: t.deletionClock.timestamp,
     operationId: t.deletionClock.operationId,

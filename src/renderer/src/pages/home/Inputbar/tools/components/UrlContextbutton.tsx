@@ -1,8 +1,6 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { getEffectiveMcpMode } from '@renderer/types'
-import { isToolUseModeFunction } from '@renderer/utils/assistant'
 import { Tooltip } from 'antd'
 import { Link } from 'lucide-react'
 import type { FC } from 'react'
@@ -24,32 +22,21 @@ const UrlContextButton: FC<Props> = ({ assistantId }) => {
     setTimeoutTimer(
       'handleToggle',
       () => {
-        const update = { ...assistant }
-        if (
-          getEffectiveMcpMode(assistant) !== 'disabled' &&
-          urlContentNewState === true &&
-          isToolUseModeFunction(assistant)
-        ) {
-          update.enableUrlContext = false
-          window.toast.warning(t('chat.mcp.warning.url_context'))
-        } else {
-          update.enableUrlContext = urlContentNewState
-        }
-        updateAssistant(update)
+        updateAssistant({ ...assistant, enableUrlContext: urlContentNewState })
       },
       100
     )
-  }, [setTimeoutTimer, assistant, urlContentNewState, updateAssistant, t])
+  }, [setTimeoutTimer, assistant, urlContentNewState, updateAssistant])
 
   return (
     <Tooltip placement="top" title={t('chat.input.url_context')} arrow>
-      <ActionIconButton
+      <ComposerIconButton
         onClick={handleToggle}
         active={assistant.enableUrlContext}
         aria-label={t('chat.input.url_context')}
         aria-pressed={assistant.enableUrlContext}>
-        <Link size={18} />
-      </ActionIconButton>
+        <Link size={16} />
+      </ComposerIconButton>
     </Tooltip>
   )
 }

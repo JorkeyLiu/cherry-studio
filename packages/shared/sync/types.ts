@@ -3,7 +3,14 @@
  * JSON-only, no Node/Electron imports.
  */
 
-export type SyncEntityType = 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'file_asset'
+export type SyncEntityType =
+  | 'topic'
+  | 'message'
+  | 'message_block'
+  | 'topic_branch'
+  | 'assistant_config'
+  | 'file_asset'
+  | 'topic_reference'
 
 export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame' | 'message_stable_replace' | 'move_turns_to_branch'
 
@@ -161,6 +168,20 @@ export const SYNC_FILE_ASSET_PATCH_FIELDS = ['mimeType', 'originalName', 'create
  * fields (never identity).
  */
 export const SYNC_BRANCH_PATCH_FIELDS = ['name', 'createdAt', 'updatedAt'] as const
+
+/**
+ * Allowlisted cross-topic history-reference payload fields.
+ * The relation is ONE coherent tuple owned by `targetTopicId`: source topic,
+ * optional source branch route, and the precise anchor message. It has no
+ * per-field clocks by design (the tuple is never mixed across competing
+ * updates); convergence is whole-entity LWW on the entity clock.
+ */
+export const SYNC_TOPIC_REFERENCE_FIELDS = [
+  'targetTopicId',
+  'sourceTopicId',
+  'sourceBranchId',
+  'anchorMessageId'
+] as const
 
 /**
  * Mutable allowlisted assistant-config fields with per-field clocks.

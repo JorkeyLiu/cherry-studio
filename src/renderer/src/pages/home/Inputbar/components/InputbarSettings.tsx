@@ -1,16 +1,19 @@
+import ComposerIconButton from '@renderer/components/Buttons/ComposerIconButton'
 import EditableNumber from '@renderer/components/EditableNumber'
 import Selector from '@renderer/components/Selector'
+import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { SettingDivider, SettingRow, SettingRowTitle } from '@renderer/pages/settings'
 import { useAppDispatch } from '@renderer/store'
 import type { SendMessageShortcut } from '@renderer/store/settings'
 import {
+  setIncludeHistoryMediaContext,
   setPasteLongTextAsFile,
   setPasteLongTextThreshold,
   setRenderInputMessageAsMarkdown
 } from '@renderer/store/settings'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
-import { Popover, Switch } from 'antd'
+import { Popover, Switch, Tooltip } from 'antd'
 import { Settings2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -24,6 +27,7 @@ const InputbarSettings: FC = () => {
     pasteLongTextAsFile,
     pasteLongTextThreshold,
     renderInputMessageAsMarkdown,
+    includeHistoryMediaContext,
     sendMessageShortcut,
     setSendMessageShortcut
   } = useSettings()
@@ -66,6 +70,26 @@ const InputbarSettings: FC = () => {
       </SettingRow>
       <SettingDivider />
       <SettingRow>
+        <SettingRowTitle>
+          <span>{t('settings.messages.input.include_history_media_context')}</span>
+          {/* Visible help affordance: the switch scope (history-only omission,
+              the current turn always sent, ON restoring normal history) is not
+              derivable from the label alone. */}
+          <HelpTooltip
+            title={t('settings.messages.input.include_history_media_context_tooltip')}
+            placement="left"
+            mouseLeaveDelay={0}
+            iconStyle={{ marginLeft: 4, cursor: 'help' }}
+          />
+        </SettingRowTitle>
+        <Switch
+          size="small"
+          checked={includeHistoryMediaContext !== false}
+          onChange={(checked) => dispatch(setIncludeHistoryMediaContext(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
         <SettingRowTitle>{t('settings.messages.input.send_shortcuts')}</SettingRowTitle>
         <Selector
           size={14}
@@ -92,9 +116,11 @@ const InputbarSettings: FC = () => {
       styles={{
         root: { width: 297 }
       }}>
-      <SettingsIconButton aria-label={t('settings.title')}>
-        <Settings2 size={15} />
-      </SettingsIconButton>
+      <Tooltip placement="top" title={t('chat.input.input_settings')} mouseLeaveDelay={0} arrow>
+        <ComposerIconButton aria-label={t('chat.input.input_settings')} data-testid="inputbar-settings-button">
+          <Settings2 size={16} />
+        </ComposerIconButton>
+      </Tooltip>
     </Popover>
   )
 }
@@ -107,26 +133,6 @@ const PopoverContent = styled.div`
 
   .ant-divider {
     margin: 8px 0;
-  }
-`
-
-const SettingsIconButton = styled.button`
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-icon);
-  cursor: pointer;
-  padding: 0;
-  transition: all 0.3s ease;
-
-  &:hover {
-    background-color: var(--color-background-soft);
-    color: var(--color-text-1);
   }
 `
 

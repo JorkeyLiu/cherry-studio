@@ -14,16 +14,21 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
+import BackToBottomButton from '@renderer/pages/home/Messages/BackToBottomButton'
 import {
   COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
-  COLUMN_REVERSE_NEWER_PREFETCH_PX,
-  distanceFromBottom,
-  isAtBottom as isColumnReverseAtBottom
+  isAtBottom as isColumnReverseAtBottom,
+  isAtNewest as isColumnReverseAtNewest,
+  isAtOldest as isColumnReverseAtOldest,
+  isExactlyAtNewest,
+  isExactlyAtOldest
 } from '@renderer/pages/home/Messages/columnReverseGeometry'
 import {
+  createVisibleAnchorCache,
   findFirstVisibleMessage,
   findViewportTopAnchorWithOffset,
-  getMessageRowById
+  getMessageRowById,
+  isElementVisibleInViewport
 } from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
@@ -32,6 +37,8 @@ import {
   type BootstrapPhase,
   canHandleUserViewportScroll,
   chooseNavigationWindow,
+  computeColumnReverseMessageScrollTop,
+  computeRestoreMessageScrollTop,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
   type MessageNavigationResult,
@@ -42,13 +49,6 @@ import {
   shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
 import { ensureMessageLoaded } from '@renderer/pages/home/Messages/messageNavigationLoader'
-import {
-  createPendingOlderIntent,
-  decidePendingOlderReplay,
-  isStillAtOldestEdge,
-  type PendingOlderEdgeIntent,
-  shouldQueueOlderIntent
-} from '@renderer/pages/home/Messages/messagePaginationIntent'
 import { createViewportProjectionCache } from '@renderer/pages/home/Messages/messageViewportProjection'
 import {
   createMessageViewportState,
@@ -60,10 +60,10 @@ import {
   type MessageViewportScrollToken
 } from '@renderer/pages/home/Messages/messageViewportReducer'
 import {
+  canAdvancePaginationWindow,
   clampWindowCount,
   createLatestMessageWindow,
-  expandMessageWindowNewer,
-  expandMessageWindowOlder,
+  derivePaginationWindow,
   getLatestWindowCompleteness,
   mergeWindowIntoTopic,
   type MessageWindow,
@@ -77,9 +77,17 @@ import { dbService } from '@renderer/services/db/DbService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
+import { clearPendingNavigate, getPendingNavigate, locateToMessageTarget } from '@renderer/services/MessagesService'
+import {
+  claimPaginationFetchLease,
+  createPaginationFetchLease,
+  isPaginationFetchLeaseFree,
+  releasePaginationFetchLease
+} from '@renderer/services/paginationFetchLease'
 import {
   captureResidentGeneration,
+  captureRouteGeneration,
+  isPaginationAttemptApplicable,
   shouldDiscardPaginationForResident
 } from '@renderer/services/paginationResidentGuard'
 import { handleScrollSnapshotCleared } from '@renderer/services/scrollSnapshotCache'
@@ -91,9 +99,14 @@ import {
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
-import { withClosureTopics } from '@renderer/store/closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import {
+  newMessagesActions,
+  readLoadedProjectionMessages,
+  selectHistoryReferenceForTopic,
+  selectLoadedMessagesForTopic
+} from '@renderer/store/newMessage'
 import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import {
   activeBranchSet,
@@ -102,6 +115,7 @@ import {
   selectDeletionFallbackIntent
 } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
+import type { EditSelectionBoundaryDirection } from '@renderer/types/editMode'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
 import {
@@ -109,14 +123,14 @@ import {
   captureScrollableAsDataURL,
   removeSpecialCharactersForFileName
 } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
-import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
+import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse, HistoryReferenceMeta } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
+  use,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -127,7 +141,7 @@ import {
   useState
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import InfiniteScroll from 'react-infinite-scroll-component'
+import { UNSAFE_NavigationContext } from 'react-router-dom'
 import styled from 'styled-components'
 
 import { AnchorGroupProvider } from './anchorGroupContext'
@@ -154,12 +168,12 @@ import {
  */
 import MessageContextMenu from './MessageContextMenu'
 import { renderEditFlowNodes } from './messageEditSelectionLayout'
-import { buildMessageFlowNodes, resolveContextDividerGroupKey } from './messageFlowNodes'
+import { buildMessageFlowNodes, resolveContextDividerGroupKey, resolveReferenceBoundary } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
 import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
-import { useCrossMessageSelectionGuard, useEditModeNativeSelectionSuppression } from './messageSelectionGuard'
+import { useCrossMessageSelectionGuard } from './messageSelectionGuard'
 import {
   buildRouteViewport,
   canonicalSavedAnchorId,
@@ -172,12 +186,20 @@ import {
   decideTopRestoreAnchor,
   initLoadedRouteState,
   isLoadedRouteCurrent,
+  isReferenceReloadObliged,
   isTopRestoreNotFoundError,
   isTopStableCommittable,
-  markLoadedRouteFailed
+  markLoadedRouteFailed,
+  type ReferenceReloadObligation
 } from './messageWindow'
-import { isRestoreTargetValid, shouldCancelStabilizerForKeyDown } from './positionStabilizer'
+import {
+  browseDirectionForClampedInput,
+  decideSelectionBoundaryPage,
+  isRestoreTargetValid,
+  shouldCancelStabilizerForKeyDown
+} from './positionStabilizer'
 import Prompt from './Prompt'
+import { ReferenceDivider } from './ReferenceDivider'
 import { attemptFirstPosition, isFirstPlacementAwaitingAttempt } from './routeFirstPlacement'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
@@ -191,12 +213,21 @@ import {
 import {
   buildContainerCapturer,
   isCaptureContainerHidden,
+  isViewportLayoutControlTarget,
+  isViewportLayoutResizeKey,
+  resolveRetainedViewportMessageId,
   useOptionalRouteViewport,
   useStableVisualAnchor,
   viewportPhaseAttrFor
 } from './routeViewportContext'
-import { displayedRouteKey, RouteViewportController, type RouteViewportSnapshot } from './routeViewportController'
+import {
+  declareUserIntentSession,
+  displayedRouteKey,
+  RouteViewportController,
+  type RouteViewportSnapshot
+} from './routeViewportController'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
+import { hasActiveStreamingReply, shouldPauseStreamingOnPrimaryMouseDown } from './streamingPause'
 import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
@@ -207,6 +238,17 @@ import {
   type ViewportTransitionPhase
 } from './viewportTransition'
 
+/**
+ * Read-only reading-anchor report (renderer-local, no persistence): the
+ * current viewport-top anchor message id with its topic/branch route.
+ * `messageId` null = no measurable row anchor. Never drives scrolling.
+ */
+export interface ReadingAnchorReport {
+  topicId: string
+  route: string | null
+  messageId: string | null
+  navigationTargetId: string | null
+}
 interface MessagesProps {
   assistant: Assistant
   topic: Topic
@@ -216,6 +258,8 @@ interface MessagesProps {
   /** Shared context projection computed once at Chat level (Phase 2B).
    *  Messages consumes boundaryMessageId and anchorGroupKey from this result. */
   sharedContextInfo: ReturnType<typeof computeContextInfo>
+  /** Read-only viewport-top anchor report for the navigation highlight (Chat forwards it). */
+  onReadingAnchor?: (report: ReadingAnchorReport) => void
 }
 
 export interface MessagesHandle {
@@ -243,6 +287,17 @@ export const shouldHandleSendMessageForTopic = (
   if (!payload || typeof payload.topicId !== 'string' || payload.topicId.length === 0) return true
   return payload.topicId === currentTopicId
 }
+
+/**
+ * Genuine physical bottom for column-reverse follow resume (renderer-local
+ * geometry only): `abs(scrollTop) <= 1`. 1px is subpixel rounding tolerance
+ * (same as the oldest-edge exact gate) — never the 50px snapshot vicinity,
+ * so a user reading near the tail never jumps to follow. Snapshot
+ * `isAtBottom` (50px) semantics are unchanged; this gate only chooses the
+ * live anchor (null = follow) for real user scrolls.
+ */
+export const isGenuinePhysicalBottom = (scrollTop: unknown): boolean =>
+  typeof scrollTop === 'number' && Number.isFinite(scrollTop) && Math.abs(scrollTop) <= 1
 
 /**
  * Explicit send-to-bottom intent (SEND_MESSAGE) dependencies (focused-test
@@ -474,10 +529,8 @@ interface MessagesContentProps {
    */
   viewportRouteKey: string
   contextBoundaryMessageId: string | null
-  hasMore: boolean
   isLoadingMore: boolean
   isLoadingNewer: boolean
-  loadMoreMessages: () => void
   registerMessageElement: (messageId: string, element: HTMLElement | null) => void
   /**
    * Fork-divider route switch (divider-visual-anchor navigation, never bottom).
@@ -488,12 +541,23 @@ interface MessagesContentProps {
    * `#messages` top — the reliable visual invariant for this switch.
    */
   onSelectRoute: (branchId: string | null, anchorMessageId: string, info?: DividerSwitchInfo) => void
-  /** Genuine user input (wheel/touch/pointer) while a stabilizer may be active. */
-  onStabilizerUserInput?: () => void
+  /** Genuine user input (touch/pointer) while a stabilizer may be active: declares the session only. */
+  onStabilizerUserInput?: (e?: React.PointerEvent | React.TouchEvent | React.MouseEvent) => void
+  /** Direction-confirmed wheel input (upward wheel at the exact oldest edge may page; rest declares only). */
+  onStabilizerWheel?: (e: React.WheelEvent) => void
   /** Keyboard scroll pre-cancel (Arrow/PageUp/PageDown/Home/End/Space, inputs excluded). */
   onStabilizerKeyDown?: (e: React.KeyboardEvent) => void
   /** Atomic viewport transition phase (diagnostic `data-viewport-phase`; hidden while positioning). */
   viewportPhase: ViewportTransitionPhase
+  /** Canonical explicit bottom navigation (independent back-to-bottom button). */
+  onScrollToBottom: () => void
+  /**
+   * Authoritative newer completeness for the current projection
+   * (`viewportState.window.hasMoreNewer`, validated Main `hasMoreAfter` +
+   * bounded-trim derivation). Forwarded to the back-to-bottom button so a
+   * historical window parked at scrollTop 0 with newer beyond stays visible.
+   */
+  hasMoreNewer?: boolean
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -505,26 +569,62 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   displayGroups,
   viewportRouteKey,
   contextBoundaryMessageId,
-  hasMore,
   isLoadingMore,
   isLoadingNewer,
-  loadMoreMessages,
   registerMessageElement,
   onSelectRoute,
   onStabilizerUserInput,
+  onStabilizerWheel,
   onStabilizerKeyDown,
-  viewportPhase
+  viewportPhase,
+  onScrollToBottom,
+  hasMoreNewer
 }) => {
   const { t } = useTranslation()
+  const dispatch = useAppDispatch()
+  // Router navigate is read from the navigation context directly (tolerating
+  // absence outside a Router, e.g. unit tests) instead of `useNavigate()`,
+  // which throws without a Router provider. Reference-source navigation fails
+  // closed when no router is present.
+  const navigationContext = use(UNSAFE_NavigationContext) as unknown as {
+    navigator?: { push: (to: string, state?: unknown) => void }
+  } | null
+  // Cross-topic history reference (Reference submenu): the active topic's
+  // topic-level reference metadata + live source title + the router navigate
+  // used only to jump to the captured source endpoint.
+  const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topic.id))
+  // Live source title: prefer the current Redux topics (rename reflects
+  // immediately) read inline (never importing `store/assistants`, which pulls
+  // the i18n index); fall back to the metadata's refreshed authoritative name.
+  const referenceSourceName = useAppSelector((state) => {
+    const ref = (
+      state as {
+        messages?: { historyReferenceByTopic?: Record<string, { sourceTopicId: string; sourceName: string | null }> }
+      }
+    )?.messages?.historyReferenceByTopic?.[topic.id]
+    if (!ref) return null
+    const assistants = (
+      state as {
+        assistants?: { assistants?: Array<{ topics?: Array<{ id: string; name?: string }> }> }
+      } | null
+    )?.assistants
+    for (const assistant of assistants?.assistants ?? []) {
+      const name = assistant.topics?.find((candidate) => candidate.id === ref.sourceTopicId)?.name
+      if (typeof name === 'string' && name.length > 0) return name
+    }
+    return ref.sourceName ?? null
+  })
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
   // Boundary-aware native selection: ordinary within-message selection is
-  // preserved; cross-message native ranges are cleared. In edit mode native
-  // text selection inside messages is suppressed (selection-only semantics).
+  // preserved; cross-message native ranges are cleared. Edit-mode native
+  // text-selection suppression is owned by the interactive turn itself
+  // (EditTurn), not by this list-level guard, so the list never forbids
+  // selection across its whole subtree (segment chrome/rename field and
+  // ordinary controls keep native selection).
   useCrossMessageSelectionGuard()
-  useEditModeNativeSelectionSuppression(isEditMode, scrollContainerRef)
 
   // Branch fork dividers for the active route: catalog for the logical
   // topic, breadcrumb path, and direct children across the addressed route
@@ -580,6 +680,31 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     [groupedMessages, contextBoundaryMessageId]
   )
 
+  // History-reference divider placement (topic-level; null for ordinary
+  // topics). The divider marks the readonly foreign-prefix / writable
+  // target-owned-suffix boundary; missing sources render at the beginning.
+  const referenceBoundary = useMemo(
+    () => resolveReferenceBoundary(groupedMessages, historyReference, topic.id),
+    [groupedMessages, historyReference, topic.id]
+  )
+
+  const onNavigateReferenceSource = useCallback(() => {
+    if (!historyReference || historyReference.status !== 'available') return
+    const navigator = navigationContext?.navigator
+    if (!navigator) return
+    // Retain the captured source branch + exact stable anchor: select the
+    // captured route on the source topic BEFORE navigating so the topic-default
+    // active branch never wins, then navigate the stable ID cross-topic.
+    dispatch(activeBranchSet({ topicId: historyReference.sourceTopicId, branchId: historyReference.sourceBranchId }))
+    const navigateCompat = ((to: string, opts?: { state?: unknown }) => navigator.push(to, opts?.state)) as Parameters<
+      typeof locateToMessageTarget
+    >[0]
+    void locateToMessageTarget(navigateCompat, {
+      topicId: historyReference.sourceTopicId,
+      messageId: historyReference.anchorMessageId
+    })
+  }, [dispatch, historyReference, navigationContext])
+
   const renderMessageSegments = () => {
     // Mounted message flow in newest→oldest render order: turn bodies and
     // independent boundary nodes as siblings. Turn runs are grouped
@@ -592,6 +717,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     const nodes = buildMessageFlowNodes({
       layerRuns,
       contextDividerGroupKey,
+      referenceBoundary,
       forkAnchorIds,
       childrenByAnchor: branchTree.childrenByAnchor,
       branchPath: branchTree.path,
@@ -613,20 +739,12 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           onSelectRoute={onSelectRoute}
         />
       ),
-      renderBody: ({ kind, stableGroupId, layerRunId, segment, isFirst, isLast, groupMessages }) => (
+      renderBody: ({ kind, stableGroupId, layerRunId, groupMessages }) => (
         <div
           style={{ position: 'relative' }}
           data-layer-kind={kind}
           data-stable-group-id={stableGroupId}
           data-layer-run-id={layerRunId}>
-          {segment && (
-            <TopicSegmentLine
-              segment={segment}
-              isFirst={isFirst}
-              isLast={isLast}
-              messageCount={isFirst ? segment.messageCount : undefined}
-            />
-          )}
           <MessageGroup
             messages={groupMessages}
             topic={topic}
@@ -642,14 +760,36 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
           <ContextWindowDividerLine />
         </ContextWindowDivider>
-      )
+      ),
+      renderReferenceBoundary: () =>
+        historyReference ? (
+          <ReferenceDivider
+            reference={historyReference}
+            sourceName={referenceSourceName}
+            onNavigateSource={onNavigateReferenceSource}
+          />
+        ) : null
     })
 
     // Turn runs group adjacent mounted bodies of one Q&A turn under a
     // single interaction container with boundary flush; selected
     // contiguous ranges keep one atomic outline that wraps interior
-    // boundaries — see renderEditFlowNodes.
-    return renderEditFlowNodes({ nodes, isEditMode, onTurnClick: handleGroupClick })
+    // boundaries — see renderEditFlowNodes. Segment chrome (vertical rule +
+    // label) is group/segment identity, not turn content, so it renders on
+    // the run chrome host as a sibling of the interactive turn.
+    return renderEditFlowNodes({
+      nodes,
+      isEditMode,
+      onTurnClick: handleGroupClick,
+      renderSegmentChrome: ({ segment, isFirst, isLast }) => (
+        <TopicSegmentLine
+          segment={segment}
+          isFirst={isFirst}
+          isLast={isLast}
+          messageCount={isFirst ? segment.messageCount : undefined}
+        />
+      )
+    })
   }
 
   return (
@@ -659,26 +799,39 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         id="messages"
         className="messages-container"
         data-viewport-phase={viewportPhase}
-        // Keyboard-focusable scroll host: ordinary click/tab navigation reaches
-        // the container so native PageUp/PageDown page #messages directly.
-        // No autofocus, no focus theft, no custom scroll arithmetic — the
-        // existing container-scoped key handler only observes the native keys.
-        tabIndex={0}
+        // Keyboard-focusable scroll host in normal mode: ordinary click/tab navigation reaches
+        // the container so native PageUp/PageDown page #messages directly. Edit mode keeps it
+        // programmatically focusable as the stable message-selection focus target.
+        // No autofocus or custom scroll arithmetic — the existing container-scoped key handler observes native keys.
+        tabIndex={isEditMode ? -1 : 0}
         ref={scrollContainerRef}
         onScroll={handleScrollPosition}
-        onWheel={onStabilizerUserInput}
+        onWheel={onStabilizerWheel}
         onTouchStart={onStabilizerUserInput}
         onPointerDown={onStabilizerUserInput}
         onKeyDown={onStabilizerKeyDown}>
-        <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
-          <InfiniteScroll
-            dataLength={displayMessages.length}
-            next={loadMoreMessages}
-            hasMore={hasMore}
-            loader={null}
-            scrollableTarget="messages"
-            inverse
-            style={{ overflow: 'visible' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column-reverse',
+            // Paused-stream fractional-zoom jitter: native TRUE intrinsic
+            // height of the sole firstElementChild content wrapper (content +
+            // margins, rounded up to the live device-pixel quantum). The
+            // keeper synchronizes `--messages-pixel-size` to
+            // `1/window.devicePixelRatio` on this same wrapper (write-only on
+            // change, existing observer/layout path, no new state/listeners);
+            // top-alignment keeps the reversed children off the fractional
+            // root start. Unsupported engines ignore the height declaration
+            // and keep the previous automatic height (no render break).
+            height: 'calc-size(auto, round(up, size, var(--messages-pixel-size, 1px)))',
+            justifyContent: 'flex-end',
+            flexShrink: 0
+          }}>
+          {/* App-owned browse paging: this wrapper is layout-only (same DOM
+          order/structure as before). Both edges are evaluated from live
+          container geometry + committed viewport state on genuine user
+          scroll/input (maybePageAtEdge) — never library latch events. */}
+          <div data-older-paging="app-owned" style={{ overflow: 'visible' }}>
             <MessageContextMenu topicId={topic.id}>
               <ScrollContainer>
                 {isLoadingNewer && (
@@ -694,12 +847,17 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                 )}
               </ScrollContainer>
             </MessageContextMenu>
-          </InfiniteScroll>
+          </div>
 
           {/* Prompts always render; the persisted showPrompt setting is inert. */}
           <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
         </div>
       </MessagesContainer>
+      <BackToBottomButton
+        onScrollToBottom={onScrollToBottom}
+        containerRef={scrollContainerRef}
+        hasMoreNewer={hasMoreNewer}
+      />
     </MessagesWrapper>
   )
 }
@@ -711,7 +869,8 @@ const Messages = ({
   setActiveTopic,
   onComponentUpdate,
   onFirstUpdate,
-  sharedContextInfo
+  sharedContextInfo,
+  onReadingAnchor
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
   // Active route of this logical topic (null = main route). Switching
   // branches never changes the active topic, sidebar selection, or topic
@@ -733,6 +892,10 @@ const Messages = ({
   const viewportCtx = useOptionalRouteViewport()
   const [, setLocalViewportVersion] = useState(0)
   const [localConnectionGeneration, setLocalConnectionGeneration] = useState(0)
+  // Bumped when an authoritative history-reference invalidation arrives for
+  // the active topic; the route effect depends on it and re-reads the window
+  // with the existing viewport-intent-preserving external-invalidation path.
+  const [referenceRefreshToken, setReferenceRefreshToken] = useState(0)
   const localControllerRef = useRef<RouteViewportController | null>(null)
   if (!localControllerRef.current && !viewportCtx) {
     localControllerRef.current = new RouteViewportController({ topicId: topic.id, route: activeBranchId })
@@ -797,6 +960,13 @@ const Messages = ({
   // The hook keeps only explicit non-scroll duties (saved reads, topic-change
   // save, capture); its throttled scroll writer is never called for route
   // viewports (no double write with the takeover path).
+  // Live visible-visual anchor-row getter for viewport-top captures (stable
+  // identity across renders; the implementation is assigned below once the
+  // projection + registry refs exist). All captureSnapshot paths (hook,
+  // keeper capturer, precommit, divider fallback, newer-load anchor) resolve
+  // through the exact ordered core from these cached visible visual rows —
+  // one canonical index, never a per-capture selector scan.
+  const getOrderedAnchorRowsRef = useRef<() => readonly HTMLElement[]>(() => [])
   const {
     containerRef: scrollContainerRef,
     getSavedPosition,
@@ -812,7 +982,8 @@ const Messages = ({
       const displayed = controller.displayedRoute
       if (displayed.topicId !== topic.id || displayed.route !== activeBranchId) return false
       return controller.canAcceptUserScrollWrite()
-    }
+    },
+    getOrderedRows: () => getOrderedAnchorRowsRef.current()
   })
   const getLegacyMainSavedPosition = useCallback(() => {
     try {
@@ -831,7 +1002,6 @@ const Messages = ({
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
   const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
-  const hasMore = viewportState.window?.hasMoreOlder ?? false
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
   const isLoadingMore = viewportState.loading.older
   const isLoadingNewer = viewportState.loading.newer
@@ -845,7 +1015,8 @@ const Messages = ({
   const loadedMessages = useLoadedTopicMessages(topic.id)
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranchByAnchor, createBranch } = useMessageOperations(topic)
+  const { displayCount, createTopicBranchByAnchor, createBranch, createReferencedTopicByAnchor } =
+    useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
@@ -891,7 +1062,7 @@ const Messages = ({
   useEffect(() => {
     const register = viewportCtxRef.current?.registerCapturer
     if (register) {
-      const capturer = buildContainerCapturer(scrollContainerRef)
+      const capturer = buildContainerCapturer(scrollContainerRef, () => getOrderedAnchorRowsRef.current())
       register(capturer)
       return () => register(null)
     }
@@ -907,6 +1078,38 @@ const Messages = ({
   const anchorMaintainer = useStableVisualAnchor(scrollContainerRef)
   const anchorMaintainerRef = useRef(anchorMaintainer)
   anchorMaintainerRef.current = anchorMaintainer
+
+  // Transactional anchor-sample bridge (F1): the keeper's layout-space hold needs
+  // a TRUE pair — the row's viewport offset and the container's scrollTop from the
+  // SAME instant. Only this component measures such a pair when it publishes a
+  // stable anchor, so it hands the pair over instead of letting the keeper pair a
+  // published offset with a later scrollTop (which would charge unknown user
+  // movement to layout and rewind it). Purely additive: the keeper stays the sole
+  // owner of the hold baseline and the controller stays the sole anchor owner.
+  const publishAnchorSample = useCallback(
+    (
+      ref: { topicId: string; route: string | null },
+      sample: { messageId: string | null; intraRowOffset: number | null | undefined; scrollTop: number }
+    ): void => {
+      try {
+        const { messageId, intraRowOffset, scrollTop } = sample
+        if (typeof messageId !== 'string' || messageId.length === 0) return
+        if (typeof intraRowOffset !== 'number' || !Number.isFinite(intraRowOffset)) return
+        if (!Number.isFinite(scrollTop)) return
+        anchorMaintainerRef.current.publishAnchorSample({
+          topicId: ref.topicId,
+          route: ref.route,
+          messageId,
+          viewportOffset: intraRowOffset,
+          scrollTop
+        })
+      } catch {
+        // fail-closed: no sample is published, the keeper falls back to its own
+        // observation (it then holds nothing rather than a fabricated delta)
+      }
+    },
+    []
+  )
   // Live translation ref so `navigate` stays stable across renders (production
   // `t` is stable; test mocks return a new closure per render).
   const tRef = useRef(t)
@@ -950,15 +1153,65 @@ const Messages = ({
   // `controller.declareUserIntent()` and the scroll itself is adopted once via
   // `controller.userTakeover()`; programmatic compensation writes are
   // recognized by the stable-anchor keeper, never by timestamp windows.
-  // Pending older-edge intent (InfiniteScroll latch fix): queued when `next`
-  // fires while the viewport is temporarily non-user (anchoring/programmatic
-  // restore or active navigation). Replayed once from the committed viewport
-  // state after `navigation idle + scrollMode user` restores. Never depends
-  // on library internals.
-  const pendingOlderIntentRef = useRef<PendingOlderEdgeIntent | null>(null)
+  // Synchronous ordinary-page ownership guard, shared by BOTH pagination
+  // directions: mirrors `loading[<direction>]` without the render-commit lag, so
+  // two user-edge events landing in the same tick (wheel declare + its scroll,
+  // key auto-repeat) start exactly one fetch. One lease instance covers the
+  // single ordinary page read at a time (older or newer), because the accepted
+  // window is derived from the committed window state whose mirror commits one
+  // render later. The guard is a TOKEN-SCOPED lease, not a boolean: a
+  // superseded/cancelled attempt can only release the ownership it still holds,
+  // so a stale continuation can never free the lease of the attempt that
+  // replaced it (which would let a third read start concurrently). Claimed on
+  // start, ownership-released on every finish/cancel below, force-released by
+  // the teardown/invalidation sites (unmount, deletion, topic transition,
+  // cancel-all). Never a queue: an edge event arriving while busy follows the
+  // committed state (guarded out here) instead of recording a second copy of
+  // scroll intent — and the very next edge event starts the next page.
+  const paginationFetchLeaseRef = useRef(createPaginationFetchLease())
   const unmountedRef = useRef(false)
   // In-flight top fetch pipeline marker (same-session duplicate-run guard).
   const routeFetchEpochRef = useRef<number | null>(null)
+  // Authoritative Main→renderer history-reference invalidation: a SOURCE topic
+  // that this target references changed (rename/mutation/delete/restore). For
+  // the ACTIVE target only, mark the loaded route + DOM provenance stale and
+  // raise a one-shot reload obligation so the existing route effect re-reads the
+  // window with its viewport-intent-preserving external-invalidation path (no
+  // new lifecycle subsystem). Non-active targets converge on next activation
+  // (pull), so a missed push is harmless.
+  //
+  // The obligation is deliberately NOT the provenance mark alone: provenance is
+  // mutable controller state that any ordinary projection apply between this
+  // hint and the passive route effect re-stamps clean (`noteSameRouteWindowUpdate`
+  // / `rebaseClean`), which would let the effect's idle guard skip and leave a
+  // degraded relation (soft-deleted source → status still `available`, foreign
+  // prefix still rendered) on screen until the next activation. The token is
+  // bound to the resident topic and consumed exactly when the re-read starts.
+  const referenceReloadRef = useRef<ReferenceReloadObligation | null>(null)
+  const consumedReferenceTokenRef = useRef(0)
+  useEffect(() => {
+    const subscribe = window.api?.chatDb?.onHistoryReferenceInvalidated
+    if (typeof subscribe !== 'function') return
+    const unsubscribe = subscribe((event) => {
+      try {
+        if (!event || !Array.isArray(event.targetTopicIds)) return
+        const activeTopicId = topicIdRef.current
+        if (!activeTopicId || !event.targetTopicIds.includes(activeTopicId)) return
+        loadedRouteRef.current = markLoadedRouteFailed(routeRef.current)
+        try {
+          controller.markRenderedUnknown()
+        } catch {
+          // fail-closed: the reload below still republishes capability/metadata
+        }
+        routeFetchEpochRef.current = null
+        referenceReloadRef.current = { token: (referenceReloadRef.current?.token ?? 0) + 1, topicId: activeTopicId }
+        setReferenceRefreshToken((n) => n + 1)
+      } catch {
+        // fail-closed: metadata still refreshes on the next activation
+      }
+    })
+    return unsubscribe
+  }, [controller])
   // First-position plan payload for the pre-paint layout reveal. Single
   // writer (the arm helpers below), never decision truth: every reader
   // re-gates on `controller.isSessionCurrent(epoch)`. Cleared only after the
@@ -1421,6 +1674,14 @@ const Messages = ({
       if (!commit) {
         return false
       }
+      // Route-restore owner commit: publish the measured pair (identity + the
+      // scrollTop measured with it) so the keeper's first observation after the
+      // transition releases holds the committed position in layout space.
+      publishAnchorSample(controller.displayedRoute, {
+        messageId: measured.messageId ?? null,
+        intraRowOffset: measured.intraRowOffset,
+        scrollTop: measured.scrollTop
+      })
       let stored = false
       try {
         stored = commitSnapshotForRoute(commit.routeKey, {
@@ -1439,7 +1700,7 @@ const Messages = ({
       notifyViewport()
       return stored
     },
-    [controller, captureSnapshot, endViewportScrollToken, notifyViewport, scrollContainerRef]
+    [controller, captureSnapshot, endViewportScrollToken, notifyViewport, publishAnchorSample, scrollContainerRef]
   )
   // Top-route identity commit (route-local stable viewport): the stable
   // snapshot is explicitly constructed from the already-applied anchor
@@ -1490,6 +1751,10 @@ const Messages = ({
       if (!commit) {
         return false
       }
+      // The transition owner already placed the anchor at `wantOffset` with this
+      // exact `scrollTop`: publish the pair so the keeper's first post-release
+      // observation holds layout growth against the committed position.
+      publishAnchorSample({ topicId: tid, route }, { messageId: anchorId, intraRowOffset: wantOffset, scrollTop })
       let stored = false
       try {
         stored = commitSnapshotForRoute(commit.routeKey, {
@@ -1508,7 +1773,7 @@ const Messages = ({
       notifyViewport()
       return stored
     },
-    [controller, endViewportScrollToken, notifyViewport, scrollContainerRef]
+    [controller, endViewportScrollToken, notifyViewport, publishAnchorSample, scrollContainerRef]
   )
   // The top selector freezes through the controller (context request); this
   // instance only needs its live capturer registered (done above), so no
@@ -1704,9 +1969,12 @@ const Messages = ({
     // detach it directly. Stable deps only (no connection-generation dep) so
     // provider gen bumps re-render without re-running this teardown.
     unmountedRef.current = false
+    // Stable lease object (created once by `useRef`): captured for the cleanup
+    // so the teardown force-releases the same ownership it observed.
+    const fetchLease = paginationFetchLeaseRef.current
     return () => {
       unmountedRef.current = true
-      pendingOlderIntentRef.current = null
+      releasePaginationFetchLease(fetchLease)
       // UI-local teardown only (single controller owner is the provider):
       // clear the in-flight fetch marker so the reconnected session adopts a
       // fresh epoch, cancel quiet frames, drop divider/visible progress + the
@@ -1751,7 +2019,7 @@ const Messages = ({
     // idempotent (topic/reset, cache delete, timer clear).
     const invalidate = () => {
       windowCacheRef.current.delete(topicIdAtSubscribe)
-      pendingOlderIntentRef.current = null
+      releasePaginationFetchLease(paginationFetchLeaseRef.current)
       // Hard deletion invalidates in-flight positioning too: invalidate the
       // controller (releases ownership exactly once so later saves are not
       // blocked) and end the scroll token so the emptied viewport is never
@@ -1811,7 +2079,7 @@ const Messages = ({
       notifyViewport()
     },
     clearTimers: () => {
-      pendingOlderIntentRef.current = null
+      releasePaginationFetchLease(paginationFetchLeaseRef.current)
       clearTimeoutTimer('loadMoreMessages')
       clearTimeoutTimer('loadNewerMessages')
     },
@@ -1899,7 +2167,27 @@ const Messages = ({
     []
   )
 
+  /**
+   * Request ownership: the attempt may PUBLISH only while it owns the load
+   * state (matching token + generation) AND that load is still active. A
+   * cancelled attempt keeps no publishable ownership: `load/cancel` clears the
+   * token and `load/finish` clears activity, so a late continuation of a
+   * cancelled/superseded attempt can never match a current load again.
+   */
   const isCurrentLoad = useCallback(
+    (direction: MessageViewportLoadDirection, token: MessageViewportLoadToken, topicGeneration: number) => {
+      const load = viewportStateRef.current.loads[direction]
+      return load.active && load.token === token && load.topicGeneration === topicGeneration
+    },
+    []
+  )
+
+  /**
+   * Completion identity for work that follows the attempt's own
+   * `load/finish` (pointer compensation): same token + generation, without the
+   * `active` requirement the attempt itself just cleared.
+   */
+  const isCurrentLoadCompletion = useCallback(
     (direction: MessageViewportLoadDirection, token: MessageViewportLoadToken, topicGeneration: number) => {
       const load = viewportStateRef.current.loads[direction]
       return load.token === token && load.topicGeneration === topicGeneration
@@ -1908,7 +2196,7 @@ const Messages = ({
   )
 
   const cancelActiveLoads = useCallback(() => {
-    pendingOlderIntentRef.current = null
+    releasePaginationFetchLease(paginationFetchLeaseRef.current)
     const state = viewportStateRef.current
     for (const direction of ['older', 'newer'] as const) {
       const load = state.loads[direction]
@@ -1932,11 +2220,302 @@ const Messages = ({
     }
   }, [cancelActiveLoads, viewportDispatch])
 
+  // Viewport-local canonical VISUAL ROW index (steady-scroll anchor path):
+  // the committed window's visible rows in true visual order (oldest-first
+  // top-to-bottom), built once per row/window/fold commit and reused for every
+  // scroll capture. `registryVersionRef` tracks actual MessageGroup
+  // mount/unmount (node replacement included); `foldVersionRef` tracks fold
+  // selection flips (same nodes, new visibility); the window reference tracks
+  // pagination/navigation/extension. Ordinary scrolling changes none of them,
+  // so routine captures pay only the O(1) key check plus O(log N) geometry in
+  // the ordered core — never a per-scroll membership scan. The cache itself
+  // defers while the container is hidden, so deactivation never poisons the
+  // index; reactivation rebuilds on the next visible capture.
+  const registryVersionRef = useRef(0)
+  const foldSigRef = useRef('')
+  const foldVersionRef = useRef(0)
+  const visualAnchorCacheRef = useRef(createVisibleAnchorCache())
+  // Forward declaration: the reading-anchor scheduler is assigned below (it
+  // needs the ordered-row/measurement refs). Registry callbacks invoked
+  // before assignment are no-ops; the window/displayed effects re-measure.
+  const scheduleReadingAnchorRef = useRef<() => void>(() => undefined)
   const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) {
+      const prev = messageElements.current.get(id)
+      if (prev === element) return
       messageElements.current.set(id, element)
+      registryVersionRef.current += 1
     } else {
+      if (!messageElements.current.has(id)) return
       messageElements.current.delete(id)
+      registryVersionRef.current += 1
+    }
+    // Reading-anchor observe-only: registry mount/unmount changes the ordered
+    // row membership. Coalesced next-frame re-measure only (no scroll, no
+    // persist); the RAF dedup absorbs mount storms.
+    try {
+      scheduleReadingAnchorRef.current()
+    } catch {}
+  }, [])
+
+  // Fold-selection signature commit (runs only on projection commits, never
+  // per scroll): O(N) string work here keeps every scroll capture O(1).
+  useLayoutEffect(() => {
+    const display = viewportStateRef.current.window?.displayMessages
+    if (!display || display.length === 0) {
+      if (foldSigRef.current !== '') {
+        foldSigRef.current = ''
+        foldVersionRef.current += 1
+      }
+      return
+    }
+    let sig = ''
+    try {
+      const parts: string[] = []
+      for (const m of display) {
+        if (!m || typeof m.id !== 'string') continue
+        parts.push(m.foldSelected ? `1${m.id}` : `0${m.id.slice(0, 8)}`)
+      }
+      sig = `${display.length}:${parts.join(',')}`
+    } catch {
+      sig = String(display.length)
+    }
+    if (sig !== foldSigRef.current) {
+      foldSigRef.current = sig
+      foldVersionRef.current += 1
+    }
+  }, [viewportState.window, messages])
+  const getOrderedAnchorRows = useCallback((): readonly HTMLElement[] => {
+    const win = viewportStateRef.current.window
+    if (!win || win.displayMessages.length === 0) return []
+    let container: HTMLElement | null = null
+    try {
+      container = scrollContainerRef.current
+    } catch {
+      container = null
+    }
+    try {
+      return visualAnchorCacheRef.current.getVisibleRows({
+        container,
+        window: win,
+        registry: messageElements.current,
+        registryVersion: registryVersionRef.current,
+        foldVersion: foldVersionRef.current
+      })
+    } catch {
+      return []
+    }
+  }, [])
+  getOrderedAnchorRowsRef.current = getOrderedAnchorRows
+  // Read-only reading-anchor report (navigation highlight): observes the
+  // viewport-top anchor only, never scrolls/persists. RAF coalescing + four
+  // field ref dedup; stale-topic/foreign-route reports are dropped and old
+  // pending-target reports are forbidden. `reportRoute` is the DISPLAYED
+  // route (`branchId`, main = null). Callback via latest ref (no dep cycle).
+  const onReadingAnchorRef = useRef(onReadingAnchor)
+  onReadingAnchorRef.current = onReadingAnchor
+  const readingAnchorLastRef = useRef<ReadingAnchorReport | null>(null)
+  const readingAnchorRafRef = useRef<number | null>(null)
+  const readingAnchorPendingTargetRef = useRef<{ navigateToken: number; targetId: string | null } | null>(null)
+  const readingAnchorNavigateTokenRef = useRef(0)
+  const measureReadingAnchor = useCallback((): ReadingAnchorReport | null => {
+    let displayedTopicId: string
+    let displayedRoute: string | null
+    try {
+      const displayed = controller.displayedRoute
+      displayedTopicId = displayed.topicId
+      displayedRoute = displayed.route
+    } catch {
+      return null
+    }
+    const selectedTopicId = topicIdRef.current
+    const selectedRoute = routeRef.current
+    if (displayedTopicId !== selectedTopicId || displayedRoute !== selectedRoute) return null
+    // Actual scroll container: the `useScrollPosition` container ref is the
+    // `#messages` host (MessagesContainer -> Scrollbar -> div). In isolated
+    // mounts the mocked hook owns that ref; fall back to the live host by id
+    // (mirror of BackToBottomButton's resolveContainer) so observe-only
+    // measurement still reads real geometry.
+    let container: HTMLElement | null = null
+    try {
+      container = scrollContainerRef.current
+    } catch {
+      container = null
+    }
+    if (!container || !container.isConnected) {
+      try {
+        const byId = document.getElementById('messages')
+        if (byId instanceof HTMLElement && byId.isConnected) container = byId
+        else if (!container?.isConnected) container = null
+      } catch {
+        if (!container?.isConnected) container = null
+      }
+    }
+    if (!container)
+      return { topicId: displayedTopicId, route: displayedRoute, messageId: null, navigationTargetId: null }
+    let rows: readonly HTMLElement[] = []
+    try {
+      rows = getOrderedAnchorRowsRef.current()
+    } catch {
+      rows = []
+    }
+    let anchor: { messageId: string } | null = null
+    try {
+      anchor = findViewportTopAnchorWithOffset(container, { orderedRows: rows })
+    } catch {
+      anchor = null
+    }
+    // Click-settle sliver guard (reading-only, renderer-local): the scroll
+    // lands the clicked row exactly at the viewport top, so the previous
+    // answer keeps at most a 1px rounding sliver below the edge. The exact
+    // crossing-first core truthfully reports that sliver, but visual reading
+    // already belongs to the target below it. When the crossing row shows 1px
+    // or less and the next visible row starts at/below the edge, prefer the
+    // next row. Genuine residency (previous row still occupies depth) keeps
+    // the crossing row, so natural cross-turn reading is unchanged.
+    try {
+      if (anchor) {
+        const containerRect = container.getBoundingClientRect()
+        const containerTop = containerRect.top
+        const crossingId = anchor.messageId
+        let crossingBottom = NaN
+        try {
+          const crossing = document.getElementById(`message-${crossingId}`)
+          if (crossing instanceof HTMLElement) crossingBottom = crossing.getBoundingClientRect().bottom
+        } catch {
+          crossingBottom = NaN
+        }
+        const sliver = crossingBottom - containerTop
+        if (Number.isFinite(sliver) && sliver > 0 && sliver <= 1) {
+          // Next-row search over the ordered cache; when it is empty (rows
+          // not yet registered) fall back to the same DOM membership the
+          // exact scan uses. Same-id duplicates of the crossing row are
+          // skipped by id, not by node identity.
+          let candidates: readonly HTMLElement[] = rows
+          if (candidates.length === 0) {
+            try {
+              const found: HTMLElement[] = []
+              const list = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+              for (const el of list) {
+                if (el instanceof HTMLElement) found.push(el)
+              }
+              candidates = found
+            } catch {
+              candidates = []
+            }
+          }
+          let nextId: string | null = null
+          let nextTop = Number.POSITIVE_INFINITY
+          for (const row of candidates) {
+            if (!(row instanceof HTMLElement)) continue
+            const rawId = typeof row.id === 'string' ? row.id : ''
+            const id = rawId.startsWith('message-') ? rawId.slice('message-'.length) : null
+            if (!id || id === crossingId) continue
+            let top = NaN
+            let bottom = NaN
+            try {
+              const rect = row.getBoundingClientRect()
+              top = rect.top
+              bottom = rect.bottom
+            } catch {
+              continue
+            }
+            if (!Number.isFinite(top) || !Number.isFinite(bottom)) continue
+            if (!(bottom - top > 0)) continue
+            try {
+              if (!isElementVisibleInViewport(row, containerRect)) continue
+            } catch {
+              continue
+            }
+            if (top >= containerTop && top < nextTop) {
+              nextTop = top
+              nextId = id
+            }
+          }
+          if (nextId) anchor = { messageId: nextId }
+        }
+      }
+    } catch {
+      // fail-closed: keep the exact crossing anchor above
+    }
+    if (!anchor) {
+      try {
+        const fallback = findFirstVisibleMessage(container, messageElements.current, rows)
+        if (fallback) {
+          const rawId = typeof fallback.element.id === 'string' ? fallback.element.id : ''
+          const messageId = rawId.startsWith('message-') ? rawId.slice('message-'.length) : null
+          anchor = messageId ? { messageId } : null
+        }
+      } catch {
+        anchor = null
+      }
+    }
+    const pending = readingAnchorPendingTargetRef.current
+    // Pending target is only valid while selected still equals displayed:
+    // topic/route switches clear pending elsewhere, but re-gate here so a
+    // stale in-flight navigate can never surface under the new identity.
+    const navigationTargetId = pending && pending.targetId !== undefined ? (pending.targetId ?? null) : null
+    return {
+      topicId: displayedTopicId,
+      route: displayedRoute,
+      messageId: anchor?.messageId ?? null,
+      navigationTargetId
+    }
+  }, [controller])
+  const emitReadingAnchor = useCallback(() => {
+    const report = measureReadingAnchor()
+    if (!report) return
+    const last = readingAnchorLastRef.current
+    if (
+      last &&
+      last.topicId === report.topicId &&
+      last.route === report.route &&
+      last.messageId === report.messageId &&
+      last.navigationTargetId === report.navigationTargetId
+    ) {
+      return
+    }
+    readingAnchorLastRef.current = report
+    try {
+      onReadingAnchorRef.current?.(report)
+    } catch {}
+  }, [measureReadingAnchor])
+  const scheduleReadingAnchor = useCallback(() => {
+    if (readingAnchorRafRef.current !== null) return
+    try {
+      readingAnchorRafRef.current = requestAnimationFrame(() => {
+        readingAnchorRafRef.current = null
+        emitReadingAnchor()
+      })
+    } catch {
+      readingAnchorRafRef.current = null
+    }
+  }, [emitReadingAnchor])
+  scheduleReadingAnchorRef.current = scheduleReadingAnchor
+  const clearReadingAnchorPendingTarget = useCallback(
+    (navigateToken: number | null) => {
+      const pending = readingAnchorPendingTargetRef.current
+      if (!pending) return
+      if (navigateToken !== null && pending.navigateToken !== navigateToken) return
+      readingAnchorPendingTargetRef.current = null
+      scheduleReadingAnchor()
+    },
+    [scheduleReadingAnchor]
+  )
+  const cancelReadingAnchorPendingTargetForUser = useCallback(() => {
+    if (!readingAnchorPendingTargetRef.current) return
+    readingAnchorPendingTargetRef.current = null
+    scheduleReadingAnchor()
+  }, [scheduleReadingAnchor])
+  useEffect(() => {
+    return () => {
+      const handle = readingAnchorRafRef.current
+      readingAnchorRafRef.current = null
+      if (handle !== null) {
+        try {
+          cancelAnimationFrame(handle)
+        } catch {}
+      }
     }
   }, [])
 
@@ -1992,7 +2571,20 @@ const Messages = ({
       const currentWindow = viewportStateRef.current.window
       if (!currentWindow) return
       const currentDisplayMessages = currentWindow.displayMessages
-      const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
+      // Same-route insertion/append retention: the loaded projection can grow
+      // while the shared keeper holds a clicked interaction region or the user's
+      // reading row. A plain newest-capacity derivation would slide the window
+      // past that row, unmount it, and let the arriving rows displace the view
+      // (the region hold then fails closed with nothing to compensate). Naming
+      // the held row keeps it resident inside the same bounded capacity by
+      // trimming the far (newer) edge instead — see `createLatestMessageWindow`.
+      const retainMessageId = resolveRetainedViewportMessageId(controller)
+      const reconciledWindow = reconcileMessageWindow(
+        messages,
+        previousMessagesRef.current,
+        currentWindow,
+        retainMessageId ? { retainMessageId } : undefined
+      )
       const newDisplayMessages = reconciledWindow.displayMessages
 
       if (
@@ -2035,8 +2627,50 @@ const Messages = ({
     cancelActiveLoads()
   }, [cancelActiveLoads, clearTimeoutTimer])
 
+  /**
+   * Edit-selection follow eligibility: the resolved physical row of a `group`
+   * intent is already resident AND visible in the displayed window, and the
+   * controller would accept an interaction adoption right now (unowned, clean
+   * DOM provenance, adoptable phase).
+   *
+   * This is exactly the condition under which the generic navigation
+   * transaction has nothing left to do but wait: no window change is needed
+   * (`chooseNavigationWindow` returns null for a displayed target), no fold
+   * reveal is needed (visible), and no DOM settle is needed (already rendered).
+   * Everything else — a target outside the displayed window, a collapsed row,
+   * a detached container, an owned/dirty controller — keeps the existing
+   * asynchronous navigation unchanged.
+   */
+  const canFollowResidentSelectionEndpoint = useCallback(
+    (intent: Extract<MessageNavigationIntent, { kind: 'group' }>): boolean => {
+      try {
+        if (unmountedRef.current) return false
+        if (!controller.canAcceptUserScrollWrite()) return false
+        const resolved = resolveMessageNavigation(messagesRef.current, intent)
+        if (!resolved || resolved.kind !== 'message') return false
+        if (checkElement(resolved.targetId) !== 'visible') return false
+        const live = scrollContainerRef.current
+        return Boolean(live && live.isConnected)
+      } catch {
+        return false
+      }
+    },
+    [checkElement, controller, scrollContainerRef]
+  )
+
   const runTransaction = useCallback(
-    (intent: MessageNavigationIntent) => {
+    /**
+     * `residentFollow` selects the resident-follow transaction shape: the
+     * endpoint row is already resident and visible, so the geometry write runs
+     * before any dispatch, commit, frame, timer or reveal — nothing a repeat key
+     * can outrun stands between the input and the scroll. Currency gates,
+     * controller adoption and the keeper handoff are the SAME code as the
+     * ordinary transaction; everything that needs a window change, a fold reveal
+     * or a settle is gated out by `canFollowResidentSelectionEndpoint` and keeps
+     * the unchanged asynchronous path.
+     */
+    (intent: MessageNavigationIntent, options?: { residentFollow?: boolean }) => {
+      const residentFollow = options?.residentFollow === true
       // Route/epoch currency bound at call time: the actual DOM scroll below
       // rechecks topic/route/controller-epoch/unmounted plus a new genuine
       // interaction before mutating, so a topic/branch swap or a later real
@@ -2047,13 +2681,28 @@ const Messages = ({
       const routeAtStart = routeRef.current
       const ctrlEpochAtStart = controller.currentEpoch
       let interactionAtStart: number | null = null
+      let interactionGenAtStart: number | null = null
       try {
         interactionAtStart = controller.activeInteractionToken?.interactionId ?? null
       } catch {
         interactionAtStart = null
       }
+      try {
+        interactionGenAtStart = controller.activeInteractionDeclareGeneration ?? null
+      } catch {
+        interactionGenAtStart = null
+      }
       return runMessageNavigationTransaction(intent, {
         begin: (token, targetId, source, alignment) => {
+          // Resident selection follow reports its own completion synchronously:
+          // the geometry is already written by the time this runs (see
+          // `resident`), so it only has to dispatch the same navigation state an
+          // ordinary transaction would, and needs no commit to prove currency —
+          // the begin dispatch itself supersedes any older navigation.
+          if (residentFollow) {
+            viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
+            return true
+          }
           const generation = viewportStateRef.current.navigation.generation
           const committed = waitForNavigationCommit(token, generation)
           viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
@@ -2085,39 +2734,216 @@ const Messages = ({
           // (topic/route/epoch/unmounted), detached container, or a new
           // genuine interaction since entry all skip the programmatic write
           // so the user's actual geometry wins and no stale scrollTo lands
-          // on the new container.
+          // on the new container. Skips return truthful outcomes so the
+          // transaction cancels without finish/savePosition (no false success).
           try {
-            if (unmountedRef.current) return
-          } catch {}
-          try {
-            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return
+            if (unmountedRef.current) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
           }
           try {
-            if (controller.currentEpoch !== ctrlEpochAtStart) return
+            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
+          }
+          try {
+            if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
+          } catch {
+            return 'cancelled' as const
           }
           try {
             const cur = controller.activeInteractionToken?.interactionId ?? null
-            if (cur !== interactionAtStart) return
+            if (cur !== interactionAtStart) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
+          }
+          try {
+            const curGen = controller.activeInteractionDeclareGeneration ?? null
+            if (curGen !== interactionGenAtStart) return 'cancelled' as const
+          } catch {
+            return 'cancelled' as const
           }
           const live = scrollContainerRef.current
           try {
-            if (!live || !live.isConnected) return
+            if (!live || !live.isConnected) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
           }
-          applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
+          const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
+            // Explicit-container row scroll (column-reverse fundamental):
+            // native scrollIntoView({ block: 'start' }) is a verified no-op
+            // for resident rows in this layout, so position the known
+            // `#messages` container arithmetically from live rects. No new
+            // controller, no global duplicate mechanism — the same canonical
+            // transaction scroll callback, same element lookup.
+            // Missing/hidden/unmeasurable physical target -> not-found.
             const target = document.getElementById(`message-${targetId}`)
-            if (target) scrollIntoView(target, { behavior: 'auto', block: alignment, container: 'nearest' })
+            if (!target) return 'not-found' as const
+            let containerRect: { top: number }
+            let elRect: { top: number; height: number }
+            try {
+              containerRect = live.getBoundingClientRect()
+              elRect = target.getBoundingClientRect()
+            } catch {
+              return 'not-found' as const
+            }
+            const elementTopWithinContainer = elRect.top - containerRect.top + live.scrollTop
+            const minScrollTop = -(live.scrollHeight - live.clientHeight)
+            // Saved-offset restore (bootstrap topic-mount recovery only): the
+            // SAME transaction that armed the pre-paint first placement
+            // converges on the passed-through stable offset — never `start`
+            // alignment. When first placement already holds the offset, the
+            // write is skipped (no second write after first placement); late
+            // layout drift gets exactly one convergent correction here.
+            // Explicit navigations carry no offset and keep the path below.
+            if (resolved.kind === 'message' && typeof resolved.restoreOffset === 'number') {
+              const restoreTop = computeRestoreMessageScrollTop({
+                elementTopWithinContainer,
+                restoreOffset: resolved.restoreOffset,
+                minScrollTop
+              })
+              if (restoreTop === null) return 'not-found' as const
+              if (Math.abs(live.scrollTop - restoreTop) <= 1) return 'success' as const
+              try {
+                live.scrollTo({ top: restoreTop })
+              } catch {
+                return 'cancelled' as const
+              }
+              return 'success' as const
+            }
+            const top = computeColumnReverseMessageScrollTop({
+              elementTopWithinContainer,
+              containerClientHeight: live.clientHeight,
+              elementHeight: elRect.height,
+              alignment,
+              minScrollTop
+            })
+            if (top === null) return 'not-found' as const
+            try {
+              live.scrollTo({ top })
+            } catch {
+              return 'cancelled' as const
+            }
+            return 'success' as const
           })
+          if (scrollOutcome !== 'success') return scrollOutcome
+          // Same-route message navigation live-anchor handoff (existing
+          // authoritative path only): the transaction scroll above moves the
+          // viewport but never installs the post-scroll row anchor, so the
+          // keeper would keep holding the old live anchor (bottom null or a
+          // stale row) and pull back on the next Resize/Mutation. Install the
+          // actual navigated row synchronously here — before any keeper
+          // observer can repin — through the existing gesture-free row keeper
+          // (`adoptInteractionViewport`, which keeps the row even in bottom
+          // vicinity, unlike the send/bottom programmatic path). Navigation
+          // to a user ID is a reading row, never an auto-resume follow.
+          // Fail-closed: currency skips above already returned without
+          // touching the DOM, so reaching here proves entry currency; a
+          // missing/unmeasurable physical target or a controller refusal
+          // (owned/dirty/route/epoch/phase) adopts nothing and commits
+          // nothing — never a false success. Bottom/top kinds keep their
+          // existing semantics (explicit bottom suspends via beginSendBottom
+          // elsewhere); no new scroll owner/controller/lifecycle/state.
+          if (resolved.kind === 'message') {
+            try {
+              const targetEl = document.getElementById(`message-${resolved.targetId}`)
+              if (!targetEl || !(targetEl instanceof HTMLElement)) return 'not-found' as const
+              if (!targetEl.isConnected) return 'not-found' as const
+              try {
+                if (!live.contains(targetEl)) return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              try {
+                if (window.getComputedStyle(targetEl).display === 'none') return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              let containerTop = NaN
+              let targetTop = NaN
+              try {
+                containerTop = live.getBoundingClientRect().top
+                targetTop = targetEl.getBoundingClientRect().top
+              } catch {
+                return 'not-found' as const
+              }
+              if (!Number.isFinite(containerTop) || !Number.isFinite(targetTop)) return 'not-found' as const
+              const intraRowOffset = targetTop - containerTop
+              if (!Number.isFinite(intraRowOffset)) return 'not-found' as const
+              const postScrollTop = live.scrollTop
+              if (typeof postScrollTop !== 'number' || !Number.isFinite(postScrollTop)) return 'not-found' as const
+              let atBottom = false
+              try {
+                atBottom = isColumnReverseAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+              } catch {
+                atBottom = false
+              }
+              try {
+                if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              try {
+                const curId = controller.activeInteractionToken?.interactionId ?? null
+                if (curId !== interactionAtStart) return 'cancelled' as const
+                const curGen = controller.activeInteractionDeclareGeneration ?? null
+                if (curGen !== interactionGenAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              const out = controller.adoptInteractionViewport(
+                { topicId: topicAtStart, route: routeAtStart },
+                {
+                  messageId: resolved.targetId,
+                  intraRowOffset,
+                  scrollTop: postScrollTop,
+                  isAtBottom: atBottom
+                },
+                { expectedEpoch: ctrlEpochAtStart }
+              )
+              if (!out || (out as { taken?: unknown }).taken !== true) return 'cancelled' as const
+              const taken = out as {
+                taken: true
+                routeKey: string
+                snapshot: {
+                  scrollTop: number
+                  messageId: string | null
+                  intraRowOffset: number | null
+                  isAtBottom: boolean
+                }
+              }
+              try {
+                commitSnapshotForRoute(taken.routeKey, {
+                  scrollTop: taken.snapshot.scrollTop,
+                  anchorId: taken.snapshot.messageId,
+                  messageId: taken.snapshot.messageId,
+                  intraRowOffset: taken.snapshot.intraRowOffset,
+                  rawScrollTop: taken.snapshot.scrollTop,
+                  isAtBottom: taken.snapshot.isAtBottom
+                })
+              } catch {
+                // fail-closed: controller state already advanced above
+              }
+              try {
+                notifyViewport()
+              } catch {
+                // fail-closed: keeper reads the live anchor on its next trigger
+              }
+              // Actually positioned + row adopted (clamped already-visible still
+              // counts — no arbitrary delta required).
+              return 'success' as const
+            } catch {
+              return 'cancelled' as const
+            }
+          }
+          // Explicit top/bottom/scrollTop canonical: success when written above.
+          return 'success' as const
         },
         finish: (token) => viewportDispatch({ type: 'navigation/finish', token }),
-        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
+        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token }),
+        // Resident follow shape: geometry first, state dispatch afterwards (see
+        // the transaction runner). The ordinary path keeps every barrier.
+        resident: residentFollow
       })
     },
     [
@@ -2127,6 +2953,7 @@ const Messages = ({
       controller,
       displayCount,
       isCurrentNavigation,
+      notifyViewport,
       scrollContainerRef,
       selectMessageForFold,
       settleNavigationDom,
@@ -2176,6 +3003,24 @@ const Messages = ({
    */
   const navigate = useCallback(
     (intent: MessageNavigationIntent) => {
+      // Explicit navigation invalidates any pending shared interaction hold:
+      // the navigation owns viewport geometry from here.
+      try {
+        controller.clearInteractionIntent()
+      } catch {}
+      if (intent.kind === 'group') {
+        // Edit-selection follow (Shift+Arrow / single-cursor movement): the
+        // endpoint is a resident visible row in every ordinary case, and the
+        // generic transaction's commit/frame/scroll barrier is what a repeat key
+        // outruns. Resident endpoints therefore take the same transaction with
+        // its barrier dependencies resolved synchronously; everything the
+        // barrier exists for (window load, fold reveal, settle) is gated out by
+        // `canFollowResidentSelectionEndpoint` and falls back to the unchanged
+        // asynchronous navigation below.
+        return runTransaction(intent, {
+          residentFollow: canFollowResidentSelectionEndpoint(intent)
+        })
+      }
       if (intent.kind !== 'message') return runTransaction(intent)
       const targetId = intent.targetId
       if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent)
@@ -2254,8 +3099,9 @@ const Messages = ({
         // into the same-route resident set so no intermediate all-immutable
         // frame is published. No manual `messagesRef` assignment: the
         // transaction below runs only after the projection commit is observable.
+        // Read-only window hydration: must not invalidate the semantic closure.
         if (ensured.blocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart))
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart)))
         }
         dispatch(
           newMessagesActions.messagesWindowMerged({
@@ -2273,7 +3119,7 @@ const Messages = ({
         return runTransaction(intent)
       })()
     },
-    [dispatch, runTransaction, waitForProjectionCommit]
+    [canFollowResidentSelectionEndpoint, controller, dispatch, runTransaction, waitForProjectionCommit]
   )
 
   /**
@@ -2292,14 +3138,22 @@ const Messages = ({
       // Without this, savePosition would write to the new topic's scroll key,
       // overwriting its position with stale data from the previous topic.
       const saveEpoch = transitionEpochRef.current
-      void navigate(intent).then((result) => {
+      const readingToken = ++readingAnchorNavigateTokenRef.current
+      readingAnchorPendingTargetRef.current =
+        intent.kind === 'message' ? { navigateToken: readingToken, targetId: intent.targetId } : null
+      scheduleReadingAnchor()
+      const pending = navigate(intent)
+      void Promise.resolve(pending).then((result) => {
         if (transitionEpochRef.current !== saveEpoch) return
         // Same-route user navigation: the resulting viewport is stable, so
         // persist it under the current (displayed) route key.
         if (shouldPersistNavigationResult(result)) savePosition()
       })
+      void Promise.resolve(pending).finally(() => {
+        clearReadingAnchorPendingTarget(readingToken)
+      })
     },
-    [navigate, savePosition]
+    [navigate, savePosition, clearReadingAnchorPendingTarget, scheduleReadingAnchor]
   )
 
   // 滚动到指定消息组
@@ -2317,8 +3171,24 @@ const Messages = ({
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
+    // Explicit bottom navigation re-enables bottom follow: suspend any
+    // incompatible prior row keeper to the bottom semantic BEFORE the
+    // navigation scroll runs (same suspension as the send-bottom intent),
+    // so keeper layout/mutation holds pin the bottom through the scroll
+    // and subsequent insertion/stream instead of pulling back to the old
+    // reading row. Fail-closed: when the suspension refuses (owned/dirty/
+    // route/epoch drift) the navigation below still runs with its existing
+    // behavior.
+    try {
+      const target = { topicId: topicIdRef.current, route: routeRef.current }
+      if (controller.beginSendBottom(target, { expectedEpoch: controller.currentEpoch })) {
+        notifyViewport()
+      }
+    } catch {
+      // fail-closed: navigation below still runs
+    }
     navigateAndSave({ kind: 'bottom', source: 'imperative' })
-  }, [navigateAndSave])
+  }, [controller, navigateAndSave, notifyViewport])
 
   /**
    * Explicit send intent (SEND_MESSAGE): only the matching topic may
@@ -2574,6 +3444,27 @@ const Messages = ({
           }
         })
       }),
+      // Cross-topic history reference creation (Reference submenu). READ-ONLY
+      // SOURCE operation: Main atomically creates the target topic + its live
+      // foreign prefix, so the DB row is NOT pre-created here (no orphan topic
+      // on failure). The captured source route + endpoint ride as stable IDs.
+      // Only after atomic creation succeeds is the target registered in Redux
+      // and activated; the existing activation flow loads the window + Main
+      // capability, which excludes the foreign prefix from mutation fail-closed.
+      EventEmitter.on(EVENT_NAMES.NEW_REFERENCE_TOPIC, async (messageId: string) => {
+        const capturedRoute = routeRef.current
+        const newTopic = getDefaultTopic(assistant.id)
+        newTopic.name = topic.name
+        const created = await createReferencedTopicByAnchor(topic.id, capturedRoute, messageId, newTopic, assistant.id)
+        if (!created) {
+          logger.error(`[NEW_REFERENCE_TOPIC] Failed to create reference topic for ${messageId}`)
+          window.toast.error(t('chat.message.reference.error'))
+          return
+        }
+        addTopic(newTopic)
+        setActiveTopic(newTopic)
+        window.toast.success(t('chat.message.reference.created'))
+      }),
       // Distinct TRUE branch creation (the ONLY true-branch creation method).
       // Forks one internal branch node at an anchor message owned by the
       // ACTIVE route (BRANCH-7 owner-only; inherited references reject
@@ -2602,12 +3493,22 @@ const Messages = ({
             requestTopicBranches(dispatch, topic.id)
             const topicIdAtCreate = topic.id
             const newRoute = created.branchId
-            await dispatch(loadRouteMessagesThunk(topicIdAtCreate, newRoute, { kind: 'latest' }))
+            const routeWindow = (await dispatch(
+              loadRouteMessagesThunk(topicIdAtCreate, newRoute, { kind: 'latest' })
+            )) as unknown as FetchMessagesWindowResponse | void
             if (topicIdRef.current !== topicIdAtCreate || routeRef.current !== newRoute) return true
+            let newRouteAuthoritative: { hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined = undefined
             try {
               const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
               if (loaded.length > 0) {
-                const latestWindow = createLatestMessageWindow(loaded, displayCount)
+                const authoritative = routeWindow?.window
+                  ? {
+                      hasMoreBefore: routeWindow.window.hasMoreBefore,
+                      hasMoreAfter: routeWindow.window.hasMoreAfter
+                    }
+                  : undefined
+                newRouteAuthoritative = authoritative
+                const latestWindow = createLatestMessageWindow(loaded, displayCount, authoritative)
                 // New-branch landing (route switch, no fetch-hold session):
                 // provenance-bound rebase with window proof — never a bare
                 // dispatch bypassing rendered. No snapshot write: the fresh
@@ -2646,6 +3547,24 @@ const Messages = ({
             // its deterministic bottom default until genuine user scrolling
             // establishes one.
             if (topicIdRef.current === topicIdAtCreate && routeRef.current === newRoute) {
+              // The explicit bottom navigate above rebuilds its window via the
+              // generic navigation path (derived flags only) and would discard
+              // the authoritative paging flags just published. Re-assert the
+              // latest authority response's hasMoreBefore/After over the same
+              // tail so genuine oldest-edge load-more can fire. Same
+              // displayMessages identity (tail), flags only; stale guards above
+              // already ensure route currency.
+              try {
+                if (newRouteAuthoritative) {
+                  const reloaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
+                  if (reloaded.length > 0) {
+                    const repaired = createLatestMessageWindow(reloaded, displayCount, newRouteAuthoritative)
+                    viewportDispatch({ type: 'window/apply', window: repaired })
+                  }
+                }
+              } catch {
+                // fail-closed: navigate's window stands; pagination stays derived
+              }
               notifyViewport()
             }
             return true
@@ -2741,7 +3660,18 @@ const Messages = ({
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, autoScrollToBottom, navigate, savePosition, topic])
+  }, [
+    assistant,
+    dispatch,
+    scrollToBottom,
+    autoScrollToBottom,
+    navigate,
+    savePosition,
+    topic,
+    createReferencedTopicByAnchor,
+    addTopic,
+    setActiveTopic
+  ])
 
   /**
    * Unified topic bootstrap: determines the initial navigation intent with strict priority.
@@ -3120,20 +4050,75 @@ const Messages = ({
     }
   }, [contextInfo, onFirstUpdate, topic.id])
 
-  const startOlderWindowLoad = useCallback(
-    (preferred?: PreferredRestoreAnchorSnapshot | null) => {
+  // ---- One ordinary bidirectional pagination path ---------------------------
+  //
+  // Browsing in either direction is ONE lifecycle. Edge input (wheel, touch,
+  // scrollbar drag, keyboard page keys, post-scroll geometry) expresses a browse
+  // DIRECTION; this single path owns request ownership, the apply-gate, the
+  // accepted current-store merge, the bounded window derivation and the single
+  // viewport application owner. Direction parameterizes only the request quota,
+  // the edge anchor identity, the derived window edge and the timer key — never
+  // lifecycle, ownership, completion or compensation semantics.
+  //
+  // Single-flight ownership is token-scoped and shared by BOTH directions (one
+  // ordinary page read at a time): the accepted window is derived from the
+  // committed window state, whose local mirror updates one render later, so two
+  // concurrent page commits could derive the next window from a stale
+  // predecessor. Continued browsing intent is never dropped: a claim fails only
+  // while a page is genuinely in flight and the lease is released at every
+  // terminal outcome, so the next edge event (or the restore owner's next step)
+  // starts the next page.
+  const startWindowPageLoad = useCallback(
+    (direction: MessageViewportLoadDirection, preferred?: PreferredRestoreAnchorSnapshot | null): Promise<boolean> => {
       const preferredSnapshot: PreferredRestoreAnchorSnapshot | null = preferred
         ? preferred.kind === 'divider-row'
           ? { kind: 'divider-row', dividerKey: preferred.dividerKey, targetOffset: preferred.targetOffset }
           : { kind: 'message-row', messageId: preferred.messageId, targetOffset: preferred.targetOffset }
         : null
       const currentState = viewportStateRef.current
-      if (!currentState.window?.hasMoreOlder || currentState.loading.older) return
+      const currentWindow = currentState.window
+      if (
+        (direction === 'older' ? !currentWindow?.hasMoreOlder : !currentWindow?.hasMoreNewer) ||
+        currentState.loading[direction] ||
+        !isPaginationFetchLeaseFree(paginationFetchLeaseRef.current)
+      ) {
+        return Promise.resolve(false)
+      }
 
-      const anchorId = currentState.window?.oldestMessageId
+      // Boundedness/retention pre-check (pure, cheap under capacity): when the
+      // one-page bound and the live reading row cannot both hold, the page is
+      // provably un-honorable, so no read is issued at all — the projection,
+      // the traversability flags and the DOM stay exactly as they are. Normal
+      // browsing moves the reading row, so the next gesture at the edge pages
+      // again (and reclaims the accumulated overshoot).
+      let liveReadingId: string | null = null
+      try {
+        const live = controller.getAnchorFor(controller.displayedRoute)
+        liveReadingId = live && live.kind === 'message' ? live.messageId : null
+      } catch {
+        liveReadingId = null
+      }
+      // The early gate above already refused a missing window; this is the
+      // type-level confirmation for the pure guard.
+      if (!currentWindow) return Promise.resolve(false)
+      const advanceGuard = canAdvancePaginationWindow({
+        direction,
+        messages: readLoadedProjectionMessages(store.getState(), topic.id),
+        currentWindow,
+        additionalGroupCount: LOAD_MORE_COUNT,
+        retainMessageId: liveReadingId
+      })
+      if (!advanceGuard.allowed) {
+        logger.silly(`[windowPage:${direction}] edge page declined: ${advanceGuard.reason}` as never)
+        return Promise.resolve(false)
+      }
+      // The request anchor is the loaded edge of the committed window: the
+      // response is guaranteed to carry it (window validation), which is what
+      // makes the route-order merge position provable.
+      const anchorId = direction === 'older' ? currentWindow?.oldestMessageId : currentWindow?.newestMessageId
       if (!anchorId) {
-        logger.warn('[loadMoreMessages] missing stable anchor for R-03 around')
-        return
+        logger.warn(`[windowPage:${direction}] missing stable anchor for R-03 around`)
+        return Promise.resolve(false)
       }
 
       const loadToken = {}
@@ -3143,13 +4128,28 @@ const Messages = ({
       const routeCacheKey = `${topicIdAtStart}::${routeAtStart ?? ''}`
       const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
       const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
-      viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
+      const capturedRouteGen = captureRouteGeneration(() => store.getState(), topicIdAtStart)
+      // Single-flight ownership: the claim IS the gate, so an attempt that was
+      // superseded or cancelled can never free the lease of the attempt that
+      // replaced it (a bare boolean could, letting a third read start).
+      if (!claimPaginationFetchLease(paginationFetchLeaseRef.current, loadToken)) return Promise.resolve(false)
+      viewportDispatch({ type: 'load/start', direction, token: loadToken })
+      // Awaitable attempt handle: settles `true` once this exact attempt reached
+      // a terminal outcome (commit, cancellation or refusal after the claim), so
+      // a selection-edge caller can await the window it asked for instead of
+      // guessing. `false` below means no attempt was started at all.
+      let settleAttempt: (started: boolean) => void = () => {}
+      const attemptSettled = new Promise<boolean>((resolve) => {
+        settleAttempt = resolve
+      })
 
       const container = scrollContainerRef.current
-      const anchor = findFirstVisibleMessage(container, messageElements.current)
 
-      const before = clampWindowCount(LOAD_MORE_COUNT)
-      const after = 1
+      // The loaded edge receives the whole page; the opposite edge keeps exactly
+      // one group, which proves the response still overlaps the resident
+      // projection around the shared request anchor.
+      const before = direction === 'older' ? clampWindowCount(LOAD_MORE_COUNT) : 1
+      const after = direction === 'older' ? 1 : clampWindowCount(LOAD_MORE_COUNT)
       const request: FetchMessagesWindowRequest = {
         kind: 'around',
         topicId: topicIdAtStart,
@@ -3166,7 +4166,7 @@ const Messages = ({
       }
       const cachedWindow = windowCacheRef.current.get(routeCacheKey)
       if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
-        logger.silly('[loadMoreMessages] coverage hit, still fetching for authoritative window' as never)
+        logger.silly(`[windowPage:${direction}] coverage hit, still fetching for authoritative window` as never)
       }
 
       // A failed restore-owned page terminates the divider search
@@ -3184,76 +4184,187 @@ const Messages = ({
         }
       }
       setTimeoutTimer(
-        'loadMoreMessages',
+        direction === 'older' ? 'loadMoreMessages' : 'loadNewerMessages',
         async () => {
-          if (!isCurrentLoad('older', loadToken, topicGeneration)) return
+          const lease = paginationFetchLeaseRef.current
+          // Ownership-scoped release: only the attempt that still owns the
+          // lease (this token) can free it, so a cancelled/superseded attempt
+          // never releases a successor's in-flight ownership.
+          const releaseOwned = () => {
+            // Every terminal outcome releases ownership exactly once, so the
+            // attempt handle settles even when a publication gate refused it.
+            settleAttempt(true)
+            return releasePaginationFetchLease(lease, loadToken)
+          }
+          if (!isCurrentLoad(direction, loadToken, topicGeneration)) {
+            // Externally cancelled before the fetch ran (topic reset,
+            // explicit cancel): release this attempt's ownership only.
+            releaseOwned()
+            return
+          }
           try {
             const { dbService } = await import('@renderer/services/db')
             // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
             // via runTopicWindowRead (bootstrap latest + around pagination share
-            // the per-topic queue). All existing stale-discard guards below
-            // (topic/generation/deletion/isCurrentLoad) are unchanged — the
-            // serializer only orders execution of the IPC read.
+            // the per-topic queue). The serializer only orders execution of the
+            // IPC read; request ownership and request applicability are
+            // re-decided at every publication boundary below.
             const response = await runTopicWindowRead(topicIdAtStart, request.kind, () =>
               dbService.fetchMessagesWindow(request)
             )
 
-            // stale discard — topic/route changed, generation advanced, or deleted during fetch, or resident generation advanced
-            if (topic.id !== topicIdAtStart) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            // Publication gate: ownership (token + generation, active) AND
+            // request applicability against the CURRENT store state — same
+            // topic, same route VALUE, same route generation token (an
+            // away-and-back excursion returns the same route value with a
+            // bumped token and must discard), same viewport topic generation,
+            // same resident applicability generation — plus the existing
+            // deletion-invalidation guard. Any mismatch publishes nothing.
+            const attemptApplicable =
+              isCurrentLoad(direction, loadToken, topicGeneration) &&
+              isPaginationAttemptApplicable({
+                state: store.getState(),
+                request: {
+                  topicId: topicIdAtStart,
+                  route: routeAtStart,
+                  routeGeneration: capturedRouteGen,
+                  topicGeneration,
+                  residentGeneration: capturedResidentGen
+                },
+                live: {
+                  topicId: topic.id,
+                  route: routeRef.current,
+                  topicGeneration: viewportStateRef.current.topicGeneration
+                }
+              }) &&
+              !isDeletionStale(topicIdAtStart, deletionGenAtStart)
+            if (!attemptApplicable) {
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
               return
             }
-            if (routeRef.current !== routeAtStart) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-              return
-            }
-            if (viewportStateRef.current.topicGeneration !== topicGeneration) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-              return
-            }
-            if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-              return
-            }
-            const currentResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
-            if (shouldDiscardPaginationForResident(capturedResidentGen, currentResidentGen)) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-              return
-            }
-            if (!isCurrentLoad('older', loadToken, topicGeneration)) return
 
             if (!isValidWindowResponse(request, response as unknown as FetchMessagesWindowResponse)) {
               logger.error(
-                '[loadMoreMessages] malformed window response, fail-closed',
+                `[windowPage:${direction}] malformed window response, fail-closed`,
                 response.window as unknown as Error
               )
               markRestoreLoadFailed()
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
               return
             }
             if (response.window.topicId !== topicIdAtStart || response.window.kind !== 'around') {
-              logger.error('[loadMoreMessages] window topic/kind mismatch, fail-closed')
+              logger.error(`[windowPage:${direction}] window topic/kind mismatch, fail-closed`)
               markRestoreLoadFailed()
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
               return
             }
 
-            // atomic staged publication: validate first, then merged messages +
-            // route capability in ONE Redux commit (no intermediate clear).
+            // Precommit capture: CURRENT stable viewport-top identity + offset,
+            // measured after the fetch resolved and all generation guards
+            // passed, immediately BEFORE the authoritative merge/window
+            // expansion below (any Redux dispatch can change the DOM).
+            // Fetch-time user navigation is already reflected here, so no
+            // request-time row is used and no staleness judgment is needed. A
+            // missing row fails closed (no fake stable; the legal snapshot
+            // stands and the existing visible recovery applies).
+            // Transactional pair capture: the reading identity AND the container
+            // scroll position, read in ONE synchronous block with no mutation in
+            // between. The pair is what makes the published anchor sample
+            // measurable in layout space (see `publishAnchorSample`); a stale
+            // offset paired with a later scrollTop would charge unknown user
+            // movement to layout and rewind it.
+            let precommit: { messageId: string; intraRowOffset: number; scrollTop: number } | null = null
+            try {
+              const captureContainer = scrollContainerRef.current ?? container
+              // Ordered-core precommit (same cached visible visual rows as every
+              // other capture path; exceptional fallback inside on stale
+              // geometry).
+              const orderedRows = getOrderedAnchorRowsRef.current()
+              const captured = captureContainer
+                ? findViewportTopAnchorWithOffset(captureContainer, { orderedRows })
+                : null
+              const capturedScrollTop = captureContainer ? captureContainer.scrollTop : NaN
+              precommit =
+                captured && Number.isFinite(capturedScrollTop)
+                  ? {
+                      messageId: captured.messageId,
+                      intraRowOffset: captured.intraRowOffset,
+                      scrollTop: capturedScrollTop
+                    }
+                  : null
+            } catch {
+              precommit = null
+            }
+
+            // Accepted-result derivation BEFORE any commit: the merge is decided
+            // against the CURRENT store projection read in this same synchronous
+            // block (never the effect-mirrored `messagesRef`, which can lag one
+            // commit behind), the viewport window is derived from the ACCEPTED
+            // merge result, and every fail-closed outcome publishes nothing at
+            // all (no merge commit followed by a half-state cancel).
+            // Read-only window hydration: must not invalidate the semantic closure.
             windowCacheRef.current.set(routeCacheKey, response as unknown as FetchMessagesWindowResponse)
             const blocks = response.blocks as unknown as MessageBlock[]
             const incoming = response.messages as unknown as Message[]
-            const existing = messagesRef.current
-            const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
-
-            if (blocks.length > 0) {
-              dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
+            const merge = mergeWindowIntoTopic(
+              readLoadedProjectionMessages(store.getState(), topicIdAtStart),
+              incoming,
+              anchorId
+            )
+            const windowAtCommit = viewportStateRef.current.window
+            if (merge.status !== 'merged' || !windowAtCommit) {
+              // The requested stable anchor is not resident in the current
+              // projection (or the response does not carry it): no route-order
+              // position is provable, so nothing is published. The existing
+              // reload/rebase path owns recovery — window reconciliation
+              // re-derives a resident anchor and the next edge event (or the
+              // restore owner) pages again.
+              logger.warn(`[windowPage:${direction}] page dropped, fail-closed: ${merge.status}`)
+              markRestoreLoadFailed()
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
+              return
             }
-            // install merged ordered list + merged capability as single Redux transition
+            const acceptedMessages = merge.messages
+            // Direction-parameterized bounded window transition, derived from
+            // the accepted merge BEFORE publication: the loaded edge grows by
+            // the page, the opposite-edge trim never crosses the live reading
+            // row, and only the loaded edge takes the response's authoritative
+            // completeness flag. A DECLINED transition (holding the live reading
+            // row and staying inside the one-page bound cannot both hold) is
+            // resolved here, before the atomic commit: nothing is published at
+            // all, so the projection, the traversability flags and the DOM stay
+            // exactly as they are — never a merge commit followed by a dropped
+            // row. The bounded restore search observes `lastLoadFailed` and
+            // terminates instead of waiting for a commit.
+            const transition = derivePaginationWindow({
+              direction,
+              messages: acceptedMessages,
+              currentWindow: windowAtCommit,
+              additionalGroupCount: LOAD_MORE_COUNT,
+              responseWindow: response.window,
+              retainMessageId: precommit?.messageId ?? null
+            })
+            if (transition.status !== 'accepted') {
+              logger.warn(`[windowPage:${direction}] page declined, nothing published: ${transition.reason}`)
+              markRestoreLoadFailed()
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
+              return
+            }
+            const nextWindow = transition.window
+            // ---- single atomic publication: no gate between the commits ----
+            if (blocks.length > 0) {
+              dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart)))
+            }
+            // install accepted ordered list + merged capability as single Redux transition
             dispatch(
               newMessagesActions.messagesWindowMerged({
                 topicId: topicIdAtStart,
-                messages: merged,
+                messages: acceptedMessages,
                 route: routeAtStart,
                 mutableMessageIds: Array.isArray(
                   (response as unknown as { mutableMessageIds?: unknown }).mutableMessageIds
@@ -3262,150 +4373,171 @@ const Messages = ({
                   : []
               })
             )
-
-            const currentWindow = viewportStateRef.current.window
-            if (!currentWindow) {
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-              return
-            }
-            const olderWindow = expandMessageWindowOlder(merged, currentWindow, LOAD_MORE_COUNT, {
-              hasMoreBefore: response.window.hasMoreBefore,
-              hasMoreAfter: currentWindow.hasMoreNewer
-            })
-
             viewportDispatch({
               type: 'load/finish',
-              direction: 'older',
+              direction,
               token: loadToken,
               topicGeneration,
-              window: olderWindow
+              window: nextWindow
             })
 
-            if (anchor || preferredSnapshot) {
-              requestAnimationFrame(async () => {
-                if (!isCurrentLoad('older', loadToken, topicGeneration)) return
-                const live = scrollContainerRef.current ?? container
-                if (!live) return
-                const esc =
-                  typeof CSS !== 'undefined' &&
-                  typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                    ? (CSS as unknown as { escape: (v: string) => string }).escape
-                    : (v: string) => v
-                const measurePreferred = (): number | null => {
-                  if (!preferredSnapshot) return null
-                  try {
-                    if (preferredSnapshot.kind === 'divider-row') {
-                      const row = document.querySelector(
-                        `[data-divider-key="${esc(preferredSnapshot.dividerKey)}"]`
-                      ) as HTMLElement | null
-                      if (row && row.isConnected) {
-                        return row.getBoundingClientRect().top - live.getBoundingClientRect().top
-                      }
-                      return null
-                    }
-                    const el = getMessageRowById(preferredSnapshot.messageId)
-                    if (el && el.isConnected) {
-                      return el.getBoundingClientRect().top - live.getBoundingClientRect().top
-                    }
-                    return null
-                  } catch {
-                    return null
-                  }
-                }
-                let fallbackDelta: number | null = null
-                if (anchor && anchor.element && anchor.element.isConnected) {
-                  try {
-                    fallbackDelta = anchor.element.getBoundingClientRect().top - anchor.rect.top
-                  } catch {
-                    fallbackDelta = null
-                  }
-                }
-                // DB query still reads around oldestMessageId; DOM compensation
-                // prefers the restore anchor's current offset at its targetOffset
-                // and falls back to the viewport-top message only when the
-                // preferred target is missing/disconnected. Ordinary pagination
-                // passes no preferred snapshot and keeps the old behavior.
-                const decision = decidePaginationCompensation({
-                  preferred: preferredSnapshot,
-                  preferredCurrentOffset: preferredSnapshot ? measurePreferred() : null,
-                  fallbackDelta
-                })
-                if (decision.kind === 'none') {
-                  return
-                }
-                const usedPreferred = decision.kind === 'preferred'
-                const delta = decision.delta
-                // Restore-owned pagination (divider search active for this
-                // load's topic/route/session): the search owns the scroll
-                // token and the align step owns completion. Apply the
-                // preferred compensation directly and return — never begin a
-                // competing token. The search watcher re-steps when this
-                // window commits. Post-reveal drift is held by the persistent
-                // stable-anchor keeper, not a stabilizer loop.
-                const owningSearch = dividerProgressRef.current
-                if (
-                  owningSearch &&
-                  owningSearch.topicId === topicIdAtStart &&
-                  owningSearch.routeId === routeAtStart &&
-                  controller.isSessionCurrent(owningSearch.ownerEpoch)
-                ) {
-                  try {
-                    live.scrollTop += delta
-                  } catch {
-                    return
-                  }
-                  return
-                }
-                // A route transition in flight owns compensation: never start
-                // a competing token over it — single direct delta, then leave
-                // the token to its owner.
-                if (controller.programmaticOwned) {
-                  try {
-                    live.scrollTop += delta
-                  } catch {
-                    return
-                  }
-                  return
-                }
-                const scrollToken = {}
-                if (!(await beginScroll('anchoring', scrollToken))) return
-                if (!isCurrentLoad('older', loadToken, topicGeneration)) {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
-                if (!usedPreferred && anchor && !anchor.element.isConnected) {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
-                try {
-                  live.scrollTop += delta
-                } catch {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
-                // Single compensation only: the persistent keeper holds the
-                // anchor across subsequent layout settling. No bounded rAF
-                // stabilizer, no second session.
-                viewportDispatch({ type: 'scroll/end', token: scrollToken })
-              })
+            // Completion re-gate for the compensation writes only: the accepted
+            // result is already published by the single commit above, so an
+            // attempt superseded between the fetch resolve and those commits
+            // skips the compensation instead of publishing it for a stale
+            // window. Ownership here is token + generation — NOT `active`,
+            // which this attempt's own `load/finish` above already cleared.
+            if (!isCurrentLoadCompletion(direction, loadToken, topicGeneration)) {
+              releaseOwned()
+              return
             }
+            if (topic.id !== topicIdAtStart || routeRef.current !== routeAtStart) {
+              releaseOwned()
+              return
+            }
+            const live = scrollContainerRef.current ?? container
+            const esc =
+              typeof CSS !== 'undefined' &&
+              typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+                ? (CSS as unknown as { escape: (v: string) => string }).escape
+                : (v: string) => v
+            const measurePreferred = (): number | null => {
+              if (!preferredSnapshot || !live) return null
+              try {
+                if (preferredSnapshot.kind === 'divider-row') {
+                  const row = document.querySelector(
+                    `[data-divider-key="${esc(preferredSnapshot.dividerKey)}"]`
+                  ) as HTMLElement | null
+                  if (row && row.isConnected) {
+                    return row.getBoundingClientRect().top - live.getBoundingClientRect().top
+                  }
+                  return null
+                }
+                const el = getMessageRowById(preferredSnapshot.messageId)
+                if (el && el.isConnected) {
+                  return el.getBoundingClientRect().top - live.getBoundingClientRect().top
+                }
+                return null
+              } catch {
+                return null
+              }
+            }
+            // Viewport-top precommit fallback for the two SCOPED owners below
+            // (restore search / route transition): they own their own geometry,
+            // so the shared keeper must not compensate. Ordinary same-route
+            // window growth never takes this path (single application owner).
+            const measureFallbackDelta = (): number | null => {
+              if (!precommit || !live) return null
+              try {
+                const el = getMessageRowById(precommit.messageId)
+                if (!el || !el.isConnected) return null
+                const liveRect = live.getBoundingClientRect()
+                const rowTop = el.getBoundingClientRect().top
+                if (!Number.isFinite(rowTop) || !Number.isFinite(liveRect.top)) return null
+                return rowTop - liveRect.top - precommit.intraRowOffset
+              } catch {
+                return null
+              }
+            }
+            const applyOwnedDirectDelta = (): void => {
+              if (!live) return
+              const decision = decidePaginationCompensation({
+                preferred: preferredSnapshot,
+                preferredCurrentOffset: preferredSnapshot ? measurePreferred() : null,
+                fallbackDelta: measureFallbackDelta()
+              })
+              if (decision.kind === 'none') return
+              try {
+                live.scrollTop += decision.delta
+              } catch {
+                // fail-closed: the owning session owns the remainder
+              }
+            }
+            // Restore-owned pagination (divider search active for this load's
+            // topic/route/session): the search owns the scroll and the align
+            // step owns completion. Apply the preferred compensation directly
+            // synchronously and return — never the keeper path. The search
+            // watcher re-steps when this window commits.
+            const owningSearch = dividerProgressRef.current
+            if (
+              owningSearch &&
+              owningSearch.topicId === topicIdAtStart &&
+              owningSearch.routeId === routeAtStart &&
+              controller.isSessionCurrent(owningSearch.ownerEpoch)
+            ) {
+              if (live && preferredSnapshot) applyOwnedDirectDelta()
+              releaseOwned()
+              return
+            }
+            // A route transition in flight owns compensation: a single direct
+            // delta under its token, never a competing keeper write. The keeper
+            // stays gated while owned.
+            if (controller.programmaticOwned) {
+              if (live && (precommit || preferredSnapshot)) applyOwnedDirectDelta()
+              releaseOwned()
+              return
+            }
+            // Ordinary same-route window growth — EITHER direction: ONE owner
+            // (the stable-anchor keeper). The precommit reading identity was
+            // captured BEFORE the merge dispatch above; publish it + the new
+            // window identity through the existing same-route API so the keeper
+            // holds it prepaint (including across a live user session via the
+            // commit-scoped hold) and across late layout. No rAF, no scroll
+            // token, no queue, no replay — the next genuine edge event pages
+            // again from actual geometry. A null precommit keeps the existing
+            // live anchor (still refreshes the window identity).
+            try {
+              const display = Array.isArray((nextWindow as { displayMessages?: unknown }).displayMessages)
+                ? (nextWindow as { displayMessages: unknown[] }).displayMessages
+                : []
+              const wid = `${String((nextWindow as { oldestMessageId?: unknown }).oldestMessageId ?? '')}::${String((nextWindow as { newestMessageId?: unknown }).newestMessageId ?? '')}::${display.length}`
+              // Publish the TRANSACTIONAL pair (reading identity + the scrollTop
+              // measured with it) before the window generation triggers the
+              // keeper, so the commit instant is held in layout space even when
+              // the identity is new to the keeper and even while the user's
+              // momentum keeps scrolling: the metric then subtracts exactly the
+              // user's own movement instead of charging it to layout.
+              publishAnchorSample(
+                { topicId: topicIdAtStart, route: routeAtStart },
+                {
+                  messageId: precommit?.messageId ?? null,
+                  intraRowOffset: precommit?.intraRowOffset ?? null,
+                  scrollTop: precommit?.scrollTop ?? NaN
+                }
+              )
+              controller.adoptOrdinaryPaginationWindow(
+                { topicId: topicIdAtStart, route: routeAtStart },
+                wid,
+                precommit ? { messageId: precommit.messageId, offset: precommit.intraRowOffset } : null
+              )
+              notifyViewport()
+            } catch {
+              // fail-closed: projection already committed above
+            }
+            releaseOwned()
           } catch (err) {
-            logger.error('[loadMoreMessages] window fetch failed, fail-closed', err as Error)
-            if (isCurrentLoad('older', loadToken, topicGeneration)) {
+            // Settle the attempt handle on EVERY terminal outcome, including the
+            // superseded case whose release is owned by a successor.
+            settleAttempt(true)
+            logger.error(`[windowPage:${direction}] window fetch failed, fail-closed`, err as Error)
+            if (isCurrentLoad(direction, loadToken, topicGeneration)) {
               markRestoreLoadFailed()
-              viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+              releaseOwned()
+              viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
             }
           }
         },
         50
       )
+      return attemptSettled
     },
     [
-      beginScroll,
       controller,
       dispatch,
       isCurrentLoad,
+      isCurrentLoadCompletion,
       notifyViewport,
+      publishAnchorSample,
       setTimeoutTimer,
       scrollContainerRef,
       topic.id,
@@ -3413,280 +4545,147 @@ const Messages = ({
     ]
   )
 
-  // InfiniteScroll `next` entry (older edge): temporary scroll ownership or
-  // active navigation must queue a generation-bound intent instead of dropping
-  // it, otherwise the internal latch never releases and later scrolls retry
-  // Preferred restore anchor snapshot for queued/driven pagination: the
-  // controller's active visual anchor as a detached snapshot (stable identity
-  // + targetOffset, never a live ref). Null unless the anchor belongs to the
-  // live topic/route/session, so ordinary user pagination snapshots null and
-  // behaves exactly as before.
-  const snapshotPreferredAnchor = useCallback((): PreferredRestoreAnchorSnapshot | null => {
-    const intent = controller.currentIntent
-    if (!intent || intent.topicId !== topic.id || intent.targetRoute !== routeRef.current) return null
-    if (!controller.isSessionCurrent(controller.currentEpoch)) return null
-    // Provenance-guarded: the anchor is observable only when it was produced
-    // for this exact topic+route. A foreign live anchor never snapshots.
-    const anchor = controller.getAnchorFor({ topicId: topic.id, route: routeRef.current })
-    if (!anchor) return null
-    if (anchor.kind === 'divider') {
-      return { kind: 'divider-row', dividerKey: anchor.dividerKey, targetOffset: anchor.offset }
-    }
-    return { kind: 'message-row', messageId: anchor.messageId, targetOffset: anchor.offset }
-  }, [controller, topic.id])
-  // nothing.
-  const loadMoreMessages = useCallback(() => {
-    const currentState = viewportStateRef.current
-    // Restore-owned search guard: while a divider restore search is active for
-    // the current topic/route/epoch, the normal/manual pagination path must
-    // never race or steal ownership. Route through the restore-owned protocol
-    // with the preserved preferred anchor (explicit drive when user-idle,
-    // queued intent otherwise) — never a plain anchor-less start.
-    const liveSearch = dividerProgressRef.current
-    if (
-      liveSearch &&
-      liveSearch.topicId === topic.id &&
-      liveSearch.routeId === routeRef.current &&
-      liveSearch.ownerEpoch === controller.currentEpoch
-    ) {
-      const restorePreferred = snapshotPreferredAnchor()
-      if (!currentState.window?.hasMoreOlder || currentState.loading.older) return
-      if (!canHandleUserViewportScroll(currentState)) {
-        if (shouldQueueOlderIntent(currentState)) {
-          pendingOlderIntentRef.current = createPendingOlderIntent({
-            topicId: topic.id,
-            routeId: routeRef.current,
-            topicGeneration: currentState.topicGeneration,
-            deletionGeneration: captureDeletionGeneration(topic.id),
-            residentGeneration: captureResidentGeneration(() => store.getState(), topic.id),
-            preferredAnchor: restorePreferred
-          })
-        }
+  // One app-owned browse-edge gate for BOTH directions (replaces the former
+  // external scroll-library `next`/latch). It fires ONLY from genuine user
+  // navigation at the edge the direction is heading toward, decided against
+  // ACTUAL geometry: the committed viewport must be user-eligible (navigation
+  // idle + scrollMode user), a real user gesture session must be live
+  // (programmatic compensation echoes and window-reconcile layout scrolls carry
+  // no session and never start an ordinary page), no route transition owns the
+  // viewport, no restore-owned divider search owns the route, and the live
+  // container geometry must rest at the direction's edge per the single
+  // column-reverse primitive. Three entries share this gate:
+  // - post-scroll (`handleScroll`): the primary path, edge vicinity;
+  // - clamped pre-input (`maybePageOnClampedEdge`): a direction-confirmed
+  //   wheel / page key parked at the EXACT clamped edge, where no scroll event
+  //   can fire. Direction confirmation happens before entry; this gate re-proves
+  //   session + eligibility + edge the same way;
+  // - restore-owned divider search: drives `startWindowPageLoad` explicitly
+  //   (never this gate) and is therefore excluded here by the live-session
+  //   requirement plus the search-ownership check.
+  // No dataLength latch, no queue, no replay, no throttle/debounce, no
+  // scrollend latency: legitimate continued input (wheel bursts, key
+  // auto-repeat, drag momentum) re-enters here on every event and traverses
+  // newly loaded rows; paused input emits no events and therefore never chains
+  // solely because content grew. A busy fetch/navigation follows the committed
+  // state (guarded out here, and by the shared single-flight lease), never a
+  // second queued copy of intent.
+  const maybePageAtEdge = useCallback(
+    (direction: MessageViewportLoadDirection) => {
+      const container = scrollContainerRef.current
+      if (!container) return
+      const currentState = viewportStateRef.current
+      const currentWindow = currentState.window
+      if (
+        (direction === 'older' ? !currentWindow?.hasMoreOlder : !currentWindow?.hasMoreNewer) ||
+        currentState.loading[direction] ||
+        !isPaginationFetchLeaseFree(paginationFetchLeaseRef.current)
+      ) {
         return
       }
-      pendingOlderIntentRef.current = null
-      startOlderWindowLoad(restorePreferred)
-      return
-    }
-    if (!currentState.window?.hasMoreOlder || currentState.loading.older) {
-      if (!currentState.window?.hasMoreOlder) pendingOlderIntentRef.current = null
-      return
-    }
-    if (!canHandleUserViewportScroll(currentState)) {
-      if (shouldQueueOlderIntent(currentState)) {
-        // Snapshot the current preferred restore anchor (stable identity +
-        // targetOffset only, never the live ref) so the replayed pagination
-        // holds the divider/saved row still. Ordinary user pagination has no
-        // active anchor and snapshots null (behavior unchanged).
-        const preferredSnapshot = snapshotPreferredAnchor()
-        pendingOlderIntentRef.current = createPendingOlderIntent({
-          topicId: topic.id,
-          routeId: routeRef.current,
-          topicGeneration: currentState.topicGeneration,
-          deletionGeneration: captureDeletionGeneration(topic.id),
-          residentGeneration: captureResidentGeneration(() => store.getState(), topic.id),
-          preferredAnchor: preferredSnapshot
-        })
+      if (!canHandleUserViewportScroll(currentState)) return
+      if (controller.programmaticOwned) return
+      const liveSearch = dividerProgressRef.current
+      if (
+        liveSearch &&
+        liveSearch.topicId === topic.id &&
+        liveSearch.routeId === routeRef.current &&
+        liveSearch.ownerEpoch === controller.currentEpoch
+      ) {
+        return
       }
-      return
-    }
-    pendingOlderIntentRef.current = null
-    startOlderWindowLoad()
-  }, [startOlderWindowLoad, topic.id])
-
-  // Pending replay: reads the *committed* viewport state (effect input after
-  // scroll/end), never a stale ref. Single replay — cleared before starting —
-  // so success/failure/hasMore/left-edge all converge without loops. Loading
-  // guard keeps the intent while a load is active.
-  useEffect(() => {
-    const pending = pendingOlderIntentRef.current
-    if (!pending) return
-    const committed = viewportState
-    const decision = decidePendingOlderReplay({
-      pending,
-      live: {
-        topicId: topic.id,
-        routeId: routeRef.current,
-        topicGeneration: committed.topicGeneration,
-        deletionGeneration: captureDeletionGeneration(topic.id),
-        residentGeneration: captureResidentGeneration(() => store.getState(), topic.id),
-        hasMoreOlder: committed.window?.hasMoreOlder ?? false,
-        loadingOlder: committed.loading.older
-      },
-      committed,
-      atOldestEdge: isStillAtOldestEdge(scrollContainerRef.current)
-    })
-    if (decision.action === 'keep') return
-    const replayAnchor = pending.preferredAnchor ?? null
-    pendingOlderIntentRef.current = null
-    if (decision.action === 'discard') return
-    startOlderWindowLoad(replayAnchor)
-  }, [viewportState, topic.id, activeBranchId, startOlderWindowLoad])
-
-  const loadNewerMessages = useCallback(() => {
-    const currentState = viewportStateRef.current
-    if (!canHandleUserViewportScroll(currentState) || !currentState.window?.hasMoreNewer || currentState.loading.newer)
-      return
-
-    const anchorId = currentState.window?.newestMessageId
-    if (!anchorId) {
-      logger.warn('[loadNewerMessages] missing stable anchor for R-03 around')
-      return
-    }
-
-    const loadToken = {}
-    const topicGeneration = currentState.topicGeneration
-    const topicIdAtStart = topic.id
-    const routeAtStart = routeRef.current
-    const routeCacheKey = `${topicIdAtStart}::${routeAtStart ?? ''}`
-    const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
-    const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
-    viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
-
-    const container = scrollContainerRef.current
-    const anchor = findFirstVisibleMessage(container, messageElements.current)
-
-    const before = 1
-    const after = clampWindowCount(LOAD_MORE_COUNT)
-    const request: FetchMessagesWindowRequest = {
-      kind: 'around',
-      topicId: topicIdAtStart,
-      branchId: routeAtStart,
-      anchorMessageId: anchorId,
-      before,
-      after
-    }
-
-    if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
-      windowCacheRef.current.delete(routeCacheKey)
-    }
-    const cachedWindow = windowCacheRef.current.get(routeCacheKey)
-    if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
-      logger.silly('[loadNewerMessages] coverage hit' as never)
-    }
-
-    setTimeoutTimer(
-      'loadNewerMessages',
-      async () => {
-        if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
-        try {
-          const { dbService } = await import('@renderer/services/db')
-          // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
-          // via runTopicWindowRead (bootstrap latest + around pagination share
-          // the per-topic queue). All existing stale-discard guards below
-          // (topic/generation/deletion/isCurrentLoad) are unchanged — the
-          // serializer only orders execution of the IPC read.
-          const response = await runTopicWindowRead(topicIdAtStart, request.kind, () =>
-            dbService.fetchMessagesWindow(request)
-          )
-
-          if (topic.id !== topicIdAtStart) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          if (routeRef.current !== routeAtStart) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          if (viewportStateRef.current.topicGeneration !== topicGeneration) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          const currentResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
-          if (shouldDiscardPaginationForResident(capturedResidentGen, currentResidentGen)) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
-
-          if (!isValidWindowResponse(request, response as unknown as FetchMessagesWindowResponse)) {
-            logger.error(
-              '[loadNewerMessages] malformed window response, fail-closed',
-              response.window as unknown as Error
-            )
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          if (response.window.topicId !== topicIdAtStart || response.window.kind !== 'around') {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-
-          windowCacheRef.current.set(routeCacheKey, response as unknown as FetchMessagesWindowResponse)
-          const blocks = response.blocks as unknown as MessageBlock[]
-          const incoming = response.messages as unknown as Message[]
-          const existing = messagesRef.current
-          const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
-
-          if (blocks.length > 0) {
-            dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
-          }
-          dispatch(
-            newMessagesActions.messagesWindowMerged({
-              topicId: topicIdAtStart,
-              messages: merged,
-              route: routeAtStart,
-              mutableMessageIds: Array.isArray(
-                (response as unknown as { mutableMessageIds?: unknown }).mutableMessageIds
-              )
-                ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-                : []
-            })
-          )
-
-          const currentWindow = viewportStateRef.current.window
-          if (!currentWindow) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-            return
-          }
-          const newerWindow = expandMessageWindowNewer(merged, currentWindow, LOAD_MORE_COUNT, {
-            hasMoreBefore: currentWindow.hasMoreOlder,
-            hasMoreAfter: response.window.hasMoreAfter
-          })
-
-          viewportDispatch({
-            type: 'load/finish',
-            direction: 'newer',
-            token: loadToken,
-            topicGeneration,
-            window: newerWindow
-          })
-
-          if (anchor) {
-            requestAnimationFrame(async () => {
-              if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
-              if (container && anchor.element && anchor.element.isConnected) {
-                const newRect = anchor.element.getBoundingClientRect()
-                const delta = newRect.top - anchor.rect.top
-                if (Math.abs(delta) > 1) {
-                  const scrollToken = {}
-                  if (!(await beginScroll('anchoring', scrollToken))) return
-                  if (!isCurrentLoad('newer', loadToken, topicGeneration) || !anchor.element.isConnected) {
-                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                    return
-                  }
-                  container.scrollTop += delta
-                  requestAnimationFrame(() => {
-                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  })
-                }
-              }
-            })
-          }
-        } catch (err) {
-          logger.error('[loadNewerMessages] window fetch failed, fail-closed', err as Error)
-          if (isCurrentLoad('newer', loadToken, topicGeneration)) {
-            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-          }
+      let sessionLive = false
+      try {
+        sessionLive = controller.hasActiveUserInteraction()
+      } catch {
+        return
+      }
+      if (!sessionLive) return
+      let atEdge = false
+      try {
+        const metrics = {
+          scrollTop: container.scrollTop,
+          scrollHeight: container.scrollHeight,
+          clientHeight: container.clientHeight
         }
-      },
-      50
-    )
-  }, [beginScroll, dispatch, isCurrentLoad, setTimeoutTimer, scrollContainerRef, topic.id, viewportDispatch])
+        atEdge = direction === 'older' ? isColumnReverseAtOldest(metrics) : isColumnReverseAtNewest(metrics)
+      } catch {
+        return
+      }
+      if (!atEdge) return
+      void startWindowPageLoad(direction)
+    },
+    [controller, startWindowPageLoad, topic.id]
+  )
+
+  const maybePageOnClampedEdge = useCallback(
+    (direction: MessageViewportLoadDirection) => {
+      const container = scrollContainerRef.current
+      if (!container) return
+      let exact = false
+      try {
+        const metrics = {
+          scrollTop: container.scrollTop,
+          scrollHeight: container.scrollHeight,
+          clientHeight: container.clientHeight
+        }
+        exact = direction === 'older' ? isExactlyAtOldest(metrics) : isExactlyAtNewest(metrics)
+      } catch {
+        return
+      }
+      if (!exact) return
+      maybePageAtEdge(direction)
+    },
+    [maybePageAtEdge, scrollContainerRef]
+  )
+
+  // Edit-selection boundary intent (Shift+arrow selection edge). A selection
+  // endpoint that cannot advance is parked on the DISPLAYED (rendered) edge —
+  // a selection position, not a physical scroll position — so it has neither a
+  // live user scroll session nor exact clamped-edge geometry. The selection
+  // therefore names only the browse DIRECTION it needs (older for ArrowUp,
+  // newer for ArrowDown) and that direction is served by the SAME ordinary
+  // bounded page path (shared lease, token/generation guards, bounded-window
+  // derivation, keeper compensation). Nothing here synthesizes a scroll, waits
+  // for geometry or fakes a user gesture; a page already in flight absorbs
+  // repeat auto-repeat instead of starting a second read, and an owned
+  // navigation (which cancels in-flight page timers) or restore-owned divider
+  // search is never fought. Resolves with the attempt handle so a caller can
+  // await the committed window rather than guess.
+  const requestSelectionBoundaryPage = useCallback(
+    (direction: EditSelectionBoundaryDirection): Promise<boolean> => {
+      const currentState = viewportStateRef.current
+      const currentWindow = currentState.window
+      if (!currentWindow) return Promise.resolve(false)
+      let restoreSearchOwned = false
+      try {
+        const liveSearch = dividerProgressRef.current
+        restoreSearchOwned = Boolean(
+          liveSearch &&
+            liveSearch.topicId === topic.id &&
+            liveSearch.routeId === routeRef.current &&
+            liveSearch.ownerEpoch === controller.currentEpoch
+        )
+      } catch {
+        restoreSearchOwned = false
+      }
+      const decision = decideSelectionBoundaryPage({
+        direction,
+        hasMoreOlder: currentWindow.hasMoreOlder ?? false,
+        hasMoreNewer: currentWindow.hasMoreNewer ?? false,
+        loading: currentState.loading[direction] === true,
+        paginationLeaseFree: isPaginationFetchLeaseFree(paginationFetchLeaseRef.current),
+        programmaticOwned: controller.programmaticOwned,
+        restoreSearchOwned
+      })
+      if (!decision.start) {
+        logger.silly(`[editSelection:${direction}] boundary page declined: ${decision.reason}` as never)
+        return Promise.resolve(false)
+      }
+      return startWindowPageLoad(direction)
+    },
+    [controller, startWindowPageLoad, topic.id]
+  )
 
   // Capture-phase declaration (interaction token/session): genuine user
   // input opens/refreshes the controller-owned session and stops persistent
@@ -3694,11 +4693,203 @@ const Messages = ({
   // terminates/releases the transition; multi-scroll gestures stay in one
   // session (each scroll updates the stable snapshot).
   const cancelActiveStabilizerForUser = useCallback(() => {
+    // Real user input cancels a pending navigation target first (observe-only
+    // reading-anchor reporting; the declaration below is unchanged).
+    cancelReadingAnchorPendingTargetForUser()
+    scheduleReadingAnchor()
+    // Single declaration per gesture (shared with the capture-phase adapter):
+    // the same input already opened/refreshed the live session there, so this
+    // call refreshes it. A refresh changes only interaction counters the
+    // projection does not render; publishing a viewport notification for it
+    // re-rendered the whole mounted conversation once more per repeat. Only the
+    // session-open transition (no live session yet — e.g. input whose capture
+    // listener did not run) is an observable change and notifies.
+    if (declareUserIntentSession(controller)) notifyViewport()
+  }, [controller, notifyViewport, cancelReadingAnchorPendingTargetForUser, scheduleReadingAnchor])
+
+  // Shared single-writer user-takeover commit (scroll path + streaming
+  // click-to-pause path). ONLY the returned
+  // `{taken:true, routeKey, snapshot}` authorizes the
+  // `commitSnapshotForRoute` user-source write. Owned takeovers run the same
+  // single session teardown in both callers (plan/search clear, token end).
+  // `opts.bottomFollow` is opt-in ONLY for genuine user SCROLL landing at the
+  // exact physical bottom (handleScroll); the click-pause path omits it and
+  // keeps the row even at bottom. Default preserves the row (existing
+  // behavior elsewhere).
+  const adoptTakeoverSnapshot = useCallback(
+    (
+      measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+      liveToken: { interactionId: number; epoch: number },
+      opts?: { bottomFollow?: boolean }
+    ) => {
+      let liveWindowId: string | undefined
+      try {
+        const w = viewportStateRef.current.window
+        if (w && Array.isArray((w as { displayMessages?: unknown }).displayMessages)) {
+          const ww = w as { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages: unknown[] }
+          liveWindowId = `${String(ww.oldestMessageId ?? '')}::${String(ww.newestMessageId ?? '')}::${ww.displayMessages.length}`
+        }
+      } catch {
+        liveWindowId = undefined
+      }
+      const out = controller.userTakeover(
+        {
+          messageId: measured.messageId,
+          intraRowOffset: measured.intraRowOffset ?? null,
+          scrollTop: measured.scrollTop,
+          isAtBottom: measured.isAtBottom
+        },
+        liveWindowId,
+        liveToken,
+        opts?.bottomFollow === true ? { bottomFollow: true } : undefined
+      )
+      if (!out.taken) return out
+      // The takeover measured the real scroll result atomically (identity +
+      // offset + scrollTop): publish that pair so the keeper's later holds use
+      // the live reading row with a TRUE baseline instead of a fabricated one.
+      publishAnchorSample(controller.displayedRoute, {
+        messageId: out.snapshot.messageId,
+        intraRowOffset: out.snapshot.intraRowOffset,
+        scrollTop: out.snapshot.scrollTop
+      })
+      try {
+        commitSnapshotForRoute(out.routeKey, {
+          scrollTop: out.snapshot.scrollTop,
+          anchorId: out.snapshot.messageId,
+          messageId: out.snapshot.messageId,
+          intraRowOffset: out.snapshot.intraRowOffset,
+          rawScrollTop: out.snapshot.scrollTop,
+          isAtBottom: out.snapshot.isAtBottom
+        })
+      } catch {
+        // fail-closed: controller state already advanced above
+      }
+      // Takeover invalidated the old epoch: stale async continuations
+      // are inert via epoch mismatch/session check. Clear only the old
+      // session's plan/search/token, never a newer owner's. The user
+      // interaction session itself stays live for momentum/drag scrolls
+      // until `scrollend` (keeper) or the next programmatic request.
+      if (out.reason === 'owned-takeover') {
+        transitionPlanRef.current = null
+        dividerProgressRef.current = null
+        // Owned takeover ends the visible quiet session with it: cancel
+        // its bounded frames and drop only the taken-over pending driver.
+        // The controller already released ownership exactly once above;
+        // the anchoring token ends here exactly once. A newer owned
+        // session (if ever armed) is never touched.
+        try {
+          const h = dividerVisibleRafRef.current
+          dividerVisibleRafRef.current = null
+          if (h !== null) cancelAnimationFrame(h)
+        } catch {}
+        try {
+          const pv = dividerVisibleRef.current
+          if (pv && !(pv.ownerEpoch === controller.currentEpoch && controller.programmaticOwned)) {
+            dividerVisibleRef.current = null
+          }
+        } catch {
+          // fail-closed
+        }
+        endViewportScrollToken()
+      }
+      // Genuine userTakeover terminates a pending navigation target (real
+      // user scroll/pause wins over the in-flight navigate; observe-only
+      // re-measure follows, no scroll/persist change here).
+      cancelReadingAnchorPendingTargetForUser()
+      scheduleReadingAnchor()
+      return out
+    },
+    [
+      controller,
+      endViewportScrollToken,
+      publishAnchorSample,
+      cancelReadingAnchorPendingTargetForUser,
+      scheduleReadingAnchor
+    ]
+  )
+
+  // Bounded click-to-pause streaming follow: ANY primary mouse press bubbled
+  // from inside #messages during an active DISPLAYED-route stream adopts
+  // the current viewport as the stable row anchor through the shared
+  // single-writer takeover above — no scroll, no geometry change, no stop of
+  // generation, no change to the press's native control action. The keeper then holds the reading row through stream growth
+  // instead of pinning the bottom. The press session is closed at once (a
+  // no-scroll press never receives a `scrollend`; leaving it live would
+  // suspend keeper compensation). All predicate reads are event-time only
+  // (displayed route + live window + store block status): no new store
+  // subscription. Returns true only when the pause took over.
+  const attemptStreamingPause = useCallback((): boolean => {
     try {
-      controller.declareUserIntent()
+      if (controller.programmaticOwned) return false
+    } catch {
+      return false
+    }
+    let displayedTopicId: string
+    let displayedRoute: string | null
+    try {
+      const displayed = controller.displayedRoute
+      displayedTopicId = displayed.topicId
+      displayedRoute = displayed.route
+    } catch {
+      return false
+    }
+    if (displayedTopicId !== topicIdRef.current || displayedRoute !== routeRef.current) return false
+    let displayList: ReadonlyArray<Message> | null = null
+    try {
+      displayList = viewportStateRef.current.window?.displayMessages ?? null
+    } catch {
+      return false
+    }
+    if (!displayList || displayList.length === 0) return false
+    let streaming = false
+    try {
+      const state = store.getState()
+      const entities = (state as unknown as { messageBlocks?: { entities?: Record<string, { status?: unknown }> } })
+        .messageBlocks?.entities
+      streaming = hasActiveStreamingReply(displayList, (blockId: string) => entities?.[blockId]?.status)
+    } catch {
+      return false
+    }
+    if (!streaming) return false
+    let liveToken: { interactionId: number; epoch: number }
+    try {
+      liveToken = controller.declareUserIntent()
+    } catch {
+      return false
+    }
+    let measured: {
+      scrollTop: number
+      messageId?: string | null
+      intraRowOffset?: number | null
+      isAtBottom: boolean
+    } | null = null
+    try {
+      measured = captureSnapshot()
+    } catch {
+      measured = null
+    }
+    // Bottom capture must yield a real row: never fabricate an anchor and
+    // never rewrite isAtBottom — an unmeasurable viewport stays following.
+    // A real row anchor is kept EVEN when measured.isAtBottom is true (the
+    // takeover below preserves row identity then), so only a missing row
+    // refuses here.
+    if (!measured || !measured.messageId) return false
+    const out = adoptTakeoverSnapshot(
+      {
+        messageId: measured.messageId,
+        intraRowOffset: measured.intraRowOffset ?? null,
+        scrollTop: measured.scrollTop,
+        isAtBottom: measured.isAtBottom
+      },
+      liveToken
+    )
+    if (!out.taken) return false
+    try {
+      controller.clearUserIntent()
     } catch {}
     notifyViewport()
-  }, [controller, notifyViewport])
+    return true
+  }, [adoptTakeoverSnapshot, captureSnapshot, controller, notifyViewport])
 
   // Wheel/touch/pointer input declares intent even before the scroll event
   // fires. Programmatic compensation never emits these, so no self-cancel
@@ -3706,15 +4897,114 @@ const Messages = ({
   // The scroll itself is recorded via `handleScroll` below; no input-gated
   // fence exists — user input never authorizes persistence by itself, the
   // resulting stable viewport does.
-  const handleStabilizerUserInput = useCallback(() => {
-    cancelActiveStabilizerForUser()
-  }, [cancelActiveStabilizerForUser])
+  // Input declares the session ONLY and never pages by itself: navigation
+  // paging is decided against actual post-scroll geometry in `handleScroll`
+  // (`maybeLoadOlderAtEdge`). Pointer/touch/focus carry no navigation
+  // direction and must never fetch — a mere pointerdown at the oldest edge
+  // (focus, selection, away-bound follow-up) is not toward-older input.
+  // Bounded exception: ANY primary mouse press bubbled from inside #messages
+  // during an active displayed-route stream pauses follow via the shared
+  // single-writer takeover (no scroll, no geometry change, no change to the
+  // press's native action — no preventDefault/stopPropagation/inert); every
+  // other press keeps the declare-only behavior below. Containment is
+  // structural (this handler lives on #messages, so topbar/inputbar presses
+  // never reach it). Bubble delivery suffices: no pointerdown stopPropagation
+  // exists in the viewport subtree (only click/contextmenu/drop stoppers),
+  // so ordinary buttons/links still bubble here.
+  const handleStabilizerUserInput = useCallback(
+    (e?: React.PointerEvent | React.TouchEvent | React.MouseEvent) => {
+      // Layout-control press (trusted resize handle): same-arbiter
+      // LAYOUTCONTROL, not user-scroll — neither streaming pause nor a
+      // genuine-scroll session may open/clear the pending shared hold here.
+      // Wheels stay genuine via the separate wheel path below.
+      try {
+        if (e) {
+          const t = (e as unknown as { target?: unknown }).target ?? null
+          if (isViewportLayoutControlTarget(t, scrollContainerRef.current)) return
+        }
+      } catch {
+        // fail-closed to declare-only on helper errors
+      }
+      try {
+        if (
+          e &&
+          shouldPauseStreamingOnPrimaryMouseDown({
+            button: (e as unknown as { button?: unknown }).button,
+            pointerType: (e as unknown as { pointerType?: unknown }).pointerType
+          }) &&
+          attemptStreamingPause()
+        ) {
+          return
+        }
+      } catch {
+        // fail-closed to declare-only
+      }
+      cancelActiveStabilizerForUser()
+    },
+    [attemptStreamingPause, cancelActiveStabilizerForUser]
+  )
+
+  // Clamped-edge browse input (no scroll event can fire because the viewport is
+  // parked exactly at the edge): the input adapter reports the direction the
+  // input itself expresses and this entry requires the EXACT clamped edge for
+  // that direction. Which direction may actually page is never decided here —
+  // the shared gate re-proves session, ownership, eligibility and edge geometry
+  // identically for both directions. Pointer/touch/focus express no direction
+  // and never enter. Native default is preserved: no preventDefault, no custom
+  // page-scroll arithmetic — the fetch grows the window and the keeper holds
+  // the reading row.
+
+  // Direction-confirmed wheel path: declare first (opens/refreshes the live
+  // session the gate requires), then page only for a wheel parked at the exact
+  // clamped edge it heads toward. A wheel in open space declares only — its
+  // paging is decided against post-scroll geometry in `handleScroll`. Real user
+  // wheel cancels the pending navigation target, then re-measures (observe-only;
+  // paging behavior unchanged).
+  const handleStabilizerWheel = useCallback(
+    (e: React.WheelEvent) => {
+      cancelReadingAnchorPendingTargetForUser()
+      scheduleReadingAnchor()
+      cancelActiveStabilizerForUser()
+      let deltaY = 0
+      try {
+        deltaY = typeof e.deltaY === 'number' ? e.deltaY : 0
+      } catch {
+        return
+      }
+      const direction = browseDirectionForClampedInput({ kind: 'wheel', deltaY })
+      if (!direction) return
+      maybePageOnClampedEdge(direction)
+    },
+    [
+      cancelActiveStabilizerForUser,
+      cancelReadingAnchorPendingTargetForUser,
+      maybePageOnClampedEdge,
+      scheduleReadingAnchor
+    ]
+  )
 
   // Keyboard scroll pre-cancel: ArrowUp/Down, PageUp/Down, Home/End, Space.
   // Input targets (input/textarea/select/contentEditable) and modified keys
   // never declare intent so editing and shortcuts keep compensation alive.
+  // Page keys are an input ADAPTER for the same browse intent, never a second
+  // paging path: PageUp/ArrowUp/Home head toward older, PageDown/ArrowDown/End
+  // and Space toward newer, Shift+Space toward older. At the matching exact
+  // clamped edge the same shared gate decides; elsewhere the native default runs
+  // and post-scroll geometry decides. Native key behavior is never intercepted.
   const handleStabilizerKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // Layout-resize keys on the trusted handle are layout resizing, never
+      // genuine scroll: no session, no clamped-edge paging. All other keys
+      // (including Space/Escape on the handle) keep existing semantics.
+      try {
+        const rawTarget = (e as unknown as { target?: unknown }).target ?? null
+        const rawKey = (e as unknown as { key?: unknown }).key
+        if (isViewportLayoutResizeKey(rawKey) && isViewportLayoutControlTarget(rawTarget, scrollContainerRef.current)) {
+          return
+        }
+      } catch {
+        // fail-closed to existing behavior on helper errors
+      }
       let target: { tagName?: string; isContentEditable?: boolean } | null = null
       try {
         target = e.target as unknown as { tagName?: string; isContentEditable?: boolean }
@@ -3730,8 +5020,24 @@ const Messages = ({
         return
       }
       handleStabilizerUserInput()
+      let shiftKey = false
+      try {
+        shiftKey = e.shiftKey === true
+      } catch {
+        shiftKey = false
+      }
+      let key = ''
+      try {
+        key = typeof e.key === 'string' ? e.key : ''
+      } catch {
+        return
+      }
+      if (key.length === 0) return
+      const direction = browseDirectionForClampedInput({ kind: 'key', key, shiftKey })
+      if (!direction) return
+      maybePageOnClampedEdge(direction)
     },
-    [handleStabilizerUserInput]
+    [handleStabilizerUserInput, maybePageOnClampedEdge]
   )
 
   // Single atomic user-scroll path (controller-owned `userTakeover` with a
@@ -3748,76 +5054,37 @@ const Messages = ({
   // takeovers write the outgoing route; selected Redux intent is untouched).
   // Pagination detection below only reads scroll geometry (never authorizes
   // a snapshot) and the hook throttled writer is never called here.
+  // Reading-anchor report: observe-only scroll trigger (no scroll mutation).
+  // Real user input cancels a pending navigation target, then re-measures.
+  // The existing takeover scroll body below is unchanged.
   const handleScroll = useCallback(() => {
+    // Observe-only re-measure on every scroll (programmatic scrolls included:
+    // viewport-top may move under navigation restores). Pending-target clear
+    // is genuine-user-only (live interaction session): programmatic scrolls
+    // carry no live token and must keep the target until Promise settle.
+    scheduleReadingAnchor()
     if (!suppressUserWriteRef.current) {
       const liveToken = controller.activeInteractionToken
       if (liveToken !== null) {
         const container = scrollContainerRef.current
         const measured = captureSnapshot()
         if (container && measured) {
-          let liveWindowId: string | undefined
-          try {
-            const w = viewportStateRef.current.window
-            if (w && Array.isArray((w as { displayMessages?: unknown }).displayMessages)) {
-              const ww = w as { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages: unknown[] }
-              liveWindowId = `${String(ww.oldestMessageId ?? '')}::${String(ww.newestMessageId ?? '')}::${ww.displayMessages.length}`
-            }
-          } catch {
-            liveWindowId = undefined
-          }
-          const out = controller.userTakeover(
+          // Shared single-writer takeover commit (scroll + streaming
+          // click-pause share this operation, never divergent semantics).
+          // Genuine user scroll landing at the exact physical bottom resumes
+          // follow (live anchor null, snapshot truthful); any scroll away
+          // keeps the row. Passive growth scrolls carry no live session and
+          // never reach here (keeper holds instead — no auto-resume).
+          adoptTakeoverSnapshot(
             {
               messageId: measured.messageId ?? null,
               intraRowOffset: measured.intraRowOffset ?? null,
               scrollTop: measured.scrollTop,
               isAtBottom: measured.isAtBottom
             },
-            liveWindowId,
-            liveToken
+            liveToken,
+            { bottomFollow: isGenuinePhysicalBottom(measured.scrollTop) }
           )
-          if (out.taken) {
-            try {
-              commitSnapshotForRoute(out.routeKey, {
-                scrollTop: out.snapshot.scrollTop,
-                anchorId: out.snapshot.messageId,
-                messageId: out.snapshot.messageId,
-                intraRowOffset: out.snapshot.intraRowOffset,
-                rawScrollTop: out.snapshot.scrollTop,
-                isAtBottom: out.snapshot.isAtBottom
-              })
-            } catch {
-              // fail-closed: controller state already advanced above
-            }
-            // Takeover invalidated the old epoch: stale async continuations
-            // are inert via epoch mismatch/session check. Clear only the old
-            // session's plan/search/token, never a newer owner's. The user
-            // interaction session itself stays live for momentum/drag scrolls
-            // until `scrollend` (keeper) or the next programmatic request.
-            if (out.reason === 'owned-takeover') {
-              transitionPlanRef.current = null
-              dividerProgressRef.current = null
-              // Owned takeover ends the visible quiet session with it: cancel
-              // its bounded frames and drop only the taken-over pending driver.
-              // The controller already released ownership exactly once above;
-              // the anchoring token ends here exactly once. A newer owned
-              // session (if ever armed) is never touched.
-              try {
-                const h = dividerVisibleRafRef.current
-                dividerVisibleRafRef.current = null
-                if (h !== null) cancelAnimationFrame(h)
-              } catch {}
-              try {
-                const pv = dividerVisibleRef.current
-                if (pv && !(pv.ownerEpoch === controller.currentEpoch && controller.programmaticOwned)) {
-                  dividerVisibleRef.current = null
-                }
-              } catch {
-                // fail-closed
-              }
-              endViewportScrollToken()
-            }
-            notifyViewport()
-          }
         }
       } else {
         // No live session: never measure for takeover, never commit, never
@@ -3831,24 +5098,24 @@ const Messages = ({
       // pagination / divider-align compensation, same-route window refresh
       // layout effects) must never pose as user.
     }
-
-    const container = scrollContainerRef.current
-    if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
-      // Column-reverse: bottom (newest) is scrollTop ≈ 0, so the newer-edge
-      // prefetch uses the single geometry primitive (never the oldest formula).
-      if (distanceFromBottom(container.scrollTop) < COLUMN_REVERSE_NEWER_PREFETCH_PX) {
-        loadNewerMessages()
-      }
-    }
+    // Both browse directions, app-owned: a genuine user scroll resting at an
+    // edge pages there through the SAME gate (programmatic echoes carry no live
+    // session and are gated out inside, so a no-user window-reconcile or
+    // compensation scroll never starts an ordinary fetch). Wheel/keys parked
+    // clamped at an edge with no scroll movement are covered by the
+    // direction-confirmed pre-input path above; pointer, touch and focus carry
+    // no direction and never page pre-input by design. The active direction is
+    // decided against the single column-reverse geometry primitive (bottom/newest
+    // is scrollTop ≈ 0, visual top/oldest is the most negative scrollTop).
+    maybePageAtEdge('newer')
+    maybePageAtEdge('older')
   }, [
+    adoptTakeoverSnapshot,
+    cancelReadingAnchorPendingTargetForUser,
     captureSnapshot,
     controller,
-    endViewportScrollToken,
-    hasMoreNewer,
-    isLoadingNewer,
-    isLoadingMore,
-    loadNewerMessages,
-    notifyViewport,
+    maybePageAtEdge,
+    scheduleReadingAnchor,
     scrollContainerRef
   ])
 
@@ -3872,6 +5139,55 @@ const Messages = ({
       onComponentUpdate?.()
     })
   }, [onComponentUpdate])
+  // Reading-anchor observe-only triggers: DOM registry/window/route commit or
+  // restore changes re-measure on the next frame (no scroll, no persistence).
+  // Topic/route mismatch clears the last report (never emits a stale route)
+  // and forbids an old pending target.
+  useEffect(() => {
+    readingAnchorPendingTargetRef.current = null
+    readingAnchorLastRef.current = null
+    scheduleReadingAnchor()
+  }, [topic.id, activeBranchId, scheduleReadingAnchor])
+  const readingAnchorDisplayedTopicId = controller.displayedRoute.topicId
+  const readingAnchorDisplayedRoute = controller.displayedRoute.route
+  // Displayed-route restore (commit or restore landing on the same selected
+  // identity): old anchor rows may be unmounted, so drop the last report and
+  // re-measure instead of retaining a stale row id.
+  useEffect(() => {
+    readingAnchorLastRef.current = null
+    scheduleReadingAnchor()
+  }, [viewportState.window, readingAnchorDisplayedTopicId, readingAnchorDisplayedRoute, scheduleReadingAnchor])
+  // Reading-anchor observe-only resize/content trigger (project pattern:
+  // ResizeObserver on the container + content wrapper, MutationObserver on
+  // the container, both disconnected on cleanup). Never scrolls/persists.
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    let resizeObserver: ResizeObserver | null = null
+    try {
+      resizeObserver = new ResizeObserver(() => scheduleReadingAnchor())
+      resizeObserver.observe(container)
+      const content = container.firstElementChild
+      if (content instanceof HTMLElement) resizeObserver.observe(content)
+    } catch {
+      resizeObserver = null
+    }
+    let mutationObserver: MutationObserver | null = null
+    try {
+      mutationObserver = new MutationObserver(() => scheduleReadingAnchor())
+      mutationObserver.observe(container, { childList: true, subtree: true, characterData: true })
+    } catch {
+      mutationObserver = null
+    }
+    return () => {
+      try {
+        resizeObserver?.disconnect()
+      } catch {}
+      try {
+        mutationObserver?.disconnect()
+      } catch {}
+    }
+  }, [scheduleReadingAnchor, scrollContainerRef, viewportState.window])
 
   // Divider restore search driver (binding invariant, single owner).
   // Exactly one action per invocation, decided purely from the committed
@@ -4276,16 +5592,22 @@ const Messages = ({
       return
     }
     if (decision.action === 'drive-older') {
+      // Single-flight: another ordinary page (either direction) currently owns
+      // the read lease — do NOT record this window as driven, so the next step
+      // (window commit / load settle) drives it for real instead of stalling.
+      if (!isPaginationFetchLeaseFree(paginationFetchLeaseRef.current)) return
       // Explicit restore-owned drive (no scroll event required): short
-      // windows at edge=0 may never fire InfiniteScroll, so the search owns
-      // pagination directly. Dedup on the committed window identity so one
-      // window drives exactly one page.
+      // windows at edge=0 may never reach the app-owned user trigger, so
+      // the search owns pagination directly — the SAME load path with an
+      // explicit direction + preferred restore anchor, never a second
+      // lifecycle. Dedup on the committed window identity so one window
+      // drives exactly one page.
       const key = windowIdentityKey(committed.window)
       if (key !== null && search.drivenWindowKey === key) return
       search.drivenWindowKey = key
       search.pagesDriven += 1
       search.lastLoadFailed = false
-      startOlderWindowLoad(decision.preferred)
+      void startWindowPageLoad('older', decision.preferred)
       return
     }
     if (decision.action === 'wait-load') {
@@ -4296,7 +5618,7 @@ const Messages = ({
     alignAndCommitDividerSearch,
     endDividerSearchTerminal,
     scrollContainerRef,
-    startOlderWindowLoad,
+    startWindowPageLoad,
     windowIdentityKey
   ])
 
@@ -5008,10 +6330,12 @@ const Messages = ({
         }
       }
       // Shared-message fallback anchor (stable viewport-top content anchor,
-      // crossing-first; NOT a min-abs-distance midpoint).
-      const fallbackTop = findViewportTopAnchorWithOffset(container)
+      // crossing-first; NOT a min-abs-distance midpoint). Same cached visible
+      // visual rows as every other capture path.
+      const fallbackTop = findViewportTopAnchorWithOffset(container, {
+        orderedRows: getOrderedAnchorRowsRef.current()
+      })
       const sharedVisualMessageId = fallbackTop?.messageId ?? null
-      void findFirstVisibleMessage
       // Outgoing-route freeze: synchronously snapshot the DISPLAYED route
       // BEFORE the selected route changes. Dropped while owned (transient):
       // the existing stable snapshot stands. Then open the divider session
@@ -5040,6 +6364,7 @@ const Messages = ({
       let deferredBlocks: MessageBlock[] = []
       let deferredMessages: Message[] = []
       let deferredMutable: string[] = []
+      let deferredReference: HistoryReferenceMeta | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
         const aroundOpts = {
@@ -5077,6 +6402,7 @@ const Messages = ({
         deferredMutable = Array.isArray((routeWindow as unknown as { mutableMessageIds?: unknown }).mutableMessageIds)
           ? ((routeWindow as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
           : []
+        deferredReference = (routeWindow as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -5104,15 +6430,17 @@ const Messages = ({
       const publishDeferredProjection = (): void => {
         if (deferredPublished) return
         deferredPublished = true
+        // Read-only deferred route-window hydration: must not invalidate the semantic closure.
         if (deferredBlocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart))
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart)))
         }
         dispatch(
           newMessagesActions.rebaseRouteMessages({
             topicId: topicIdAtStart,
             messages: deferredMessages,
             route: branchId,
-            mutableMessageIds: deferredMutable
+            mutableMessageIds: deferredMutable,
+            reference: deferredReference
           })
         )
       }
@@ -5861,12 +7189,24 @@ const Messages = ({
     // auto-retries: a terminal session needs an explicit route/connection
     // trigger, never a progress reentry.
     const wasActivation = controller.isActivationRequired
+    // Reference-reload obligation: a Main→renderer history-reference
+    // invalidation addressed to THIS resident target owes a re-read even when
+    // the controller's provenance was re-stamped clean after the hint (an
+    // ordinary projection apply does that through `noteSameRouteWindowUpdate` /
+    // `rebaseClean`). Both idle-skip guards below therefore require "clean AND
+    // no obligation"; the obligation is consumed where the re-read pipeline
+    // takes ownership, so it is one-shot and never a reload loop.
+    const referenceReloadObliged = isReferenceReloadObliged(
+      referenceReloadRef.current,
+      consumedReferenceTokenRef.current,
+      topic.id
+    )
     if (!wasActivation) {
       // Terminal no-retry (fail-closed): a released terminal viewport stays
       // until the next genuine selected/connection trigger.
       if (controller.currentPhase === 'terminal') return
       if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) {
-        if (controller.isDomProvenanceClean) return
+        if (controller.isDomProvenanceClean && !referenceReloadObliged) return
       }
     }
     const topicIdAtEffect = topic.id
@@ -5900,7 +7240,8 @@ const Messages = ({
       controller.displayedRoute.topicId === topicIdAtEffect &&
       controller.displayedRoute.route === routeAtEffect &&
       (controller.currentPhase === 'stable' || controller.currentPhase === 'idle') &&
-      controller.isDomProvenanceClean
+      controller.isDomProvenanceClean &&
+      !referenceReloadObliged
     ) {
       return
     }
@@ -5978,7 +7319,7 @@ const Messages = ({
     // shape (missing anchor, changed route, deletion, anchorless non-bottom)
     // falls through to the existing full fetch/rebuild below. Divider-owned
     // sessions already refused above and never reach here.
-    if (wasActivation) {
+    if (wasActivation && !referenceReloadObliged) {
       // Validated continuation lives ONLY in the pre-paint layout effect above
       // (single shared 1px geometry helper + immediate remeasure, still
       // revealed, still synchronous). This ordinary passive effect never
@@ -6303,6 +7644,11 @@ const Messages = ({
     // target/epoch fails the currency check and proceeds.
     if (routeFetchEpochRef.current !== null && controller.isSessionCurrent(routeFetchEpochRef.current)) return
     routeFetchEpochRef.current = fetchEpoch
+    // The re-read pipeline owns the obligation now: consume it here (one-shot)
+    // so this session's completion cannot re-trigger another reload, while a
+    // hint arriving during the fetch raises a newer token that outlives this
+    // consume.
+    consumedReferenceTokenRef.current = referenceReloadRef.current?.token ?? consumedReferenceTokenRef.current
     loadedRouteRef.current = claimLoadedRoute(activeBranchId)
     cancelActiveLoads()
     // Incremental: keep the current viewport during the windowed fetch (no
@@ -6894,6 +8240,7 @@ const Messages = ({
     failVisibleTransition,
     getLegacyMainSavedPosition,
     readTargetSnapshot,
+    referenceRefreshToken,
     saveDisplayedSnapshot,
     selectMessageForFold,
     t,
@@ -6904,7 +8251,11 @@ const Messages = ({
   ])
 
   return (
-    <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
+    <EditModeProvider
+      topicId={topic.id}
+      scrollToGroup={scrollToGroup}
+      visibleGroupIds={visibleGroupIds}
+      requestBoundaryPage={requestSelectionBoundaryPage}>
       <AnchorGroupProvider anchorGroupKey={anchorGroupKey}>
         <MessagesContent
           assistant={assistant}
@@ -6915,15 +8266,16 @@ const Messages = ({
           displayGroups={displayGroups}
           viewportRouteKey={`${topic.id}::${activeBranchId ?? 'main'}`}
           contextBoundaryMessageId={contextBoundaryMessageId}
-          hasMore={hasMore}
           isLoadingMore={isLoadingMore}
           isLoadingNewer={isLoadingNewer}
-          loadMoreMessages={loadMoreMessages}
           registerMessageElement={registerMessageElement}
           onSelectRoute={handleSelectRoute}
           onStabilizerUserInput={handleStabilizerUserInput}
+          onStabilizerWheel={handleStabilizerWheel}
           onStabilizerKeyDown={handleStabilizerKeyDown}
           viewportPhase={viewportPhaseAttr}
+          onScrollToBottom={scrollToBottom}
+          hasMoreNewer={hasMoreNewer}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

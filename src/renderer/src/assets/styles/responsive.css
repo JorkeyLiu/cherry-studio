@@ -19,9 +19,10 @@
 /* lg */
 @media (max-width: 1080px) {
   :root {
-    --assistants-width: 210px;
+    --assistants-width: 220px;
     --assistant-settings-width: 275px;
-    --topic-list-width: 210px;
+    /* Both home sidebars share the canonical 220px minimum (SIDEBAR_MIN_WIDTH). */
+    --topic-list-width: 220px;
     --settings-width: 210px;
   }
 }

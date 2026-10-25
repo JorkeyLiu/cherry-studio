@@ -20,7 +20,6 @@ vi.mock('@renderer/store', () => ({
     dispatch: (action: unknown) => mockStore.dispatch(action as never)
   }
 }))
-vi.mock('@renderer/store/mcp', () => ({ hubMCPServer: { id: 'hub' } }))
 vi.mock('@renderer/i18n', () => ({ default: { t: (k: string) => k } }))
 vi.mock('@renderer/config/models', async (importOriginal) => {
   const actual = await importOriginal<typeof ConfigModelsModule>()
@@ -67,8 +66,8 @@ vi.mock('@renderer/aiCore', () => ({
     getActualProvider() {
       return 'test-provider'
     }
-    async completions() {
-      return completionsMock()
+    async completions(...args: unknown[]) {
+      return (completionsMock as (...a: unknown[]) => unknown)(...args)
     }
   }
 }))
@@ -156,5 +155,30 @@ describe('fetchGenerate — exact provider resolution', () => {
 
     expect(result).toBe('Title')
     expect(completionsMock).toHaveBeenCalledOnce()
+  })
+})
+
+describe('topic vs topicless routing to the AiProvider boundary', () => {
+  it('summary forwards the stable topic identity while note/generate carry none (boundary mints topicless)', async () => {
+    assistantMocks.getQuickModel.mockReturnValue(unknownModel)
+    assistantMocks.getProviderByModel.mockReturnValue(exactProvider)
+
+    const messages: any[] = [{ id: 'm1', topicId: 'topic-stable-9', role: 'user', blocks: [] }]
+    await fetchMessagesSummary({ messages })
+    const summaryConfig = (completionsMock.mock.calls[0] as unknown[])[2] as { topicId?: string }
+    // Topic-scoped: existing stable topic identity reaches the boundary.
+    expect(summaryConfig?.topicId).toBe('topic-stable-9')
+
+    completionsMock.mockClear()
+    await fetchNoteSummary({ content: 'hello' })
+    const noteConfig = (completionsMock.mock.calls[0] as unknown[])[2] as { topicId?: string }
+    // Genuinely topicless: no fake topic is forwarded; the boundary mints
+    // one request-local opaque identity instead.
+    expect(noteConfig?.topicId).toBeUndefined()
+
+    completionsMock.mockClear()
+    await fetchGenerate({ prompt: 'p', content: 'c', model: unknownModel })
+    const generateConfig = (completionsMock.mock.calls[0] as unknown[])[2] as { topicId?: string }
+    expect(generateConfig?.topicId).toBeUndefined()
   })
 })

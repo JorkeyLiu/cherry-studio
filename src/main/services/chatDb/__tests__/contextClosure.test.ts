@@ -426,4 +426,146 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
       validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: partial } as any)
     ).not.toThrow()
   })
+
+  it('effective route: main vs branch vs nested diverge; prefix anchor excludes main-only after-fork turns; branch-owned anchor resolves', () => {
+    const topicId = `t-${uid()}`
+    // Main 5 turns: u1/a1 .. u5/a5
+    for (const n of ['u1', 'u2', 'u3', 'u4', 'u5']) {
+      const u = makeMsg(topicId, n, 'user')
+      const aId = n.replace('u', 'a')
+      const a = makeMsg(topicId, aId, 'assistant', n)
+      agg.appendMessage(topicId, u as any, [makeBlock(n) as any])
+      agg.appendMessage(topicId, a as any, [makeBlock(aId) as any])
+    }
+    // Fork B1 at complete turn a3: effective prefix u1..a3 (3 turns)
+    const b1 = okValue(agg.createBranch(topicId, null, 'a3', 'B1')).branch.id
+    agg.appendMessage(
+      topicId,
+      makeMsg(topicId, 'b1u', 'user') as any,
+      [makeBlock('b1u') as any],
+      undefined,
+      undefined,
+      {
+        branchId: b1
+      }
+    )
+    agg.appendMessage(
+      topicId,
+      makeMsg(topicId, 'b1a', 'assistant', 'b1u') as any,
+      [makeBlock('b1a') as any],
+      undefined,
+      undefined,
+      { branchId: b1 }
+    )
+    // Nested B2 from B1 at branch-owned b1a: prefix is full B1, plus own suffix
+    const b2 = okValue(agg.createBranch(topicId, b1, 'b1a', 'B2')).branch.id
+    agg.appendMessage(
+      topicId,
+      makeMsg(topicId, 'b2u', 'user') as any,
+      [makeBlock('b2u') as any],
+      undefined,
+      undefined,
+      {
+        branchId: b2
+      }
+    )
+    agg.appendMessage(
+      topicId,
+      makeMsg(topicId, 'b2a', 'assistant', 'b2u') as any,
+      [makeBlock('b2a') as any],
+      undefined,
+      undefined,
+      { branchId: b2 }
+    )
+
+    const main = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+    expect(main.messages.map((m: any) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3', 'a3', 'u4', 'a4', 'u5', 'a5'])
+    expect(main.closure.returnedCount).toBe(10)
+    expect(main.closure.totalTurnCount).toBe(5)
+    expect(main.closure.selectedTurnCount).toBe(5)
+    expect(main.blocks).toHaveLength(10)
+
+    const branch = okValue(agg.fetchContextClosure({ topicId, branchId: b1, anchorGroupKey: 'u1' }))
+    expect(branch.messages.map((m: any) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3', 'a3', 'b1u', 'b1a'])
+    expect(branch.closure.returnedCount).toBe(8)
+    expect(branch.closure.totalTurnCount).toBe(4)
+    expect(branch.closure.selectedTurnCount).toBe(4)
+    expect(branch.blocks).toHaveLength(8)
+    // Common prefix anchor must NOT include main-only after-fork turns
+    expect(branch.messages.map((m: any) => m.id)).not.toContain('u4')
+    expect(branch.messages.map((m: any) => m.id)).not.toContain('a5')
+    expect(branch.blocks.map((b: any) => b.content)).toContain('block-b1u')
+    expect(branch.blocks.map((b: any) => b.content)).not.toContain('block-u4')
+
+    const nested = okValue(agg.fetchContextClosure({ topicId, branchId: b2, anchorGroupKey: 'u1' }))
+    expect(nested.messages.map((m: any) => m.id)).toEqual([
+      'u1',
+      'a1',
+      'u2',
+      'a2',
+      'u3',
+      'a3',
+      'b1u',
+      'b1a',
+      'b2u',
+      'b2a'
+    ])
+    expect(nested.closure.returnedCount).toBe(10)
+    expect(nested.closure.totalTurnCount).toBe(5)
+    expect(nested.closure.selectedTurnCount).toBe(5)
+    expect(nested.blocks).toHaveLength(10)
+    // Same count as main but different effective sequence/blocks
+    expect(nested.messages.map((m: any) => m.id)).not.toEqual(main.messages.map((m: any) => m.id))
+    expect(nested.blocks.map((b: any) => b.content)).toContain('block-b2u')
+    expect(nested.blocks.map((b: any) => b.content)).not.toContain('block-u4')
+
+    // Branch-owned anchor must resolve on its owner route
+    const owned = okValue(agg.fetchContextClosure({ topicId, branchId: b1, anchorGroupKey: 'b1u' }))
+    expect(owned.messages.map((m: any) => m.id)).toEqual(['b1u', 'b1a'])
+    expect(owned.closure.totalTurnCount).toBe(4)
+    expect(owned.closure.selectedTurnCount).toBe(1)
+    expect(owned.closure.boundaryMessageId).toBe('b1u')
+    const ownedNested = okValue(agg.fetchContextClosure({ topicId, branchId: b2, anchorGroupKey: 'b2u' }))
+    expect(ownedNested.messages.map((m: any) => m.id)).toEqual(['b2u', 'b2a'])
+    expect(ownedNested.closure.totalTurnCount).toBe(5)
+    expect(ownedNested.closure.selectedTurnCount).toBe(1)
+
+    // Main-only after-fork anchor is NOT in the branch effective route
+    const afterForkOnBranch = agg.fetchContextClosure({ topicId, branchId: b1, anchorGroupKey: 'u4' })
+    expect(afterForkOnBranch.ok).toBe(false)
+    if (!afterForkOnBranch.ok) expect(afterForkOnBranch.error.code).toBe(ERR_NOT_FOUND)
+  })
+
+  it('effective route fail-closed: invalid/deleted branch and missing fork anchor are NOT_FOUND', () => {
+    const topicId = `t-${uid()}`
+    for (const n of ['u1', 'u2', 'u3']) {
+      const u = makeMsg(topicId, n, 'user')
+      const aId = n.replace('u', 'a')
+      const a = makeMsg(topicId, aId, 'assistant', n)
+      agg.appendMessage(topicId, u as any, [makeBlock(n) as any])
+      agg.appendMessage(topicId, a as any, [makeBlock(aId) as any])
+    }
+    const bDel = okValue(agg.createBranch(topicId, null, 'a2', 'B-del')).branch.id
+    const bMissing = okValue(agg.createBranch(topicId, null, 'a2', 'B-missing')).branch.id
+
+    // Invalid branch fails closed, consistent with effective-route resolution
+    const invalid = agg.fetchContextClosure({ topicId, branchId: 'branch-nope', anchorGroupKey: 'u1' })
+    expect(invalid.ok).toBe(false)
+    if (!invalid.ok) expect(invalid.error.code).toBe(ERR_NOT_FOUND)
+
+    // Deleted branch fails closed
+    expect(okValue(agg.deleteBranch(topicId, bDel)).deletedBranchIds).toContain(bDel)
+    const deleted = agg.fetchContextClosure({ topicId, branchId: bDel, anchorGroupKey: 'u1' })
+    expect(deleted.ok).toBe(false)
+    if (!deleted.ok) expect(deleted.error.code).toBe(ERR_NOT_FOUND)
+    // Main route still resolves after sibling subtree delete
+    const mainStill = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+    expect(mainStill.closure.totalTurnCount).toBe(3)
+
+    // Missing fork anchor fails closed: owner deletes the branch anchor on main
+    expect(agg.deleteMessage(topicId, 'a2').ok).toBe(true)
+    const missingAnchor = agg.fetchContextClosure({ topicId, branchId: bMissing, anchorGroupKey: 'u1' })
+    expect(missingAnchor.ok).toBe(false)
+    if (!missingAnchor.ok) expect(missingAnchor.error.code).toBe(ERR_NOT_FOUND)
+  })
 })

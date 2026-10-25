@@ -505,13 +505,6 @@
         "title": "Modo Autônomo"
       },
       "tooling": {
-        "mcp": {
-          "description": "Conecte servidores MCP para desbloquear ferramentas adicionais que você pode aprovar acima.",
-          "empty": "Nenhum servidor MCP detectado. Adicione um na página de configurações do MCP.",
-          "inactiveTooltip": "Este servidor MCP não está ativo. Por favor, inicie-o primeiro.",
-          "manageHint": "Precisa de configuração avançada? Visite Configurações → Servidores MCP.",
-          "toggle": "Alternar {{name}}"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "As edições de arquivos e operações do sistema de arquivos são aprovadas automaticamente.",
@@ -543,7 +536,6 @@
           "autoDescription": "Esta ferramenta é aprovada automaticamente pelo modo de permissão atual.",
           "autoDisabledTooltip": "Aprovado automaticamente por \"{{mode}}\" e não pode ser desativado.",
           "empty": "Nenhuma ferramenta corresponde aos seus filtros.",
-          "mcpBadge": "Ferramenta MCP",
           "requiresApproval": "Requer aprovação quando desativado",
           "search": "Ferramentas de pesquisa",
           "toggle": "Alternar {{name}}"
@@ -557,16 +549,6 @@
         "tab": "Ferramentas pré-aprovadas",
         "title": "Ferramentas",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "Servidores MCP"
-        },
-        "tab": "Ferramentas",
-        "tools": {
-          "title": "Ferramentas pré-aprovadas"
-        }
       }
     },
     "sidebar_title": "Agentes",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "Busca conteúdo de um URL especificado"
-        },
-        "WebSearch": {
-          "description": "Realiza pesquisas na web com filtragem de domínio"
         },
         "Write": {
           "description": "Cria ou sobrescreve arquivos"
@@ -897,27 +876,6 @@
         "label": "Máximo de Chamadas de Ferramentas",
         "tip": "Número máximo de chamadas de ferramentas permitidas em uma única conversa. Valores mais altos permitem operações mais complexas de múltiplas etapas, mas podem aumentar o uso de tokens e o tempo de resposta."
       },
-      "mcp": {
-        "description": "Servidor MCP ativado por padrão",
-        "enableFirst": "Por favor, ative este servidor nas configurações do MCP primeiro",
-        "label": "Servidor MCP",
-        "mode": {
-          "auto": {
-            "description": "IA descobre e usa ferramentas automaticamente",
-            "label": "Auto"
-          },
-          "disabled": {
-            "description": "Sem ferramentas MCP",
-            "label": "Desativado"
-          },
-          "manual": {
-            "description": "Selecione servidores MCP específicos",
-            "label": "Manual"
-          }
-        },
-        "noServersAvailable": "Nenhum servidor MCP disponível. Adicione um servidor nas configurações",
-        "title": "Configurações do MCP"
-      },
       "model": "Configurações do Modelo",
       "more": "Configurações do Assistente",
       "prompt": "Configurações de Prompt",
@@ -1050,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Assistente",
-      "click_to_navigate": "Clique para pular para a mensagem correspondente",
-      "coming_soon": "O gráfico do fluxo de chat estará disponível em breve",
-      "no_messages": "Nenhuma mensagem encontrada",
-      "start_conversation": "Inicie uma conversa para visualizar o gráfico do fluxo de chat",
-      "title": "Histórico de Chat",
-      "user_node": "Usuário",
-      "view_full_content": "Ver conteúdo completo"
-    },
     "input": {
       "auto_resize": "Ajuste automático de altura",
       "context_count": {
@@ -1073,6 +1021,7 @@
       "file_not_supported_count": "{{count}} arquivos não suportados",
       "generate_image": "Gerar imagem",
       "generate_image_not_supported": "Modelo não suporta geração de imagem",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Base de conhecimento",
       "new_topic": "Novo tópico {{Command}}",
       "paste_text_file_confirm": "Colar na caixa de entrada?",
@@ -1118,36 +1067,7 @@
         "image_or_document": "Carregar imagem ou documento",
         "upload_from_local": "Fazer upload de arquivo local..."
       },
-      "url_context": "Contexto da Página da Web",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "Este modelo não suporta busca na web",
-          "enabled_content": "Usar a função integrada de busca na web do modelo",
-          "label": "Integrado ao modelo"
-        },
-        "button": {
-          "ok": "Ir para configurações"
-        },
-        "enable": "Ativar pesquisa na web",
-        "enable_content": "É necessário verificar a conectividade da pesquisa na web nas configurações primeiro",
-        "label": "Ativar pesquisa na web",
-        "no_web_search": {
-          "description": "Não ativar a função de busca na web",
-          "label": "Sem busca na web"
-        },
-        "settings": "Configurações de Pesquisa na Web"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "Não é possível converter para um formato de chamada de ferramenta válido: {{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "O Gemini não suporta o uso simultâneo da ferramenta de pesquisa nativa e da chamada de funções.",
-        "multiple_tools": "Existem várias ferramentas MCP correspondentes, a ferramenta {{tool}} foi selecionada",
-        "no_tool": "Nenhuma ferramenta MCP necessária correspondente encontrada {{tool}}",
-        "url_context": "O Gemini não suporta o uso simultâneo de contexto da página da web e chamadas de função"
-      }
+      "url_context": "Contexto da Página da Web"
     },
     "message": {
       "copy_topic": {
@@ -1189,13 +1109,9 @@
     },
     "navigation": {
       "bottom": "Voltar ao fundo",
-      "close": "Fechar",
       "first": "Esta é a primeira mensagem",
-      "history": "Histórico de Conversas",
       "last": "Esta é a última mensagem",
-      "next": "Próxima mensagem",
-      "prev": "Mensagem anterior",
-      "top": "Voltar ao topo"
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Reenviar",
     "save": {
@@ -1469,12 +1385,7 @@
       },
       "unpin": "Desfixar"
     },
-    "translate": "Traduzir",
-    "web_search": {
-      "warning": {
-        "openai": "O modelo GPT5 com intensidade mínima de pensamento não suporta pesquisa na web"
-      }
-    }
+    "translate": "Traduzir"
   },
   "code": {
     "auto_update_to_latest": "Verificar atualizações e instalar a versão mais recente",
@@ -1732,10 +1643,7 @@
         "message": "Parece que ocorreu um problema...",
         "reload": "Recarregar"
       },
-      "details": "Detalhes",
-      "mcp": {
-        "invalid": "Servidor MCP inválido"
-      }
+      "details": "Detalhes"
     },
     "cause": "Causa do erro",
     "chat": {
@@ -1758,12 +1666,10 @@
       "deprecated": "Este modelo foi descontinuado; por favor, mude para outro modelo.",
       "go_to_settings": "Ir para definições",
       "knowledge": "Falha na vetorização da base de conhecimento",
-      "mcp": "Falha na ligação ao servidor MCP, verifique se o serviço está em execução",
       "model": "Modelo não encontrado ou sem acesso",
       "model_conflict": "O modelo de diagnóstico é igual ao modelo com erro",
       "network": "Não é possível ligar ao servidor, verifique as definições de rede ou proxy",
       "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
-      "ocr": "Motor OCR não inicializado, verifique as definições de OCR",
       "parse": "A IA retornou uma resposta inválida, tente novamente ou mude de modelo",
       "payload": "Conteúdo da solicitação muito grande, reduza o tamanho do arquivo ou do texto",
       "proxy": "Erro de proxy ou certificado SSL, verifique as configurações de proxy e de rede",
@@ -2182,112 +2088,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "Ações",
-    "add_failed": "Falha ao adicionar memória",
-    "add_first_memory": "Adicione sua primeira memória",
-    "add_memory": "Adicionar memória",
-    "add_new_user": "Adicionar novo usuário",
-    "add_success": "Memória adicionada com sucesso",
-    "add_user": "Adicionar usuário",
-    "add_user_failed": "Falha ao adicionar usuário",
-    "all_users": "Todos os usuários",
-    "cannot_delete_default_user": "Não é possível excluir o usuário padrão",
-    "configure_memory_first": "Configure as configurações de memória primeiro",
-    "content": "Conteúdo",
-    "current_user": "Usuário atual",
-    "custom": "Personalizado",
-    "default": "Padrão",
-    "default_user": "Usuário padrão",
-    "delete_confirm": "Tem certeza de que deseja excluir esta memória?",
-    "delete_confirm_content": "Tem certeza de que deseja excluir {{count}} memórias?",
-    "delete_confirm_single": "Tem certeza de que deseja excluir esta memória?",
-    "delete_confirm_title": "Excluir memória",
-    "delete_failed": "Falha ao excluir memória",
-    "delete_selected": "Excluir selecionados",
-    "delete_success": "Memória excluída com sucesso",
-    "delete_user": "Excluir usuário",
-    "delete_user_confirm_content": "Tem certeza de que deseja excluir o usuário {{user}} e todas as suas memórias?",
-    "delete_user_confirm_title": "Excluir usuário",
-    "delete_user_failed": "Falha ao excluir usuário",
-    "description": "A função de memória permite armazenar e gerenciar informações das interações com o assistente. Você pode adicionar, editar e excluir memórias, além de filtrar e pesquisá-las.",
-    "edit_memory": "Editar memória",
-    "embedding_dimensions": "Dimensões de incorporação",
-    "embedding_model": "Modelo de incorporação",
-    "enable_global_memory_first": "Habilite primeiro a memória global",
-    "end_date": "Data final",
-    "global_memory": "Memória global",
-    "global_memory_description": "É necessário ativar a memória global nas configurações do assistente para utilizá-la",
-    "global_memory_disabled_desc": "Para usar a função de memória, ative primeiro a memória global nas configurações do assistente.",
-    "global_memory_disabled_title": "Memória global desativada",
-    "global_memory_enabled": "Memória global ativada",
-    "go_to_memory_page": "Ir para a página de memória",
-    "initial_memory_content": "Bem-vindo! Esta é sua primeira memória.",
-    "llm_model": "Modelo LLM",
-    "load_failed": "Falha ao carregar memória",
-    "loading": "Carregando memória...",
-    "loading_memories": "Carregando memórias...",
-    "memories_description": "Exibindo {{count}} de {{total}} memórias",
-    "memories_reset_success": "Todas as memórias de {{user}} foram redefinidas com sucesso",
-    "memory": "memória(s)",
-    "memory_content": "Conteúdo da memória",
-    "memory_placeholder": "Digite o conteúdo da memória...",
-    "new_user_id": "Novo ID de usuário",
-    "new_user_id_placeholder": "Insira um ID de usuário único",
-    "no_matching_memories": "Nenhuma memória correspondente encontrada",
-    "no_memories": "Nenhuma memória ainda",
-    "no_memories_description": "Comece adicionando sua primeira memória",
-    "not_configured_desc": "Configure os modelos de incorporação e LLM nas configurações de memória para ativar a função de memória.",
-    "not_configured_title": "Memória não configurada",
-    "pagination_total": "Itens {{start}}-{{end}} de {{total}}",
-    "please_enter_memory": "Por favor, insira o conteúdo da memória",
-    "please_select_embedding_model": "Por favor, selecione um modelo de incorporação",
-    "please_select_llm_model": "Por favor, selecione o modelo LLM",
-    "reset_filters": "Redefinir filtros",
-    "reset_memories": "Redefinir memórias",
-    "reset_memories_confirm_content": "Tem certeza de que deseja excluir permanentemente todas as memórias de {{user}}? Esta ação não pode ser desfeita.",
-    "reset_memories_confirm_title": "Redefinir todas as memórias",
-    "reset_memories_failed": "Falha ao redefinir memórias",
-    "reset_user_memories": "Redefinir memórias do usuário",
-    "reset_user_memories_confirm_content": "Tem certeza de que deseja redefinir todas as memórias de {{user}}?",
-    "reset_user_memories_confirm_title": "Redefinir memórias do usuário",
-    "reset_user_memories_failed": "Falha ao redefinir memórias do usuário",
-    "score": "Pontuação",
-    "search": "Pesquisar",
-    "search_placeholder": "Pesquisar memórias...",
-    "select_embedding_model_placeholder": "Selecione um modelo de incorporação",
-    "select_llm_model_placeholder": "Selecione o modelo LLM",
-    "select_user": "Selecionar usuário",
-    "settings": "Configurações",
-    "settings_title": "Configurações de memória",
-    "start_date": "Data inicial",
-    "statistics": "Estatísticas",
-    "stored_memories": "Memórias armazenadas",
-    "switch_user": "Alternar usuário",
-    "switch_user_confirm": "Alterar o contexto do usuário para {{user}}?",
-    "time": "Tempo",
-    "title": "Memória global",
-    "total_memories": "memória(s)",
-    "try_different_filters": "Tente ajustar os critérios de pesquisa",
-    "update_failed": "Falha ao atualizar memória",
-    "update_success": "Memória atualizada com sucesso",
-    "user": "Usuário",
-    "user_created": "Usuário {{user}} criado e alternado com sucesso",
-    "user_deleted": "Usuário {{user}} excluído com sucesso",
-    "user_id": "ID do usuário",
-    "user_id_exists": "Este ID de usuário já existe",
-    "user_id_invalid_chars": "O ID do usuário pode conter apenas letras, números, hífens e sublinhados",
-    "user_id_placeholder": "Insira o ID do usuário (opcional)",
-    "user_id_required": "O ID do usuário é obrigatório",
-    "user_id_reserved": "'default-user' é uma palavra reservada, use outro ID",
-    "user_id_rules": "O ID do usuário deve ser único e pode conter apenas letras, números, hífens (-) e sublinhados (_)",
-    "user_id_too_long": "O ID do usuário não pode ter mais de 50 caracteres",
-    "user_management": "Gerenciamento de usuários",
-    "user_memories_reset": "Todas as memórias de {{user}} foram redefinidas",
-    "user_switch_failed": "Falha ao alternar usuário",
-    "user_switched": "O contexto do usuário foi alterado para {{user}}",
-    "users": "Usuários"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2367,9 +2167,6 @@
       "chunk_overlap_too_large": "A sobreposição de fragmentos não pode ser maior que o tamanho do fragmento",
       "copy": "Falha ao copiar",
       "dimension_too_large": "Dimensão do conteúdo muito grande",
-      "endpoint": {
-        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
-      },
       "enter": {
         "api": {
           "host": "Insira seu endereço API",
@@ -2557,7 +2354,6 @@
         "exitPlanMode": "ModoPlanoDeSaída",
         "glob": "Globo",
         "grep": "Grep",
-        "mcpServerTool": "Ferramenta do Servidor MCP",
         "multiEdit": "MultiEdit",
         "notebookEdit": "NotebookEdit",
         "readFile": "Ler Arquivo",
@@ -2567,7 +2363,6 @@
         "todoWrite": "Fazer Escrever",
         "tool": "Ferramenta",
         "webFetch": "Busca na Web",
-        "webSearch": "Pesquisa na Web",
         "write": "Escreva"
       },
       "noData": "Nenhum dado disponível para esta ferramenta",
@@ -2641,11 +2436,7 @@
       }
     },
     "websearch": {
-      "cutoff": "Truncando o conteúdo da pesquisa...",
-      "fetch_complete": "{{count}} resultados da pesquisa",
-      "rag": "Executando RAG...",
-      "rag_complete": "Mantendo {{countAfter}} dos {{countBefore}} resultados...",
-      "rag_failed": "RAG falhou, retornando resultado vazio..."
+      "fetch_complete": "{{count}} resultados da pesquisa"
     }
   },
   "minapp": {
@@ -2946,30 +2737,6 @@
       "success": "Adicionado com sucesso {{type}} à base de conhecimento"
     },
     "tip": "Se a resposta for bem-sucedida, lembrete apenas para mensagens que excedam 30 segundos"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "OCR do sistema"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "Não é possível excluir o provedor integrado",
-        "existing": "O provedor já existe",
-        "get_providers": "Falha ao obter provedores disponíveis",
-        "not_found": "O provedor OCR não existe",
-        "update_failed": "Falha ao atualizar a configuração"
-      },
-      "unknown": "O processo OCR apresentou um erro"
-    },
-    "file": {
-      "not_supported": "Tipo de arquivo não suportado {{type}}"
-    },
-    "processing": "Processamento OCR em andamento...",
-    "warning": {
-      "provider": {
-        "fallback": "Revertido para {{name}}, o que pode causar problemas"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4529,6 @@
       "title": "Inicialização",
       "totray": "Minimizar para bandeja ao iniciar"
     },
-    "mcp": {
-      "actions": "Ações",
-      "active": "Ativar",
-      "addError": "Falha ao adicionar servidor",
-      "addServer": {
-        "create": "Criação rápida",
-        "importFrom": {
-          "connectionFailed": "Falha na conexão",
-          "dxt": "Importar pacote DXT",
-          "dxtFile": "Arquivo do pacote DXT",
-          "dxtHelp": "Selecione um arquivo .dxt que contenha o servidor MCP",
-          "dxtProcessFailed": "Falha ao processar o arquivo DXT",
-          "error": {
-            "multipleServers": "Não é possível importar de vários servidores"
-          },
-          "invalid": "Entrada inválida, verifique o formato JSON",
-          "json": "Importar do JSON",
-          "method": "Método de importação",
-          "nameExists": "Servidor já existe: {{name}}",
-          "noDxtFile": "Por favor, selecione um arquivo DXT",
-          "oneServer": "Apenas uma configuração de servidor MCP pode ser salva por vez",
-          "placeholder": "Cole a configuração JSON do servidor MCP",
-          "selectDxtFile": "Selecionar arquivo DXT",
-          "tooltip": "Copie o JSON de configuração da página de introdução do MCP Servers (prefira configurações NPX ou UVX) e cole na caixa de entrada"
-        },
-        "label": "Adicionar Servidor"
-      },
-      "addSuccess": "Servidor adicionado com sucesso",
-      "advancedSettings": "Configurações Avançadas",
-      "args": "Argumentos",
-      "argsTooltip": "Cada argumento em uma linha",
-      "baseUrlTooltip": "Endereço de URL remoto",
-      "builtinServers": "Servidores integrados",
-      "builtinServersDescriptions": {
-        "brave_search": "uma implementação de servidor MCP integrada com a API de pesquisa Brave, fornecendo funcionalidades de pesquisa web e local. Requer a configuração da variável de ambiente BRAVE_API_KEY",
-        "browser": "Controla uma janela Electron headless via Chrome DevTools Protocol. Ferramentas: abrir URL, executar JS de linha única, reiniciar sessão.",
-        "didi_mcp": "Servidor DiDi MCP que fornece serviços de transporte incluindo pesquisa de mapas, estimativa de preços, gestão de pedidos e rastreamento de motoristas. Disponível apenas na China Continental. Requer configuração da variável de ambiente DIDI_API_KEY",
-        "dify_knowledge": "Implementação do servidor MCP do Dify, que fornece uma API simples para interagir com o Dify. Requer a configuração da chave Dify",
-        "fetch": "servidor MCP para obter o conteúdo da página web do URL",
-        "filesystem": "Servidor Node.js do protocolo de contexto de modelo (MCP) para implementar operações de sistema de ficheiros. Requer configuração do diretório permitido para acesso",
-        "flomo": "Conecte-se ao flomo para capturar rapidamente notas e ideias via IA. Requer autorização da conta do flomo.",
-        "mcp_auto_install": "Instalação automática do serviço MCP (beta)",
-        "memory": "Implementação base de memória persistente baseada em grafos de conhecimento locais. Isso permite que o modelo lembre informações relevantes do utilizador entre diferentes conversas. É necessário configurar a variável de ambiente MEMORY_FILE_PATH.",
-        "no": "sem descrição",
-        "nowledge_mem": "Requer a aplicação Nowledge Mem em execução localmente. Mantém conversas de IA, ferramentas, notas, agentes e ficheiros numa memória privada no seu computador. Transfira de https://mem.nowledge.co/",
-        "python": "Executar código Python num ambiente sandbox seguro. Utilizar Pyodide para executar Python, suportando a maioria das bibliotecas padrão e pacotes de computação científica",
-        "sequentialthinking": "Uma implementação de servidor MCP que fornece ferramentas para resolução dinâmica e reflexiva de problemas através de um processo de pensamento estruturado"
-      },
-      "command": "Comando",
-      "config_description": "Configurar modelo de protocolo de contexto do servidor",
-      "customRegistryPlaceholder": "Por favor, insira o endereço do repositório privado, por exemplo: https://npm.company.com",
-      "deleteError": "Falha ao excluir servidor",
-      "deleteServer": "Excluir Servidor",
-      "deleteServerConfirm": "Tem certeza de que deseja excluir este servidor?",
-      "deleteSuccess": "Servidor excluído com sucesso",
-      "dependenciesInstall": "Instalar dependências",
-      "dependenciesInstalling": "Instalando dependências...",
-      "description": "Descrição",
-      "disable": {
-        "description": "Não ativar a funcionalidade do serviço MCP",
-        "label": "Não usar servidor MCP"
-      },
-      "discover": "Descobrir",
-      "duplicateName": "Já existe um servidor com o mesmo nome",
-      "editJson": "Editar JSON",
-      "editMcpJson": "Editar Configuração MCP",
-      "editServer": "Editar servidor",
-      "env": "Variáveis de ambiente",
-      "envTooltip": "Formato: CHAVE=valor, uma por linha",
-      "errors": {
-        "32000": "Falha ao iniciar o servidor MCP, verifique se todos os parâmetros foram preenchidos corretamente conforme o tutorial",
-        "toolNotFound": "Ferramenta não encontrada {{name}}"
-      },
-      "fetch": {
-        "button": "Buscar Servidores",
-        "success": "Servidores MCP obtidos com sucesso"
-      },
-      "findMore": "Mais servidores MCP",
-      "headers": "Cabeçalhos da Requisição",
-      "headersTooltip": "Cabeçalhos HTTP personalizados para as requisições",
-      "inMemory": "Na Memória",
-      "install": "Instalar",
-      "installError": "Falha ao instalar dependências",
-      "installSuccess": "Dependências instaladas com sucesso",
-      "jsonFormatError": "Erro de formatação JSON",
-      "jsonModeHint": "Edite a representação JSON da configuração do servidor MCP. Certifique-se de que o formato está correto antes de salvar.",
-      "jsonSaveError": "Falha ao salvar configuração JSON",
-      "jsonSaveSuccess": "Configuração JSON salva com sucesso",
-      "lanyun": {
-        "description": "Plataforma Cloud da Lanyun Technology – Serviço MCP",
-        "name": "Lanyun Technology"
-      },
-      "logoUrl": "URL do Logotipo",
-      "logs": "Registros",
-      "longRunning": "Modo de execução prolongada",
-      "longRunningTooltip": "Quando ativado, o servidor suporta tarefas de longa duração, redefinindo o temporizador de tempo limite ao receber notificações de progresso e estendendo o tempo máximo de tempo limite para 10 minutos.",
-      "marketplaces": "Mercados",
-      "missingDependencies": "Ausente, instale para continuar",
-      "more": {
-        "awesome": "Lista selecionada de servidores MCP",
-        "composio": "Ferramentas de desenvolvimento MCP Composio",
-        "glama": "Diretório de servidores MCP Glama",
-        "higress": "Servidor MCP Higress",
-        "mcpso": "Plataforma de descoberta de servidores MCP",
-        "mcpworld": "Plataforma de agregação MCP da Baidu",
-        "modelscope": "Servidor MCP da comunidade ModelScope",
-        "official": "Coleção oficial de servidores MCP",
-        "pulsemcp": "Servidor MCP Pulse",
-        "smithery": "Ferramentas Smithery MCP",
-        "zhipu": "MCP Curado, Integração Rápida"
-      },
-      "name": "Nome",
-      "newServer": "Servidor MCP",
-      "noDescriptionAvailable": "Nenhuma descrição disponível no momento",
-      "noLogs": "Ainda sem registos",
-      "noServers": "Nenhum servidor configurado",
-      "not_support": "Modelo Não Suportado",
-      "npx_list": {
-        "actions": "Ações",
-        "description": "Descrição",
-        "no_packages": "Nenhum pacote encontrado",
-        "npm": "NPM",
-        "package_name": "Nome do Pacote",
-        "scope_placeholder": "Insira o escopo npm (por exemplo, @sua-organizacao)",
-        "scope_required": "Insira o escopo npm",
-        "search": "Pesquisar",
-        "search_error": "Falha na pesquisa",
-        "usage": "Uso",
-        "version": "Versão"
-      },
-      "oauth": {
-        "callback": {
-          "message": "Você pode fechar esta página e retornar ao Cherry Chat",
-          "title": "Autenticação Bem-Sucedida"
-        }
-      },
-      "prompts": {
-        "arguments": "Argumentos",
-        "availablePrompts": "Dicas disponíveis",
-        "genericError": "Erro ao buscar dicas",
-        "loadError": "Falha ao carregar dicas",
-        "noPromptsAvailable": "Nenhuma dica disponível",
-        "requiredField": "Campo obrigatório"
-      },
-      "protocolInstallWarning": {
-        "command": "Comando de inicialização",
-        "message": "Este MCP foi instalado a partir de uma fonte externa via protocolo. Executar ferramentas desconhecidas pode prejudicar seu computador.",
-        "run": "Correr",
-        "title": "Executar MCP externo?"
-      },
-      "provider": "Fornecedor",
-      "providerPlaceholder": "Nome do Fornecedor",
-      "providerUrl": "URL do Fornecedor",
-      "providers": "Fornecedores",
-      "registry": "Fonte de Gerenciamento de Pacotes",
-      "registryDefault": "Padrão",
-      "registryTooltip": "Selecione uma fonte alternativa para instalar pacotes, caso tenha problemas de rede com a fonte padrão.",
-      "requiresConfig": "Requer configuração",
-      "resources": {
-        "availableResources": "Recursos disponíveis",
-        "blob": "Dados binários",
-        "blobInvisible": "Ocultar dados binários",
-        "genericError": "Erro ao obter recursos",
-        "mimeType": "Tipo MIME",
-        "noResourcesAvailable": "Nenhum recurso disponível",
-        "size": "Tamanho",
-        "text": "Texto",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "Buscar servidores MCP...",
-        "tooltip": "Buscar servidores MCP"
-      },
-      "searchNpx": "Buscar MCP",
-      "serverPlural": "Servidores",
-      "serverSingular": "Servidor",
-      "servers": "Servidores MCP",
-      "sse": "Eventos do Servidor (sse)",
-      "startError": "Falha ao Iniciar",
-      "stdio": "Entrada/Saída Padrão (stdio)",
-      "streamableHttp": "HTTP Transmitido em Fluxo (streamableHttp)",
-      "sync": {
-        "button": "Sincronizar",
-        "discoverMcpServers": "Descobrir servidores MCP",
-        "discoverMcpServersDescription": "Acesse a plataforma para descobrir servidores MCP disponíveis",
-        "error": "Erro ao sincronizar servidor MCP",
-        "getToken": "Obter token de API",
-        "getTokenDescription": "Obtenha um token de API pessoal da sua conta",
-        "noServersAvailable": "Nenhum servidor MCP disponível",
-        "providerDescriptions": {
-          "302ai": "302.Serviço MCP da Plataforma AI",
-          "bailian": "Alibaba Cloud Bailian Plataforma Serviço MCP",
-          "lanyun": "Plataforma Cloud da Lanyun Technology - Serviço MCP",
-          "mcprouter": "Plataforma de Roteamento MCP Serviço MCP",
-          "modelscope": "Serviço MCP da Plataforma ModelScope",
-          "tokenflux": "Serviço MCP da Plataforma TokenFlux"
-        },
-        "selectProvider": "Selecione o provedor:",
-        "setToken": "Digite seu token",
-        "success": "Servidor MCP sincronizado com sucesso",
-        "title": "Sincronizar Servidor",
-        "tokenPlaceholder": "Digite o token de API aqui",
-        "tokenRequired": "Token de API é obrigatório",
-        "unauthorized": "Sincronização não autorizada"
-      },
-      "system": "Sistema",
-      "tabs": {
-        "description": "Descrição",
-        "general": "Geral",
-        "prompts": "Prompts",
-        "resources": "Recursos",
-        "tools": "Ferramentas"
-      },
-      "tags": "Etiquetas",
-      "tagsPlaceholder": "Digite as etiquetas",
-      "timeout": "Tempo Limite",
-      "timeoutTooltip": "Tempo limite (em segundos) para as requisições deste servidor; o padrão é 60 segundos",
-      "title": "Configurações do MCP",
-      "tools": {
-        "autoApprove": {
-          "label": "Aprovação Automática",
-          "tooltip": {
-            "confirm": "Deseja executar esta ferramenta MCP?",
-            "disabled": "A aprovação manual é necessária antes da execução da ferramenta",
-            "enabled": "A ferramenta será executada automaticamente sem necessidade de aprovação",
-            "howToEnable": "A aprovação automática só pode ser usada após a ferramenta ser habilitada"
-          }
-        },
-        "availableTools": "Ferramentas Disponíveis",
-        "enable": "Habilitar Ferramenta",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "Valores permitidos"
-          },
-          "label": "Esquema de Entrada"
-        },
-        "loadError": "Falha ao Obter Ferramentas",
-        "noToolsAvailable": "Nenhuma Ferramenta Disponível",
-        "run": "Executar"
-      },
-      "type": "Tipo",
-      "types": {
-        "inMemory": "Integrado",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "Streaming"
-      },
-      "updateError": "Falha ao atualizar servidor",
-      "updateSuccess": "Servidor atualizado com sucesso",
-      "url": "URL",
-      "user": "Usuário"
-    },
     "messages": {
       "divider": {
         "label": "Divisor de mensagens",
@@ -5647,38 +5162,6 @@
     },
     "title": "Configurações",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "Idiomas suportados"
-        },
-        "error": {
-          "not_system": "O OCR do sistema suporta apenas Windows e MacOS"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "O provedor não existe"
-          },
-          "system": {
-            "no_need_configure": "MacOS não requer configuração"
-          },
-          "title": "Imagem"
-        },
-        "image_provider": "Provedor de serviços OCR",
-        "paddleocr": {
-          "aistudio_access_token": "Token de acesso da comunidade AI Studio",
-          "api_url": "URL da API",
-          "api_url_label": "Obter Token de Acesso e URL da API"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "Dependendo do Windows para fornecer serviços, você precisa baixar pacotes de idiomas no sistema para dar suporte aos idiomas relevantes."
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "Leia a documentação para saber quais idiomas personalizados são suportados"
-        },
-        "title": "Serviço OCR"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "Token de acesso da Comunidade AI Studio",
@@ -5691,100 +5174,7 @@
         "title": "Pré-processamento de documentos",
         "tooltip": "Configure o provedor de pré-processamento de documentos ou OCR em Configurações -> Ferramentas. O pré-processamento de documentos pode melhorar significativamente a eficácia da busca em documentos com formatos complexos ou versões escaneadas. O OCR só consegue reconhecer texto em imagens ou PDFs escaneados."
       },
-      "title": "Configurações de Ferramentas",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}} requer uma chave de API para funcionar. Você gostaria de configurá-la agora?",
-          "ok": "Configurar",
-          "title": "Chave de API Necessária"
-        },
-        "api_providers": "Provedores de API",
-        "apikey": "Chave API",
-        "blacklist": "Lista Negra",
-        "blacklist_description": "Os resultados dos seguintes sites não aparecerão nos resultados de pesquisa",
-        "blacklist_tooltip": "Por favor, utilize o seguinte formato (separado por quebras de linha)\nPadrão de correspondência: *://*.exemplo.com/*\nExpressão regular: /exemplo\\.(net|org)/",
-        "check": "Verificar",
-        "check_failed": "Falha na verificação",
-        "check_success": "Verificação bem-sucedida",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "Comprimento do corte",
-              "placeholder": "Comprimento de entrada",
-              "tooltip": "Limita o comprimento do conteúdo dos resultados de pesquisa; o conteúdo excedente será cortado (por exemplo, 2000 caracteres)"
-            },
-            "unit": {
-              "char": "caractere",
-              "token": "Token"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG falhou"
-          },
-          "info": {
-            "dimensions_auto_success": "Obtenção automática de dimensões bem-sucedida, as dimensões são {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "Cortar",
-            "label": "Método de compressão",
-            "none": "Sem compressão",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "Número de fragmentos de documentos",
-              "tooltip": "Número esperado de fragmentos de documentos a serem extraídos de um único resultado de pesquisa. O número total real extraído será esse valor multiplicado pelo número de resultados de pesquisa."
-            }
-          },
-          "title": "Compressão de resultados de pesquisa"
-        },
-        "content_limit": "Limite de comprimento do conteúdo",
-        "content_limit_tooltip": "Limita o comprimento do conteúdo dos resultados de pesquisa; o conteúdo excedente será truncado",
-        "default_provider": "Provedor Padrão",
-        "free": "Grátis",
-        "is_default": "Padrão",
-        "local_provider": {
-          "hint": "Faça login no site para obter melhores resultados de pesquisa e personalizar suas configurações de busca.",
-          "open_settings": "Abrir Configurações do {{provider}}",
-          "settings": "Configurações de Pesquisa Local"
-        },
-        "local_providers": "Fornecedores Locais",
-        "no_provider_selected": "Por favor, selecione um provedor de pesquisa antes de verificar",
-        "overwrite": "Substituir busca do provedor",
-        "overwrite_tooltip": "Força o uso do provedor de pesquisa em vez do modelo de linguagem grande",
-        "search_max_result": {
-          "label": "Número de resultados de pesquisa",
-          "tooltip": "Quando a compactação de resultados não está ativada, um número elevado pode consumir muitos tokens"
-        },
-        "search_provider": "Provedor de pesquisa",
-        "search_provider_placeholder": "Selecione um provedor de pesquisa",
-        "search_with_time": "Pesquisar com data",
-        "set_as_default": "Definir como Padrão",
-        "subscribe": "Assinatura de lista negra",
-        "subscribe_add": "Adicionar assinatura",
-        "subscribe_add_failed": "Falha ao adicionar a fonte de subscrição",
-        "subscribe_add_success": "Fonte de assinatura adicionada com sucesso!",
-        "subscribe_delete": "Excluir fonte de assinatura",
-        "subscribe_name": {
-          "label": "Nome alternativo",
-          "placeholder": "Nome alternativo usado quando a fonte de assinatura baixada não possui nome"
-        },
-        "subscribe_update": "Atualizar agora",
-        "subscribe_update_failed": "A atualização da fonte de subscrição falhou",
-        "subscribe_update_success": "A atualização do feed foi bem-sucedida",
-        "subscribe_url": "Endereço da fonte de assinatura",
-        "tavily": {
-          "api_key": {
-            "label": "Chave API Tavily",
-            "placeholder": "Por favor, insira a chave API Tavily"
-          },
-          "description": "Tavily é um mecanismo de busca personalizado para agentes de IA, que oferece resultados precisos e em tempo real, sugestões inteligentes de consulta e capacidades avançadas de pesquisa",
-          "title": "Tavily"
-        },
-        "title": "Pesquisa na Web",
-        "url_invalid": "Introduziu um URL inválido",
-        "url_required": "Precisa de introduzir o URL"
-      }
+      "title": "Configurações de Ferramentas"
     },
     "translate": {
       "custom": {
@@ -5865,8 +5255,6 @@
     "home": "Página Inicial",
     "knowledge": "Base de Conhecimento",
     "launchpad": "Plataforma de Inicialização",
-    "mcp-servers": "Servidores MCP",
-    "memories": "Memórias",
     "notes": "Notas",
     "openclaw": "OpenClaw",
     "paintings": "Pinturas",

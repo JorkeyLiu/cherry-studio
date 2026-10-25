@@ -23,6 +23,11 @@ const { mocks } = vi.hoisted(() => ({
     listSegments: vi.fn(),
     setClipboard: vi.fn((p: unknown) => ({ type: 'clipboard/setClipboard', payload: p })),
     executeDeleteMessagesWithDependents: vi.fn(),
+    executeStagedCutSourceDelete: vi.fn(),
+    deleteMessagesFromDB: vi.fn(),
+    consumeFileCleanupResult: vi.fn(),
+    deleteSegmentsBySnapshots: vi.fn().mockResolvedValue(undefined),
+    syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined),
     pushUndoAction: vi.fn((p: unknown) => ({ type: 'undoStack/pushUndoAction', payload: p }))
   }
 }))
@@ -56,7 +61,42 @@ vi.mock('@renderer/store/clipboard', () => ({
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
-  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
+  executeStagedCutSourceDelete: mocks.executeStagedCutSourceDelete,
+  deleteMessagesFromDB: mocks.deleteMessagesFromDB,
+  isDeletePostCommitConvergenceError: (error: unknown) => {
+    if (typeof error !== 'object' || error === null) return false
+    const candidate = error as { committed?: unknown; response?: unknown; undoParts?: unknown }
+    return (
+      candidate.committed === true && typeof candidate.response === 'object' && typeof candidate.undoParts === 'object'
+    )
+  }
+}))
+
+vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
+  consumeFileCleanupResult: mocks.consumeFileCleanupResult
+}))
+
+vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
+  deleteSegmentsBySnapshots: mocks.deleteSegmentsBySnapshots,
+  syncSegmentsAfterMessageDeletion: mocks.syncSegmentsAfterMessageDeletion
+}))
+
+vi.mock('@renderer/store/messageBlock', () => ({
+  upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
+  removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p }))
+}))
+
+vi.mock('@renderer/store/newMessage', () => ({
+  newMessagesActions: {
+    messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
+    removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p }))
+  },
+  selectLoadedMessagesForTopic: vi.fn(() => [])
+}))
+
+vi.mock('@renderer/store/topicSegment', () => ({
+  addSegment: vi.fn((p: unknown) => ({ type: 'topicSegment/addSegment', payload: p }))
 }))
 
 vi.mock('@renderer/store/undoStack', () => ({
@@ -146,7 +186,13 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
     const { cutMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
-    const count = await cutMessages(dispatch, () => gateState() as never, 'topic-1', ['u1'], 'b1')
+    const count = await cutMessages(
+      dispatch,
+      () => gateState({ activeRoute: 'b1', mutableRoute: 'b1' }) as never,
+      'topic-1',
+      ['u1'],
+      'b1'
+    )
 
     expect(count).toBe(2)
     expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
@@ -159,6 +205,13 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
     expect(action.type).toBe('clipboard/setClipboard')
     expect(action.payload.mode).toBe('cut')
     expect(action.payload.sourceTopicId).toBe('topic-1')
+    expect(action.payload.sourceBranchId).toBe('b1')
+    // Cut-time source eligibility is captured with the staged route.
+    expect(action.payload.sourceProjection).toEqual({
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'b1',
+      loadedMessageIds: LOADED_IDS
+    })
   })
 
   it.each([

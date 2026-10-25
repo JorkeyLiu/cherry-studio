@@ -25,6 +25,10 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
     const trimmed = editName.trim()
     if (trimmed && trimmed !== segment.name) {
       await updateSegmentName(segment.id, trimmed)
+    } else {
+      // Cancel path (empty/unchanged): restore the authoritative name so a
+      // stray blur never leaves a blank draft in the pill.
+      setEditName(segment.name)
     }
     setIsEditing(false)
   }, [editName, segment, updateSegmentName])
@@ -38,14 +42,34 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
     setIsEditing(true)
   }, [segment.name])
 
+  // Row navigation must never fire from label interactions: the label sits
+  // inside the turn wrapper whose click capture selects the turn in edit
+  // mode. Controls and the label pill stop propagation; row navigation is
+  // a drawer/nav concern, never a turn-click side effect.
+  const stopRowNavigation = useCallback((e: React.SyntheticEvent) => {
+    e.stopPropagation()
+  }, [])
+
+  // Escape cancels the label rename back to the authoritative name.
+  const handleEditKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setEditName(segment.name)
+        setIsEditing(false)
+      }
+    },
+    [segment.name]
+  )
+
   return (
-    <LineContainer $isFirst={isFirst} $isLast={isLast}>
+    <LineContainer $isFirst={isFirst} $isLast={isLast} data-testid="topic-segment-line">
       {/* 竖线 */}
       <Line $isFirst={isFirst} $isLast={isLast} $color={color} />
 
       {/* 首条消息处渲染标签卡 */}
       {isFirst && (
-        <TabContainer $color={color}>
+        <TabContainer $color={color} onClick={stopRowNavigation} data-testid="topic-segment-label">
           <TabContent>
             <ColorDot $color={color} />
             {isEditing ? (
@@ -55,6 +79,8 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
                 onChange={(e) => setEditName(e.target.value)}
                 onPressEnter={handleRename}
                 onBlur={handleRename}
+                onKeyDown={handleEditKeyDown}
+                onClick={stopRowNavigation}
                 autoFocus
               />
             ) : (
@@ -67,7 +93,11 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
             )}
           </TabContent>
           <TabActions>
-            <TabActionBtn onClick={handleStartEdit} title={t('topicSegment.rename')}>
+            <TabActionBtn
+              type="button"
+              onClick={handleStartEdit}
+              title={t('topicSegment.rename')}
+              aria-label={t('topicSegment.rename')}>
               <Pencil size={12} />
             </TabActionBtn>
             <Popconfirm
@@ -75,7 +105,11 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
               onConfirm={handleDissolve}
               okText={t('common.confirm')}
               cancelText={t('common.cancel')}>
-              <TabActionBtn title={t('topicSegment.dissolveAction')}>
+              <TabActionBtn
+                type="button"
+                title={t('topicSegment.dissolveAction')}
+                aria-label={t('topicSegment.dissolveAction')}
+                onClick={stopRowNavigation}>
                 <Trash2 size={12} />
               </TabActionBtn>
             </Popconfirm>
@@ -97,8 +131,19 @@ const LineContainer = styled.div<{
   top: 0;
   bottom: 0;
   width: 4px;
-  z-index: 1;
+  // Local layer contract with conversation navigation: the Chat host that
+  // stacks Messages vs nav is a positioned (relative, z-auto) flex row, so
+  // sibling paint order follows this explicit z. The nav body paints at
+  // z999; the segment group label sits above it (z1000) while staying below
+  // antd portal overlays (popover ~1030) and ordinary message bodies
+  // (z auto) sit below it. Geometric hit
+  // containment (LineContainer pointer-events:none, only TabContainer auto,
+  // tab isolated) keeps label hover from entering the nav body — no nav
+  // expansion from label hover, nav still expands in its own trigger.
+  z-index: 1000;
   pointer-events: none;
+  // Isolate label paint so its hover never leaks into the nav hit path.
+  isolation: isolate;
 `
 
 const Line = styled.div<{
@@ -129,6 +174,10 @@ const TabContainer = styled.div<{ $color: string }>`
   pointer-events: auto;
   white-space: nowrap;
   max-width: 280px;
+  // Contained hit region: only this pill is interactive; the surrounding
+  // LineContainer stays pointer-events:none so hover never leaks into the
+  // conversation-nav body beside it.
+  isolation: isolate;
 `
 
 const TabContent = styled.div`

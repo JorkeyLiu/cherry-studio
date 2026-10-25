@@ -24,7 +24,7 @@ describe('visual position contracts', () => {
   it('(1) new true branch explicitly lands at latest/bottom via a windowed latest read', () => {
     const src = messagesSrc()
     const idx = src.indexOf('EVENT_NAMES.NEW_TRUE_BRANCH')
-    const slice = src.slice(idx, idx + 4500)
+    const slice = src.slice(idx, idx + 7000)
     expect(slice).toMatch(/kind:\s*'latest'/)
     expect(slice).toMatch(/createLatestMessageWindow/)
     expect(slice).toMatch(/kind:\s*'bottom'/)
@@ -58,11 +58,13 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/alignAndCommitDividerSearch/)
     expect(src).toMatch(/endDividerSearchTerminal/)
     // Restore identity + captured offset survive every older-window expansion;
-    // expansion compensation prefers the controller anchor while current.
-    // Route-qualified only: a foreign live anchor must never snapshot.
+    // expansion compensation prefers the restore-owned preferred anchor while
+    // its search session is current (explicit drive carries decision.preferred).
+    // Route-qualified only: the driver builds the preferred snapshot from its
+    // own search state, never from a foreign live anchor.
     // (Behavioral coverage lives in the routeRestoreAnchor smoke + controller
     // provenance unit; no duplicated spelling assertion here.)
-    expect(src).toMatch(/snapshotPreferredAnchor/)
+    expect(src).toMatch(/startWindowPageLoad\('older', decision\.preferred\)/)
     expect(src).not.toMatch(/activeRestoreAnchorRef/)
     expect(src).not.toMatch(/snapshotRestoreAnchor\(/)
     // Terminal paths release exactly once with NO divider-position commit:
@@ -80,10 +82,11 @@ describe('visual position contracts', () => {
     const alignSlice = src.slice(alignIdx, alignIdx + 9000)
     expect(alignSlice).toMatch(/commitDisplayedStable/)
     expect(alignSlice).not.toMatch(/runBoundedPositionStabilizer/)
-    // Restore-owned pages are driven explicitly from window state (short
-    // windows at edge=0 may never fire InfiniteScroll); the manual path
-    // cannot race while a search is active.
-    expect(src).toMatch(/Restore-owned search guard/)
+    // Restore-owned pages are driven explicitly from window state (a short
+    // window parked at edge=0 never reaches the app-owned user trigger); the
+    // user trigger explicitly yields while the search session owns the route.
+    expect(src).toMatch(/maybePageAtEdge/)
+    expect(src).toMatch(/ownerEpoch === controller\.currentEpoch/)
     expect(src).toMatch(/drivenWindowKey/)
     // No diagnostic probes, no fence/user-input gating, no wheel dependence.
     expect(src).not.toMatch(/TEMP-DIAG/)
@@ -255,14 +258,20 @@ describe('visual position contracts', () => {
     expect(context.slice(cancelIdx, cancelIdx + 600)).toMatch(/cancelAnimationFrame/)
     // Scheduler coalesces: re-arm cancels the pending frame first.
     expect(context.slice(schedulerIdx, schedulerIdx + 1200)).toMatch(/cancelTabValidationLocked/)
-    // Tab interaction contract: click captures the tab offset synchronously,
-    // the keeper holds it across the async selection, validation settles
-    // into the post-switch visible geometry.
+    // Shared interaction contract: the click boundary captures scope +
+    // region synchronously, the keeper holds it across the mutation,
+    // validation settles into the post-mutation visible geometry through one
+    // observed-layout-change + quiet gate (answer tabs keep their async
+    // target-visible semantics through the same gate via the handoff
+    // representative).
     expect(context).toMatch(/captureAnswerTabSwitchIntent/)
+    expect(context).toMatch(/captureInteractionFromEvent/)
     expect(context).toMatch(/beginAnswerTabSwitch/)
-    expect(context).toMatch(/activeAnswerTabIntent/)
-    expect(context).toMatch(/clearAnswerTabSwitch/)
+    expect(context).toMatch(/activeInteractionIntent/)
+    expect(context).toMatch(/clearInteractionIntent/)
     expect(context).toMatch(/resolveAnswerTabElement/)
+    expect(context).toMatch(/resolveInteractionRegionElement/)
+    expect(context).toMatch(/resolveInteractionRepresentative/)
     expect(context).toMatch(/resolveRealMessageBox/)
     expect(context).toMatch(/isKeeperAnchorRowHidden/)
     expect(context).toMatch(/isCaptureContainerHidden/)
@@ -283,22 +292,27 @@ describe('visual position contracts', () => {
       validationEnd > validationIdx ? validationEnd : validationIdx + 9500
     )
     expect(validationSlice).toMatch(/tabRafRef\.current = null/)
-    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    expect(validationSlice).toMatch(/adoptInteractionViewport/)
     expect(validationSlice.indexOf('tabRafRef.current = null')).toBeLessThan(
-      validationSlice.indexOf('adoptProgrammaticViewport')
+      validationSlice.indexOf('adoptInteractionViewport')
     )
-    expect(validationSlice).toMatch(/activeAnswerTabIntent/)
-    expect(validationSlice).toMatch(/clearAnswerTabSwitch/)
+    // Interaction handoff never follows on vicinity: it keeps the row via
+    // the interaction adopt, never the bottom-priority programmatic adopt
+    // (which stays reserved for explicit send/bottom).
+    expect(validationSlice).not.toMatch(/\.adoptProgrammaticViewport\(/)
+    expect(validationSlice).toMatch(/activeInteractionIntent/)
+    expect(validationSlice).toMatch(/clearInteractionIntent/)
     expect(validationSlice).toMatch(/currentEpoch !== intent\.epoch/)
     expect(validationSlice).toMatch(/programmaticOwned/)
     expect(validationSlice).toMatch(/hasActiveUserInteraction/)
     expect(validationSlice).toMatch(/isDomProvenanceClean/)
-    expect(validationSlice).toMatch(/resolveAnswerTabElement/)
-    expect(validationSlice).toMatch(/resolveRealMessageBox/)
-    expect(validationSlice).toMatch(/isKeeperAnchorRowHidden/)
+    expect(validationSlice).toMatch(/resolveInteractionScopeElement/)
+    expect(validationSlice).toMatch(/resolveInteractionRegionElement/)
+    expect(validationSlice).toMatch(/resolveInteractionRepresentative/)
     // Stable handoff uses the measured post-switch target geometry (never
-    // the old hidden body anchor, never intermediate geometry).
-    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    // the old hidden body anchor, never intermediate geometry) via the
+    // row-preserving interaction adopt (never a vicinity follow).
+    expect(validationSlice).toMatch(/adoptInteractionViewport/)
     expect(validationSlice).toMatch(/writeRouteSnapshot/)
     // Hold prefers the pending tab intent over the body anchor: a hidden
     // body row holds nothing (fail-closed, no sibling transfer); ordinary
@@ -308,13 +322,13 @@ describe('visual position contracts', () => {
     const holdEnd = context.indexOf('holdRef.current = hold', holdIdx)
     expect(holdEnd).toBeGreaterThan(holdIdx)
     const holdSlice = context.slice(holdIdx, holdEnd)
-    expect(holdSlice).toMatch(/activeAnswerTabIntent/)
-    expect(holdSlice).toMatch(/clearAnswerTabSwitch/)
-    expect(holdSlice).toMatch(/resolveAnswerTabElement/)
+    expect(holdSlice).toMatch(/activeInteractionIntent/)
+    expect(holdSlice).toMatch(/clearInteractionIntent/)
+    expect(holdSlice).toMatch(/resolveInteractionRegionElement/)
     expect(holdSlice).toMatch(/scheduleTabValidation/)
-    expect(holdSlice).toMatch(/isKeeperAnchorRowHidden/)
     expect(holdSlice).not.toMatch(/findVisibleFoldSiblingId/)
     expect(holdSlice).not.toMatch(/adoptProgrammaticViewport/)
+    expect(holdSlice).not.toMatch(/adoptInteractionViewport/)
     expect(holdSlice).not.toMatch(/writeRouteSnapshot/)
     // User input declares intent first (wheel/touch/pointer/key, inputs
     // excluded by the shared key guard). Pending-only, never terminates.
@@ -336,11 +350,10 @@ describe('visual position contracts', () => {
     expect(stab).not.toMatch(/isSelfInducedStabilizerScroll/)
     expect(stab).toMatch(/isRestoreTargetValid/)
     expect(stab).toMatch(/shouldCancelStabilizerForKeyDown/)
-    // Ordinary pagination compensates once under its own token; the keeper
-    // holds afterwards.
+    // Ordinary pagination publishes once to the keeper (single owner); the
+    // keeper holds afterwards. No second scroll writer beside it.
     const src = messagesSrc()
-    expect(src).toMatch(/beginScroll\('anchoring'/)
-    expect(src).toMatch(/scroll\/end/)
+    expect(src).toMatch(/adoptOrdinaryPaginationWindow/)
     expect(src).not.toMatch(/maxMs:\s*1500/)
     expect(src).not.toMatch(/quietMs/)
   })
@@ -393,17 +406,57 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/handleStabilizerKeyDown/)
     expect(src).toMatch(/shouldCancelStabilizerForKeyDown/)
     // Single atomic path: capture opens/refreshes the interaction session,
-    // scroll measures then calls userTakeover with the live token; only the
+    // scroll measures then commits via the shared `adoptTakeoverSnapshot`
+    // single-writer (scroll + streaming click-pause share it); only the
     // returned key authorizes the snapshot write. Scrolls with no live
     // session never take over (programmatic / window-reconcile).
     const scrollIdx = src.indexOf('const handleScroll = useCallback')
-    const scrollSlice = src.slice(scrollIdx, scrollIdx + 5200)
+    expect(scrollIdx).toBeGreaterThan(-1)
+    const scrollEnd = src.indexOf("useShortcut('copy_last_message'", scrollIdx)
+    const scrollSlice = src.slice(scrollIdx, scrollEnd > scrollIdx ? scrollEnd : scrollIdx + 5200)
     expect(scrollSlice).toMatch(/activeInteractionToken/)
     expect(scrollSlice).toMatch(/hasActiveUserInteraction|activeInteractionToken/)
-    expect(scrollSlice).toMatch(/controller\.userTakeover\(/)
-    expect(scrollSlice).toMatch(/commitSnapshotForRoute\(out\.routeKey/)
+    // Scroll delegates to the shared helper with the live token + one
+    // measured snapshot (single takeover site lives in the helper, never
+    // duplicated in the scroll body).
+    expect(scrollSlice).toMatch(/adoptTakeoverSnapshot\(/)
+    expect(scrollSlice).toMatch(/liveToken/)
+    expect(scrollSlice).toMatch(/captureSnapshot\(\)/)
+    expect((scrollSlice.match(/captureSnapshot\(\)/g) ?? []).length).toBe(1)
+    expect((scrollSlice.match(/adoptTakeoverSnapshot\(/g) ?? []).length).toBe(1)
+    expect(scrollSlice).not.toMatch(/controller\.userTakeover\(/)
+    expect(scrollSlice).not.toMatch(/commitSnapshotForRoute\(/)
     expect(scrollSlice).not.toMatch(/userCancelledScroll/)
     expect(scrollSlice).not.toMatch(/canHandleUserViewportScroll/)
+    // Shared helper owns the atomic takeover -> commit: live token +
+    // measured snapshot in exactly once, controller outcome route -> commit
+    // of the returned route/snapshot, stale/no-gesture never commits.
+    const adoptIdx = src.indexOf('const adoptTakeoverSnapshot = useCallback')
+    expect(adoptIdx).toBeGreaterThan(-1)
+    const pauseIdx = src.indexOf('const attemptStreamingPause = useCallback', adoptIdx)
+    expect(pauseIdx).toBeGreaterThan(adoptIdx)
+    const adoptSlice = src.slice(adoptIdx, pauseIdx)
+    expect(adoptSlice).toMatch(/liveToken/)
+    expect(adoptSlice).toMatch(/liveWindowId/)
+    expect(adoptSlice).toMatch(/controller\.userTakeover\(/)
+    expect((adoptSlice.match(/controller\.userTakeover\(/g) ?? []).length).toBe(1)
+    expect(adoptSlice).toMatch(/liveToken/)
+    expect(adoptSlice).toMatch(/if\s*\(\s*!out\.taken\s*\)/)
+    expect(adoptSlice).toMatch(/commitSnapshotForRoute\(out\.routeKey/)
+    expect((adoptSlice.match(/commitSnapshotForRoute\(/g) ?? []).length).toBe(1)
+    expect(adoptSlice).toMatch(/out\.snapshot/)
+    // Atomic order: takeover -> taken-gate -> commit of the returned snapshot.
+    expect(adoptSlice.indexOf('controller.userTakeover(')).toBeLessThan(
+      adoptSlice.indexOf('commitSnapshotForRoute(out.routeKey')
+    )
+    expect(adoptSlice.indexOf('!out.taken')).toBeLessThan(adoptSlice.indexOf('commitSnapshotForRoute(out.routeKey'))
+    // Click-pause shares the same single-writer (no divergent semantics).
+    const pauseEnd = src.indexOf('const handleStabilizerUserInput', pauseIdx)
+    expect(pauseEnd).toBeGreaterThan(pauseIdx)
+    const pauseSlice = src.slice(pauseIdx, pauseEnd)
+    expect(pauseSlice).toMatch(/adoptTakeoverSnapshot\(/)
+    expect(pauseSlice).not.toMatch(/controller\.userTakeover\(/)
+    expect(pauseSlice).not.toMatch(/commitSnapshotForRoute\(/)
     // keeper/hook never independently gate+capture+write the same scroll.
     expect(scrollSlice).not.toMatch(/handleScrollPosition\(\)/)
     // Wheel/touch/pointer pre-declare plus keyboard pre-declare; scrollbar
@@ -433,6 +486,40 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/dividerVisualAnchor/)
     expect(src).toMatch(/contextBoundaryMessageId/)
     expect(src).toMatch(/never cross-write|never feeds this|never carries fork-divider or context/i)
+  })
+
+  it('(2e) streaming follow intent: pause keeps the row, genuine scroll at exact bottom resumes', () => {
+    const src = messagesSrc()
+    // Renderer-local exact-bottom gate (never the 50px snapshot vicinity).
+    expect(src).toMatch(/isGenuinePhysicalBottom/)
+    expect(src).toMatch(/Math\.abs\(scrollTop\)\s*<=\s*1/)
+    // Scroll path opts into bottom follow with the exact gate; the pause
+    // path keeps the default row behavior (no opt-in, never a synthesized
+    // bottom record).
+    const scrollIdx = src.indexOf('const handleScroll = useCallback')
+    expect(scrollIdx).toBeGreaterThan(-1)
+    const scrollEnd = src.indexOf("useShortcut('copy_last_message'", scrollIdx)
+    const scrollSlice = src.slice(scrollIdx, scrollEnd > scrollIdx ? scrollEnd : scrollIdx + 6200)
+    expect(scrollSlice).toMatch(/bottomFollow/)
+    expect(scrollSlice).toMatch(/isGenuinePhysicalBottom\(measured\.scrollTop\)/)
+    const adoptIdx = src.indexOf('const adoptTakeoverSnapshot = useCallback')
+    expect(adoptIdx).toBeGreaterThan(-1)
+    const pauseIdx = src.indexOf('const attemptStreamingPause = useCallback', adoptIdx)
+    expect(pauseIdx).toBeGreaterThan(adoptIdx)
+    const adoptSlice = src.slice(adoptIdx, pauseIdx)
+    expect(adoptSlice).toMatch(/bottomFollow/)
+    expect(adoptSlice).toMatch(/opts\?\.bottomFollow/)
+    const pauseEnd = src.indexOf('const handleStabilizerUserInput', pauseIdx)
+    const pauseSlice = src.slice(pauseIdx, pauseEnd > pauseIdx ? pauseEnd : pauseIdx + 4200)
+    expect(pauseSlice).not.toMatch(/bottomFollow/)
+    // Controller owns the opt-in with an exact re-validation (default row).
+    const controller = controllerSrc()
+    expect(controller).toMatch(/bottomFollow/)
+    expect(controller).toMatch(/Math\.abs\(measured\.scrollTop\)\s*<=\s*1/)
+    // No wide-threshold jump, no synthesized record, no new timers/modes.
+    expect(scrollSlice).not.toMatch(/COLUMN_REVERSE_BOTTOM_THRESHOLD_PX/)
+    expect(src).not.toMatch(/isPaused/)
+    expect(src).not.toMatch(/pausedMode/)
   })
 
   it('(7) divider main button and top selector entry disable Antd two-char auto spacing (popup already set)', () => {

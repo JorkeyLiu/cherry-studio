@@ -4,14 +4,14 @@
  */
 
 import { loggerService } from '@logger'
-import type { AISDKWebSearchResult, MCPTool, WebSearchResults, WebSearchSource } from '@renderer/types'
+import type { AISDKWebSearchResult, WebSearchResults, WebSearchSource } from '@renderer/types'
 import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import type { Chunk, ProviderMetadata } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
 import { ProviderSpecificError } from '@renderer/types/provider-specific-error'
 import { formatErrorMessage, isAbortError } from '@renderer/utils/error'
 import type { IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
-import { convertLinks, flushLinkConverterBuffer } from '@renderer/utils/linkConverter'
+import { flushLinkConverterBuffer } from '@renderer/utils/linkConverter'
 import { AISDKError, type TextStreamPart, type ToolSet } from 'ai'
 
 import { ToolCallChunkHandler } from './handleToolCallChunk'
@@ -25,8 +25,6 @@ const logger = loggerService.withContext('AiSdkToChunkAdapter')
 export class AiSdkToChunkAdapter {
   toolCallHandler: ToolCallChunkHandler
   private accumulate: boolean | undefined
-  private isFirstChunk = true
-  private enableWebSearch: boolean = false
   private responseStartTimestamp: number | null = null
   private firstTokenTimestamp: number | null = null
   private providerId?: string
@@ -38,15 +36,14 @@ export class AiSdkToChunkAdapter {
 
   constructor(
     private onChunk: (chunk: Chunk) => void,
-    mcpTools: MCPTool[] = [],
+    _mcpTools: unknown[] = [],
     accumulate?: boolean,
-    enableWebSearch?: boolean,
+    _enableWebSearch?: boolean,
     providerId?: string,
     idleTimeout?: IdleTimeoutHandle
   ) {
-    this.toolCallHandler = new ToolCallChunkHandler(onChunk, mcpTools)
+    this.toolCallHandler = new ToolCallChunkHandler(onChunk, [])
     this.accumulate = accumulate
-    this.enableWebSearch = enableWebSearch || false
     this.providerId = providerId
     this.idleTimeout = idleTimeout
   }
@@ -111,8 +108,6 @@ export class AiSdkToChunkAdapter {
     this.resetTimingState()
     this.hasTerminalChunk = false
     this.responseStartTimestamp = Date.now()
-    // Reset state at the start of stream
-    this.isFirstChunk = true
 
     try {
       while (true) {
@@ -122,8 +117,8 @@ export class AiSdkToChunkAdapter {
         this.idleTimeout?.reset()
 
         if (done) {
-          // Flush any remaining content from link converter buffer if web search is enabled
-          if (this.enableWebSearch) {
+          // Link conversion (external websearch) removed — flush any residual buffer best-effort without gating.
+          try {
             const remainingText = flushLinkConverterBuffer()
             if (remainingText) {
               this.markFirstTokenIfNeeded()
@@ -132,7 +127,7 @@ export class AiSdkToChunkAdapter {
                 text: remainingText
               })
             }
-          }
+          } catch {}
           // Normal EOF without an explicit finish: converge exactly once.
           // Error/abort chunks already marked a terminal and must never be
           // overwritten with SUCCESS; thrown read errors skip this path.
@@ -253,26 +248,7 @@ export class AiSdkToChunkAdapter {
           this.hasActiveText = true
         }
         const processedText = chunk.text || ''
-        let finalText: string
-
-        // Only apply link conversion if web search is enabled
-        if (this.enableWebSearch) {
-          const result = convertLinks(processedText, this.isFirstChunk)
-
-          if (this.isFirstChunk) {
-            this.isFirstChunk = false
-          }
-
-          // Handle buffered content
-          if (result.hasBufferedContent) {
-            finalText = result.text
-          } else {
-            finalText = result.text || processedText
-          }
-        } else {
-          // Without web search, just use the original text
-          finalText = processedText
-        }
+        const finalText: string = processedText
 
         if (this.accumulate) {
           final.text += finalText

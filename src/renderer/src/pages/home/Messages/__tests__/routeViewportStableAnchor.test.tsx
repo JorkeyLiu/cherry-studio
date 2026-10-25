@@ -14,7 +14,12 @@
 import { act, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { RouteViewportContext, type RouteViewportContextValue, useStableVisualAnchor } from '../routeViewportContext'
+import {
+  RouteViewportContext,
+  type RouteViewportContextValue,
+  type StableVisualAnchorMaintainer,
+  useStableVisualAnchor
+} from '../routeViewportContext'
 import { RouteViewportController } from '../routeViewportController'
 
 vi.mock('@renderer/services/scrollSnapshotCache', () => ({
@@ -197,15 +202,20 @@ const installFakeObservers = (): void => {
   vi.stubGlobal('ResizeObserver', FakeResizeObserver)
   vi.stubGlobal('MutationObserver', FakeMutationObserver)
 }
-
+/**
+ * Render the production keeper. `maintainer` receives the live maintainer object
+ * so a test can drive the same bridge Messages uses (`publishAnchorSample`).
+ */
 const renderKeeper = (
   controller: RouteViewportController,
   ref: { current: HTMLDivElement | null },
   version: number,
-  notify: () => void
+  notify: () => void,
+  maintainer?: { current: StableVisualAnchorMaintainer | null }
 ): { rerender: (version: number) => void; unmount: () => void } => {
   const Harness = ({ containerRef }: { containerRef: { current: HTMLDivElement | null } }) => {
-    useStableVisualAnchor(containerRef as React.RefObject<HTMLElement | null>)
+    const live = useStableVisualAnchor(containerRef as React.RefObject<HTMLElement | null>)
+    if (maintainer) maintainer.current = live
     return null
   }
   const value = (v: number): RouteViewportContextValue => ({
@@ -389,6 +399,333 @@ describe('same-route window 16→28 full event loop (row replacement + 12 rows)'
   })
 })
 
+describe('ordinary pagination commit and later geometry hold across a live browse session (layout space)', () => {
+  it('prepaint same-identity hold applies at the commit instant and keeps holding later growth', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // Continuous upward gesture still live (wheel bursts across fetch flight).
+    controller.declareUserIntent()
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+
+    // Older prepend commits: 1033px above m2 pushes it from -60 to 973.
+    // Production publishes the precommit identity via adopt (same tick as the
+    // window commit), then the generation notify drives the keeper prepaint.
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+          messageId: 'm2',
+          offset: -60
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    // Held despite the live session: same reading identity, same offset.
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    // The write landed: the real row is back under its held offset (the mock
+    // models a keeper scroll write as the row's offset returning).
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(1033)
+
+    // Layout-space scope (no one-shot): LATER content growth in the same live
+    // session is still held, so the reading identity does not drift while the
+    // user keeps browsing across several fetches.
+    act(() => {
+      rects.set('m2', { top: 40, height: 40 })
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(1133)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+
+    // The user's OWN scroll inside the session is never cancelled: offset and
+    // scrollTop move together by the same amount (pure scroll, Δoffset =
+    // −ΔscrollTop in this container), which measures as zero layout
+    // displacement — the hold writes nothing.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(4)
+    })
+    expect(container.scrollTop).toBe(1133)
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 1333, writable: true, configurable: true })
+      rects.set('m2', { top: -260, height: 40 })
+      container.dispatchEvent(new Event('scroll'))
+    })
+    expect(container.scrollTop).toBe(1333)
+
+    // Layout growth on top of the user's own scroll: exactly the layout part is
+    // held (+100 growth below the reading row), never the 200px the user moved.
+    act(() => {
+      rects.set('m2', { top: -160, height: 40 })
+      keeper.rerender(5)
+    })
+    expect(container.scrollTop).toBe(1433)
+
+    // The write landed (the row is back at its held offset).
+    act(() => {
+      rects.set('m2', { top: -260, height: 40 })
+      keeper.rerender(6)
+    })
+    expect(container.scrollTop).toBe(1433)
+
+    // After the gesture ends the live anchor still holds its layout position
+    // (idempotent: nothing new to compensate, no snapshot fabricated here).
+    act(() => {
+      controller.noteInteractionScrollEnd()
+      keeper.rerender(7)
+    })
+    expect(container.scrollTop).toBe(1433)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('pre-commit scroll/mutation observers cannot steal the one-shot from the matching layout commit', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    // Continuous upward gesture still live across the fetch flight.
+    controller.declareUserIntent()
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+
+    // Arm the commit-scoped hold WITHOUT driving the keeper layout yet (the
+    // fetch resolved, the DOM has not committed): pre-growth geometry.
+    expect(
+      controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+        messageId: 'm2',
+        offset: -60
+      })
+    ).toBe(true)
+
+    // Earlier scroll + resize + mutation callbacks on the pre-growth DOM must
+    // neither consume the one-shot nor move the viewport.
+    act(() => {
+      container.dispatchEvent(new Event('scroll'))
+      for (const ro of FakeResizeObserver.instances) ro.fire()
+      for (const mo of FakeMutationObserver.instances) mo.fire()
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // The matching layout commit still holds: prepend growth above m2 pushes
+    // it from -60 to 973 and the keeper compensates exactly once.
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('late layout after the commit hold converges without swapping the reading identity', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+          messageId: 'm2',
+          offset: -60
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    // Late layout settles the row back under the held offset; the keeper
+    // holds nothing further and the identity never swaps to a new oldest row.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+})
+
+describe('layout-space hold symmetry, re-seed provenance and fail-closed recovery', () => {
+  it('holds both displacement signs with the same rule (never a direction patch)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // Reading row pushed DOWN by growth (positive layout displacement): the
+    // keeper scrolls forward by exactly the growth.
+    act(() => {
+      rects.set('m2', { top: 120, height: 40 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(180)
+    // The write landed.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(180)
+
+    // Reading row pulled UP by growth on the other side (negative layout
+    // displacement): the same rule scrolls back by the growth.
+    act(() => {
+      rects.set('m2', { top: -260, height: 40 })
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(-20)
+    // The write landed; the opposite sign is idempotent too.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(4)
+    })
+    expect(container.scrollTop).toBe(-20)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('an anchor identity change re-seeds from the published offset (no compensation of the new row)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    // A genuine gesture (wheel declares the session) moves the reading row to
+    // m3; offset and scrollTop move together, so the keeper writes nothing.
+    act(() => {
+      container.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true }))
+    })
+    expect(controller.userIntentPending).toBe(true)
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 400, writable: true, configurable: true })
+      rects.set('m2', { top: -460, height: 40 })
+      rects.set('m3', { top: -15, height: 40 })
+      container.dispatchEvent(new Event('scroll'))
+    })
+    expect(container.scrollTop).toBe(400)
+    // The atomic takeover then publishes m3 as the new live anchor.
+    const token = controller.activeInteractionToken
+    const out = controller.userTakeover(
+      { messageId: 'm3', intraRowOffset: -15, scrollTop: 400, isAtBottom: false },
+      undefined,
+      token ?? undefined
+    )
+    expect(out.taken).toBe(true)
+    // The new identity is seeded from its own published offset: the keeper does
+    // not treat the identity change itself as a layout displacement.
+    act(() => {
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(400)
+    // Real growth under the new identity is then held normally.
+    act(() => {
+      rects.set('m3', { top: 85, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(500)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm3',
+      offset: -15
+    })
+    keeper.unmount()
+  })
+
+  it('an unmeasurable anchor row drops the baseline and re-seeds fail-closed', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // The anchor row is gone (window rebuild in flight): nothing is measured,
+    // nothing is written, and the stale baseline is dropped.
+    act(() => {
+      const row = container.querySelector('[data-message-id="m2"]')
+      row?.remove()
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // The same identity comes back at a shifted offset: the hold re-seeds from
+    // the controller's anchor instead of compensating against a stale baseline.
+    act(() => {
+      const fresh = document.createElement('div')
+      fresh.id = 'message-m2'
+      fresh.setAttribute('data-message-id', 'm2')
+      mockRect(fresh, 'm2')
+      rects.set('m2', { top: 120, height: 40 })
+      container.prepend(fresh)
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(180)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+})
+
 describe('keeper event model (generation / scroll / rebind / gates)', () => {
   it('first mount binds container + content wrapper + live anchor row', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
@@ -488,7 +825,7 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
     keeper.unmount()
   })
 
-  it('live user session blocks the hold until scrollend', () => {
+  it('live user session: layout growth is held at once, the self scroll echo is not re-compensated', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm2', -60)
     rects.set('m1', { top: -460, height: 400 })
@@ -500,12 +837,20 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
       container.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true }))
     })
     expect(controller.userIntentPending).toBe(true)
+    // Layout growth DURING the live gesture holds immediately (the correction is
+    // layout-only, so it cannot cancel the gesture's own movement).
     act(() => {
       rects.set('m2', { top: 973, height: 40 })
       keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    // The write landed (the row is back under its held offset); the scroll echo
+    // the keeper's own write produced is swallowed, never compensated twice.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
       container.dispatchEvent(new Event('scroll'))
     })
-    expect(container.scrollTop).toBe(0)
+    expect(container.scrollTop).toBe(1033)
     act(() => {
       expect(controller.noteInteractionScrollEnd()).toBe(true)
     })
@@ -642,31 +987,43 @@ describe('user input takes over the anchor', () => {
     const { container, ref } = buildSurface()
     const keeper = renderKeeper(controller, ref, 0, vi.fn())
 
-    // Genuine user wheel: declare pending-only, compensation stops.
+    // Genuine user wheel: declare pending-only; the keeper stops moving the
+    // viewport for the user, but content growth is still held (layout space).
     act(() => {
       container.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true }))
     })
     expect(controller.userIntentPending).toBe(true)
 
-    // Layout grows at the same moment: no programmatic compensation follows
-    // user intent.
+    // Layout grows at the same moment: the growth is held in LAYOUT space only,
+    // so the reading row stays put and the gesture's own movement is untouched.
     act(() => {
       rects.set('m2', { top: 973, height: 40 })
       keeper.rerender(1)
     })
-    expect(container.scrollTop).toBe(0)
+    expect(container.scrollTop).toBe(1033)
+    // The write landed.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(1033)
 
-    // The real user scroll lands with m3 crossing the top. The keeper never
-    // adopts itself (single writer): Messages measures crossing-first and
-    // calls the atomic takeover, whose return authorizes the snapshot write.
+    // The real user scroll lands with m3 crossing the top. Offset and scrollTop
+    // move together (pure scroll in this container's coordinates), so the keeper
+    // alone writes NOTHING: it never cancels the user's own movement. The keeper
+    // also never adopts itself (single writer): Messages measures crossing-first
+    // and calls the atomic takeover, whose return authorizes the snapshot write.
     act(() => {
       Object.defineProperty(container, 'scrollTop', { value: 500, writable: true, configurable: true })
       rects.set('m1', { top: -900, height: 400 })
-      rects.set('m2', { top: -500, height: 40 })
+      // Pure scroll in this container's coordinates: the offset moves exactly
+      // opposite to the scroll (Δoffset = −ΔscrollTop), so there is no layout
+      // displacement to hold.
+      rects.set('m2', { top: 473, height: 40 })
       rects.set('m3', { top: -10, height: 400 })
       container.dispatchEvent(new Event('scroll'))
     })
-    // Keeper alone writes nothing.
+    expect(container.scrollTop).toBe(500)
     expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
       kind: 'message',
       messageId: 'm2',
@@ -1006,5 +1363,217 @@ describe('intent defaults', () => {
     expect(out.committed).toBe(true)
     expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', intraRowOffset: 150 })
     expect(out.didRelease).toBe(true)
+  })
+})
+
+describe('hold baseline provenance (no fabricated pairs; user input always wins)', () => {
+  const holder = (): { current: StableVisualAnchorMaintainer | null } => ({ current: null })
+
+  it('pairs a published offset with the scrollTop measured with it: intervening momentum is not charged to layout', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    // The keeper starts holding a DIFFERENT row than the one the commit publishes,
+    // so it has no observation of its own for the committed identity: only the
+    // published transactional pair is usable.
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: 400, height: 400 })
+    const { container, ref } = buildSurface()
+    const maintainer = holder()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn(), maintainer)
+    expect(maintainer.current).not.toBeNull()
+    expect(container.scrollTop).toBe(0)
+
+    // The user's momentum moves the viewport 500px (pure scroll: m3 travels with
+    // it) and the keeper observes that scroll, which seeds m3 as a row it has
+    // seen — so the pair comes from the commit below instead.
+    const publishM3 = (): void => {
+      act(() => {
+        rects.set('m3', { top: -100, height: 400 })
+        maintainer.current!.publishAnchorSample({
+          topicId: 't1',
+          route: null,
+          messageId: 'm3',
+          viewportOffset: -100,
+          scrollTop: 500
+        })
+      })
+    }
+    // Commit instant: the reading row is m3 at offset -100 with scrollTop 500.
+    Object.defineProperty(container, 'scrollTop', { value: 500, writable: true, configurable: true })
+    act(() => {
+      rects.set('m2', { top: -560, height: 40 })
+      rects.set('m3', { top: -100, height: 400 })
+    })
+    publishM3()
+    act(() => {
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::40', {
+          messageId: 'm3',
+          offset: -100
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+
+    // Between the publication and the next observation the user keeps scrolling
+    // 300px (momentum, with no scrollend guarantee) AND 120px of content grows
+    // above the row: layout displacement is exactly 120 and NOT -180.
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 800, writable: true, configurable: true })
+      rects.set('m2', { top: -860, height: 40 })
+      rects.set('m3', { top: -280, height: 400 })
+      keeper.rerender(2)
+    })
+    // The user's 300px of input survives (only the 120px layout growth is held):
+    // the fabricated-pair bug would have written -180 and rewound the viewport.
+    expect(container.scrollTop).toBe(920)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm3',
+      offset: -100
+    })
+    keeper.unmount()
+  })
+
+  it('with no true pair the keeper holds nothing: a cold seed never rewinds the user', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    // Committed anchor is m3 at offset -100; the keeper has no observation of m3
+    // and NO transactional pair was published.
+    driveStableMessage(controller, 'm3', -100)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -560, height: 40 })
+    rects.set('m3', { top: -280, height: 400 })
+    const { container, ref } = buildSurface()
+    Object.defineProperty(container, 'scrollTop', { value: 800, writable: true, configurable: true })
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // The published offset (-100) and the live scrollTop (800) describe DIFFERENT
+    // instants, so no baseline is provable: nothing may be written.
+    expect(container.scrollTop).toBe(800)
+    act(() => {
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(800)
+    keeper.unmount()
+  })
+
+  it('a dropped baseline (region intent) with momentum and later growth never rewinds, and a renewed pair holds again', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: 400, height: 400 })
+    const { container, ref } = buildSurface()
+    const maintainer = holder()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn(), maintainer)
+    expect(container.scrollTop).toBe(0)
+
+    // A pending region intent (e.g. message controls) owns this frame's geometry
+    // and DROPS the anchor baseline.
+    act(() => {
+      expect(
+        controller.beginInteractionIntent(
+          { topicId: 't1', route: null },
+          { kind: 'message', id: 'm2' },
+          'message-controls',
+          -60
+        )
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // The intent clears and the user's momentum lands (pure scroll of 200): the
+    // frame measures zero layout displacement, so the keeper writes nothing at
+    // all and the user's own movement is never undone.
+    act(() => {
+      controller.clearInteractionIntent(controller.currentEpoch, 'm2', 0, 'message-controls')
+    })
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 200, writable: true, configurable: true })
+      rects.set('m2', { top: -260, height: 40 })
+    })
+    act(() => {
+      container.dispatchEvent(new Event('scroll'))
+    })
+    expect(container.scrollTop).toBe(200)
+
+    // Content then grows 100px above the same reading row. The keeper's own
+    // synchronous read (offset + scrollTop of one instant) is a true pair, so
+    // exactly the layout part is held: the row keeps its post-momentum screen
+    // offset and the 200px the user moved survive (a fabricated pair would have
+    // charged the momentum to layout and rewound the viewport).
+    act(() => {
+      rects.set('m2', { top: -160, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(300)
+
+    // The write landed: the row is back at its held offset.
+    act(() => {
+      rects.set('m2', { top: -260, height: 40 })
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(300)
+
+    // A renewed transaction pair (the next commit publishes one) describes the
+    // same instant as the keeper's own re-based baseline, and holding resumes
+    // with it: the same row growing by 100 with the viewport otherwise still.
+    act(() => {
+      maintainer.current!.publishAnchorSample({
+        topicId: 't1',
+        route: null,
+        messageId: 'm2',
+        viewportOffset: -260,
+        scrollTop: 300
+      })
+      rects.set('m2', { top: -160, height: 40 })
+      keeper.rerender(4)
+    })
+    expect(container.scrollTop).toBe(400)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('initial pagination hold stays effective with a pair published at the commit instant', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const maintainer = holder()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn(), maintainer)
+    expect(container.scrollTop).toBe(0)
+    controller.declareUserIntent()
+
+    // Older prepend commits 1033px above m2 while the gesture is live; the pair
+    // is published for a row the keeper has NOT observed (m2 is republished as a
+    // new anchor identity via the same-route adopt below).
+    act(() => {
+      maintainer.current!.publishAnchorSample({
+        topicId: 't1',
+        route: null,
+        messageId: 'm2',
+        viewportOffset: -60,
+        scrollTop: 0
+      })
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::40', {
+          messageId: 'm2',
+          offset: -60
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    keeper.unmount()
   })
 })

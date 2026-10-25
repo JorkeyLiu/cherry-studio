@@ -29,6 +29,7 @@ import {
   queryChatDbViaElectron,
   test
 } from '../../fixtures/electron.fixture'
+import { cmContent, replaceEditorContent } from '../../utils/message-editor'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
 // ---------------------------------------------------------------------------
@@ -570,33 +571,23 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       await editBtn.waitFor({ state: 'visible', timeout: 10000 })
       await editBtn.click()
 
-      // The editor should now be visible
+      // The editor should now be visible (CodeMirror contract: visible
+      // .editing-message wrapper containing real .cm-content[contenteditable])
       const editorArea = msgContainer.locator('.message-editor-area')
       await expect(editorArea).toBeVisible({ timeout: 5000 })
 
-      // Find the editing textarea and clear + type new content
-      const editingTextarea = editorArea.locator('.editing-message')
-      await expect(editingTextarea).toBeVisible({ timeout: 5000 })
+      const editorWrapper = editorArea.locator('.editing-message')
+      await expect(editorWrapper).toBeVisible({ timeout: 5000 })
+      const cmEditor = cmContent(editorArea)
+      await expect(cmEditor).toBeVisible({ timeout: 5000 })
 
-      // Clear existing content and type the edited text
-      await editingTextarea.click()
-      // Select all and replace
-      await page.keyboard.press('Meta+A')
-      await page.keyboard.press('Backspace')
+      // Clear existing content and type the edited text through the real
+      // CodeMirror onChange path (platform-modifier select-all + insertText).
+      await replaceEditorContent(page, editorArea, 'EDITED: E2E verification message (edit proven)')
 
-      // Use React-compatible input setter for the editing textarea
-      await page.evaluate(() => {
-        const el = document.querySelector('.editing-message') as HTMLTextAreaElement
-        if (!el) throw new Error('Editing textarea not found')
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-        if (!nativeSetter) throw new Error('No native textarea setter')
-        nativeSetter.call(el, 'EDITED: E2E verification message (edit proven)')
-        el.dispatchEvent(new Event('input', { bubbles: true }))
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      })
-
-      // Verify edited text was accepted
-      await expect(editingTextarea).toHaveValue('EDITED: E2E verification message (edit proven)', { timeout: 5000 })
+      // Verify edited text was accepted (document text assertion, not toHaveValue;
+      // short draft renders fully so containment is exact here)
+      await expect(cmEditor).toContainText('EDITED: E2E verification message (edit proven)', { timeout: 5000 })
 
       // Click Save button — visible and enabled
       const saveBtn = editorArea.locator('.message-editor-save-btn')
@@ -706,9 +697,9 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       const editorArea = msgContainer.locator('.message-editor-area')
       await expect(editorArea).toBeVisible({ timeout: 5000 })
 
-      // Verify the editor textarea is visible (confirms editor fully rendered)
-      const editingTextarea = editorArea.locator('.editing-message')
-      await expect(editingTextarea).toBeVisible({ timeout: 5000 })
+      // Verify the CodeMirror editor is mounted (confirms editor fully rendered)
+      const cmEditor = cmContent(editorArea)
+      await expect(cmEditor).toBeVisible({ timeout: 5000 })
 
       // Click the Resend button in the editor
       const resendBtn = editorArea.locator('.message-editor-resend-btn')

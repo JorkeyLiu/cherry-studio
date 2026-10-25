@@ -1,3 +1,4 @@
+import type { EditSelectionBoundaryPageRequest } from '@renderer/types/editMode'
 import { createContext, use, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 
 import { useCreateEditMode } from '../hooks/useEditMode'
@@ -13,14 +14,26 @@ interface EditModeProviderProps {
   topicId: string
   scrollToGroup?: (askId: string) => void
   visibleGroupIds?: Set<string>
+  /**
+   * Selection-boundary page request owned by the chat viewport: the selection
+   * names the browse direction its edge needs, the viewport decides whether one
+   * bounded page may start (and settles once that attempt resolved).
+   */
+  requestBoundaryPage?: EditSelectionBoundaryPageRequest
 }
 
 type EditModeHeavyBridgeProps = Omit<EditModeProviderProps, 'children'> & {
   onValue: (v: EditModeContextType | null) => void
 }
 
-function EditModeHeavyBridge({ topicId, scrollToGroup, visibleGroupIds, onValue }: EditModeHeavyBridgeProps) {
-  const heavyValue = useCreateEditMode(topicId, scrollToGroup, visibleGroupIds)
+function EditModeHeavyBridge({
+  topicId,
+  scrollToGroup,
+  visibleGroupIds,
+  requestBoundaryPage,
+  onValue
+}: EditModeHeavyBridgeProps) {
+  const heavyValue = useCreateEditMode(topicId, scrollToGroup, visibleGroupIds, requestBoundaryPage)
   useLayoutEffect(() => {
     onValue(heavyValue)
   }, [heavyValue, onValue])
@@ -30,7 +43,13 @@ function EditModeHeavyBridge({ topicId, scrollToGroup, visibleGroupIds, onValue 
   return null
 }
 
-export function EditModeProvider({ children, topicId, scrollToGroup, visibleGroupIds }: EditModeProviderProps) {
+export function EditModeProvider({
+  children,
+  topicId,
+  scrollToGroup,
+  visibleGroupIds,
+  requestBoundaryPage
+}: EditModeProviderProps) {
   const isEnabled = useAppSelector((state) => state.editMode.enabled)
   const dispatch = useAppDispatch()
   const toggleEditMode = useCallback((enabled: boolean) => dispatch(toggleEditModeAction(enabled)), [dispatch])
@@ -87,6 +106,7 @@ export function EditModeProvider({ children, topicId, scrollToGroup, visibleGrou
           topicId={topicId}
           scrollToGroup={scrollToGroup}
           visibleGroupIds={visibleGroupIds}
+          requestBoundaryPage={requestBoundaryPage}
           onValue={handleHeavyValue}
         />
       )}

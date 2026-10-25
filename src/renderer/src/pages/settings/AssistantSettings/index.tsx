@@ -10,8 +10,6 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import AssistantKnowledgeBaseSettings from './AssistantKnowledgeBaseSettings'
-import AssistantMCPSettings from './AssistantMCPSettings'
-import AssistantMemorySettings from './AssistantMemorySettings'
 import AssistantModelSettings from './AssistantModelSettings'
 import AssistantPromptSettings from './AssistantPromptSettings'
 
@@ -20,7 +18,7 @@ interface AssistantSettingPopupShowParams {
   tab?: AssistantSettingPopupTab
 }
 
-type AssistantSettingPopupTab = 'prompt' | 'model' | 'messages' | 'knowledge_base' | 'mcp' | 'memory'
+type AssistantSettingPopupTab = 'prompt' | 'model' | 'messages' | 'knowledge_base'
 
 interface Props extends AssistantSettingPopupShowParams {
   resolve: (assistant: Assistant) => void
@@ -67,14 +65,6 @@ const AssistantSettingPopupContainer: React.FC<Props> = ({ resolve, tab, ...prop
     showKnowledgeIcon && {
       key: 'knowledge_base',
       label: t('assistants.settings.knowledge_base.label')
-    },
-    {
-      key: 'mcp',
-      label: t('assistants.settings.mcp.label')
-    },
-    {
-      key: 'memory',
-      label: t('memory.title', 'Memories')
     }
   ].filter(Boolean) as { key: string; label: string }[]
 
@@ -130,21 +120,6 @@ const AssistantSettingPopupContainer: React.FC<Props> = ({ resolve, tab, ...prop
               assistant={assistant}
               updateAssistant={updateAssistant}
               updateAssistantSettings={updateAssistantSettings}
-            />
-          )}
-          {menu === 'mcp' && (
-            <AssistantMCPSettings
-              assistant={assistant}
-              updateAssistant={updateAssistant}
-              updateAssistantSettings={updateAssistantSettings}
-            />
-          )}
-          {menu === 'memory' && (
-            <AssistantMemorySettings
-              assistant={assistant}
-              updateAssistant={updateAssistant}
-              updateAssistantSettings={updateAssistantSettings}
-              onClose={onCancel}
             />
           )}
         </Settings>

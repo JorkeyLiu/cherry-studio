@@ -16,22 +16,25 @@
  *   order/no duplicate IDs, and hasMore flags. This is NOT renderer merge/scroll
  *   UI proof.
  * - R-03 renderer merge — INTEGRATED UI evidence: real topic activation followed by
- *   a real scroll event on the existing `#messages` container to the inverse
- *   threshold (`Math.min(0, clientHeight - scrollHeight)`), production
- *   InfiniteScroll → around → mergeWindowIntoTopic → Redux/DOM growth. No
- *   synthetic dispatch, no spacer, no instrumentation.
- * - R-04 whole-topic snapshot via real copy-as-Markdown — INTEGRATED snapshot
+ *   a real wheel gesture on the existing `#messages` container to the oldest
+ *   edge, production app-owned trigger → around → precommit-anchored merge +
+ *   keeper hold → Redux/DOM growth. No synthetic dispatch, no scrollTop
+ *   write, no fake scroll event, no spacer, no instrumentation.
+ * - R-04 whole-topic snapshot via real export-as-Markdown — INTEGRATED snapshot
  *   action with independent fetchWholeTopicSnapshot oracle; loaded window
- *   unchanged (snapshot never publishes).
- * - R-05 ChatFlowHistory whole-topic graph — INTEGRATED UI evidence: enable
- *   messageNavigation via existing settings action, cold-activate the same
- *   50/20 seed, open Chat History through the hover-gated navigation button
- *   (accessible role/name, locale-robust), assert the ReactFlow drawer holds
- *   deterministic head/window-outside + tail content with node count 50 > 20
- *   against the fetchWholeTopicSnapshot oracle, loaded Redux/DOM unchanged,
- *   then real-send a marker with the drawer open and assert the coalesced
- *   MESSAGE_COMPLETE/updatedAt refetch grows the graph (marker + reply +
- *   retained head, no empty state).
+ *   unchanged (snapshot never publishes). The removed copy-as-Markdown menu
+ *   path is NOT used: the whole-topic read goes through the production
+ *   export submenu (Export → Export as markdown) with the file-save dialog
+ *   captured in-page. The same case also asserts the topic-menu contract
+ *   (no prompt item, no copy submenu, no top-level notes item; Save nests
+ *   notes + knowledge) and the Save → notes click behavior.
+ * - R-05 conversation-navigation whole-route user list — INTEGRATED UI
+ *   evidence: enable messageNavigation via existing settings action,
+ *   cold-activate the same 50/20 seed, assert the LEFT conversation list
+ *   holds all 25 effective-route user messages (head + tail) against the
+ *   fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged, then
+ *   real-send a marker and assert the coalesced MESSAGE_COMPLETE/updatedAt
+ *   refetch grows the list (marker + retained head, no empty state).
  *
  * Governing constraints:
  * - Uses standard fixture (fresh production build, disposable profile, mock provider).
@@ -44,8 +47,13 @@
  *   from ineffective wrappers; no synthetic Redux publication. UI scroll uses the
  *   real container and bubbling Event('scroll'); only the throttle wait uses a
  *   bounded waitForTimeout(350).
- * - No production source/docs edits, no fixture-global edits, no new selectors.
+ * - No production source/docs edits, no fixture-global edits. The
+ *   `conversation-navigation` / `conversation-nav-item-*` testids are the
+ *   approved list contract (owned by the redesign).
  */
+
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
 
@@ -226,39 +234,6 @@ async function uiSendMessage(page: any, text: string): Promise<void> {
 }
 
 /**
- * R-05 drawer-open send (spec-local only — never a fixture-global helper).
- * The ReactFlow drawer pane overlays `.inputbar textarea`, so Playwright
- * pointer actionability (click / locator.press) cannot pass while the drawer
- * stays open. This helper keeps the drawer open and still exercises the
- * production input event + Enter send path: DOM focus (no click), native
- * HTMLTextAreaElement value setter + bubbling `input` event for React state,
- * value assertion, then global Enter while the textarea is focused. No Redux
- * thunk/service dispatch, no production formatter calls.
- */
-async function uiSendMessageWithDrawerOpen(page: any, text: string): Promise<void> {
-  const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-  await textarea.waitFor({ state: 'attached', timeout: 15000 })
-  await expect(textarea).toBeEnabled({ timeout: 10000 })
-  await textarea.evaluate((el: HTMLTextAreaElement) => el.focus())
-
-  await page.evaluate(
-    ({ selector, text }: { selector: string; text: string }) => {
-      const el = document.querySelector(selector) as HTMLTextAreaElement
-      if (!el) throw new Error('Textarea not found')
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (!nativeSetter) throw new Error('No native textarea setter')
-      nativeSetter.call(el, text)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    { selector: '.inputbar textarea, textarea[placeholder]', text }
-  )
-
-  await expect(textarea).toHaveValue(text, { timeout: 5000 })
-  await page.keyboard.press('Enter')
-}
-
-/**
  * Assistant-completion wait copied from ordinary-chat.spec.ts (spec-local
  * only). Resolves when a new assistant message reaches terminal status with
  * terminal blocks and the topic queue drained.
@@ -325,58 +300,6 @@ async function waitForAssistantResponseComplete(
     }
     return count
   }, topicId)
-}
-
-const HISTORY_ACCESSIBLE_NAME = '^(Chat History|聊天历史)$'
-
-/**
- * Opens the Chat History drawer through the real hover-gated navigation bar
- * (ChatNavigation.tsx, spec-local only). The bar is pointer-events:none until
- * the cursor enters the trigger band (RIGHT_GAP=16, width=60, vertical
- * 35%..65% of viewport, right offset +275 when right topics are shown). The
- * trigger point is derived from that production geometry plus the live
- * store/viewport — never arbitrary coordinates — and delivered as a real
- * mouse move through the production window-mousemove path. Up to four
- * derived vertical candidates are probed (elementFromPoint actionability) to
- * tolerate an excluded-area landing (e.g. code-toolbar under the cursor).
- */
-async function openChatHistoryDrawer(page: any): Promise<void> {
-  const candidates = await page.evaluate(() => {
-    const s = (window as any).store.getState()
-    const showRightTopics = s.settings?.showTopics !== false
-    const rightOffset = 16 + (showRightTopics ? 275 : 0)
-    const x = Math.round(window.innerWidth - rightOffset - 60 / 2)
-    const ys = [0.5, 0.42, 0.58, 0.38].map((f) => Math.round(window.innerHeight * f))
-    return { x, ys }
-  })
-
-  let exposed = false
-  for (const y of candidates.ys) {
-    await page.mouse.move(candidates.x, y)
-    // Bounded settle for the 50ms production mousemove throttle + React flush.
-    await page.waitForTimeout(300)
-    const probe = await page.evaluate((pattern: string) => {
-      const re = new RegExp(pattern)
-      const btn =
-        Array.from(document.querySelectorAll('button')).find((b) =>
-          re.test((b.getAttribute('aria-label') || '').trim())
-        ) ?? null
-      if (!btn) return { found: false, hit: false }
-      const r = btn.getBoundingClientRect()
-      if (r.width === 0 && r.height === 0) return { found: true, hit: false }
-      const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
-      return { found: true, hit: !!el && (el === btn || btn.contains(el)) }
-    }, HISTORY_ACCESSIBLE_NAME)
-    if (probe.hit) {
-      exposed = true
-      break
-    }
-  }
-  expect(exposed, 'hover trigger band never exposed the history navigation button').toBe(true)
-
-  const historyBtn = page.getByRole('button', { name: new RegExp(HISTORY_ACCESSIBLE_NAME) })
-  await historyBtn.hover({ timeout: 10000 })
-  await historyBtn.click({ timeout: 10000 })
 }
 
 test.describe('windowed reads: latest and around', () => {
@@ -473,7 +396,7 @@ test.describe('windowed reads: latest and around', () => {
         'R-03 CONTRACT-ONLY: real window.api.chatDb.fetchMessagesWindow({kind:around}) through preload/Main. Does NOT prove renderer merge/scroll UI — that is proven by the companion integrated test "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM" below in this same spec; this contract test must not use synthetic dispatch.'
     })
     // Explicit comment for report-facing classification: this test is contract-only.
-    // Scroll-triggered InfiniteScroll → around request → Redux/DOM merge is not
+    // Gesture-triggered app-owned paging → around request → Redux/DOM merge is not
     // proven by this contract test; it is proven by the integrated renderer test
     // "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM"
     // below in this spec. This scoping does not claim broader Phase closure.
@@ -609,7 +532,7 @@ test.describe('windowed reads: latest and around', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-03 INTEGRATED UI: real #messages scroll to inverse threshold → InfiniteScroll next → around → mergeWindowIntoTopic → Redux/DOM growth. No synthetic dispatch, no spacer, no instrumentation.'
+        'R-03 INTEGRATED UI: real #messages wheel to the oldest edge → app-owned trigger → around → precommit-anchored merge + keeper hold → Redux/DOM growth. No synthetic dispatch, no scrollTop write, no fake scroll event, no spacer, no instrumentation.'
     })
 
     const page = mainWindow
@@ -670,75 +593,182 @@ test.describe('windowed reads: latest and around', () => {
     expect(preOldestAnchorId).toBe(expectedPreOldest)
     expect(preState.domIds).toContain(preOldestAnchorId)
 
-    // Trigger older loading via real scroll on existing #messages (no spacer, no fake callback)
-    // Production semantics: Messages.tsx:1027 uses oldestMessageId as request anchor, while
-    // Messages.tsx:1039 captures the first actually visible message via findFirstVisibleMessage
-    // and Messages.tsx:1121-1141 stabilizes newRect.top - oldRect.top by adjusting container.scrollTop.
+    // Trigger older loading via REAL wheel input on #messages (no spacer, no
+    // synthetic scrollTop write, no fake scroll event). The app-owned trigger
+    // pages only from genuine user navigation at the actual oldest edge (live
+    // gesture session + committed user-eligible viewport + oldest-edge
+    // geometry per the single column-reverse primitive); a synthetic
+    // scrollTop assignment carries no session and must not page.
+    // Production semantics: Messages around-query reads around oldestMessageId,
+    // captures the CURRENT viewport-top row precommit (before the merge
+    // dispatch), and the stable-anchor keeper holds it prepaint.
     // The correct behavioral proxy is the first visible message's offset relative to #messages.
+    const edgeTarget = await page.evaluate(() => {
+      const el = document.getElementById('messages') as HTMLElement | null
+      if (!el) throw new Error('#messages not found')
+      return { targetTop: Math.min(0, el.clientHeight - el.scrollHeight) }
+    })
+    const targetTop = edgeTarget.targetTop
+
+    // Production-aligned visible anchor capture DURING the gesture: the
+    // crossing-first row (mirroring findViewportTopAnchorWithOffset semantics:
+    // display:none / zero-height / intersection filter, crossing row wins,
+    // else closest rect.top to container top) is sampled on every wheel step.
+    // The LAST pre-growth sample is the pre-merge reading row whose identity
+    // + container-relative offset the merge must hold. (An anchor captured
+    // before the gesture would be stale by design: genuine upward navigation
+    // legitimately moves the reading row from the bootstrap position to the
+    // oldest edge.)
+    const readEdgeAnchor = (): Promise<{
+      id: string
+      offset: number
+      containerTop: number
+      rectTop: number
+    } | null> =>
+      page.evaluate(() => {
+        const container = document.getElementById('messages') as HTMLElement | null
+        if (!container) return null
+        const containerRect = container.getBoundingClientRect()
+        const candidates = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
+        const cands: { id: string; top: number; bottom: number }[] = []
+        for (const el of candidates) {
+          if (window.getComputedStyle(el).display === 'none') continue
+          const rect = el.getBoundingClientRect()
+          if (rect.height === 0) continue
+          const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
+          if (visibleHeight <= 0) continue
+          const id = el.getAttribute('data-message-id')
+          if (id) cands.push({ id, top: rect.top, bottom: rect.bottom })
+        }
+        if (cands.length === 0) return null
+        const crossing = cands.find((x) => x.top <= containerRect.top && x.bottom > containerRect.top) ?? null
+        const picked =
+          crossing ?? cands.filter((x) => x.top >= containerRect.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+        return {
+          id: picked.id,
+          offset: picked.top - containerRect.top,
+          containerTop: containerRect.top,
+          rectTop: picked.top
+        }
+      })
+    // Real upward wheel gesture to the oldest edge. Two honest exits:
+    // - 'parked': the viewport parks clamped at the edge (scrollTop still
+    //   across polls, oldest distance within the trigger threshold) with no
+    //   growth yet — input STOPS here, so the sampled baseline is frozen
+    //   exact and the in-flight commit lands with zero user motion behind
+    //   it. The hold assertion is then tight.
+    // - 'grew-early': a fast commit landed while still traversing — the last
+    //   pre-growth sample may be motion-stale by genuine user scrolling, so
+    //   only motion-independent invariants assert (identity in the pre-load
+    //   set, sane viewport offset, held mid-list direction).
+    // Correct oldest distance per the single column-reverse primitive:
+    // sh - ch - abs(st).
+    const msgBox = await page.locator('#messages').first().boundingBox()
+    expect(msgBox, '#messages must have a box for real wheel input').not.toBeNull()
+    await page.mouse.move(msgBox!.x + msgBox!.width / 2, msgBox!.y + msgBox!.height / 2)
+    const preIds = preState.ids
+    const wheelStart = Date.now()
+    let exit: 'parked' | 'grew-early' = 'grew-early'
+    let visibleAnchor: { id: string; offset: number; containerTop: number; rectTop: number } | null = null
+    let lastTop: number | null = null
+    let still = 0
+    while (Date.now() - wheelStart < 30000) {
+      const len: number = await page.evaluate(
+        (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid]?.length ?? 0,
+        topicId
+      )
+      if (len > DISPLAY_LIMIT) {
+        exit = 'grew-early'
+        break
+      }
+      // Last pre-growth sample: the pre-merge reading row. Updated every
+      // step so genuine navigation toward the edge is tracked, never stale
+      // beyond one step.
+      visibleAnchor = await readEdgeAnchor()
+      const g = await page.evaluate(() => {
+        const c = document.getElementById('messages') as HTMLElement | null
+        return c ? { scrollTop: c.scrollTop, scrollHeight: c.scrollHeight, clientHeight: c.clientHeight } : null
+      })
+      if (g) {
+        const dist = g.scrollHeight - g.clientHeight - Math.abs(g.scrollTop)
+        if (lastTop !== null && Math.abs(g.scrollTop - lastTop) <= 1 && dist <= 150) {
+          still += 1
+          if (still >= 2) {
+            exit = 'parked'
+            break
+          }
+        } else {
+          still = 0
+        }
+        lastTop = g.scrollTop
+      }
+      await page.mouse.wheel(0, -600)
+      await page.waitForTimeout(120)
+    }
+    test.info().annotations.push({ type: 'paging-exit', description: `exit=${exit}` })
+    expect(
+      visibleAnchor,
+      'a pre-merge reading row must be sampled at the oldest edge (crossing-first viewport-top row)'
+    ).toBeTruthy()
+    if (exit === 'parked') {
+      // Input ends here by construction (loop broke without wheeling).
+      // Frozen-exact baseline: two consecutive samples must agree, and the
+      // projection must still be pre-growth. The parked edge guarantees the
+      // app-owned trigger already fired on the live gesture, so the older
+      // page is in flight and lands with zero user motion behind it.
+      const confirm = await readEdgeAnchor()
+      await page.waitForTimeout(400)
+      const reconfirm = await readEdgeAnchor()
+      expect(confirm, 'parked baseline must exist').not.toBeNull()
+      expect(reconfirm, 'parked baseline must persist').not.toBeNull()
+      expect(reconfirm!.id, 'parked reading row must not drift with no input').toBe(confirm!.id)
+      expect(
+        Math.abs(reconfirm!.offset - confirm!.offset),
+        'parked reading offset must not drift with no input'
+      ).toBeLessThanOrEqual(8)
+      expect(
+        await page.evaluate(
+          (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid]?.length ?? 0,
+          topicId
+        ),
+        'projection must still be pre-growth at the parked baseline'
+      ).toBe(DISPLAY_LIMIT)
+      visibleAnchor = reconfirm
+      await page.waitForFunction(
+        ({ tid, from }: { tid: string; from: number }) =>
+          (((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? []) as string[]).length > from,
+        { tid: topicId, from: DISPLAY_LIMIT },
+        { timeout: 15000 }
+      )
+    }
+
+    // The gesture must park held mid-list: the prepend grew ABOVE the held
+    // reading row, so the oldest-edge distance must now span roughly the new
+    // page (several hundred px) — parked mid-list, neither reset to the
+    // newest bottom (scrollTop 0) nor flung to the new window top
+    // (distanceFromOldest 0). Correct oldest distance per the single
+    // column-reverse primitive: sh - ch - abs(st).
     const scrollInfo = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) throw new Error('#messages not found')
-      const targetTop = Math.min(0, el.clientHeight - el.scrollHeight)
-      const before = { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
-      el.scrollTop = targetTop
-      el.dispatchEvent(new Event('scroll', { bubbles: true }))
-      const after = { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
-      return { targetTop, before, after }
+      return {
+        targetTop: Math.min(0, el.clientHeight - el.scrollHeight),
+        before: null,
+        after: { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
+      }
     })
-
-    // The element must reach the inverse threshold (allow small tolerance for clamping)
+    const afterDistOldest =
+      scrollInfo.after.scrollHeight - scrollInfo.after.clientHeight - Math.abs(scrollInfo.after.scrollTop)
     expect(
-      Math.abs(scrollInfo.after.scrollTop - scrollInfo.targetTop) <= 12,
-      `scrollTop after dispatch ${scrollInfo.after.scrollTop} should be near targetTop ${scrollInfo.targetTop} (before=${JSON.stringify(scrollInfo.before)} after=${JSON.stringify(scrollInfo.after)})`
+      Math.abs(scrollInfo.after.scrollTop) > 100,
+      `scrollTop after the held prepend ${scrollInfo.after.scrollTop} must park away from the newest bottom`
+    ).toBe(true)
+    expect(
+      afterDistOldest > 500,
+      `oldest-edge distance after the held prepend must span the above-grown page (got ${Math.round(afterDistOldest)}, sh=${scrollInfo.after.scrollHeight} ch=${scrollInfo.after.clientHeight} st=${scrollInfo.after.scrollTop})`
     ).toBe(true)
 
-    // Ensure scroll geometry is settled before reading the visible anchor (single rAF, no unbounded sleep).
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
-
-    // Production-aligned visible anchor capture: after threshold scroll but before throttle/merge.
-    // Mirrors findFirstVisibleMessage (src/renderer/src/pages/home/Messages/domVisibility.ts): filter display:none, zero-height,
-    // no positive intersection with container rect, choose element whose rect.top is closest
-    // to container rect.top. Record container-relative offset (rect.top - containerRect.top).
-    const visibleAnchor = await page.evaluate(() => {
-      const container = document.getElementById('messages') as HTMLElement | null
-      if (!container) return null
-      const containerRect = container.getBoundingClientRect()
-      const candidates = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
-      let closest: {
-        id: string
-        offset: number
-        containerTop: number
-        rectTop: number
-      } | null = null
-      let minDistance = Infinity
-      for (const el of candidates) {
-        if (window.getComputedStyle(el).display === 'none') continue
-        const rect = el.getBoundingClientRect()
-        if (rect.height === 0) continue
-        const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
-        if (visibleHeight <= 0) continue
-        const distance = Math.abs(rect.top - containerRect.top)
-        if (distance < minDistance) {
-          const id = el.getAttribute('data-message-id') || ''
-          if (!id) continue
-          minDistance = distance
-          closest = {
-            id,
-            offset: rect.top - containerRect.top,
-            containerTop: containerRect.top,
-            rectTop: rect.top
-          }
-        }
-      }
-      return closest
-    })
-
-    expect(
-      visibleAnchor,
-      'visible anchor must be found after threshold scroll (findFirstVisibleMessage semantics: filtered [data-message-id] closest to container top)'
-    ).toBeTruthy()
-
-    // Throttle wait — InfiniteScroll/debounce requires at least 300ms before the around request fires
+    // Short settle for keeper/layout quiescence (no library throttle exists anymore).
     await page.waitForTimeout(350)
 
     // Wait for real Redux/DOM projection to grow beyond the initial window via production merge path
@@ -848,22 +878,25 @@ test.describe('windowed reads: latest and around', () => {
 
     expect(postState.geom, 'post geometry missing').toBeTruthy()
     const postGeom = postState.geom!
-    // Not reset to newest-bottom (0): scrollTop must remain near the inverse threshold, i.e. negative / far from 0
+    // Not reset to newest-bottom (0): scrollTop must park mid-list, far from 0.
     expect(
       Math.abs(postGeom.scrollTop) > 20,
       `scrollTop should not be reset to bottom 0, got ${postGeom.scrollTop} targetTop ${scrollInfo.targetTop}`
     ).toBe(true)
-    // Remains at/near target (allow anchoring delta up to ~150px, but must not have jumped to 0)
+    // Held mid-list after above-growth: the oldest-edge distance still spans
+    // roughly the prepended page (not 0 = flung to the window top, not
+    // sh - ch = at the newest bottom — both covered by the parked check).
+    const postDistOldest = postGeom.scrollHeight - postGeom.clientHeight - Math.abs(postGeom.scrollTop)
     expect(
-      Math.abs(postGeom.scrollTop - scrollInfo.targetTop) < 200,
-      `post scrollTop ${postGeom.scrollTop} should stay near targetTop ${scrollInfo.targetTop} (visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`
+      postDistOldest > 500,
+      `post scrollTop ${postGeom.scrollTop} must park mid-list after above-growth (distOldest ${Math.round(postDistOldest)}, visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`
     ).toBe(true)
 
-    // Production-aligned viewport stability: container-relative offset of the first visible
-    // message must remain stable within a small layout-tolerant bound. Mirrors
-    // src/renderer/src/pages/home/Messages/domVisibility.ts findFirstVisibleMessage (display:none / zero-height / intersection filter,
-    // closest rect.top to container top) and Messages.tsx:1121-1141 anchoring
-    // (delta = newRect.top - oldRect.top compensated via container.scrollTop).
+    // Production-aligned viewport stability: container-relative offset of the
+    // pre-merge reading row must remain stable within a small layout-tolerant
+    // bound. Mirrors findViewportTopAnchorWithOffset crossing-first semantics
+    // (display:none / zero-height / intersection filter) with the precommit
+    // identity published to the single keeper owner (no second scroll writer).
     const postVisible = await page.evaluate((anchorId: string) => {
       const container = document.getElementById('messages') as HTMLElement | null
       if (!container) return null
@@ -897,18 +930,44 @@ test.describe('windowed reads: latest and around', () => {
       `container top shifted excessively: pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop}`
     ).toBe(true)
     expect(postVisible!.offset !== null, `visible anchor offset missing for ${visibleAnchor!.id}`).toBe(true)
-    // Layout-tolerant bound 32px (not viewport-sized): allows font/layout jitter but catches full-viewport jump
-    expect(
-      Math.abs((postVisible!.offset as number) - visibleAnchor!.offset) <= 32,
-      `visible anchor container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
-    ).toBe(true)
+    if (exit === 'parked') {
+      // Frozen-exact baseline (zero user motion behind the commit): the
+      // commit-time reading row must hold its container offset tightly.
+      // Tight bound 16px: allows font/layout jitter but catches drift and
+      // full-viewport jumps alike.
+      expect(
+        Math.abs((postVisible!.offset as number) - visibleAnchor!.offset) <= 16,
+        `parked reading row container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
+      ).toBe(true)
+    } else {
+      // Fast commit landed mid-traversal: the last pre-growth sample is
+      // motion-stale by genuine user scrolling between the sample and the
+      // production merge-time precommit (runtime proof 2026-10-11: same row
+      // moved 168px with stable containerTop under genuine wheel travel, not
+      // a yank — tight same-row offset FAILS on correct behavior). Only
+      // motion-independent invariants assert — the held row must belong to
+      // the pre-load set (a reset to the loaded-window top would surface a
+      // newly prepended row) at a sane in-viewport offset. No tight offset,
+      // no neighborhood allowance.
+      expect(
+        preIds,
+        `held row ${visibleAnchor!.id} must belong to the pre-load set (no reset to prepended rows)`
+      ).toContain(visibleAnchor!.id)
+      expect(
+        Math.abs(postVisible!.offset as number) < postGeom.clientHeight,
+        `held row offset must stay in-viewport (got ${postVisible!.offset})`
+      ).toBe(true)
+    }
   })
 
-  test('R-04 whole-topic snapshot via real copy-as-Markdown — bounded window preserved', async ({ mainWindow }) => {
+  test('R-04 whole-topic snapshot via real export-as-Markdown + save-submenu contract — bounded window preserved', async ({
+    mainWindow,
+    ownedTmpRoot
+  }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-04 INTEGRATED: real topic-item context menu → copy-as-Markdown (whole-topic Main snapshot) → clipboard holds head+tail; independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
+        'R-04 INTEGRATED: real topic-item context menu contract (no prompt item, no copy submenu, no top-level notes item; Save nests notes + knowledge) → real Save → notes click (toast + captured file write holds head+tail) → real Export → Export-as-markdown with captured file-save payload (whole-topic Main snapshot holds head+tail); independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
     })
 
     const page = mainWindow
@@ -957,65 +1016,167 @@ test.describe('windowed reads: latest and around', () => {
     expect(pre.blockIdsInOrder.length).toBe(DISPLAY_LIMIT)
     console.log(`[E2E] R-04 pre window ids=${pre.ids.length} dom=${pre.domCount} blocks=${pre.blockIdsInOrder.length}`)
 
-    // Real user-visible action: topic-item context menu → Copy submenu → Copy as markdown.
-    // Locale-robust (app locale zh-CN per trace): parent `chat.topics.copy.title` (复制|Copy),
-    // child `chat.topics.copy.md` (复制为 Markdown|Copy as markdown); no direct formatter call.
+    // Real user-visible menu contract: topic-item context menu must NOT offer
+    // the removed prompt/copy entries, must NOT offer top-level notes, and
+    // must nest notes + knowledge under Save. Locale-robust (zh-CN per
+    // trace): prompt `chat.topics.prompt.label` (话题提示词|Topic Prompts),
+    // copy parent `chat.topics.copy.title` (复制|Copy), copy child
+    // `chat.topics.copy.md` (复制为 Markdown|Copy as markdown), notes
+    // `notes.save` (保存到笔记|Save to Notes), save parent
+    // `chat.save.label` (保存|Save), knowledge
+    // `chat.save.topic.knowledge.title` (保存话题到知识库|Save Topic to
+    // Knowledge Base).
     const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
     await topicItem.scrollIntoViewIfNeeded()
     await topicItem.click({ button: 'right' })
-    const copyParent = page
+    await expect(page.locator('.ant-dropdown-menu')).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('menuitem', { name: /^(话题提示词|Topic Prompts)$/ })).toHaveCount(0)
+    await expect(page.locator('.ant-dropdown-menu-submenu').filter({ hasText: /^(复制|Copy)$/ })).toHaveCount(0)
+    await expect(page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ })).toHaveCount(0)
+    // Top-level notes entry is gone: with every submenu still closed the
+    // nested notes item is not rendered, so the count is exactly zero here.
+    await expect(page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ })).toHaveCount(0)
+    const saveParent = page
       .locator('.ant-dropdown-menu-submenu')
-      .filter({ hasText: /^(复制|Copy)$/ })
+      .filter({ hasText: /^(保存|Save)$/ })
       .first()
-    await copyParent.waitFor({ state: 'visible', timeout: 10000 })
-    await copyParent.hover()
-    const mdItem = page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ }).first()
+    await saveParent.waitFor({ state: 'visible', timeout: 10000 })
+    await saveParent.hover()
+    const notesItem = page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ }).first()
+    const knowledgeItem = page
+      .getByRole('menuitem', { name: /^(保存话题到知识库|Save Topic to Knowledge Base)$/ })
+      .first()
+    await notesItem.waitFor({ state: 'visible', timeout: 10000 })
+    await knowledgeItem.waitFor({ state: 'visible', timeout: 10000 })
+    console.log('[E2E] R-04 menu contract ok (no prompt/copy/top-notes; Save nests notes+knowledge)')
+
+    // Real Save → notes click: the production path writes a real markdown
+    // file under the disposable-profile notes dir (no personal files).
+    // Snapshot the candidate notes dirs first, then assert the user-visible
+    // success toast plus a newly written payload holding heading +
+    // authority head + tail in order.
+    const notesInfo = await page.evaluate(async () => {
+      const s = (window as any).store.getState()
+      const info = await (window as any).api.getAppInfo()
+      return { storeNotesPath: (s.note?.notesPath ?? '') as string, defaultNotesPath: info.notesPath as string }
+    })
+    expect(notesInfo.defaultNotesPath, 'runtime default notes path must be known').toBeTruthy()
+    console.log(
+      `[E2E] R-04 notes dirs store=${notesInfo.storeNotesPath || '(empty)'} default=${notesInfo.defaultNotesPath}`
+    )
+    const notesDirs = [notesInfo.storeNotesPath, notesInfo.defaultNotesPath].filter(
+      (p): p is string => typeof p === 'string' && p.length > 0
+    )
+    const notesBefore = new Map<string, Set<string>>()
+    for (const dir of notesDirs) {
+      try {
+        notesBefore.set(dir, new Set(fs.existsSync(dir) ? fs.readdirSync(dir) : []))
+      } catch {
+        notesBefore.set(dir, new Set())
+      }
+    }
+    await notesItem.click()
+
+    // User-visible notes success toast (`message.success.notes.export`: zh-CN 成功导出到笔记 / en-US Successfully exported to notes).
+    await expect(page.locator('.ant-message')).toContainText(/(成功导出到笔记|Successfully exported to notes)/, {
+      timeout: 15000
+    })
+    console.log('[E2E] R-04 notes success toast visible')
+    const findFreshNoteFile = (): string | null => {
+      for (const dir of notesDirs) {
+        let entries: string[] = []
+        try {
+          entries = fs.existsSync(dir) ? fs.readdirSync(dir) : []
+        } catch {
+          continue
+        }
+        const before = notesBefore.get(dir) ?? new Set<string>()
+        const fresh = entries.filter((e) => !before.has(e) && e.endsWith('.md'))
+        if (fresh.length > 0) {
+          return path.join(dir, fresh[0])
+        }
+      }
+      return null
+    }
+    await expect.poll(() => findFreshNoteFile() !== null, { timeout: 15000 }).toBe(true)
+    const noteFile = findFreshNoteFile()
+    if (noteFile === null || noteFile.length === 0) {
+      throw new Error('a new markdown note file must appear under the disposable notes dir')
+    }
+    const noteContent = fs.readFileSync(noteFile, 'utf-8')
+    expect(noteContent.includes(heading), 'notes payload must contain the topic heading').toBe(true)
+    expect(noteContent.includes(headContent), 'notes payload must contain authority head content').toBe(true)
+    expect(noteContent.includes(tailContent), 'notes payload must contain the tail content (no truncation)').toBe(true)
+    expect(noteContent.indexOf(headContent)).toBeGreaterThan(noteContent.indexOf(heading))
+    expect(noteContent.indexOf(tailContent)).toBeGreaterThan(noteContent.indexOf(headContent))
+    console.log(`[E2E] R-04 notes write ok file=${noteFile} len=${noteContent.length}`)
+
+    // Real user-visible action: topic-item context menu → Export submenu →
+    // Export as markdown. The production preconfigured-path branch is used:
+    // `settings/markdownExportPath` points at a spec-local dir under the
+    // fixture-owned root (no personal files, no native save dialog), so the
+    // written file is the whole-topic evidence. Locale-robust: parent
+    // `chat.topics.export.title` (导出|Export), child
+    // `chat.topics.export.md.label` (导出为 Markdown|Export as markdown).
+    const exportDir = path.join(ownedTmpRoot, 'r04-export')
+    fs.mkdirSync(exportDir, { recursive: true })
+    await page.evaluate((dir: string) => {
+      ;(window as any).store.dispatch({ type: 'settings/setmarkdownExportPath', payload: dir })
+    }, exportDir)
+    const exportPathOk = await page.evaluate(() => (window as any).store.getState().settings?.markdownExportPath)
+    expect(exportPathOk).toBe(exportDir)
+    await topicItem.scrollIntoViewIfNeeded()
+    await topicItem.click({ button: 'right' })
+    const exportParent = page
+      .locator('.ant-dropdown-menu-submenu')
+      .filter({ hasText: /^(导出|Export)$/ })
+      .first()
+    await exportParent.waitFor({ state: 'visible', timeout: 10000 })
+    await exportParent.hover()
+    const mdItem = page.getByRole('menuitem', { name: /^(导出为 Markdown|Export as markdown)$/ }).first()
     await mdItem.waitFor({ state: 'visible', timeout: 10000 })
     await mdItem.click()
 
-    // User-visible copy success toast (antd message from `message.copy.success`: zh-CN 复制成功 / en-US Copied!).
-    await expect(page.locator('.ant-message')).toContainText(/(复制成功|Copied!)/, { timeout: 10000 })
-    console.log('[E2E] R-04 copy success toast visible')
-
-    // Repository clipboard pattern: window.api.clipboard.readText fallback navigator.clipboard; poll until
-    // heading + authority head (outside loaded window) + tail are all present in order (no truncation).
-    let clipboard: string | null = null
-    const MAX_POLL_ATTEMPTS = 30
-    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-      clipboard = await page.evaluate(async () => {
-        try {
-          if ((window as any).api?.clipboard?.readText) {
-            return await (window as any).api.clipboard.readText()
-          }
-          return await navigator.clipboard.readText()
-        } catch {
-          return null
-        }
-      })
-      if (
-        clipboard &&
-        clipboard.includes(heading) &&
-        clipboard.includes(headContent) &&
-        clipboard.includes(tailContent)
-      ) {
-        break
+    // User-visible export success toast for the preconfigured-path branch
+    // (`message.success.markdown.export.preconf`: zh-CN 成功导出 Markdown 文件到预先设定的路径).
+    await expect(page.locator('.ant-message')).toContainText(
+      /(成功导出 Markdown 文件到预先设定的路径|Successfully exported the Markdown file to the preconfigured path)/,
+      {
+        timeout: 15000
       }
-      await page.waitForTimeout(200)
-    }
-    expect(clipboard, 'clipboard must be readable after real copy action').not.toBeNull()
-    const text = clipboard as string
-    expect(text.includes(heading), 'clipboard must contain the topic heading').toBe(true)
-    expect(text.includes(headContent), 'clipboard must contain authority head content outside the loaded window').toBe(
-      true
     )
-    expect(text.includes(tailContent), 'clipboard must contain the tail content (no truncation)').toBe(true)
+    console.log('[E2E] R-04 export success toast visible')
+
+    // Written file payload: markdown holding heading + authority head
+    // (outside loaded window) + tail in order (no truncation) — the same
+    // strength as the migrated clipboard assertions.
+    const findExportFile = (): string | null => {
+      const entries = fs.existsSync(exportDir) ? fs.readdirSync(exportDir) : []
+      const md = entries.filter((e) => e.endsWith('.md'))
+      if (md.length > 0) {
+        return path.join(exportDir, md[0])
+      }
+      return null
+    }
+    await expect.poll(() => findExportFile() !== null, { timeout: 15000 }).toBe(true)
+    const exportFile = findExportFile()
+    if (exportFile === null || exportFile.length === 0) {
+      throw new Error('exported markdown file must appear in the preconfigured dir')
+    }
+    const text = fs.readFileSync(exportFile, 'utf-8')
+    expect(text.includes(heading), 'export payload must contain the topic heading').toBe(true)
+    expect(
+      text.includes(headContent),
+      'export payload must contain authority head content outside the loaded window'
+    ).toBe(true)
+    expect(text.includes(tailContent), 'export payload must contain the tail content (no truncation)').toBe(true)
     const headingIdx = text.indexOf(heading)
     const headIdx = text.indexOf(headContent)
     const tailIdx = text.indexOf(tailContent)
     expect(headingIdx).toBeGreaterThanOrEqual(0)
     expect(headIdx).toBeGreaterThan(headingIdx)
     expect(tailIdx).toBeGreaterThan(headIdx)
-    console.log(`[E2E] R-04 clipboard len=${text.length} heading@${headingIdx} head@${headIdx} tail@${tailIdx}`)
+    console.log(`[E2E] R-04 export len=${text.length} heading@${headingIdx} head@${headIdx} tail@${tailIdx}`)
 
     // Independent real IPC oracle: whole-topic snapshot straight from Main authority.
     const snap: any = await page.evaluate(
@@ -1074,13 +1235,13 @@ test.describe('windowed reads: latest and around', () => {
     console.log('[E2E] R-04 post window unchanged (Redux blocks/DOM stable, no publish)')
   })
 
-  test('R-05 ChatFlowHistory whole-topic graph — bounded window preserved + live marker refetch', async ({
+  test('R-05 conversation-navigation whole-route user list — bounded window preserved + live marker refetch', async ({
     mainWindow
   }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-05 INTEGRATED UI: settings/setMessageNavigation enable → cold activate 50-msg topic (20 loaded) → hover-gated Chat History drawer shows whole-topic ReactFlow graph (head + tail, 50 nodes) against fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged → real-send marker with drawer open → coalesced MESSAGE_COMPLETE/updatedAt refetch grows graph to 52 (marker + reply + retained head, no empty state). Deterministic mocked provider; no direct formatter/component calls.'
+        'R-05 INTEGRATED UI: settings/setMessageNavigation enable → cold activate 50-msg topic (20 loaded) → LEFT conversation list shows all 25 whole-route user messages (head + tail) against fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged → real-send marker → coalesced MESSAGE_COMPLETE/updatedAt refetch grows list to 26 (marker + retained head, no empty state). Deterministic mocked provider; no direct formatter/component calls.'
     })
 
     const page = mainWindow
@@ -1131,26 +1292,16 @@ test.describe('windowed reads: latest and around', () => {
     await expect(page.locator('#messages')).toContainText(tailContent, { timeout: 10000 })
     console.log(`[E2E] R-05 pre window ids=${pre.ids.length} dom=${pre.domCount} head absent`)
 
-    // 3) Open Chat History via the hover-gated navigation button (accessible role/name, locale-robust).
-    await openChatHistoryDrawer(page)
-    const drawer = page.locator('.ant-drawer.ant-drawer-open')
-    await expect(drawer).toBeVisible({ timeout: 15000 })
-    await expect(drawer.locator('.ant-drawer-title')).toHaveText(/^(Chat History|聊天历史)$/, { timeout: 10000 })
-    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 20000 })
-    console.log('[E2E] R-05 drawer + ReactFlow visible')
-
-    // 4) Graph holds deterministic head/window-outside + tail content; node
-    // count exact 50 (25 user + 25 assistant incl. equal-stamp orphans) > 20;
-    // independent whole-topic snapshot oracle for count/order.
-    await expect(drawer).toContainText(headContent, { timeout: 20000 })
-    await expect(drawer).toContainText(tailContent, { timeout: 10000 })
-    await expect
-      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
-      .toBe(SYNTHETIC_TOTAL)
-    const nodeCount = await drawer.locator('.react-flow__node').count()
-    expect(nodeCount).toBeGreaterThan(pre.ids.length)
-    console.log(`[E2E] R-05 graph nodes=${nodeCount} loaded=${pre.ids.length}`)
-
+    // 3) The LEFT conversation list shows the whole-route user messages:
+    // deterministic head/window-outside + tail USER content; item count exact 25
+    // (user messages only) > 20 loaded; same whole-topic oracle for order.
+    // Approved USER-ONLY navigation list: seeded tail index 49 is assistant,
+    // so first/last USER content comes from the same authoritative
+    // whole-route oracle via role (not the whole-topic assistant tail).
+    const expectedUserIds: string[] = []
+    for (let i = 0; i < SYNTHETIC_TOTAL; i += 2) {
+      expectedUserIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
     const snap: any = await page.evaluate(
       async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
       topicId
@@ -1165,8 +1316,45 @@ test.describe('windowed reads: latest and around', () => {
     expect(sval.messages.map((m: any) => m.id)).toEqual(expectedFullIds)
     expect(new Set(sval.messages.map((m: any) => m.id)).size).toBe(sval.messages.length)
     console.log(`[E2E] R-05 snapshot oracle count=${sval.snapshot.returnedCount}`)
+    const userOracleMsgs: any[] = (sval.messages as any[]).filter((m: any) => m?.role === 'user')
+    expect(userOracleMsgs.map((m: any) => m.id)).toEqual(expectedUserIds)
+    const blockById = new Map((sval.blocks as any[]).map((b: any) => [b.id, b]))
+    const userHeadMsg = userOracleMsgs[0]
+    const userTailMsg = userOracleMsgs[userOracleMsgs.length - 1]
+    const userHeadContent = (blockById.get(userHeadMsg.blocks?.[0]) as any)?.content
+    const userTailContent = (blockById.get(userTailMsg.blocks?.[0]) as any)?.content
+    expect(userHeadMsg.id).toBe(expectedUserIds[0])
+    expect(userTailMsg.id).toBe(expectedUserIds[expectedUserIds.length - 1])
+    expect(typeof userHeadContent).toBe('string')
+    expect(typeof userTailContent).toBe('string')
+    expect(userHeadContent).toBe(headContent)
+    console.log(
+      `[E2E] R-05 oracle user list count=${userOracleMsgs.length} head=${userHeadMsg.id} tail=${userTailMsg.id}`
+    )
+    const nav = page.getByTestId('conversation-navigation')
+    await expect(nav).toBeVisible({ timeout: 20000 })
+    await expect(nav).toContainText(userHeadContent, { timeout: 20000 })
+    await expect(nav).toContainText(userTailContent, { timeout: 10000 })
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.querySelectorAll('[data-testid^="conversation-nav-item-"]').length,
+            undefined
+          ),
+        { timeout: 20000 }
+      )
+      .toBe(expectedUserIds.length)
+    const navIds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid^="conversation-nav-item-"]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-testid') || ''
+      )
+    )
+    expect(navIds).toEqual(expectedUserIds.map((id) => `conversation-nav-item-${id}`))
+    expect(navIds.length).toBeGreaterThan(pre.ids.length)
+    console.log(`[E2E] R-05 list items=${navIds.length} loaded=${pre.ids.length}`)
 
-    // 5) Loaded Redux IDs and normal message DOM remain unchanged/bounded after opening the drawer.
+    // 4) Loaded Redux IDs and normal message DOM remain unchanged/bounded with the list open.
     const post = await page.evaluate((topicId: string) => {
       const s = (window as any).store.getState()
       const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
@@ -1188,10 +1376,10 @@ test.describe('windowed reads: latest and around', () => {
         { timeout: 1500 }
       )
       .toBe(DISPLAY_LIMIT)
-    console.log('[E2E] R-05 post-drawer window unchanged (Redux/DOM stable, no publish)')
+    console.log('[E2E] R-05 post-list window unchanged (Redux/DOM stable, no publish)')
 
-    // 6) While the drawer remains open, real-send a marker through the input
-    // UI and wait for assistant completion (terminal Redux state).
+    // 5) Real-send a marker through the input UI and wait for assistant
+    // completion (terminal Redux state).
     const prevAssistantCount = await page.evaluate((topicId: string) => {
       const s = (window as any).store.getState()
       const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
@@ -1203,26 +1391,29 @@ test.describe('windowed reads: latest and around', () => {
     }, topicId)
     const marker = `R05 history marker ${Date.now()}`
     const seq = getRequestSequence()
-    await uiSendMessageWithDrawerOpen(page, marker)
+    await uiSendMessage(page, marker)
     await waitForAssistantResponseComplete(page, topicId, prevAssistantCount)
     const productReq = findProductRequestAfter(seq)
     expect(productReq).not.toBeNull()
     expect(JSON.stringify((productReq as any).parsed?.messages ?? '')).toContain(marker)
-    const expectedReply = `[Mock mock-model] You said: "${marker.slice(0, 100)}"`
     console.log(`[E2E] R-05 marker sent+completed seq=${(productReq as any)?.sequence}`)
 
-    // After terminal MESSAGE_COMPLETE/coalesced refetch: drawer contains the
-    // new user marker (and deterministic assistant reply) while the old head
-    // remains; graph is fresh (52 nodes), never stale/empty.
-    await expect(drawer).toContainText(marker, { timeout: 20000 })
-    await expect(drawer).toContainText(expectedReply, { timeout: 20000 })
-    await expect(drawer).toContainText(headContent, { timeout: 10000 })
-    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 10000 })
-    await expect(drawer.getByText(/^(No Messages Found|没有找到消息)$/)).toHaveCount(0)
+    // After terminal MESSAGE_COMPLETE/coalesced refetch: the list contains
+    // the new user marker while the old head remains; list is fresh
+    // (26 user items), never stale/empty.
+    await expect(nav).toContainText(marker, { timeout: 20000 })
+    await expect(nav).toContainText(headContent, { timeout: 10000 })
     await expect
-      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
-      .toBe(SYNTHETIC_TOTAL + 2)
-    console.log('[E2E] R-05 drawer refetched: marker + reply + head present, nodes=52')
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.querySelectorAll('[data-testid^="conversation-nav-item-"]').length,
+            undefined
+          ),
+        { timeout: 20000 }
+      )
+      .toBe(expectedUserIds.length + 1)
+    console.log('[E2E] R-05 list refetched: marker + head present, items=26')
 
     const snap2: any = await page.evaluate(
       async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
@@ -1244,12 +1435,5 @@ test.describe('windowed reads: latest and around', () => {
       expect(seededNums[i]).toBeGreaterThan(seededNums[i - 1])
     }
     console.log(`[E2E] R-05 post-send snapshot oracle count=${sval2.snapshot.returnedCount}`)
-
-    // 7) Close via visible drawer's own close button; drawer hidden, no global cleanup.
-    const drawerCloseButton = drawer.locator('.ant-drawer-close')
-    await expect(drawerCloseButton).toBeVisible({ timeout: 10000 })
-    await drawerCloseButton.click()
-    await expect(page.locator('.ant-drawer.ant-drawer-open')).toHaveCount(0, { timeout: 10000 })
-    console.log('[E2E] R-05 drawer closed via close button')
   })
 })

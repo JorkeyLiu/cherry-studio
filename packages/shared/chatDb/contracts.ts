@@ -21,6 +21,7 @@ import type {
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
+  CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
   DeleteMessageRequest,
@@ -31,6 +32,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -41,6 +43,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  ImportTopicDataRequest,
   InsertMessageGroupIntent,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
@@ -398,8 +401,103 @@ function validateAppendMessageResult(result: unknown): void {
   }
 }
 
+/**
+ * Keys allowed on the conditional usage source.
+ */
+const UPDATE_MESSAGE_USAGE_SOURCE_KEYS = new Set(['textContents', 'fileIds'])
+
+/**
+ * Rejection codes a conditional usage write may report.
+ */
+const UPDATE_MESSAGE_USAGE_REJECTIONS = new Set([
+  'target-missing',
+  'not-user-message',
+  'usage-present',
+  'source-changed'
+])
+
+/**
+ * Validate the optional conditional usage mode of `chatdb:update-message`.
+ *
+ * Absent → nothing to check (ordinary unconditional patch, unchanged). Present →
+ * the condition must be exactly `{textContents, fileIds}` string arrays AND the
+ * patch must contain exactly one key, `usage`: the conditional mode exists only
+ * to land the optional prompt-token estimate, so any other patch shape is
+ * rejected rather than silently extended into a general CAS protocol.
+ */
+function validateUpdateMessageUsageCondition(req: UpdateMessageRequest): void {
+  const condition = req.usageCondition
+  if (condition === undefined) return
+  if (condition === null || typeof condition !== 'object' || Array.isArray(condition)) {
+    throw new ValidationError('request.usageCondition', '[chatdb:update-message] Expected an object')
+  }
+  const source = condition as unknown as Record<string, unknown>
+  for (const key of Object.keys(source)) {
+    if (!UPDATE_MESSAGE_USAGE_SOURCE_KEYS.has(key)) {
+      throw new ValidationError(
+        `request.usageCondition.${key}`,
+        `[chatdb:update-message] Unknown condition key: "${key}"`
+      )
+    }
+  }
+  // Non-empty strings only: both sides omit empty text blocks (they estimate to
+  // zero tokens), so an empty entry can never carry a meaningful difference.
+  validateStringArray(source.textContents, 'request.usageCondition.textContents')
+  validateStringArray(source.fileIds, 'request.usageCondition.fileIds')
+  const patchKeys = Object.keys(req.updates)
+  if (patchKeys.length !== 1 || patchKeys[0] !== 'usage') {
+    throw new ValidationError(
+      'request.updates',
+      '[chatdb:update-message] Conditional usage mode accepts exactly one "usage" update'
+    )
+  }
+  validateJsonObject(req.updates.usage, 'request.updates.usage')
+}
+
+/**
+ * Result validator for `chatdb:update-message`.
+ *
+ * `null` is the ordinary unconditional patch result (unchanged). A conditional
+ * usage write returns exactly one `{applied, rejection?}` outcome: applied →
+ * boolean true with no rejection; rejected → boolean false plus a known rejection
+ * code.
+ */
+function updateMessageResult(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true || obj.value === null) return
+    const value = obj.value
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError(`result.value`, `[${channel}] Expected null or a usage outcome object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Usage outcome must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (key !== 'applied' && key !== 'rejection') {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in usage outcome: "${key}"`)
+      }
+    }
+    if (typeof v.applied !== 'boolean') {
+      throw new ValidationError('result.value.applied', `[${channel}] Expected a boolean "applied"`)
+    }
+    if (v.applied === true) {
+      if (v.rejection !== undefined) {
+        throw new ValidationError('result.value.rejection', `[${channel}] Rejection must be absent when applied`)
+      }
+      return
+    }
+    if (typeof v.rejection !== 'string' || !UPDATE_MESSAGE_USAGE_REJECTIONS.has(v.rejection)) {
+      throw new ValidationError('result.value.rejection', `[${channel}] Expected a known rejection code`)
+    }
+  }
+}
+
 const updateMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'branchId', 'messageId', 'updates', 'resendAttemptId'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageId', 'updates', 'resendAttemptId', 'usageCondition'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageContract.allowedKeys)
     const req = value as UpdateMessageRequest
@@ -410,8 +508,9 @@ const updateMessageContract: ChatDbContract = {
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
     validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'branchId', 'sortOrder']), 'request.updates')
+    validateUpdateMessageUsageCondition(req)
   },
-  validateResult: voidResult('chatdb:update-message')
+  validateResult: updateMessageResult('chatdb:update-message')
 }
 
 /**
@@ -705,12 +804,14 @@ function validateStreamWriteDiagnostics(diagnostics: unknown, at = 'request.diag
 }
 
 const updateBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks', 'diagnostics', 'resendAttemptId'),
+  allowedKeys: keySet('blocks', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, updateBlocksContract.allowedKeys)
     const req = value as UpdateBlocksRequest
     validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId, reject reparenting
@@ -723,13 +824,15 @@ const updateBlocksContract: ChatDbContract = {
 }
 
 const updateSingleBlockContract: ChatDbContract = {
-  allowedKeys: keySet('blockId', 'updates', 'diagnostics', 'resendAttemptId'),
+  allowedKeys: keySet('blockId', 'updates', 'diagnostics', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, updateSingleBlockContract.allowedKeys)
     const req = value as UpdateSingleBlockRequest
     validateNonEmptyString(req.blockId, 'request.blockId')
     validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // updates is a partial patch, not a full block — no messageId required
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
@@ -739,11 +842,13 @@ const updateSingleBlockContract: ChatDbContract = {
 }
 
 const bulkAddBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks', 'resendAttemptId'),
+  allowedKeys: keySet('blocks', 'resendAttemptId', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, bulkAddBlocksContract.allowedKeys)
     const req = value as BulkAddBlocksRequest
     validateResendAttemptId(req.resendAttemptId)
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId
@@ -756,11 +861,13 @@ const bulkAddBlocksContract: ChatDbContract = {
 }
 
 const deleteBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blockIds'),
+  allowedKeys: keySet('blockIds', 'topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, deleteBlocksContract.allowedKeys)
     const req = value as DeleteBlocksRequest
     validateStringArray(req.blockIds, 'request.blockIds')
+    if (req.topicId !== undefined) validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult: fileCleanupResultValidator('chatdb:delete-blocks')
 }
@@ -1183,7 +1290,15 @@ const listBlocksByFileContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const updateTopicMetadataContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'name', 'pinned', 'prompt', 'isNameManuallyEdited'),
+  allowedKeys: keySet(
+    'topicId',
+    'name',
+    'pinned',
+    'prompt',
+    'isNameManuallyEdited',
+    'expectedName',
+    'expectedIsNameManuallyEdited'
+  ),
   validate(value: unknown): void {
     validateRequest(value, updateTopicMetadataContract.allowedKeys)
     const req = value as UpdateTopicMetadataRequest
@@ -1214,6 +1329,20 @@ const updateTopicMetadataContract: ChatDbContract = {
       throw new ValidationError(
         'request.isNameManuallyEdited',
         `Expected boolean|null, got ${typeof req.isNameManuallyEdited}`
+      )
+    }
+    // Optional atomic preimage guards for automatic naming (absent = no guard).
+    if (req.expectedName !== undefined && req.expectedName !== null && typeof req.expectedName !== 'string') {
+      throw new ValidationError('request.expectedName', `Expected string|null, got ${typeof req.expectedName}`)
+    }
+    if (
+      req.expectedIsNameManuallyEdited !== undefined &&
+      req.expectedIsNameManuallyEdited !== null &&
+      typeof req.expectedIsNameManuallyEdited !== 'boolean'
+    ) {
+      throw new ValidationError(
+        'request.expectedIsNameManuallyEdited',
+        `Expected boolean|null, got ${typeof req.expectedIsNameManuallyEdited}`
       )
     }
   },
@@ -1792,6 +1921,99 @@ const branchMessagesToTopicContract: ChatDbContract = {
 }
 
 /**
+ * Cross-topic history reference (Reference/Copy = Reference). Wires:
+ * { targetTopicId, sourceTopicId, sourceBranchId(null ok), anchorMessageId,
+ *   sourceName(null ok), createdAt(null ok), updatedAt(null ok) }.
+ */
+const TOPIC_REFERENCE_WIRE_KEYS = new Set([
+  'targetTopicId',
+  'sourceTopicId',
+  'sourceBranchId',
+  'anchorMessageId',
+  'sourceName',
+  'createdAt',
+  'updatedAt'
+])
+
+function validateTopicReferenceWire(value: unknown, path: string, channel: string): void {
+  validateJsonObject(value, path)
+  const v = value as Record<string, unknown>
+  for (const key of Object.keys(v)) {
+    if (!TOPIC_REFERENCE_WIRE_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in reference wire: "${key}"`)
+    }
+  }
+  validateNonEmptyString(v.targetTopicId, `${path}.targetTopicId`)
+  validateNonEmptyString(v.sourceTopicId, `${path}.sourceTopicId`)
+  if (v.sourceBranchId !== null) {
+    validateNonEmptyString(v.sourceBranchId, `${path}.sourceBranchId`)
+  }
+  validateNonEmptyString(v.anchorMessageId, `${path}.anchorMessageId`)
+  if (v.sourceName !== null) {
+    validateNonEmptyString(v.sourceName, `${path}.sourceName`)
+  }
+  if (v.createdAt !== null && v.createdAt !== undefined) {
+    validateNonEmptyString(v.createdAt, `${path}.createdAt`)
+  }
+  if (v.updatedAt !== null && v.updatedAt !== undefined) {
+    validateNonEmptyString(v.updatedAt, `${path}.updatedAt`)
+  }
+}
+
+const CREATE_REFERENCED_TOPIC_VALUE_KEYS = new Set(['topicId', 'reference', 'messages', 'blocks'])
+
+const createReferencedTopicContract: ChatDbContract = {
+  allowedKeys: keySet('sourceTopicId', 'branchId', 'targetTopicId', 'anchorMessageId', 'assistantId', 'name'),
+  validate(value: unknown): void {
+    validateRequest(value, createReferencedTopicContract.allowedKeys)
+    const req = value as CreateReferencedTopicRequest
+    validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+    if (req.assistantId !== undefined) {
+      validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+    if (req.name !== undefined) {
+      validateNonEmptyString(req.name, 'request.name')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:create-referenced-topic', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:create-referenced-topic] Expected object with topicId, reference, messages, blocks'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:create-referenced-topic] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!CREATE_REFERENCED_TOPIC_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:create-referenced-topic] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateTopicReferenceWire(v.reference, 'result.value.reference', 'chatdb:create-referenced-topic')
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+    }
+  }
+}
+
+/**
  * Topic-internal branch wire validators (migration 016 model).
  *
  * A branch wire is a plain object with exactly the TopicBranchWire keys:
@@ -2007,11 +2229,80 @@ const MOVE_SELECTED_TURNS_VALUE_KEYS = new Set([
   'parentMessages',
   'parentBlocks',
   'messages',
-  'blocks'
+  'blocks',
+  'resolvedContextAnchorGroupKey',
+  'sourceContextAnchorTransfer'
 ])
+const MOVE_CONTEXT_ANCHOR_INHERITANCE_KEYS = new Set(['sourceAnchorGroupKey', 'contextCount'])
+const MOVE_SOURCE_ANCHOR_TRANSFER_KEYS = new Set(['fromGroupKey', 'toGroupKey'])
+
+/**
+ * Optional renderer-owned context-window inheritance input for a move.
+ *
+ * Strict shape: a plain object with only the two known keys; the anchor key is
+ * `null`/absent or a non-empty string, the window size is `null`/absent or a
+ * finite number. Values are facts from the renderer's own assistant settings —
+ * Main reads no assistant configuration.
+ */
+function validateMoveContextAnchorInheritance(value: unknown): void {
+  if (value === undefined) return
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance',
+      '[chatdb:move-selected-turns] contextAnchorInheritance must be a plain object'
+    )
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance',
+      '[chatdb:move-selected-turns] contextAnchorInheritance must be a plain object'
+    )
+  }
+  const rec = value as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (!MOVE_CONTEXT_ANCHOR_INHERITANCE_KEYS.has(key)) {
+      throw new ValidationError(
+        `request.contextAnchorInheritance.${key}`,
+        `[chatdb:move-selected-turns] Unknown key in contextAnchorInheritance: "${key}"`
+      )
+    }
+  }
+  const anchorKey = rec.sourceAnchorGroupKey
+  if (anchorKey !== undefined && anchorKey !== null && typeof anchorKey !== 'string') {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.sourceAnchorGroupKey',
+      '[chatdb:move-selected-turns] Expected string sourceAnchorGroupKey or null'
+    )
+  }
+  if (typeof anchorKey === 'string' && anchorKey.length === 0) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.sourceAnchorGroupKey',
+      '[chatdb:move-selected-turns] sourceAnchorGroupKey must be non-empty or null'
+    )
+  }
+  const contextCount = rec.contextCount
+  if (
+    contextCount !== undefined &&
+    contextCount !== null &&
+    (typeof contextCount !== 'number' || !Number.isFinite(contextCount))
+  ) {
+    throw new ValidationError(
+      'request.contextAnchorInheritance.contextCount',
+      '[chatdb:move-selected-turns] Expected finite number contextCount or null'
+    )
+  }
+}
 
 const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'sourceBranchId', 'selectedGroupIds', 'expectedSelectedMessageIds', 'name'),
+  allowedKeys: keySet(
+    'topicId',
+    'sourceBranchId',
+    'selectedGroupIds',
+    'expectedSelectedMessageIds',
+    'name',
+    'contextAnchorInheritance'
+  ),
   validate(value: unknown): void {
     validateRequest(value, moveSelectedTurnsToNewBranchContract.allowedKeys)
     const req = value as MoveSelectedTurnsToNewBranchRequest
@@ -2037,6 +2328,7 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
     if (req.name !== undefined) {
       validateNonEmptyString(req.name, 'request.name')
     }
+    validateMoveContextAnchorInheritance(req.contextAnchorInheritance)
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:move-selected-turns-to-new-branch', { skipValueValidation: true })
@@ -2072,6 +2364,62 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
       validateJsonObjectArrayBlock(v.parentBlocks, 'result.value.parentBlocks', BLOCK_JSON_PROFILE)
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      // Optional, explicitly nullable: absent means Main produced no fact.
+      const anchor = v.resolvedContextAnchorGroupKey
+      if (anchor !== undefined) {
+        if (anchor !== null && typeof anchor !== 'string') {
+          throw new ValidationError(
+            'result.value.resolvedContextAnchorGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] Expected string resolvedContextAnchorGroupKey or null'
+          )
+        }
+        if (typeof anchor === 'string' && anchor.length === 0) {
+          throw new ValidationError(
+            'result.value.resolvedContextAnchorGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] resolvedContextAnchorGroupKey must be non-empty or null'
+          )
+        }
+      }
+      // Optional source-anchor transfer fact (absent = nothing moved).
+      const transfer = v.sourceContextAnchorTransfer
+      if (transfer !== undefined) {
+        if (transfer === null || typeof transfer !== 'object' || Array.isArray(transfer)) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer',
+            '[chatdb:move-selected-turns-to-new-branch] sourceContextAnchorTransfer must be a plain object'
+          )
+        }
+        const transferProto = Object.getPrototypeOf(transfer)
+        if (transferProto !== Object.prototype && transferProto !== null) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer',
+            '[chatdb:move-selected-turns-to-new-branch] sourceContextAnchorTransfer must be a plain object'
+          )
+        }
+        const rec = transfer as Record<string, unknown>
+        for (const key of Object.keys(rec)) {
+          if (!MOVE_SOURCE_ANCHOR_TRANSFER_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.sourceContextAnchorTransfer.${key}`,
+              `[chatdb:move-selected-turns-to-new-branch] Unknown key in sourceContextAnchorTransfer: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(rec.fromGroupKey, 'result.value.sourceContextAnchorTransfer.fromGroupKey')
+        const to = rec.toGroupKey
+        if (to !== null && typeof to !== 'string') {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer.toGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] Expected string toGroupKey or null'
+          )
+        }
+        if (typeof to === 'string' && to.length === 0) {
+          throw new ValidationError(
+            'result.value.sourceContextAnchorTransfer.toGroupKey',
+            '[chatdb:move-selected-turns-to-new-branch] toGroupKey must be non-empty or null'
+          )
+        }
+      }
     }
   }
 }
@@ -2878,7 +3226,7 @@ function validateBoundedCount(value: unknown, path: string): void {
   }
 }
 
-const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds'])
+const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds', 'reference'])
 const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
   'kind',
   'completeness',
@@ -3115,6 +3463,50 @@ const fetchMessagesWindowContract: ChatDbContract = {
             `result.value.mutableMessageIds[${i}]`,
             '[chatdb:fetch-messages-window] mutableMessageIds must be subset of returned messages'
           )
+        }
+      }
+      // Optional history-reference metadata (absent/null for ordinary topics).
+      if (v.reference !== undefined && v.reference !== null) {
+        const ref = v.reference
+        if (typeof ref !== 'object' || Array.isArray(ref)) {
+          throw new ValidationError(
+            'result.value.reference',
+            '[chatdb:fetch-messages-window] Expected reference object or null'
+          )
+        }
+        const r = ref as Record<string, unknown>
+        const REF_KEYS = new Set([
+          'sourceTopicId',
+          'sourceBranchId',
+          'anchorMessageId',
+          'sourceName',
+          'status',
+          'boundaryMessageId'
+        ])
+        for (const key of Object.keys(r)) {
+          if (!REF_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.reference.${key}`,
+              `[chatdb:fetch-messages-window] Unknown key in reference: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(r.sourceTopicId, 'result.value.reference.sourceTopicId')
+        if (r.sourceBranchId !== null) {
+          validateNonEmptyString(r.sourceBranchId, 'result.value.reference.sourceBranchId')
+        }
+        validateNonEmptyString(r.anchorMessageId, 'result.value.reference.anchorMessageId')
+        if (r.sourceName !== null) {
+          validateNonEmptyString(r.sourceName, 'result.value.reference.sourceName')
+        }
+        if (r.status !== 'available' && r.status !== 'missing') {
+          throw new ValidationError(
+            'result.value.reference.status',
+            '[chatdb:fetch-messages-window] Expected reference status "available" or "missing"'
+          )
+        }
+        if (r.boundaryMessageId !== null) {
+          validateNonEmptyString(r.boundaryMessageId, 'result.value.reference.boundaryMessageId')
         }
       }
     }
@@ -4542,7 +4934,139 @@ const insertMessageGroupsContract: ChatDbContract = {
       }
     }
   },
-  validateResult: fileCleanupResultValidator('chatdb:insert-message-groups')
+  validateResult: validateInsertMessageGroupsResult
+}
+
+const INSERT_MESSAGE_GROUPS_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'topicId',
+  'branchId',
+  'insertedMessages',
+  'insertedBlocks',
+  'insertedMessageIds',
+  'mutableMessageIds',
+  'groups'
+])
+
+const INSERT_MESSAGE_GROUPS_GROUP_KEYS = new Set(['insertedMessageIds', 'beforeMessageId', 'nextMessageId'])
+
+/**
+ * Main-issued batch insertion acknowledgment result validation
+ * (`chatdb:insert-message-groups`).
+ *
+ * The addressed route echoes normalized (null = main route); the flat delta
+ * is limited to actual new owned rows in flat request-group order with the
+ * capability delta a subset of inserted; per-group runs preserve transaction
+ * ordering with stable neighbors (InsertAfter convention, never numeric
+ * order). Fail-closed on inconsistent IDs/rows/routes/mutable extras.
+ */
+function validateInsertMessageGroupsResult(result: unknown): void {
+  const channel = 'chatdb:insert-message-groups'
+  validateResultEnvelope(result, channel)
+  const obj = result as Record<string, unknown>
+  if (obj.ok === true) {
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', `[${channel}] Expected InsertMessageGroupsResponse object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!INSERT_MESSAGE_GROUPS_VALUE_KEYS.has(key)) {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+      }
+    }
+    validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+    validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+    const counts = v.remainingReferenceCounts as Record<string, unknown>
+    for (const key of Object.keys(counts)) {
+      if (key.length === 0) {
+        throw new ValidationError(
+          'result.value.remainingReferenceCounts',
+          `[${channel}] remainingReferenceCounts key must be a non-empty string`
+        )
+      }
+      validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (v.branchId !== null) {
+      validateNonEmptyString(v.branchId, 'result.value.branchId')
+    }
+    validateJsonObjectArray(v.insertedMessages, 'result.value.insertedMessages')
+    validateJsonObjectArrayBlock(v.insertedBlocks, 'result.value.insertedBlocks', BLOCK_JSON_PROFILE)
+    validateStringArray(v.insertedMessageIds, 'result.value.insertedMessageIds')
+    validateStringArray(v.mutableMessageIds, 'result.value.mutableMessageIds')
+    const inserted = v.insertedMessageIds as string[]
+    const wireIds = (v.insertedMessages as Array<Record<string, unknown>>).map((m) => m.id as string)
+    if (inserted.length !== wireIds.length || !inserted.every((id, i) => id === wireIds[i])) {
+      throw new ValidationError(
+        'result.value.insertedMessageIds',
+        `[${channel}] insertedMessageIds must match insertedMessages ids in order`
+      )
+    }
+    if (new Set(inserted).size !== inserted.length) {
+      throw new ValidationError('result.value.insertedMessageIds', `[${channel}] Duplicate insertedMessageId`)
+    }
+    if (inserted.length === 0) {
+      throw new ValidationError('result.value.insertedMessageIds', `[${channel}] insert must carry inserted rows`)
+    }
+    const mutable = v.mutableMessageIds as string[]
+    for (const id of mutable) {
+      if (!inserted.includes(id)) {
+        throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be an inserted id`)
+      }
+    }
+    if (!Array.isArray(v.groups) || (v.groups as unknown[]).length === 0) {
+      throw new ValidationError('result.value.groups', `[${channel}] groups must be a non-empty array`)
+    }
+    const groups = v.groups as Array<Record<string, unknown>>
+    const groupedIds: string[] = []
+    for (let gi = 0; gi < groups.length; gi++) {
+      const gpath = `result.value.groups[${gi}]`
+      const group = groups[gi]
+      if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+        throw new ValidationError(gpath, `[${channel}] Expected group result object`)
+      }
+      for (const key of Object.keys(group)) {
+        if (!INSERT_MESSAGE_GROUPS_GROUP_KEYS.has(key)) {
+          throw new ValidationError(`${gpath}.${key}`, `[${channel}] Unknown key in group result: "${key}"`)
+        }
+      }
+      validateStringArray(group.insertedMessageIds, `${gpath}.insertedMessageIds`)
+      const gids = group.insertedMessageIds as string[]
+      if (gids.length === 0) {
+        throw new ValidationError(`${gpath}.insertedMessageIds`, `[${channel}] group run must not be empty`)
+      }
+      if (new Set(gids).size !== gids.length) {
+        throw new ValidationError(`${gpath}.insertedMessageIds`, `[${channel}] Duplicate insertedMessageId in group`)
+      }
+      if (group.beforeMessageId !== null) {
+        validateNonEmptyString(group.beforeMessageId, `${gpath}.beforeMessageId`)
+      }
+      if (group.nextMessageId !== null) {
+        validateNonEmptyString(group.nextMessageId, `${gpath}.nextMessageId`)
+      }
+      for (const id of gids) {
+        if (groupedIds.includes(id)) {
+          throw new ValidationError(
+            `${gpath}.insertedMessageIds`,
+            `[${channel}] Duplicate insertedMessageId across groups`
+          )
+        }
+        groupedIds.push(id)
+      }
+    }
+    if (groupedIds.length !== inserted.length || !groupedIds.every((id, i) => id === inserted[i])) {
+      throw new ValidationError(
+        'result.value.groups',
+        `[${channel}] groups insertedMessageIds concatenated must equal flat insertedMessageIds in order`
+      )
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4671,6 +5195,203 @@ const insertMessagesAfterAnchorContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Standalone topic JSON data exchange (whole-logical-topic export/import)
+// ---------------------------------------------------------------------------
+
+const TOPIC_DATA_FORMAT_MARKER = 'cherry-chat-topic-data'
+const TOPIC_DATA_VERSION = 1
+const TOPIC_DATA_PAYLOAD_KEYS = new Set([
+  'format',
+  'version',
+  'exportedAt',
+  'topic',
+  'messages',
+  'blocks',
+  'branches',
+  'segments',
+  'fileReferences',
+  'historySnapshot'
+])
+
+/**
+ * Structural check of a topic-data payload at the IPC contract boundary.
+ * Deep semantic validation (unique IDs, referential links, parent cycles,
+ * owner relationships) runs in Main before any write; this only proves the
+ * envelope carries the versioned format with array/object slots.
+ */
+function validateTopicDataPayloadShape(value: unknown, path: string, channel: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected topic-data payload object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] Topic-data payload must be a plain object`)
+  }
+  const payload = value as Record<string, unknown>
+  for (const key of Object.keys(payload)) {
+    if (!TOPIC_DATA_PAYLOAD_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in topic-data payload: "${key}"`)
+    }
+  }
+  if (payload.format !== TOPIC_DATA_FORMAT_MARKER) {
+    throw new ValidationError(`${path}.format`, `[${channel}] Expected format "${TOPIC_DATA_FORMAT_MARKER}"`)
+  }
+  if (payload.version !== TOPIC_DATA_VERSION) {
+    throw new ValidationError(
+      `${path}.version`,
+      `[${channel}] Unsupported topic-data version (expected ${TOPIC_DATA_VERSION})`
+    )
+  }
+  validateJsonObject(payload.topic, `${path}.topic`)
+  validateJsonObjectArray(payload.messages, `${path}.messages`)
+  // Blocks carry the same large-content budgets as every other block wire
+  // (LOCK-LB-1/4/5): a persisted block above the generic 1 MiB string cap is
+  // valid storage and must export/import, so the block profile applies here.
+  // Messages stay on the generic caps, matching fetch-messages (LOCK-LB-5).
+  validateJsonObjectArrayBlock(payload.blocks, `${path}.blocks`, BLOCK_JSON_PROFILE)
+  validateJsonObjectArray(payload.branches, `${path}.branches`)
+  validateJsonObjectArray(payload.segments, `${path}.segments`)
+  validateJsonObjectArray(payload.fileReferences, `${path}.fileReferences`)
+  // Optional provenance of the embedded referenced-history prefix (present
+  // only for a reference target). Absent = ordinary topic / legacy export.
+  // Records only the snapshot posture — never source ids/names/paths.
+  if (payload.historySnapshot !== undefined) {
+    validateTopicDataHistorySnapshotShape(payload.historySnapshot, `${path}.historySnapshot`, channel)
+  }
+}
+
+/**
+ * Strict shape check of the optional topic-data history-snapshot provenance.
+ * Exactly one key (`status`), one of the two defined postures; no source
+ * identity of any kind is representable.
+ */
+function validateTopicDataHistorySnapshotShape(value: unknown, path: string, channel: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected historySnapshot object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] historySnapshot must be a plain object`)
+  }
+  const snapshot = value as Record<string, unknown>
+  for (const key of Object.keys(snapshot)) {
+    if (key !== 'status') {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in historySnapshot: "${key}"`)
+    }
+  }
+  if (snapshot.status !== 'materialized' && snapshot.status !== 'missing') {
+    throw new ValidationError(
+      `${path}.status`,
+      `[${channel}] historySnapshot.status must be "materialized" or "missing"`
+    )
+  }
+}
+
+const exportTopicDataContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, exportTopicDataContract.allowedKeys)
+    const req = value as ExportTopicDataRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:export-topic-data', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:export-topic-data] Expected object with payload')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:export-topic-data] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (key !== 'payload') {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:export-topic-data] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateTopicDataPayloadShape(v.payload, 'result.value.payload', 'chatdb:export-topic-data')
+    }
+  }
+}
+
+const IMPORT_TOPIC_DATA_VALUE_KEYS = new Set([
+  'topic',
+  'messageCount',
+  'blockCount',
+  'branchCount',
+  'segmentCount',
+  'fileReferenceCount'
+])
+
+function validateImportCount(value: unknown, path: string, channel: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new ValidationError(path, `[${channel}] Expected non-negative integer count`)
+  }
+}
+
+const importTopicDataContract: ChatDbContract = {
+  allowedKeys: keySet('payload', 'assistantId'),
+  validate(value: unknown): void {
+    // Narrow request envelope check (no generic full-walk): blocks carry the
+    // block-profile budgets, so a generic `validateRequest` walk would reject
+    // a valid >1 MiB block before the shape check below. The shape validator
+    // enforces JSON safety per slot (generic for topic/messages/branches/
+    // segments/fileRefs, block profile for blocks), so no non-JSON value
+    // escapes validation.
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('request', 'Request must be a plain object')
+    }
+    const requestProto = Object.getPrototypeOf(value)
+    if (requestProto !== Object.prototype && requestProto !== null) {
+      throw new ValidationError('request', 'Request must be a plain object')
+    }
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (!importTopicDataContract.allowedKeys.has(key)) {
+        throw new ValidationError(`request.${key}`, `Unknown property '${key}'`)
+      }
+    }
+    const req = value as ImportTopicDataRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    validateTopicDataPayloadShape(req.payload, 'request.payload', 'chatdb:import-topic-data')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:import-topic-data', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:import-topic-data] Expected object with topic and counts')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:import-topic-data] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!IMPORT_TOPIC_DATA_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:import-topic-data] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObject(v.topic, 'result.value.topic')
+      validateImportCount(v.messageCount, 'result.value.messageCount', 'chatdb:import-topic-data')
+      validateImportCount(v.blockCount, 'result.value.blockCount', 'chatdb:import-topic-data')
+      validateImportCount(v.branchCount, 'result.value.branchCount', 'chatdb:import-topic-data')
+      validateImportCount(v.segmentCount, 'result.value.segmentCount', 'chatdb:import-topic-data')
+      validateImportCount(v.fileReferenceCount, 'result.value.fileReferenceCount', 'chatdb:import-topic-data')
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -4732,6 +5453,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:rename-branch': renameBranchContract,
   'chatdb:delete-branch': deleteBranchContract,
   'chatdb:move-selected-turns-to-new-branch': moveSelectedTurnsToNewBranchContract,
+  // Cross-topic history references (local-only; Reference/Copy = Reference)
+  'chatdb:create-referenced-topic': createReferencedTopicContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
@@ -4759,7 +5482,10 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-topic-activity': fetchTopicActivityContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
-  'chatdb:insert-message-groups': insertMessageGroupsContract
+  'chatdb:insert-message-groups': insertMessageGroupsContract,
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  'chatdb:export-topic-data': exportTopicDataContract,
+  'chatdb:import-topic-data': importTopicDataContract
 })
 
 /**

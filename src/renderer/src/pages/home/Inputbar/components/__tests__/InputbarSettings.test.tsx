@@ -16,17 +16,21 @@ const mocks = vi.hoisted(() => {
     pasteLongTextAsFile: false,
     pasteLongTextThreshold: 1500,
     renderInputMessageAsMarkdown: false,
+    includeHistoryMediaContext: true,
     sendMessageShortcut: 'Enter',
     setSendMessageShortcut: vi.fn()
   }
-  const useSettings = vi.fn(() => ({ ...defaultSettings }))
+  // Loosely typed so a test can model an older persisted settings object that
+  // predates a key.
+  const useSettings = vi.fn((): Record<string, unknown> => ({ ...defaultSettings }))
   const t = vi.fn((key: string) => key)
   return { dispatch, useSettings, t, defaultSettings }
 })
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: mocks.t })
-}))
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return { ...actual, useTranslation: () => ({ t: mocks.t }) }
+})
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => mocks.dispatch
@@ -44,20 +48,30 @@ vi.mock('@renderer/pages/settings', () => ({
   )
 }))
 
-vi.mock('antd', () => ({
-  Popover: ({ children, content }: any) => (
-    <div data-testid="popover-trigger">
-      <div data-testid="popover-content">{content}</div>
-      {children}
-    </div>
-  ),
-  Switch: ({ checked, onChange }: any) => (
-    <button type="button" data-testid="switch" data-checked={String(checked)} onClick={() => onChange?.(!checked)} />
-  )
-}))
+vi.mock('antd', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return {
+    ...actual,
+    Popover: ({ children, content }: any) => (
+      <div data-testid="popover-trigger">
+        <div data-testid="popover-content">{content}</div>
+        {children}
+      </div>
+    ),
+    Switch: ({ checked, onChange }: any) => (
+      <button type="button" data-testid="switch" data-checked={String(checked)} onClick={() => onChange?.(!checked)} />
+    ),
+    Tooltip: ({ children, title }: any) => (
+      <div data-testid="settings-tooltip" data-title={typeof title === 'string' ? title : ''}>
+        {children}
+      </div>
+    )
+  }
+})
 
 vi.mock('lucide-react', () => ({
-  Settings2: () => <span data-testid="settings-icon" />
+  Settings2: () => <span data-testid="settings-icon" />,
+  HelpCircle: () => <span data-testid="help-icon" />
 }))
 
 vi.mock('@renderer/components/Selector', () => ({
@@ -83,6 +97,7 @@ describe('InputbarSettings', () => {
     expect(titles).toEqual([
       'settings.messages.input.paste_long_text_as_file',
       'settings.messages.markdown_rendering_input_message',
+      'settings.messages.input.include_history_media_context',
       'settings.messages.input.send_shortcuts'
     ])
     expect(screen.queryByTestId('editable-number')).not.toBeInTheDocument()
@@ -97,6 +112,7 @@ describe('InputbarSettings', () => {
       'settings.messages.input.paste_long_text_as_file',
       'settings.messages.input.paste_long_text_threshold',
       'settings.messages.markdown_rendering_input_message',
+      'settings.messages.input.include_history_media_context',
       'settings.messages.input.send_shortcuts'
     ])
     expect(screen.getByTestId('editable-number')).toBeInTheDocument()
@@ -114,5 +130,52 @@ describe('InputbarSettings', () => {
 
     fireEvent.click(screen.getAllByTestId('switch')[1])
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setRenderInputMessageAsMarkdown', payload: true })
+  })
+
+  it('toggles the media-context switch and dispatches setIncludeHistoryMediaContext', () => {
+    render(<InputbarSettings />)
+
+    // Switch order: paste-long-text, markdown, media context.
+    fireEvent.click(screen.getAllByTestId('switch')[2])
+    expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setIncludeHistoryMediaContext', payload: false })
+  })
+
+  it('treats a missing persisted media-context key as ON', () => {
+    // Model an older persisted settings object that predates the new key.
+    const withoutKey: Record<string, unknown> = { ...mocks.defaultSettings }
+    delete withoutKey.includeHistoryMediaContext
+    mocks.useSettings.mockReturnValue(withoutKey)
+    render(<InputbarSettings />)
+
+    expect(screen.getAllByTestId('switch')[2]).toHaveAttribute('data-checked', 'true')
+  })
+
+  it('uses the shared composer button contract (28px geometry, same hover as other tools)', () => {
+    render(<InputbarSettings />)
+
+    const trigger = screen.getByTestId('inputbar-settings-button')
+    expect(trigger.tagName).toBe('BUTTON')
+    expect(trigger).toHaveAttribute('data-tone', 'default')
+    expect(trigger).toHaveAttribute('aria-label', 'chat.input.input_settings')
+  })
+
+  it('shows the input-settings tooltip on hover like the other tool buttons', () => {
+    render(<InputbarSettings />)
+
+    const titles = screen.getAllByTestId('settings-tooltip').map((el) => el.getAttribute('data-title'))
+    expect(titles).toContain('chat.input.input_settings')
+  })
+
+  it('explains the media-context switch scope with a visible help icon (history only, current turn unaffected)', () => {
+    render(<InputbarSettings />)
+
+    // The explanation must be reachable from a visible affordance, not from the
+    // row label alone.
+    const helpIcon = screen.getByTestId('help-icon')
+    expect(helpIcon).toBeInTheDocument()
+
+    const tooltip = helpIcon.closest('[data-testid="settings-tooltip"]')
+    expect(tooltip).not.toBeNull()
+    expect(tooltip).toHaveAttribute('data-title', 'settings.messages.input.include_history_media_context_tooltip')
   })
 })

@@ -114,8 +114,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     // Verify tables
     const tables = getTableNames(sqlite)
     expect(tables).toContain('message_blocks_normalized')
@@ -204,8 +203,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     // Insert test data
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
@@ -231,8 +229,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -256,8 +253,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -283,8 +279,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -312,8 +307,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -343,8 +337,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -372,8 +365,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -402,8 +394,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -428,8 +419,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -457,15 +447,14 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied1 = runMigrations(db, sqlite)
-    expect(applied1).toBe(21)
-
+    expect(applied1).toBe(22)
     // Run again — should apply 0 new migrations
     const applied2 = runMigrations(db, sqlite)
     expect(applied2).toBe(0)
 
     // Verify migration state
     const states = sqlite.prepare('SELECT * FROM migration_state ORDER BY key').all() as any[]
-    expect(states.length).toBe(21)
+    expect(states.length).toBe(22)
     expect(states.map((s) => s.key)).toEqual([
       '001_initial_schema',
       '002_corrective_schema',
@@ -485,6 +474,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
       '016_topic_branches',
       '017_cleanup_route_message_overlay',
       '018_branch_sync_frames',
+      '018_topic_references',
       '019_assistant_config_mirror',
       '020_attachment_sync',
       '021_attachment_capture_intent'
@@ -500,8 +490,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -590,8 +579,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -613,8 +601,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -637,8 +624,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`
@@ -671,8 +657,7 @@ describe('Migration 003 — FTS5 Normalized Search Projection', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(21)
-
+    expect(applied).toBe(22)
     sqlite.exec(`INSERT INTO topics (id, name, created_at) VALUES ('t1', 'Test', '2026-01-01T00:00:00.000Z')`)
     sqlite.exec(
       `INSERT INTO messages (id, topic_id, role, content, created_at, sort_order) VALUES ('m1', 't1', 'user', 'Hello', '2026-01-01T00:01:00.000Z', 0)`

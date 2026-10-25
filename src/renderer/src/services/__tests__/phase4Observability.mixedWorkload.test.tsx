@@ -375,23 +375,24 @@ describe('Phase 4 mixed-workload observability (B-06/B-07/B-08/B-09)', () => {
     expect(getFreshValidatedClosure(active, 'u-wrong', fpActive)).toBeNull()
     // miss: missing topic
     expect(getFreshValidatedClosure('t-missing', 'u1', fpActive)).toBeNull()
-    // miss: fingerprint mismatch (same-length visible mutation)
+    // viewport independence: viewport shape change retains the valid closure
+    // (genuine mutations invalidate via generation, covered elsewhere).
     const fpWrong = computeClosureFingerprint([
       { id: 'u1', role: 'user', topicId: active, status: 'pending', blocks: [] }
     ] as any)
     expect(fpWrong).not.toBe(fpActive)
-    expect(getFreshValidatedClosure(active, 'u1', fpWrong)).toBeNull()
+    expect(getFreshValidatedClosure(active, 'u1', fpWrong)).not.toBeNull()
 
     diag = getContextClosureDiagnostics()
-    expect(diag.hitCount).toBe(1)
-    expect(diag.missCount).toBe(3)
+    expect(diag.hitCount).toBe(2)
+    expect(diag.missCount).toBe(2)
     expect(diag.totalAccessCount).toBe(4)
     expect(diag.retainedTopicCount).toBeLessThanOrEqual(1)
 
     // coherent snapshot reflects hit/miss
     const snap = getPhase4Snapshot(null)
-    expect(snap.b09.hitCount).toBe(1)
-    expect(snap.b09.missCount).toBe(3)
+    expect(snap.b09.hitCount).toBe(2)
+    expect(snap.b09.missCount).toBe(2)
     expect(snap.b09.retainedTopicCount).toBeLessThanOrEqual(1)
 
     // reset diagnostics without clearing cache (preserves retention)

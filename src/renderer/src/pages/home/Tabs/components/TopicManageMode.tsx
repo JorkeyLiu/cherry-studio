@@ -5,9 +5,9 @@ import { softDeleteOrdinaryTopic } from '@renderer/services/db/topicTrashLifecyc
 import type { Assistant, Topic } from '@renderer/types'
 import { cn } from '@renderer/utils'
 import { Dropdown, Tooltip } from 'antd'
-import { CheckSquare, FolderOpen, Search, Square, Trash2, XIcon } from 'lucide-react'
-import type { FC, PropsWithChildren, Ref } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { CheckSquare, FolderOutput, Square, Trash2, XIcon } from 'lucide-react'
+import type { FC, PropsWithChildren } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 export interface TopicManageModeState {
@@ -93,15 +93,15 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
 }) => {
   const { t } = useTranslation()
   const logger = useMemo(() => loggerService.withContext('TopicManageMode'), [])
-  const { isManageMode, selectedIds, searchText, exitManageMode, setSelectedIds, setSearchText } = manageState
-  const [isSearchMode, setIsSearchMode] = useState(false)
-  const searchInputRef = useRef<HTMLInputElement>(null)
+  const { isManageMode, selectedIds, searchText, exitManageMode, setSelectedIds } = manageState
 
-  // Topics that can be selected (non-pinned, and filtered when in search mode)
+  // Topics that can be selected: non-pinned topics, narrowed to the header
+  // search filter whenever a filter is active (single search UI lives in the
+  // Topics header; there is no bottom search control/state).
   const selectableTopics = useMemo(() => {
-    const baseTopics = isSearchMode ? filteredTopics : assistant.topics
+    const baseTopics = searchText.trim() ? filteredTopics : assistant.topics
     return (baseTopics ?? []).filter((topic) => !topic.pinned)
-  }, [assistant.topics, filteredTopics, isSearchMode])
+  }, [assistant.topics, filteredTopics, searchText])
 
   // Check if all selectable topics are selected
   const isAllSelected = useMemo(() => {
@@ -233,81 +233,9 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
     [selectedIds, assistant.topics, assistants, moveTopic, activeTopic.id, setActiveTopic, t, exitManageMode]
   )
 
-  // Enter search mode
-  const enterSearchMode = useCallback(() => {
-    setIsSearchMode(true)
-  }, [])
-
-  // Exit search mode
-  const exitSearchMode = useCallback(() => {
-    setIsSearchMode(false)
-    setSearchText('')
-  }, [setSearchText])
-
-  // Focus input when entering search mode
-  useEffect(() => {
-    if (isSearchMode && searchInputRef.current) {
-      searchInputRef.current.focus()
-    }
-  }, [isSearchMode])
-
-  // Reset search mode when exiting manage mode
-  useEffect(() => {
-    if (!isManageMode) {
-      setIsSearchMode(false)
-    }
-  }, [isManageMode])
-
-  // Handle search input keydown
-  const handleSearchKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        exitSearchMode()
-      }
-    },
-    [exitSearchMode]
-  )
-
   if (!isManageMode) return null
 
-  // Search mode UI
-  if (isSearchMode) {
-    return (
-      <ManagePanel>
-        <ManagePanelContent>
-          <LeftGroup>
-            <Tooltip title={isAllSelected ? t('chat.topics.manage.deselect_all') : t('common.select_all')}>
-              <ManageIconButton onClick={handleSelectAll}>
-                {isAllSelected ? <CheckSquare size={16} /> : <Square size={16} />}
-              </ManageIconButton>
-            </Tooltip>
-            {selectedIds.size > 0 && (
-              <Tooltip title={t('chat.topics.manage.clear_selection')}>
-                <SelectedBadge onClick={handleClearSelection}>{selectedIds.size}</SelectedBadge>
-              </Tooltip>
-            )}
-          </LeftGroup>
-          <SearchInputWrapper>
-            <SearchInput
-              ref={searchInputRef}
-              type="text"
-              placeholder={t('chat.topics.search.placeholder')}
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              onKeyDown={handleSearchKeyDown}
-            />
-          </SearchInputWrapper>
-          <Tooltip title={t('common.close')}>
-            <ManageIconButton onClick={exitSearchMode}>
-              <XIcon size={16} />
-            </ManageIconButton>
-          </Tooltip>
-        </ManagePanelContent>
-      </ManagePanel>
-    )
-  }
-
-  // Normal manage mode UI
+  // Manage mode toolbar (single search UI lives in the Topics header).
   return (
     <ManagePanel>
       <ManagePanelContent>
@@ -324,31 +252,27 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
           )}
         </LeftGroup>
         <RightGroup>
-          <Tooltip title={t('chat.topics.search.title')}>
-            <ManageIconButton onClick={enterSearchMode}>
-              <Search size={16} />
-            </ManageIconButton>
-          </Tooltip>
-          {otherAssistants.length > 0 && (
-            <Dropdown
-              menu={{
-                items: otherAssistants.map((a) => ({
-                  key: a.id,
-                  label: a.name,
-                  icon: <AssistantAvatar assistant={a} size={18} />,
-                  onClick: () => handleMoveSelected(a.id),
-                  disabled: selectedIds.size === 0
-                }))
-              }}
-              trigger={['click']}
-              disabled={selectedIds.size === 0}>
-              <Tooltip title={t('chat.topics.move_to')}>
-                <ManageIconButton disabled={selectedIds.size === 0}>
-                  <FolderOpen size={16} />
-                </ManageIconButton>
-              </Tooltip>
-            </Dropdown>
-          )}
+          <Dropdown
+            menu={{
+              items: otherAssistants.map((a) => ({
+                key: a.id,
+                label: a.name,
+                icon: <AssistantAvatar assistant={a} size={18} />,
+                onClick: () => handleMoveSelected(a.id),
+                disabled: selectedIds.size === 0
+              }))
+            }}
+            trigger={['click']}
+            disabled={selectedIds.size === 0 || otherAssistants.length === 0}>
+            <Tooltip title={t('chat.topics.move_to')}>
+              <ManageIconButton
+                data-testid="topic-batch-move-btn"
+                aria-label={t('chat.topics.move_to')}
+                disabled={selectedIds.size === 0 || otherAssistants.length === 0}>
+                <FolderOutput size={16} />
+              </ManageIconButton>
+            </Tooltip>
+          </Dropdown>
           <Tooltip title={t('common.delete')}>
             <ManageIconButton danger onClick={handleDeleteSelected} disabled={selectedIds.size === 0}>
               <Trash2 size={16} />
@@ -366,10 +290,14 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
   )
 }
 
-// Tailwind components
+// Normal-flow footer: occupies flex layout space below the list (no overlay,
+// no magic clearance). The Topics list keeps flex-1/min-h-0 so the last row
+// stays reachable at small heights.
 const ManagePanel: FC<PropsWithChildren> = ({ children }) => (
-  <div className="absolute bottom-[15px] left-[12px] z-[100] flex w-[calc(100%_-_24px)] flex-row items-center rounded-xl bg-[var(--color-background)] px-3 py-2 shadow-[0_4px_12px_rgba(0,0,0,0.15),0_0_0_1px_var(--color-border)]">
-    {children}
+  <div data-testid="topic-manage-toolbar" className="w-full shrink-0 px-3 pb-3">
+    <div className="flex w-full flex-row items-center rounded-xl bg-[var(--color-background)] px-3 py-2 shadow-[0_4px_12px_rgba(0,0,0,0.15),0_0_0_1px_var(--color-border)]">
+      {children}
+    </div>
   </div>
 )
 
@@ -425,25 +353,6 @@ const SelectedBadge: FC<PropsWithChildren<React.HTMLAttributes<HTMLSpanElement>>
     )}>
     {children}
   </span>
-)
-
-const SearchInputWrapper: FC<PropsWithChildren> = ({ children }) => (
-  <div className="mx-1 flex min-w-0 flex-1 items-center gap-1">{children}</div>
-)
-
-interface SearchInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
-  ref?: Ref<HTMLInputElement>
-}
-
-const SearchInput: FC<SearchInputProps> = ({ className, ref, ...props }) => (
-  <input
-    {...props}
-    ref={ref}
-    className={cn(
-      'h-7 min-w-0 flex-1 border-none bg-transparent p-0 text-[13px] text-[var(--color-text-1)] outline-none placeholder:text-[var(--color-text-3)]',
-      className
-    )}
-  />
 )
 
 export default TopicManagePanel

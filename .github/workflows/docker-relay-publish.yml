@@ -13,8 +13,8 @@ name: Docker relay publish (manual)
 # mutable ref again). The tag is derived from that SHA.
 #
 # Pre-publish gate is intentionally minimal (relay init contract + relay
-# file static checks, no Docker daemon required). The full
-# `pnpm build:check` aggregate gate is NOT required for an image publish.
+# file static checks, no Docker daemon required); a full build/validation
+# gate is NOT required for an image publish.
 
 permissions:
   contents: read

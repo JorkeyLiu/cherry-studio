@@ -7,7 +7,7 @@ import {
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
 import { closureInvalidationMiddleware } from '@renderer/store'
-import { withClosureTopics } from '@renderer/store/closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -144,6 +144,40 @@ describe('closureInvalidationMiddleware topic scoping (Task A)', () => {
     runMiddleware(withClosureTopics({ type, payload }, 'topicA'))
 
     expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
+  })
+
+  it('read-only window/closure hydration never invalidates (viewport independence)', () => {
+    const fpA = seedFresh('topicA')
+    const fpB = seedFresh('topicB')
+
+    // Read-only block hydrations (window reads, closure hydration) retain.
+    runMiddleware(
+      markClosureReadOnly(
+        withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [{ id: 'b-win' }] }, 'topicA')
+      )
+    )
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
+
+    // Read-only message projections (latest/around/load-more) retain.
+    for (const type of [
+      'newMessages/rebaseRouteMessages',
+      'newMessages/messagesWindowMerged',
+      'newMessages/messagesReceived',
+      'newMessages/setTopicLoading',
+      'newMessages/setTopicFulfilled',
+      'newMessages/mergeRouteMutability',
+      'newMessages/invalidateRouteMutability'
+    ]) {
+      runMiddleware({ type, payload: { topicId: 'topicA', messages: [] } })
+    }
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
+
+    // Genuine mutations still invalidate (safe default, no marker).
+    runMiddleware({ type: 'newMessages/addMessage', payload: { topicId: 'topicA', message: { id: 'u9' } } })
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).toBeNull()
     expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
   })
 

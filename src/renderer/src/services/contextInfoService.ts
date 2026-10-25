@@ -62,12 +62,10 @@ import type { FetchContextClosureResponse } from '@shared/chatDb'
  *   1. buildContextTurns — groups all topic turns into semantic turns
  *   2. Turn selection — anchor-to-end, or default derivation when no anchor
  *   3. turnsToMessages — expands selected turns to Message[]
- *   4. filterUsefulMessages — deduplicates retries within assistant groups
- *   5. filterErrorOnlyMessagesWithRelated — removes error-only pairs
- *   6. filterLastAssistantMessage — removes trailing assistant message
- *   7. filterAdjacentUserMessaegs — removes adjacent duplicate user messages
- *   8. filterEmptyMessages — removes messages without content blocks
- *   9. filterUserRoleStartMessages — trims leading non-user messages
+ *   4-9. Message-level model/token filters — implemented ONCE in
+ *        {@link filterContextMessages} and shared with the authoritative
+ *        closure projection and request preparation (that helper's doc lists
+ *        the exact filter order and the single trailing-assistant divergence)
  *
  * N+2 compensation is removed: selection is by whole turns, so post-selection
  * model filters (steps 4–7) cannot create partial turn boundaries that would
@@ -85,6 +83,84 @@ export type ContextInfo = {
   /** Canonical resolved anchor: the start turn's group key, or null for an
    *  empty/undefined window. Sole expression of the effective window start. */
   anchorGroupKey: string | null
+  /**
+   * Authority-pending marker (UI only): true when the route cannot be
+   * described authoritatively yet — a persisted route anchor without a fresh
+   * authoritative closure (initial fetch or pending branch switch), or a
+   * non-empty route with no persisted anchor at all (establishment
+   * transition). Consumers must NOT substitute viewport-derived
+   * counts/anchor/boundary in this state — use existing optional/loading
+   * rendering (hide TokenCount, no divider) rather than misleading partial
+   * counts. False/undefined means the result is authoritative (closure) or the
+   * legitimate empty-route fallback. Request paths keep their explicitly
+   * allowed availability fallback separately and never set this.
+   */
+  isAuthoritativePending?: boolean
+}
+
+/**
+ * The single message-level filter pipeline shared by every context consumer.
+ *
+ * Input boundary: `anchorClippedMessages` is ALREADY the authoritative
+ * anchor-to-trigger message slice in authority order. This pipeline never
+ * groups turns, never resolves the anchor, and never selects a window — that is
+ * decided once upstream:
+ *   - bounded fallback (`computeContextInfo`): the turns of the resolved anchor
+ *     window expanded back to messages;
+ *   - authoritative closure (`deriveContextInfoFromClosure`): the Main
+ *     anchor-to-end closure;
+ *   - request preparation (`ConversationService`): the validated Main closure
+ *     clipped through the triggering user.
+ *
+ * One shared prefix, then the two consumers:
+ *   prefix       filterUsefulMessages -> filterErrorOnlyMessagesWithRelated
+ *   model-facing prefix -> filterLastAssistantMessage -> filterAdjacentUserMessaegs
+ *                -> filterEmptyMessages -> filterUserRoleStartMessages
+ *   token        prefix -> filterAdjacentUserMessaegs -> filterEmptyMessages
+ *                -> filterUserRoleStartMessages
+ *
+ * The only divergence is trailing-assistant removal on the model branch (a
+ * request must not end on an assistant message, while token estimation keeps
+ * it). Ordering is preserved: adjacent-user collapsing runs after that removal
+ * on the model branch, so a user pair exposed by dropping the trailing
+ * assistant is still collapsed.
+ */
+export function filterContextMessages(
+  anchorClippedMessages: Message[],
+  overlay?: BlockOverlay
+): { uiMessages: Message[]; tokenEstimationMessages: Message[] } {
+  const modelCandidates = toModelCandidates(anchorClippedMessages, overlay)
+  return {
+    uiMessages: toUiMessages(modelCandidates, overlay),
+    tokenEstimationMessages: toTokenEstimationMessages(modelCandidates, overlay)
+  }
+}
+
+/**
+ * Model-facing messages of the shared pipeline. Request preparation consumes
+ * only this half, so it never builds the token-estimation list it would
+ * discard.
+ */
+export function filterContextUiMessages(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
+  return toUiMessages(toModelCandidates(anchorClippedMessages, overlay), overlay)
+}
+
+/** Shared prefix: retry dedup inside assistant groups, then error-only pairs. */
+function toModelCandidates(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
+  return filterErrorOnlyMessagesWithRelated(filterUsefulMessages(anchorClippedMessages), overlay)
+}
+
+/** Model-facing branch: drops the trailing assistant before final cleanup. */
+function toUiMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+  const withoutTrailingAssistant = filterLastAssistantMessage(modelCandidates)
+  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
+}
+
+/** Token-estimation branch: retains the trailing assistant. */
+function toTokenEstimationMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+  const withoutAdjacentUsers = filterAdjacentUserMessaegs(modelCandidates)
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
 }
 
 export function computeContextInfo(
@@ -152,22 +228,8 @@ export function computeContextInfo(
   // --- Step 3: Expand selected real turns to Message[] ---
   const expandedMessages = turnsToMessages(selectedRealTurns)
 
-  // --- Steps 4-7: Model filters ---
-  const usefulMessages = filterUsefulMessages(expandedMessages)
-  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages, overlay)
-
-  // uiMessages: model-facing — trailing assistant removed
-  const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
-  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
-
-  // --- Steps 8-9: Post-filter cleanup ---
-  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers, overlay)
-  const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
-
-  // tokenEstimationMessages: retains trailing assistant for token estimation.
-  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers, overlay)
-  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+  // --- Steps 4-9: The one shared message-level model/token filter pipeline ---
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(expandedMessages, overlay)
 
   return {
     uiMessages,
@@ -197,11 +259,25 @@ export function computeContextInfo(
 /**
  * Minimal shared projection boundary used by Chat and order-sensitive tests.
  *
- * Pure selection only: a fresh authoritative closure projects full-topic
- * counts/metadata, otherwise the bounded fallback derives from loaded
- * viewport messages. No timing, no diagnostics, no side effects — Chat wraps
- * this with phase-timing only. Extracted so the TokenCount re-anchor
- * committed-render regression constrains the exact product semantics.
+ * Authority-only UI projection: a fresh authoritative closure projects
+ * full-route counts/metadata (viewport-independent). When no fresh closure
+ * is available but a persisted route anchor exists, returns an
+ * authority-pending result (persisted anchor, no divider, empty lists,
+ * `isAuthoritativePending: true`) — callers must NOT substitute
+ * viewport-derived counts/anchor/boundary in this state. The same pending
+ * result applies when NO persisted anchor exists on a non-empty route (branch
+ * establishment transition, stripped/invalid anchor): the loaded projection is
+ * a window, never the route's turn set, so it must not become the authoritative
+ * `current/max`. Only an EMPTY route (empty topic / empty branch / fresh
+ * anchorless route, I-1) uses the bounded fallback's legitimate 0/0 shape.
+ * No timing, no diagnostics, no side effects — Chat wraps this with
+ * phase-timing only.
+ * Extracted so the TokenCount re-anchor committed-render regression
+ * constrains the exact product semantics. Actual provider requests never
+ * consume the pending marker or the bounded fallback as authority: they read
+ * the caller-local Main closure directly (ConversationService) and fail
+ * closed on read failure. Only usage-estimate paths (baseCallbacks) retain
+ * their explicitly allowed estimate fallback.
  */
 export function resolveSharedContextInfo(
   topicMessages: Message[],
@@ -210,32 +286,62 @@ export function resolveSharedContextInfo(
   freshClosure: FetchContextClosureResponse | null,
   branchId?: string | null
 ): ContextInfo {
-  return freshClosure
-    ? deriveContextInfoFromClosure(freshClosure)
-    : computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null)
+  if (freshClosure) {
+    return { ...deriveContextInfoFromClosure(freshClosure), isAuthoritativePending: false }
+  }
+  const routeKey = typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
+  const persisted =
+    assistant !== undefined
+      ? (getAssistantSettings(assistant).contextWindowAnchor?.[routeKey] as
+          | { kind: string; groupKey: string }
+          | undefined)
+      : undefined
+  const persistedKey = persisted?.kind === 'active' ? persisted.groupKey : null
+  if (persistedKey) {
+    return {
+      uiMessages: [],
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: persistedKey,
+      isAuthoritativePending: true
+    }
+  }
+  // No persisted anchor. Only an EMPTY route may use the bounded fallback:
+  // a non-empty route without an anchor is not authority, because the loaded
+  // projection is a bounded window and its counts would report the viewport as
+  // if it were the whole route (e.g. 7/7 for a 49-turn branch). Keep it
+  // authority-pending until the route's anchor is established (or a closure
+  // arrives). Empty routes keep the legitimate 0/0 anchorless shape (I-1).
+  if (topicMessages.length > 0) {
+    return {
+      uiMessages: [],
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: null,
+      isAuthoritativePending: true
+    }
+  }
+  return {
+    ...computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null),
+    isAuthoritativePending: false
+  }
 }
 
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
-  // Filter pipeline on authoritative closure messages (anchor-to-end)
-  const expandedMessages = closure.messages as unknown as Message[]
-  const usefulMessages = filterUsefulMessages(expandedMessages)
-  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages)
-
-  const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
-  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
-
-  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers)
-  const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
-
-  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers)
-  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+  // Closure messages are already the authoritative anchor-to-end slice, so only
+  // the shared message-level pipeline applies — no turn grouping, no anchor
+  // resolution. No overlay is passed (unchanged): this projection keeps
+  // resolving blocks from the store rather than from closure blocks.
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(closure.messages as unknown as Message[])
 
   return {
     uiMessages,
     tokenEstimationMessages,
     boundaryMessageId: closure.closure.boundaryMessageId,
     contextCount: { current: closure.closure.selectedTurnCount, max: closure.closure.totalTurnCount },
-    anchorGroupKey: closure.closure.anchorGroupKey
+    anchorGroupKey: closure.closure.anchorGroupKey,
+    isAuthoritativePending: false
   }
 }

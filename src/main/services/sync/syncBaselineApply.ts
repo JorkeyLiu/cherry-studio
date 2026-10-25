@@ -96,7 +96,9 @@ const ENTITY_PRIORITY: Record<EntityType, number> = {
   message: 1,
   message_block: 2,
   topic_branch: 3,
-  file_asset: 4
+  file_asset: 4,
+  // Target-owned relation: never before its target topic.
+  topic_reference: 5
 }
 const UNSUPPORTED_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool', 'citation'])
 const TOMBSTONE_PREFIX: Record<EntityType, string> = {
@@ -104,7 +106,8 @@ const TOMBSTONE_PREFIX: Record<EntityType, string> = {
   message: 'tombstone:message:',
   message_block: 'tombstone:message_block:',
   topic_branch: 'tombstone:topic_branch:',
-  file_asset: 'tombstone:file_asset:'
+  file_asset: 'tombstone:file_asset:',
+  topic_reference: 'tombstone:topic_reference:'
 }
 
 /**
@@ -1519,6 +1522,17 @@ function requireVersionedLiveForTombstone(
   } else if (entityType === 'topic_branch') {
     try {
       liveExists = !!tx.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, entityId)).get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) liveExists = false
+      else throw e
+    }
+  } else if (entityType === 'topic_reference') {
+    try {
+      liveExists = !!tx
+        .select({ id: schema.topicReferences.targetTopicId })
+        .from(schema.topicReferences)
+        .where(eq(schema.topicReferences.targetTopicId, entityId))
+        .get()
     } catch (e) {
       if (e instanceof Error && /no such table/i.test(e.message)) liveExists = false
       else throw e
@@ -3401,6 +3415,122 @@ export function mergeValidatedBaselineInTx(
       )
       continue
     }
+
+    // topic_reference (v6): the relation is ONE coherent tuple owned by the
+    // target topic. Whole-entity LWW only — never per-field mixing. The
+    // target topic must exist locally (or be part of this same input, and it
+    // is ordered before relations), while source topic/branch/anchor may be
+    // absent (existing fail-closed "missing" read state, auto-recovering).
+    if (entity.entityType === 'topic_reference') {
+      const targetTopicId = entity.entityId
+      if (payload.targetTopicId !== targetTopicId) {
+        fail(`baseline apply reference targetTopicId mismatch for ${targetTopicId}`)
+      }
+      if (
+        typeof payload.sourceTopicId !== 'string' ||
+        payload.sourceTopicId.length === 0 ||
+        payload.sourceTopicId === targetTopicId ||
+        typeof payload.anchorMessageId !== 'string' ||
+        payload.anchorMessageId.length === 0
+      ) {
+        fail(`baseline apply malformed reference tuple for ${targetTopicId}`)
+      }
+      const sourceBranchId =
+        typeof payload.sourceBranchId === 'string' && payload.sourceBranchId.length > 0 ? payload.sourceBranchId : null
+      const targetExists = !!inner
+        .select({ id: schema.topics.id })
+        .from(schema.topics)
+        .where(eq(schema.topics.id, targetTopicId))
+        .get()
+      if (!targetExists) {
+        fail(`baseline apply orphan reference relation ${targetTopicId}: target topic missing`)
+      }
+      // Local tombstone delete-wins over a stale relation upsert.
+      const localTomb = tombstoneByKey.get(key)
+      if (localTomb) {
+        const liveTs = incomingEntityClock.timestamp
+        const liveOp = incomingEntityClock.operationId
+        if (isSuppressedByTombstone(liveTs, liveOp, localTomb.timestamp, localTomb.operationId)) {
+          result.suppressed += 1
+          continue
+        }
+      }
+      const localClock = entityClockByKey.get(key)
+      if (
+        localClock &&
+        compareLww(
+          incomingEntityClock.timestamp,
+          incomingEntityClock.operationId,
+          localClock.timestamp,
+          localClock.operationId
+        ) <= 0
+      ) {
+        result.unchanged += 1
+        continue
+      }
+      let existingRef:
+        | { targetTopicId: string; sourceTopicId: string; sourceBranchId: string | null; anchorMessageId: string }
+        | undefined
+      try {
+        existingRef = inner
+          .select({
+            targetTopicId: schema.topicReferences.targetTopicId,
+            sourceTopicId: schema.topicReferences.sourceTopicId,
+            sourceBranchId: schema.topicReferences.sourceBranchId,
+            anchorMessageId: schema.topicReferences.anchorMessageId
+          })
+          .from(schema.topicReferences)
+          .where(eq(schema.topicReferences.targetTopicId, targetTopicId))
+          .get() as typeof existingRef
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          fail(`baseline apply reference inventory missing locally for ${targetTopicId}`)
+        }
+        throw e
+      }
+      const stampIso = new Date(incomingEntityClock.timestamp).toISOString()
+      if (!existingRef) {
+        inner
+          .insert(schema.topicReferences)
+          .values({
+            targetTopicId,
+            sourceTopicId: payload.sourceTopicId,
+            sourceBranchId,
+            anchorMessageId: payload.anchorMessageId,
+            createdAt: stampIso,
+            updatedAt: stampIso
+          })
+          .run()
+        result.inserted += 1
+      } else if (
+        existingRef.sourceTopicId === payload.sourceTopicId &&
+        existingRef.sourceBranchId === sourceBranchId &&
+        existingRef.anchorMessageId === payload.anchorMessageId
+      ) {
+        result.unchanged += 1
+      } else {
+        inner
+          .update(schema.topicReferences)
+          .set({
+            sourceTopicId: payload.sourceTopicId,
+            sourceBranchId,
+            anchorMessageId: payload.anchorMessageId,
+            updatedAt: stampIso
+          })
+          .where(eq(schema.topicReferences.targetTopicId, targetTopicId))
+          .run()
+        result.updated += 1
+      }
+      upsertEntityClock(
+        inner,
+        'topic_reference',
+        targetTopicId,
+        incomingEntityClock.timestamp,
+        incomingEntityClock.operationId,
+        entityClockByKey
+      )
+      continue
+    }
   }
 
   // Tombstone application comes before frame merge so that liveness is final.
@@ -3440,6 +3570,20 @@ export function mergeValidatedBaselineInTx(
           else throw e
         }
       }
+      // Target-owned reference relation cascades with the target topic: the
+      // FK removes the row, and the coherent reference tombstone keeps replay
+      // delete-win closed (a stale relation upsert can never resurrect it).
+      let hadReferenceRelation = false
+      try {
+        hadReferenceRelation = !!inner
+          .select({ id: schema.topicReferences.targetTopicId })
+          .from(schema.topicReferences)
+          .where(eq(schema.topicReferences.targetTopicId, tomb.entityId))
+          .get()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) hadReferenceRelation = false
+        else throw e
+      }
       // Capture membership parent for each child to know descendant blocks? Use membership map
       const existing = inner.select().from(schema.topics).where(eq(schema.topics.id, tomb.entityId)).get()
       if (existing) {
@@ -3449,6 +3593,9 @@ export function mergeValidatedBaselineInTx(
         result.unchanged += 1
       }
       persistTombstone(inner, 'topic', tomb.entityId, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      if (hadReferenceRelation) {
+        persistTombstone(inner, 'topic_reference', tomb.entityId, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      }
       if (tomb.operationId !== null) {
         upsertEntityClock(inner, 'topic', tomb.entityId, tomb.timestamp, tomb.operationId, entityClockByKey)
       } else if (tomb.entityClock) {
@@ -3622,6 +3769,39 @@ export function mergeValidatedBaselineInTx(
         upsertEntityClock(
           inner,
           'topic_branch',
+          tomb.entityId,
+          tomb.entityClock.timestamp,
+          tomb.entityClock.operationId,
+          entityClockByKey
+        )
+      }
+    } else if (tomb.entityType === 'topic_reference') {
+      // Relation delete (idempotent when the target cascade already removed
+      // the row): remove the relation and keep the delete-wins tombstone.
+      let existingRef: { targetTopicId: string } | undefined
+      try {
+        existingRef = inner
+          .select({ targetTopicId: schema.topicReferences.targetTopicId })
+          .from(schema.topicReferences)
+          .where(eq(schema.topicReferences.targetTopicId, tomb.entityId))
+          .get() as typeof existingRef
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) existingRef = undefined
+        else throw e
+      }
+      if (existingRef) {
+        inner.delete(schema.topicReferences).where(eq(schema.topicReferences.targetTopicId, tomb.entityId)).run()
+        result.deleted += 1
+      } else {
+        result.unchanged += 1
+      }
+      persistTombstone(inner, 'topic_reference', tomb.entityId, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      if (tomb.operationId !== null) {
+        upsertEntityClock(inner, 'topic_reference', tomb.entityId, tomb.timestamp, tomb.operationId, entityClockByKey)
+      } else if (tomb.entityClock) {
+        upsertEntityClock(
+          inner,
+          'topic_reference',
           tomb.entityId,
           tomb.entityClock.timestamp,
           tomb.entityClock.operationId,

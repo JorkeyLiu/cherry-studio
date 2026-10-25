@@ -1,6 +1,6 @@
 # 投影完备性与权威意图（Projection Completeness and Authority Intents）
 
-> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
+> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
 > **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
 > **最后更新**：2026-09-28
 > **Owner**：Personal fork（jorkeyliu）
@@ -84,7 +84,7 @@
 | `'window'` | Main SQLite 单事务读取；Renderer 视口消费 | 单次响应；边界随响应声明（`latest` / `around`、界、`hasMoreBefore` / `hasMoreAfter`） | 视口装配（最新/环绕/搜索命中导航）、分页与合并 |
 | `'window'` 能力携带 | Main SQLite 随窗口响应发布 | 随所属窗口响应存活；路由切换/驱逐/删除即失效（恰与窗口同代） | `mutableMessageIds`：精确定义与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-9）唯一治理；本文档仅说明其作为窗口能力携带的生命周期。供 Renderer 对当前 loaded/resident 可解析成员预检与 UI 门禁，窗口外/依赖展开成员由 Main 最终裁决，永不替代 Main 守卫 |
 | `'answer-group'` | Main SQLite 单事务解析（成员集合声明） | 单次响应；变更后必须重新解析 | 回答选择、分支/克隆定位、回答组重排 |
-| `'context-closure'` | Main SQLite 按 renderer 拥有的稳定锚点派生（锚点 turn 至最新） | 单次响应；锚点/结构/代际/指纹任一变化即失效 | 请求上下文构建、锚点建立/重锚定/移动/继承 |
+| `'context-closure'` | Main SQLite 按 renderer 拥有的稳定锚点派生（锚点 turn 至最新，整路由权威） | 单次响应；路由/锚点/语义变更代际任一变化使缓存与请求新鲜度失效并触发后台重验，纯 `latest`/`around`/加载更多视口读取与视口成员/指纹变化永不使有效闭包失效；同路由同锚点的已接受 UI 投影在后台重验期间保留，仅在身份变化或权威无效响应时清除 | 请求上下文构建、锚点建立/重锚定/移动/继承；UI 计数/高亮/分隔线消费同一已接受共享结果（§8/§10 authority-pending 仅限冷路由尚无已接受投影、身份切换或权威无效响应） |
 | `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业 |
 | `'naming-context'` | Main SQLite 有界命名读取（命名元数据、精确计数、首条消息、至多 5 条最新消息及其块） | 调用者本地、短生命周期 | 自动命名 |
 | `'topic-activity'` | Main SQLite 有界活跃度读取（精确计数、最新消息 ID/时间戳，无消息/块） | 调用者本地、短生命周期 | 限流检查等只需活跃度的作业 |
@@ -147,27 +147,28 @@
 ## 8. 暂定候选与请求/用量边界（Provisional Candidates, Request/Usage Boundary）
 
 - 暂定已加载候选（PROJ-11）仅允许：瞬时展示、请求可用性（请求载荷至少包含触发用户消息）、用量估算回退。
-- 禁止：移动持久化锚点；决定权威回答组成员或变更作用域；替代新鲜闭包（闭包新鲜度以代际/指纹/锚点为准）；改变最终持久化内容。
+- 禁止：移动持久化锚点；决定权威回答组成员或变更作用域；替代新鲜闭包（闭包新鲜度以路由/锚点/语义变更代际为准，与已加载视口成员/形状无关）；改变最终持久化内容。
 - 请求本地执行覆盖（PROJ-9）与暂定候选不同：前者是执行的权威块视图，随执行存活并经受驱逐；后者是只读的可用性候选，随投影失效而丢弃。两者都不向 Redux 注入窗口外记录。
-- 上下文闭包权威永远属于持久化锚点加 Main 闭包响应；暂定候选只用于新鲜度判断，不作为上下文内容来源。
+- 上下文闭包权威永远属于持久化锚点加 Main 闭包响应；暂定候选只用于请求可用性/用量估算回退，不作为上下文内容来源，不参与闭包新鲜度判断。
+- UI 权威唯一（authority-only）：TokenCount、锚点高亮、边界分隔线消费同一已接受权威共享结果（整路由计数与边界同快照）。同路由同锚点的已接受投影在后台重验期间保留，新权威结果原子提交、不清空白闪断；仅在冷路由已持久化锚点存在但尚无已接受投影时（初始取数/分支切换 pending）、身份切换或权威无效响应时，UI 渲染 authority-pending（持久化锚点、无分隔线、空列表，不展示视口推导的 current/max；TokenCount 隐藏）——永不以后备视口计数替代，日常流式/状态刷新永不清 token/计数/分隔线。空路由/无锚点仍走合法空行为。实际 provider 请求上下文永不用视口替代：每次实际请求在固定请求路由（pinned branchId，非当前 active）上经 `fetchContextClosure` 直接读取调用者本地 Main 完整有效路由锚点到末尾闭包（不依赖 UI 缓存预热、不发布临时缓存、不做视口/Redux 全量水合），以稳定 ID 裁剪至触发用户（含）后经同一过滤管线构造模型消息；块经请求本地只读 BlockOverlay（含闭包块与 authorityUser 覆盖优先）解析。缺失触发目标或真实权威读取失败一律 fail-closed，经既有请求错误通道报错，永不回退视口部分投影。唯一保留的可用性语义是重试目标先于当前锚点时仅发送触发用户本身（不拓宽锚点、不静默默认派生）。该实际请求边界不改变 UI 权威语义；用量估算等 DISPLAY/USAGE 暂定估计仍走其明确允许的估计路径。
 
 ---
 
 ## 9. 持久化与迁移边界（Persistence and Migration Boundary）
 
 - 聊天权威持久化是 Main SQLite（Drizzle + better-sqlite3），经版本化迁移治理；本文档不改变其 schema、迁移流程与 L2 兼容导入语义，一律以 [SQLite migration governance](../archived/sqlite-migration.md) 为准。
-- 上下文锚点与 `contextCount` 属普通 renderer 设置持久化（`assistants` slice + redux-persist），不是聊天权威；其有效性/默认位置/继承/闭包派生由 Main 解析，详见 [Context window governance](./context-window.md)。分支路由的上下文锚点键是路由隔离的（main 用 topicId，分支用 `topicId:branchId`）；父路由有效组序号到新分支的映射（clamp）由 Main `inherit` 解析器拥有——此处仅说明锚点继承的归属，不混淆“上下文锚点”（context-window 的单稳定锚点）与“分支锚点”（true-branch 的 fork 消息）。
+- 上下文锚点与 `contextCount` 属普通 renderer 设置持久化（`assistants` slice + redux-persist），不是聊天权威；其有效性/默认位置/继承/闭包派生由 Main 解析，详见 [Context window governance](./context-window.md)。分支路由的上下文锚点键是路由隔离的（main 用 topicId，分支用 `topicId:branchId`）；有效源 turn 序号在目标分支内可映射时按索引映射（clone ID 重映射后索引保留），被排除/缺失的非空新分支锚点以**当前** `contextCount` 在默认窗口位置建立——由 Main `inherit` 解析器拥有，此处仅说明锚点继承的归属，不混淆“上下文锚点”（context-window 的单稳定锚点）与“分支锚点”（true-branch 的 fork 消息）。
 - 驻留注册、视口 `MessageWindow`、本地最新窗口完备性、闭包缓存、调用者本地读取结果、请求本地执行覆盖、暂定候选均为不持久化、可丢弃、可重建的状态；不得经 StoreSync 或任何持久化通道变成第二权威。
-- **视口定位区分**：路由切换时的稳定视口归属、恢复意图/所有权、快照/默认定位、分隔线稳定完成与可见性原子性由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；`MessageWindow` 仍是本地有界投影，稳定视口语义不在本文档定义。
+- **视口定位区分**：聊天视口定位（路由本地稳定视口归属、页面重激活、同路由在位交互连续性、流式阅读/跟随、意图优先级、恢复意图/所有权、快照/默认定位、分隔线稳定完成与可见性原子性）由 [Chat Viewport Position](./chat-viewport-position.md)（VIEWPORT-1…VIEWPORT-16）治理；`MessageWindow` 仍是本地有界投影，稳定视口语义不在本文档定义。
 - Dexie 表（文件目录、设置、知识笔记、翻译历史/语言、快捷短语）与消息块 UI / 遗留导入兼容例外保持现状；任何跨存储的聊天权威移动都属于迁移治理域，不属于本文档。
 
 ---
 
 ## 10. 请求与 UI 一致性（Request/UI Consistency）
 
-- 单一权威解析：回答组、分支/插入位置、搜索命中窗口、上下文闭包、命名上下文、活跃度一律由 Main 单事务解析；Renderer 不自行推导权威成员、顺序或闭包范围。
-- 变更一致性：所有变更先经 Main 成功，再收敛 Redux 已加载交集、替换权威集合（Segment 目录/有序 ID 列表）、转移渲染锚点；失败时不发布、不回退到整体重取伪装。
-- 展示一致性：视口只渲染已加载投影的窗口切片；闭包只来自新鲜的 Main 闭包响应；命名/用量/限流只消费各自的有界能力，不复用视口或投影推导。
+- 单一权威解析：回答组、分支/插入位置、搜索命中窗口、上下文闭包、命名上下文、活跃度一律由 Main 单事务解析；Renderer 不自行推导权威成员、顺序或闭包范围。闭包缓存与请求新鲜度以路由/锚点/语义变更代际为准（缓存读取与请求载荷门禁），与已加载视口成员/形状无关；该新鲜度不清除同路由同锚点的已接受 UI 投影。
+- 变更一致性：所有变更先经 Main 成功，再收敛 Redux 已加载交集、替换权威集合（Segment 目录/有序 ID 列表）、转移渲染锚点；失败时不发布、不回退到整体重取伪装。纯视口读取（`latest`/`around`/加载更多/导航/路由切换窗口发布与块水合）是只读投影，永不推进语义代际、不替代新鲜闭包。
+- 展示一致性：视口只渲染已加载投影的窗口切片；UI 计数/高亮/分隔线消费同一已接受权威共享结果（整路由计数与边界同快照），同路由同锚点的已接受投影在后台重验期间保留、新结果原子提交；仅在冷路由尚无已接受投影、身份切换或权威无效响应时渲染 authority-pending（无视口计数替代），空/无锚点仍走合法空行为；命名/用量/限流只消费各自的有界能力，不复用视口或投影推导。实际 provider 请求无视口可用性回退（一律经固定请求路由的调用者本地完整闭包直读，失败即请求错误；重试目标先于锚点时仅保留触发用户本身），用量估算等 DISPLAY/USAGE 暂定估计保留其明确允许的估计策略。
 - 未来接口一致性（PROJ-12）：任何读起来像整体的新读取必须声明 §5 的完备性能力并接受隔离规则；任何改变权威顺序/成员的新变更必须使用稳定 ID 意图并返回完整权威集合响应。
 
 ---
@@ -175,7 +176,7 @@
 ## 11. 测试与证据契约（Test/Evidence Contract）
 
 - **单元测试**：已加载投影判别（`'loaded-projection'`、空与未加载区分）、稳定 ID 合并与确定性排序、回答组选择/重排的已加载交集提交、删除展开的已加载交集与 Segment 目录替换、稳定插入的锚点解析、调用者本地读取不进 Redux、暂定候选三用途边界。
-- **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§15 测试契约）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
+- **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§8 验证与验收）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
 - **投影组件测试（Renderer）**：MessageMenubar/ MessageGroup / EditMode / Clipboard 的预检与 UI 门禁行为（能力未知 fail-closed、路由切换清选择、copy 允许而 cut/delete/segment 按能力禁用）仍按投影收敛语义覆盖；分支权限的允许/拒绝语义以 Branch ADR 为准，不在本文档重复矩阵。
 - **组件测试**：窗口装配与分页边界保留、窗口外导航装配、回答选择可见折叠、删除后锚点转移展示。传输中状态不作为回归证据。
 - **证据层级**：按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`。跨组件/IPC/持久化/生命周期行为的合同级回归以 Playwright E2E 为准；隔离的稳定展示/逻辑以 Vitest/组件测试为先。

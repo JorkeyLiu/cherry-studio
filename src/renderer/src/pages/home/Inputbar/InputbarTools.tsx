@@ -2,7 +2,7 @@ import '@renderer/pages/home/Inputbar/tools'
 
 import type { DropResult } from '@hello-pangea/dnd'
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd'
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import { useInputbarTools } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
 import type {
   InputbarScope,
@@ -315,11 +315,11 @@ const InputbarTools = ({ scope, assistant, model }: InputbarToolsNewProps) => {
         </DragDropContext>
 
         {showCollapseButton && (
-          <ActionIconButton
+          <ComposerIconButton
             onClick={() => dispatch(setIsCollapsed(!isCollapse))}
             title={isCollapse ? t('chat.input.tools.expand') : t('chat.input.tools.collapse')}>
-            <CircleChevronRight size={18} style={{ transform: isCollapse ? 'scaleX(1)' : 'scaleX(-1)' }} />
-          </ActionIconButton>
+            <CircleChevronRight size={16} style={{ transform: isCollapse ? 'scaleX(1)' : 'scaleX(-1)' }} />
+          </ComposerIconButton>
         )}
       </ToolsContainer>
     </Dropdown>
@@ -336,7 +336,7 @@ const ToolsContainer = styled.div`
 `
 
 const VisibleTools = styled.div`
-  height: 30px;
+  height: 28px;
   display: flex;
   align-items: center;
   overflow-x: auto;
@@ -348,7 +348,7 @@ const VisibleTools = styled.div`
 `
 
 const HiddenTools = styled.div`
-  height: 30px;
+  height: 28px;
   display: flex;
   align-items: center;
   overflow-x: auto;
@@ -360,7 +360,7 @@ const HiddenTools = styled.div`
 `
 
 const ToolWrapper = styled.div`
-  width: 30px;
+  width: 28px;
   margin-right: 6px;
   transition:
     width 0.2s,

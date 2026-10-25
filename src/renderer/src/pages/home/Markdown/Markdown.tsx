@@ -6,7 +6,7 @@ import MarkdownShadowDOMRenderer from '@renderer/components/MarkdownShadowDOMRen
 import { useSmoothStream } from '@renderer/hooks/useSmoothStream'
 import type { MainTextMessageBlock, ThinkingMessageBlock, TranslationMessageBlock } from '@renderer/types/newMessage'
 import { removeSvgEmptyLines } from '@renderer/utils/formats'
-import { processLatexBrackets } from '@renderer/utils/markdown'
+import { normalizeAttachedBlockMathClose, processLatexBrackets } from '@renderer/utils/markdown'
 import { isEmpty } from 'lodash'
 import { type FC, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -69,7 +69,7 @@ const MarkdownBody: FC<MarkdownBodyProps> = memo(({ blockId, isPausedEmpty, pars
     if (isPausedEmpty) {
       return t('message.chat.completion.paused')
     }
-    return removeSvgEmptyLines(processLatexBrackets(parsedContent))
+    return removeSvgEmptyLines(normalizeAttachedBlockMathClose(processLatexBrackets(parsedContent)))
   }, [isPausedEmpty, parsedContent, t])
 
   const [mathRuntime, setMathRuntime] = useState<MathRuntime | null>(null)

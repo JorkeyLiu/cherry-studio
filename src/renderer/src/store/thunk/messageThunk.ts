@@ -18,17 +18,27 @@ import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import { INITIAL_MESSAGES_COUNT } from '@renderer/config/constant'
 import { getModel } from '@renderer/hooks/useModel'
-import { ensureTopicAnchorEstablished, transferAnchorsWithAuthorityGroupKeys } from '@renderer/services/anchorService'
+import {
+  anchorKeyForRoute,
+  ensureTopicAnchorEstablished,
+  transferAnchorsWithAuthorityGroupKeys
+} from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
+import type { BlockWriteRouteContext, BranchRoute } from '@renderer/services/db/types'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
+import {
+  notifyUnavailableAttachmentsSkipped,
+  resolveTriggerAttachmentAvailability
+} from '@renderer/services/requestAttachmentAvailability'
 import { buildBlockOverlay } from '@renderer/services/requestBlockOverlay'
 import {
   recordResidentReadDiscard,
@@ -38,6 +48,7 @@ import {
 } from '@renderer/services/residentReadDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
+import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import {
   captureDeletionGeneration,
   getDeletionGeneration,
@@ -45,10 +56,10 @@ import {
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse } from '@renderer/services/windowCoverage'
 import store from '@renderer/store'
-import { updateTopicUpdatedAt } from '@renderer/store/assistants'
-import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
+import { updateAssistantSettings, updateTopicUpdatedAt } from '@renderer/store/assistants'
+import { type Assistant, type ContextWindowAnchor, type FileMetadata, type Model, type Topic } from '@renderer/types'
 import { ChunkType } from '@renderer/types/chunk'
-import type { GroupAnchor } from '@renderer/types/editMode'
+import type { GroupAnchor, StagedCutSourceProjection } from '@renderer/types/editMode'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import {
   AssistantMessageStatus,
@@ -70,17 +81,20 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   JsonObject,
+  MoveContextAnchorInheritanceInput,
   SemanticModelSnapshot,
   SemanticResendResponse,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  UpdateMessageUsageSource
 } from '@shared/chatDb'
+import type { HistoryReferenceMeta } from '@shared/chatDb'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
 import { throttle } from 'lodash'
 import { LRUCache } from 'lru-cache'
 
-import { withClosureTopics } from '../closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
@@ -163,7 +177,14 @@ const updateExistingMessageAndBlocksInDB = async (
     const route = branchId === undefined ? activeRouteOf(store.getState, updatedMessage.topicId) : branchId
     // Always update blocks if provided
     if (updatedBlocks.length > 0) {
-      await updateBlocks(updatedBlocks, undefined, resendAttemptId)
+      // The block-only channel is addressed by the same route as the message
+      // patch: an explicitly pinned stream route (source background execution)
+      // is preserved instead of re-resolving the active route at write time,
+      // so Main can verify each block's parent against the addressed tuple.
+      await updateBlocks(updatedBlocks, undefined, resendAttemptId, {
+        topicId: updatedMessage.topicId,
+        branchId: route
+      })
     }
 
     // Check if there are message properties to update beyond id and topicId
@@ -232,6 +253,15 @@ export interface ThrottledBlockWriteContext {
    * Absent = unknown ownership -> deliberate global fallback in middleware.
    */
   topicId?: string
+  /**
+   * Addressed route owner for the block-only DB write, paired with `topicId`.
+   * When set, the throttled write carries `{ topicId, branchId }` so Main can
+   * verify the block's parent belongs to the addressed route instead of
+   * inferring it at write time. The source background stream pins its captured
+   * execution route here (never the active route); an explicit null addresses
+   * the main route. Absent = no addressed tuple (canonical parent resolution).
+   */
+  branchId?: BranchRoute
 }
 
 /**
@@ -272,7 +302,11 @@ const getBlockThrottler = (id: string) => {
       // F1/F2: the DB write carries the calling execution's attempt, and the
       // produced promise is tracked on the calling execution's barrier when
       // present (flush-triggered trailing writes are therefore awaitable).
-      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId)
+      // The addressed route (when known) travels with the write: the source
+      // background execution pins its captured route, so a mid-stream branch
+      // switch can never redirect the write to the active route.
+      const route = ctx?.topicId ? { topicId: ctx.topicId, branchId: ctx.branchId } : undefined
+      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId, route)
       if (ctx?.barrier) {
         await ctx.barrier.track(write)
       } else {
@@ -355,7 +389,8 @@ export const saveUpdatedBlockToDB = async (
   topicId: string,
   getState: () => RootState,
   resendAttemptId?: string,
-  localBlock?: MessageBlock
+  localBlock?: MessageBlock,
+  branchId?: string | null
 ) => {
   if (!blockId) {
     logger.warn('[DB Save Single Block] Received null/undefined blockId. Skipping save.')
@@ -363,7 +398,7 @@ export const saveUpdatedBlockToDB = async (
   }
   const blockToSave = localBlock ?? getState().messageBlocks.entities[blockId]
   if (blockToSave) {
-    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId)
+    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId, branchId)
   } else {
     logger.warn(`[DB Save Single Block] Block ${blockId} not found in state. Cannot save.`)
   }
@@ -620,7 +655,21 @@ const dispatchMultiModelResponses = async (
   publishConfirmedAppendAcks(dispatch, getState, topicId, confirmed, stubRoute, stubGeneration)
 
   const queue = getTopicQueue(topicId)
+  // Provider gating follows the ACKNOWLEDGMENT of each stub (the authority row
+  // fact), never the projection currency: a stub Main never confirmed has no row
+  // to fill, so its request is skipped, while confirmed siblings are unaffected
+  // and a currency-only publication rejection still executes (the owned row
+  // exists on the pinned route; only the late projection publication is
+  // filtered).
+  const acknowledgedStubIds = new Set(confirmed.map((entry) => entry.message.id))
   for (const task of tasksToQueue) {
+    if (!acknowledgedStubIds.has(task.messageStub.id)) {
+      logger.warn('Multi-model response stub was not acknowledged; provider request skipped', {
+        topicId,
+        messageId: task.messageStub.id
+      })
+      continue
+    }
     void queue.add(async () => {
       await fetchAndProcessAssistantResponseImpl(
         dispatch,
@@ -663,11 +712,30 @@ export const mergeRequestAssistantSnapshot = (
   topicId: string
 ): Assistant => {
   const topic = freshAssistant.topics.find((t) => t.id === topicId)
+  const {
+    enableWebSearch: _droppedWebSearch,
+    webSearchProviderId: _droppedProviderId,
+    mcpMode: _droppedMcpMode,
+    mcpServers: _droppedMcpServers,
+    enableMemory: _droppedMemory,
+    ...origRest
+  } = origAssistant as Record<string, unknown> as Assistant & {
+    enableWebSearch?: unknown
+    webSearchProviderId?: unknown
+    mcpMode?: unknown
+    mcpServers?: unknown
+    enableMemory?: unknown
+  }
+  void _droppedWebSearch
+  void _droppedProviderId
+  void _droppedMcpMode
+  void _droppedMcpServers
+  void _droppedMemory
   return {
-    ...origAssistant,
+    ...origRest,
     settings: freshAssistant.settings,
     prompt: topic?.prompt ? `${freshAssistant.prompt}\n${topic.prompt}` : freshAssistant.prompt
-  }
+  } as Assistant
 }
 
 /**
@@ -778,7 +846,10 @@ const fetchAndProcessAssistantResponseImpl = async (
       execTopicId,
       execGetState,
       resendAttemptId,
-      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined)
+      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined),
+      // Pin the source execution route: a background stream never re-resolves
+      // the active route at write time, so a branch switch cannot redirect it.
+      execRoute
     )
   // F1/Fix B: execution-scoped final atomic persist binding the immutable
   // closure attempt. onComplete's success-final checkpoint carries exactly
@@ -829,7 +900,10 @@ const fetchAndProcessAssistantResponseImpl = async (
           resendAttemptId: attemptId ?? resendAttemptId,
           barrier: barrier ?? writeBarrier,
           shouldMirrorToRedux: shouldMirror ?? isExecLoaded,
-          topicId
+          topicId,
+          // Source background execution: address the captured execution route
+          // explicitly (never the active route re-resolved at write time).
+          branchId: execRoute
         }),
       flushThrottledBlockUpdate,
       cancelThrottledBlockUpdate
@@ -887,6 +961,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       getState,
       topicId,
       assistantMsgId,
+      requestRoute: execRoute,
       saveUpdatesToDB: saveUpdatesToDBForExec,
       saveFinalUpdatesAtomically: saveFinalUpdatesAtomicallyForExec,
       assistant,
@@ -938,6 +1013,176 @@ const fetchAndProcessAssistantResponseImpl = async (
 }
 
 /**
+ * Inputs the OPTIONAL user-prompt estimate consumes, plus the exact source
+ * snapshot Main re-checks before accepting the result: the MAIN_TEXT contents and
+ * the FILE/IMAGE attachment IDs.
+ *
+ * Files are uploaded before the user message is built, so the estimate always
+ * sees stored file metadata. Both snapshot arrays are canonicalized the same way
+ * Main canonicalizes the authority rows (empty text dropped, sorted) so the two
+ * sides compare as multisets — block order is a rendering detail and never changes
+ * the token total.
+ */
+const collectUsageEstimateInputs = (
+  blocks: MessageBlock[]
+): { content: string; files: FileMetadata[]; source: UpdateMessageUsageSource } => {
+  let content = ''
+  const files: FileMetadata[] = []
+  const textContents: string[] = []
+  const fileIds: string[] = []
+  for (const block of blocks) {
+    if (block.type === MessageBlockType.MAIN_TEXT) {
+      const blockContent = block.content ?? ''
+      content += blockContent
+      if (blockContent.length > 0) textContents.push(blockContent)
+      continue
+    }
+    if ((block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) && block.file) {
+      files.push(block.file)
+      if (block.file.id) fileIds.push(block.file.id)
+    }
+  }
+  return { content, files, source: { textContents: textContents.sort(), fileIds: fileIds.sort() } }
+}
+
+/**
+ * Deliberate TASK boundary (macrotask), not a microtask: the continuation runs
+ * after the current task's microtask queue drained, so the estimator's own
+ * synchronous tokenization can never execute inside the send/echo task. This is a
+ * scheduling boundary only — it makes no guarantee about a paint having happened.
+ * The repository's established pattern for "let the current work finish first"
+ * (`NotesService` batching) is the same zero-delay timeout.
+ */
+const yieldToNextTask = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+/**
+ * Best-effort persistence of the OPTIONAL user-prompt token estimate.
+ *
+ * The estimate is display metadata only: request token math derives from message
+ * content, nothing reads `message.usage` to build a request, and no part of the
+ * send waits for it. It is scheduled on a later task (see the caller), and the
+ * result goes through the conditional usage mode of `updateMessage`: Main applies
+ * it only inside one transaction when the row still exists on the pinned route, is
+ * a user message, has no usage yet, and its blocks still match this estimate's
+ * source — so an estimate that lost the race to an edit, resend, or delete can
+ * never overwrite newer metadata.
+ *
+ * Fire-and-forget by contract: failures are logged and dropped (a message without
+ * usage is a valid state). The projection is enriched only for an `applied`
+ * outcome, and only when the message is still loaded — an unloaded (windowed-out)
+ * message keeps its authority value and is never resurrected into the projection.
+ */
+const runDeferredUsageEstimate = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  userMessage: Message,
+  userMessageBlocks: MessageBlock[],
+  sendRoute: string | null
+): Promise<void> => {
+  try {
+    await yieldToNextTask()
+    const { content, files, source } = collectUsageEstimateInputs(userMessageBlocks)
+    const usage = await estimateUserPromptUsage({ content, files })
+    const outcome = await dbService.updateMessageUsageIfUnchanged(topicId, userMessage.id, usage, source, sendRoute)
+    if (!outcome?.applied) return
+    if (!getState().messages.entities[userMessage.id]) return
+    dispatch(newMessagesActions.updateMessage({ topicId, messageId: userMessage.id, updates: { usage } }))
+  } catch (error) {
+    logger.warn('Deferred user prompt usage estimate skipped (best effort):', error as Error)
+  }
+}
+
+/**
+ * Schedule the deferred estimate without letting scheduling itself affect the
+ * send: a throwing scheduler (or a missing timer implementation) is swallowed.
+ */
+const scheduleDeferredUsageEstimate = (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  userMessage: Message,
+  userMessageBlocks: MessageBlock[],
+  sendRoute: string | null
+): void => {
+  try {
+    void runDeferredUsageEstimate(dispatch, getState, topicId, userMessage, userMessageBlocks, sendRoute)
+  } catch (error) {
+    logger.warn('Failed to schedule user prompt usage estimate (best effort):', error as Error)
+  }
+}
+
+/**
+ * Does this route already own an ESTABLISHED context-window anchor?
+ *
+ * Ordinary-send callsite read only — `ensureTopicAnchorEstablished` keeps its
+ * original behavior everywhere else (topic activation and every explicit repair
+ * flow still resolve even an existing key, so an unresolvable anchor is still
+ * repaired there, docs/adr/context-window.md §10). Establishment is a one-time
+ * command (§6): an ordinary send only has to establish a route that has no
+ * anchor yet, so it does not pay an authority round trip per send.
+ *
+ * Reads the LATEST store assistant — the captured send snapshot may predate an
+ * establishment earlier in this session — and builds the route key with the
+ * shared `anchorKeyForRoute`. Unreadable state answers `false`, i.e. the ordinary
+ * establishment call runs (fail-open to the unchanged behavior).
+ */
+const hasEstablishedRouteAnchor = (
+  getState: () => RootState,
+  assistantId: string,
+  topicId: string,
+  route: string | null
+): boolean => {
+  try {
+    const freshAssistant = getState().assistants.assistants.find((asst) => asst.id === assistantId)
+    if (!freshAssistant) return false
+    const anchor = getAssistantSettings(freshAssistant).contextWindowAnchor?.[anchorKeyForRoute(topicId, route)]
+    return anchor?.kind === 'active' && typeof anchor.groupKey === 'string' && anchor.groupKey.length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Attachment-only end of one operation, decided before any assistant row,
+ * Main reset, or provider request exists.
+ *
+ * Returns true when the triggering user message provably has nothing to send:
+ * every attachment it carries is unavailable on this device (imported without
+ * payload bytes, file removed outside the app) and it holds no other content.
+ * The existing top notice explains the skipped attachments once, and the caller
+ * finishes the operation as a clean no-op — the same shape as the existing
+ * empty-send guard in `sendMessage` — instead of issuing a request that could
+ * only fail into an inline assistant/error block.
+ *
+ * Never a general "drop hard messages" gate: attachments that merely fail to
+ * read, encode, or extract are not classified here and keep the existing
+ * atomic attachment-error behavior. Messages whose blocks are not resolvable
+ * (window-outside projection) stay unclassifiable and proceed unchanged.
+ */
+const endsWithoutSendableAttachments = async (
+  trigger: Message | undefined,
+  blocks: MessageBlock[] | undefined
+): Promise<boolean> => {
+  if (!trigger || !Array.isArray(blocks)) return false
+  const availability = await resolveTriggerAttachmentAvailability(trigger, blocks)
+  if (availability.unavailableAttachmentCount === 0 || availability.hasSendableContent) return false
+  notifyUnavailableAttachmentsSkipped(availability.unavailableAttachmentCount)
+  return true
+}
+
+/**
+ * Loaded blocks of a message, for the attachment gate above. Window-outside
+ * references stay unresolved (no request-local overlay is invented here), which
+ * keeps the gate inert rather than letting it decide on partial knowledge.
+ */
+const loadedBlocksOf = (state: RootState, message: Message | undefined): MessageBlock[] | undefined => {
+  if (!message || !Array.isArray(message.blocks)) return undefined
+  const entities = state.messageBlocks?.entities ?? {}
+  return message.blocks.map((blockId) => entities[blockId]).filter((block): block is MessageBlock => Boolean(block))
+}
+
+/**
  * 发送消息并处理助手回复
  * @param userMessage 已创建的用户消息
  * @param userMessageBlocks 用户消息关联的消息块
@@ -963,6 +1208,10 @@ export const sendMessage =
     } catch {
       sendGeneration = 0
     }
+    // Set once the user echo was published; the OPTIONAL usage estimate is
+    // scheduled from `finally` only then (nothing authoritative to enrich
+    // otherwise).
+    let usageEstimateEligible = false
     try {
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
@@ -992,16 +1241,38 @@ export const sendMessage =
         dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
+      // The OPTIONAL prompt-token estimate is display metadata only: it is never a
+      // request input (request token math derives from message content) and never a
+      // precondition of the authoritative user echo. It is scheduled in `finally`
+      // below — after the user echo, the anchor step, the assistant stub and the
+      // provider queue — on a fresh task, so nothing above waits for it.
+      usageEstimateEligible = userPublished
+
+      // Attachment-only end of send: when every attachment of this message is
+      // provably unavailable on this device and nothing else is left, the top
+      // notice has already explained it once and the send finishes here — like
+      // the empty-send guard above. The user message stays persisted and
+      // visible, but no assistant stub is created, no provider request is
+      // issued, and no failed/inline answer is produced. Text and usable
+      // attachments never reach this branch.
+      if (await endsWithoutSendableAttachments(userMessage, userMessageBlocks)) {
+        return
+      }
 
       // First establishment: after the user message is persisted and added to
-      // Redux, idempotently persist the topic anchor when it is absent or
-      // unresolvable (docs/adr/context-window.md §6). A valid anchor is never
-      // recalculated; an empty topic never receives an anchor. This runs
-      // BEFORE the assistant response is queued so the first request resolves
-      // the same persisted anchor even though its captured assistant snapshot
-      // predates this dispatch. Route-scoped: branch routes anchor under
-      // their own route key.
-      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, sendRoute)
+      // Redux, persist the topic anchor when this route has none
+      // (docs/adr/context-window.md §6). Only a route WITHOUT an established
+      // anchor reaches the authority command here — an ordinary send never
+      // re-resolves an existing anchor. Establishment (and, on the topic
+      // activation / explicit repair paths, unresolvable-anchor repair, §10) is
+      // untouched: this is a send-callsite guard, not a service change. It runs
+      // AFTER the user echo and BEFORE the assistant append + queue so the first
+      // request resolves the same persisted anchor even though its captured
+      // assistant snapshot predates this dispatch. Route-scoped: branch routes
+      // anchor under their own route key.
+      if (!hasEstablishedRouteAnchor(getState, assistant.id, topicId, sendRoute)) {
+        await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, sendRoute)
+      }
 
       const queue = getTopicQueue(topicId)
 
@@ -1026,7 +1297,22 @@ export const sendMessage =
           traceId: userMessage.traceId
         })
         const assistantAck = await saveMessageAndBlocksToDB(topicId, assistantMessage, [], -1, sendContext, sendRoute)
+        // `publishAppendAck` reports PROJECTION publication (route/generation
+        // currency). The provider gate is the acknowledgment itself: an
+        // unacknowledged stub has no authority row, so a request against it
+        // could only write into a phantom message. A currency-only rejection
+        // still executes: the owned row exists on the pinned route, the
+        // projection filters the late publication, and the pinned request fills
+        // the row (reload-recoverable) exactly as before.
+        const assistantAcknowledged = toValidAppendEntry(topicId, assistantMessage, assistantAck, sendRoute) !== null
         publishAppendAck(dispatch, getState, topicId, assistantMessage, assistantAck, sendRoute, sendGeneration)
+        if (!assistantAcknowledged) {
+          logger.warn('sendMessage: assistant response stub was not acknowledged; provider request skipped', {
+            topicId,
+            messageId: assistantMessage.id
+          })
+          return
+        }
 
         void queue.add(async () => {
           await fetchAndProcessAssistantResponseImpl(
@@ -1044,6 +1330,12 @@ export const sendMessage =
     } catch (error) {
       logger.error('Error in sendMessage thunk:', error as Error)
     } finally {
+      // The OPTIONAL estimate is scheduled LAST, on its own task: the user echo is
+      // published, the anchor step ran, and the assistant stub + provider queue were
+      // dispatched above. A scheduler failure is contained (best effort).
+      if (usageEstimateEligible) {
+        scheduleDeferredUsageEstimate(dispatch, getState, topicId, userMessage, userMessageBlocks, sendRoute)
+      }
       void finishTopicLoading(topicId)
     }
   }
@@ -1137,32 +1429,58 @@ export function buildDeleteDependentsUndoParts(
   return { groupAnchors, segmentSnapshots, fileReferenceDeltas }
 }
 
-export const executeDeleteMessagesWithDependents = async (
+/**
+ * Typed post-commit convergence failure for the shared semantic delete core.
+ *
+ * Main `deleteMessagesWithDependents` COMMITTED (source rows removed) but a
+ * renderer-side post-commit step (projection dispatch / anchor transfer /
+ * awaited cleanup) threw. Carries the authoritative response plus the
+ * pre-delete-loaded undo parts so callers retain usable undo metadata without
+ * re-deriving it from projection. `committed === true` distinguishes this
+ * from a pre-commit rejection (Main never committed, safe to roll back fresh
+ * copies). No recovery ownership: callers decide, never this error.
+ */
+export class DeletePostCommitConvergenceError extends Error {
+  readonly committed = true as const
+  readonly response: DeleteMessagesWithDependentsResponse
+  readonly undoParts: DeleteDependentsUndoParts
+
+  constructor(
+    message: string,
+    response: DeleteMessagesWithDependentsResponse,
+    undoParts: DeleteDependentsUndoParts,
+    options?: ErrorOptions
+  ) {
+    super(message, options)
+    this.name = 'DeletePostCommitConvergenceError'
+    this.response = response
+    this.undoParts = undoParts
+  }
+}
+
+/** Narrow guard for the committed marker (works across mocked module boundaries). */
+export function isDeletePostCommitConvergenceError(error: unknown): error is DeletePostCommitConvergenceError {
+  if (error instanceof DeletePostCommitConvergenceError) return true
+  if (typeof error !== 'object' || error === null) return false
+  const candidate = error as { committed?: unknown; response?: unknown; undoParts?: unknown }
+  return (
+    candidate.committed === true && typeof candidate.response === 'object' && typeof candidate.undoParts === 'object'
+  )
+}
+
+/**
+ * ONE shared authoritative delete acknowledgment: message/block removal plus
+ * the complete Main segment catalog from an already-returned
+ * `deleteMessagesWithDependents` response. No extra list (the response is
+ * already the complete catalog per PROJ-10/I-5); the paired
+ * `isDeletePairedFollowUp` flag keeps the single atomic commit preserving
+ * the valid loaded projection (raw/fromSync invalidation unchanged).
+ */
+export function publishDeleteAuthorityCatalog(
   dispatch: AppDispatch,
-  getState: () => RootState,
   topicId: string,
-  rootIds: string[]
-): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
-  // Renderer precheck against Main-authoritative capability; Main guard stays
-  // final. Fail-closed before any Main call so shared/inherited targets never
-  // issue a mutation (existing toast path on throw).
-  const preState = getState()
-  for (const rootId of rootIds) requireMutableForActiveRoute(preState, topicId, rootId)
-  // Capture the pre-delete loaded projection BEFORE any persistence. The
-  // intersection below bounds the Redux undo projection; Main always keeps
-  // the full authority restore groups.
-  const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
-  // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
-  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, activeRouteOf(getState, topicId))
-
-  // Cancel throttled block updates for the authoritative deleted blocks.
-  response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
-
-  // Consume file cleanup exactly once after commit.
-  await consumeFileCleanupResult(response)
-
-  // Redux mutations AFTER successful SQLite commit — reducers naturally
-  // affect only the loaded intersection, never injecting window-outside entities.
+  response: DeleteMessagesWithDependentsResponse
+): void {
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
   if (response.deletedBlockIds.length > 0) {
     dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
@@ -1174,18 +1492,173 @@ export const executeDeleteMessagesWithDependents = async (
     }),
     meta: { isDeletePairedFollowUp: true }
   } as any)
+}
 
-  // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
-  transferAnchorsWithAuthorityGroupKeys(
-    dispatch,
-    getState,
-    topicId,
-    response.previousUserMessageIds,
-    response.remainingUserMessageIds,
-    activeRouteOf(getState, topicId)
-  )
+async function executeDeleteCore(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  rootIds: string[],
+  addressedRoute: string | null,
+  eligibleLoadedIds?: Iterable<string>
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> {
+  // Ordinary deletes capture the pre-delete loaded projection BEFORE any
+  // persistence. Staged-cut callers pass the cut-time source eligibility
+  // explicitly and must never read the (possibly retargeted) live projection
+  // here. The intersection below bounds the Redux undo projection only; Main
+  // always keeps the full authority restore groups.
+  const preDeleteLoadedIds =
+    typeof eligibleLoadedIds !== 'undefined'
+      ? new Set<string>(eligibleLoadedIds)
+      : new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
+  // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
+  // A throw here is a PRE-COMMIT failure: Main never committed, no typed marker.
+  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, addressedRoute)
 
-  return { response, undoParts: buildDeleteDependentsUndoParts(response, preDeleteLoadedIds) }
+  // Undo parts are derived from the authoritative response plus the pre-delete
+  // loaded IDs BEFORE any convergence step, so a later convergence throw never
+  // loses the payload.
+  const undoParts = buildDeleteDependentsUndoParts(response, preDeleteLoadedIds)
+
+  // Post-commit convergence: every throw below means Main COMMITTED. Wrap into
+  // the typed marker carrying response + undoParts; callers must NOT treat it
+  // as a pre-commit failure (no fresh-copy rollback).
+  try {
+    // Cancel throttled block updates for the authoritative deleted blocks.
+    response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+
+    // Consume file cleanup exactly once after commit.
+    await consumeFileCleanupResult(response)
+
+    // Redux mutations AFTER successful SQLite commit — reducers naturally
+    // affect only the loaded intersection, never injecting window-outside entities.
+    // ONE shared delete acknowledgment (no duplicate flags, no extra list).
+    publishDeleteAuthorityCatalog(dispatch, topicId, response)
+
+    // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
+    transferAnchorsWithAuthorityGroupKeys(
+      dispatch,
+      getState,
+      topicId,
+      response.previousUserMessageIds,
+      response.remainingUserMessageIds,
+      addressedRoute
+    )
+  } catch (convergenceError) {
+    throw new DeletePostCommitConvergenceError(
+      '[executeDeleteCore] Renderer convergence failed after Main commit; source deletion committed',
+      response,
+      undoParts,
+      { cause: convergenceError }
+    )
+  }
+
+  return { response, undoParts }
+}
+
+export const executeDeleteMessagesWithDependents = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  rootIds: string[]
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  // Renderer precheck against Main-authoritative capability; Main guard stays
+  // final. Fail-closed before any Main call so shared/inherited targets never
+  // issue a mutation (existing toast path on throw).
+  const preState = getState()
+  for (const rootId of rootIds) requireMutableForActiveRoute(preState, topicId, rootId)
+  return executeDeleteCore(dispatch, getState, topicId, rootIds, activeRouteOf(getState, topicId))
+}
+
+/**
+ * Staged-cut authority execution for cut-paste source deletion only.
+ *
+ * A cut stages its authority at cut time (after the edit-selection precheck):
+ * the addressed source route plus the complete authority member IDs, plus the
+ * cut-time SOURCE projection eligibility (which source rows were loaded and
+ * therefore eligible for immediate Redux visibility on undo). Paste/redo
+ * reuse that staged authority without rerequiring projection capability,
+ * because a straddling source may include complete outside-loaded members,
+ * and without rerequiring the current UI route, because a same-topic branch
+ * switch (staged source branch != live route) must still complete. The
+ * eligibility intersection uses the cut-time snapshot ONLY — never the live
+ * (possibly retargeted) projection — so a paste after switching to another
+ * window/branch cannot poison `loadedMessageIds` with the target's IDs. Main
+ * remains the final owner guard (every root owner == addressed route, user
+ * dependents all-owned, atomic) and the source of full restore payloads.
+ *
+ * Fail-closed before any Main call when the staged route is missing (legacy
+ * provenance), invalid, or when the source projection provenance is missing,
+ * mismatched (topic/route), or malformed. Ordinary delete paths stay
+ * per-root guarded with a live pre-delete snapshot; this helper is
+ * cut-specific and takes no generic skip flag.
+ */
+export interface StagedCutAuthority {
+  sourceTopicId: string
+  sourceBranchId: string | null
+  rootIds: string[]
+  /**
+   * Cut-time source projection eligibility. Required (undefined/null fail
+   * closed); `sourceTopicId`/`sourceBranchId` must exactly match the staged
+   * authority above (null = main, undefined never equals null).
+   */
+  sourceProjection?: StagedCutSourceProjection | null
+}
+
+function requireStagedCutSourceEligibility(authority: StagedCutAuthority): ReadonlyArray<string> {
+  const { sourceTopicId, sourceBranchId, sourceProjection } = authority
+  if (typeof sourceProjection === 'undefined' || sourceProjection === null) {
+    throw new Error(`[stagedCutDelete] Missing staged source projection for topic ${sourceTopicId}`)
+  }
+  if (typeof sourceProjection !== 'object') {
+    throw new Error(`[stagedCutDelete] Invalid staged source projection for topic ${sourceTopicId}`)
+  }
+  if (sourceProjection.sourceTopicId !== sourceTopicId) {
+    throw new Error(`[stagedCutDelete] Staged source projection topic mismatch for topic ${sourceTopicId}`)
+  }
+  // Strict route identity: null (main) vs string vs undefined stay distinct.
+  if (
+    typeof (sourceProjection as { sourceBranchId?: unknown }).sourceBranchId === 'undefined' ||
+    sourceProjection.sourceBranchId !== sourceBranchId
+  ) {
+    throw new Error(`[stagedCutDelete] Staged source projection route mismatch for topic ${sourceTopicId}`)
+  }
+  if (!Array.isArray(sourceProjection.loadedMessageIds)) {
+    throw new Error(`[stagedCutDelete] Invalid staged source projection ids for topic ${sourceTopicId}`)
+  }
+  const eligible: string[] = []
+  const seen = new Set<string>()
+  for (const id of sourceProjection.loadedMessageIds) {
+    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    eligible.push(id)
+  }
+  return eligible
+}
+
+export const executeStagedCutSourceDelete = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  authority: StagedCutAuthority
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  const { sourceTopicId, sourceBranchId, rootIds } = authority
+  if (typeof sourceBranchId === 'undefined') {
+    throw new Error(`[stagedCutDelete] Missing staged source route for topic ${sourceTopicId}`)
+  }
+  if (sourceBranchId !== null && !(typeof sourceBranchId === 'string' && sourceBranchId.length > 0)) {
+    throw new Error(`[stagedCutDelete] Invalid staged source route for topic ${sourceTopicId}`)
+  }
+  if (!Array.isArray(rootIds) || rootIds.length === 0) {
+    throw new Error(`[stagedCutDelete] Missing staged source roots for topic ${sourceTopicId}`)
+  }
+  // Cut-time eligibility (validated above) drives the undo intersection.
+  // The live projection is intentionally never read here.
+  const eligibleLoadedIds = requireStagedCutSourceEligibility(authority)
+  // Staged-addressed: the explicitly staged source route drives the Main
+  // delete independent of the current UI route. No live-route equality check:
+  // a same-topic branch switch must not refuse, and Main validates every root
+  // owner == staged addressed route with all-owned atomicity.
+  return executeDeleteCore(dispatch, getState, sourceTopicId, rootIds, sourceBranchId, eligibleLoadedIds)
 }
 
 export const deleteMessagesWithDependentsThunk =
@@ -1249,6 +1722,14 @@ export const resendMessageThunk =
       // loaded members throw fail-closed with zero IPC calls; window-outside
       // members are decided by the Main guard.
       requireLoadedAnswerMembersMutable(state, topicId, userMessageToResend.id)
+
+      // Attachment-only end of resend: nothing of this user turn can be sent,
+      // so the existing answers are left exactly as they are and the top notice
+      // is the whole result — no Main reset, no empty assistant row, no
+      // failed/inline answer.
+      if (await endsWithoutSendableAttachments(localUser, loadedBlocksOf(state, localUser))) {
+        return
+      }
 
       // Clear cached search results for the user message being resent
       // This ensures that the regenerated responses will not use stale search results
@@ -1433,6 +1914,18 @@ export const regenerateAssistantResponseThunk =
         )
         return
       }
+      // Attachment-only end of regenerate: the addressed answer's user turn has
+      // nothing sendable, so the existing answer is preserved untouched and the
+      // top notice is the whole result — no reset, no empty row, no inline
+      // failed answer. An unloaded user turn stays undecidable here and is
+      // decided by the request boundary instead.
+      const regeneratedUserAskId = localSelected.askId ?? assistantMessageToRegenerate.askId
+      if (regeneratedUserAskId) {
+        const regeneratedUser = state.messages.entities[regeneratedUserAskId]
+        if (await endsWithoutSendableAttachments(regeneratedUser, loadedBlocksOf(state, regeneratedUser))) {
+          return
+        }
+      }
       // Self-model compat: a truthy selected `modelId` preserves the old
       // retain-model path without requiring a configured assistant model.
       // Never forge a model id — omit `currentModel` when the assistant
@@ -1603,7 +2096,7 @@ export const initiateTranslationThunk =
 
 // --- Thunk to update the translation block with new content ---
 export const updateTranslationBlockThunk =
-  (blockId: string, accumulatedText: string, isComplete: boolean = false) =>
+  (blockId: string, accumulatedText: string, isComplete: boolean = false, route?: BlockWriteRouteContext) =>
   async (dispatch: AppDispatch) => {
     // Logger.log(`[updateTranslationBlockThunk] 更新翻译块 ${blockId}, isComplete: ${isComplete}`)
     try {
@@ -1619,7 +2112,11 @@ export const updateTranslationBlockThunk =
       // middleware invalidates globally rather than inferring from projection.
       dispatch(updateOneBlock({ id: blockId, changes }))
 
-      await updateSingleBlock(blockId, changes)
+      // The translation block belongs to the active topic/route the UI initiated
+      // from (mutability prechecked at initiation); that addressed route rides
+      // with the write when the caller supplies it. Absent = canonical parent
+      // resolution.
+      await updateSingleBlock(blockId, changes, undefined, undefined, route)
       // Logger.log(`[updateTranslationBlockThunk] Successfully updated translation block ${blockId}.`)
     } catch (error) {
       logger.error(`[updateTranslationBlockThunk] Failed to update translation block ${blockId}:`, error as Error)
@@ -1690,6 +2187,16 @@ export const appendAssistantResponseThunk =
           precheck as Error
         )
         return
+      }
+
+      // Attachment-only end of append: the addressed user turn has nothing
+      // sendable, so no new answer row is created and no request is issued — the
+      // existing answers stand and the top notice is the whole result.
+      {
+        const appendedUser = state.messages.entities[askId]
+        if (await endsWithoutSendableAttachments(appendedUser, loadedBlocksOf(state, appendedUser))) {
+          return
+        }
       }
 
       // 2. Create the new assistant message stub
@@ -2020,6 +2527,73 @@ export const branchMessagesToTopicThunk =
   }
 
 /**
+ * Cross-topic history reference creation (Reference / Copy = Reference).
+ *
+ * READ-ONLY SOURCE operation: Main atomically creates the target topic and its
+ * reference relation to the source route endpoint, returning the live foreign
+ * prefix wire for projection. Never writes the source, never copies
+ * messages/blocks/files, and grants no mutation. The returned prefix messages
+ * keep their canonical SOURCE topicId (never restamped) so `messageIdsByTopic`
+ * shares stable IDs with the source and Main excludes them from the target
+ * route's `mutableMessageIds` (readonly enforced by capability, fail-closed).
+ * Local-only: no sync intent.
+ *
+ * The target topic row is created by Main inside the same transaction — the
+ * caller must NOT pre-create it (no orphan topic on failure).
+ */
+export const createReferencedTopicThunk =
+  (
+    sourceTopicId: string,
+    sourceBranchId: string | null,
+    anchorMessageId: string,
+    newTopic: Topic,
+    assistantId?: string
+  ) =>
+  async (dispatch: AppDispatch, _getState: () => RootState): Promise<{ topicId: string } | null> => {
+    if (!newTopic || !newTopic.id || !sourceTopicId || !anchorMessageId) {
+      logger.error(`[createReferencedTopicThunk] Invalid arguments.`)
+      return null
+    }
+    try {
+      const result = await dbService.createReferencedTopic(
+        sourceTopicId,
+        sourceBranchId,
+        newTopic.id,
+        anchorMessageId,
+        assistantId ?? newTopic.assistantId,
+        newTopic.name
+      )
+      const messages = result.messages as unknown as Message[]
+      const blocks = result.blocks as unknown as MessageBlock[]
+      if (blocks.length > 0) {
+        // Read-only foreign-prefix projection: must not invalidate the closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks), newTopic.id)))
+      }
+      dispatch(newMessagesActions.messagesReceived({ topicId: newTopic.id, messages }))
+      // The target starts with an empty owned suffix, so the last foreign-prefix
+      // message is the divider boundary.
+      const boundaryMessageId = messages.length > 0 ? messages[messages.length - 1].id : null
+      dispatch(
+        newMessagesActions.historyReferenceSet({
+          topicId: newTopic.id,
+          reference: {
+            sourceTopicId: result.reference.sourceTopicId,
+            sourceBranchId: result.reference.sourceBranchId,
+            anchorMessageId: result.reference.anchorMessageId,
+            sourceName: result.reference.sourceName,
+            status: 'available',
+            boundaryMessageId
+          }
+        })
+      )
+      return { topicId: result.topicId }
+    } catch (error) {
+      logger.error(`[createReferencedTopicThunk] Failed to create referenced topic:`, error as Error)
+      return null
+    }
+  }
+
+/**
  * Create one topic-internal branch node (the ONLY true-branch creation
  * method).
  *
@@ -2085,7 +2659,9 @@ export const createBranchThunk =
         })
       )
       if (effectiveBlocks.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId))
+        // Read-only effective-route projection (branch creation wire): must not
+        // invalidate the semantic closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId)))
       }
       const { branchesReceived } = await import('../topicBranch')
       try {
@@ -2107,11 +2683,12 @@ export const createBranchThunk =
       }
       const newBranchId = result.branch.id
       // Deterministic per-route context-anchor inheritance (ADR §9, CW-4):
-      // parent effective group-list index → new branch group-list with clamp;
-      // invalid/missing source on a non-empty branch falls back to the default
-      // position; empty branches stay anchorless. Anchors are route-isolated
-      // (main `topicId`, branch `topicId:branchId`). Main `inherit` resolver
-      // owns the index mapping; this thunk only persists the non-stale result.
+      // valid source turn index in destination maps (clone IDs remapped);
+      // excluded/missing anchor on a non-empty branch establishes the CURRENT
+      // `contextCount` default position; empty branches stay anchorless.
+      // Anchors are route-isolated (main `topicId`, branch `topicId:branchId`).
+      // Main `inherit` resolver owns the index mapping; this thunk only
+      // persists the non-stale result.
       try {
         const state = getState()
         const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
@@ -2216,6 +2793,65 @@ export const fetchTopicBranchesThunk =
   }
 
 /**
+ * Persist Main-resolved context-window anchor facts into the assistant's
+ * per-route anchor map, atomically in ONE settings update.
+ *
+ * Each entry is a Main-resolved fact: a non-empty `groupKey` writes that
+ * route's anchor, `null` removes it (empty route, no anchor), and `undefined`
+ * means no fact was produced — nothing is written and no anchor is invented
+ * locally.
+ *
+ * `onlyIfCurrentGroupKey` makes the write conditional: it applies only while
+ * that route's persisted anchor still equals the pre-commit value the request
+ * carried. A concurrent explicit change during the IPC await therefore wins and
+ * is never overwritten by a stale fact.
+ *
+ * The owner's anchor map is re-read from the LATEST store state at dispatch
+ * time, so a write that follows an await gap can never re-publish a stale map
+ * and clobber another route's anchor. Only the addressed route keys are
+ * touched; the active route is never changed here.
+ */
+type RouteAnchorWrite = {
+  routeKey: string
+  groupKey: string | null | undefined
+  /** Apply only while the route's current anchor equals this value. */
+  onlyIfCurrentGroupKey?: string
+}
+
+function persistRouteContextAnchors(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  assistantId: string,
+  writes: RouteAnchorWrite[]
+): void {
+  const owner = getState().assistants.assistants.find((a) => a.id === assistantId)
+  if (!owner) return
+  const settings = getAssistantSettings(owner)
+  let next: Record<string, ContextWindowAnchor | undefined> | null = null
+  const mutable = (): Record<string, ContextWindowAnchor | undefined> => {
+    if (!next) next = { ...settings.contextWindowAnchor }
+    return next
+  }
+  for (const write of writes) {
+    if (write.groupKey === undefined) continue
+    const current = (next ?? settings.contextWindowAnchor)?.[write.routeKey]
+    if (write.onlyIfCurrentGroupKey !== undefined) {
+      const currentKey = current?.kind === 'active' ? current.groupKey : null
+      if (currentKey !== write.onlyIfCurrentGroupKey) continue
+    }
+    if (write.groupKey === null) {
+      if (!current) continue
+      delete mutable()[write.routeKey]
+      continue
+    }
+    if (current?.kind === 'active' && current.groupKey === write.groupKey) continue
+    mutable()[write.routeKey] = { kind: 'active', groupKey: write.groupKey }
+  }
+  if (!next) return
+  dispatch(updateAssistantSettings({ assistantId, settings: { contextWindowAnchor: next } }))
+}
+
+/**
  * Move selected whole turns to a newly created child branch.
  *
  * Purpose-specific ownership move: the edit-mode whole-turn selection
@@ -2273,7 +2909,14 @@ export const moveSelectedTurnsToNewBranchThunk =
       entryGeneration = 0
     }
     const editSel = await import('../editSelection')
-    const runMovePrechecks = (state: RootState): { expectedDisplayOrdered: string[]; precedingId: string } | null => {
+    const runMovePrechecks = (
+      state: RootState
+    ): {
+      expectedDisplayOrdered: string[]
+      precedingId: string
+      ownerAssistantId?: string
+      contextAnchorInheritance?: MoveContextAnchorInheritanceInput
+    } | null => {
       const active = selectActiveBranchId(state, topicId)
       if ((active ?? null) !== normalizedSource) {
         logger.error(`[moveSelectedTurnsToNewBranchThunk] Source route mismatch; failing closed without IPC.`)
@@ -2401,7 +3044,30 @@ export const moveSelectedTurnsToNewBranchThunk =
         logger.error(`[moveSelectedTurnsToNewBranchThunk] Segment check failed; failing closed.`)
         return null
       }
-      return { expectedDisplayOrdered, precedingId }
+      // Pre-commit capture of the renderer-owned context-window facts: the
+      // source route anchor and the assistant window size at commit time ride
+      // WITH the move request, so Main resolves the destination anchor inside
+      // the same transaction against the PRE-MOVE source route. Reading them
+      // after the commit would resolve against the already-mutated source and
+      // silently land on the default window position.
+      const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
+      if (!owner) {
+        // No owner assistant → nothing could persist a destination anchor;
+        // request no fact and never invent one.
+        return { expectedDisplayOrdered, precedingId }
+      }
+      const preCommitSettings = getAssistantSettings(owner)
+      const parentRouteKey = anchorKeyForRoute(topicId, normalizedSource)
+      const parentAnchor = preCommitSettings.contextWindowAnchor?.[parentRouteKey]
+      return {
+        expectedDisplayOrdered,
+        precedingId,
+        ownerAssistantId: owner.id,
+        contextAnchorInheritance: {
+          sourceAnchorGroupKey: parentAnchor?.kind === 'active' ? parentAnchor.groupKey : null,
+          contextCount: preCommitSettings.contextCount ?? null
+        }
+      }
     }
     // Fresh pre-IPC gate: current route/generation must still match the
     // caller's addressed source; zero IPC on any change before the call
@@ -2428,7 +3094,8 @@ export const moveSelectedTurnsToNewBranchThunk =
         sourceBranchId,
         selectedGroupIds,
         name,
-        precheck.expectedDisplayOrdered
+        precheck.expectedDisplayOrdered,
+        precheck.contextAnchorInheritance
       )
     } catch (error) {
       logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to move turns:`, error as Error)
@@ -2442,7 +3109,30 @@ export const moveSelectedTurnsToNewBranchThunk =
       anchorMessageId: result.anchorMessageId,
       movedMessageIds: result.movedMessageIds
     }
-    const effectiveMessages = result.messages as unknown as Message[]
+    // Write the committed destination anchor (and the deterministic source
+    // transfer, when Main reported one) BEFORE this thunk's own
+    // activeBranchSet and before any await gap: the commit is durable, so the
+    // routes must carry their Main-resolved anchors whether or not the viewport
+    // load below publishes, is superseded, or the user switches away. Both keys
+    // ride ONE settings update built from the latest owner map, so an
+    // unrelated route key is never clobbered.
+    if (precheck.ownerAssistantId) {
+      const writes: RouteAnchorWrite[] = [
+        { routeKey: anchorKeyForRoute(topicId, result.branch.id), groupKey: result.resolvedContextAnchorGroupKey }
+      ]
+      const transfer = result.sourceContextAnchorTransfer
+      if (transfer) {
+        // Conditional: only while the source route still carries the anchor the
+        // request was built from. An explicit user re-anchor during the commit
+        // await wins; the destination write still happens.
+        writes.push({
+          routeKey: anchorKeyForRoute(topicId, normalizedSource),
+          groupKey: transfer.toGroupKey,
+          onlyIfCurrentGroupKey: transfer.fromGroupKey
+        })
+      }
+      persistRouteContextAnchors(dispatch, getState, precheck.ownerAssistantId, writes)
+    }
     const effectiveBlocks = result.blocks as unknown as MessageBlock[]
     if (effectiveBlocks.length > 0) {
       try {
@@ -2564,79 +3254,6 @@ export const moveSelectedTurnsToNewBranchThunk =
         // committed success stands; the route effect reloads on demand.
         return committed
       }
-    }
-    try {
-      const state = getState()
-      const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
-      if (owner) {
-        const { getAssistantSettings } = await import('@renderer/services/AssistantService')
-        const { anchorKeyForRoute } = await import('@renderer/services/anchorService')
-        const parentRoute = typeof sourceBranchId === 'string' && sourceBranchId.length > 0 ? sourceBranchId : null
-        const parentKey = anchorKeyForRoute(topicId, parentRoute)
-        const targetKey = anchorKeyForRoute(topicId, newBranchId)
-        const parentAnchor =
-          (getAssistantSettings(owner).contextWindowAnchor?.[parentKey] as
-            | { kind: string; groupKey: string }
-            | undefined) ?? null
-        const sourceKey =
-          parentAnchor && (parentAnchor as { kind: string }).kind === 'active'
-            ? (parentAnchor as { groupKey: string }).groupKey
-            : null
-        const contextCount = getAssistantSettings(owner).contextCount ?? null
-        try {
-          const inheritRes = await dbService.resolveContextClosure({
-            topicId,
-            branchId: newBranchId,
-            intent: 'inherit',
-            sourceTopicId: topicId,
-            sourceBranchId: parentRoute,
-            sourceAnchorGroupKey: sourceKey,
-            contextCount,
-            currentAnchorGroupKey: null,
-            detail: 'anchor'
-          })
-          const resolved = (inheritRes as { resolvedAnchorGroupKey: string | null }).resolvedAnchorGroupKey
-          const fresh = getState()
-          const freshOwner = fresh.assistants.assistants.find((a) => a.id === owner.id)
-          const freshSettings = freshOwner ? getAssistantSettings(freshOwner) : getAssistantSettings(owner)
-          const existing =
-            (freshSettings.contextWindowAnchor?.[targetKey] as { kind: string; groupKey: string } | undefined) ?? null
-          if (resolved !== null && resolved !== undefined) {
-            if (!existing || (existing as { kind: string }).kind !== 'active') {
-              const { updateAssistantSettings } = await import('../assistants')
-              dispatch(
-                updateAssistantSettings({
-                  assistantId: owner.id,
-                  settings: {
-                    contextWindowAnchor: {
-                      ...freshSettings.contextWindowAnchor,
-                      [targetKey]: { kind: 'active', groupKey: resolved }
-                    }
-                  }
-                }) as any
-              )
-            }
-          } else if (existing) {
-            const { updateAssistantSettings } = await import('../assistants')
-            const next = { ...freshSettings.contextWindowAnchor }
-            delete next[targetKey]
-            dispatch(
-              updateAssistantSettings({
-                assistantId: owner.id,
-                settings: { contextWindowAnchor: next }
-              }) as any
-            )
-          }
-        } catch {
-          if (effectiveMessages.length > 0) {
-            try {
-              await ensureTopicAnchorEstablished(dispatch, getState, owner.id, topicId, newBranchId)
-            } catch {}
-          }
-        }
-      }
-    } catch {
-      // Best-effort inheritance; never break the move.
     }
     return committed
   }
@@ -3214,9 +3831,16 @@ export const loadTopicMessagesThunk =
         const blocks = response!.blocks as unknown as MessageBlock[]
         const messages = response!.messages as unknown as Message[]
         if (blocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(blocks as any), topicId))
+          // Read-only window hydration: must not invalidate the semantic closure.
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks as any), topicId)))
         }
-        dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
+        dispatch(
+          newMessagesActions.messagesReceived({
+            topicId,
+            messages,
+            reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+          } as any)
+        )
       }
 
       // Anchor/context work is scheduled after interactive completion and never blocks
@@ -3364,12 +3988,21 @@ export const loadRouteMessagesThunk =
         return response
       }
       if (typedBlocks.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(typedBlocks), topicId))
+        // Read-only route-window hydration: must not invalidate the semantic closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(typedBlocks), topicId)))
       }
       // Atomic conservative rebase with Main-authoritative capability:
       // single commit, no blank, no mixed route. Empty windows publish []
       // (clear). Capability rides atomically; absent clears fail-closed.
-      dispatch(newMessagesActions.rebaseRouteMessages({ topicId, messages: typedMessages, route, mutableMessageIds }))
+      dispatch(
+        newMessagesActions.rebaseRouteMessages({
+          topicId,
+          messages: typedMessages,
+          route,
+          mutableMessageIds,
+          reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+        })
+      )
       return response
     } finally {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -3565,15 +4198,20 @@ export const updateMessage = async (
 
 /**
  * Update a single message block
+ *
+ * `route` is the optional addressed route tuple (`{ topicId, branchId }`); when
+ * supplied, Main verifies the block's parent against it (rejecting a foreign
+ * cross-topic prefix write) instead of inferring the route from the parent.
  */
 export const updateSingleBlock = async (
   blockId: string,
   updates: Partial<MessageBlock>,
   streamDiag?: StreamWriteDiagnostics,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
 ): Promise<void> => {
   try {
-    await dbService.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
+    await dbService.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId, route)
     logger.silly('Updated single block via DbService', { blockId })
   } catch (error) {
     logger.error('Failed to update single block:', { blockId, error })
@@ -3583,10 +4221,17 @@ export const updateSingleBlock = async (
 
 /**
  * Bulk add message blocks (for new blocks)
+ *
+ * `route` addresses the write like `updateSingleBlock`; absent = canonical
+ * parent resolution.
  */
-export const bulkAddBlocks = async (blocks: MessageBlock[], resendAttemptId?: string): Promise<void> => {
+export const bulkAddBlocks = async (
+  blocks: MessageBlock[],
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
+): Promise<void> => {
   try {
-    await dbService.bulkAddBlocks(blocks, resendAttemptId)
+    await dbService.bulkAddBlocks(blocks, resendAttemptId, route)
     logger.silly('Bulk added blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to bulk add blocks:', { count: blocks.length, error })
@@ -3596,14 +4241,18 @@ export const bulkAddBlocks = async (blocks: MessageBlock[], resendAttemptId?: st
 
 /**
  * Update multiple message blocks (upsert operation)
+ *
+ * `route` addresses the write like `updateSingleBlock`; absent = canonical
+ * parent resolution.
  */
 export const updateBlocks = async (
   blocks: MessageBlock[],
   streamDiag?: StreamWriteDiagnostics,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  route?: BlockWriteRouteContext
 ): Promise<void> => {
   try {
-    await dbService.updateBlocks(blocks, streamDiag, resendAttemptId)
+    await dbService.updateBlocks(blocks, streamDiag, resendAttemptId, route)
     logger.silly('Updated blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to update blocks:', { count: blocks.length, error })
@@ -3771,11 +4420,30 @@ export const setupChannelStream = (
       return false
     }
   }
+  // IM channel execution is main-route only (the append above pinned null):
+  // bind the main route explicitly on every write so channel persistence never
+  // falls back to the topic's active branch, and the block-only channel is
+  // addressed with the same tuple Main verifies against each block's parent.
+  const saveUpdatedBlockToDBForChannel = (
+    blockId: string | null,
+    messageId: string,
+    channelTopicId: string,
+    channelGetState: () => RootState,
+    _attemptId?: string,
+    localBlock?: MessageBlock
+  ): Promise<void> =>
+    saveUpdatedBlockToDB(blockId, messageId, channelTopicId, channelGetState, undefined, localBlock, null)
+  const saveUpdatesToDBForChannel = (
+    messageId: string,
+    channelTopicId: string,
+    messageUpdates: Partial<Message>,
+    blocksToUpdate: MessageBlock[]
+  ): Promise<void> => saveUpdatesToDB(messageId, channelTopicId, messageUpdates, blocksToUpdate, undefined, null)
   const blockManager = new BlockManager({
     dispatch,
     getState,
-    saveUpdatedBlockToDB,
-    saveUpdatesToDB,
+    saveUpdatedBlockToDB: saveUpdatedBlockToDBForChannel,
+    saveUpdatesToDB: saveUpdatesToDBForChannel,
     assistantMsgId: assistantMessage.id,
     topicId,
     barrier: channelBarrier,
@@ -3790,7 +4458,8 @@ export const setupChannelStream = (
       throttledBlockUpdate(id, blockUpdate, {
         barrier: barrier ?? channelBarrier,
         shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
-        topicId
+        topicId,
+        branchId: null
       }),
     flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
@@ -3803,16 +4472,17 @@ export const setupChannelStream = (
     topicId,
     assistantMsgId: assistantMessage.id,
     executionState: channelExecutionState,
-    saveUpdatesToDB,
+    saveUpdatesToDB: saveUpdatesToDBForChannel,
     // Ordinary IM channel execution: no resend attempt (carrier omitted), but
-    // the same single-transaction final checkpoint as ordinary chat.
+    // the same single-transaction final checkpoint as ordinary chat, pinned to
+    // the main route.
     saveFinalUpdatesAtomically: (
       messageId: string,
       channelTopicId: string,
       messageUpdates: Partial<Message>,
       blocksToUpdate: MessageBlock[]
     ): Promise<FileCleanupResult> =>
-      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate),
+      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate, undefined, null),
     assistant
   })
 

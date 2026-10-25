@@ -1,6 +1,6 @@
 /**
- * 内置插件：MCP Prompt 模式
- * 为不支持原生 Function Call 的模型提供 prompt 方式的工具调用
+ * 内置插件：Prompt 工具调用模式
+ * 为不支持原生 Function Call 的模型提供 prompt 方式的通用工具调用
  * 内置默认逻辑，支持自定义覆盖
  */
 import type { TextStreamPart, ToolSet } from 'ai'
@@ -183,16 +183,10 @@ ${result}
 /**
  * 默认的系统提示符构建函数（提取自 Cherry Studio）
  */
-function defaultBuildSystemPrompt(userSystemPrompt: string, tools: ToolSet, mcpMode?: string): string {
+function defaultBuildSystemPrompt(userSystemPrompt: string, tools: ToolSet): string {
   const availableTools = buildAvailableTools(tools)
   if (availableTools === null) return userSystemPrompt
 
-  if (mcpMode == 'auto') {
-    return DEFAULT_SYSTEM_PROMPT.replace('{{ TOOLS_INFO }}', '').replace(
-      '{{ USER_SYSTEM_PROMPT }}',
-      userSystemPrompt || ''
-    )
-  }
   const toolsInfo = `
 ## Tool Use Examples
 {{ TOOL_USE_EXAMPLES }}
@@ -239,17 +233,7 @@ function defaultParseToolUse(content: string, tools: ToolSet): { results: ToolUs
   // Find all tool use blocks
   while ((match = toolUsePattern.exec(contentToProcess)) !== null) {
     const fullMatch = match[0]
-    let toolName = match[2].trim()
-    switch (toolName.toLowerCase()) {
-      case 'search':
-        toolName = 'mcp__CherryHub__search'
-        break
-      case 'exec':
-        toolName = 'mcp__CherryHub__exec'
-        break
-      default:
-        break
-    }
+    const toolName = match[2].trim()
     const toolArgs = match[4].trim()
 
     // Try to parse the arguments as JSON
@@ -283,12 +267,7 @@ function defaultParseToolUse(content: string, tools: ToolSet): { results: ToolUs
 export const createPromptToolUsePlugin = (
   config: PromptToolUseConfig = {}
 ): AiPlugin<StreamTextParams, StreamTextResult> => {
-  const {
-    enabled = true,
-    buildSystemPrompt = defaultBuildSystemPrompt,
-    parseToolUse = defaultParseToolUse,
-    mcpMode
-  } = config
+  const { enabled = true, buildSystemPrompt = defaultBuildSystemPrompt, parseToolUse = defaultParseToolUse } = config
 
   return definePlugin<StreamTextParams, StreamTextResult>({
     name: 'built-in:prompt-tool-use',
@@ -313,10 +292,10 @@ export const createPromptToolUsePlugin = (
 
       // 只有当有非 provider 工具时才保存到 context
       if (Object.keys(promptTools).length > 0) {
-        context.mcpTools = promptTools
+        context.promptTools = promptTools
       }
 
-      // 递归调用时，不重新构建 system prompt，避免重复追加工具定义
+      // 递归调用时，不重新构建系统提示符，避免重复追加工具定义
       if (context.isRecursiveCall) {
         const transformedParams = {
           ...params,
@@ -328,7 +307,7 @@ export const createPromptToolUsePlugin = (
 
       // 构建系统提示符（只包含非 provider 工具）
       const userSystemPrompt = typeof params.system === 'string' ? params.system : ''
-      const systemPrompt = buildSystemPrompt(userSystemPrompt, promptTools, mcpMode)
+      const systemPrompt = buildSystemPrompt(userSystemPrompt, promptTools)
 
       // 保留 provide tools，移除其他 tools
       const transformedParams = {
@@ -344,7 +323,7 @@ export const createPromptToolUsePlugin = (
       // let stepId = ''
 
       // 如果没有需要 prompt 模式处理的工具，直接返回原始流
-      if (!context.mcpTools) {
+      if (!context.promptTools) {
         return new TransformStream()
       }
 
@@ -371,7 +350,7 @@ export const createPromptToolUsePlugin = (
       let pendingTextStart: TextStreamPart<TOOLS> | null = null
       let hasStartedText = false
 
-      type TOOLS = NonNullable<typeof context.mcpTools>
+      type TOOLS = NonNullable<typeof context.promptTools>
       return new TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>({
         async transform(
           chunk: TextStreamPart<TOOLS>,
@@ -421,7 +400,7 @@ export const createPromptToolUsePlugin = (
 
           if (chunk.type === 'finish-step') {
             // 统一在finish-step阶段检查并执行工具调用
-            const tools = context.mcpTools
+            const tools = context.promptTools
             if (tools && Object.keys(tools).length > 0 && !context.hasExecutedToolsInCurrentStep) {
               // 解析完整的textBuffer来检测工具调用
               const { results: parsedTools } = parseToolUse(textBuffer, tools)

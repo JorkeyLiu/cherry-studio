@@ -2,7 +2,6 @@ import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import type { MCPToolResponseStatus } from '@renderer/types'
 import type { Message, MessageBlock, ToolMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { isToolPending } from '@renderer/utils/userConfirmation'
 import { Collapse, type CollapseProps } from 'antd'
 import { ChevronRight, Wrench } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
@@ -10,10 +9,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { useToolApproval } from '../Tools/hooks/useToolApproval'
 import MessageTools from '../Tools/MessageTools'
 import { getEffectiveStatus, type ToolStatus } from '../Tools/shared/GenericTools'
-import ToolApprovalActionsComponent from '../Tools/ToolApprovalActions'
 import ToolHeader from '../Tools/ToolHeader'
 import BlockErrorFallback from './BlockErrorFallback'
 import MainTextBlock from './MainTextBlock'
@@ -141,14 +138,6 @@ const AnimatedHeaderWrapper = styled(motion.div)`
   width: 100%;
 `
 
-const HeaderWithActions = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  justify-content: space-between;
-`
-
 const ExpandIcon = styled(ChevronRight)<{ $isActive?: boolean }>`
   transition: transform 0.2s;
   transform: ${({ $isActive }) => ($isActive ? 'rotate(90deg)' : 'rotate(0deg)')};
@@ -181,25 +170,10 @@ function isCompletedToolBlock(block: ToolMessageBlock): boolean {
   return isCompletedBlockStatus(block.status)
 }
 
-// Calculate actual waiting state for a block (not depending on hooks)
-function getBlockIsWaiting(block: ToolMessageBlock): boolean {
-  const toolResponse = block.metadata?.rawMcpToolResponse
-  if (!toolResponse || toolResponse.status !== 'pending') return false
-
-  const tool = toolResponse.tool
-  if (tool?.type === 'mcp') {
-    // MCP tools: check the global confirmation queue
-    return isToolPending(toolResponse.id)
-  }
-  // Agent tools: no longer need permission checking
-  return false
-}
-
 // Get effective UI status for a block
 function getBlockEffectiveStatus(block: ToolMessageBlock): ToolStatus {
   const toolResponse = block.metadata?.rawMcpToolResponse
-  const isWaiting = getBlockIsWaiting(block)
-  return getEffectiveStatus(toolResponse?.status, isWaiting)
+  return getEffectiveStatus(toolResponse?.status, false)
 }
 
 // Animation variants for smooth header transitions
@@ -210,25 +184,6 @@ const headerVariants = {
 }
 
 // ============ Sub-Components ============
-
-// Component for rendering a block with approval actions
-interface WaitingToolHeaderProps {
-  block: ToolMessageBlock
-}
-
-const WaitingToolHeader = React.memo(({ block }: WaitingToolHeaderProps) => {
-  const approval = useToolApproval(block)
-  const toolResponse = block.metadata?.rawMcpToolResponse
-  const effectiveStatus = getEffectiveStatus(toolResponse?.status, approval.isWaiting)
-
-  return (
-    <HeaderWithActions>
-      <ToolHeader block={block} variant="collapse-label" status={effectiveStatus} />
-      {(approval.isWaiting || approval.isExecuting) && <ToolApprovalActionsComponent {...approval} compact />}
-    </HeaderWithActions>
-  )
-})
-WaitingToolHeader.displayName = 'WaitingToolHeader'
 
 interface GroupHeaderContentProps {
   blocks: MessageBlock[]
@@ -262,26 +217,6 @@ const GroupHeaderContent = React.memo(({ blocks, allCompleted }: GroupHeaderCont
         <Wrench size={14} className="tool-icon" />
         <span className="tool-count">{groupHeader}</span>
       </GroupHeader>
-    )
-  }
-
-  // Find blocks actually waiting for approval (using effective status)
-  const waitingBlocks = toolBlocks.filter((block) => getBlockEffectiveStatus(block) === 'waiting')
-
-  // Prioritize showing waiting blocks that need approval
-  const lastWaitingBlock = waitingBlocks[waitingBlocks.length - 1]
-  if (lastWaitingBlock) {
-    return (
-      <AnimatePresence mode="wait">
-        <AnimatedHeaderWrapper
-          key={lastWaitingBlock.id}
-          variants={headerVariants}
-          initial="enter"
-          animate="center"
-          exit="exit">
-          <WaitingToolHeader block={lastWaitingBlock} />
-        </AnimatedHeaderWrapper>
-      </AnimatePresence>
     )
   }
 
@@ -386,10 +321,6 @@ const ToolBlockGroup: React.FC<Props> = ({ blocks, role = 'assistant' }) => {
     return toolBlocks.find((block) => !isCompletedToolBlock(block))
   }, [toolBlocks])
 
-  const hasWaitingTool = useMemo(() => {
-    return toolBlocks.some((block) => getBlockEffectiveStatus(block) === 'waiting')
-  }, [toolBlocks])
-
   useEffect(() => {
     if (activeKey.includes('tool-group') && currentRunningBlock && scrollRef.current) {
       const element = scrollRef.current.querySelector(`[data-block-id="${currentRunningBlock.id}"]`)
@@ -414,12 +345,11 @@ const ToolBlockGroup: React.FC<Props> = ({ blocks, role = 'assistant' }) => {
     return [
       {
         key: 'tool-group',
-        className: hasWaitingTool ? 'tool-group-waiting-approval' : undefined,
         label: <GroupHeaderContent blocks={blocks} allCompleted={allCompleted} />,
         children: <ToolListContent blocks={blocks} allCompleted={allCompleted} role={role} scrollRef={scrollRef} />
       }
     ]
-  }, [blocks, allCompleted, hasWaitingTool, role])
+  }, [blocks, allCompleted, role])
 
   return (
     <Container>

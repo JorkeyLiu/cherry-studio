@@ -94,10 +94,34 @@ describe('insert-message-groups request validation', () => {
     ).toThrow(ValidationError)
   })
 
-  it('validates FileCleanupResult response shape', () => {
-    expect(() =>
-      validateChatDbResult(CHANNEL, { ok: true, value: { affectedFileIds: [], remainingReferenceCounts: {} } })
-    ).not.toThrow()
+  it('validates batch insertion acknowledgment response shape', () => {
+    const good = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't-1',
+      branchId: null,
+      insertedMessages: [{ id: 'm-1', topicId: 't-1' }],
+      insertedBlocks: [],
+      insertedMessageIds: ['m-1'],
+      mutableMessageIds: ['m-1'],
+      groups: [{ insertedMessageIds: ['m-1'], beforeMessageId: null, nextMessageId: null }]
+    }
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: good })).not.toThrow()
     expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { affectedFileIds: [] } })).toThrow(ValidationError)
+    // Mutable ids must be a subset of inserted ids.
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { ...good, mutableMessageIds: ['ghost'] } })).toThrow(
+      ValidationError
+    )
+    // Flat ids must match wires in order.
+    expect(() =>
+      validateChatDbResult(CHANNEL, { ok: true, value: { ...good, insertedMessageIds: ['other'] } })
+    ).toThrow(ValidationError)
+    // Group runs must concatenate to the flat ids in order.
+    expect(() =>
+      validateChatDbResult(CHANNEL, {
+        ok: true,
+        value: { ...good, groups: [{ insertedMessageIds: ['other'], beforeMessageId: null, nextMessageId: null }] }
+      })
+    ).toThrow(ValidationError)
   })
 })

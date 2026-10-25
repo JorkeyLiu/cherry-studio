@@ -12,6 +12,7 @@
 
 import { loggerService } from '@logger'
 import type { ChatProjectionInvalidationEvent } from '@shared/chatDb'
+import type { HistoryReferenceInvalidationEvent } from '@shared/chatDb'
 import { validateChatProjectionInvalidationEvent } from '@shared/chatDb'
 import { IpcChannel } from '@shared/IpcChannel'
 import { BrowserWindow } from 'electron'
@@ -78,6 +79,57 @@ export function broadcastChatProjectionInvalidation(
       if (!wc || wc.isDestroyed()) continue
       if (excluded !== null && typeof wc.id === 'number' && wc.id === excluded) continue
       wc.send(IpcChannel.ChatDb_ChatProjectionInvalidated, payload)
+    } catch {
+      // best-effort, never throw
+    }
+  }
+}
+
+/**
+ * History-reference invalidation broadcast — Main → all renderer windows.
+ *
+ * Post-commit HINT only (never data authority): a SOURCE topic that a target
+ * references changed (rename / content / order / segment / restore / delete),
+ * so every open target must re-read its window and re-derive the live foreign
+ * prefix + divider title. Carries stable source/target topic IDs only. Empty
+ * or malformed payloads never broadcast; failures never throw.
+ *
+ * Single writer for both mutation origins (renderer IPC commits and remote
+ * sync application), so a target open on any window is invalidated no matter
+ * which side produced the source change.
+ */
+export function broadcastHistoryReferenceInvalidation(
+  sourceTopicId: string,
+  targetTopicIds: string[],
+  opts?: { excludeWebContentsId?: number }
+): void {
+  let payload: HistoryReferenceInvalidationEvent
+  try {
+    if (typeof sourceTopicId !== 'string' || sourceTopicId.length === 0) return
+    const targets = dedup(targetTopicIds)
+    if (targets.length === 0) return
+    payload = { sourceTopicId, targetTopicIds: targets }
+  } catch {
+    return
+  }
+  let wins: Array<{
+    isDestroyed: () => boolean
+    webContents?: { id?: number; isDestroyed: () => boolean; send: (...a: unknown[]) => void }
+  }>
+  try {
+    wins = BrowserWindow.getAllWindows() as unknown as typeof wins
+  } catch {
+    return
+  }
+  if (!Array.isArray(wins)) return
+  const excluded = typeof opts?.excludeWebContentsId === 'number' ? opts.excludeWebContentsId : null
+  for (const win of wins) {
+    try {
+      if (!win || win.isDestroyed()) continue
+      const wc = win.webContents
+      if (!wc || wc.isDestroyed()) continue
+      if (excluded !== null && typeof wc.id === 'number' && wc.id === excluded) continue
+      wc.send(IpcChannel.ChatDb_HistoryReferenceInvalidated, payload)
     } catch {
       // best-effort, never throw
     }

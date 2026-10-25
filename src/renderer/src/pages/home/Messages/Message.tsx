@@ -26,8 +26,12 @@ import MessageEditor from './MessageEditor'
 import MessageErrorBoundary from './MessageErrorBoundary'
 import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
-import MessageOutline from './MessageOutline'
 import { areProjectedMessagesEqual, areTopicsViewportEqual, isSameViewportPosition } from './messageViewportProjection'
+import {
+  captureInteractionIntent,
+  INTERACTION_REGION_CONTROLS,
+  useOptionalRouteViewportCommands
+} from './routeViewportContext'
 
 interface Props {
   message: Message
@@ -85,7 +89,7 @@ const MessageItem: FC<Props> = ({
   const { assistant, setModel } = useMessageAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
-  const { fontSize, showMessageOutline } = useSettings()
+  const { fontSize } = useSettings()
   const { editSave, resendWithEdit } = useMessageActionController()
   const messageContainerRef = useRef<HTMLDivElement>(null)
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
@@ -93,16 +97,25 @@ const MessageItem: FC<Props> = ({
   const isEditing = editingMessageId === message.id
   const editMode = useOptionalEditMode()
   const selectedGroupIds = editMode?.selectedGroupIds ?? EMPTY_SELECTED_GROUP_IDS
+  // Stable command surface (NOT the versioned context): a row renders its own
+  // message/config/window, never the viewport version, so subscribing to the
+  // versioned value would re-render every mounted row on every viewport
+  // notification (native key repeats included) for no rendered output.
+  const routeViewport = useOptionalRouteViewportCommands()
+  const viewportController = routeViewport?.controller ?? null
 
-  useEffect(() => {
-    if (isEditing && messageContainerRef.current) {
-      scrollIntoView(messageContainerRef.current, {
-        behavior: 'smooth',
-        block: 'center',
-        container: 'nearest'
-      })
-    }
-  }, [isEditing])
+  // Edit open/cancel never smooth-centers: the shared interaction hold keeps
+  // the footer ↔ action-bar region stationary through the editor swap, and
+  // the editor focuses with preventScroll (see MessageEditor). The former
+  // `scrollIntoView(center, smooth)` competing write is removed; explicit
+  // locate navigation (messageHighlightHandler below) keeps its own path.
+
+  const captureControlsIntent = useCallback(() => {
+    try {
+      if (!viewportController) return
+      captureInteractionIntent(viewportController, { kind: 'message', id: message.id }, INTERACTION_REGION_CONTROLS)
+    } catch {}
+  }, [viewportController, message.id])
 
   const handleEditSave = useCallback(
     async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
@@ -129,17 +142,23 @@ const MessageItem: FC<Props> = ({
   )
 
   const handleEditCancel = useCallback(() => {
+    // Non-click cancel paths (Esc key, programmatic) carry no click-boundary
+    // capture: arm the shared region hold synchronously before the close.
+    // Click cancels already armed via the shared click boundary; re-arming
+    // with the same pre-mutation geometry is harmless (newer gesture wins).
+    captureControlsIntent()
     stopEditing()
-  }, [stopEditing])
+  }, [stopEditing, captureControlsIntent])
 
   const isLastMessage = index === 0 || !!isGrouped
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
   // Edit mode is selection-only: the ordinary message toolbar keeps its
-  // DOM/layout structure and occupied height but is forcibly hidden (never
-  // hover-revealed) and noninteractive/inaccessible — see the
-  // edit-mode-toolbar-hidden treatment on MessageFooter. The floating
-  // edit-mode selection action bar is a separate overlay and is unaffected.
+  // DOM/layout structure and occupied height. Forced hiding is owned one
+  // layer up by the turn container (EditTurn), which hides this footer in
+  // the same edit-mode commit with no transition while reserving height.
+  // The floating edit-mode selection action bar is a separate overlay and
+  // is unaffected.
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
   // LOCK-105: message style is always bubble; every assistant-message
   // toolbar sits on the LEFT side (not only the last assistant message).
@@ -228,6 +247,9 @@ const MessageItem: FC<Props> = ({
   useEffect(() => {
     const handleEditRequest = (targetId: string) => {
       if (targetId === message.id) {
+        // Shortcut/programmatic open carries no click: capture the live
+        // footer region synchronously before the editor swap.
+        captureControlsIntent()
         startEditing(message.id)
       }
     }
@@ -235,7 +257,7 @@ const MessageItem: FC<Props> = ({
     return () => {
       unsubscribe()
     }
-  }, [message.id, startEditing])
+  }, [message.id, startEditing, captureControlsIntent])
 
   return (
     <WrapperContainer isMultiSelectMode={isMultiSelectMode}>
@@ -271,9 +293,6 @@ const MessageItem: FC<Props> = ({
         )}
         {!isEditing && (
           <>
-            {!isMultiSelectMode && message.role === 'assistant' && showMessageOutline && (
-              <MessageOutline message={message} snapshotBlocksById={snapshotBlocksById} />
-            )}
             <MessageContentContainer
               className="message-content-container"
               style={{
@@ -286,12 +305,9 @@ const MessageItem: FC<Props> = ({
             </MessageContentContainer>
             {showMenubar && (
               <MessageFooter
-                className={classNames({
-                  MessageFooter: true,
-                  'edit-mode-toolbar-hidden': isEditMode
-                })}
-                inert={isEditMode ? true : undefined}
-                aria-hidden={isEditMode ? true : undefined}>
+                data-interaction-region="message-controls"
+                data-viewport-baseline-edge="end"
+                className="MessageFooter">
                 <HorizontalScrollContainer
                   classNames={{
                     content: cn(
@@ -370,22 +386,6 @@ const MessageFooter = styled.div`
   margin-left: 46px;
   margin-top: 3px;
   user-select: none;
-  // Edit-mode forced hide: keeps DOM structure and occupied height (no
-  // layout shift when toggling edit mode) while defeating the
-  // container-hover opacity reveal above. visibility:hidden removes the
-  // subtree from mouse hit-testing, sequential keyboard focus, and the
-  // accessibility tree; pointer-events and inert/aria-hidden belt it. The
-  // metadata rule below additionally defeats the bubble user-message hover
-  // reveal, which sets opacity/visibility directly on the metadata child
-  // with higher specificity than inheritance.
-  &.edit-mode-toolbar-hidden {
-    visibility: hidden;
-    pointer-events: none;
-    .message-footer-metadata {
-      opacity: 0 !important;
-      visibility: hidden !important;
-    }
-  }
 `
 
 /**

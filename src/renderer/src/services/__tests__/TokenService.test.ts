@@ -420,3 +420,53 @@ describe('combineHistoryAndDraftTokens', () => {
     expect(result).not.toBe(20) // must not replace history with draft
   })
 })
+
+// ---------------------------------------------------------------------------
+// Media-context switch — the preview must not count media that is not sent
+// ---------------------------------------------------------------------------
+describe('estimateHistoryTokens — media context switch', () => {
+  beforeEach(() => {
+    mockStore = createMockStore()
+    vi.clearAllMocks()
+  })
+
+  it('excludes media attachment tokens when includeMedia is false and keeps text tokens', async () => {
+    const { estimateHistoryTokens } = await import('@renderer/services/TokenService')
+    const msgId = 'u-media'
+    const textBlockId = 'text-media'
+    const imageBlockId = 'image-media'
+    mockStore.dispatch(
+      messageBlocksSlice.actions.upsertOneBlock({
+        id: textBlockId,
+        type: MessageBlockType.MAIN_TEXT,
+        content: 'hello',
+        messageId: msgId
+      } as any)
+    )
+    mockStore.dispatch(
+      messageBlocksSlice.actions.upsertOneBlock({
+        id: imageBlockId,
+        type: MessageBlockType.IMAGE,
+        url: 'https://example.com/media.png',
+        messageId: msgId
+      } as any)
+    )
+    const withMediaMessage: Message = {
+      id: msgId,
+      role: 'user',
+      assistantId: 'assistant-1',
+      topicId: 'topic-1',
+      createdAt: '2026-07-19T00:00:00.000Z',
+      status: UserMessageStatus.SUCCESS,
+      blocks: [textBlockId, imageBlockId]
+    } as Message
+
+    const withMedia = await estimateHistoryTokens(makeAssistant(''), [withMediaMessage])
+    const withoutMedia = await estimateHistoryTokens(makeAssistant(''), [withMediaMessage], { includeMedia: false })
+
+    // Media attachment tokens are part of the default (switch ON) estimate.
+    expect(withMedia).toBeGreaterThan(withoutMedia)
+    // Switch OFF keeps the text tokens untouched.
+    expect(withoutMedia).toBe(msgTokens('hello'))
+  })
+})

@@ -49,5 +49,5 @@ export type {
   ToolFactory,
   ToolFactoryMap,
   ToolFactoryPatch,
-  WebSearchToolConfigMap
+  UrlContextToolConfigMap
 } from './types'

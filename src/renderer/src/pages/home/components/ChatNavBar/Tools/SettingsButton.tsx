@@ -26,7 +26,7 @@ const SettingsButton: FC = () => {
       styles={{
         root: { width: 272 }
       }}>
-      <Tooltip title={t('settings.title')} mouseEnterDelay={0.8}>
+      <Tooltip title={t('chat.navigation.settings')} mouseEnterDelay={0.8}>
         <NavbarIcon onClick={() => setSettingsOpen(true)}>
           <Settings2 size={18} />
         </NavbarIcon>

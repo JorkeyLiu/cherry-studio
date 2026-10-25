@@ -6,14 +6,16 @@
  * mirroring Chat's shared projection boundary (`resolveSharedContextInfo`).
  * Observes committed `current/max` across the async re-anchor: pending keeps
  * the old authoritative value, the first committed render with the new anchor
- * is the new authoritative current/max, and the bounded-viewport
- * characteristic fallback (1/1) never appears.
+ * is the new authoritative current/max, and no viewport-derived bounded
+ * fallback (never 1/1; authority-pending renders 0/null with TokenCount
+ * hidden) ever appears on the correct path.
  *
  * Sensitivity: inserting an `await` (or throwing/reordering) between the
  * anchor persist and the closure-cache publication forces an extra committed
- * render with the new anchor but no cache → the harness records 1/1 and the
- * test fails. Anchor-only/invalid/unpublishable responses never make the new
- * anchor visible, so they also never produce 1/1.
+ * authority-pending render (0/null) with the new anchor but no cache → the
+ * harness records 0/null and the test fails. Anchor-only/invalid/unpublishable
+ * responses never make the new anchor visible, so they also never produce a
+ * bounded fallback.
  */
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { renderHook } from '@testing-library/react'
@@ -259,7 +261,7 @@ describe('useContextWindowAnchor committed order (real store harness)', () => {
     expect(committed[committed.length - 1]).toBe('2/5')
   })
 
-  it('broken publish (anchor visible before cache) commits the 1/1 fallback — harness sensitivity proof', async () => {
+  it('broken publish (anchor visible before cache) commits authority-pending, never a bounded fallback — harness sensitivity proof', async () => {
     act(() => {
       ;(store as any).dispatch({ type: 'ordertest/seed', payload: [assistantSeed('u1')] })
     })
@@ -275,7 +277,9 @@ describe('useContextWindowAnchor committed order (real store harness)', () => {
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('5/5'))
 
     // Simulate the bug: anchor dispatch becomes visible while the new cache
-    // is still missing (an await/reorder between persist and cache).
+    // is still missing (an await/reorder between persist and cache). The UI
+    // must render authority-pending (0/null, TokenCount hidden) — never a
+    // viewport-derived bounded fallback.
     await act(async () => {
       ;(store as any).dispatch({
         type: 'assistants/updateAssistantSettings',
@@ -285,10 +289,11 @@ describe('useContextWindowAnchor committed order (real store harness)', () => {
         }
       })
     })
-    await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1'))
-    expect(committed).toContain('1/1')
+    await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('0/null'))
+    expect(committed).toContain('0/null')
+    expect(committed).not.toContain('1/1')
 
-    // Late cache arrival repairs to authoritative — but the jitter already happened.
+    // Late cache arrival repairs to authoritative — but the pending frame already happened.
     await act(async () => {
       setCachedContextClosure(TOPIC_ID, toCacheEntry(closureFor(TOPIC_ID, 'u4', 5, 2)))
       ;(store as any).dispatch({
@@ -300,6 +305,6 @@ describe('useContextWindowAnchor committed order (real store harness)', () => {
       })
     })
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('2/5'))
-    expect(committed).toContain('1/1')
+    expect(committed).toContain('0/null')
   })
 })

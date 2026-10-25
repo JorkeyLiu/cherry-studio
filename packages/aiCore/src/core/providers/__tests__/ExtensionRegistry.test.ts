@@ -933,7 +933,7 @@ describe('ExtensionRegistry', () => {
           name: 'azure',
           create: createMockProviderV3,
           toolFactories: {
-            webSearch: baseFactory
+            urlContext: baseFactory
           },
           variants: [
             {
@@ -941,14 +941,14 @@ describe('ExtensionRegistry', () => {
               name: 'Azure Anthropic',
               transform: () => createMockProviderV3(),
               toolFactories: {
-                webSearch: variantFactory
+                urlContext: variantFactory
               }
             }
           ]
         })
       )
 
-      const factory = registry.getToolFactory('azure-anthropic', 'webSearch')
+      const factory = registry.getToolFactory('azure-anthropic', 'urlContext')
       expect(factory).toBe(variantFactory)
     })
 
@@ -960,7 +960,7 @@ describe('ExtensionRegistry', () => {
           name: 'azure',
           create: createMockProviderV3,
           toolFactories: {
-            webSearch: baseFactory
+            urlContext: baseFactory
           },
           variants: [
             {
@@ -972,7 +972,7 @@ describe('ExtensionRegistry', () => {
         })
       )
 
-      const factory = registry.getToolFactory('azure-responses', 'webSearch')
+      const factory = registry.getToolFactory('azure-responses', 'urlContext')
       expect(factory).toBe(baseFactory)
     })
 
@@ -982,12 +982,13 @@ describe('ExtensionRegistry', () => {
           name: 'test',
           create: createMockProviderV3,
           toolFactories: {
-            webSearch: vi.fn()
+            urlContext: vi.fn()
           }
         })
       )
 
       expect(registry.getToolFactory('test', 'fileSearch')).toBeUndefined()
+      expect(registry.getToolFactory('test', 'webSearch' as any)).toBeUndefined()
     })
   })
 
@@ -1008,14 +1009,14 @@ describe('ExtensionRegistry', () => {
               name: 'Azure Anthropic',
               transform: transformSpy,
               toolFactories: {
-                webSearch: factorySpy
+                urlContext: factorySpy
               }
             }
           ]
         })
       )
 
-      const result = await registry.resolveToolCapability('azure-anthropic', 'webSearch')
+      const result = await registry.resolveToolCapability('azure-anthropic', 'urlContext')
       expect(result).toBeDefined()
       // The factory should receive the variant-transformed provider
       expect(result!.provider).toBe(variantProvider)
@@ -1031,12 +1032,12 @@ describe('ExtensionRegistry', () => {
           name: 'azure',
           create: () => baseProvider,
           toolFactories: {
-            webSearch: factorySpy
+            urlContext: factorySpy
           }
         })
       )
 
-      const result = await registry.resolveToolCapability('azure', 'webSearch')
+      const result = await registry.resolveToolCapability('azure', 'urlContext')
       expect(result).toBeDefined()
       expect(result!.provider).toBe(baseProvider)
     })

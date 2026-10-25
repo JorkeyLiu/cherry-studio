@@ -1,11 +1,9 @@
-import type { MCPTool, MCPToolResponse, NormalToolResponse } from '@renderer/types'
+import type { MCPToolResponse, NormalToolResponse } from '@renderer/types'
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
-import { isToolAutoApproved } from '@renderer/utils/mcp-tools'
-import { Flex, Tooltip } from 'antd'
-import { ShieldCheck, Wrench } from 'lucide-react'
+import { Flex } from 'antd'
+import { Wrench } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { memo } from 'react'
-import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import { type ToolStatus, ToolStatusIndicator } from './shared/GenericTools'
@@ -136,8 +134,6 @@ const ToolHeader: FC<ToolHeaderProps> = ({
   showStatus = true,
   variant = 'standalone'
 }) => {
-  const { t } = useTranslation()
-
   const toolResponse = block?.metadata?.rawMcpToolResponse
   const tool = toolResponse?.tool
 
@@ -150,31 +146,7 @@ const ToolHeader: FC<ToolHeaderProps> = ({
 
   const Container = variant === 'standalone' ? HeaderContainer : LabelContainer
 
-  if (block && tool?.type === 'mcp') {
-    const mcpTool = tool as MCPTool
-    return (
-      <Container>
-        <ToolName className="tool-name" align="center" gap={6}>
-          <Wrench size={14} className="tool-icon" />
-          <span className="name">
-            {mcpTool.serverName} : {mcpTool.name}
-          </span>
-          {isToolAutoApproved(mcpTool) && (
-            <Tooltip title={t('message.tools.autoApproveEnabled')} mouseLeaveDelay={0}>
-              <ShieldCheck size={14} color="var(--color-primary)" />
-            </Tooltip>
-          )}
-        </ToolName>
-        {description && <Description>{description}</Description>}
-        {stats && <Stats>{stats}</Stats>}
-        {showStatus && status && (
-          <StatusWrapper>
-            <ToolStatusIndicator status={status} hasError={hasError} />
-          </StatusWrapper>
-        )}
-      </Container>
-    )
-  }
+  // Removed MCP execution UI: legacy 'mcp' blocks render through the generic path below.
 
   return (
     <Container>

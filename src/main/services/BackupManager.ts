@@ -2035,7 +2035,7 @@ class BackupManager {
 
   /**
    * Stage a factory-reset Data directory; handleStartupRestore swaps it in on next launch.
-   * Avoids races with libsql / MemoryService / KnowledgeService recreating files
+   * Avoids races with libsql / KnowledgeService recreating files
    * before relaunch.
    *
    * Bounded production reset: publishes Data.restore containing a valid

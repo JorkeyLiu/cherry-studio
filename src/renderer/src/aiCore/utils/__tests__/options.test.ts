@@ -116,10 +116,6 @@ vi.mock('../image', () => ({
   }))
 }))
 
-vi.mock('../websearch', () => ({
-  getWebSearchParams: vi.fn(() => ({ enable_search: true }))
-}))
-
 vi.mock('../../prepareParams/header', () => ({
   addAnthropicHeaders: vi.fn(() => ['context-1m-2025-08-07'])
 }))
@@ -166,7 +162,6 @@ describe('options utils', () => {
       it('should build basic OpenAI options', () => {
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -178,7 +173,6 @@ describe('options utils', () => {
       it('should include reasoning parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -195,7 +189,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, mockModel, providerWithServiceTier, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -211,7 +204,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, mockModel, providerWithServiceTier, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -228,7 +220,6 @@ describe('options utils', () => {
         expect(() =>
           buildProviderOptions(mockAssistant, gpt5Model, openaiProvider, {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: false
           })
         ).not.toThrow()
@@ -254,7 +245,6 @@ describe('options utils', () => {
       it('should build basic Anthropic options', () => {
         const result = buildProviderOptions(mockAssistant, anthropicModel, anthropicProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -265,7 +255,6 @@ describe('options utils', () => {
       it('should include reasoning parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, anthropicModel, anthropicProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -297,7 +286,6 @@ describe('options utils', () => {
       it('should build basic Google options', () => {
         const result = buildProviderOptions(mockAssistant, googleModel, googleProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -308,7 +296,6 @@ describe('options utils', () => {
       it('should include reasoning parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, googleModel, googleProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -321,7 +308,6 @@ describe('options utils', () => {
       it('should include image generation parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, googleModel, googleProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: true
         })
 
@@ -350,7 +336,6 @@ describe('options utils', () => {
       it('should build generic OpenAI-compatible options instead of brand-keyed xai options', () => {
         const result = buildProviderOptions(mockAssistant, xaiModel, xaiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -362,7 +347,6 @@ describe('options utils', () => {
       it('should include generic reasoning parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, xaiModel, xaiProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -389,7 +373,6 @@ describe('options utils', () => {
       it('should build generic OpenAI-compatible options instead of brand-keyed deepseek options', () => {
         const result = buildProviderOptions(mockAssistant, deepseekModel, deepseekProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
         expect(result.providerOptions).toHaveProperty('openai-compatible')
@@ -417,7 +400,6 @@ describe('options utils', () => {
       it('should build generic OpenAI-compatible options instead of brand-keyed openrouter options', () => {
         const result = buildProviderOptions(mockAssistant, openrouterModel, openrouterProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -426,50 +408,14 @@ describe('options utils', () => {
         expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
 
-      it('should emit no brand-specific web search params for generic models', async () => {
-        // Real debranded behavior: unknown/generic compatible has no built-in
-        // search params (this file mocks getWebSearchParams to enable_search
-        // by default, so restore the real empty shape here).
-        const { getWebSearchParams } = await import('../websearch')
-        vi.mocked(getWebSearchParams).mockReturnValue({})
-
+      it('emits no web search params for generic models (websearch removed)', async () => {
         const result = buildProviderOptions(mockAssistant, openrouterModel, openrouterProvider, {
           enableReasoning: false,
-          enableWebSearch: true,
           enableGenerateImage: false
         })
 
-        // Debranded: unknown/generic compatible has no built-in search params.
         expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_search')
-      })
-
-      it('should keep generic websearch coherence: only web_search_options family emits', async () => {
-        const mocked = await import('../websearch')
-        const actual = await vi.importActual<typeof mocked>('../websearch')
-        vi.mocked(mocked.getWebSearchParams).mockImplementation((model: Model) => actual.getWebSearchParams(model))
-
-        const searchPreview = { id: 'gpt-4o-search-preview', name: 'Search', provider: 'custom-x' } as Model
-        const previewResult = buildProviderOptions(mockAssistant, searchPreview, openrouterProvider, {
-          enableReasoning: false,
-          enableWebSearch: true,
-          enableGenerateImage: false
-        })
-        expect(previewResult.providerOptions['openai-compatible']).toMatchObject({ web_search_options: {} })
-
-        for (const id of ['sonar-pro', 'qwen-max-latest', 'hunyuan-pro', 'gemini-2.5-pro', 'gpt-4o']) {
-          const model = { id, name: id, provider: 'custom-x' } as Model
-          const result = buildProviderOptions(mockAssistant, model, openrouterProvider, {
-            enableReasoning: false,
-            enableWebSearch: true,
-            enableGenerateImage: false
-          })
-          // No true-capability/empty-param mismatch: these families emit
-          // nothing on generic, and never vendor-private keys.
-          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('web_search_options')
-          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_search')
-          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_enhancement')
-          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('extra_body')
-        }
+        expect(result.providerOptions['openai-compatible']).not.toHaveProperty('web_search_options')
       })
     })
 
@@ -489,24 +435,17 @@ describe('options utils', () => {
         provider: 'poe'
       } as Model
 
-      it('should deep merge generic extra_body reasoning and web search parameters', async () => {
+      it('should deep merge generic extra_body reasoning parameters (websearch removed)', async () => {
         const { getReasoningEffort } = await import('../reasoning')
-        const { getWebSearchParams } = await import('../websearch')
 
         vi.mocked(getReasoningEffort).mockReturnValue({
           extra_body: {
             reasoning_effort: 'medium'
           }
         } as any)
-        vi.mocked(getWebSearchParams).mockReturnValue({
-          extra_body: {
-            web_search: true
-          }
-        })
 
         const result = buildProviderOptions(mockAssistant, poeModel, poeProvider, {
           enableReasoning: true,
-          enableWebSearch: true,
           enableGenerateImage: false
         })
 
@@ -514,10 +453,10 @@ describe('options utils', () => {
         expect(result.providerOptions).not.toHaveProperty('poe')
         expect(result.providerOptions['openai-compatible']).toMatchObject({
           extra_body: {
-            reasoning_effort: 'medium',
-            web_search: true
+            reasoning_effort: 'medium'
           }
         })
+        expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_search')
       })
     })
 
@@ -542,7 +481,6 @@ describe('options utils', () => {
           } as unknown as Provider,
           {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: false
           }
         )
@@ -581,7 +519,6 @@ describe('options utils', () => {
           } as unknown as Provider,
           {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: false
           }
         )
@@ -625,7 +562,6 @@ describe('options utils', () => {
           } as unknown as Provider,
           {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: false
           }
         )
@@ -657,7 +593,6 @@ describe('options utils', () => {
       it('should combine reasoning and image generation', () => {
         const result = buildProviderOptions(mockAssistant, googleModel, googleProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: true
         })
 
@@ -668,7 +603,6 @@ describe('options utils', () => {
       it('should handle all capabilities enabled', () => {
         const result = buildProviderOptions(mockAssistant, googleModel, googleProvider, {
           enableReasoning: true,
-          enableWebSearch: true,
           enableGenerateImage: true
         })
 
@@ -696,7 +630,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, vertexModel, vertexProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -722,7 +655,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, vertexModel, vertexAnthropicProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -750,7 +682,6 @@ describe('options utils', () => {
       it('should build generic OpenAI-compatible options instead of brand-keyed bedrock options', () => {
         const result = buildProviderOptions(mockAssistant, bedrockModel, bedrockProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -765,7 +696,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, bedrockModel, bedrockProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -780,7 +710,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, bedrockModel, bedrockProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -807,7 +736,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, openaiModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -824,7 +752,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, anthropicModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -841,7 +768,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, geminiModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -858,7 +784,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, grokModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -878,7 +803,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, anthropicModel, gatewayProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -903,7 +827,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, anthropicModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -936,7 +859,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, openaiModel, gatewayProvider, {
           enableReasoning: true,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -957,7 +879,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, unknownModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -996,7 +917,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, geminiModel, aihubmixProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1039,7 +959,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, openaiModel, aihubmixProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1080,7 +999,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, geminiModel, geminiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1119,7 +1037,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, anthropicModel, gatewayProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1158,7 +1075,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1199,7 +1115,6 @@ describe('options utils', () => {
 
           const result = buildProviderOptions(mockAssistant, geminiModel, provider, {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: true
           })
 
@@ -1258,7 +1173,6 @@ describe('options utils', () => {
 
           const result = buildProviderOptions(mockAssistant, model, provider, {
             enableReasoning: false,
-            enableWebSearch: false,
             enableGenerateImage: false
           })
 
@@ -1297,7 +1211,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, testModel, aihubmixProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1336,7 +1249,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, doubaoModel, volcengineProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1365,7 +1277,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1401,7 +1312,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, doubaoModel, volcengineProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 
@@ -1433,7 +1343,6 @@ describe('options utils', () => {
 
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
           enableReasoning: false,
-          enableWebSearch: false,
           enableGenerateImage: false
         })
 

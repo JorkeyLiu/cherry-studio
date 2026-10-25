@@ -210,10 +210,14 @@ vi.mock('@renderer/utils/dom', () => ({ scrollIntoView: vi.fn() }))
 vi.mock('@renderer/utils/markdown', () => ({ updateCodeBlock: vi.fn() }))
 vi.mock('@renderer/utils/messageUtils/find', () => ({ getMainTextContent: vi.fn(() => '') }))
 vi.mock('@renderer/utils/messageUtils/is', () => ({ isTextLikeBlock: vi.fn(() => false) }))
-vi.mock('@renderer/pages/home/Messages/domVisibility', () => ({
-  findFirstVisibleMessage: vi.fn(() => null),
-  findFirstVisibleMessageId: vi.fn(() => null)
-}))
+vi.mock('@renderer/pages/home/Messages/domVisibility', async () => {
+  const actual = await vi.importActual('@renderer/pages/home/Messages/domVisibility')
+  return {
+    ...actual,
+    findFirstVisibleMessage: vi.fn(() => null),
+    findFirstVisibleMessageId: vi.fn(() => null)
+  }
+})
 vi.mock('@renderer/pages/home/Messages/messageBranch', () => ({ branchFromMessage: vi.fn() }))
 vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
   const actual = await vi.importActual('../messageNavigation')
@@ -268,9 +272,6 @@ vi.mock('@renderer/config/constant', async (importOriginal) => {
   const actual = (await importOriginal()) as any
   return { ...actual, LOAD_MORE_COUNT: 20 }
 })
-vi.mock('react-infinite-scroll-component', () => ({
-  default: ({ children }: any) => <div data-testid="infinite-scroll">{children}</div>
-}))
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = (await importOriginal()) as any
   // Stable `t` identity (production `t` is stable; a fresh closure per render
@@ -697,9 +698,12 @@ describe('Messages edit-mode overlay regression', () => {
     const scrollbarSource = fs.readFileSync('src/renderer/src/components/Scrollbar/index.tsx', 'utf-8')
     expect(scrollbarSource).toContain('overflow-y: auto')
 
-    // scrollableTarget contract: Messages still targets #messages for InfiniteScroll.
+    // App-owned older paging contract: the scroll host stays #messages and
+    // the layout-only wrapper carries the app-owned marker (no external
+    // scroll library owns the edge).
     const messagesSource = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf-8')
-    expect(messagesSource).toContain('scrollableTarget="messages"')
+    expect(messagesSource).toContain('data-older-paging="app-owned"')
     expect(messagesSource).toContain('id="messages"')
+    expect(messagesSource).not.toContain('react-infinite-scroll-component')
   })
 })

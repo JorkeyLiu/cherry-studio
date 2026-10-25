@@ -689,7 +689,9 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
       { id: 'u1', role: 'user', topicId: active, status: 'pending', blocks: [] }
     ] as any)
     expect(fpWrong).not.toBe(fpActive)
-    expect(getFreshValidatedClosure(active, 'u1', fpWrong)).toBeNull()
+    // Viewport independence: viewport shape change retains the valid closure;
+    // genuine mutations invalidate via generation (covered below).
+    expect(getFreshValidatedClosure(active, 'u1', fpWrong)).not.toBeNull()
 
     // Generation bump invalidates distinct from retention: publish, bump, then miss
     const fpBeforeBump = computeClosureFingerprint([{ id: 'u1', role: 'user', topicId: active, blocks: [] }] as any)
@@ -718,8 +720,8 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     expect(getFreshValidatedClosure(delTopic, 'u1', fpDel)).toBeNull()
     // stale fingerprint with old generation must still be rejected even if we try to re-validate
     expect(getFreshValidatedClosure(delTopic, 'u1', fpDel)).toBeNull()
-    expect(getContextClosureDiagnostics().hitCount).toBe(2)
-    expect(getContextClosureDiagnostics().missCount).toBeGreaterThanOrEqual(6)
+    expect(getContextClosureDiagnostics().hitCount).toBe(3)
+    expect(getContextClosureDiagnostics().missCount).toBeGreaterThanOrEqual(5)
     // SENTINEL_CREDENTIAL exercised via disposable context-closure cache entry (transient message id/fingerprint, scalar snapshot must not leak)
     const credTopic = 't-cred-sentinel'
     const credFingerprintInput = [

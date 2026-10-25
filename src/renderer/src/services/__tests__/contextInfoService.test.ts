@@ -29,11 +29,16 @@
  * error-only, trailing assistant, adjacent users) remove individual messages.
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import {
+  computeContextInfo,
+  filterContextMessages,
+  filterContextUiMessages
+} from '@renderer/services/contextInfoService'
+import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import type { ContextWindowAnchor } from '@renderer/types'
 import type { Assistant } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -649,5 +654,114 @@ describe('computeContextInfo', () => {
       // The turn counts are identical — the change is purely block-driven.
       expect(filledResult.contextCount).toEqual(emptyResult.contextCount)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shared anchor-clipped filter pipeline
+//
+// The message-level model/token filters live in exactly one place and are
+// shared by the bounded fallback, the authoritative closure projection and
+// request preparation. These cases constrain the input boundary (already
+// anchor-clipped, no turn selection) and the ordering that must survive the
+// extraction.
+// ---------------------------------------------------------------------------
+describe('shared anchor-clipped filter pipeline', () => {
+  /** Attach a MAIN_TEXT block to every message so filterEmptyMessages keeps it. */
+  const withBlocks = (messages: Message[]): Message[] =>
+    messages.map((m) => {
+      const blockId = `block-${m.id}`
+      mockStore.dispatch(
+        messageBlocksSlice.actions.upsertOneBlock({
+          id: blockId,
+          type: MessageBlockType.MAIN_TEXT,
+          content: `content-${m.id}`,
+          messageId: m.id
+        } as any)
+      )
+      return { ...m, blocks: [blockId] }
+    })
+
+  const ids = (messages: Message[]) => messages.map((m) => m.id)
+
+  beforeEach(() => {
+    mockStore = createMockStore()
+    vi.clearAllMocks()
+  })
+
+  it('keeps the single model/token divergence: trailing assistant dropped for the model only', () => {
+    // Trailing assistant present, then two adjacent users after its removal.
+    const messages = withBlocks([msg('u1'), msg('u2'), msg('a2', 'assistant', 'u2')])
+    const { uiMessages, tokenEstimationMessages } = filterContextMessages(messages)
+    expect(ids(uiMessages)).toEqual(['u2'])
+    expect(ids(tokenEstimationMessages)).toEqual(['u2', 'a2'])
+  })
+
+  it('trims leading non-user messages identically for both consumers', () => {
+    const messages = withBlocks([msg('a0', 'assistant'), msg('u1'), msg('a1', 'assistant', 'u1')])
+    const { uiMessages, tokenEstimationMessages } = filterContextMessages(messages)
+    expect(ids(uiMessages)).toEqual(['u1'])
+    expect(ids(tokenEstimationMessages)).toEqual(['u1', 'a1'])
+  })
+
+  it('filterContextUiMessages is the model-facing half of the same pipeline', () => {
+    const messages = withBlocks([msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2')])
+    expect(ids(filterContextUiMessages(messages))).toEqual(ids(filterContextMessages(messages).uiMessages))
+  })
+
+  it('performs no turn selection: every anchor-clipped message is a filter candidate', () => {
+    // Three user turns; the pipeline itself never windows them by turn count.
+    const messages = withBlocks([
+      msg('u1'),
+      msg('a1', 'assistant', 'u1'),
+      msg('u2'),
+      msg('a2', 'assistant', 'u2'),
+      msg('u3')
+    ])
+    expect(ids(filterContextUiMessages(messages))).toEqual(['u1', 'a1', 'u2', 'a2', 'u3'])
+  })
+
+  it('request-local overlay wins over store blocks for empty-content filtering', () => {
+    // Store block is blank; the overlay resolves content for the same id.
+    mockStore.dispatch(
+      messageBlocksSlice.actions.upsertOneBlock({
+        id: 'block-u1',
+        type: MessageBlockType.MAIN_TEXT,
+        content: '   ',
+        messageId: 'u1'
+      } as any)
+    )
+    const userMsg = { ...msg('u1'), blocks: ['block-u1'] }
+    const assistantMsg = withBlocks([msg('a1', 'assistant', 'u1')])[0]
+    const overlay: BlockOverlay = new Map([
+      [
+        'block-u1',
+        {
+          id: 'block-u1',
+          messageId: 'u1',
+          type: MessageBlockType.MAIN_TEXT,
+          content: 'from overlay'
+        } as unknown as MessageBlock
+      ]
+    ])
+
+    // Without the overlay the blank user message is filtered out.
+    expect(ids(filterContextUiMessages([userMsg, assistantMsg]))).toEqual([])
+    // With the overlay the same slice keeps the user message.
+    expect(ids(filterContextUiMessages([userMsg, assistantMsg], overlay))).toEqual(['u1'])
+  })
+
+  it('removes an error-only assistant response together with its user message', () => {
+    mockStore.dispatch(
+      messageBlocksSlice.actions.upsertOneBlock({
+        id: 'block-err',
+        type: MessageBlockType.ERROR,
+        content: 'boom',
+        messageId: 'a1'
+      } as any)
+    )
+    const messages: Message[] = [msg('u1'), { ...msg('a1', 'assistant', 'u1'), blocks: ['block-err'] }]
+    expect(ids(filterContextMessages(messages).uiMessages)).toEqual([])
+    expect(ids(filterContextMessages(messages).tokenEstimationMessages)).toEqual([])
   })
 })

@@ -9,13 +9,20 @@ import { describe, expect, it } from 'vitest'
 const assistant = { id: 'assistant-1' } as unknown as Assistant
 
 describe('Inputbar tool registry', () => {
-  it('retains ordinary Chat tools: attachment, thinking, mention_models, mcp_tools', () => {
+  it('retains ordinary Chat tools: attachment thinking mention_models url_context knowledge generate_image', () => {
     const keys = getAllTools().map((tool) => tool.key)
     expect(keys).toContain('attachment')
     expect(keys).toContain('thinking')
     expect(keys).toContain('new_topic')
     expect(keys).toContain('mention_models')
-    expect(keys).toContain('mcp_tools')
+    expect(keys).toContain('url_context')
+    expect(keys).toContain('knowledge_base')
+    expect(keys).toContain('generate_image')
+    // Removed capabilities never re-enter the registry: web_search + mcp_tools
+    // were deleted Inputbar tools; memory never had an Inputbar key (guard only).
+    for (const removed of ['web_search', 'mcp_tools', 'memory_search']) {
+      expect(keys).not.toContain(removed)
+    }
   })
 
   it('registers no retired inputbar tools (clear_topic, new_context, toggle_expand)', () => {

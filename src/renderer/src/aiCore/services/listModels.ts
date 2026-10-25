@@ -18,6 +18,7 @@ import { formatApiHost, getDefaultGroupName, withoutTrailingSlash } from '@rende
 import { defaultAppHeaders } from '@shared/utils'
 import * as z from 'zod'
 
+import { resolveOutboundRequestHeaders } from '../prepareParams/header'
 import { GeminiModelsResponseSchema, OpenAIModelsResponseSchema } from './schemas'
 
 const logger = loggerService.withContext('ModelListService')
@@ -101,6 +102,28 @@ function defaultHeaders(provider: Provider): Record<string, string> {
   }
 }
 
+/**
+ * Same header policy at the listing protocol boundary: endpoint-gated
+ * session identity via the existing transport headers option (no new
+ * transport lifecycle, no body conflation). Listing is topicless, so the
+ * boundary mints one request-local opaque identity on Go only; provider
+ * extra session wins over the automatic identity and explicit listing
+ * headers (auth/default/extra) are preserved.
+ */
+function withSessionPolicy(provider: Provider, baseHeaders: Record<string, string>): Record<string, string> {
+  const resolved = resolveOutboundRequestHeaders({
+    apiHost: provider.apiHost,
+    explicitHeaders: baseHeaders,
+    providerExtraHeaders: provider.extra_headers as Record<string, string | undefined> | undefined
+  })
+  if (!resolved) return baseHeaders
+  const cleaned: Record<string, string> = {}
+  for (const [key, value] of Object.entries(resolved)) {
+    if (value !== undefined) cleaned[key] = value
+  }
+  return { ...baseHeaders, ...cleaned }
+}
+
 function defaultGroup(modelId: string, provider: Provider): string {
   return getDefaultGroupName(modelId, provider.id)
 }
@@ -135,7 +158,7 @@ const geminiFetcher: ModelFetcher = {
     const searchParams = new URLSearchParams({ key: getApiKey(provider) })
     const response = await getFromApi({
       url: `${baseUrl}/v1beta/models?${searchParams.toString()}`,
-      headers: { ...defaultAppHeaders(), ...provider.extra_headers },
+      headers: withSessionPolicy(provider, { ...defaultAppHeaders(), ...provider.extra_headers }),
       responseSchema: GeminiModelsResponseSchema,
       abortSignal: signal
     })
@@ -153,7 +176,7 @@ const openAICompatibleFetcher: ModelFetcher = {
     const baseUrl = formatApiHost(provider.apiHost)
     const response = await getFromApi({
       url: `${baseUrl}/models`,
-      headers: defaultHeaders(provider),
+      headers: withSessionPolicy(provider, defaultHeaders(provider)),
       responseSchema: OpenAIModelsResponseSchema,
       abortSignal: signal
     })

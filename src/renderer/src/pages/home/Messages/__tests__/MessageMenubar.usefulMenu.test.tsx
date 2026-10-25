@@ -213,8 +213,10 @@ vi.mock('react-redux', () => ({
 }))
 
 const emitNewBranchMock = vi.fn()
+const emitReferenceTopicMock = vi.fn()
 vi.mock('../messageBranch', () => ({
   emitNewBranch: (...args: unknown[]) => emitNewBranchMock(...args),
+  emitReferenceTopic: (...args: unknown[]) => emitReferenceTopicMock(...args),
   emitTrueBranch: vi.fn()
 }))
 
@@ -225,7 +227,15 @@ vi.mock('../MessageTokens', () => ({ default: () => null }))
 vi.mock('antd', () => ({
   Dropdown: (props: {
     children?: ReactNode
-    menu?: { items?: Array<{ key?: string; label?: unknown; icon?: unknown; onClick?: () => void }> }
+    menu?: {
+      items?: Array<{
+        key?: string
+        label?: unknown
+        icon?: unknown
+        onClick?: () => void
+        children?: Array<{ key?: string; label?: unknown; onClick?: () => void }>
+      }>
+    }
   }) => {
     dropdownCapture.items = props.menu?.items ?? []
     return <>{props.children}</>
@@ -324,10 +334,17 @@ function renderMenubar(
 
 const findMenuItem = (key: string) => dropdownCapture.items.find((item) => item?.key === key)
 
+const findSubMenuItem = (parentKey: string, childKey: string) => {
+  const parent = findMenuItem(parentKey)
+  const children = (parent?.children ?? []) as Array<{ key?: string; label?: unknown; onClick?: () => void }>
+  return children.find((child) => child?.key === childKey)
+}
+
 describe('MessageMenubar useful-in-More-menu + Clone Topic', () => {
   beforeEach(() => {
     updateAssistantSettingsMock.mockReset()
     emitNewBranchMock.mockReset()
+    emitReferenceTopicMock.mockReset()
     dropdownCapture.items = []
   })
 
@@ -415,6 +432,7 @@ describe('MessageMenubar useful-in-More-menu + Clone Topic', () => {
     setOwnedGroup(entities, ['u1', 'a1', 'a2'], ['u1', 'a1', 'a2'])
     const { container, unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
 
+    // Parent submenu keeps the stable testid/key/i18n wiring + CopyPlus icon.
     const cloneItem = findMenuItem('copy-topic')
     expect(cloneItem).toBeDefined()
     const cloneLabel = cloneItem?.label as { props?: Record<string, unknown>; children?: unknown }
@@ -429,8 +447,13 @@ describe('MessageMenubar useful-in-More-menu + Clone Topic', () => {
     expect(iconRender.container.querySelector('.lucide-copy')).toBeNull()
     iconRender.unmount()
 
-    // Cloning behavior unchanged: still emits NEW_BRANCH for this message.
-    cloneItem?.onClick?.()
+    // The Copy child keeps the clone behavior unchanged: emits NEW_BRANCH.
+    const copyChild = findSubMenuItem('copy-topic', 'copy-topic-copy')
+    expect(copyChild).toBeDefined()
+    const copyLabel = copyChild?.label as { props?: Record<string, unknown>; children?: unknown }
+    expect(copyLabel?.props?.['data-testid']).toBe('message-copy-topic-copy-btn')
+    expect(copyLabel?.children ?? copyLabel?.props?.['children']).toBe('chat.message.copy_topic.copy.label')
+    copyChild?.onClick?.()
     expect(emitNewBranchMock).toHaveBeenCalledTimes(1)
     expect(emitNewBranchMock).toHaveBeenCalledWith('a1')
 
@@ -439,6 +462,30 @@ describe('MessageMenubar useful-in-More-menu + Clone Topic', () => {
     expect(container.textContent).toContain('copy-icon')
     expect(container.querySelector('[data-testid="msg-true-branch-btn"]')).not.toBeNull()
     expect(container.querySelector('.lucide-split')).not.toBeNull()
+    unmount()
+  })
+
+  it('exposes a Reference child that emits NEW_REFERENCE_TOPIC (read-only source action, no clone)', () => {
+    const entities: Record<string, Message> = {
+      u1: makeUserMessage('u1'),
+      a1: makeAssistantMessage('a1', 'u1'),
+      a2: makeAssistantMessage('a2', 'u1')
+    }
+    setOwnedGroup(entities, ['u1', 'a1', 'a2'], ['u1', 'a1', 'a2'])
+    const { unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
+
+    const referenceChild = findSubMenuItem('copy-topic', 'copy-topic-reference')
+    expect(referenceChild).toBeDefined()
+    const referenceLabel = referenceChild?.label as { props?: Record<string, unknown>; children?: unknown }
+    expect(referenceLabel?.props?.['data-testid']).toBe('message-copy-topic-reference-btn')
+    expect(referenceLabel?.children ?? referenceLabel?.props?.['children']).toBe(
+      'chat.message.copy_topic.reference.label'
+    )
+    referenceChild?.onClick?.()
+    expect(emitReferenceTopicMock).toHaveBeenCalledTimes(1)
+    expect(emitReferenceTopicMock).toHaveBeenCalledWith('a1')
+    // Reference must never dispatch the clone-prefix copy contract.
+    expect(emitNewBranchMock).not.toHaveBeenCalled()
     unmount()
   })
 

@@ -13,21 +13,16 @@ import type { StreamTextParams } from './aiCoreTypes'
 import type { Chunk } from './chunk'
 import type { FileMetadata } from './file'
 import type { KnowledgeBase, KnowledgeReference } from './knowledge'
-import type { MCPConfigSample, MCPServerInstallSource, McpServerType } from './mcp'
 import type { Message } from './newMessage'
 import type { BaseTool, MCPTool } from './tool'
 
 export * from './apiModels'
 export * from './apiServer'
 export * from './knowledge'
-export * from './mcp'
 export * from './notification'
-export * from './ocr'
 export * from './plugin'
 export * from './provider'
 export * from './serialize'
-
-export type McpMode = 'disabled' | 'auto' | 'manual'
 
 export type Assistant = {
   id: string
@@ -43,30 +38,14 @@ export type Assistant = {
   // This field should be considered as not Partial and not optional in v2
   settings?: Partial<AssistantSettings>
   messages?: AssistantMessage[]
-  /** enableWebSearch 代表使用模型内置网络搜索功能 */
-  enableWebSearch?: boolean
-  webSearchProviderId?: WebSearchProvider['id']
-  // enableUrlContext 是 Gemini/Anthropic 的特有功能
+  // enableUrlContext 是 Gemini/Anthropic 的特有功能（保留：原生网页上下文）
   enableUrlContext?: boolean
   enableGenerateImage?: boolean
-  /** MCP mode: 'disabled' (no MCP), 'auto' (hub server only), 'manual' (user selects servers) */
-  mcpMode?: McpMode
-  mcpServers?: MCPServer[]
   knowledgeRecognition?: 'off' | 'on'
   tags?: string[] // 助手标签
-  enableMemory?: boolean
   // for translate. 更好的做法是定义base assistant，把 Assistant 作为多种不同定义 assistant 的联合类型，但重构代价太大
   content?: string
   targetLanguage?: TranslateLanguage
-}
-
-/**
- * Get the effective MCP mode for an assistant with backward compatibility.
- * Legacy assistants without mcpMode default based on mcpServers presence.
- */
-export function getEffectiveMcpMode(assistant: Assistant): McpMode {
-  if (assistant.mcpMode) return assistant.mcpMode
-  return (assistant.mcpServers?.length ?? 0) > 0 ? 'manual' : 'disabled'
 }
 
 export type TranslateAssistant = Assistant & {
@@ -249,7 +228,11 @@ export type LegacyMessage = {
   askId?: string
   useful?: boolean
   error?: Record<string, any>
-  enabledMCPs?: MCPServer[]
+  /**
+   * Legacy history-only server refs (removed MCP/memory/search).
+   * Read-only shape for old persisted/imported messages; never constructed.
+   */
+  enabledMCPs?: Array<Record<string, unknown>>
   metadata?: {
     // Gemini
     groundingMetadata?: GroundingMetadata
@@ -312,7 +295,7 @@ export type User = {
   email: string
 }
 
-export type ModelType = 'text' | 'vision' | 'embedding' | 'reasoning' | 'function_calling' | 'web_search' | 'rerank'
+export type ModelType = 'text' | 'vision' | 'embedding' | 'reasoning' | 'function_calling' | 'rerank'
 
 export type ModelTag = Exclude<ModelType, 'text'> | 'free'
 
@@ -596,6 +579,14 @@ export type ApiClient = {
   apiKey: string
   apiVersion?: string
   baseURL: string
+  /**
+   * Optional provider-level custom headers forwarded from the owning
+   * connection (`Provider.extra_headers`). Absent = no custom headers (no
+   * required migration for existing persisted/IPC payloads). Main resolves
+   * the shared request-header policy against these plus the automatic Go
+   * session identity; auth/default headers are preserved independently.
+   */
+  extra_headers?: Record<string, string>
 }
 
 export type GenerateImageParams = {
@@ -682,47 +673,13 @@ export const isAutoDetectionMethod = (method: string): method is AutoDetectionMe
 export type SidebarIcon = 'assistants' | 'knowledge' | 'files' | 'notes'
 
 export type ExternalToolResult = {
-  mcpTools?: MCPTool[]
-  toolUse?: MCPToolResponse[]
-  webSearch?: WebSearchResponse
   knowledge?: KnowledgeReference[]
-  memories?: MemoryItem[]
 }
 
-export const WebSearchProviderIds = {
-  zhipu: 'zhipu',
-  tavily: 'tavily',
-  searxng: 'searxng',
-  exa: 'exa',
-  'exa-mcp': 'exa-mcp',
-  bocha: 'bocha',
-  querit: 'querit',
-  'local-google': 'local-google',
-  'local-bing': 'local-bing',
-  'local-baidu': 'local-baidu'
-} as const
-
-export type WebSearchProviderId = keyof typeof WebSearchProviderIds
-
-export const isWebSearchProviderId = (id: string): id is WebSearchProviderId => {
-  return Object.hasOwn(WebSearchProviderIds, id)
-}
-
-export type WebSearchProvider = {
-  id: WebSearchProviderId
-  name: string
-  apiKey?: string
-  apiHost?: string
-  engines?: string[]
-  url?: string
-  basicAuthUsername?: string
-  basicAuthPassword?: string
-  usingBrowser?: boolean
-  topicId?: string
-  allowedTools?: string[]
-  parentSpanId?: string
-  modelName?: string
-}
+// Removed external websearch providers (exa/tavily/searxng/bocha/querit/local-*):
+// no runtime consumer remains. The generic fetch result below is retained for
+// native URL-context fetching, and the legacy provider-response wrapper is
+// retained for historic message metadata readability.
 
 export type WebSearchProviderResult = {
   title: string
@@ -770,132 +727,6 @@ export type WebSearchResponse = {
   source: WebSearchSource
 }
 
-export type WebSearchPhase = 'default' | 'fetch_complete' | 'rag' | 'rag_complete' | 'rag_failed' | 'cutoff'
-
-export type WebSearchStatus = {
-  phase: WebSearchPhase
-  countBefore?: number
-  countAfter?: number
-}
-
-// TODO: 把 mcp 相关类型定义迁移到独立文件中
-export type MCPArgType = 'string' | 'list' | 'number'
-export type MCPEnvType = 'string' | 'number'
-export type MCPArgParameter = { [key: string]: MCPArgType }
-export type MCPEnvParameter = { [key: string]: MCPEnvType }
-
-export interface MCPServerParameter {
-  name: string
-  type: MCPArgType | MCPEnvType
-  description: string
-}
-
-export interface MCPServer {
-  id: string // internal id
-  name: string // mcp name, generally as unique key
-  type?: McpServerType | 'inMemory'
-  description?: string
-  baseUrl?: string
-  command?: string
-  registryUrl?: string
-  args?: string[]
-  env?: Record<string, string>
-  headers?: Record<string, string> // Custom headers to be sent with requests to this server
-  provider?: string // Provider name for this server like ModelScope, Higress, etc.
-  providerUrl?: string // URL of the MCP server in provider's website or documentation
-  logoUrl?: string // URL of the MCP server's logo
-  tags?: string[] // List of tags associated with this server
-  longRunning?: boolean // Whether the server is long running
-  timeout?: number // Timeout in seconds for requests to this server, default is 60 seconds
-  dxtVersion?: string // Version of the DXT package
-  dxtPath?: string // Path where the DXT package was extracted
-  reference?: string // Reference link for the server, e.g., documentation or homepage
-  searchKey?: string
-  configSample?: MCPConfigSample
-  /** List of tool names that are disabled for this server */
-  disabledTools?: string[]
-  /** Whether to auto-approve tools for this server */
-  disabledAutoApproveTools?: string[]
-
-  /** 用于标记内置 MCP 是否需要配置 */
-  shouldConfig?: boolean
-  /** 用于标记服务器是否运行中 */
-  isActive: boolean
-  /** 标记 MCP 安装来源，例如 builtin/manual/protocol */
-  installSource?: MCPServerInstallSource
-  /** 指示用户是否已信任该 MCP */
-  isTrusted?: boolean
-  /** 首次标记为信任的时间戳 */
-  trustedAt?: number
-  /** 安装时间戳 */
-  installedAt?: number
-}
-
-export type BuiltinMCPServer = MCPServer & {
-  type: 'inMemory'
-  name: BuiltinMCPServerName
-}
-
-export const isBuiltinMCPServer = (server: MCPServer): server is BuiltinMCPServer => {
-  return server.type === 'inMemory' && isBuiltinMCPServerName(server.name)
-}
-
-export const BuiltinMCPServerNames = {
-  flomo: '@cherry/flomo',
-  mcpAutoInstall: '@cherry/mcp-auto-install',
-  memory: '@cherry/memory',
-  sequentialThinking: '@cherry/sequentialthinking',
-  braveSearch: '@cherry/brave-search',
-  fetch: '@cherry/fetch',
-  filesystem: '@cherry/filesystem',
-  difyKnowledge: '@cherry/dify-knowledge',
-  python: '@cherry/python',
-  nowledgeMem: '@cherry/nowledge-mem',
-  hub: '@cherry/hub'
-} as const
-
-export type BuiltinMCPServerName = (typeof BuiltinMCPServerNames)[keyof typeof BuiltinMCPServerNames]
-
-export const BuiltinMCPServerNamesArray = Object.values(BuiltinMCPServerNames)
-
-export const isBuiltinMCPServerName = (name: string): name is BuiltinMCPServerName => {
-  return BuiltinMCPServerNamesArray.some((n) => n === name)
-}
-
-export interface MCPPromptArguments {
-  name: string
-  description?: string
-  required?: boolean
-}
-
-export interface MCPPrompt {
-  id: string
-  name: string
-  description?: string
-  arguments?: MCPPromptArguments[]
-  serverId: string
-  serverName: string
-}
-
-export interface GetMCPPromptResponse {
-  description?: string
-  messages: {
-    role: string
-    content: {
-      type: 'text' | 'image' | 'audio' | 'resource'
-      text?: string
-      data?: string
-      mimeType?: string
-    }
-  }[]
-}
-
-export interface MCPConfig {
-  servers: MCPServer[]
-  isUvInstalled: boolean
-  isBunInstalled: boolean
-}
-
 export type MCPToolResponseStatus = 'pending' | 'streaming' | 'cancelled' | 'invoking' | 'done' | 'error'
 
 interface BaseToolResponse {
@@ -929,41 +760,6 @@ export interface NormalToolResponse extends Omit<ToolCallResponse, 'tool'> {
   tool: BaseTool
   toolCallId: string
   parentToolUseId?: string
-}
-
-export interface MCPToolResultContent {
-  type: 'text' | 'image' | 'audio' | 'resource'
-  text?: string
-  data?: string
-  mimeType?: string
-  resource?: {
-    uri?: string
-    text?: string
-    mimeType?: string
-    blob?: string
-  }
-}
-
-export interface MCPCallToolResponse {
-  content: MCPToolResultContent[]
-  structuredContent?: unknown
-  isError?: boolean
-}
-
-export interface MCPResource {
-  serverId: string
-  serverName: string
-  uri: string
-  name: string
-  description?: string
-  mimeType?: string
-  size?: number
-  text?: string
-  blob?: string
-}
-
-export interface GetResourceResponse {
-  contents: MCPResource[]
 }
 
 export interface QuickPhrase {
@@ -1012,79 +808,7 @@ export type S3Config = {
 export type { Message } from './newMessage'
 export * from './tool'
 
-// Memory Service Types
-// ========================================================================
-export interface MemoryConfig {
-  embeddingDimensions?: number
-  embeddingModel?: Model
-  llmModel?: Model
-  // Dynamically retrieved, not persistently stored
-  embeddingApiClient?: ApiClient
-  customFactExtractionPrompt?: string
-  customUpdateMemoryPrompt?: string
-  /** Indicates whether embedding dimensions are automatically detected */
-  isAutoDimensions?: boolean
-}
-
-export interface MemoryItem {
-  id: string
-  memory: string
-  hash?: string
-  createdAt?: string
-  updatedAt?: string
-  score?: number
-  metadata?: Record<string, any>
-}
-
-export interface MemorySearchResult {
-  results: MemoryItem[]
-  relations?: any[]
-}
-
-export interface MemoryEntity {
-  userId?: string
-  agentId?: string
-  runId?: string
-}
-
-export interface MemorySearchFilters {
-  userId?: string
-  agentId?: string
-  runId?: string
-  [key: string]: any
-}
-
-export interface AddMemoryOptions extends MemoryEntity {
-  metadata?: Record<string, any>
-  filters?: MemorySearchFilters
-  infer?: boolean
-}
-
-export interface MemorySearchOptions extends MemoryEntity {
-  limit?: number
-  filters?: MemorySearchFilters
-}
-
-export interface MemoryHistoryItem {
-  id: number
-  memoryId: string
-  previousValue?: string
-  newValue: string
-  action: 'ADD' | 'UPDATE' | 'DELETE'
-  createdAt: string
-  updatedAt: string
-  isDeleted: boolean
-}
-
-export interface MemoryListOptions extends MemoryEntity {
-  limit?: number
-  offset?: number
-}
-
-export interface MemoryDeleteAllOptions extends MemoryEntity {}
-
 export type EditorView = 'preview' | 'source' | 'read' // 实时,源码,预览
-// ========================================================================
 
 /**
  * 获取对象的所有键名，并保持类型安全

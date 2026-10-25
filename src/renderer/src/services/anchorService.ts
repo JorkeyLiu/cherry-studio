@@ -43,10 +43,15 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
  *   - 若锚点 groupKey 仍在 newGroupList 中，返回原 active（不动）
  *   - 若锚点 groupKey 已被删除：
  *       - oldGroupList 中找不到 groupKey → 返回原锚点（异常保护）
- *       - newIndex = oldIndex - 1（落到更旧的组）
  *       - newGroupList 为空（topic 变空）→ undefined（空 topic 无锚点，I-1）
- *       - newIndex < 0（删首组）且 newGroupList 非空 → active(newGroupList[0])
- *       - newIndex >= 0 → active(newGroupList[newIndex])
+ *       - 否则取「oldGroupList 中锚点之前、且在 newGroupList 中仍存活的最近一组」
+ *         （按稳定 group 身份比对，从新到旧扫描）
+ *       - 没有更旧的存活组（删首组，或更旧的组也一并被删）→ active(newGroupList[0])
+ *
+ * 关键：绝不用 `oldIndex - 1` 直接索引 newGroupList。批量删除会压缩 post
+ * 列表的索引，`oldIndex - 1` 可能越过末尾（越界）或指向一个**更新**的组
+ * （例如 old=[A,B,C,D,E,F], anchor=E, 删 D,E → new=[A,B,C,F]，`oldIndex-1=3`
+ * 会错选 F）。稳定存活组扫描对单组删除与批量删除是同一条规则。
  * 本函数不读 redux，纯函数。
  */
 export function transferAnchorOnDeletion(
@@ -76,13 +81,16 @@ export function transferAnchorOnDeletion(
     return undefined
   }
 
-  // 落到更旧的组（oldIndex - 1）
-  const newIndex = oldIndex - 1
-  if (newIndex < 0) {
-    // 删的是首组，没有更旧的组，落到新首组
-    return { kind: 'active', groupKey: newGroupList[0] }
+  // 更旧一侧最近的**存活**组：按 pre 顺序从锚点前一位起向更旧扫描，
+  // 以稳定 group 身份判定存活（不是 post 索引运算）。
+  const surviving = new Set(newGroupList)
+  for (let i = oldIndex - 1; i >= 0; i--) {
+    if (surviving.has(oldGroupList[i])) {
+      return { kind: 'active', groupKey: oldGroupList[i] }
+    }
   }
-  return { kind: 'active', groupKey: newGroupList[newIndex] }
+  // 没有更旧的存活组（删首组，或更旧的组也一并被删）→ 新首组
+  return { kind: 'active', groupKey: newGroupList[0] }
 }
 
 /**
@@ -155,28 +163,34 @@ export function transferAnchorsAfterDeletion(
  * Branch anchor inheritance (docs/adr/context-window.md §9, CW-4 · 分支继承):
  * deterministically maps the parent topic's persisted anchor into a new
  * branch by position (group-list index transfer), never by recomputing from
- * `contextCount`.
+ * `contextCount` for the in-range case.
  *
  * Rules:
- *   - Source anchor missing or not active → `undefined` (nothing to inherit).
+ *   - Source anchor missing or not active → `undefined` (nothing to inherit;
+ *     non-empty caller establishes the default at CURRENT `contextCount`).
  *   - Source anchor groupKey absent from `sourceGroupList` (invalid source
- *     anchor) → `undefined`.
+ *     anchor) → `undefined` (caller establishes the default).
  *   - Empty branch group list → `undefined` (empty topics have no anchor,
  *     I-1).
  *   - In-range index (`sourceIndex < branchGroupList.length`) → maps the
- *     parent position into the branch by index.
+ *     parent position into the branch by index (clone remaps fresh
+ *     UUID/askId IDs, index preserved).
  *   - Out-of-range index (`sourceIndex >= branchGroupList.length`, the branch
- *     is a strict prefix of the source) → clamped to the branch's LAST
- *     available group — the nearest available predecessor (CW-FIX-1). A
- *     non-empty branch always receives a persisted anchor; it never silently
- *     stays anchorless.
+ *     is a strict prefix of the source, e.g. creating/cloning above the
+ *     context-start divider excludes the original anchor) → NEVER clamp to
+ *     last. Returns the CURRENT-`contextCount` default when `contextCount`
+ *     is provided (`null` => first turn, same position as a TokenCount
+ *     click); returns `undefined` when `contextCount` is omitted so the
+ *     caller establishes the default. A non-empty branch never silently stays
+ *     anchorless.
  *
  * Pure function: no store access, no dispatch.
  */
 export function inheritAnchorForBranch(
   sourceAnchor: ContextWindowAnchor | undefined,
   sourceGroupList: string[],
-  branchGroupList: string[]
+  branchGroupList: string[],
+  contextCount?: number | null
 ): ContextWindowAnchor | undefined {
   if (sourceAnchor?.kind !== 'active') {
     return undefined
@@ -191,9 +205,14 @@ export function inheritAnchorForBranch(
   if (sourceIndex < branchGroupList.length) {
     return { kind: 'active', groupKey: branchGroupList[sourceIndex] }
   }
-  // Out-of-range: clamp to the branch's last available group (nearest
-  // available predecessor).
-  return { kind: 'active', groupKey: branchGroupList[branchGroupList.length - 1] }
+  // Out-of-range: fall back to the CURRENT-contextCount default position
+  // (resolveDefaultIndex semantics), never clamp to last.
+  if (contextCount === undefined) {
+    return undefined
+  }
+  const total = branchGroupList.length
+  const defaultIndex = contextCount === null ? 0 : Math.max(0, total - Math.max(1, Math.floor(contextCount)))
+  return { kind: 'active', groupKey: branchGroupList[defaultIndex] }
 }
 
 /**

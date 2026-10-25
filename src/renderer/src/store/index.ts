@@ -40,25 +40,24 @@ import storeSyncService from '../services/StoreSyncService'
 import assistants, { assistantsPersistTransform } from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
-import { getClosureTopicIds } from './closureOwnership'
+import { getClosureTopicIds, isClosureReadOnly } from './closureOwnership'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
 import llm from './llm'
-import mcp from './mcp'
-import memory from './memory'
 import messageBlocksReducer from './messageBlock'
 import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
 import nutstore from './nutstore'
-import ocr from './ocr'
 import preprocess from './preprocess'
 import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
   RETENTION_EVICT,
-  shouldDiscardJointPublish
+  SEGMENT_CATALOG_PUBLISH_COMPLETE,
+  shouldDiscardJointPublish,
+  shouldDiscardSegmentCatalogPublish
 } from './residentRegistry'
 import runtime from './runtime'
 import settings from './settings'
@@ -68,7 +67,6 @@ import topicBranch, { topicBranchPersistTransform } from './topicBranch'
 import topicSegment from './topicSegment'
 import translate from './translate'
 import undoStack from './undoStack'
-import websearch from './websearch'
 
 const logger = loggerService.withContext('Store')
 
@@ -81,16 +79,12 @@ const appReducer = combineReducers({
   runtime,
   shortcuts,
   knowledge,
-  websearch,
-  mcp,
-  memory,
   tabs,
   preprocess,
   messages: newMessagesReducer,
   messageBlocks: messageBlocksReducer,
   inputTools: inputToolsReducer,
   translate,
-  ocr,
   note,
   clipboard,
   editMode,
@@ -245,6 +239,16 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
       }
     } catch {
       // best-effort window completeness; never break dispatch
+    }
+  }
+
+  // Segment-only catalog publication: atomic authority install that preserves
+  // the resident message window. Stale/evicted/switched/mismatched payloads
+  // discard with no catalog install and no residency restore (fail closed).
+  // Raw unpaired/fromSync structural actions below keep invalidating.
+  if (action?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE) {
+    if (shouldDiscardSegmentCatalogPublish(state, action.payload)) {
+      return state as any
     }
   }
 
@@ -479,7 +483,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 225,
+    version: 227,
     transforms: [topicBranchPersistTransform, assistantsPersistTransform],
     blacklist: [
       'runtime',
@@ -515,22 +519,49 @@ storeSyncService.setOptions({
 
 /**
  * R-06 closure freshness invalidation middleware (Task A: topic-scoped).
- * Authoritative renderer publication/mutation paths for messages/blocks bump
- * the per-topic closure generation and invalidate cached closure entries.
+ * Genuine semantic mutations bump the per-topic closure generation and
+ * invalidate cached closure entries. Full-route authoritative counts are
+ * independent of the currently loaded viewport: pure latest/around/load-more
+ * read publications never invalidate.
  *
- * - `newMessages/*` actions invalidate their payload topic only (unchanged).
+ * - `newMessages/*` genuine mutations invalidate their payload topic only.
+ *   Explicitly enumerated read-only projection publications never invalidate:
+ *   `rebaseRouteMessages` / `messagesWindowMerged` / `messagesReceived`
+ *   (Main window reads), lifecycle markers (`setCurrentTopicId`,
+ *   `setTopicLoading`, `setTopicFulfilled`, `setDisplayCount`), and
+ *   capability maintenance (`mergeRouteMutability`, `pruneRouteMutability`,
+ *   `invalidateRouteMutability`). Unknown `newMessages/*` types keep the safe
+ *   default (invalidate).
  * - `messageBlocks/*` CONTENT mutations consume ONLY the explicit trustworthy
  *   topic ownership in `action.meta.closureTopicIds` (see `withClosureTopics`
  *   in store/closureOwnership.ts): one/many unique topics -> `bumpAndInvalidate`
  *   each; absent/invalid/explicit-unknown -> `bumpAndInvalidateAll` (deliberate
  *   global fallback). Ownership is never inferred from Redux entities or
- *   projections here.
+ *   projections here. Explicitly marked read-only hydrations
+ *   (`meta.closureReadOnly`, see `markClosureReadOnly`) — Main window block
+ *   hydration and closure hydration for the same topic — never invalidate.
+ *   Safe default: absent marker means mutate (invalidate).
  * - `messageBlocks/setMessageBlocksLoading|setMessageBlocksError` are not
  *   block-content mutations and never invalidate.
+ * - `resident/jointPublishComplete`, `residentRegistry/*`, `retention/*` are
+ *   read/projection lifecycle and never invalidate semantic context.
  * This gives same-length/outside-viewport mutations a generation signal
  * without a new IPC protocol. Generation check before cache publication
  * and before cache use ensures stale data is never claimed.
  */
+const READONLY_NEW_MESSAGES_TYPES = new Set([
+  'newMessages/rebaseRouteMessages',
+  'newMessages/messagesWindowMerged',
+  'newMessages/messagesReceived',
+  'newMessages/setCurrentTopicId',
+  'newMessages/setTopicLoading',
+  'newMessages/setTopicFulfilled',
+  'newMessages/setDisplayCount',
+  'newMessages/mergeRouteMutability',
+  'newMessages/pruneRouteMutability',
+  'newMessages/invalidateRouteMutability'
+])
+
 /**
  * Assistant-config bridge middleware (bounded, event-driven only — no polls).
  * Local `assistants/enqueueAssistantConfigDelta` (non-fromSync) commits via
@@ -710,7 +741,20 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
   const result = next(action)
   try {
     const type = typeof action?.type === 'string' ? (action.type as string) : ''
+    if (!type) return result
+    // Explicit authoritative read-only hydration/publication never invalidates,
+    // regardless of slice. Only read sites set this marker.
+    if (isClosureReadOnly(action)) return result
+    if (
+      type === 'resident/jointPublishComplete' ||
+      type === SEGMENT_CATALOG_PUBLISH_COMPLETE ||
+      type.startsWith('residentRegistry/') ||
+      type.startsWith('retention/')
+    ) {
+      return result
+    }
     if (type.startsWith('newMessages/')) {
+      if (READONLY_NEW_MESSAGES_TYPES.has(type)) return result
       const topicId = action.payload?.topicId as string | undefined
       if (typeof topicId === 'string' && topicId.length > 0) {
         closureCache.bumpAndInvalidate(topicId)

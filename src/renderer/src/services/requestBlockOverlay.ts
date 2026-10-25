@@ -28,3 +28,25 @@ export function resolveOverlayBlock(
   if (!overlay) return undefined
   return overlay.get(blockId)
 }
+
+/**
+ * Merge a request-local authority overlay over a closure base (override wins).
+ *
+ * The base carries the caller-local Main closure blocks (anchor-to-end); the
+ * override carries the fresh triggering user blocks (semantic resend/regenerate
+ * authority snapshot). Same IDs resolve to the override so the triggering
+ * content is fresh without injecting window-outside blocks into Redux. Pure,
+ * readonly, never dispatched, never persisted.
+ */
+export function mergeBlockOverlays(
+  base: BlockOverlay | undefined | null,
+  override: BlockOverlay | undefined | null
+): BlockOverlay {
+  if (!override || override.size === 0) return base ?? new Map<string, MessageBlock>()
+  if (!base || base.size === 0) return override
+  const merged = new Map<string, MessageBlock>(base)
+  for (const [id, block] of override) {
+    merged.set(id, block)
+  }
+  return merged
+}

@@ -1,6 +1,7 @@
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import {
+  ensureClosureGeneration,
   getClosureLoadGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
@@ -10,7 +11,7 @@ import {
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
-import { withClosureTopics } from '@renderer/store/closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import type { Assistant, AssistantSettings, ContextWindowAnchor } from '@renderer/types'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
@@ -79,6 +80,9 @@ export function useContextWindowAnchor(
     const contextCount = settings.contextCount ?? null
     // In-flight freshness guards (mirrors useContextClosure): a mutation or
     // hard-deletion during the resolve discards cache publication.
+    // Register route generation at resolve start so a bare-topic mutation
+    // during an uncached branch resolve still bumps this route (init-only).
+    ensureClosureGeneration(topicId, route)
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
@@ -192,7 +196,11 @@ export function useContextWindowAnchor(
       let blocksAction: unknown = null
       try {
         if (Array.isArray(closureResponse.blocks) && closureResponse.blocks.length > 0) {
-          blocksAction = withClosureTopics(upsertManyBlocks(closureResponse.blocks as any), topicId)
+          // Read-only closure hydration for the new anchor: must not
+          // invalidate the semantic generation it just snapshotted.
+          blocksAction = markClosureReadOnly(
+            withClosureTopics(upsertManyBlocks(closureResponse.blocks as any), topicId)
+          )
         }
       } catch {
         return
@@ -218,7 +226,8 @@ export function useContextWindowAnchor(
         return
       }
       // The authoritative closure must be readable for the new anchor in this
-      // same boundary; otherwise the anchor stays invisible (fail-closed).
+      // same boundary (viewport-independent); otherwise the anchor stays
+      // invisible (fail-closed).
       if (!getFreshValidatedClosure(topicId, resolved, undefined, route)) return
       persistAnchor()
       return

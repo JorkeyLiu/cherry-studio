@@ -131,8 +131,16 @@ export function isValidContextClosureResponse(
  * Same-anchor + same-generation validated: generation is publication-aware via explicit
  * invalidation; stale/in-flight is caller responsibility.
  * LOCK-R06-004: empty closures are never valid hits (regardless of null bounds).
- * Optional fingerprint check (LOCK-R06-006): when both cached and current fingerprints
- * are supplied, a same-length authoritative mutation (different fingerprint) fails the hit.
+ *
+ * Viewport independence: the loaded-viewport fingerprint parameters are legacy
+ * and intentionally ignored. Full-route authoritative counts/anchor/boundary
+ * are independent of currently loaded viewport membership — pure
+ * latest/around/load-more reads must not reject a valid closure. Same-length
+ * and outside-viewport mutations are covered by the semantic generation
+ * (bumped only by genuine mutations; read-only hydrations are exempt), not by
+ * viewport shape. Route identity, persisted anchor, deletion guards, and stale
+ * in-flight guards still hold via the caller's generation/global/deletion
+ * checks.
  */
 export function isValidContextClosureCacheHit(
   cached: FetchContextClosureResponse | null | undefined,
@@ -186,16 +194,11 @@ export function isValidContextClosureCacheHit(
     if (typeof boundaryMessageId !== 'string' || boundaryMessageId.length === 0) return false
     if (boundaryMessageId !== cached.closure.firstMessageId) return false
   }
-  // LOCK-R06-006: fingerprint freshness — same-length mutation invalidates
-  if (
-    typeof currentFingerprint === 'string' &&
-    typeof cachedFingerprint === 'string' &&
-    currentFingerprint.length > 0 &&
-    cachedFingerprint.length > 0 &&
-    currentFingerprint !== cachedFingerprint
-  ) {
-    return false
-  }
+  // Viewport fingerprint intentionally ignored (see doc above): loaded
+  // viewport membership/shape never gates a route/anchor/generation-valid
+  // closure. Both params are retained for call compatibility only.
+  void currentFingerprint
+  void cachedFingerprint
   return true
 }
 
@@ -217,12 +220,70 @@ let closureCacheMissCount = 0
 
 let globalBlockGeneration = 0
 
+// ---------------------------------------------------------------------------
+// Reactive semantic invalidation signal (viewport-independent)
+// ---------------------------------------------------------------------------
+// Module Maps above are non-reactive; length-preserving mutations bump
+// generation + clear cache but never change viewport length, so the hook
+// fetch effect ([topicId,anchor,route,viewportTick]) and the Chat fresh memo
+// would stall indefinitely (first-empty order can discard the initial fetch
+// silently with no dep change to retry). This ephemeral signal makes semantic
+// invalidation reactive without restoring viewport fingerprint or using length
+// as a proxy: every genuine generation/global advance notifies subscribers;
+// snapshots are per-route `routeGen:globalGen` so unrelated topics/routes bail
+// out (no cross-route leak) and read-only hydrations (no bump) never notify
+// (no hydration loop). No persistence/IPC/schema, no new lifecycle owner.
+type ClosureInvalidationListener = () => void
+const closureInvalidationListeners = new Set<ClosureInvalidationListener>()
+
+export function subscribeClosureInvalidations(listener: ClosureInvalidationListener): () => void {
+  if (typeof listener !== 'function') return () => {}
+  closureInvalidationListeners.add(listener)
+  return () => {
+    closureInvalidationListeners.delete(listener)
+  }
+}
+
+function emitClosureInvalidations(): void {
+  if (closureInvalidationListeners.size === 0) return
+  for (const listener of Array.from(closureInvalidationListeners)) {
+    try {
+      listener()
+    } catch {
+      // best-effort; never break mutation path
+    }
+  }
+}
+
 /**
- * Deterministic fingerprint of authoritative message entities for closure freshness.
- * Changes when ordering/IDs/roles/askId/status/blocks association change at the same
- * topic and anchor. Local, cheap, no persistence/IPC generation protocol.
- * Excludes volatile block content — message-level only. Block-content-only changes
- * without message identity changes are a residual risk (see verification note).
+ * Stable per-route semantic snapshot for `useSyncExternalStore`.
+ * Pure read (never ensures/creates keys): route generation + global epoch.
+ * Unrelated-topic bumps leave this route's token unchanged so subscribers
+ * bail out without refetch (no cross-route/topic leak). Global unknown-
+ * ownership bumps change every route's token (deliberate global fallback).
+ * Bare-topic parent butterfly bumps every registered route key of that topic,
+ * so registered branches observe parent mutations via their own route token.
+ */
+export function getClosureSemanticToken(topicId: string, branchId?: string | null): string {
+  if (typeof topicId !== 'string' || topicId.length === 0) return `empty:${globalBlockGeneration}`
+  const key = closureKeyForRoute(topicId, branchId)
+  const routeGen = loadGenerations.get(key) ?? 0
+  return `${routeGen}:${globalBlockGeneration}`
+}
+
+/** Test-only listener count (proves bounded subscription cleanup, no leak). */
+export function getClosureInvalidationListenerCountForTests(): number {
+  return closureInvalidationListeners.size
+}
+
+/**
+ * Deterministic fingerprint of message entities (legacy diagnostic helper).
+ *
+ * Viewport independence: fingerprints derived from the loaded viewport no
+ * longer gate closure freshness — the semantic generation (bumped only by
+ * genuine mutations) is the freshness signal. This helper is retained for
+ * diagnostics and focused tests; production freshness never depends on it.
+ * Excludes volatile block content — message-level only.
  */
 export function computeClosureFingerprint(
   messages: ReadonlyArray<{
@@ -273,8 +334,31 @@ export function getCachedClosureGeneration(topicId: string, branchId?: string | 
   return cachedGenerations.get(closureKeyForRoute(topicId, branchId))
 }
 
+function ensureLoadGenerationForKey(key: string): number {
+  const existing = loadGenerations.get(key)
+  if (existing !== undefined) return existing
+  loadGenerations.set(key, 0)
+  return 0
+}
+
+/**
+ * Register a route generation at fetch/read start (uncached-branch race fix).
+ *
+ * Bare-topic `bumpAndInvalidate(topicId)` only bumps tracked keys in
+ * `closureCache` + `loadGenerations`. A never-cached branch in-flight fetch
+ * has no tracked key, so a parent-prefix mutation between fetch dispatch and
+ * publication would leave the branch generation at implied 0 and the stale
+ * read could pass route/global unchanged. Ensuring the route key (0) at
+ * fetch/read start makes the later bare-topic bump visible (0 -> 1) so the
+ * staged publication guard discards. Initialization only — never bumps, never
+ * invalidates reads or unrelated topics; retention preserves generations.
+ */
+export function ensureClosureGeneration(topicId: string, branchId?: string | null): number {
+  return ensureLoadGenerationForKey(closureKeyForRoute(topicId, branchId))
+}
+
 export function getCurrentClosureGeneration(topicId: string, branchId?: string | null): number {
-  return loadGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0
+  return ensureLoadGenerationForKey(closureKeyForRoute(topicId, branchId))
 }
 
 export function getAllCachedTopicIds(): string[] {
@@ -384,6 +468,9 @@ export function resetAllClosureStateForTests(): void {
   globalBlockGeneration = 0
   closureCacheHitCount = 0
   closureCacheMissCount = 0
+  // Notify safely (usually no listeners yet before mount); generation maps
+  // already reset so a later mount observes the post-reset token.
+  emitClosureInvalidations()
 }
 
 /**
@@ -419,6 +506,9 @@ export function bumpAndInvalidate(topicId: string, branchId?: string | null): vo
     if (!touched) {
       bumpClosureGenerationForKey(topicId)
     }
+    // Reactive refresh: notify even when no listener/route registered yet —
+    // generation maps already advanced so a later mount observes the bump.
+    emitClosureInvalidations()
     return
   }
   const key = closureKeyForRoute(topicId, branchId)
@@ -426,6 +516,7 @@ export function bumpAndInvalidate(topicId: string, branchId?: string | null): vo
   closureCache.delete(key)
   closureFingerprints.delete(key)
   cachedGenerations.delete(key)
+  emitClosureInvalidations()
 }
 
 export function bumpAndInvalidateAll(): void {
@@ -440,6 +531,7 @@ export function bumpAndInvalidateAll(): void {
     closureFingerprints.delete(id)
     cachedGenerations.delete(id)
   }
+  emitClosureInvalidations()
 }
 
 export function getGlobalBlockGeneration(): number {
@@ -448,11 +540,12 @@ export function getGlobalBlockGeneration(): number {
 
 export function bumpGlobalBlockGeneration(): number {
   globalBlockGeneration += 1
+  emitClosureInvalidations()
   return globalBlockGeneration
 }
 
 export function getClosureLoadGeneration(topicId: string, branchId?: string | null): number {
-  return loadGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0
+  return ensureLoadGenerationForKey(closureKeyForRoute(topicId, branchId))
 }
 
 function bumpClosureGenerationForKey(key: string): number {
@@ -462,7 +555,9 @@ function bumpClosureGenerationForKey(key: string): number {
 }
 
 export function bumpClosureGeneration(topicId: string, branchId?: string | null): number {
-  return bumpClosureGenerationForKey(closureKeyForRoute(topicId, branchId))
+  const next = bumpClosureGenerationForKey(closureKeyForRoute(topicId, branchId))
+  emitClosureInvalidations()
+  return next
 }
 
 export function nextGlobalLoadSeq(): number {
@@ -473,17 +568,21 @@ export function nextGlobalLoadSeq(): number {
 /**
  * Centralized freshness-gated cache read (LOCK-R06-006).
  *
- * Combines structural validation, same topic/anchor validation, and
- * full-closure freshness (generation + optional fingerprint) in one helper.
- * Fail-closed: returns null when structural invalid, anchor/topic mismatch,
- * empty, or freshness cannot be proven (generation mismatch or fingerprint mismatch).
- * Callers must fallback to viewport when null.
+ * Combines structural validation, same topic/anchor/route validation, and
+ * semantic-generation freshness in one helper. Viewport-independent: the
+ * optional viewport fingerprint is legacy and ignored — pure read-only
+ * viewport hydration never invalidates or rejects a valid closure.
+ * Fail-closed: returns null when structural invalid, anchor/topic/route
+ * mismatch, empty, or semantic freshness cannot be proven (generation
+ * mismatch). Callers must treat null as authority-pending (UI) or fall back
+ * to the explicitly allowed availability projection (requests) — never as
+ * viewport authority.
  *
  * B-09 local diagnostics: increments hit/miss counters (bounded scalars, no content).
  *
  * @param topicId current topic
  * @param anchorGroupKey current renderer anchor (null => null)
- * @param currentFingerprint optional current viewport fingerprint for same-length visible mutation detection; generation alone covers outside-viewport
+ * @param currentFingerprint legacy viewport fingerprint, ignored (retained for call compatibility)
  */
 export function getFreshValidatedClosure(
   topicId: string,
@@ -496,6 +595,10 @@ export function getFreshValidatedClosure(
     return null
   }
   const key = closureKeyForRoute(topicId, branchId)
+  // Register route generation at read start so a later bare-topic
+  // bumpAndInvalidate sees this route even when no closure is cached yet
+  // (uncached-branch in-flight race). Init-only, never invalidates.
+  ensureLoadGenerationForKey(key)
   const cached = closureCache.get(key) ?? null
   if (!cached) {
     closureCacheMissCount += 1
@@ -518,17 +621,11 @@ export function getFreshValidatedClosure(
     closureCacheMissCount += 1
     return null
   }
-  // Viewport fingerprint freshness (same-length visible mutations)
-  const storedFp = closureFingerprints.get(key) ?? null
-  if (
-    !isValidContextClosureCacheHit(
-      cached,
-      topicId,
-      anchorGroupKey,
-      currentFingerprint ?? undefined,
-      storedFp ?? undefined
-    )
-  ) {
+  // Structural + anchor + counts/boundary coherence (viewport-independent).
+  // currentFingerprint is legacy and ignored; semantic generation above is
+  // the only mutation signal.
+  void currentFingerprint
+  if (!isValidContextClosureCacheHit(cached, topicId, anchorGroupKey, undefined, undefined)) {
     closureCacheMissCount += 1
     return null
   }
@@ -566,7 +663,39 @@ export function getContextClosureDiagnostics(): ContextClosureDiagnostics {
 }
 
 /**
- * Validate an arbitrary closure response for freshness against stored generation/fingerprint.
+ * UI acceptance check (root regression correction): does an already-accepted
+ * complete-route projection still belong to the CURRENT topic/route/anchor?
+ *
+ * Structural + identity only — deliberately WITHOUT the strict per-route
+ * generation check. Ordinary streamed text/status updates bump generation
+ * (strict cache freshness) but must NOT clear the accepted UI projection;
+ * only a topic/anchor mismatch or a structurally invalid response fail-closes
+ * the UI. Callers use this to decide retain-vs-clear for display; the strict
+ * `getFreshValidatedClosure` / `isValidFreshClosure` guards below remain the
+ * sole gate for cache reads and request payloads.
+ */
+export function isAcceptedClosureForRoute(
+  response: FetchContextClosureResponse | null | undefined,
+  topicId: string,
+  anchorGroupKey: string | null
+): boolean {
+  if (!response || !anchorGroupKey) return false
+  if (response.closure.topicId !== topicId) return false
+  if (response.closure.anchorGroupKey !== anchorGroupKey) return false
+  // Structural coherence (counts/boundary/first-last/anchor-row present) for
+  // the CURRENT topic/anchor. Route isolation is enforced by the caller via
+  // the hook's route-key identity (closureKeyForRoute + acceptedKeyRef);
+  // closure payloads carry no branch field, so this helper takes no branch
+  // param. Generation intentionally ignored.
+  if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: null }, response as any)) {
+    return false
+  }
+  return true
+}
+
+/**
+ * Validate an arbitrary closure response for freshness against stored generation.
+ * Viewport fingerprint is legacy and ignored (viewport-independent).
  * Useful for validating hook-provided closure objects that may not be the current cached entry.
  */
 export function isValidFreshClosure(
@@ -581,23 +710,15 @@ export function isValidFreshClosure(
   if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: branchId ?? null }, response as any))
     return false
   const key = closureKeyForRoute(topicId, branchId)
-  const curGen = loadGenerations.get(key) ?? 0
+  const curGen = ensureLoadGenerationForKey(key)
   const storedGen = cachedGenerations.get(key)
   if (storedGen !== undefined) {
     if (storedGen !== curGen) return false
   } else if (curGen !== 0) {
     return false
   }
-  const storedFp = closureFingerprints.get(key) ?? null
-  if (
-    !isValidContextClosureCacheHit(
-      response as any,
-      topicId,
-      anchorGroupKey,
-      currentFingerprint ?? undefined,
-      storedFp ?? undefined
-    )
-  ) {
+  void currentFingerprint
+  if (!isValidContextClosureCacheHit(response as any, topicId, anchorGroupKey, undefined, undefined)) {
     return false
   }
   return true

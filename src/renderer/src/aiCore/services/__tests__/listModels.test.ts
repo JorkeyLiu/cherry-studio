@@ -223,6 +223,53 @@ describe('listModels protocol selection', () => {
     })
   })
 
+  describe('listing session policy (same boundary, transport headers only)', () => {
+    const SESSION = 'x-opencode-session'
+    function wireHeaders(): Record<string, string | undefined> | undefined {
+      return mockGetFromApi.mock.calls[0]?.[0]?.headers as Record<string, string | undefined> | undefined
+    }
+    function sessionOf(headers: Record<string, string | undefined> | undefined): string | undefined {
+      if (!headers) return undefined
+      const key = Object.keys(headers).find((k) => k.toLowerCase() === SESSION)
+      return key ? headers[key] : undefined
+    }
+
+    it('mints a topicless opaque identity on the Go endpoint and preserves auth', async () => {
+      mockGetFromApi.mockResolvedValue({ value: REAL_DEEPSEEK })
+      await listModels(makeProvider({ id: 'opencode-go', type: 'openai', apiHost: 'https://opencode.ai/zen/go/v1' }))
+      const headers = wireHeaders()
+      const value = sessionOf(headers)
+      expect(value).toBeTruthy()
+      // Auth/connection headers preserved alongside the session identity.
+      expect(headers?.Authorization).toBe('Bearer sk-test')
+      expect(headers?.['X-Api-Key']).toBe('sk-test')
+    })
+
+    it('lets provider extra session win over the automatic identity', async () => {
+      mockGetFromApi.mockResolvedValue({ value: REAL_DEEPSEEK })
+      await listModels(
+        makeProvider({
+          id: 'opencode-go',
+          type: 'openai',
+          apiHost: 'https://opencode.ai/zen/go/v1',
+          extra_headers: { [SESSION]: 'provider-extra' }
+        })
+      )
+      expect(sessionOf(wireHeaders())).toBe('provider-extra')
+    })
+
+    it('sends no session header for Zen and non-Go endpoints', async () => {
+      for (const apiHost of ['https://opencode.ai/zen/v1', 'https://api.deepseek.com/v1']) {
+        mockGetFromApi.mockReset()
+        mockGetFromApi.mockResolvedValue({ value: REAL_DEEPSEEK })
+        await listModels(makeProvider({ id: 'p', type: 'openai', apiHost }))
+        expect(sessionOf(wireHeaders())).toBeUndefined()
+        // Auth still preserved without the session header.
+        expect(wireHeaders()?.Authorization).toBe('Bearer sk-test')
+      }
+    })
+  })
+
   describe('default grouping ignores Provider.isSystem', () => {
     it('yields identical groups for isSystem true/false/undefined', async () => {
       mockGetFromApi.mockResolvedValue({

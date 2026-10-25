@@ -82,12 +82,15 @@ vi.mock('antd', () => ({
       {children}
     </button>
   ),
-  Input: ({ value, onChange, onPressEnter, onBlur, ...rest }: any) => (
+  Input: ({ value, onChange, onPressEnter, onBlur, onKeyDown, ...rest }: any) => (
     <input
       value={value}
       onChange={onChange}
       onBlur={onBlur}
       onKeyDown={(e: any) => {
+        // Real antd runs the caller's onKeyDown and then onPressEnter for the
+        // same keydown; mirror both so cancel/commit paths stay faithful.
+        onKeyDown?.(e)
         if (e.key === 'Enter') onPressEnter?.(e)
       }}
       {...rest}
@@ -311,5 +314,25 @@ describe('TopicContent unified branch selector', () => {
     await vi.waitFor(() => expect(deleteBranchSubtreeMock).toHaveBeenCalledWith('t-1', 'b-1', 'b-1'))
     expect(setActiveTopic).not.toHaveBeenCalled()
     expect(requestBranchesMock).toHaveBeenCalledWith(expect.anything(), 't-1')
+  })
+
+  it('Escape cancels the rename: editor closes, nothing is written, re-entry starts from the original name', () => {
+    setTree([b1()], [], null)
+    renameBranchMock.mockResolvedValue({ branch: b1() })
+    const setActiveTopic = vi.fn()
+    renderTopicContent(setActiveTopic)
+    fireEvent.click(screen.getByTestId('branch-rename-btn-b-1'))
+    const input = screen.getByTestId('branch-selector-rename-input')
+    fireEvent.change(input, { target: { value: 'Discarded draft' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    // The editor is gone and the option row is back ...
+    expect(screen.queryByTestId('branch-selector-rename-input')).toBeNull()
+    expect(screen.getByTestId('branch-cascader-item-b-1')).toHaveTextContent('B1')
+    // ... nothing was written and the catalog was not refreshed ...
+    expect(renameBranchMock).not.toHaveBeenCalled()
+    expect(requestBranchesMock).not.toHaveBeenCalled()
+    // ... and re-entering starts from the stored name, not the draft.
+    fireEvent.click(screen.getByTestId('branch-rename-btn-b-1'))
+    expect(screen.getByTestId('branch-selector-rename-input')).toHaveValue('B1')
   })
 })

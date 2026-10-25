@@ -1,3 +1,4 @@
+import { redoDepth, undoDepth } from '@codemirror/commands'
 import { useCodeStyle } from '@renderer/context/CodeStyleProvider'
 import { useSettings } from '@renderer/hooks/useSettings'
 import type { BasicSetupOptions } from '@uiw/react-codemirror'
@@ -6,6 +7,7 @@ import diff from 'fast-diff'
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
 import { memo } from 'react'
 
+import { toHistoryInitialState } from './historySession'
 import { useBlurHandler, useHeightListener, useLanguageExtensions, useSaveKeymap, useScrollToLine } from './hooks'
 import type { CodeEditorProps } from './types'
 
@@ -25,6 +27,14 @@ const CodeEditorImpl = ({
   onChange,
   onBlur,
   onHeightChange,
+  onEditorKeyDown,
+  onEditorPaste,
+  onEditorFocus,
+  onEditorContextMenu,
+  onEditorReady,
+  historySnapshot,
+  onHistoryChange,
+  spellcheck,
   height,
   maxHeight,
   minHeight,
@@ -96,27 +106,152 @@ const CodeEditorImpl = ({
   const blurExtension = useBlurHandler({ onBlur })
   const heightListenerExtension = useHeightListener({ onHeightChange })
 
+  // Native-history session: restore the owning component's snapshot (when
+  // its document still matches this mount's document) as this engine's
+  // initial history. Everything else (theme, keymaps, handlers) comes fresh
+  // from the current props via the normal extension pipeline below.
+  const historyInitialState = useMemo(
+    () => toHistoryInitialState(historySnapshot ?? null, initialContent.current),
+    [historySnapshot]
+  )
+
+  // Latest-callback ref: the reporter extension subscribes once per mount,
+  // so the consumer callback must stay identity-stable on the caller side
+  // and is always invoked through the ref (no stale closures).
+  const onHistoryChangeRef = useRef(onHistoryChange)
+  onHistoryChangeRef.current = onHistoryChange
+  const historyDepthsRef = useRef({ undo: 0, redo: 0 })
+
+  const reportHistoryDepths = useCallback((state: EditorView['state']) => {
+    let undo = 0
+    let redo = 0
+    try {
+      undo = undoDepth(state)
+    } catch {}
+    try {
+      redo = redoDepth(state)
+    } catch {}
+    const prev = historyDepthsRef.current
+    if (prev.undo === undo && prev.redo === redo) return
+    historyDepthsRef.current = { undo, redo }
+    try {
+      onHistoryChangeRef.current?.({ undo, redo })
+    } catch {}
+  }, [])
+
+  // Depth reporter: observe-only update listener, attached only when a
+  // consumer subscribes. Every other consumer keeps the exact previous
+  // extension set. Depths are reported only on actual change; the mount
+  // report in onCreateEditor always fires (syncing restored histories).
+  const historyReporterExtension = useMemo(() => {
+    if (!onHistoryChange) return []
+    return EditorView.updateListener.of((update) => {
+      reportHistoryDepths(update.state)
+    })
+  }, [onHistoryChange, reportHistoryDepths])
+
+  // Optional native behaviors: only active when the caller provides them.
+  // Keeps every existing consumer on the exact previous extension set.
+  const spellcheckExtension = useMemo(() => {
+    if (spellcheck === undefined) return []
+    return EditorView.contentAttributes.of({ spellcheck: spellcheck ? 'true' : 'false' })
+  }, [spellcheck])
+
+  const domHandlersExtension = useMemo(() => {
+    if (!onEditorKeyDown && !onEditorPaste && !onEditorFocus && !onEditorContextMenu) return []
+    return EditorView.domEventHandlers({
+      ...(onEditorKeyDown
+        ? {
+            keydown: (event: KeyboardEvent) => {
+              try {
+                return onEditorKeyDown(event)
+              } catch {
+                return false
+              }
+            }
+          }
+        : {}),
+      ...(onEditorPaste
+        ? {
+            paste: (event: ClipboardEvent) => {
+              try {
+                onEditorPaste(event)
+              } catch {}
+            }
+          }
+        : {}),
+      ...(onEditorFocus
+        ? {
+            focus: () => {
+              try {
+                onEditorFocus()
+              } catch {}
+            }
+          }
+        : {}),
+      ...(onEditorContextMenu
+        ? {
+            contextmenu: (event: MouseEvent) => {
+              try {
+                onEditorContextMenu(event)
+              } catch {}
+            }
+          }
+        : {})
+    })
+  }, [onEditorKeyDown, onEditorPaste, onEditorFocus, onEditorContextMenu])
+
   const customExtensions = useMemo(() => {
     return [
       ...(extensions ?? []),
       ...langExtensions,
       ...(wrapped ? [EditorView.lineWrapping] : []),
+      spellcheckExtension,
+      domHandlersExtension,
       saveKeymapExtension,
       blurExtension,
-      heightListenerExtension
+      heightListenerExtension,
+      historyReporterExtension
     ].flat()
-  }, [extensions, langExtensions, wrapped, saveKeymapExtension, blurExtension, heightListenerExtension])
+  }, [
+    extensions,
+    langExtensions,
+    wrapped,
+    spellcheckExtension,
+    domHandlersExtension,
+    saveKeymapExtension,
+    blurExtension,
+    heightListenerExtension,
+    historyReporterExtension
+  ])
 
   const scrollToLine = useScrollToLine(editorViewRef)
+
+  const focusEditor = useCallback((options?: { preventScroll?: boolean }) => {
+    const view = editorViewRef.current
+    if (!view) return
+    const preventScroll = options?.preventScroll ?? true
+    try {
+      view.contentDOM.focus({ preventScroll })
+    } catch {
+      try {
+        view.focus()
+      } catch {}
+    }
+  }, [])
+
+  const getView = useCallback(() => editorViewRef.current, [])
 
   useImperativeHandle(
     ref,
     () => ({
       save: handleSave,
       scrollToLine,
-      getContent
+      getContent,
+      focus: focusEditor,
+      getView
     }),
-    [handleSave, scrollToLine, getContent]
+    [handleSave, scrollToLine, getContent, focusEditor, getView]
   )
 
   return (
@@ -133,9 +268,25 @@ const CodeEditorImpl = ({
       // @ts-ignore 强制使用，见 react-codemirror 的 Example.tsx
       theme={activeCmTheme}
       extensions={customExtensions}
+      initialState={historyInitialState}
       onCreateEditor={(view: EditorView) => {
         editorViewRef.current = view
-        onHeightChange?.(view.scrollDOM?.scrollHeight ?? 0)
+        // Natural content height (see useHeightListener): the scroller
+        // scrollHeight would report the clamped viewport when content is
+        // shorter than the surface, which is useless for adaptive sizing.
+        onHeightChange?.(view.contentHeight ?? 0)
+        try {
+          // Always sync depths on mount: a restored session remounts with a
+          // non-empty history, a fresh mount with an empty one. Either way
+          // the subscriber's disabled states reflect this exact engine.
+          const undo = undoDepth(view.state)
+          const redo = redoDepth(view.state)
+          historyDepthsRef.current = { undo, redo }
+          onHistoryChangeRef.current?.({ undo, redo })
+        } catch {}
+        try {
+          onEditorReady?.()
+        } catch {}
       }}
       onChange={(value, viewUpdate) => {
         if (onChange && viewUpdate.docChanged) onChange(value)
@@ -207,4 +358,4 @@ function prepareCodeChanges(oldCode: string, newCode: string) {
 }
 
 export default memo(CodeEditorImpl)
-export type { CodeEditorHandles, CodeEditorProps } from './types'
+export type { CodeEditorHandles, CodeEditorProps, EditorHistoryDepths, EditorHistorySnapshot } from './types'

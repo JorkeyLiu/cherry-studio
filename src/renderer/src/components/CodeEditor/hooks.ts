@@ -183,11 +183,18 @@ export function useBlurHandler({ onBlur }: UseBlurHandlerProps) {
 }
 
 interface UseHeightListenerProps {
-  onHeightChange?: (scrollHeight: number) => void
+  onHeightChange?: (contentHeight: number) => void
 }
 
 /**
- * CodeMirror 扩展，用于监听编辑器高度变化
+ * CodeMirror 扩展，用于监听编辑器内容高度变化
+ *
+ * Reports the engine's natural content height (`view.contentHeight`: total
+ * wrapped document height at the current width), NOT the scroller viewport
+ * height — `scrollDOM.scrollHeight` collapses to the clamped scroller
+ * clientHeight when content is shorter than the fixed surface, so it can
+ * never size a content-adaptive surface. Content height depends on width
+ * only, so sizing a surface from it converges without a feedback loop.
  * @param onHeightChange 高度变化时触发的回调函数
  * @returns 扩展或空数组
  */
@@ -199,7 +206,7 @@ export function useHeightListener({ onHeightChange }: UseHeightListenerProps) {
 
     return EditorView.updateListener.of((update) => {
       if (update.docChanged || update.heightChanged) {
-        onHeightChange(update.view.scrollDOM?.scrollHeight ?? 0)
+        onHeightChange(update.view.contentHeight ?? 0)
       }
     })
   }, [onHeightChange])

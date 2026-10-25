@@ -196,6 +196,51 @@ export interface AppendMessageResponse {
   mutableMessageIds: string[]
 }
 
+/**
+ * Renderer-captured estimate source for the conditional usage write.
+ *
+ * The user-prompt token estimate is optional display metadata that is computed
+ * AFTER the user message has been persisted, so by the time the result comes back
+ * the prompt may have been edited, re-estimated by an edit/resend path, or
+ * deleted. Main therefore compares this snapshot — exactly the inputs the
+ * estimate consumed — against the authority blocks inside the same write
+ * transaction, and applies the usage only when the prompt still has the same text
+ * content and the same attachments.
+ *
+ * Comparison is order-insensitive (multiset): only the SET of estimated inputs
+ * affects the token total, block ordering is a rendering detail. Empty text
+ * contents are omitted on both sides (they contribute no tokens).
+ */
+export interface UpdateMessageUsageSource {
+  /** MAIN_TEXT block contents the estimate consumed. */
+  textContents: string[]
+  /** FILE/IMAGE attachment IDs the estimate consumed. */
+  fileIds: string[]
+}
+
+/**
+ * Why a conditional usage write was rejected. A rejection is a successful
+ * no-op: nothing is written, nothing is emitted, the row is left exactly as it
+ * was (deleted target, a non-user row, an already-owned usage, or a prompt whose
+ * estimated inputs changed since the estimate started).
+ */
+export type UpdateMessageUsageRejection = 'target-missing' | 'not-user-message' | 'usage-present' | 'source-changed'
+
+/** Outcome of a conditional usage write. */
+export interface UpdateMessageUsageResult {
+  /** True only when Main applied the usage patch in the same transaction. */
+  applied: boolean
+  /** Present exactly when `applied === false`. */
+  rejection?: UpdateMessageUsageRejection
+}
+
+/**
+ * Result of `chatdb:update-message`: `null` for an ordinary unconditional patch
+ * (unchanged behavior), or the conditional usage outcome when the request
+ * carried `usageCondition`.
+ */
+export type UpdateMessageResult = UpdateMessageUsageResult | null
+
 /** @see IpcChannel.ChatDb_UpdateMessage */
 export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
@@ -208,6 +253,15 @@ export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
    * Must NOT change id or topicId.
    */
   updates: JsonObject
+  /**
+   * Optional conditional metadata mode. When present, `updates` must contain
+   * exactly one key — `usage` — and Main applies it only if, inside the same
+   * transaction: the target still exists in this topic/route, it is a user
+   * message, it has no usage yet, and its MAIN_TEXT/FILE/IMAGE blocks still
+   * match {@link UpdateMessageUsageSource}. Ordinary requests omit it and keep
+   * the unconditional behavior.
+   */
+  usageCondition?: UpdateMessageUsageSource
 }
 
 /** @see IpcChannel.ChatDb_UpdateMessageAndBlocks */
@@ -339,6 +393,15 @@ export interface UpdateBlocksRequest extends ResendAttemptIdCarrier {
    * carries only an opaque id + ordinal (LOCK-STREAM-ATTR-001).
    */
   diagnostics?: StreamWriteDiagnostics
+  /**
+   * Optional addressed route context. When present, Main enforces each block's
+   * parent ownership against this route: a cross-topic foreign-prefix row
+   * written through a reference target fails closed. Absent = the route is
+   * resolved from the committed parent row (canonical source stream).
+   */
+  topicId?: string
+  /** Route owner for `topicId`: absent/null = main route, else that branch. */
+  branchId?: BranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_UpdateSingleBlock */
@@ -354,17 +417,29 @@ export interface UpdateSingleBlockRequest extends ResendAttemptIdCarrier {
    * carries only an opaque id + ordinal (LOCK-STREAM-ATTR-001).
    */
   diagnostics?: StreamWriteDiagnostics
+  /** Optional addressed route context (see UpdateBlocksRequest). */
+  topicId?: string
+  /** Route owner for `topicId`: absent/null = main route, else that branch. */
+  branchId?: BranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_BulkAddBlocks */
 export interface BulkAddBlocksRequest extends ResendAttemptIdCarrier {
   /** Full block entities to insert. Each must contain `id` and `messageId`. */
   blocks: JsonObject[]
+  /** Optional addressed route context (see UpdateBlocksRequest). */
+  topicId?: string
+  /** Route owner for `topicId`: absent/null = main route, else that branch. */
+  branchId?: BranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_DeleteBlocks */
 export interface DeleteBlocksRequest {
   blockIds: string[]
+  /** Optional addressed route context (see UpdateBlocksRequest). */
+  topicId?: string
+  /** Route owner for `topicId`: absent/null = main route, else that branch. */
+  branchId?: BranchRouteId
 }
 export type DeleteBlocksResponse = FileCleanupResult
 
@@ -452,6 +527,13 @@ export interface FetchMessagesWindowResponse {
    * stale list as fail-closed (no mutation).
    */
   mutableMessageIds: string[]
+  /**
+   * History-reference metadata when this topic is a reference target (its
+   * effective route starts with a live foreign prefix). Absent/null for
+   * ordinary topics. Read-only metadata; the foreign prefix itself is returned
+   * inside `messages` under its canonical source IDs/topicId.
+   */
+  reference?: HistoryReferenceMeta | null
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +877,200 @@ export interface FetchTopicActivityResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Standalone topic JSON data exchange (whole-logical-topic export/import)
+// ---------------------------------------------------------------------------
+
+/**
+ * Standalone topic JSON export payload — ONE ENTIRE logical topic including
+ * the main route plus ALL nested/sibling branches, messages/blocks,
+ * segments/memberships, and file-reference index data.
+ *
+ * Deliberately excluded: attachment payloads (file bytes stay in the local
+ * file catalog and are never copied), Dexie file-catalog rows, and
+ * assistant/settings/provider credentials (topic/message assistant bindings
+ * are stripped; the importer rebinds them to the target assistant).
+ *
+ * IDs below are source-stable references used only to preserve relationships
+ * inside this payload (askId, anchorMessageId, branch parents, segment
+ * membership, block parents). The importer allocates fresh IDs for the new
+ * topic/messages/blocks/branches/segments/file references and remaps every
+ * internal reference, so repeated imports stay fully disjoint.
+ *
+ * A referenced-history prefix is MATERIALIZED: the foreign effective prefix a
+ * topic references (through its anchor) is embedded as target-MAIN-owned
+ * snapshot rows, ahead of the topic's own main rows, exactly once — never a
+ * live external reference. The snapshot is therefore standalone and portable;
+ * import always produces an independent, target-owned, fully writable topic
+ * with no live relationship and no foreign read-only permission.
+ *
+ * Entities carry their known fields plus opaque overflow keys (spread from
+ * the stored `extra` JSON), preserved verbatim through the exchange.
+ *
+ * Not `extends JsonObject`: the additive optional `historySnapshot` makes the
+ * payload's property set non-uniform (an optional key is not representable
+ * under the strict `JsonObject` index signature), while the payload is still a
+ * fully JSON-safe value validated at the IPC boundary.
+ */
+export interface TopicDataExportPayload {
+  /** Format marker — always 'cherry-chat-topic-data'. Never renamed. */
+  format: 'cherry-chat-topic-data'
+  /** Schema version — currently 1. Unsupported versions fail before writes. */
+  version: 1
+  /** Export timestamp (ISO 8601). Informational only. */
+  exportedAt: string
+  /** Source topic metadata (identity/scope stripped; rebound on import). */
+  topic: TopicDataExportTopic
+  /** ALL owned messages across main + every branch (authority order). */
+  messages: TopicDataExportMessage[]
+  /** Blocks owned by the exported messages (authority order). */
+  blocks: TopicDataExportBlock[]
+  /** ALL branch nodes of the logical topic. */
+  branches: TopicDataExportBranch[]
+  /** Segments with ordered membership. */
+  segments: TopicDataExportSegment[]
+  /** File-reference index rows (identities/metadata only, no payloads). */
+  fileReferences: TopicDataExportFileReference[]
+  /**
+   * Optional provenance of the referenced-history prefix embedded above.
+   * Present only when the source topic is itself a reference target (an
+   * ordinary topic and every pre-existing export omit it — backward
+   * compatible). It records ONLY the snapshot posture, never a source id, a
+   * live source name, or a source path:
+   * - `materialized` — the foreign effective prefix was embedded as
+   *   target-MAIN-owned snapshot rows (the export is standalone).
+   * - `missing` — the referenced history's source was unavailable at export
+   *   time, so only the surviving rows are embedded; the omission is recorded
+   *   explicitly and never presented as complete.
+   */
+  historySnapshot?: TopicDataExportHistorySnapshot
+}
+
+/** Source topic metadata in a topic-data payload (no identity, no scope). */
+export interface TopicDataExportTopic extends JsonObject {
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/**
+ * Source message in a topic-data payload.
+ * `id`/`branchId`/`askId` are source-stable references for remapping.
+ */
+export interface TopicDataExportMessage extends JsonObject {
+  id: string
+  /** Owner route: null = main route, otherwise the source branch id. */
+  branchId: string | null
+  role: string | null
+  content: string | null
+  status: string | null
+  /** Source-stable reference to a message id (remapped) or an opaque key (kept). */
+  askId: string | null
+  /** Scalar model name or a structured model object (overflow round-trip). */
+  model: JsonValue
+  modelId: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/** Source block in a topic-data payload (`messageId` is remapped on import). */
+export interface TopicDataExportBlock extends JsonObject {
+  id: string
+  messageId: string
+  type: string | null
+  /** Scalar content, or structured content (e.g. tool results) as an object. */
+  content: JsonValue
+  status: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/** Source branch node in a topic-data payload (ids remapped on import). */
+export interface TopicDataExportBranch extends JsonObject {
+  id: string
+  /** Null = forked from the main route, otherwise the source parent id. */
+  parentBranchId: string | null
+  /** Source-stable anchor reference; a dangling anchor preserves missing-anchor state. */
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** Source segment in a topic-data payload (`messageIds` remapped on import). */
+export interface TopicDataExportSegment extends JsonObject {
+  id: string
+  name: string | null
+  messageIds: string[]
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/**
+ * Source file reference in a topic-data payload.
+ * `blockId` is remapped on import; `fileId` is preserved verbatim as the
+ * attachment identity (the file catalog itself is never copied).
+ */
+export interface TopicDataExportFileReference extends JsonObject {
+  id: string
+  blockId: string
+  fileId: string
+  fileName: string | null
+  filePath: string | null
+  fileType: string | null
+  count: number | null
+}
+
+/**
+ * Provenance of the referenced-history prefix embedded in a topic-data
+ * payload.
+ *
+ * Deliberately minimal: it encodes the snapshot posture of the referenced
+ * history and nothing else. No source topic/branch/anchor id, no live source
+ * name, and no source path is recorded — the snapshot carries no live
+ * dependency, so it stays portable and free of foreign identity.
+ */
+export interface TopicDataExportHistorySnapshot extends JsonObject {
+  /** `materialized` = prefix embedded as own rows; `missing` = source unavailable. */
+  status: 'materialized' | 'missing'
+}
+
+/** @see IpcChannel.ChatDb_ExportTopicData — snapshot ONE ENTIRE topic for standalone JSON export. */
+export interface ExportTopicDataRequest {
+  topicId: string
+}
+
+/** @see IpcChannel.ChatDb_ExportTopicData */
+export interface ExportTopicDataResponse {
+  payload: TopicDataExportPayload
+}
+
+/**
+ * @see IpcChannel.ChatDb_ImportTopicData — create a new topic from a
+ * standalone JSON payload under the target assistant. Always allocates fresh
+ * IDs (no dedup/merge/overwrite); repeated imports intentionally duplicate.
+ */
+export interface ImportTopicDataRequest {
+  /** Untrusted standalone payload (deep-validated in Main before any write). */
+  payload: TopicDataExportPayload
+  /** Target assistant that will own the new topic (rebinds topic/messages). */
+  assistantId: string
+}
+
+/** @see IpcChannel.ChatDb_ImportTopicData */
+export interface ImportTopicDataResponse {
+  /** The newly created topic wire for the renderer projection. */
+  topic: TopicWire
+  messageCount: number
+  blockCount: number
+  branchCount: number
+  segmentCount: number
+  fileReferenceCount: number
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -1011,6 +1287,16 @@ export interface UpdateTopicMetadataRequest {
   prompt?: string | null
   /** isNameManuallyEdited (overflow). null clears, absent = no change. */
   isNameManuallyEdited?: boolean | null
+  /**
+   * Optional atomic preimage guard for automatic naming writes only.
+   * Absent = no guard (manual paths). When present, Main compares the current
+   * authority value inside the same transaction and returns the current wire
+   * unchanged (graceful no-op, no sync intent, no updatedAt bump) on mismatch.
+   * Null matches a null/absent authority value; it never creates metadata.
+   */
+  expectedName?: string | null
+  /** Optional atomic preimage guard for the manual-edit flag (same no-op semantics). */
+  expectedIsNameManuallyEdited?: boolean | null
 }
 
 /** @see IpcChannel.ChatDb_UpdateTopicMetadata */
@@ -1299,9 +1585,41 @@ export interface MoveSelectedTurnsToNewBranchRequest {
    */
   expectedSelectedMessageIds: string[]
   name?: string
+  /**
+   * Optional renderer-owned context-window inheritance input.
+   *
+   * When present, Main resolves the DESTINATION route's context anchor inside
+   * the same root transaction, against the PRE-MOVE source route (the
+   * destination's inherited prefix plus the selection in its original
+   * positions), and returns it as a fact in
+   * {@link MoveSelectedTurnsToNewBranchResponse.resolvedContextAnchorGroupKey}.
+   * A post-commit resolution would read the already-mutated source route and
+   * silently fall back to the default window position.
+   *
+   * Main owns no assistant configuration: it only maps the renderer-supplied
+   * index into the destination and reports the result; the renderer persists it.
+   */
+  contextAnchorInheritance?: MoveContextAnchorInheritanceInput
 }
 
-/** @see IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch */
+/**
+ * Renderer-supplied context-window inheritance facts for a move.
+ *
+ * Both fields are renderer-owned persisted configuration, never chat
+ * authority: `sourceAnchorGroupKey` is the source route's persisted anchor
+ * (canonical turn group key) and `contextCount` is the assistant window size
+ * at commit time (turns; null = unlimited).
+ */
+export interface MoveContextAnchorInheritanceInput {
+  /** Source route anchor group key; null/absent = the source route has no anchor. */
+  sourceAnchorGroupKey?: string | null
+  /** Assistant default/initial window size in turns; null/absent = unlimited. */
+  contextCount?: number | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch
+ */
 export interface MoveSelectedTurnsToNewBranchResponse {
   branch: TopicBranchWire
   /** Stable IDs of the moved messages in display order. */
@@ -1314,6 +1632,128 @@ export interface MoveSelectedTurnsToNewBranchResponse {
   /** Effective wire messages of the new branch route. */
   messages: JsonObject[]
   blocks: JsonObject[]
+  /**
+   * Destination route context-window anchor resolved by Main inside the same
+   * atomic move transaction (pre-move inheritance source).
+   *
+   * - non-empty string: the destination's inherited anchor group key;
+   * - `null`: the destination route is empty, so it has no anchor (I-1);
+   * - absent: Main was not asked to resolve it (no
+   *   {@link MoveSelectedTurnsToNewBranchRequest.contextAnchorInheritance})
+   *   or did not produce a fact — the caller must not invent one.
+   *
+   * Main never persists this value; it is a fact the renderer writes into its
+   * own per-route anchor map.
+   */
+  resolvedContextAnchorGroupKey?: string | null
+  /**
+   * Source route context-window anchor repair resolved by Main inside the same
+   * atomic move transaction.
+   *
+   * Present ONLY when the request supplied an active source anchor
+   * ({@link MoveContextAnchorInheritanceInput.sourceAnchorGroupKey}) whose turn
+   * was part of the moved selection, so the source route no longer holds it.
+   * Main then applies the deterministic delete-transfer rule of the
+   * context-window governance ADR §9 against the PRE-move and POST-move source
+   * routes: the previous surviving older turn, the new first turn when the
+   * deleted turn was the first one, or `null` when the source route became
+   * empty (an empty route has no anchor).
+   *
+   * Absent means nothing moved: the request carried no active source anchor,
+   * the key names no source turn, or the anchor still exists in the source
+   * route. Callers must NOT rebuild or rewrite the source anchor in that case.
+   */
+  sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
+}
+
+/** Deterministic source-route anchor transfer produced by a move. */
+export interface MoveSourceContextAnchorTransfer {
+  /** Source anchor group key as supplied with the request (pre-move truth). */
+  fromGroupKey: string
+  /**
+   * Replacement source anchor group key, or `null` when the source route is
+   * empty after the move (no anchor).
+   */
+  toGroupKey: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Cross-topic history references (synced versioned relation, live shared prefix)
+// ---------------------------------------------------------------------------
+//
+// A history reference is a topic-level relation: the target topic's effective
+// route begins with a LIVE stable-ID prefix of a source topic's effective
+// route (through a precise anchor message). The foreign prefix is read-only
+// and never copied (canonical source IDs/topicId are preserved); the target
+// owns its own writable suffix. The relation itself is a first-class versioned
+// sync entity (`topic_reference`, baseline wire/inventory `v6`) carried as ONE
+// coherent tuple keyed by the target topic, while the referenced prefix stays
+// owned by the source. A missing/removed source (soft/hard delete, branch
+// removal, missing endpoint) yields status 'missing' with the prefix omitted;
+// the target topic and its suffix survive, and the prefix recovers when the
+// dependency arrives again.
+
+/** Wire shape of one history-reference relation (topic-level). */
+export interface TopicReferenceWire {
+  targetTopicId: string
+  sourceTopicId: string
+  /** Source route: null = source main route. */
+  sourceBranchId: string | null
+  /** Precise endpoint stable ID in the source route. */
+  anchorMessageId: string
+  /** Live authoritative source topic name (never copied). Null when source is gone. */
+  sourceName: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_CreateReferencedTopic
+ *
+ * Atomically create a new target topic plus its history-reference relation to
+ * a source route through a precise anchor (Reference/Copy: the Reference
+ * variant). The source effective route and anchor are validated in the same
+ * transaction; a failure leaves no orphan topic. The target topic and its
+ * relation are captured for sync together (the foreign prefix is never
+ * copied — it stays owned by the source).
+ */
+export interface CreateReferencedTopicRequest {
+  sourceTopicId: string
+  /** Source route: absent/null = source main route. */
+  branchId?: BranchRouteId
+  targetTopicId: string
+  anchorMessageId: string
+  assistantId?: string
+  /** Target topic display name; never copied from the source. */
+  name?: string
+}
+
+/** @see IpcChannel.ChatDb_CreateReferencedTopic */
+export interface CreateReferencedTopicResponse {
+  topicId: string
+  reference: TopicReferenceWire
+  /** Effective wire of the new route (foreign prefix + empty owned suffix). */
+  messages: JsonObject[]
+  blocks: JsonObject[]
+}
+
+/**
+ * History-reference metadata exposed on windowed reads for a target topic.
+ *
+ * `status` is 'missing' when the source topic/branch/anchor is gone (soft or
+ * hard delete, branch removal, missing endpoint): the prefix is omitted while
+ * the target topic and its own suffix survive. `boundaryMessageId` is the last
+ * foreign-prefix message (the divider boundary), or null when missing.
+ */
+export interface HistoryReferenceMeta {
+  sourceTopicId: string
+  sourceBranchId: string | null
+  anchorMessageId: string
+  /** Live authoritative source topic name; null when source is gone. */
+  sourceName: string | null
+  status: 'available' | 'missing'
+  /** Stable ID of the last foreign-prefix message (divider boundary); null when missing. */
+  boundaryMessageId: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1658,8 +2098,61 @@ export interface InsertMessageGroupsRequest {
   groups: InsertMessageGroup[]
 }
 
-/** @see IpcChannel.ChatDb_InsertMessageGroups */
-export type InsertMessageGroupsResponse = FileCleanupResult
+/**
+ * One committed insertion run for `insert-message-groups`.
+ *
+ * Each entry corresponds to one request group in request order. Placement
+ * follows the existing `InsertMessagesAfterAnchor` convention: stable
+ * neighbors in post-insert effective order, never numeric indexes.
+ */
+export interface InsertMessageGroupsGroupResult {
+  /** Stable IDs of truly inserted messages for this group (request order). */
+  insertedMessageIds: string[]
+  /**
+   * Post-insert effective-route predecessor of this group's run (stable ID),
+   * or null when the run starts the effective route.
+   */
+  beforeMessageId: string | null
+  /**
+   * Post-insert effective-route successor of this group's run (stable ID),
+   * or null when the run ends the effective route.
+   */
+  nextMessageId: string | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_InsertMessageGroups
+ *
+ * Main-issued typed batch insertion acknowledgment. Main stamps every
+ * inserted row with the normalized addressed route and publishes the exact
+ * final committed canonical wires plus capability; no empty guessed
+ * acknowledgments. `insertedMessageIds` matches `insertedMessages` ids in
+ * flat request-group concatenated order; `groups` carries per-group stable
+ * placement in request order so multi-group restores preserve their
+ * pre-delete relation. `mutableMessageIds` is the authoritative capability
+ * delta (always a subset of `insertedMessageIds`; all fresh own rows today).
+ * A failure publishes nothing.
+ */
+export interface InsertMessageGroupsResponse extends FileCleanupResult {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
+  /** Canonical post-write wire for truly inserted messages (flat request-group order). */
+  insertedMessages: JsonObject[]
+  /** Canonical post-write wire for blocks under truly inserted messages (authority block order). */
+  insertedBlocks: JsonObject[]
+  /** Stable IDs of truly inserted messages (flat request-group order; matches insertedMessages ids). */
+  insertedMessageIds: string[]
+  /**
+   * Main-authoritative mutability delta for this command: the inserted owned
+   * IDs mutable through the addressed route. Renderer unions same-route only;
+   * never infers from branchId.
+   */
+  mutableMessageIds: string[]
+  /** Per-group committed runs in request order with stable placement. */
+  groups: InsertMessageGroupsGroupResult[]
+}
 
 // ---------------------------------------------------------------------------
 // Search command DTOs (Phase 5.1B-2)
@@ -1732,7 +2225,7 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:topic-exists': { request: TopicExistsRequest; response: boolean }
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }
   'chatdb:append-message': { request: AppendMessageRequest; response: AppendMessageResponse }
-  'chatdb:update-message': { request: UpdateMessageRequest; response: null }
+  'chatdb:update-message': { request: UpdateMessageRequest; response: UpdateMessageResult }
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
   // Cross-process authority answer selection (Main-resolved full group)
   'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }
@@ -1876,6 +2369,14 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     response: FetchTopicNamingContextResponse
   }
   'chatdb:fetch-topic-activity': { request: FetchTopicActivityRequest; response: FetchTopicActivityResponse }
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  'chatdb:export-topic-data': { request: ExportTopicDataRequest; response: ExportTopicDataResponse }
+  'chatdb:import-topic-data': { request: ImportTopicDataRequest; response: ImportTopicDataResponse }
+  // Cross-topic history references (local-only; Reference/Copy = Reference)
+  'chatdb:create-referenced-topic': {
+    request: CreateReferencedTopicRequest
+    response: CreateReferencedTopicResponse
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1913,6 +2414,19 @@ export interface ChatProjectionInvalidationEvent {
   branchIds: string[]
   /** Commit source: snapshot baseline bootstrap vs incremental apply vs local write. */
   reason: 'sync-baseline' | 'sync-incremental' | 'local-commit'
+}
+
+/**
+ * Authoritative Main → renderer push event: a SOURCE topic that one or more
+ * target topics reference changed (rename/mutation/delete/restore). Renderers
+ * re-read the named target topics' windows so their live foreign prefix
+ * projection converges. Never guessed; non-empty targets only.
+ */
+export interface HistoryReferenceInvalidationEvent {
+  /** The source topic that changed. */
+  sourceTopicId: string
+  /** Exact reference target topic IDs to refresh. */
+  targetTopicIds: string[]
 }
 
 /** All valid ChatDb command channel strings. */

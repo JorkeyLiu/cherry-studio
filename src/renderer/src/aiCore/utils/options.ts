@@ -27,7 +27,6 @@ import { type AiSdkParam, isAiSdkParam, type OpenAIVerbosity } from '@renderer/t
 import { isSupportServiceTierProvider, isSupportVerbosityProvider } from '@renderer/utils/provider'
 import type { JSONValue } from 'ai'
 import { t } from 'i18next'
-import { merge } from 'lodash'
 
 import { getAiSdkProviderId } from '../provider/factory'
 import type { ProviderCapabilities } from '../types'
@@ -39,7 +38,6 @@ import {
   getOpenAIReasoningParams,
   getReasoningEffort
 } from './reasoning'
-import { getWebSearchParams } from './websearch'
 
 const logger = loggerService.withContext('aiCore.utils.options')
 
@@ -123,7 +121,7 @@ export function buildProviderOptions(
   assistant: Assistant,
   model: Model,
   actualProvider: Provider,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
+  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableGenerateImage'>
 ): {
   providerOptions: Record<string, Record<string, JSONValue>>
   standardParams: Partial<Record<AiSdkParam, any>>
@@ -239,7 +237,7 @@ export function buildProviderOptions(
 function buildOpenAIProviderOptions(
   assistant: Assistant,
   model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>,
+  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableGenerateImage'>,
   serviceTier: OpenAIServiceTier,
   textVerbosity?: OpenAIVerbosity
 ): Record<string, OpenAIResponsesProviderOptions> {
@@ -295,7 +293,7 @@ function buildOpenAIProviderOptions(
 function buildAnthropicProviderOptions(
   assistant: Assistant,
   _model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
+  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableGenerateImage'>
 ): Record<string, AnthropicProviderOptions> {
   const { enableReasoning } = capabilities
   let providerOptions: AnthropicProviderOptions = {}
@@ -322,7 +320,7 @@ function buildAnthropicProviderOptions(
 function buildGeminiProviderOptions(
   assistant: Assistant,
   model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
+  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableGenerateImage'>
 ): Record<string, GoogleGenerativeAIProviderOptions> {
   const { enableReasoning, enableGenerateImage } = capabilities
   let providerOptions: GoogleGenerativeAIProviderOptions = {
@@ -380,9 +378,8 @@ function buildGenericProviderOptions(
   providerId: string,
   assistant: Assistant,
   model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
+  _capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableGenerateImage'>
 ): Record<string, any> {
-  const { enableWebSearch } = capabilities
   let providerOptions: Record<string, any> = {}
 
   const reasoningParams = getReasoningEffort(assistant, model)
@@ -390,11 +387,6 @@ function buildGenericProviderOptions(
   providerOptions = {
     ...providerOptions,
     ...reasoningParams
-  }
-
-  if (enableWebSearch) {
-    const webSearchParams = getWebSearchParams(model)
-    providerOptions = merge({}, providerOptions, webSearchParams)
   }
 
   // 特殊处理 Qwen MT

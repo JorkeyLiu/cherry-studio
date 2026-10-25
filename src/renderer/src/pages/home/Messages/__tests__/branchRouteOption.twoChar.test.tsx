@@ -39,6 +39,7 @@ const baseProps = {
   draft: '',
   onDraftChange: () => {},
   onCommitRename: () => {},
+  onCancelRename: () => {},
   onStartRename: () => {},
   onConfirmDelete: () => {},
   deleting: false,

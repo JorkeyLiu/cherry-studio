@@ -1,6 +1,7 @@
 import OpenAI from '@cherrystudio/openai'
 import { loggerService } from '@logger'
 import { fileStorage } from '@main/services/FileStorage'
+import { resolveOutboundRequestHeaders } from '@shared/aiCore/provider/utils/requestHeaders'
 import type { FileListResponse, FileMetadata, FileUploadResponse, Provider } from '@types'
 import * as fs from 'fs'
 
@@ -16,10 +17,45 @@ export class OpenaiService extends BaseFileService {
 
   constructor(provider: Provider) {
     super(provider)
+    // Provider custom headers flow per request (see resolveFileRequestHeaders)
+    // so the long-lived client carries no baked session identity. Bodies,
+    // purpose, and error semantics below are untouched.
     this.client = new OpenAI({
       apiKey: provider.apiKey,
       baseURL: provider.apiHost
     })
+  }
+
+  /**
+   * Shared cross-runtime header policy for file requests (topicless: file
+   * operations carry no topic, so this is the topicless logical-request
+   * identity — one opaque value per method invocation on the Go endpoint
+   * only). Resolved per method call, hence constant for that
+   * invocation/retries and never persisted. Provider custom headers
+   * (`Provider.extra_headers`) flow alongside; credentials stay in the client.
+   */
+  private resolveFileRequestHeaders(): Record<string, string> | undefined {
+    const providerExtra = this.provider.extra_headers as Record<string, string | undefined> | undefined
+    const resolved = resolveOutboundRequestHeaders({
+      apiHost: this.provider.apiHost,
+      providerExtraHeaders: providerExtra
+    })
+    const merged: Record<string, string> = {}
+    if (providerExtra) {
+      for (const [key, value] of Object.entries(providerExtra)) {
+        if (value !== undefined) {
+          merged[key] = value
+        }
+      }
+    }
+    if (resolved) {
+      for (const [key, value] of Object.entries(resolved)) {
+        if (value !== undefined) {
+          merged[key] = value
+        }
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined
   }
 
   async uploadFile(file: FileMetadata): Promise<FileUploadResponse> {
@@ -30,10 +66,14 @@ export class OpenaiService extends BaseFileService {
       const fileStreamWithMeta = Object.assign(fileReadStream, {
         name: file.origin_name
       })
-      const response = await this.client.files.create({
-        file: fileStreamWithMeta,
-        purpose: file.purpose || 'assistants'
-      })
+      const fileHeaders = this.resolveFileRequestHeaders()
+      const response = await this.client.files.create(
+        {
+          file: fileStreamWithMeta,
+          purpose: file.purpose || 'assistants'
+        },
+        ...(fileHeaders ? [{ headers: fileHeaders } as const] : [])
+      )
       if (!response.id) {
         throw new Error('File id not found in response')
       }
@@ -67,7 +107,10 @@ export class OpenaiService extends BaseFileService {
 
   async listFiles(): Promise<FileListResponse> {
     try {
-      const response = await this.client.files.list()
+      const fileHeaders = this.resolveFileRequestHeaders()
+      const response = await (fileHeaders
+        ? this.client.files.list(undefined, { headers: fileHeaders })
+        : this.client.files.list())
       return {
         files: response.data.map((file) => ({
           id: file.id,
@@ -89,7 +132,10 @@ export class OpenaiService extends BaseFileService {
   async deleteFile(fileId: string): Promise<void> {
     try {
       const cachedRemoteFileId = CacheService.get<string>(OpenaiService.generateUIFileIdCacheKey(fileId))
-      await this.client.files.delete(cachedRemoteFileId || fileId)
+      const fileHeaders = this.resolveFileRequestHeaders()
+      await (fileHeaders
+        ? this.client.files.delete(cachedRemoteFileId || fileId, { headers: fileHeaders })
+        : this.client.files.delete(cachedRemoteFileId || fileId))
       logger.debug(`File ${fileId} deleted`)
     } catch (error) {
       logger.error('Error deleting file:', error as Error)
@@ -101,7 +147,10 @@ export class OpenaiService extends BaseFileService {
     try {
       // 尝试反映射RemoteFileId
       const cachedRemoteFileId = CacheService.get<string>(OpenaiService.generateUIFileIdCacheKey(fileId))
-      const response = await this.client.files.retrieve(cachedRemoteFileId || fileId)
+      const fileHeaders = this.resolveFileRequestHeaders()
+      const response = await (fileHeaders
+        ? this.client.files.retrieve(cachedRemoteFileId || fileId, { headers: fileHeaders })
+        : this.client.files.retrieve(cachedRemoteFileId || fileId))
 
       return {
         fileId: response.id,

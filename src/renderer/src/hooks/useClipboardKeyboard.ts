@@ -120,15 +120,16 @@ export function useClipboardKeyboard() {
       // 让浏览器原生处理（不 preventDefault，不触发消息动作）。
       if (isTextInputFocused()) return
 
-      // Ctrl+Z / Cmd+Z: 撤销
-      if (isMod && e.key === 'z' && !e.shiftKey) {
+      // Ctrl+Z / Cmd+Z: 撤销（大小写不敏感：Shift 修饰在部分布局产生大写 'Z'）
+      const isZ = e.key.toLowerCase() === 'z'
+      if (isMod && isZ && !e.shiftKey) {
         e.preventDefault()
         void cbs.handleUndo()
         return
       }
 
-      // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
-      if (isMod && e.key === 'z' && e.shiftKey) {
+      // Ctrl+Shift+Z / Cmd+Shift+Z: 重做（大小写不敏感：Meta+Shift+Z 产生 'Z'）
+      if (isMod && isZ && e.shiftKey) {
         e.preventDefault()
         void cbs.handleRedo()
         return

@@ -20,6 +20,7 @@
 import { invalidateTopicsDeletion } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
+import type { Usage } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { cloneForWire } from '@renderer/utils/jsonWire'
 import type {
@@ -36,6 +37,8 @@ import type {
   CountFileRefsByFileResponse,
   CreateBranchRequest,
   CreateBranchResponse,
+  CreateReferencedTopicRequest,
+  CreateReferencedTopicResponse,
   DeleteBlocksRequest,
   DeleteBlocksResponse,
   DeleteBranchRequest,
@@ -52,6 +55,8 @@ import type {
   EnsureAssistantTopicsRequest,
   EnsureAssistantTopicsResponse,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
+  ExportTopicDataResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -73,6 +78,9 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  HistoryReferenceMeta,
+  ImportTopicDataRequest,
+  ImportTopicDataResponse,
   InsertMessageGroup,
   InsertMessageGroupsRequest,
   InsertMessageGroupsResponse,
@@ -92,6 +100,7 @@ import type {
   ListTrashTopicsRequest,
   ListTrashTopicsResponse,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   MoveSelectedTurnsToNewBranchRequest,
   MoveSelectedTurnsToNewBranchResponse,
   PasteMessagesToTopicRequest,
@@ -126,11 +135,16 @@ import type {
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
   TopicBranchWire,
+  TopicDataExportPayload,
   TopicExistsRequest,
+  TopicReferenceWire,
   TopicWire,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
+  UpdateMessageResult,
+  UpdateMessageUsageResult,
+  UpdateMessageUsageSource,
   UpdateSegmentMetadataRequest,
   UpdateSegmentMetadataResponse,
   UpdateSingleBlockRequest,
@@ -142,7 +156,7 @@ import type {
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
-import type { MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource } from './types'
 
 // ---------------------------------------------------------------------------
 // ChatDbApi — narrow typed interface for the preload bridge
@@ -165,8 +179,11 @@ export interface ChatDbApi {
     request: FetchTopicNamingContextRequest
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
   fetchTopicActivity?(request: FetchTopicActivityRequest): Promise<ChatDbResult<FetchTopicActivityResponse>>
+  exportTopicData?(request: ExportTopicDataRequest): Promise<ChatDbResult<ExportTopicDataResponse>>
+  importTopicData?(request: ImportTopicDataRequest): Promise<ChatDbResult<ImportTopicDataResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   createBranch?(request: CreateBranchRequest): Promise<ChatDbResult<CreateBranchResponse>>
+  createReferencedTopic?(request: CreateReferencedTopicRequest): Promise<ChatDbResult<CreateReferencedTopicResponse>>
   listBranches?(request: ListBranchesRequest): Promise<ChatDbResult<ListBranchesResponse>>
   renameBranch?(request: RenameBranchRequest): Promise<ChatDbResult<RenameBranchResponse>>
   deleteBranch?(request: DeleteBranchRequest): Promise<ChatDbResult<DeleteBranchResponse>>
@@ -181,7 +198,7 @@ export interface ChatDbApi {
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<AppendMessageResponse>>
-  updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
+  updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<UpdateMessageResult>>
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   // Cross-process authority answer selection (Main-resolved full group)
   selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
@@ -475,6 +492,38 @@ export class SqliteMessageDataSource implements MessageDataSource {
     dispatchTopicUpdatedAt(topicId)
   }
 
+  /**
+   * Conditional usage-only write for the OPTIONAL user-prompt token estimate.
+   *
+   * A narrow wrapper over the same `chatdb:update-message` command: it adds the
+   * `usageCondition` source snapshot so Main can decide inside one transaction
+   * whether the estimate still describes the prompt. It returns Main's outcome
+   * (`applied` / rejection) instead of void so the caller projects only a write
+   * that actually landed; a rejected condition is a normal, non-throwing no-op.
+   *
+   * `dispatchTopicUpdatedAt` is deliberately NOT dispatched: this is background
+   * display metadata, not user activity, and it must never reorder topic lists.
+   */
+  async updateMessageUsageIfUnchanged(
+    topicId: string,
+    messageId: string,
+    usage: Usage,
+    source: UpdateMessageUsageSource,
+    branchId?: string | null
+  ): Promise<UpdateMessageUsageResult | null> {
+    const request: UpdateMessageRequest = {
+      topicId,
+      branchId: branchId ?? null,
+      messageId,
+      updates: { usage: cloneForWire(usage as unknown as JsonObject) },
+      usageCondition: {
+        textContents: [...source.textContents],
+        fileIds: [...source.fileIds]
+      }
+    }
+    return unwrap(await this.api.updateMessage(request))
+  }
+
   async updateMessageAndBlocks(
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
@@ -561,12 +610,14 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async updateBlocks(
     blocks: MessageBlock[],
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ): Promise<void> {
     void streamDiag
     const request: UpdateBlocksRequest = {
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.updateBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
@@ -576,29 +627,35 @@ export class SqliteMessageDataSource implements MessageDataSource {
     blockId: string,
     updates: Partial<MessageBlock>,
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ): Promise<void> {
     void streamDiag
     const request: UpdateSingleBlockRequest = {
       blockId,
       updates: cloneForWire(updates as unknown as JsonObject),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.updateSingleBlock(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string): Promise<void> {
+  async bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string, route?: BlockWriteRouteContext): Promise<void> {
     const request: BulkAddBlocksRequest = {
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(resendAttemptId !== undefined && { resendAttemptId })
+      ...(resendAttemptId !== undefined && { resendAttemptId }),
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
     }
     unwrap(await this.api.bulkAddBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async deleteBlocks(blockIds: string[]): Promise<FileCleanupResult> {
-    const request: DeleteBlocksRequest = cloneForWire({ blockIds })
+  async deleteBlocks(blockIds: string[], route?: BlockWriteRouteContext): Promise<FileCleanupResult> {
+    const request: DeleteBlocksRequest = cloneForWire({
+      blockIds,
+      ...(route?.topicId !== undefined && { topicId: route.topicId, branchId: route.branchId ?? null })
+    })
     return unwrap(await this.api.deleteBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
@@ -729,9 +786,20 @@ export class SqliteMessageDataSource implements MessageDataSource {
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expected?: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
   ): Promise<TopicWire> {
-    const request: UpdateTopicMetadataRequest = cloneForWire({ topicId, name, pinned, prompt, isNameManuallyEdited })
+    const request: UpdateTopicMetadataRequest = cloneForWire({
+      topicId,
+      name,
+      pinned,
+      prompt,
+      isNameManuallyEdited,
+      ...(expected?.expectedName !== undefined ? { expectedName: expected.expectedName } : {}),
+      ...(expected?.expectedIsNameManuallyEdited !== undefined
+        ? { expectedIsNameManuallyEdited: expected.expectedIsNameManuallyEdited }
+        : {})
+    })
     return unwrap(await this.api.updateTopicMetadata(request))
   }
 
@@ -877,6 +945,43 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
   }
 
+  // ============ Cross-topic history references (local-only live prefix) ============
+
+  /**
+   * Create a new target topic that references a source route through a precise
+   * anchor (Reference/Copy = Reference). Atomic in Main (topic + relation);
+   * returns the live foreign prefix for projection. The target topic is
+   * local-only (its foreign prefix is not representable in sync).
+   */
+  async createReferencedTopic(
+    sourceTopicId: string,
+    sourceBranchId: string | null | undefined,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ): Promise<{ topicId: string; reference: TopicReferenceWire; messages: Message[]; blocks: MessageBlock[] }> {
+    if (!this.api.createReferencedTopic) {
+      throw new Error('ChatDb API unavailable: createReferencedTopic not exposed')
+    }
+    const request: CreateReferencedTopicRequest = cloneForWire({
+      sourceTopicId,
+      branchId: sourceBranchId ?? null,
+      targetTopicId,
+      anchorMessageId,
+      assistantId,
+      name
+    })
+    const result = unwrap(await this.api.createReferencedTopic(request))
+    dispatchTopicUpdatedAt(targetTopicId)
+    return {
+      topicId: result.topicId,
+      reference: result.reference,
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[]
+    }
+  }
+
   async listBranches(topicId: string): Promise<ListBranchesResponse> {
     if (!this.api.listBranches) {
       throw new Error('ChatDb API unavailable: listBranches not exposed')
@@ -910,7 +1015,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ): Promise<MoveSelectedTurnsToNewBranchResponse> {
     if (!this.api.moveSelectedTurnsToNewBranch) {
       throw new Error('ChatDb API unavailable: moveSelectedTurnsToNewBranch not exposed')
@@ -920,7 +1026,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
       sourceBranchId: sourceBranchId ?? null,
       selectedGroupIds: [...selectedGroupIds],
       expectedSelectedMessageIds: [...(expectedSelectedMessageIds ?? [])],
-      name
+      name,
+      ...(contextAnchorInheritance
+        ? {
+            contextAnchorInheritance: {
+              sourceAnchorGroupKey: contextAnchorInheritance.sourceAnchorGroupKey ?? null,
+              contextCount: contextAnchorInheritance.contextCount ?? null
+            }
+          }
+        : {})
     })
     const result = unwrap(await this.api.moveSelectedTurnsToNewBranch(request))
     dispatchTopicUpdatedAt(topicId)
@@ -1055,7 +1169,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     groups: InsertMessageGroup[],
     branchId?: string | null
-  ): Promise<FileCleanupResult> {
+  ): Promise<InsertMessageGroupsResponse> {
     if (!this.api.insertMessageGroups) {
       throw new Error('ChatDb API unavailable: insertMessageGroups not exposed')
     }
@@ -1079,7 +1193,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       window: result.window,
       mutableMessageIds: Array.isArray((result as { mutableMessageIds?: unknown }).mutableMessageIds)
         ? ((result as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-        : []
+        : [],
+      reference: (result as { reference?: HistoryReferenceMeta | null }).reference ?? null
     } as unknown as FetchMessagesWindowResponse
   }
 
@@ -1217,6 +1332,45 @@ export class SqliteMessageDataSource implements MessageDataSource {
       groups: result.groups,
       clipboard: result.clipboard
     } as unknown as FetchClipboardGroupsResponse
+  }
+
+  // ============ Standalone topic JSON data exchange (whole-topic export/import) ============
+  /**
+   * Snapshot ONE ENTIRE logical topic for standalone JSON export.
+   *
+   * One Main SQLite transaction returns the versioned topic-data payload
+   * covering the main route plus ALL branches (never one effective route,
+   * never the loaded projection). Caller-local only, dispatches nothing.
+   * Missing topic throws ChatDbResultError (NOT_FOUND); transport rejection
+   * propagates unchanged.
+   */
+  async exportTopicData(topicId: string): Promise<TopicDataExportPayload> {
+    if (!this.api.exportTopicData) {
+      throw new Error('ChatDb API unavailable: topic-data export not exposed')
+    }
+    const request: ExportTopicDataRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.exportTopicData(request))
+    return result.payload as unknown as TopicDataExportPayload
+  }
+
+  /**
+   * Create a new topic from a standalone JSON payload under the target
+   * assistant. Main allocates fresh IDs (no dedup/merge/overwrite) in one
+   * atomic transaction. Dispatches `updateTopicUpdatedAt` exactly once for
+   * the new topic after success. Structured failure throws
+   * ChatDbResultError; transport rejection propagates unchanged.
+   */
+  async importTopicData(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse> {
+    if (!this.api.importTopicData) {
+      throw new Error('ChatDb API unavailable: topic-data import not exposed')
+    }
+    const request: ImportTopicDataRequest = cloneForWire({
+      payload,
+      assistantId
+    })
+    const result = unwrap(await this.api.importTopicData(request))
+    dispatchTopicUpdatedAt(result.topic.id)
+    return result
   }
 
   // ============ Bounded naming/activity reads (naming + rate-limit, read-only) ============

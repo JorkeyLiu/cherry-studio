@@ -95,7 +95,8 @@ vi.mock('@renderer/utils/formats', () => ({
 }))
 
 vi.mock('@renderer/utils/markdown', () => ({
-  processLatexBrackets: vi.fn((str: string) => str)
+  processLatexBrackets: vi.fn((str: string) => str),
+  normalizeAttachedBlockMathClose: vi.fn((str: string) => str)
 }))
 
 import Markdown from '../Markdown'

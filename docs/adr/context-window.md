@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，实现阶段的目标契约）。本文档是上下文窗口（context window）语义的**唯一权威规范**：定义默认上下文数量（`contextCount`）、稳定 topic 锚点（`contextWindowAnchor`）、上下文窗口、允许的锚点迁移、持久化归属、兼容性修复与测试边界，防止既有语义漂移再次发生。
 > **决策锁**：CW-1 … CW-8（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-09-28
+> **最后更新**：2026-10-11
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
@@ -91,9 +91,9 @@
 | 用户点击 TokenCount | 以**当前** `contextCount` 重锚定到默认窗口位置 | 是（CW-4 · TokenCount 重锚定） |
 | 用户点击/选择消息锚点控件 | 锚点移动到该消息所在 turn | 是（CW-4 · 消息锚点控件） |
 | 用户点击**当前已锚定** turn 的锚点控件 | 重锚定到当前默认窗口位置；**绝不**使已初始化非空 topic 无锚点 | 是（CW-4 · 消息锚点控件；§8） |
-| 删除锚点 turn | 确定性转移：落到更旧一侧的前一组；若锚点组为首组则落到新首组；topic 变空则移除锚点 | 是（CW-4 · 确定性删除转移/修复） |
+| 删除锚点 turn | 确定性转移：落到更旧一侧最近的**存活**组（按删除前的组顺序、稳定 group 身份）；锚点之前无存活组则落到新首组；topic 变空则移除锚点 | 是（CW-4 · 确定性删除转移/修复） |
 | 删除非锚点 turn | 锚点相对位置不动 | 否 |
-| 分支创建 | 确定性继承父 topic 锚点（分支继承），不从 `contextCount` 重算 | 是（CW-4 · 分支继承） |
+| 分支创建 | 确定性继承父 topic 锚点（分支继承）：范围内按索引映射，不重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 同位），空分支无锚点 | 是（CW-4 · 分支继承） |
 | 兼容性修复（遗留非空 topic 缺锚点） | 恰好一次在默认窗口位置初始化锚点；永不重算有效锚点 | 是（CW-4/CW-5 · 兼容性修复） |
 | topic 清空为空 | 锚点移除（空 topic 无锚点，I-1） | 否（不变量推论） |
 
@@ -128,21 +128,23 @@
 
 ## 9. 删除与分支行为（Deletion and Branch Behavior）
 
-**确定性删除转移（CW-4）**，规则与现状纯函数 `transferAnchorOnDeletion` 一致，作为确定性契约：
+**确定性删除转移（CW-4）**，规则与纯函数 `transferAnchorOnDeletion` 与 Main 同规则实现一致，作为确定性契约：
 
 - 锚点组仍在删除后的组列表中 → 锚点不动。
-- 锚点组被删除 → 转移到**更旧一侧的前一组**（原位置前一组的相对索引）。
-- 被删的是首组 → 转移到删除后的新首组。
+- 锚点组被删除 → 转移到**更旧一侧最近的存活组**：在**删除前**的组顺序中，从锚点组的前一位置起向更旧方向扫描，取第一个在删除后仍然存在的组（按稳定 group 身份比对，与索引压缩无关）。
+- 被删的是首组，或锚点之前的所有组也一并被删除 → 转移到删除后的新首组。
 - 删除后 topic 为空 → 锚点移除（空 topic 无锚点，I-1）。
+
+> **批量删除澄清**：一次删除/移动多个连续组会压缩 post 列表的索引，因此转移位置**不得**用「原索引 − 1」直接索引 post 列表——那样可能越过末尾（批量移动回滚）或命中一个**更新**的组（例如 pre = [A,B,C,D,E,F]、锚点 E、删除 D,E → post = [A,B,C,F]，`原索引 − 1 = 3` 会错选 F）。以稳定 group 身份取「更旧一侧最近的存活组」是同一条规则在单组删除与批量删除下的唯一表达。上下文锚点的分支迁移（move）同样适用本条。
 
 **删除非锚点 turn**：锚点相对位置不动（I-6）。
 
-**分支继承（CW-4）**：同-topic 真分支创建时，新分支**确定性继承**父路由的有效锚点；该动作不使用 `contextCount` 重新推导，也不使任何已初始化路由无锚点。确切映射（CW-FIX-1，实现契约）：以父锚点在父有效 group list 中的**索引**映射进新分支 group list——
+**分支继承（CW-4）**：同-topic 真分支创建时，新分支**确定性继承**父路由的有效锚点；确切映射（CW-FIX-1，实现契约）：以父锚点在父有效 group list 中的**索引**映射进新分支 group list（clone 以 fresh UUID/askId 重映射 ID，索引保留）——
 
 - 新分支为空 → 无锚点（空路由无锚点，I-1；I-1 按路由适用）。
-- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 新分支不继承；**非空新分支必须立即获得锚点**（按 §6 默认位置建立），不允许已初始化的非空分支保持无锚点。
-- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 新分支 group list 同索引组。
-- 索引超出分支范围（新分支是父 list 的严格前缀）→ **钳制到新分支最后一个可用组**（最近可用前驱），而非放弃继承。
+- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 新分支不继承；**非空新分支必须立即以当前 `contextCount` 在默认窗口位置建立锚点**（§6，与 TokenCount 重锚定同一位置；`null` → 首 turn），不允许已初始化的非空分支保持无锚点。
+- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 新分支 group list 同索引组（不使用 `contextCount` 重算）。
+- 索引超出分支范围（新分支是父 list 的严格前缀，例如在 context-start 分隔线上方创建真分支或克隆 topic 使原锚点被排除在外）→ **永不钳制到末尾**；非空新分支以**当前** `contextCount` 在默认窗口位置建立锚点（与 TokenCount 点击同一位置），空分支保持无锚点。
 
 路由隔离：继承源为父路由键（`topicId` 或 `topicId:parentBranchId`），写入目标为新路由键（`topicId:newBranchId`）；源键与目标键互不覆盖。切 route 与窗口化读取（latest/around）永不触发继承与重算。
 
@@ -163,7 +165,7 @@
 - 锚点与 `contextCount` 同属**普通 renderer assistant-settings 持久化**（Redux `assistants` slice + redux-persist），不是 SQLite/Dexie 聊天权威、不是 IPC 聊天存储、不是渲染投影（CW-2/CW-7）。
 - 聊天数据权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理；本文档不改变这两个治理域的边界，也不把锚点移入任何聊天权威存储。
 - **迁移**：`contextStartOverride` → `contextWindowAnchor` 的字段演进由**迁移测试**覆盖（§13）；**不需要**锚点专用重启 E2E（CW-7）。
-- **视口区分**：路由切换时的滚动位置（路由本地稳定视口、恢复意图/所有权、快照/默认定位、分隔线稳定完成、可见性原子性）由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；视口变化永不移动上下文锚点，锚点变化永不提交视口快照——本文档不定义视口语义。
+- **视口区分**：聊天视口定位（路由本地稳定视口、页面重激活、同路由在位交互连续性、流式阅读/跟随、意图优先级、恢复意图/所有权、快照/默认定位、分隔线稳定完成、可见性原子性）由 [Chat Viewport Position](./chat-viewport-position.md)（VIEWPORT-1…VIEWPORT-16）治理；视口变化永不移动上下文锚点，锚点变化永不提交视口快照——本文档不定义视口语义。
 
 ---
 

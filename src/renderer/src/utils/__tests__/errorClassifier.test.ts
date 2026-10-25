@@ -172,23 +172,23 @@ describe('classifyError', () => {
     expect(result.category).not.toBe('knowledge')
   })
 
-  // OCR
-  it('classifies ocr error', () => {
+  // Removed OCR capability: legacy OCR error text no longer routes to an OCR diagnosis.
+  it('does not classify legacy ocr error as ocr', () => {
     const result = classifyError(makeError({ message: 'OCR engine not initialized' }))
-    expect(result.category).toBe('ocr')
-    expect(result.navTarget).toBeNull()
+    expect(result.category).not.toBe('ocr')
+    expect(result.i18nKey).not.toBe('error.diagnosis.ocr')
   })
 
-  // MCP
-  it('classifies mcp server error', () => {
+  // Removed MCP capability: legacy MCP error text no longer routes to a settings page.
+  it('does not route legacy mcp server text to a removed settings page', () => {
     const result = classifyError(makeError({ message: 'MCP server failed to start' }))
-    expect(result.category).toBe('mcp')
-    expect(result.navTarget).toBe('/settings/mcp/servers')
+    expect(result.category).not.toBe('mcp')
+    expect(result.navTarget).not.toBe('/settings/mcp/servers')
   })
 
-  it('classifies mcp connection error', () => {
+  it('does not route legacy mcp connection text to a removed settings page', () => {
     const result = classifyError(makeError({ message: 'MCP connection refused' }))
-    expect(result.category).toBe('mcp')
+    expect(result.category).not.toBe('mcp')
   })
 
   it('does not match plain "mcp" without qualifier', () => {

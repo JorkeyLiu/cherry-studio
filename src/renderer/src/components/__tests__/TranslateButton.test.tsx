@@ -27,9 +27,10 @@ const mocks = vi.hoisted(() => {
   return { dispatch, useSettings, useTranslate, translateText, t }
 })
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: mocks.t })
-}))
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return { ...actual, useTranslation: () => ({ t: mocks.t }) }
+})
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => mocks.dispatch
@@ -70,8 +71,15 @@ vi.mock('antd', () => ({
   Switch: ({ checked, onChange }: any) => (
     <button type="button" data-testid="switch" data-checked={String(checked)} onClick={() => onChange?.(!checked)} />
   ),
-  Button: ({ children, onClick, disabled, type }: any) => (
-    <button type="button" data-testid="antd-button" data-type={type} disabled={disabled} onClick={onClick}>
+  Button: ({ children, onClick, disabled, type, className, ...rest }: any) => (
+    <button
+      type="button"
+      data-testid="antd-button"
+      data-type={type}
+      disabled={disabled}
+      onClick={onClick}
+      className={className}
+      {...rest}>
       {children}
     </button>
   )
@@ -150,5 +158,22 @@ describe('TranslateButton (LOCK-110)', () => {
     await waitFor(() => {
       expect((window as any).modal.confirm).toHaveBeenCalled()
     })
+  })
+
+  it('renders the toolbar trigger on the shared composer button contract', () => {
+    render(<TranslateButton text="hello" onTranslated={onTranslated} />)
+
+    const trigger = screen.getByTestId('translate-toolbar-button')
+    expect(trigger.tagName).toBe('BUTTON')
+    expect(trigger).toHaveAttribute('data-tone', 'default')
+    expect(trigger).not.toBeDisabled()
+  })
+
+  it('disables the toolbar trigger natively when disabled or translating', () => {
+    const { rerender } = render(<TranslateButton text="hello" onTranslated={onTranslated} disabled />)
+    expect(screen.getByTestId('translate-toolbar-button')).toBeDisabled()
+
+    rerender(<TranslateButton text="hello" onTranslated={onTranslated} isLoading />)
+    expect(screen.getByTestId('translate-toolbar-button')).toBeDisabled()
   })
 })

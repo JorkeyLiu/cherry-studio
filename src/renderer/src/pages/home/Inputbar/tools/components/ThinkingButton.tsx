@@ -1,4 +1,4 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import {
   MdiLightbulbAutoOutline,
   MdiLightbulbOffOutline,
@@ -200,9 +200,9 @@ const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
   return (
     <ToolPopover open={open} onOpenChange={setOpen} content={popoverContent}>
       <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow open={open ? false : undefined}>
-        <ActionIconButton active={isThinkingEnabled} aria-label={ariaLabel} aria-pressed={isThinkingEnabled}>
+        <ComposerIconButton active={isThinkingEnabled} aria-label={ariaLabel} aria-pressed={isThinkingEnabled}>
           {ThinkingIcon({ option: currentReasoningEffort })}
-        </ActionIconButton>
+        </ComposerIconButton>
       </Tooltip>
     </ToolPopover>
   )
@@ -238,7 +238,7 @@ const ThinkingIcon = (props: { option?: ThinkingOption }) => {
       break
   }
 
-  return <IconComponent className="icon" width={18} height={18} style={{ marginTop: -2 }} />
+  return <IconComponent className="icon" width={16} height={16} style={{ marginTop: -2 }} />
 }
 
 const ThinkingPopoverInner = styled.div<{ $lockedHeight?: number | null }>`

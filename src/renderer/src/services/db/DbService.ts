@@ -1,4 +1,5 @@
 import db from '@renderer/databases'
+import type { Usage } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   DeleteMessagesWithDependentsResponse,
@@ -13,8 +14,10 @@ import type {
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
+  ImportTopicDataResponse,
   InsertMessageGroup,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
@@ -24,13 +27,15 @@ import type {
   SelectAnswerMessageResponse,
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  TopicDataExportPayload,
+  UpdateMessageUsageSource
 } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
-import type { MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource } from './types'
 
 interface FileCountSource {
   updateFileCount(fileId: string, delta: number, deleteIfZero?: boolean): Promise<void>
@@ -128,6 +133,14 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.fetchTopicActivity) throw new Error('fetchTopicActivity unavailable')
     return this.ordinarySource.fetchTopicActivity(topicId, branchId)
   }
+  exportTopicData(topicId: string): Promise<TopicDataExportPayload> {
+    if (!this.ordinarySource.exportTopicData) throw new Error('exportTopicData unavailable')
+    return this.ordinarySource.exportTopicData(topicId)
+  }
+  importTopicData(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse> {
+    if (!this.ordinarySource.importTopicData) throw new Error('importTopicData unavailable')
+    return this.ordinarySource.importTopicData(payload, assistantId)
+  }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
   }
@@ -158,6 +171,20 @@ class DbService implements MessageDataSource {
     branchId?: string | null
   ) {
     return this.ordinarySource.updateMessage(topicId, messageId, updates, resendAttemptId, branchId)
+  }
+  /**
+   * Conditional usage-only write (optional prompt-token estimate). Delegates to
+   * the ordinary SQLite source; Main decides inside one transaction whether the
+   * estimate still describes the prompt and returns the outcome.
+   */
+  updateMessageUsageIfUnchanged(
+    topicId: string,
+    messageId: string,
+    usage: Usage,
+    source: UpdateMessageUsageSource,
+    branchId?: string | null
+  ) {
+    return this.ordinarySource.updateMessageUsageIfUnchanged(topicId, messageId, usage, source, branchId)
   }
   updateMessageAndBlocks(
     topicId: string,
@@ -214,32 +241,39 @@ class DbService implements MessageDataSource {
     return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
-  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics, resendAttemptId?: string): Promise<void> {
-    return this.ordinarySource.updateBlocks(blocks, streamDiag, resendAttemptId)
+  updateBlocks(
+    blocks: MessageBlock[],
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
+  ): Promise<void> {
+    return this.ordinarySource.updateBlocks(blocks, streamDiag, resendAttemptId, route)
   }
 
   updateSingleBlock(
     blockId: string,
     updates: Partial<MessageBlock>,
     streamDiag?: StreamWriteDiagnostics,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    route?: BlockWriteRouteContext
   ) {
-    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
+    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId, route)
   }
-  bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string) {
-    return this.ordinarySource.bulkAddBlocks(blocks, resendAttemptId)
+  bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string, route?: BlockWriteRouteContext) {
+    return this.ordinarySource.bulkAddBlocks(blocks, resendAttemptId, route)
   }
-  deleteBlocks(blockIds: string[]) {
-    return this.ordinarySource.deleteBlocks(blockIds)
+  deleteBlocks(blockIds: string[], route?: BlockWriteRouteContext) {
+    return this.ordinarySource.deleteBlocks(blockIds, route)
   }
   updateTopicMetadata(
     topicId: string,
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expected?: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
   ) {
-    return this.ordinarySource.updateTopicMetadata(topicId, name, pinned, prompt, isNameManuallyEdited)
+    return this.ordinarySource.updateTopicMetadata(topicId, name, pinned, prompt, isNameManuallyEdited, expected)
   }
   softDeleteTopic(topicId: string, name?: string | null) {
     return this.ordinarySource.softDeleteTopic(topicId, name)
@@ -328,6 +362,24 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.createBranch) throw new Error('createBranch unavailable')
     return this.ordinarySource.createBranch(topicId, parentBranchId, anchorMessageId, name)
   }
+  createReferencedTopic(
+    sourceTopicId: string,
+    sourceBranchId: string | null | undefined,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ) {
+    if (!this.ordinarySource.createReferencedTopic) throw new Error('createReferencedTopic unavailable')
+    return this.ordinarySource.createReferencedTopic(
+      sourceTopicId,
+      sourceBranchId,
+      targetTopicId,
+      anchorMessageId,
+      assistantId,
+      name
+    )
+  }
   listBranches(topicId: string) {
     if (!this.ordinarySource.listBranches) throw new Error('listBranches unavailable')
     return this.ordinarySource.listBranches(topicId)
@@ -345,7 +397,8 @@ class DbService implements MessageDataSource {
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ) {
     if (!this.ordinarySource.moveSelectedTurnsToNewBranch) throw new Error('moveSelectedTurnsToNewBranch unavailable')
     return this.ordinarySource.moveSelectedTurnsToNewBranch(
@@ -353,7 +406,8 @@ class DbService implements MessageDataSource {
       sourceBranchId,
       selectedGroupIds,
       name,
-      expectedSelectedMessageIds
+      expectedSelectedMessageIds,
+      contextAnchorInheritance
     )
   }
   insertMessagesAfterAnchor(

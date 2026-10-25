@@ -10,6 +10,7 @@ import type {
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
+  CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
   DeleteMessageRequest,
@@ -20,6 +21,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -30,6 +32,8 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  HistoryReferenceInvalidationEvent,
+  ImportTopicDataRequest,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
@@ -80,7 +84,6 @@ import type {
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
 import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
-import type { MCPServerLogEntry } from '@shared/config/types'
 import type { ExternalAppInfo } from '@shared/externalApp/types'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { MediaAttachmentOpenRequest } from '@shared/mediaAttachment'
@@ -89,8 +92,6 @@ import type { ProviderLogoResult } from '@shared/providerLogo'
 import type { SaveDataAck, SaveDataRequest } from '@shared/saveData'
 import type { Notification } from '@types'
 import type {
-  AddMemoryOptions,
-  AssistantMessage,
   FileListResponse,
   FileMetadata,
   FileUploadResponse,
@@ -98,19 +99,12 @@ import type {
   KnowledgeBaseParams,
   KnowledgeItem,
   KnowledgeSearchResult,
-  MCPServer,
-  MemoryConfig,
-  MemoryListOptions,
-  MemorySearchOptions,
-  OcrProvider,
-  OcrResult,
   Provider,
   RestartApiServerStatusResult,
   S3Config,
   Shortcut,
   StartApiServerStatusResult,
   StopApiServerStatusResult,
-  SupportedOcrFile,
   ThemeMode,
   WebDavConfig
 } from '@types'
@@ -387,23 +381,6 @@ const api = {
       context?: SpanContext
     ) => tracedInvoke(IpcChannel.KnowledgeBase_Rerank, context, { search, base, results })
   },
-  memory: {
-    add: (messages: string | AssistantMessage[], options?: AddMemoryOptions) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Add, messages, options),
-    search: (query: string, options: MemorySearchOptions) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Search, query, options),
-    list: (options?: MemoryListOptions) => ipcRenderer.invoke(IpcChannel.Memory_List, options),
-    delete: (id: string) => ipcRenderer.invoke(IpcChannel.Memory_Delete, id),
-    update: (id: string, memory: string, metadata?: Record<string, any>) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Update, id, memory, metadata),
-    get: (id: string) => ipcRenderer.invoke(IpcChannel.Memory_Get, id),
-    setConfig: (config: MemoryConfig) => ipcRenderer.invoke(IpcChannel.Memory_SetConfig, config),
-    deleteUser: (userId: string) => ipcRenderer.invoke(IpcChannel.Memory_DeleteUser, userId),
-    deleteAllMemoriesForUser: (userId: string) =>
-      ipcRenderer.invoke(IpcChannel.Memory_DeleteAllMemoriesForUser, userId),
-    getUsersList: () => ipcRenderer.invoke(IpcChannel.Memory_GetUsersList),
-    migrateMemoryDb: () => ipcRenderer.invoke(IpcChannel.Memory_MigrateMemoryDb)
-  },
   window: {
     setMinimumSize: (width: number, height: number) =>
       ipcRenderer.invoke(IpcChannel.Windows_SetMinimumSize, width, height),
@@ -428,42 +405,6 @@ const api = {
       ipcRenderer.invoke(IpcChannel.Aes_Encrypt, text, secretKey, iv),
     decrypt: (encryptedData: string, iv: string, secretKey: string) =>
       ipcRenderer.invoke(IpcChannel.Aes_Decrypt, encryptedData, iv, secretKey)
-  },
-  mcp: {
-    removeServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_RemoveServer, server),
-    restartServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_RestartServer, server),
-    stopServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_StopServer, server),
-    listTools: (server: MCPServer, context?: SpanContext) => tracedInvoke(IpcChannel.Mcp_ListTools, context, server),
-    callTool: (
-      { server, name, args, callId }: { server: MCPServer; name: string; args: any; callId?: string },
-      context?: SpanContext
-    ) => tracedInvoke(IpcChannel.Mcp_CallTool, context, { server, name, args, callId }),
-    listPrompts: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_ListPrompts, server),
-    getPrompt: ({ server, name, args }: { server: MCPServer; name: string; args?: Record<string, any> }) =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetPrompt, { server, name, args }),
-    listResources: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_ListResources, server),
-    getResource: ({ server, uri }: { server: MCPServer; uri: string }) =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetResource, { server, uri }),
-    getInstallInfo: () => ipcRenderer.invoke(IpcChannel.Mcp_GetInstallInfo),
-    checkMcpConnectivity: (server: any) => ipcRenderer.invoke(IpcChannel.Mcp_CheckConnectivity, server),
-    uploadDxt: async (file: File) => {
-      const buffer = await file.arrayBuffer()
-      return ipcRenderer.invoke(IpcChannel.Mcp_UploadDxt, buffer, file.name)
-    },
-    abortTool: (callId: string) => ipcRenderer.invoke(IpcChannel.Mcp_AbortTool, callId),
-    resolveHubTool: (nameOrId: string): Promise<{ serverId: string; toolName: string } | null> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_ResolveHubTool, nameOrId),
-    getServerVersion: (server: MCPServer): Promise<string | null> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetServerVersion, server),
-    getServerLogs: (server: MCPServer): Promise<MCPServerLogEntry[]> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetServerLogs, server),
-    onServerLog: (callback: (log: MCPServerLogEntry & { serverId?: string }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, log: MCPServerLogEntry & { serverId?: string }) => {
-        callback(log)
-      }
-      ipcRenderer.on(IpcChannel.Mcp_ServerLog, listener)
-      return () => ipcRenderer.off(IpcChannel.Mcp_ServerLog, listener)
-    }
   },
   python: {
     execute: (script: string, context?: Record<string, any>, timeout?: number) =>
@@ -508,11 +449,6 @@ const api = {
     decryptToken: (token: string) => ipcRenderer.invoke(IpcChannel.Nutstore_DecryptToken, token),
     getDirectoryContents: (token: string, path: string) =>
       ipcRenderer.invoke(IpcChannel.Nutstore_GetDirectoryContents, token, path)
-  },
-  searchService: {
-    openSearchWindow: (uid: string, show?: boolean) => ipcRenderer.invoke(IpcChannel.SearchWindow_Open, uid, show),
-    closeSearchWindow: (uid: string) => ipcRenderer.invoke(IpcChannel.SearchWindow_Close, uid),
-    openUrlInSearchWindow: (uid: string, url: string) => ipcRenderer.invoke(IpcChannel.SearchWindow_OpenUrl, uid, url)
   },
   webview: {
     setOpenLinkExternal: (webviewId: number, isExternal: boolean) =>
@@ -606,11 +542,6 @@ const api = {
       // requests). Main rejects stale/duplicate/post-dispose signals.
       ready: (): Promise<CatalogRecoveryReadyResult> => ipcRenderer.invoke(IpcChannel.CherryImport_CatalogReady)
     }
-  },
-  ocr: {
-    ocr: (file: SupportedOcrFile, provider: OcrProvider): Promise<OcrResult> =>
-      ipcRenderer.invoke(IpcChannel.OCR_ocr, file, provider),
-    listProviders: (): Promise<string[]> => ipcRenderer.invoke(IpcChannel.OCR_ListProviders)
   },
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Minimize),
@@ -713,6 +644,10 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ResolveContextClosure, request),
     fetchWholeTopicSnapshot: (request: FetchWholeTopicSnapshotRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchWholeTopicSnapshot, request),
+    exportTopicData: (request: ExportTopicDataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ExportTopicData, request),
+    importTopicData: (request: ImportTopicDataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ImportTopicData, request),
     fetchClipboardGroups: (request: FetchClipboardGroupsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchClipboardGroups, request),
     fetchTopicNamingContext: (request: FetchTopicNamingContextRequest) =>
@@ -788,6 +723,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),
     // Topic-internal branches (016): local-only, no prefix cloning (only creation method)
     createBranch: (request: CreateBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_CreateBranch, request),
+    createReferencedTopic: (request: CreateReferencedTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_CreateReferencedTopic, request),
     listBranches: (request: ListBranchesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListBranches, request),
     renameBranch: (request: RenameBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_RenameBranch, request),
     deleteBranch: (request: DeleteBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBranch, request),
@@ -834,6 +771,16 @@ const api = {
       ipcRenderer.on(IpcChannel.ChatDb_ChatProjectionInvalidated, listener)
       return () => {
         ipcRenderer.removeListener(IpcChannel.ChatDb_ChatProjectionInvalidated, listener)
+      }
+    },
+    // Cross-topic reference invalidation — Main → all renderers (targets to re-read)
+    onHistoryReferenceInvalidated: (callback: (event: HistoryReferenceInvalidationEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: HistoryReferenceInvalidationEvent) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.ChatDb_HistoryReferenceInvalidated, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ChatDb_HistoryReferenceInvalidated, listener)
       }
     }
   }

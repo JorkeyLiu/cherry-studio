@@ -139,12 +139,17 @@ export interface ReceiverUnionResult {
 }
 
 type TombstoneRef = {
-  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset' | 'topic_reference'
   entityId: string
 }
 type RegisterRef = { messageId: string; activeBlockIds: string[] }
 
 function parseTombstoneKey(key: string): TombstoneRef {
+  if (key.startsWith('tombstone:topic_reference:')) {
+    const id = key.slice('tombstone:topic_reference:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'topic_reference', entityId: id }
+  }
   if (key.startsWith('tombstone:file_asset:')) {
     const id = key.slice('tombstone:file_asset:'.length)
     if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
@@ -352,7 +357,8 @@ function assertCandidateClosureDisjoint(
         t.entityType !== 'topic' &&
         t.entityType !== 'message' &&
         t.entityType !== 'message_block' &&
-        t.entityType !== 'topic_branch'
+        t.entityType !== 'topic_branch' &&
+        t.entityType !== 'topic_reference'
       ) {
         fail(`receiver union unknown incoming tombstone type ${String(t.entityType)}`)
       }
@@ -1485,6 +1491,111 @@ export function adoptReceiverExclusiveInTx(
     insertedOpIds.push(opId)
   }
 
+  // V6: adopt fully-unversioned local-exclusive reference relations.
+  //
+  // A fully-local reference (created before sync existed on this device) must
+  // not stay invisible: the target topic would sync without its relation and
+  // peers would read an ordinary topic instead of the reference. Adoption
+  // mints a real monotonic clock (same boundary as every other adopted
+  // entity) and enqueues the relation so the peer receives target + relation
+  // together. The target topic must already be incoming, candidate, or
+  // locally versioned-complete — otherwise the relation would be adopted
+  // without its owner and fail closed.
+  let adoptedReferences = 0
+  {
+    let refRows: Array<{
+      targetTopicId: string
+      sourceTopicId: string
+      sourceBranchId: string | null
+      anchorMessageId: string
+    }> = []
+    try {
+      refRows = tx
+        .select({
+          targetTopicId: schema.topicReferences.targetTopicId,
+          sourceTopicId: schema.topicReferences.sourceTopicId,
+          sourceBranchId: schema.topicReferences.sourceBranchId,
+          anchorMessageId: schema.topicReferences.anchorMessageId
+        })
+        .from(schema.topicReferences)
+        .all() as typeof refRows
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      if (/no such table/i.test(m)) refRows = []
+      else throw e
+    }
+    let refIdx = candidates.length
+    for (const row of refRows) {
+      const key = `topic_reference:${row.targetTopicId}`
+      if (incomingEntityByKey.has(key)) continue
+      const alreadyVersioned = !!tx
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, 'topic_reference'))
+        .all()
+        .find((r) => r.entityId === row.targetTopicId)
+      if (alreadyVersioned) continue
+      if (incomingTombstoneKeys.has(key)) {
+        fail(`receiver union tombstone direct overlap topic_reference/${row.targetTopicId}`)
+      }
+      const targetLocalTomb = collectLocalTombstones(tx).some(
+        (t) => t.entityType === 'topic_reference' && t.entityId === row.targetTopicId
+      )
+      if (targetLocalTomb) fail(`receiver union local tombstone blocks reference adoption ${row.targetTopicId}`)
+      const tid = row.targetTopicId
+      const targetOk =
+        incomingTopicIds.has(tid) ||
+        candidates.some((c) => c.entityType === 'topic' && c.entityId === tid) ||
+        (isPreservedTopicParent(tid) &&
+          !!tx.select().from(schema.topics).where(eq(schema.topics.id, tid)).get() &&
+          !!tx
+            .select()
+            .from(schema.syncEntityClock)
+            .where(eq(schema.syncEntityClock.entityType, 'topic'))
+            .all()
+            .find((r) => r.entityId === tid))
+      if (!targetOk) {
+        fail(`receiver union reference ${tid} has no adoptable/versioned target topic`)
+      }
+      const ts = baseTs + refIdx
+      refIdx += 1
+      if (!isSafeTs(ts) || ts >= Number.MAX_SAFE_INTEGER) fail('receiver union per-entity clock exhausted')
+      const opId = randomUUID()
+      const payload = {
+        targetTopicId: row.targetTopicId,
+        sourceTopicId: row.sourceTopicId,
+        sourceBranchId: row.sourceBranchId ?? null,
+        anchorMessageId: row.anchorMessageId
+      }
+      tx.insert(schema.syncOutbox)
+        .values({
+          id: opId,
+          entityType: 'topic_reference',
+          op: 'upsert',
+          entityId: row.targetTopicId,
+          timestamp: ts,
+          deviceId,
+          payloadJson: JSON.stringify(payload),
+          createdAt: new Date().toISOString()
+        })
+        .run()
+      tx.insert(schema.syncEntityClock)
+        .values({
+          entityType: 'topic_reference',
+          entityId: row.targetTopicId,
+          timestamp: ts,
+          operationId: opId
+        })
+        .onConflictDoUpdate({
+          target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+          set: { timestamp: ts, operationId: opId }
+        })
+        .run()
+      // No field clocks: the relation tuple is one coherent entity unit.
+      adoptedReferences += 1
+    }
+  }
+
   // Determine parent sets for post-merge frame generation
   const exclusiveParentTopicIds = new Set<string>()
   const exclusiveParentMessageIds = new Set<string>()
@@ -1539,7 +1650,7 @@ export function adoptReceiverExclusiveInTx(
   // However we have already minted memberships; the post-merge step needs to know which parents to refresh.
   // Return all exclusive parents; caller will decide.
   return {
-    adopted: candidates.length,
+    adopted: candidates.length + adoptedReferences,
     sharedParents: {
       topicIds: sharedTopicIds.sort(),
       messageIds: sharedMessageIds.sort(),

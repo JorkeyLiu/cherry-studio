@@ -56,7 +56,8 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 }))
 
 vi.mock('@renderer/hooks/useContextClosure', () => ({
-  useContextClosure: () => ({ closure: null })
+  useContextClosure: () => ({ closure: null, loading: false }),
+  useClosureSemanticSignal: () => '0:0'
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
@@ -163,7 +164,7 @@ vi.mock('./Inputbar/Inputbar', () => ({
   default: () => <div data-testid="inputbar-stub" />
 }))
 
-vi.mock('./Messages/ChatNavigation', () => ({
+vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))
 

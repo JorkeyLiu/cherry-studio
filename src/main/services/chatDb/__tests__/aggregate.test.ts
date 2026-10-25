@@ -2620,6 +2620,46 @@ describe('ChatDbAggregateService', () => {
       expect(wire.isNameManuallyEdited).toBeNull()
     })
 
+    it('updateTopicMetadata conditional: matching preimage applies the automatic name', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      agg.updateTopicMetadata(topicId, 'New Topic')
+      const result = agg.updateTopicMetadata(topicId, 'Auto Name', undefined, undefined, undefined, 'New Topic', null)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('Auto Name')
+    })
+
+    it('updateTopicMetadata conditional: stale name preimage is a graceful no-op', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      agg.updateTopicMetadata(topicId, 'New Topic')
+      agg.updateTopicMetadata(topicId, 'Manual Title', undefined, undefined, true)
+      const result = agg.updateTopicMetadata(topicId, 'Stale Auto', undefined, undefined, undefined, 'New Topic', false)
+      expect(result.ok).toBe(true)
+      // Manual title and flag survive; no clobber, no flag revert.
+      expect(okValue(result).name).toBe('Manual Title')
+      expect(okValue(result).isNameManuallyEdited).toBe(true)
+    })
+
+    it('updateTopicMetadata conditional: stale flag preimage is a graceful no-op', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      agg.updateTopicMetadata(topicId, 'New Topic', undefined, undefined, false)
+      const result = agg.updateTopicMetadata(topicId, 'Stale Auto', undefined, undefined, undefined, 'New Topic', null)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('New Topic')
+      expect(okValue(result).isNameManuallyEdited).toBe(false)
+    })
+
+    it('updateTopicMetadata conditional: absent guard keeps manual behavior unchanged', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      agg.updateTopicMetadata(topicId, 'Manual Title', undefined, undefined, true)
+      const result = agg.updateTopicMetadata(topicId, 'Manual Edit 2', undefined, undefined, true)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('Manual Edit 2')
+    })
+
     it('softDeleteTopic: sets deletedAt', () => {
       const topicId = `t-${uid()}`
       agg.ensureTopic(topicId)

@@ -1,21 +1,8 @@
 import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
-import { McpLogo } from '@renderer/components/Icons'
 import Scrollbar from '@renderer/components/Scrollbar'
 import ModelSettings from '@renderer/pages/settings/ModelSettings/ModelSettings'
 import { Divider as AntDivider } from 'antd'
-import {
-  Brain,
-  Cloud,
-  Command,
-  FileCode,
-  HardDrive,
-  Info,
-  MonitorCog,
-  Package,
-  Search,
-  Server,
-  Settings2
-} from 'lucide-react'
+import { Cloud, Command, FileCode, HardDrive, Info, MonitorCog, Package, Server, Settings2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
@@ -26,12 +13,9 @@ import DataSettings from './DataSettings/DataSettings'
 import DisplaySettings from './DisplaySettings/DisplaySettings'
 import DocProcessSettings from './DocProcessSettings'
 import GeneralSettings from './GeneralSettings'
-import MCPSettings from './MCPSettings'
-import MemorySettings from './MemorySettings'
 import { ProviderList } from './ProviderSettings'
 import ShortcutSettings from './ShortcutSettings'
 import { ApiServerSettings } from './ToolSettings/ApiServerSettings'
-import WebSearchSettings from './WebSearchSettings'
 
 const SettingsPage: FC = () => {
   const { pathname } = useLocation()
@@ -78,24 +62,6 @@ const SettingsPage: FC = () => {
             </MenuItem>
           </MenuItemLink>
           <Divider />
-          <MenuItemLink to="/settings/mcp">
-            <MenuItem className={isRoute('/settings/mcp')}>
-              <McpLogo width={18} height={18} style={{ opacity: 0.8 }} />
-              {t('settings.mcp.title')}
-            </MenuItem>
-          </MenuItemLink>
-          <MenuItemLink to="/settings/websearch">
-            <MenuItem className={isRoute('/settings/websearch')}>
-              <Search size={18} />
-              {t('settings.tool.websearch.title')}
-            </MenuItem>
-          </MenuItemLink>
-          <MenuItemLink to="/settings/memory">
-            <MenuItem className={isRoute('/settings/memory')}>
-              <Brain size={18} />
-              {t('memory.title')}
-            </MenuItem>
-          </MenuItemLink>
           <MenuItemLink to="/settings/api-server">
             <MenuItem className={isRoute('/settings/api-server')}>
               <Server size={18} />
@@ -126,11 +92,8 @@ const SettingsPage: FC = () => {
           <Routes>
             <Route path="provider" element={<ProviderList />} />
             <Route path="model" element={<ModelSettings />} />
-            <Route path="websearch/*" element={<WebSearchSettings />} />
             <Route path="api-server" element={<ApiServerSettings />} />
             <Route path="docprocess" element={<DocProcessSettings />} />
-            <Route path="mcp/*" element={<MCPSettings />} />
-            <Route path="memory" element={<MemorySettings />} />
             <Route path="general/*" element={<GeneralSettings />} />
             <Route path="display" element={<DisplaySettings />} />
             <Route path="shortcut" element={<ShortcutSettings />} />

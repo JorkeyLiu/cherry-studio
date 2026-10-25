@@ -4,7 +4,7 @@
 
 This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
 
-Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](../adr/cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](../archived/sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), the [Context window governance](../adr/context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary), the [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md) (loaded projection semantics, typed completeness capabilities, stable-ID navigation/mutation, caller-local complete reads, request-local execution overlay), the [Topic Branches ADR](../adr/topic-branches.md) (true-branch single-entity/owner/reference, effective-route resolution, owner-only mutation with butterfly effect and missing-anchor fail-closed), and the [Route Viewport Position](../adr/route-viewport-position.md) (route-local stable viewport, restore intent/ownership lifecycle, snapshot/default positioning, divider stable completion, atomic visibility). Multi-client synchronization progress is tracked in the active [Personal Multi-Device Sync](../work/multi-device-sync.md) work document (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](../adr/sync-connection-channel.md); the [Sync Architecture Selection](../archived/sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
+Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](../adr/cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](../archived/sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), the [Context window governance](../adr/context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary), the [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md) (loaded projection semantics, typed completeness capabilities, stable-ID navigation/mutation, caller-local complete reads, request-local execution overlay), the [Topic Branches ADR](../adr/topic-branches.md) (true-branch single-entity/owner/reference, effective-route resolution, owner-only mutation with butterfly effect and missing-anchor fail-closed), and the [Chat Viewport Position](../adr/chat-viewport-position.md) (chat viewport position: route-local stable viewport, page reactivation, same-route in-place continuity, streaming reading/follow and intent priority, restore intent/ownership lifecycle, snapshot/default positioning, divider stable completion, atomic visibility). Multi-client synchronization progress is tracked in the active [Personal Multi-Device Sync](../work/multi-device-sync.md) work document (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](../adr/sync-connection-channel.md); the [Sync Architecture Selection](../archived/sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
 
 ## Contents
 
@@ -32,7 +32,7 @@ src/
 packages/
   aiCore/        # @cherrystudio/ai-core — AI SDK v6 provider abstraction (provider extension registry + runtime executor)
   shared/        # Cross-process types, constants, IPC channel definitions
-  mcp-trace/     # OpenTelemetry tracing for MCP operations
+  mcp-trace/     # Generic OpenTelemetry tracing (retained; package name is historical)
   extension-table-plus/  # TipTap table extension
 ```
 
@@ -55,7 +55,6 @@ Node.js backend services. Key services:
 | Service | Responsibility |
 |---|---|
 | `WindowService` | Electron window lifecycle management |
-| `MCPService` | Model Context Protocol server management |
 | `KnowledgeService` | RAG / knowledge base (via `@cherrystudio/embedjs`) |
 | `AnthropicService` | Anthropic API integration |
 | `LoggerService` | Winston-based structured logging (daily rotate) |
@@ -83,7 +82,7 @@ components/      # Shared UI components (Ant Design 5 + styled-components + Tail
 databases/       # Dexie (IndexedDB) — files catalog, settings, knowledge notes, translation history/languages, quick phrases
 hooks/           # React hooks (useAssistant, useChatContext, useModel, etc.)
 pages/           # Route pages (home eager; files/notes/knowledge/settings/launchpad lazy-loaded as separate chunks — see route loading below)
-services/        # Frontend services (ApiService, ModelService, MemoryService, etc.) consuming the preload window.api typed surface
+services/        # Frontend services (ApiService, ModelService, etc.) consuming the preload window.api typed surface
 store/           # Redux Toolkit slices
 types/           # TypeScript type definitions
 workers/         # Web Workers
@@ -101,12 +100,9 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 | `assistants` | AI assistant configurations (including the default `contextCount` and the per-topic context-window anchor — see [Context window governance](../adr/context-window.md)) |
 | `settings` | App-wide settings |
 | `llm` | LLM provider/model configs |
-| `mcp` | MCP server configs |
 | `messageBlock` | Message block rendering state (block entities may cover a broader cache than the loaded message projection; block presence never proves message completeness — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md)) |
-| `messages` | Ordinary topic message projection — loaded ID lists per topic (`messageIdsByTopic`) with entity dictionary; completeness is always `'loaded-projection'` (resident/loaded vs explicit-empty vs unloaded are distinct); never the whole topic — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md). Route-switch scroll position (per-route stable viewport session, restore lifecycle, divider completion including explicit continuation, atomic visibility; sessions survive page deactivation/reconnect) is owned by [Route Viewport Position](../adr/route-viewport-position.md), not by this slice. Major-page navigation is an active page change rather than session destruction: a chat-session secondary roundtrip returns to the same chat route's stable position with first-visible correctness, and retained-projection validation stays presentation-only |
+| `messages` | Ordinary topic message projection — loaded ID lists per topic (`messageIdsByTopic`) with entity dictionary; completeness is always `'loaded-projection'` (resident/loaded vs explicit-empty vs unloaded are distinct); never the whole topic — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md). Route-switch scroll position (per-route stable viewport session, restore lifecycle, divider completion including explicit continuation, atomic visibility; sessions survive page deactivation/reconnect) and same-route in-place continuity plus streaming reading/follow intent priority is owned by [Chat Viewport Position](../adr/chat-viewport-position.md), not by this slice. Implementation mapping (locations only, no call chains): renderer Messages viewport controller/context plus interaction region keeper and intent/streaming helpers; contract-level regression in the conversation scroll-intent/streaming/edit-region/fold-region E2E specs with focused component suites alongside. Major-page navigation is an active page change rather than session destruction: a chat-session secondary roundtrip returns to the same chat route's stable position with first-visible correctness, and retained-projection validation stays presentation-only |
 | `knowledge` | Knowledge base entries |
-| `memory` | Memory system config |
-| `websearch` | Web search settings |
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
 | `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation with B-01..B-05 retention enforcement implemented renderer-local per `archived/architecture-evolution-program.md` §6.5; Phase 4 closed 2026-08-29 |
@@ -170,7 +166,7 @@ src/core/
 The renderer builds multiple HTML entry points (inputs declared in `electron.vite.config.ts`):
 
 - `index.html` — Main application window
-- `traceWindow.html` — MCP trace viewer (`src/renderer/src/trace/`)
+- `traceWindow.html` — trace viewer (`src/renderer/src/trace/`)
 - `chatImport.html` — L2 ZIP import window (`src/renderer/src/windows/chatImport/`, hidden sandboxed window over the extracted ZIP's IndexedDB)
 
 ## Logging

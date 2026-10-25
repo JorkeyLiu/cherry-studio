@@ -565,6 +565,47 @@ describe('Naming lifecycle: post-persist only', () => {
     expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
     expect(mocks.autoRenameTopic).not.toHaveBeenCalled()
   })
+
+  it('captured request route is used for naming even when latest active differs', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-text'] })
+    seedBlocks(store, [textBlock({ status: MessageBlockStatus.STREAMING, content: 'streaming...' })])
+
+    const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+    // Pinned branch route from the request; the harness store has no
+    // topicBranch slice so latest-active fallback would be null.
+    const callbacks = createCallbacks({
+      blockManager: manager,
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      topicId: TOPIC_ID,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      requestRoute: 'branch-pinned',
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
+        saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT),
+      assistant: assistantStub
+    })
+    manager.activeBlockInfo = { id: 'b-text', type: MessageBlockType.MAIN_TEXT }
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mocks.autoRenameTopic).toHaveBeenCalledTimes(1)
+    expect(mocks.autoRenameTopic).toHaveBeenCalledWith(assistantStub, TOPIC_ID, 'branch-pinned')
+  })
 })
 
 describe('Detached execution: request-local state completes without Redux injection', () => {

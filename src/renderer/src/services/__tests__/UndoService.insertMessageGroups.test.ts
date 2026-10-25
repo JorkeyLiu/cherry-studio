@@ -16,7 +16,11 @@ const { mocks } = vi.hoisted(() => ({
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p })),
     newMessagesActions: {
       removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
-      insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
+      insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
+      applyInsertedMessageGroups: vi.fn((p: unknown) => ({
+        type: 'newMessages/applyInsertedMessageGroups',
+        payload: p
+      }))
     },
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
@@ -82,7 +86,24 @@ vi.mock('@renderer/store', () => ({
   default: { dispatch: vi.fn(), getState: () => storeState }
 }))
 
-const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
+function ackFor(ids: string[], groups?: Array<{ ids: string[]; before?: string | null; next?: string | null }>) {
+  const runs = groups ?? ids.map((id) => ({ ids: [id], before: undefined as unknown as string | null, next: null }))
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    topicId: 'topic-1',
+    branchId: null,
+    insertedMessages: ids.map((id) => ({ id, topicId: 'topic-1' })),
+    insertedBlocks: [],
+    insertedMessageIds: ids,
+    mutableMessageIds: [...ids],
+    groups: runs.map((r) => ({
+      insertedMessageIds: r.ids,
+      beforeMessageId: r.before ?? null,
+      nextMessageId: r.next ?? null
+    }))
+  }
+}
 
 function makeMessage(id: string): Message {
   return {
@@ -104,7 +125,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       messages: { entities: {}, messageIdsByTopic: { 'topic-1': ['survivor'] } },
       messageBlocks: { entities: {} }
     } as unknown as RootState
-    mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
+    mocks.insertMessageGroups.mockResolvedValue(ackFor(['g1m', 'g2m']))
     mocks.selectLoadedMessagesForTopic.mockImplementation((() => [{ id: 'survivor' } as Message]) as any)
   })
 
@@ -159,8 +180,21 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       null
     )
     expect(mocks.saveMessageAndBlocksToDB).not.toHaveBeenCalled()
-    // Bounded projection: both visible groups inserted (tail appends, anchor inserts).
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenCalledTimes(2)
+    // Bounded projection via the shared Main ack: ONE atomic batch with both
+    // visible groups (capability from Main, placement from stable neighbors).
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
+    const batch = mocks.newMessagesActions.applyInsertedMessageGroups.mock.calls[0][0] as {
+      topicId: string
+      route: string | null
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ insertedMessageIds: string[]; visibleMessageIds: string[] }>
+    }
+    expect(batch.topicId).toBe('topic-1')
+    expect(batch.insertedMessageIds).toEqual(['g1m', 'g2m'])
+    expect(batch.mutableMessageIds).toEqual(['g1m', 'g2m'])
+    expect(batch.groups.map((g) => g.visibleMessageIds)).toEqual([['g1m'], ['g2m']])
+    expect(mocks.newMessagesActions.insertMessageAtIndex).not.toHaveBeenCalled()
   })
 
   it('undoDelete restores FULL group to DB but projects only the loaded intersection to Redux', async () => {
@@ -192,6 +226,17 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       ],
       segmentSnapshots: []
     }
+    mocks.insertMessageGroups.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      insertedMessages: [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }],
+      insertedBlocks: [b1, b2, b3],
+      insertedMessageIds: ['m1', 'm2', 'm3'],
+      mutableMessageIds: ['m1', 'm2', 'm3'],
+      groups: [{ insertedMessageIds: ['m1', 'm2', 'm3'], beforeMessageId: 'survivor', nextMessageId: null }]
+    })
     storeState.undoStack = { undoStack: [action], redoStack: [] }
     const { executeUndo } = await import('../UndoService')
     await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
@@ -204,18 +249,19 @@ describe('UndoService stable restore (insert-message-groups)', () => {
     ]
     expect(groups).toHaveLength(1)
     expect(groups[0].entries.map((e) => e.message.id)).toEqual(['m1', 'm2', 'm3'])
-    // Redux projects only the loaded subset, preserving authority order.
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenCalledTimes(2)
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenNthCalledWith(1, {
-      topicId: 'topic-1',
-      message: m1,
-      index: 0
-    })
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenNthCalledWith(2, {
-      topicId: 'topic-1',
-      message: m3,
-      index: 1
-    })
+    // Redux projects only the loaded subset via ONE atomic batch, preserving
+    // authority order; capability comes from the Main ack.
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
+    const batch = mocks.newMessagesActions.applyInsertedMessageGroups.mock.calls[0][0] as {
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ visibleMessageIds: string[] }>
+    }
+    expect(batch.insertedMessageIds).toEqual(['m1', 'm2', 'm3'])
+    expect(batch.mutableMessageIds).toEqual(['m1', 'm2', 'm3'])
+    expect(batch.groups).toHaveLength(1)
+    expect(batch.groups[0].visibleMessageIds).toEqual(['m1', 'm3'])
+    expect(mocks.newMessagesActions.insertMessageAtIndex).not.toHaveBeenCalled()
     expect(mocks.upsertManyBlocks).toHaveBeenCalledTimes(1)
     expect(mocks.upsertManyBlocks).toHaveBeenCalledWith([b1, b3])
   })
@@ -244,6 +290,17 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       ],
       segmentSnapshots: []
     }
+    mocks.insertMessageGroups.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      insertedMessages: [{ id: 'tail-m' }],
+      insertedBlocks: [tailBlock],
+      insertedMessageIds: ['tail-m'],
+      mutableMessageIds: ['tail-m'],
+      groups: [{ insertedMessageIds: ['tail-m'], beforeMessageId: null, nextMessageId: null }]
+    })
     storeState.undoStack = { undoStack: [action], redoStack: [] }
     const { executeUndo } = await import('../UndoService')
     await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
@@ -255,6 +312,11 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       Array<{ entries: Array<{ message: Message }> }>
     ]
     expect(groups[0].entries.map((e) => e.message.id)).toEqual(['tail-m'])
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
+    const batch = mocks.newMessagesActions.applyInsertedMessageGroups.mock.calls[0][0] as {
+      groups: Array<{ visibleMessageIds: string[] }>
+    }
+    expect(batch.groups[0].visibleMessageIds).toEqual([])
     expect(mocks.newMessagesActions.insertMessageAtIndex).not.toHaveBeenCalled()
     expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
   })
@@ -276,6 +338,17 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetInsertIntent: { kind: 'after-group-tail', messageId: 'orig-target' },
       targetSegmentSnapshots: []
     }
+    mocks.insertMessageGroups.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      insertedMessages: [{ id: 'pasted-1' }],
+      insertedBlocks: [block],
+      insertedMessageIds: ['pasted-1'],
+      mutableMessageIds: ['pasted-1'],
+      groups: [{ insertedMessageIds: ['pasted-1'], beforeMessageId: 'orig-target', nextMessageId: null }]
+    })
     storeState.undoStack = { undoStack: [], redoStack: [action] }
     mocks.selectLoadedMessagesForTopic.mockImplementation((() => [{ id: 'orig-target' } as Message]) as any)
     const { executeRedo } = await import('../UndoService')
@@ -285,6 +358,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
     const [, groups] = mocks.insertMessageGroups.mock.calls[0] as unknown as [string, Array<{ intent: unknown }>]
     expect(groups[0].intent).toEqual({ kind: 'after-group-tail', messageId: 'orig-target' })
     expect(mocks.saveMessageAndBlocksToDB).not.toHaveBeenCalled()
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
   })
 
   it('redoPaste non-contiguous same-answer group projects after the last loaded assistant (Main parity)', async () => {
@@ -308,6 +382,17 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetInsertIntent: { kind: 'after-group-tail', messageId: 'u0' },
       targetSegmentSnapshots: []
     }
+    mocks.insertMessageGroups.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      insertedMessages: [{ id: 'pasted-1' }],
+      insertedBlocks: [],
+      insertedMessageIds: ['pasted-1'],
+      mutableMessageIds: ['pasted-1'],
+      groups: [{ insertedMessageIds: ['pasted-1'], beforeMessageId: 'a2', nextMessageId: null }]
+    })
     storeState.undoStack = { undoStack: [], redoStack: [action] }
     mocks.selectLoadedMessagesForTopic.mockImplementation((() => loaded) as any)
     const { executeRedo } = await import('../UndoService')
@@ -316,13 +401,10 @@ describe('UndoService stable restore (insert-message-groups)', () => {
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     const [, groups] = mocks.insertMessageGroups.mock.calls[0] as unknown as [string, Array<{ intent: unknown }>]
     expect(groups[0].intent).toEqual({ kind: 'after-group-tail', messageId: 'u0' })
-    // Bounded local projection matches Main intent: insert at loaded index 4 (after a2).
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenCalledTimes(1)
-    expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenCalledWith({
-      topicId: 'topic-1',
-      message: pasted,
-      index: 4
-    })
+    // Bounded local projection via the shared Main ack (stable neighbors from
+    // Main, capability from Main — no local index splice).
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.newMessagesActions.insertMessageAtIndex).not.toHaveBeenCalled()
   })
 
   it('redoCutPaste uses the stored stable intent for the target re-insert', async () => {
@@ -344,6 +426,17 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetInsertPositionIndex: 77,
       targetInsertIntent: { kind: 'topic-tail' }
     }
+    mocks.insertMessageGroups.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      insertedMessages: [{ id: 'pasted-1' }],
+      insertedBlocks: [],
+      insertedMessageIds: ['pasted-1'],
+      mutableMessageIds: ['pasted-1'],
+      groups: [{ insertedMessageIds: ['pasted-1'], beforeMessageId: null, nextMessageId: null }]
+    })
     storeState.undoStack = { undoStack: [], redoStack: [action] }
     mocks.selectLoadedMessagesForTopic.mockImplementation((() => [] as Message[]) as any)
     const { executeRedo } = await import('../UndoService')
@@ -353,5 +446,6 @@ describe('UndoService stable restore (insert-message-groups)', () => {
     const [, groups] = mocks.insertMessageGroups.mock.calls[0] as unknown as [string, Array<{ intent: unknown }>]
     expect(groups[0].intent).toEqual({ kind: 'topic-tail' })
     expect(mocks.saveMessageAndBlocksToDB).not.toHaveBeenCalled()
+    expect(mocks.newMessagesActions.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
   })
 })

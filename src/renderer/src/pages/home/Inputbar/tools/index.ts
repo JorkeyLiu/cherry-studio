@@ -5,10 +5,8 @@ import './attachmentTool'
 import './mentionModelsTool'
 import './newTopicTool'
 import './thinkingTool'
-import './webSearchTool'
 import './urlContextTool'
 import './knowledgeBaseTool'
-import './mcpToolsTool'
 import './generateImageTool'
 
 // Export registry functions

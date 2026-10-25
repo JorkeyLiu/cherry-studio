@@ -58,7 +58,8 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
-  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
+  publishDeleteAuthorityCatalog: vi.fn()
 }))
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({

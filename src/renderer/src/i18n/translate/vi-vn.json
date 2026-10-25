@@ -505,13 +505,6 @@
         "title": "Chế độ tự hành"
       },
       "tooling": {
-        "mcp": {
-          "description": "Kết nối các máy chủ MCP để mở khóa các công cụ bổ sung mà bạn có thể phê duyệt ở trên.",
-          "empty": "Không phát hiện máy chủ MCP nào. Hãy thêm một máy chủ từ trang cài đặt MCP.",
-          "inactiveTooltip": "MCP server này không hoạt động. Vui lòng khởi động trước.",
-          "manageHint": "Cần cấu hình nâng cao? Truy cập Cài đặt → Máy chủ MCP.",
-          "toggle": "Chuyển đổi {{name}}"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "Có thể đọc và chỉnh sửa tập tin tự do. Hỏi trước khi chạy lệnh.",
@@ -543,7 +536,6 @@
           "autoDescription": "Công cụ này được tự động phê duyệt bởi chế độ quyền hiện tại.",
           "autoDisabledTooltip": "Được tự động phê duyệt bởi \"{{mode}}\" và không thể bị vô hiệu hóa.",
           "empty": "Không có công cụ nào phù hợp với bộ lọc của bạn.",
-          "mcpBadge": "Công cụ MCP",
           "requiresApproval": "Yêu cầu phê duyệt khi bị vô hiệu hóa",
           "search": "Công cụ tìm kiếm",
           "toggle": "Chuyển đổi {{name}}"
@@ -557,16 +549,6 @@
         "tab": "Công cụ được phê duyệt trước",
         "title": "Công cụ được phê duyệt trước",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "Máy chủ MCP"
-        },
-        "tab": "Công cụ",
-        "tools": {
-          "title": "Pre-aprobate Instrumentos"
-        }
       }
     },
     "sidebar_title": "Đại lý",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "Lấy nội dung từ một URL được chỉ định"
-        },
-        "WebSearch": {
-          "description": "Thực hiện tìm kiếm web với bộ lọc tên miền"
         },
         "Write": {
           "description": "Tạo hoặc ghi đè lên các tệp"
@@ -897,27 +876,6 @@
         "label": "Số lần gọi công cụ tối đa",
         "tip": "Số lượng tối đa các lệnh gọi công cụ được phép trong một cuộc trò chuyện. Giá trị cao hơn cho phép thực hiện các thao tác nhiều bước phức tạp hơn nhưng có thể làm tăng lượng token sử dụng và thời gian phản hồi."
       },
-      "mcp": {
-        "description": "Servidores MCP habilitados por defecto",
-        "enableFirst": "Bật máy chủ này trong cài đặt MCP trước",
-        "label": "Máy chủ MCP",
-        "mode": {
-          "auto": {
-            "description": "AI tự động phát hiện và sử dụng các công cụ",
-            "label": "Tự động"
-          },
-          "disabled": {
-            "description": "Không có công cụ MCP",
-            "label": "Vô hiệu hóa"
-          },
-          "manual": {
-            "description": "Chọn các máy chủ MCP cụ thể",
-            "label": "Sách hướng dẫn"
-          }
-        },
-        "noServersAvailable": "Không có máy chủ MCP nào khả dụng. Thêm máy chủ trong cài đặt",
-        "title": "Cài đặt MCP"
-      },
       "model": "Cài đặt mô hình",
       "more": "Cài đặt Trợ lý",
       "prompt": "Cài đặt lời nhắc",
@@ -1050,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Trợ lý",
-      "click_to_navigate": "Nhấp để điều hướng đến tin nhắn",
-      "coming_soon": "Sơ đồ quy trình làm việc trò chuyện sắp ra mắt",
-      "no_messages": "Không tìm thấy tin nhắn nào",
-      "start_conversation": "Bắt đầu một cuộc trò chuyện để xem sơ đồ luồng chat",
-      "title": "Lịch sử trò chuyện",
-      "user_node": "Người dùng",
-      "view_full_content": "Xem Toàn Bộ Nội Dung"
-    },
     "input": {
       "auto_resize": "Tự động điều chỉnh chiều cao",
       "context_count": {
@@ -1073,6 +1021,7 @@
       "file_not_supported_count": "{{count}} tệp không được hỗ trợ",
       "generate_image": "Tạo hình ảnh",
       "generate_image_not_supported": "Mô hình không hỗ trợ tạo hình ảnh.",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Cơ sở tri thức",
       "new_topic": "Chủ đề mới {{Command}}",
       "paste_text_file_confirm": "Dán vào thanh nhập liệu?",
@@ -1118,36 +1067,7 @@
         "image_or_document": "Tải lên tệp hình ảnh hoặc tài liệu",
         "upload_from_local": "Tải tệp tin cục bộ..."
       },
-      "url_context": "Bối cảnh URL",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "Mô hình hiện tại không hỗ trợ tìm kiếm web",
-          "enabled_content": "Sử dụng chức năng tìm kiếm web tích hợp sẵn của mô hình",
-          "label": "Mô hình tích hợp sẵn"
-        },
-        "button": {
-          "ok": "Đi tới Cài đặt"
-        },
-        "enable": "Bật tìm kiếm web",
-        "enable_content": "Cần kiểm tra kết nối tìm kiếm web trong cài đặt trước",
-        "label": "Tìm kiếm trên web",
-        "no_web_search": {
-          "description": "Không bật tìm kiếm web",
-          "label": "Tắt tìm kiếm web"
-        },
-        "settings": "Cài đặt Tìm kiếm Web"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "Không thể chuyển đổi sang định dạng cuộc gọi công cụ hợp lệ: {{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "Gemini không hỗ trợ sử dụng đồng thời các công cụ tìm kiếm web gốc và gọi hàm",
-        "multiple_tools": "Tồn tại nhiều công cụ MCP khớp, {{tool}} đã được chọn",
-        "no_tool": "Không tìm thấy công cụ MCP phù hợp cho {{tool}}",
-        "url_context": "Gemini không hỗ trợ sử dụng ngữ cảnh url và gọi hàm đồng thời"
-      }
+      "url_context": "Bối cảnh URL"
     },
     "message": {
       "copy_topic": {
@@ -1189,13 +1109,9 @@
     },
     "navigation": {
       "bottom": "Quay lại đầu trang",
-      "close": "Đóng",
       "first": "Đã ngay từ tin nhắn đầu tiên",
-      "history": "Lịch sử trò chuyện",
       "last": "Đã ở tin nhắn cuối cùng",
-      "next": "Tin nhắn tiếp theo",
-      "prev": "Tin nhắn trước",
-      "top": "Quay lại đầu trang"
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Gửi lại",
     "save": {
@@ -1469,12 +1385,7 @@
       },
       "unpin": "Bỏ ghim chủ đề"
     },
-    "translate": "Dịch",
-    "web_search": {
-      "warning": {
-        "openai": "Mô hình GPT-5 với nỗ lực suy luận tối thiểu không hỗ trợ tìm kiếm web."
-      }
-    }
+    "translate": "Dịch"
   },
   "code": {
     "auto_update_to_latest": "Tự động cập nhật lên phiên bản mới nhất",
@@ -1732,10 +1643,7 @@
         "message": "Il semble que quelque chose ait mal tourné...",
         "reload": "Tải lại"
       },
-      "details": "Chi tiết",
-      "mcp": {
-        "invalid": "Máy chủ MCP không hợp lệ"
-      }
+      "details": "Chi tiết"
     },
     "cause": "Nguyên nhân lỗi",
     "chat": {
@@ -1758,12 +1666,10 @@
       "deprecated": "Mô hình này đã ngừng hoạt động, vui lòng chuyển sang mô hình khác",
       "go_to_settings": "Đi tới Cài đặt",
       "knowledge": "Vector hóa cơ sở tri thức thất bại",
-      "mcp": "Kết nối máy chủ MCP thất bại, hãy kiểm tra xem dịch vụ có đang chạy không",
       "model": "Không tìm thấy mô hình hoặc bạn không có quyền truy cập",
       "model_conflict": "Mô hình chẩn đoán giống với mô hình đang gặp lỗi",
       "network": "Không thể kết nối đến máy chủ, hãy kiểm tra cài đặt mạng hoặc proxy",
       "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
-      "ocr": "Công cụ OCR chưa được khởi tạo, hãy kiểm tra cài đặt OCR",
       "parse": "AI đã trả về phản hồi không hợp lệ, vui lòng thử lại hoặc chuyển sang mô hình khác",
       "payload": "Nội dung yêu cầu quá lớn, vui lòng giảm kích thước tệp hoặc văn bản",
       "proxy": "Lỗi proxy hoặc chứng chỉ SSL, hãy kiểm tra cài đặt proxy và mạng",
@@ -2182,112 +2088,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "Hành động",
-    "add_failed": "Không thể thêm bộ nhớ",
-    "add_first_memory": "Adicione Sua Primeira Memória",
-    "add_memory": "Adicionar Memória",
-    "add_new_user": "Thêm Người Dùng Mới",
-    "add_success": "Memoria añadida con éxito",
-    "add_user": "Thêm Người dùng",
-    "add_user_failed": "Không thể thêm người dùng",
-    "all_users": "Tất cả người dùng",
-    "cannot_delete_default_user": "Không thể xóa người dùng mặc định",
-    "configure_memory_first": "Vui lòng định cấu hình cài đặt bộ nhớ trước",
-    "content": "Nội dung",
-    "current_user": "Người dùng hiện tại",
-    "custom": "Tùy chỉnh",
-    "default": "Mặc định",
-    "default_user": "Người dùng Mặc định",
-    "delete_confirm": "Bạn có chắc chắn muốn xóa ký ức này không?",
-    "delete_confirm_content": "Bạn có chắc chắn muốn xóa {{count}} ký ức?",
-    "delete_confirm_single": "Bạn có chắc chắn muốn xóa ký ức này không?",
-    "delete_confirm_title": "Xóa Ký Ức",
-    "delete_failed": "Gagal menghapus memori",
-    "delete_selected": "Xóa đã chọn",
-    "delete_success": "Bộ nhớ đã được xóa thành công",
-    "delete_user": "Xóa Người dùng",
-    "delete_user_confirm_content": "Bạn có chắc chắn muốn xóa người dùng {{user}} và toàn bộ ký ức của họ không?",
-    "delete_user_confirm_title": "Xóa người dùng",
-    "delete_user_failed": "Không xóa được người dùng",
-    "description": "Bộ nhớ cho phép bạn lưu trữ và quản lý thông tin về các tương tác của bạn với trợ lý. Bạn có thể thêm, chỉnh sửa và xóa ký ức, cũng như lọc và tìm kiếm trong số chúng.",
-    "edit_memory": "Chỉnh sửa Bộ nhớ",
-    "embedding_dimensions": "Kích thước nhúng",
-    "embedding_model": "Mô hình Nhúng",
-    "enable_global_memory_first": "Vui lòng bật bộ nhớ toàn cầu trước",
-    "end_date": "Ngày kết thúc",
-    "global_memory": "Bộ nhớ toàn cục",
-    "global_memory_description": "Để sử dụng các tính năng bộ nhớ, vui lòng kích hoạt bộ nhớ toàn cầu trong cài đặt trợ lý.",
-    "global_memory_disabled_desc": "Để sử dụng các tính năng bộ nhớ, vui lòng bật bộ nhớ toàn cục trong cài đặt trợ lý trước.",
-    "global_memory_disabled_title": "Bộ Nhớ Toàn Cầu Đã Bị Vô Hiệu Hóa",
-    "global_memory_enabled": "Bộ nhớ toàn cầu đã được kích hoạt",
-    "go_to_memory_page": "Đi tới Trang Bộ nhớ",
-    "initial_memory_content": "Chào mừng! Đây là ký ức đầu tiên của bạn.",
-    "llm_model": "Mô hình LLM",
-    "load_failed": "Không tải được ký ức",
-    "loading": "Đang tải ký ức...",
-    "loading_memories": "Đang tải ký ức...",
-    "memories_description": "Hiển thị {{count}} trong tổng số {{total}} ký ức",
-    "memories_reset_success": "Tất cả ký ức cho {{user}} đã được đặt lại thành công",
-    "memory": "bộ nhớ",
-    "memory_content": "Nội dung bộ nhớ",
-    "memory_placeholder": "Nhập nội dung bộ nhớ...",
-    "new_user_id": "ID Người Dùng Mới",
-    "new_user_id_placeholder": "Nhập ID người dùng duy nhất",
-    "no_matching_memories": "Không tìm thấy ký ức phù hợp nào",
-    "no_memories": "Chưa có kỷ niệm nào",
-    "no_memories_description": "Bắt đầu bằng cách thêm ký ức đầu tiên của bạn để bắt đầu",
-    "not_configured_desc": "Vui lòng cấu hình các mô hình embedding và LLM trong cài đặt bộ nhớ để kích hoạt chức năng bộ nhớ.",
-    "not_configured_title": "Bộ nhớ chưa được cấu hình",
-    "pagination_total": "{{start}}-{{end}} trong tổng số {{total}} mục",
-    "please_enter_memory": "Vui lòng nhập nội dung bộ nhớ",
-    "please_select_embedding_model": "Vui lòng chọn một mô hình nhúng",
-    "please_select_llm_model": "Vui lòng chọn một mô hình LLM",
-    "reset_filters": "Đặt lại Bộ lọc",
-    "reset_memories": "Đặt lại Ký ức",
-    "reset_memories_confirm_content": "Bạn có chắc chắn muốn xóa vĩnh viễn tất cả ký ức của {{user}} không? Hành động này không thể hoàn tác.",
-    "reset_memories_confirm_title": "Đặt lại Tất cả Ký ức",
-    "reset_memories_failed": "Không thể đặt lại ký ức",
-    "reset_user_memories": "Đặt lại Bộ nhớ Người dùng",
-    "reset_user_memories_confirm_content": "Bạn có chắc chắn muốn đặt lại toàn bộ ký ức cho {{user}} không?",
-    "reset_user_memories_confirm_title": "Đặt lại bộ nhớ người dùng",
-    "reset_user_memories_failed": "Không thể đặt lại bộ nhớ người dùng",
-    "score": "Điểm",
-    "search": "Tìm kiếm",
-    "search_placeholder": "Tìm kiếm ký ức...",
-    "select_embedding_model_placeholder": "Chọn Mô hình Nhúng",
-    "select_llm_model_placeholder": "Chọn mô hình LLM",
-    "select_user": "Chọn Người dùng",
-    "settings": "Cài đặt",
-    "settings_title": "Cài đặt bộ nhớ",
-    "start_date": "Ngày bắt đầu",
-    "statistics": "Thống kê",
-    "stored_memories": "Ký Ức Được Lưu Trữ",
-    "switch_user": "Chuyển người dùng",
-    "switch_user_confirm": "Chuyển ngữ cảnh người dùng sang {{user}}?",
-    "time": "Thời gian",
-    "title": "Kỷ niệm",
-    "total_memories": "tổng số ký ức",
-    "try_different_filters": "Thử điều chỉnh tiêu chí tìm kiếm của bạn",
-    "update_failed": "Không thể cập nhật bộ nhớ",
-    "update_success": "Bộ nhớ đã được cập nhật thành công",
-    "user": "Người dùng",
-    "user_created": "Người dùng {{user}} đã được tạo và chuyển đổi thành công",
-    "user_deleted": "Người dùng {{user}} đã được xóa thành công",
-    "user_id": "ID người dùng",
-    "user_id_exists": "ID người dùng này đã tồn tại",
-    "user_id_invalid_chars": "ID người dùng chỉ có thể chứa chữ cái, chữ số, dấu gạch ngang và dấu gạch dưới",
-    "user_id_placeholder": "Nhập ID người dùng (tùy chọn)",
-    "user_id_required": "ID người dùng là bắt buộc",
-    "user_id_reserved": "'default-user' được giữ lại, vui lòng sử dụng một ID khác",
-    "user_id_rules": "ID người dùng phải là duy nhất và chỉ chứa chữ cái, chữ số, dấu gạch ngang (-) và dấu gạch dưới (_)",
-    "user_id_too_long": "ID người dùng không được vượt quá 50 ký tự",
-    "user_management": "Quản lý người dùng",
-    "user_memories_reset": "Tất cả ký ức cho {{user}} đã được đặt lại",
-    "user_switch_failed": "Không thể chuyển đổi người dùng",
-    "user_switched": "Ngữ cảnh người dùng đã chuyển sang {{user}}",
-    "users": "người dùng"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2367,9 +2167,6 @@
       "chunk_overlap_too_large": "Phần chồng chéo của khối không thể lớn hơn kích thước khối",
       "copy": "Sao chép thất bại",
       "dimension_too_large": "Kích thước nội dung quá lớn",
-      "endpoint": {
-        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
-      },
       "enter": {
         "api": {
           "host": "Vui lòng nhập máy chủ API của bạn trước",
@@ -2557,7 +2354,6 @@
         "exitPlanMode": "ThoátChếĐộKếHoạch",
         "glob": "Glob",
         "grep": "Grep",
-        "mcpServerTool": "Công cụ Máy chủ MCP",
         "multiEdit": "Chỉnh sửa đa nhiệm",
         "notebookEdit": "Chỉnh sửa Sổ tay",
         "readFile": "Đọc Tệp",
@@ -2567,7 +2363,6 @@
         "todoWrite": "Viết",
         "tool": "Công cụ",
         "webFetch": "Truy xuất Web",
-        "webSearch": "Tìm kiếm trên web",
         "write": "Viết"
       },
       "noData": "Không có dữ liệu nào cho công cụ này",
@@ -2641,11 +2436,7 @@
       }
     },
     "websearch": {
-      "cutoff": "Đang cắt ngắn nội dung tìm kiếm...",
-      "fetch_complete": "{{count}} kết quả tìm kiếm",
-      "rag": "Đang thực thi RAG...",
-      "rag_complete": "Giữ lại {{countAfter}} trên {{countBefore}} kết quả...",
-      "rag_failed": "RAG thất bại, trả về kết quả trống..."
+      "fetch_complete": "{{count}} kết quả tìm kiếm"
     }
   },
   "minapp": {
@@ -2946,30 +2737,6 @@
       "success": "Đã thêm thành công {{type}} vào cơ sở tri thức"
     },
     "tip": "Nếu phản hồi thành công, chỉ những tin nhắn vượt quá 30 giây mới kích hoạt lời nhắc"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "Hệ thống OCR"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "Không thể xóa nhà cung cấp tích hợp sẵn",
-        "existing": "Nhà cung cấp đã tồn tại",
-        "get_providers": "Không lấy được các nhà cung cấp khả dụng",
-        "not_found": "Nhà cung cấp OCR không tồn tại",
-        "update_failed": "Không thể cập nhật cấu hình"
-      },
-      "unknown": "Đã xảy ra lỗi trong quá trình OCR"
-    },
-    "file": {
-      "not_supported": "Loại tệp không được hỗ trợ {{type}}"
-    },
-    "processing": "Đang xử lý OCR...",
-    "warning": {
-      "provider": {
-        "fallback": "Đã hoàn nguyên về {{name}}, điều này có thể gây ra sự cố"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4529,6 @@
       "title": "Khởi chạy",
       "totray": "Thu nhỏ vào khay hệ thống khi khởi chạy"
     },
-    "mcp": {
-      "actions": "Hành động",
-      "active": "Đang hoạt động",
-      "addError": "Gagal menambahkan server",
-      "addServer": {
-        "create": "Tạo nhanh",
-        "importFrom": {
-          "connectionFailed": "Kết nối thất bại",
-          "dxt": "Nhập gói DXT",
-          "dxtFile": "Tệp gói DXT",
-          "dxtHelp": "Chọn một tệp .dxt chứa gói máy chủ MCP",
-          "dxtProcessFailed": "Không thể xử lý tệp DXT",
-          "error": {
-            "multipleServers": "Không thể nhập từ nhiều máy chủ"
-          },
-          "invalid": "Đầu vào không hợp lệ, vui lòng kiểm tra định dạng JSON",
-          "json": "Nhập từ JSON",
-          "method": "Phương thức nhập",
-          "nameExists": "Máy chủ đã tồn tại: {{name}}",
-          "noDxtFile": "Vui lòng chọn một tệp DXT",
-          "oneServer": "Chỉ một cấu hình máy chủ MCP tại một thời điểm",
-          "placeholder": "Dán cấu hình JSON máy chủ MCP",
-          "selectDxtFile": "Chọn tệp DXT",
-          "tooltip": "Vui lòng sao chép cấu hình JSON (ưu tiên cấu hình NPX hoặc UVX) từ trang giới thiệu MCP Servers và dán vào ô nhập."
-        },
-        "label": "Thêm Máy chủ"
-      },
-      "addSuccess": "Servidor añadido con éxito",
-      "advancedSettings": "Cài đặt nâng cao",
-      "args": "Lập luận",
-      "argsTooltip": "Mỗi lập luận trên một dòng mới",
-      "baseUrlTooltip": "URL cơ sở máy chủ từ xa",
-      "builtinServers": "Máy chủ tích hợp",
-      "builtinServersDescriptions": {
-        "brave_search": "Một máy chủ MCP triển khai tích hợp API Tìm kiếm Brave, cung cấp cả chức năng tìm kiếm web và địa phương. Yêu cầu cấu hình biến môi trường BRAVE_API_KEY",
-        "browser": "Điều khiển cửa sổ Electron không giao diện qua Chrome DevTools Protocol. Công cụ: mở URL, thực thi JS một dòng, đặt lại phiên.",
-        "didi_mcp": "Máy chủ MCP DiDi cung cấp dịch vụ đặt xe bao gồm tìm kiếm bản đồ, ước tính giá, quản lý đơn hàng và theo dõi tài xế. Chỉ khả dụng tại Trung Quốc Đại lục. Yêu cầu cấu hình biến môi trường DIDI_API_KEY",
-        "dify_knowledge": "Triển khai máy chủ MCP của Dify cung cấp một API đơn giản để tương tác với Dify. Yêu cầu cấu hình Khóa Dify",
-        "fetch": "MCP server để lấy nội dung web từ URL",
-        "filesystem": "Một máy chủ Node.js triển khai Giao thức Ngữ cảnh Mô hình (MCP) cho các thao tác hệ thống tệp. Yêu cầu cấu hình các thư mục được phép truy cập.",
-        "flomo": "Kết nối với flomo để nhanh chóng ghi lại ghi chú và ý tưởng qua AI. Yêu cầu ủy quyền tài khoản flomo.",
-        "mcp_auto_install": "Tự động cài đặt dịch vụ MCP (beta)",
-        "memory": "Triển khai bộ nhớ liên tục dựa trên đồ thị tri thức cục bộ. Điều này cho phép mô hình ghi nhớ thông tin liên quan đến người dùng trên các cuộc trò chuyện khác nhau. Yêu cầu cấu hình biến môi trường MEMORY_FILE_PATH.",
-        "no": "Không có mô tả",
-        "nowledge_mem": "Yêu cầu ứng dụng Nowledge Mem chạy cục bộ. Giữ các cuộc trò chuyện AI, công cụ, ghi chú, tác nhân và tệp trong bộ nhớ riêng tư trên máy tính của bạn. Tải xuống từ https://mem.nowledge.co/",
-        "python": "Thực thi mã Python trong môi trường sandbox an toàn. Chạy Python với Pyodide, hỗ trợ hầu hết các thư viện chuẩn và các gói tính toán khoa học",
-        "sequentialthinking": "Một triển khai máy chủ MCP cung cấp các công cụ để giải quyết vấn đề động và phản chiếu thông qua các quy trình tư duy có cấu trúc"
-      },
-      "command": "Command",
-      "config_description": "Định cấu hình máy chủ Giao thức Ngữ cảnh Mô hình",
-      "customRegistryPlaceholder": "Nhập URL của registry riêng, ví dụ: https://npm.company.com",
-      "deleteError": "Không xóa được máy chủ",
-      "deleteServer": "Xóa Máy chủ",
-      "deleteServerConfirm": "Bạn có chắc chắn muốn xóa máy chủ này không?",
-      "deleteSuccess": "Servidor eliminado correctamente",
-      "dependenciesInstall": "Cài đặt các phụ thuộc",
-      "dependenciesInstalling": "Đang cài đặt các phụ thuộc...",
-      "description": "Mô tả",
-      "disable": {
-        "description": "Không kích hoạt chức năng máy chủ MCP",
-        "label": "Vô hiệu hóa máy chủ MCP"
-      },
-      "discover": "Khám phá",
-      "duplicateName": "Một máy chủ với tên này đã tồn tại",
-      "editJson": "Chỉnh sửa JSON",
-      "editMcpJson": "Chỉnh sửa cấu hình MCP",
-      "editServer": "Chỉnh sửa Máy chủ",
-      "env": "Biến môi trường",
-      "envTooltip": "Định dạng: KEY=value, mỗi dòng một cặp",
-      "errors": {
-        "32000": "MCP server không khởi động được, vui lòng kiểm tra các tham số theo hướng dẫn",
-        "toolNotFound": "Công cụ {{name}} không tìm thấy"
-      },
-      "fetch": {
-        "button": "Lấy Máy chủ",
-        "success": "Đã lấy thành công các máy chủ MCP"
-      },
-      "findMore": "Tìm thêm MCP",
-      "headers": "Tiêu đề",
-      "headersTooltip": "Tiêu đề tùy chỉnh cho yêu cầu HTTP",
-      "inMemory": "Memoria",
-      "install": "Cài đặt",
-      "installError": "Không thể cài đặt các phụ thuộc",
-      "installSuccess": "Các phụ thuộc đã được cài đặt thành công",
-      "jsonFormatError": "Lỗi định dạng JSON",
-      "jsonModeHint": "Chỉnh sửa biểu diễn JSON của cấu hình máy chủ MCP. Hãy đảm bảo định dạng chính xác trước khi lưu.",
-      "jsonSaveError": "Falha ao salvar a configuração JSON.",
-      "jsonSaveSuccess": "Configuration JSON a été enregistrée.",
-      "lanyun": {
-        "description": "Nền tảng Công nghệ Lanyun Dịch vụ MCP",
-        "name": "Lanyun Technology"
-      },
-      "logoUrl": "URL Logo",
-      "logs": "Nhật ký",
-      "longRunning": "Chế độ chạy dài",
-      "longRunningTooltip": "Khi được bật, máy chủ hỗ trợ các tác vụ chạy lâu. Khi nhận được thông báo tiến độ, thời gian chờ sẽ được đặt lại và thời gian thực thi tối đa sẽ được kéo dài thành 10 phút.",
-      "marketplaces": "Thị trường",
-      "missingDependencies": "bị thiếu, vui lòng cài đặt để tiếp tục.",
-      "more": {
-        "awesome": "Danh sách máy chủ MCP được chọn lọc",
-        "composio": "Công cụ phát triển MCP Composio",
-        "glama": "Danh mục Máy chủ MCP Glama",
-        "higress": "Máy chủ MCP Higress",
-        "mcpso": "Nền tảng Khám phá Máy chủ MCP",
-        "mcpworld": "Nền tảng Tổng hợp MCP Baidu",
-        "modelscope": "Máy chủ MCP Cộng đồng ModelScope",
-        "official": "Bộ sưu tập Máy chủ MCP Chính thức",
-        "pulsemcp": "Pulse MCP Server",
-        "smithery": "Công cụ MCP Smithery",
-        "zhipu": "MCP được chọn lọc, Tích hợp nhanh"
-      },
-      "name": "Tên",
-      "newServer": "MCP Server",
-      "noDescriptionAvailable": "Không có mô tả nào",
-      "noLogs": "Chưa có nhật ký nào",
-      "noServers": "Không có máy chủ nào được cấu hình",
-      "not_support": "Mô hình không được hỗ trợ",
-      "npx_list": {
-        "actions": "Hành động",
-        "description": "Mô tả",
-        "no_packages": "Không tìm thấy gói nào",
-        "npm": "NPM",
-        "package_name": "Tên Gói",
-        "scope_placeholder": "Nhập phạm vi npm (ví dụ: @tổ-chức-của-bạn)",
-        "scope_required": "Vui lòng nhập phạm vi npm",
-        "search": "Tìm kiếm",
-        "search_error": "Lỗi tìm kiếm",
-        "usage": "Cách sử dụng",
-        "version": "Phiên bản"
-      },
-      "oauth": {
-        "callback": {
-          "message": "Bạn có thể đóng trang này và quay lại Cherry Chat",
-          "title": "Autenticación exitosa"
-        }
-      },
-      "prompts": {
-        "arguments": "Lập luận",
-        "availablePrompts": "Prompts Disponibles",
-        "genericError": "Lỗi nhận prompt",
-        "loadError": "Lỗi lấy prompt",
-        "noPromptsAvailable": "Không có lời nhắc nào có sẵn",
-        "requiredField": "Trường bắt buộc"
-      },
-      "protocolInstallWarning": {
-        "command": "Lệnh khởi động",
-        "message": "MCP này đã được cài đặt từ một nguồn bên ngoài thông qua giao thức. Việc chạy các công cụ không rõ nguồn gốc có thể gây hại cho máy tính của bạn.",
-        "run": "Chạy",
-        "title": "Chạy MCP bên ngoài?"
-      },
-      "provider": "Nhà cung cấp",
-      "providerPlaceholder": "Tên nhà cung cấp",
-      "providerUrl": "URL của nhà cung cấp",
-      "providers": "Nhà cung cấp",
-      "registry": "Bộ đăng ký gói",
-      "registryDefault": "Mặc định",
-      "registryTooltip": "Chọn registry để cài đặt gói nhằm khắc phục các vấn đề mạng với registry mặc định.",
-      "requiresConfig": "Yêu cầu cấu hình",
-      "resources": {
-        "availableResources": "Tài nguyên có sẵn",
-        "blob": "Dữ liệu nhị phân",
-        "blobInvisible": "Blob Vô hình",
-        "genericError": "Lỗi khi lấy tài nguyên",
-        "mimeType": "Loại MIME",
-        "noResourcesAvailable": "Không có tài nguyên khả dụng",
-        "size": "Kích thước",
-        "text": "Văn bản",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "Tìm kiếm máy chủ MCP...",
-        "tooltip": "Tìm kiếm máy chủ MCP"
-      },
-      "searchNpx": "Tìm kiếm MCP",
-      "serverPlural": "máy chủ",
-      "serverSingular": "máy chủ",
-      "servers": "Máy chủ MCP",
-      "sse": "Sự kiện gửi từ máy chủ (SSE)",
-      "startError": "Khởi động thất bại",
-      "stdio": "Đầu vào/Đầu ra chuẩn (stdio)",
-      "streamableHttp": "HTTP có thể truyền dòng (streamableHttp)",
-      "sync": {
-        "button": "Đồng bộ",
-        "discoverMcpServers": "Khám phá các máy chủ MCP",
-        "discoverMcpServersDescription": "Truy cập nền tảng để khám phá các máy chủ MCP có sẵn",
-        "error": "Lỗi đồng bộ máy chủ MCP",
-        "getToken": "Lấy Mã Thông Báo API",
-        "getTokenDescription": "Lấy mã thông báo API cá nhân của bạn từ tài khoản",
-        "noServersAvailable": "Không có máy chủ MCP nào khả dụng",
-        "providerDescriptions": {
-          "302ai": "Dịch vụ MCP Nền tảng 302.AI",
-          "bailian": "Dịch vụ MCP Nền tảng Bailian của Alibaba Cloud",
-          "lanyun": "Nền tảng Công nghệ Đám mây Lanyun Dịch vụ MCP",
-          "mcprouter": "Nền tảng Định tuyến MCP Dịch vụ MCP",
-          "modelscope": "Dịch vụ MCP nền tảng ModelScope",
-          "tokenflux": "Dịch vụ MCP Nền tảng TokenFlux"
-        },
-        "selectProvider": "Chọn Nhà cung cấp:",
-        "setToken": "Nhập mã thông báo của bạn",
-        "success": "Đồng bộ máy chủ MCP thành công",
-        "title": "Máy chủ đồng bộ",
-        "tokenPlaceholder": "Nhập mã API vào đây",
-        "tokenRequired": "Cần có Mã thông báo API",
-        "unauthorized": "Đồng bộ không được ủy quyền"
-      },
-      "system": "Hệ thống",
-      "tabs": {
-        "description": "Mô tả",
-        "general": "Tổng quát",
-        "prompts": "Lời nhắc",
-        "resources": "Tài nguyên",
-        "tools": "Công cụ"
-      },
-      "tags": "Thẻ",
-      "tagsPlaceholder": "Nhập thẻ",
-      "timeout": "Hết thời gian",
-      "timeoutTooltip": "Thời gian chờ tính bằng giây cho các yêu cầu đến máy chủ này, mặc định là 60 giây",
-      "title": "Máy chủ MCP",
-      "tools": {
-        "autoApprove": {
-          "label": "Tự động phê duyệt",
-          "tooltip": {
-            "confirm": "Bạn có chắc chắn muốn chạy công cụ MCP này không?",
-            "disabled": "Công cụ sẽ cần phê duyệt thủ công trước khi chạy",
-            "enabled": "Công cụ sẽ chạy tự động mà không cần xác nhận",
-            "howToEnable": "Bật công cụ trước để sử dụng tự động phê duyệt"
-          }
-        },
-        "availableTools": "Công cụ có sẵn",
-        "enable": "Bật Công cụ",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "Giá trị được phép"
-          },
-          "label": "Schema d'entrée"
-        },
-        "loadError": "Lỗi lấy công cụ",
-        "noToolsAvailable": "Không có công cụ nào khả dụng",
-        "run": "Chạy"
-      },
-      "type": "Loại",
-      "types": {
-        "inMemory": "En mémoire",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "HTTP có thể truyền phát"
-      },
-      "updateError": "Không thể cập nhật máy chủ",
-      "updateSuccess": "Máy chủ đã được cập nhật thành công",
-      "url": "URL",
-      "user": "Người dùng"
-    },
     "messages": {
       "divider": {
         "label": "Hiển thị đường phân cách giữa các tin nhắn",
@@ -5647,38 +5162,6 @@
     },
     "title": "Cài đặt",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "Ngôn ngữ được hỗ trợ"
-        },
-        "error": {
-          "not_system": "Hệ thống OCR chỉ hỗ trợ Windows và MacOS"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "Nhà cung cấp không tồn tại"
-          },
-          "system": {
-            "no_need_configure": "macOS erfordert keine Konfiguration"
-          },
-          "title": "Hình ảnh"
-        },
-        "image_provider": "nhà cung cấp dịch vụ OCR",
-        "paddleocr": {
-          "aistudio_access_token": "Mã truy cập của Cộng đồng AI Studio",
-          "api_url": "URL API",
-          "api_url_label": "Lấy Mã Truy Cập và URL API"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "Để Windows cung cấp dịch vụ, bạn cần tải các gói ngôn ngữ trong hệ thống để hỗ trợ các ngôn ngữ liên quan."
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "Đọc tài liệu để tìm hiểu ngôn ngữ tùy chỉnh nào được hỗ trợ"
-        },
-        "title": "Dịch vụ OCR"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "Mã truy cập của Cộng đồng AI Studio",
@@ -5691,100 +5174,7 @@
         "title": "Xử lý tài liệu",
         "tooltip": "Trong Cài đặt -> Công cụ, hãy đặt nhà cung cấp dịch vụ xử lý tài liệu. Xử lý tài liệu có thể cải thiện hiệu quả khả năng truy xuất của các tài liệu có định dạng phức tạp và tài liệu đã quét."
       },
-      "title": "Các Cài Đặt Khác",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}} yêu cầu một khóa API để hoạt động. Bạn có muốn cấu hình ngay bây giờ không?",
-          "ok": "Cấu hình",
-          "title": "Cần có Khóa API"
-        },
-        "api_providers": "Nhà cung cấp API",
-        "apikey": "Khóa API",
-        "blacklist": "Danh sách đen",
-        "blacklist_description": "Kết quả từ các trang web sau sẽ không xuất hiện trong kết quả tìm kiếm",
-        "blacklist_tooltip": "Pattern matching: *://*.example.com/*\nRegular expression: /example\\.(net|org)/",
-        "check": "Kiểm tra",
-        "check_failed": "Verifikation fehlgeschlagen",
-        "check_success": "Xác minh thành công",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "Limite de corte",
-              "placeholder": "Nhập chiều dài",
-              "tooltip": "Giới hạn độ dài nội dung của kết quả tìm kiếm, nội dung vượt quá giới hạn sẽ bị cắt ngắn (ví dụ: 2000 ký tự)"
-            },
-            "unit": {
-              "char": "Ký tự",
-              "token": "Token"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG thất bại"
-          },
-          "info": {
-            "dimensions_auto_success": "Kích thước tự động lấy thành công, kích thước: {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "Ngưỡng cắt",
-            "label": "Phương pháp nén",
-            "none": "không",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "Số lượng phần tài liệu",
-              "tooltip": "Số lượng đoạn tài liệu dự kiến sẽ trích xuất từ mỗi kết quả tìm kiếm, tổng số đoạn tài liệu thực tế được trích xuất bằng giá trị này nhân với số lượng kết quả tìm kiếm."
-            }
-          },
-          "title": "Nén Kết Quả Tìm Kiếm"
-        },
-        "content_limit": "Giới hạn độ dài nội dung",
-        "content_limit_tooltip": "Giới hạn độ dài nội dung của kết quả tìm kiếm; nội dung vượt quá giới hạn sẽ bị cắt ngắn.",
-        "default_provider": "Nhà cung cấp mặc định",
-        "free": "Miễn phí",
-        "is_default": "Mặc định",
-        "local_provider": {
-          "hint": "Đăng nhập vào trang web để có kết quả tìm kiếm tốt hơn và cá nhân hóa cài đặt tìm kiếm của bạn.",
-          "open_settings": "Mở Cài đặt {{provider}}",
-          "settings": "Cài đặt Tìm kiếm Địa phương"
-        },
-        "local_providers": "Nhà cung cấp địa phương",
-        "no_provider_selected": "Vui lòng chọn nhà cung cấp dịch vụ tìm kiếm trước khi kiểm tra.",
-        "overwrite": "Ghi đè dịch vụ tìm kiếm",
-        "overwrite_tooltip": "Buộc sử dụng dịch vụ tìm kiếm thay vì mô hình ngôn ngữ lớn",
-        "search_max_result": {
-          "label": "Số kết quả tìm kiếm",
-          "tooltip": "Khi tính năng nén kết quả tìm kiếm bị tắt, số lượng kết quả có thể quá lớn, dẫn đến không đủ token"
-        },
-        "search_provider": "Nhà cung cấp dịch vụ tìm kiếm",
-        "search_provider_placeholder": "Chọn một nhà cung cấp dịch vụ tìm kiếm.",
-        "search_with_time": "Tìm kiếm bao gồm cả ngày tháng",
-        "set_as_default": "Definir como padrão",
-        "subscribe": "Đăng ký Danh sách đen",
-        "subscribe_add": "Thêm Đăng ký",
-        "subscribe_add_failed": "Không thêm được nguồn nguồn cấp dữ liệu",
-        "subscribe_add_success": "Đã thêm nguồn cấp dữ liệu đăng ký thành công!",
-        "subscribe_delete": "Xóa",
-        "subscribe_name": {
-          "label": "Tên thay thế",
-          "placeholder": "Tên thay thế được sử dụng khi nguồn cấp dữ liệu đã tải xuống không có tên."
-        },
-        "subscribe_update": "Cập nhật",
-        "subscribe_update_failed": "Cập nhật nguồn đăng ký thất bại",
-        "subscribe_update_success": "Nguồn đăng ký đã được cập nhật thành công",
-        "subscribe_url": "Url Đăng ký",
-        "tavily": {
-          "api_key": {
-            "label": "Khóa API Tavily",
-            "placeholder": "Introduce la clave de API de Tavily"
-          },
-          "description": "Tavily là một công cụ tìm kiếm được thiết kế dành cho các tác nhân AI, cung cấp kết quả thời gian thực chính xác, gợi ý truy vấn thông minh và khả năng nghiên cứu chuyên sâu.",
-          "title": "Tavily"
-        },
-        "title": "Tìm kiếm Web",
-        "url_invalid": "Đã nhập một URL không hợp lệ",
-        "url_required": "Vui lòng nhập một URL"
-      }
+      "title": "Các Cài Đặt Khác"
     },
     "translate": {
       "custom": {
@@ -5865,8 +5255,6 @@
     "home": "Trang chủ",
     "knowledge": "Cơ sở tri thức",
     "launchpad": "Bảng khởi chạy",
-    "mcp-servers": "MCP Servers",
-    "memories": "Kỷ niệm",
     "notes": "Ghi chú",
     "openclaw": "OpenClaw",
     "paintings": "Tranh vẽ",

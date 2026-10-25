@@ -57,6 +57,11 @@ const FILE_ASSET_ALLOW = new Set(['id', 'sha256', 'byteLength', 'extension', 'mi
 // Branch allowlist — identity (id/topicId/parentBranchId/anchorMessageId) plus
 // mutable state (name/createdAt/updatedAt). No synthetic decoded identities.
 const BRANCH_ALLOW = new Set(['id', 'topicId', 'parentBranchId', 'anchorMessageId', 'name', 'createdAt', 'updatedAt'])
+// Cross-topic history reference allowlist — one coherent relation tuple per
+// target topic. No source message/block/file duplication (the referenced
+// prefix stays owned by the source topic and is never copied) and no
+// device-local path or credential field.
+const TOPIC_REFERENCE_ALLOW = new Set(['targetTopicId', 'sourceTopicId', 'sourceBranchId', 'anchorMessageId'])
 
 // Denied substrings (defense-in-depth)
 const DENIED_KEYS = new Set(['file_path', 'filePath', 'credentials', 'token', 'password', 'secret'])
@@ -135,6 +140,18 @@ export function filterBranchPayload(raw: Record<string, unknown>): Record<string
   return out
 }
 
+export function filterTopicReferencePayload(raw: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(raw)) {
+    if (!TOPIC_REFERENCE_ALLOW.has(k)) continue
+    if (DENIED_KEYS.has(k)) continue
+    const v = raw[k]
+    if (v !== undefined) out[k] = v
+  }
+  return out
+}
+
 export function isPayloadSafe(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return true
   const obj = payload as Record<string, unknown>
@@ -187,7 +204,9 @@ export function validateSyncPayloadAllowlist(op: {
         ? MESSAGE_ALLOW
         : op.entityType === 'topic_branch'
           ? BRANCH_ALLOW
-          : BLOCK_ALLOW
+          : op.entityType === 'topic_reference'
+            ? TOPIC_REFERENCE_ALLOW
+            : BLOCK_ALLOW
   for (const k of Object.keys(op.payload)) {
     if (!allow.has(k)) return `field ${k} not allowlisted for ${op.entityType}`
   }
@@ -436,7 +455,8 @@ export function validateSyncOperationStrict(op: {
     op.entityType !== 'message_block' &&
     op.entityType !== 'topic_branch' &&
     op.entityType !== 'assistant_config' &&
-    op.entityType !== 'file_asset'
+    op.entityType !== 'file_asset' &&
+    op.entityType !== 'topic_reference'
   ) {
     return `invalid entityType ${String(op.entityType)}`
   }
@@ -568,6 +588,28 @@ export function validateSyncOperationStrict(op: {
     if ('name' in payload && !isOptionalStringOrNull(payload.name)) return 'invalid branch name'
     if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid branch createdAt'
     if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid branch updatedAt'
+    return null
+  }
+  // topic_reference — one coherent relation tuple keyed by targetTopicId.
+  // Every key is required and immutable for the lifetime of the relation;
+  // the referenced prefix is never copied, so no message/block/file keys and
+  // no device-local path may appear.
+  if (entityType === 'topic_reference') {
+    if (!isNonEmptyString(payload.targetTopicId)) return 'topic_reference upsert missing targetTopicId'
+    if (payload.targetTopicId !== (op as { entityId?: unknown }).entityId) {
+      return 'topic_reference targetTopicId must agree with entityId'
+    }
+    if (!isNonEmptyString(payload.sourceTopicId)) return 'topic_reference upsert missing sourceTopicId'
+    if (payload.sourceTopicId === payload.targetTopicId) return 'topic_reference source must differ from target'
+    if (!isNonEmptyString(payload.anchorMessageId)) return 'topic_reference upsert missing anchorMessageId'
+    if (
+      'sourceBranchId' in payload &&
+      payload.sourceBranchId !== undefined &&
+      payload.sourceBranchId !== null &&
+      !isNonEmptyString(payload.sourceBranchId)
+    ) {
+      return 'invalid topic_reference sourceBranchId'
+    }
     return null
   }
   // file_asset

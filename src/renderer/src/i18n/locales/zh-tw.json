@@ -505,13 +505,6 @@
         "title": "自主模式"
       },
       "tooling": {
-        "mcp": {
-          "description": "連線 MCP 伺服器即可解鎖更多可在上方預先授權的工具。",
-          "empty": "尚未偵測到 MCP 伺服器，請前往 MCP 設定頁新增。",
-          "inactiveTooltip": "此 MCP 伺服器未啟用，請先啟動它。",
-          "manageHint": "需要進階設定？前往 設定 → MCP 伺服器。",
-          "toggle": "切換 {{name}}"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "檔案編輯與檔案系統操作會自動核准。",
@@ -543,7 +536,6 @@
           "autoDescription": "此工具由目前的權限模式自動預先授權。",
           "autoDisabledTooltip": "由「{{mode}}」自動授權，無法停用。",
           "empty": "沒有符合篩選條件的工具。",
-          "mcpBadge": "MCP 工具",
           "requiresApproval": "停用時需要人工核准",
           "search": "搜尋工具",
           "toggle": "切換 {{name}}"
@@ -557,16 +549,6 @@
         "tab": "預先授權工具",
         "title": "預先授權工具",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "MCP 伺服器"
-        },
-        "tab": "工具",
-        "tools": {
-          "title": "預授權工具"
-        }
       }
     },
     "sidebar_title": "Agents",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "從指定 URL 取得內容"
-        },
-        "WebSearch": {
-          "description": "執行帶有網域過濾的網路搜尋"
         },
         "Write": {
           "description": "建立或覆寫檔案"
@@ -897,27 +876,6 @@
         "label": "最大工具呼叫次數",
         "tip": "單次對話中允許的最大工具呼叫次數。較高的值支援更複雜的多步操作，但可能增加 Token 消耗和回應時間。"
       },
-      "mcp": {
-        "description": "預設啟用的 MCP 伺服器",
-        "enableFirst": "請先在 MCP 設定中啟用此伺服器",
-        "label": "MCP 伺服器",
-        "mode": {
-          "auto": {
-            "description": "AI 自動發現和使用工具",
-            "label": "自動"
-          },
-          "disabled": {
-            "description": "不使用 MCP 工具",
-            "label": "停用"
-          },
-          "manual": {
-            "description": "選擇特定的 MCP 伺服器",
-            "label": "手動"
-          }
-        },
-        "noServersAvailable": "無可用 MCP 伺服器。請在設定中新增伺服器",
-        "title": "MCP 設定"
-      },
       "model": "模型設定",
       "more": "助手設定",
       "prompt": "提示詞設定",
@@ -1050,16 +1008,6 @@
       "undoAction": "復原",
       "undone": "已復原"
     },
-    "history": {
-      "assistant_node": "助手",
-      "click_to_navigate": "點選以前往對應訊息",
-      "coming_soon": "聊天工作流圖表即將上線",
-      "no_messages": "沒有找到訊息",
-      "start_conversation": "開始對話以檢視聊天流程圖",
-      "title": "聊天歷史",
-      "user_node": "使用者",
-      "view_full_content": "檢視完整內容"
-    },
     "input": {
       "auto_resize": "自動調整高度",
       "context_count": {
@@ -1073,6 +1021,7 @@
       "file_not_supported_count": "{{count}} 個檔案不被支援",
       "generate_image": "產生圖片",
       "generate_image_not_supported": "模型不支援產生圖片",
+      "input_settings": "輸入設定",
       "knowledge_base": "知識庫",
       "new_topic": "新話題 {{Command}}",
       "paste_text_file_confirm": "貼到輸入框？",
@@ -1118,41 +1067,18 @@
         "image_or_document": "上傳圖片或檔案",
         "upload_from_local": "上傳本機檔案..."
       },
-      "url_context": "網頁上下文",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "目前模型不支援網路搜尋功能",
-          "enabled_content": "使用模型內建的網路搜尋功能",
-          "label": "模型內建"
-        },
-        "button": {
-          "ok": "前往設定"
-        },
-        "enable": "開啟網路搜尋",
-        "enable_content": "需要先在設定中開啟網路搜尋",
-        "label": "網路搜尋",
-        "no_web_search": {
-          "description": "關閉網路搜尋",
-          "label": "關閉網路搜尋"
-        },
-        "settings": "網路搜尋設定"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "無法轉換為有效的工具呼叫格式：{{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "Gemini 不支援同時使用原生網路搜尋工具與函式呼叫",
-        "multiple_tools": "找到多個相符的 MCP 工具，已選擇 {{tool}}",
-        "no_tool": "找不到符合需求的 MCP 工具：{{tool}}",
-        "url_context": "Gemini 不支援同時使用網頁內容與函式呼叫"
-      }
+      "url_context": "網頁上下文"
     },
     "message": {
       "copy_topic": {
+        "copy": {
+          "label": "複製"
+        },
         "created": "[to be translated]:Topic cloned",
-        "label": "[to be translated]:Clone Topic"
+        "label": "[to be translated]:Clone Topic",
+        "reference": {
+          "label": "引用"
+        }
       },
       "insert": {
         "label": "插入訊息",
@@ -1168,6 +1094,14 @@
         "context": "新上下文"
       },
       "quote": "引用",
+      "reference": {
+        "created": "已建立引用話題",
+        "error": "建立引用話題失敗"
+      },
+      "reference_divider": {
+        "label": "歷史訊息引用自：{{name}}",
+        "missing": "歷史訊息引用不存在"
+      },
       "regenerate": {
         "model": "切換模型"
       },
@@ -1189,13 +1123,26 @@
     },
     "navigation": {
       "bottom": "回到底端",
-      "close": "關閉",
+      "conversation_list": "對話列表",
       "first": "已經是第一條訊息",
-      "history": "聊天歷史",
       "last": "已經是最後一條訊息",
-      "next": "下一條訊息",
-      "prev": "上一條訊息",
-      "top": "回到頂端"
+      "settings": "聊天設定",
+      "user_attachment_count_one": "{{count}} 個附件",
+      "user_attachment_count_other": "{{count}} 個附件",
+      "user_attachment_fallback": "附件",
+      "user_attachment_file": "{{name}}",
+      "user_attachment_file_more_one": "{{name}} +{{count}} 個附件",
+      "user_attachment_file_more_other": "{{name}} +{{count}} 個附件",
+      "user_attachment_image_one": "{{count}} 張圖片",
+      "user_attachment_image_other": "{{count}} 張圖片",
+      "user_attachment_type_audio": "音訊",
+      "user_attachment_type_code": "程式碼",
+      "user_attachment_type_document": "文件",
+      "user_attachment_type_image": "圖片",
+      "user_attachment_type_text": "文字",
+      "user_attachment_type_video": "影片",
+      "user_message_fallback": "引用訊息",
+      "user_message_link": "連結"
     },
     "resend": "重新傳送",
     "save": {
@@ -1375,6 +1322,13 @@
         "image": "匯出為圖片",
         "image_saved": "圖片儲存成功",
         "joplin": "匯出到 Joplin",
+        "json": {
+          "error": "匯出話題資料失敗",
+          "label": "匯出為 JSON",
+          "referenceExplanation": "包含引用歷史；匯入後成為獨立副本",
+          "referenceMissing": "引用歷史無法使用，僅匯出既有內容",
+          "success": "話題資料已匯出"
+        },
         "md": {
           "label": "匯出為 Markdown",
           "reason": "匯出為 Markdown (包含思考)"
@@ -1420,6 +1374,12 @@
         "word": "匯出為 Word",
         "yuque": "匯出到語雀"
       },
+      "import": {
+        "action": "從 JSON 匯入話題",
+        "error": "匯入話題檔案失敗",
+        "invalid": "無效的話題資料檔案",
+        "success": "話題已匯入"
+      },
       "list": "話題列表",
       "manage": {
         "clear_selection": "取消選擇",
@@ -1458,7 +1418,7 @@
       },
       "search": {
         "placeholder": "搜尋話題...",
-        "title": "搜尋"
+        "title": "搜尋話題"
       },
       "title": "話題",
       "trash": {
@@ -1469,12 +1429,7 @@
       },
       "unpin": "取消固定"
     },
-    "translate": "翻譯",
-    "web_search": {
-      "warning": {
-        "openai": "GPT-5 模型的最小推理力度不支援網路搜尋。"
-      }
-    }
+    "translate": "翻譯"
   },
   "code": {
     "auto_update_to_latest": "檢查更新並安裝最新版本",
@@ -1732,10 +1687,7 @@
         "message": "似乎出現了一些問題...",
         "reload": "重新載入"
       },
-      "details": "詳細資訊",
-      "mcp": {
-        "invalid": "無效的 MCP 伺服器"
-      }
+      "details": "詳細資訊"
     },
     "cause": "錯誤原因",
     "chat": {
@@ -1758,12 +1710,10 @@
       "deprecated": "此模型已停用，請切換至其他模型",
       "go_to_settings": "前往設定",
       "knowledge": "知識庫向量化失敗",
-      "mcp": "MCP 伺服器連線失敗，請檢查服務是否已啟動",
       "model": "模型不存在或你沒有存取權限",
       "model_conflict": "診斷模型與出錯模型相同，無法進行診斷",
       "network": "無法連線到伺服器，請檢查網路或代理設定",
       "no_model": "未選擇模型或模型服務商未設定，請先新增模型",
-      "ocr": "OCR 識別引擎未初始化，請檢查 OCR 設定",
       "parse": "AI 回傳了無效的回應，請重試或切換模型",
       "payload": "請求內容過大，請減少檔案或文字大小",
       "proxy": "代理或 SSL 憑證錯誤，請檢查代理和網路設定",
@@ -2182,112 +2132,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "操作",
-    "add_failed": "新增記憶失敗",
-    "add_first_memory": "新增您的第一個記憶",
-    "add_memory": "新增記憶",
-    "add_new_user": "新增新使用者",
-    "add_success": "記憶新增成功",
-    "add_user": "新增使用者",
-    "add_user_failed": "新增使用者失敗",
-    "all_users": "所有使用者",
-    "cannot_delete_default_user": "不能刪除預設使用者",
-    "configure_memory_first": "請先設定記憶設定",
-    "content": "內容",
-    "current_user": "目前使用者",
-    "custom": "自訂",
-    "default": "預設",
-    "default_user": "預設使用者",
-    "delete_confirm": "確定要刪除這條記憶嗎？",
-    "delete_confirm_content": "確定要刪除 {{count}} 條記憶嗎？",
-    "delete_confirm_single": "確定要刪除這個記憶嗎？",
-    "delete_confirm_title": "刪除記憶",
-    "delete_failed": "刪除記憶失敗",
-    "delete_selected": "刪除選取",
-    "delete_success": "記憶刪除成功",
-    "delete_user": "刪除使用者",
-    "delete_user_confirm_content": "確定要刪除使用者 {{user}} 及其所有記憶嗎？",
-    "delete_user_confirm_title": "刪除使用者",
-    "delete_user_failed": "刪除使用者失敗",
-    "description": "記憶功能讓您儲存和管理與助手互動的資訊。您可以新增、編輯和刪除記憶，也可以對它們進行篩選和搜尋。",
-    "edit_memory": "編輯記憶",
-    "embedding_dimensions": "嵌入維度",
-    "embedding_model": "嵌入模型",
-    "enable_global_memory_first": "請先啟用全域記憶",
-    "end_date": "結束日期",
-    "global_memory": "全域記憶",
-    "global_memory_description": "需要開啟助手設定中的全域記憶才能使用",
-    "global_memory_disabled_desc": "要使用記憶功能，請先在助手設定中啟用全域記憶。",
-    "global_memory_disabled_title": "全域記憶已停用",
-    "global_memory_enabled": "全域記憶已啟用",
-    "go_to_memory_page": "前往記憶頁面",
-    "initial_memory_content": "歡迎！這是你的第一個記憶。",
-    "llm_model": "LLM 模型",
-    "load_failed": "載入記憶失敗",
-    "loading": "載入記憶中...",
-    "loading_memories": "正在載入記憶...",
-    "memories_description": "顯示 {{count}} / {{total}} 條記憶",
-    "memories_reset_success": "{{user}} 的所有記憶已成功重設",
-    "memory": "個記憶",
-    "memory_content": "記憶內容",
-    "memory_placeholder": "輸入記憶內容...",
-    "new_user_id": "新使用者 ID",
-    "new_user_id_placeholder": "輸入唯一的使用者 ID",
-    "no_matching_memories": "未找到符合的記憶",
-    "no_memories": "暫無記憶",
-    "no_memories_description": "開始新增您的第一個記憶吧",
-    "not_configured_desc": "請在記憶設定中設定嵌入和 LLM 模型以啟用記憶功能。",
-    "not_configured_title": "記憶未設定",
-    "pagination_total": "第 {{start}}-{{end}} 項，共 {{total}} 項",
-    "please_enter_memory": "請輸入記憶內容",
-    "please_select_embedding_model": "請選擇一個嵌入模型",
-    "please_select_llm_model": "請選擇一個 LLM 模型",
-    "reset_filters": "重設篩選",
-    "reset_memories": "重設記憶",
-    "reset_memories_confirm_content": "確定要永久刪除 {{user}} 的所有記憶嗎？此操作無法復原。",
-    "reset_memories_confirm_title": "重設所有記憶",
-    "reset_memories_failed": "重設記憶失敗",
-    "reset_user_memories": "重設使用者記憶",
-    "reset_user_memories_confirm_content": "確定要重設 {{user}} 的所有記憶嗎？",
-    "reset_user_memories_confirm_title": "重設使用者記憶",
-    "reset_user_memories_failed": "重設使用者記憶失敗",
-    "score": "分數",
-    "search": "搜尋",
-    "search_placeholder": "搜尋記憶...",
-    "select_embedding_model_placeholder": "選擇嵌入模型",
-    "select_llm_model_placeholder": "選擇 LLM 模型",
-    "select_user": "選擇使用者",
-    "settings": "設定",
-    "settings_title": "記憶體設定",
-    "start_date": "開始日期",
-    "statistics": "統計",
-    "stored_memories": "儲存的記憶",
-    "switch_user": "切換使用者",
-    "switch_user_confirm": "將使用者內容切換至 {{user}}？",
-    "time": "時間",
-    "title": "全域記憶",
-    "total_memories": "個記憶",
-    "try_different_filters": "嘗試調整搜尋條件",
-    "update_failed": "更新記憶失敗",
-    "update_success": "記憶更新成功",
-    "user": "使用者",
-    "user_created": "使用者 {{user}} 建立並切換成功",
-    "user_deleted": "使用者 {{user}} 刪除成功",
-    "user_id": "使用者 ID",
-    "user_id_exists": "此使用者 ID 已存在",
-    "user_id_invalid_chars": "使用者 ID 只能包含英文字母、數字、連字號與底線",
-    "user_id_placeholder": "輸入使用者 ID（可選）",
-    "user_id_required": "使用者 ID 為必填欄位",
-    "user_id_reserved": "'default-user' 為保留字，請使用其他 ID",
-    "user_id_rules": "使用者 ID 必須唯一，只能包含英文字母、數字、連字號（-）與底線（_）",
-    "user_id_too_long": "使用者 ID 不能超過 50 個字元",
-    "user_management": "使用者管理",
-    "user_memories_reset": "{{user}} 的所有記憶已重設",
-    "user_switch_failed": "切換使用者失敗",
-    "user_switched": "使用者內容已切換至 {{user}}",
-    "users": "使用者"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2356,20 +2200,45 @@
       "failed": "下載失敗",
       "success": "下載成功"
     },
+    "edit": {
+      "bold": "粗體",
+      "bullet_list": "無序清單",
+      "code": "程式碼",
+      "collapse": "收起編輯器",
+      "expand": "展開編輯器",
+      "expanded_hint": "正在展開視窗中編輯…",
+      "expanded_title": "編輯訊息",
+      "find_count": "第 {{current}} 個，共 {{total}} 個",
+      "find_next": "下一個符合項目",
+      "find_placeholder": "尋找",
+      "find_previous": "上一個符合項目",
+      "find_replace": "尋找取代",
+      "heading": "標題",
+      "link": "連結",
+      "no_results": "無結果",
+      "quote": "引用",
+      "redo": "重做",
+      "replace": "取代",
+      "replace_all": "全部取代",
+      "replace_placeholder": "取代為",
+      "resize_height": "調整編輯器高度",
+      "show_preview": "切換到預覽",
+      "show_source": "切換到編輯",
+      "undo": "復原"
+    },
     "empty_url": "無法下載圖片，可能是提示詞包含敏感內容或違禁詞彙",
     "error": {
       "attachment": {
         "attach_failed": "無法附加「{{name}}」（{{type}}）：{{reason}}",
         "encode_unsupported": "無法附加「{{name}}」（{{type}}）：目前端點無法編碼此格式",
         "image_url_failed": "附加圖片（連結）失敗：{{reason}}",
-        "text_extraction_failed": "無法從附件「{{name}}」（{{type}}）中擷取文字：{{reason}}"
+        "text_extraction_failed": "無法從附件「{{name}}」（{{type}}）中擷取文字：{{reason}}",
+        "unavailable_skipped_one": "已略過 1 個附件：檔案在目前裝置上無法使用",
+        "unavailable_skipped_other": "已略過 {{count}} 個附件：檔案在目前裝置上無法使用"
       },
       "chunk_overlap_too_large": "分段重疊不能大於分段大小",
       "copy": "複製失敗",
       "dimension_too_large": "內容尺寸過大",
-      "endpoint": {
-        "web_search_unsupported": "網路搜尋無法在 {{endpoint}} 端點上編碼：目前提供者沒有顯式搜尋介面卡"
-      },
       "enter": {
         "api": {
           "host": "請先輸入您的 API 主機位址",
@@ -2557,7 +2426,6 @@
         "exitPlanMode": "退出計畫模式",
         "glob": "檔案匹配",
         "grep": "搜尋",
-        "mcpServerTool": "MCP 伺服器工具",
         "multiEdit": "批次編輯",
         "notebookEdit": "筆記本編輯",
         "readFile": "讀取檔案",
@@ -2567,7 +2435,6 @@
         "todoWrite": "待辦寫入",
         "tool": "工具",
         "webFetch": "網頁擷取",
-        "webSearch": "網頁搜尋",
         "write": "寫入"
       },
       "noData": "此工具暫無可用資料",
@@ -2641,11 +2508,7 @@
       }
     },
     "websearch": {
-      "cutoff": "正在截斷搜尋內容...",
-      "fetch_complete": "{{count}} 個搜尋結果",
-      "rag": "正在執行 RAG...",
-      "rag_complete": "保留 {{countBefore}} 個結果中的 {{countAfter}} 個...",
-      "rag_failed": "RAG 失敗，回傳空結果..."
+      "fetch_complete": "{{count}} 個搜尋結果"
     }
   },
   "minapp": {
@@ -2946,30 +2809,6 @@
       "success": "成功將 {{type}} 新增至知識庫"
     },
     "tip": "如果回應成功，則只針對超過 30 秒的訊息發出提醒"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "系統 OCR"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "不能刪除內建提供者",
-        "existing": "提供者已存在",
-        "get_providers": "取得可用提供者失敗",
-        "not_found": "OCR 提供者不存在",
-        "update_failed": "更新設定失敗"
-      },
-      "unknown": "OCR 過程發生錯誤"
-    },
-    "file": {
-      "not_supported": "不支援的檔案類型 {{type}}"
-    },
-    "processing": "OCR 處理中...",
-    "warning": {
-      "provider": {
-        "fallback": "已改用 {{name}}，這可能導致問題"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4601,6 @@
       "title": "啟動",
       "totray": "啟動時最小化到系統匣"
     },
-    "mcp": {
-      "actions": "操作",
-      "active": "啟用",
-      "addError": "新增伺服器失敗",
-      "addServer": {
-        "create": "快速建立",
-        "importFrom": {
-          "connectionFailed": "連線失敗",
-          "dxt": "匯入 DXT 套件",
-          "dxtFile": "DXT 套件檔案",
-          "dxtHelp": "選擇包含 MCP 伺服器的 .dxt 檔案",
-          "dxtProcessFailed": "處理 DXT 檔案失敗",
-          "error": {
-            "multipleServers": "不能從多個伺服器匯入"
-          },
-          "invalid": "無效的輸入，請檢查 JSON 格式",
-          "json": "從 JSON 匯入",
-          "method": "匯入方式",
-          "nameExists": "伺服器已存在：{{name}}",
-          "noDxtFile": "請選擇一個 DXT 檔案",
-          "oneServer": "每次只能儲存一個 MCP 伺服器設定",
-          "placeholder": "貼上 MCP 伺服器 JSON 設定",
-          "selectDxtFile": "選擇 DXT 檔案",
-          "tooltip": "請從 MCP Servers 的介紹頁面複製設定 JSON（優先使用 NPX 或 UVX 設定），並貼上到輸入框中"
-        },
-        "label": "新增伺服器"
-      },
-      "addSuccess": "伺服器新增成功",
-      "advancedSettings": "進階設定",
-      "args": "參數",
-      "argsTooltip": "每個參數佔一行",
-      "baseUrlTooltip": "遠端 URL 位址",
-      "builtinServers": "內建伺服器",
-      "builtinServersDescriptions": {
-        "brave_search": "一個整合了 Brave 搜尋 API 的 MCP 伺服器實做，提供網頁與本機搜尋雙重功能。需要設定 BRAVE_API_KEY 環境變數",
-        "browser": "透過 Chrome DevTools Protocol 控制 headless Electron 視窗。工具：開啟 URL、執行單行 JS、重設工作階段。",
-        "didi_mcp": "一個整合了滴滴 MCP 伺服器實做，提供網約車服務包括地圖搜尋、價格預估、訂單管理和司機追蹤。僅支援中國大陸地區。需要設定 DIDI_API_KEY 環境變數",
-        "dify_knowledge": "Dify 的 MCP 伺服器實做，提供了一個簡單的 API 來與 Dify 進行互動。需要設定 Dify Key",
-        "fetch": "用於取得 URL 網頁內容的 MCP 伺服器",
-        "filesystem": "實做文件系統操作的模型上下文協議（MCP）的 Node.js 伺服器。需要設定允許存取的目錄",
-        "flomo": "連接 flomo 透過 AI 快速記錄筆記和想法。需要 flomo 帳號授權。",
-        "mcp_auto_install": "自動安裝 MCP 服務（測試版）",
-        "memory": "基於本機知識圖譜的持久性記憶基礎實做。這使得模型能夠在不同對話間記住使用者的相關資訊。需要設定 MEMORY_FILE_PATH 環境變數。",
-        "no": "無描述",
-        "nowledge_mem": "需要本機執行 Nowledge Mem 應用程式。將 AI 對話、工具、筆記、代理和檔案保存在電腦上的私人記憶體中。請從 https://mem.nowledge.co/ 下載",
-        "python": "在安全的沙盒環境中執行 Python 程式碼。使用 Pyodide 執行 Python，支援大多數標準函式庫和科學計算套件",
-        "sequentialthinking": "一個 MCP 伺服器實做，提供了透過結構化思維過程進行動態和反思性問題解決的工具"
-      },
-      "command": "指令",
-      "config_description": "設定模型上下文協議伺服器",
-      "customRegistryPlaceholder": "請輸入私有倉庫位址，如：https://npm.company.com",
-      "deleteError": "刪除伺服器失敗",
-      "deleteServer": "刪除伺服器",
-      "deleteServerConfirm": "確定要刪除此伺服器嗎？",
-      "deleteSuccess": "伺服器刪除成功",
-      "dependenciesInstall": "安裝相依套件",
-      "dependenciesInstalling": "正在安裝相依套件...",
-      "description": "描述",
-      "disable": {
-        "description": "不啟用 MCP 服務功能",
-        "label": "不使用 MCP 伺服器"
-      },
-      "discover": "發現",
-      "duplicateName": "已存在相同名稱的伺服器",
-      "editJson": "編輯 JSON",
-      "editMcpJson": "編輯 MCP 設定",
-      "editServer": "編輯伺服器",
-      "env": "環境變數",
-      "envTooltip": "格式：KEY=value，每行一個",
-      "errors": {
-        "32000": "MCP 伺服器啟動失敗，請根據教學檢查參數是否填寫完整",
-        "toolNotFound": "未找到工具 {{name}}"
-      },
-      "fetch": {
-        "button": "取得伺服器",
-        "success": "伺服器取得成功"
-      },
-      "findMore": "更多 MCP",
-      "headers": "請求標頭",
-      "headersTooltip": "HTTP 請求的自定義標頭",
-      "inMemory": "記憶體",
-      "install": "安裝",
-      "installError": "安裝相依套件失敗",
-      "installSuccess": "相依套件安裝成功",
-      "jsonFormatError": "JSON 格式錯誤",
-      "jsonModeHint": "編輯 MCP 伺服器設定的 JSON 表示。儲存前請確認格式正確",
-      "jsonSaveError": "儲存 JSON 設定失敗",
-      "jsonSaveSuccess": "JSON 設定已儲存",
-      "lanyun": {
-        "description": "藍雲科技雲平台MCP服務",
-        "name": "藍雲科技"
-      },
-      "logoUrl": "Logo URL",
-      "logs": "日誌",
-      "longRunning": "長時間運作模式",
-      "longRunningTooltip": "啟用後，伺服器支援長時間任務；收到進度通知時會重設逾時計時器，並將最大逾時時間延長至 10 分鐘",
-      "marketplaces": "市場",
-      "missingDependencies": "遺失，請安裝它以繼續",
-      "more": {
-        "awesome": "精選的 MCP 伺服器清單",
-        "composio": "Composio MCP 開發工具",
-        "glama": "Glama MCP 伺服器目錄",
-        "higress": "Higress MCP 伺服器",
-        "mcpso": "MCP 伺服器發現平台",
-        "mcpworld": "百度旗下MCP聚合平台網站",
-        "modelscope": "魔搭社群 MCP 伺服器",
-        "official": "官方 MCP 伺服器集合",
-        "pulsemcp": "Pulse MCP 伺服器",
-        "smithery": "Smithery MCP 工具",
-        "zhipu": "精選 MCP，極速接入"
-      },
-      "name": "名稱",
-      "newServer": "MCP 伺服器",
-      "noDescriptionAvailable": "描述不存在",
-      "noLogs": "暫無日誌",
-      "noServers": "未設定伺服器",
-      "not_support": "不支援此模型",
-      "npx_list": {
-        "actions": "操作",
-        "description": "描述",
-        "no_packages": "找不到套件",
-        "npm": "NPM",
-        "package_name": "套件名稱",
-        "scope_placeholder": "輸入 npm 作用區域 (例如 @your-org)",
-        "scope_required": "請輸入 npm 作用區域",
-        "search": "搜尋",
-        "search_error": "搜尋失敗",
-        "usage": "用法",
-        "version": "版本"
-      },
-      "oauth": {
-        "callback": {
-          "message": "關閉此頁面後即可回到 Cherry Chat",
-          "title": "認證成功"
-        }
-      },
-      "prompts": {
-        "arguments": "參數",
-        "availablePrompts": "可用提示",
-        "genericError": "取得提示錯誤",
-        "loadError": "取得提示失敗",
-        "noPromptsAvailable": "無可用提示",
-        "requiredField": "必填欄位"
-      },
-      "protocolInstallWarning": {
-        "command": "啟動命令",
-        "message": "此 MCP 透過協議從外部來源安裝，執行來源不明的工具可能會對您的電腦造成危害。",
-        "run": "執行",
-        "title": "執行外部 MCP？"
-      },
-      "provider": "提供者",
-      "providerPlaceholder": "提供者名稱",
-      "providerUrl": "提供者網址",
-      "providers": "供應商",
-      "registry": "套件管理源",
-      "registryDefault": "預設",
-      "registryTooltip": "選擇用於安裝套件的源，以解決預設源的網路問題",
-      "requiresConfig": "需要設定",
-      "resources": {
-        "availableResources": "可用資源",
-        "blob": "二進位資料",
-        "blobInvisible": "隱藏二進位資料",
-        "genericError": "取得資源錯誤",
-        "mimeType": "MIME 類型",
-        "noResourcesAvailable": "無可用資源",
-        "size": "大小",
-        "text": "文字",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "搜尋 MCP 伺服器...",
-        "tooltip": "搜尋 MCP 伺服器"
-      },
-      "searchNpx": "搜尋 MCP",
-      "serverPlural": "伺服器",
-      "serverSingular": "伺服器",
-      "servers": "MCP 伺服器",
-      "sse": "伺服器傳送事件 (sse)",
-      "startError": "啟動失敗",
-      "stdio": "標準輸入 / 輸出 (stdio)",
-      "streamableHttp": "可串流的 HTTP (streamableHttp)",
-      "sync": {
-        "button": "同步",
-        "discoverMcpServers": "發現 MCP 伺服器",
-        "discoverMcpServersDescription": "存取平台以發現可用的 MCP 伺服器",
-        "error": "同步 MCP 伺服器出錯",
-        "getToken": "取得 API 權杖",
-        "getTokenDescription": "從帳戶取得個人 API 權杖",
-        "noServersAvailable": "無可用的 MCP 伺服器",
-        "providerDescriptions": {
-          "302ai": "302.AI 平台 MCP 服務",
-          "bailian": "阿里雲百鍊平台 MCP 服務",
-          "lanyun": "藍雲科技雲平台 MCP 服務",
-          "mcprouter": "MCP 路由器平台 MCP 服務",
-          "modelscope": "ModelScope平台MCP服務",
-          "tokenflux": "TokenFlux 平台 MCP 服務"
-        },
-        "selectProvider": "選擇提供者：",
-        "setToken": "輸入權杖",
-        "success": "同步 MCP 伺服器成功",
-        "title": "同步伺服器",
-        "tokenPlaceholder": "在此輸入 API 權杖",
-        "tokenRequired": "需要 API 權杖",
-        "unauthorized": "同步未授權"
-      },
-      "system": "系統",
-      "tabs": {
-        "description": "描述",
-        "general": "通用",
-        "prompts": "提示",
-        "resources": "資源",
-        "tools": "工具"
-      },
-      "tags": "標籤",
-      "tagsPlaceholder": "輸入標籤",
-      "timeout": "逾時",
-      "timeoutTooltip": "對該伺服器請求的逾時時間（秒），預設為 60 秒",
-      "title": "MCP 伺服器",
-      "tools": {
-        "autoApprove": {
-          "label": "自動核准",
-          "tooltip": {
-            "confirm": "是否運作該 MCP 工具？",
-            "disabled": "工具運作前需要手動核准",
-            "enabled": "工具將自動運作而無需手動核准",
-            "howToEnable": "啟用工具後才能使用自動核准"
-          }
-        },
-        "availableTools": "可用工具",
-        "enable": "啟用工具",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "允許的值"
-          },
-          "label": "輸入模式"
-        },
-        "loadError": "取得工具失敗",
-        "noToolsAvailable": "無可用工具",
-        "run": "運作"
-      },
-      "type": "類型",
-      "types": {
-        "inMemory": "記憶體內",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "串流 HTTP"
-      },
-      "updateError": "更新伺服器失敗",
-      "updateSuccess": "伺服器更新成功",
-      "url": "URL",
-      "user": "使用者"
-    },
     "messages": {
       "divider": {
         "label": "訊息間顯示分隔線",
@@ -5024,6 +4611,8 @@
         "confirm_delete_message": "刪除訊息前確認",
         "confirm_regenerate_message": "重新產生訊息前確認",
         "enable_quick_triggers": "啟用 / 和 @ 觸發快捷選單",
+        "include_history_media_context": "媒體上下文",
+        "include_history_media_context_tooltip": "開啟：請求包含歷史訊息中的圖片、音訊和影片。關閉：僅不再傳送這些歷史媒體，目前正在傳送的訊息仍會包含。再次開啟後恢復正常包含歷史媒體。",
         "paste_long_text_as_file": "將長文字貼上為檔案",
         "paste_long_text_threshold": "長文字長度",
         "send_shortcuts": "傳送快捷鍵"
@@ -5032,10 +4621,9 @@
       "metrics": "首字延遲 {{time_first_token_millsec}} ms | 每秒 {{token_speed}} tokens",
       "model": {},
       "navigation": {
-        "label": "訊息導覽"
+        "label": "對話導覽"
       },
-      "prompt": "提示詞顯示",
-      "show_message_outline": "顯示訊息大綱"
+      "prompt": "提示詞顯示"
     },
     "miniapps": {
       "cache_change_notice": "變更會在開啟的小程式數量調整至設定值後生效",
@@ -5647,38 +5235,6 @@
     },
     "title": "設定",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "支援的語言"
-        },
-        "error": {
-          "not_system": "系統 OCR 僅支援 Windows 與 MacOS"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "該供應商不存在"
-          },
-          "system": {
-            "no_need_configure": "MacOS 無需設定"
-          },
-          "title": "圖片"
-        },
-        "image_provider": "OCR 服務供應商",
-        "paddleocr": {
-          "aistudio_access_token": "星河社區訪問令牌",
-          "api_url": "API 網址",
-          "api_url_label": "取得訪問令牌及 API 網址"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "仰賴 Windows 提供的服務，需要在系統中下載語言套件，才能支援相關語言。"
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "閱讀文件以了解哪些自訂語言受支援"
-        },
-        "title": "OCR 服務"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "星河社區訪問令牌",
@@ -5691,100 +5247,7 @@
         "title": "文件處理",
         "tooltip": "在「設定」->「工具」中設定文件處理服務供應商。文件處理可有效提升複雜格式文件及掃描文件的檢索效能"
       },
-      "title": "其他設定",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}} 需要 API 金鑰才能運作。您現在要設定嗎？",
-          "ok": "設定",
-          "title": "需要 API 金鑰"
-        },
-        "api_providers": "API 服務商",
-        "apikey": "API 金鑰",
-        "blacklist": "黑名單",
-        "blacklist_description": "以下網站不會出現在搜尋結果中",
-        "blacklist_tooltip": "請使用以下格式 (換行符號分隔)\nexample.com\nhttps://www.example.com\nhttps://example.com\n*://*.example.com",
-        "check": "檢查",
-        "check_failed": "驗證失敗",
-        "check_success": "驗證成功",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "截斷長度",
-              "placeholder": "輸入長度",
-              "tooltip": "限制搜尋結果的內容長度，超過限制的內容將被截斷（例如 2000 字元）"
-            },
-            "unit": {
-              "char": "字元",
-              "token": "Token"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG 失敗"
-          },
-          "info": {
-            "dimensions_auto_success": "維度自動取得成功，維度為 {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "截斷",
-            "label": "壓縮方法",
-            "none": "不壓縮",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "文件片段數量",
-              "tooltip": "預期從單個搜尋結果中提取的文件片段數量，實際提取的總數量是這個值乘以搜尋結果數量。"
-            }
-          },
-          "title": "搜尋結果壓縮"
-        },
-        "content_limit": "內容長度限制",
-        "content_limit_tooltip": "限制搜尋結果的內容長度；超過限制的內容將被截斷。",
-        "default_provider": "預設搜尋引擎",
-        "free": "免費",
-        "is_default": "預設",
-        "local_provider": {
-          "hint": "登入網站以獲得更佳搜尋結果並個人化您的搜尋設定。",
-          "open_settings": "開啟 {{provider}} 設定",
-          "settings": "本地搜尋設定"
-        },
-        "local_providers": "本地搜尋",
-        "no_provider_selected": "請選擇搜尋供應商後再檢查",
-        "overwrite": "覆蓋搜尋服務",
-        "overwrite_tooltip": "強制使用搜尋服務而不是 LLM",
-        "search_max_result": {
-          "label": "搜尋結果個數",
-          "tooltip": "未開啟搜尋結果壓縮的情況下，數量過大可能會消耗過多 tokens"
-        },
-        "search_provider": "搜尋供應商",
-        "search_provider_placeholder": "選擇一個搜尋供應商",
-        "search_with_time": "搜尋包含日期",
-        "set_as_default": "設為預設",
-        "subscribe": "黑名單訂閱",
-        "subscribe_add": "新增訂閱",
-        "subscribe_add_failed": "訂閱來源新增失敗",
-        "subscribe_add_success": "訂閱來源新增成功！",
-        "subscribe_delete": "刪除",
-        "subscribe_name": {
-          "label": "替代名稱",
-          "placeholder": "下載的訂閱來源沒有名稱時使用的替代名稱。"
-        },
-        "subscribe_update": "更新",
-        "subscribe_update_failed": "訂閱來源更新失敗",
-        "subscribe_update_success": "訂閱來源更新成功",
-        "subscribe_url": "訂閱網址",
-        "tavily": {
-          "api_key": {
-            "label": "Tavily API 金鑰",
-            "placeholder": "請輸入 Tavily API 金鑰"
-          },
-          "description": "Tavily 是一個為 AI 代理量身訂製的搜尋引擎，提供即時、準確的結果、智慧查詢建議和深入的研究能力",
-          "title": "Tavily"
-        },
-        "title": "網路搜尋",
-        "url_invalid": "輸入了無效的 URL",
-        "url_required": "需要輸入 URL"
-      }
+      "title": "其他設定"
     },
     "translate": {
       "custom": {
@@ -5865,8 +5328,6 @@
     "home": "首頁",
     "knowledge": "知識庫",
     "launchpad": "啟動台",
-    "mcp-servers": "MCP 伺服器",
-    "memories": "記憶",
     "notes": "筆記",
     "openclaw": "OpenClaw",
     "paintings": "繪畫",

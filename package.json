@@ -22,7 +22,6 @@
     "debug": "pnpm native:run electron -- electron-vite -- --inspect --sourcemap --remote-debugging-port=9222",
     "build": "pnpm native:run electron -- pnpm build:run",
     "build:run": "npm run generate:openapi && npm run typecheck && electron-vite build",
-    "build:check": "pnpm lint && pnpm openapi:check && pnpm test",
     "build:unpack": "pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn \"pnpm build:unpack:run\"",
     "build:unpack:run": "npm run build && electron-builder --dir",
     "build:win": "pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn \"pnpm build:win:run\"",
@@ -44,7 +43,7 @@
     "build:linux:x64": "pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn \"pnpm build:linux:x64:run\"",
     "build:linux:x64:run": "npm run build && electron-builder --linux --x64",
     "release": "node scripts/version.js",
-    "publish": "pnpm build:check && pnpm release patch push",
+    "publish": "pnpm release patch push",
     "pulish:artifacts": "cd packages/artifacts && npm publish && cd -",
     "analyze:renderer": "VISUALIZER_RENDERER=true pnpm native:run electron -- pnpm build",
     "analyze:main": "VISUALIZER_MAIN=true pnpm native:run electron -- pnpm build",
@@ -106,7 +105,6 @@
     "@expo/sudo-prompt": "^9.3.2",
     "@libsql/client": "0.14.0",
     "@napi-rs/canvas": "0.1.80",
-    "@napi-rs/system-ocr": "1.0.2",
     "@paymoapp/electron-shutdown-handler": "1.1.2",
     "better-sqlite3": "13.0.3",
     "canonicalize": "^2.1.0",
@@ -122,14 +120,10 @@
     "pdf-parse": "^2.4.5",
     "sharp": "0.34.5",
     "swagger-ui-express": "5.0.1",
-    "tesseract.js": "6.0.1",
     "turndown": "7.2.0",
     "ws": "^8.18.2"
   },
   "devDependencies": {
-    "@agentic/exa": "^7.3.3",
-    "@agentic/searxng": "^7.3.3",
-    "@agentic/tavily": "^7.3.3",
     "@ai-sdk/anthropic": "^3.0.71",
     "@ai-sdk/google": "^3.0.64",
     "@ai-sdk/openai": "^3.0.53",
@@ -163,6 +157,7 @@
     "@cherrystudio/embedjs-utils": "0.1.31",
     "@cherrystudio/extension-table-plus": "workspace:^",
     "@cherrystudio/openai": "6.15.0",
+    "@codemirror/commands": "6.10.2",
     "@codemirror/lang-json": "6.0.2",
     "@codemirror/lint": "6.9.5",
     "@codemirror/view": "6.39.16",
@@ -192,7 +187,6 @@
     "@langchain/openai": "1.0.0",
     "@langchain/textsplitters": "0.1.0",
     "@mistralai/mistralai": "^1.7.5",
-    "@modelcontextprotocol/sdk": "1.27.1",
     "@mozilla/readability": "^0.6.0",
     "@notionhq/client": "^2.2.15",
     "@opentelemetry/api": "^1.9.0",
@@ -282,7 +276,6 @@
     "@vitest/web-worker": "^3.2.4",
     "@viz-js/lang-dot": "^1.0.5",
     "@viz-js/viz": "^3.14.0",
-    "@xyflow/react": "^12.4.4",
     "adm-zip": "0.4.16",
     "ai": "^6.0.143",
     "ansi-to-react": "^6.2.6",
@@ -483,8 +476,6 @@
       "@ai-sdk/provider-utils": "4.0.23"
     },
     "patchedDependencies": {
-      "@napi-rs/system-ocr@1.0.2": "patches/@napi-rs-system-ocr-npm-1.0.2-59e7a78e8b.patch",
-      "tesseract.js@6.0.1": "patches/tesseract.js-npm-6.0.1-2562a7e46d.patch",
       "@langchain/core@1.0.2": "patches/@langchain-core-npm-1.0.2-183ef83fe4.patch",
       "@langchain/openai@1.0.0": "patches/@langchain-openai-npm-1.0.0-474d0ad9d4.patch",
       "@tiptap/extension-drag-handle@3.2.0": "patches/@tiptap-extension-drag-handle-npm-3.2.0-5a9ebff7c9.patch",
@@ -498,7 +489,8 @@
       "@ai-sdk/openai@3.0.53": "patches/@ai-sdk__openai@3.0.53.patch",
       "@ai-sdk/google@3.0.64": "patches/@ai-sdk__google@3.0.64.patch",
       "@ai-sdk/anthropic": "patches/@ai-sdk__anthropic.patch",
-      "@cherrystudio/embedjs-loader-web@0.1.31": "patches/@cherrystudio__embedjs-loader-web@0.1.31.patch"
+      "@cherrystudio/embedjs-loader-web@0.1.31": "patches/@cherrystudio__embedjs-loader-web@0.1.31.patch",
+      "builder-util@26.8.1": "patches/builder-util@26.8.1.patch"
     },
     "onlyBuiltDependencies": [
       "@j178/prek",
@@ -513,7 +505,6 @@
       "protobufjs",
       "registry-js",
       "sharp",
-      "tesseract.js",
       "zipfile"
     ]
   },
@@ -548,10 +539,6 @@
     "@napi-rs/canvas-linux-x64-musl": "0.1.97",
     "@napi-rs/canvas-win32-arm64-msvc": "0.1.97",
     "@napi-rs/canvas-win32-x64-msvc": "0.1.97",
-    "@napi-rs/system-ocr-darwin-arm64": "1.0.2",
-    "@napi-rs/system-ocr-darwin-x64": "1.0.2",
-    "@napi-rs/system-ocr-win32-arm64-msvc": "1.0.2",
-    "@napi-rs/system-ocr-win32-x64-msvc": "1.0.2",
     "@strongtz/win32-arm64-msvc": "0.4.7"
   }
 }

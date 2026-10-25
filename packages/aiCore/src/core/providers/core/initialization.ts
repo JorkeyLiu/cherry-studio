@@ -27,10 +27,6 @@ const AnthropicExtension = ProviderExtension.create({
   supportsImageGeneration: false,
   create: createAnthropic,
   toolFactories: {
-    webSearch:
-      (provider) => (config: NonNullable<Parameters<AnthropicProvider['tools']['webSearch_20260209']>[0]>) => ({
-        tools: { webSearch: provider.tools.webSearch_20260209(config) }
-      }),
     urlContext:
       (provider) => (config: NonNullable<Parameters<AnthropicProvider['tools']['webFetch_20260209']>[0]>) => ({
         tools: { urlContext: provider.tools.webFetch_20260209(config) }
@@ -44,11 +40,6 @@ const GoogleExtension = ProviderExtension.create({
   supportsImageGeneration: true,
   create: createGoogleGenerativeAI,
   toolFactories: {
-    webSearch:
-      (provider: GoogleGenerativeAIProvider) =>
-      (config: NonNullable<Parameters<GoogleGenerativeAIProvider['tools']['googleSearch']>[0]>) => ({
-        tools: { webSearch: provider.tools.googleSearch(config) }
-      }),
     urlContext: (provider) => (config) => ({
       tools: {
         urlContext: provider.tools.urlContext(config)
@@ -73,25 +64,12 @@ const OpenAIExtension = ProviderExtension.create({
   aliases: ['openai-response'] as const,
   supportsImageGeneration: true,
   create: createOpenAI,
-  toolFactories: {
-    webSearch:
-      (provider: OpenAIProvider) => (config: NonNullable<Parameters<OpenAIProvider['tools']['webSearch']>[0]>) => ({
-        tools: { webSearch: provider.tools.webSearch(config) }
-      })
-  },
 
   variants: [
     {
       suffix: 'chat',
       name: 'OpenAI Chat',
-      resolveModel: (provider: OpenAIProvider, modelId: string) => provider.chat(modelId),
-      toolFactories: {
-        webSearch:
-          (provider: OpenAIProvider) =>
-          (config: NonNullable<Parameters<OpenAIProvider['tools']['webSearchPreview']>[0]>) => ({
-            tools: { webSearch: provider.tools.webSearchPreview(config) }
-          })
-      }
+      resolveModel: (provider: OpenAIProvider, modelId: string) => provider.chat(modelId)
     }
   ] as const
 } as const satisfies ProviderExtensionConfig<OpenAIProviderSettings, OpenAIProvider, 'openai'>)

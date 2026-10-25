@@ -556,7 +556,7 @@ describe('StreamEventManager', () => {
       await manager.handleRecursiveCall(controller, {}, context)
 
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[MCP Prompt] No fullstream found'),
+        expect.stringContaining('[PromptToolUse] No fullstream found'),
         expect.any(Object)
       )
 

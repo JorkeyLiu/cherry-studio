@@ -35,6 +35,22 @@ export interface MockRequestEntry {
 /** Opt-in marker for the slow/long streaming mode used by the streaming-responsiveness spec. */
 export const SLOW_STREAM_MARKER = '__E2E_SLOW_STREAM__'
 
+/**
+ * Opt-in marker for the EXTENDED slow-stream budget (streaming-click-pause
+ * wheel/zoom legs only). Same 60ms realistic pacing, ~2x content so a >=3.5s
+ * every-frame pause observation + a genuine wheel return while active + a
+ * >=500-char resumed-growth hold all fit inside one streaming turn and still
+ * complete within the spec timeout.
+ *
+ * Budget arithmetic (model=mock-model):
+ * - default: 150 paragraphs / 152 SSE chunks * 60ms ~= 9120ms, ~4145 chars.
+ * - extended: 300 paragraphs / 302 SSE chunks * 60ms ~= 18120ms, ~8200 chars.
+ * The default reply is byte-identical for every other spec; only this marker
+ * selects the extended budget. Detection checks this marker BEFORE the
+ * default marker so a future substring collision can never misroute.
+ */
+export const EXTENDED_SLOW_STREAM_MARKER = '__E2E_SLOW_STREAM_XL__'
+
 /** Opt-in marker for reasoning leak simulation: reasoning-start/delta without reasoning-end */
 export const REASONING_LEAK_MARKER = '__E2E_REASONING_LEAK__'
 
@@ -64,6 +80,9 @@ const SLOW_STREAM_CHUNK_DELAY_MS = 60
 /** Number of paragraphs in the slow streaming reply (must overflow the chat viewport). */
 const SLOW_STREAM_PARAGRAPHS = 150
 
+/** Number of paragraphs in the extended slow-stream reply (~2x default, same pacing). */
+const EXTENDED_SLOW_STREAM_PARAGRAPHS = 300
+
 /**
  * Deterministic long reply for the slow streaming mode. The tail marker lets
  * the spec assert that the very end of the response was rendered (no
@@ -71,6 +90,16 @@ const SLOW_STREAM_PARAGRAPHS = 150
  */
 export function getSlowStreamReply(model: string): string {
   const paragraphs = Array.from({ length: SLOW_STREAM_PARAGRAPHS }, (_, i) => `paragraph-${i} filler words`)
+  return `[Mock ${model}] Slow stream started.\n\n${paragraphs.join('\n\n')}\n\ntail-marker-END`
+}
+
+/**
+ * Deterministic extended long reply for the wheel/zoom legs only. Same shape
+ * and tail marker as the default reply, only more paragraphs at the same
+ * 60ms chunk pacing. The default reply above is unchanged.
+ */
+export function getExtendedSlowStreamReply(model: string): string {
+  const paragraphs = Array.from({ length: EXTENDED_SLOW_STREAM_PARAGRAPHS }, (_, i) => `paragraph-${i} filler words`)
   return `[Mock ${model}] Slow stream started.\n\n${paragraphs.join('\n\n')}\n\ntail-marker-END`
 }
 
@@ -364,6 +393,51 @@ function buildSlowChatCompletionChunks(model: string) {
   }
 
   // Final chunk with stop reason (no content delta)
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }
+    ]
+  })
+
+  return { id, chunks }
+}
+
+/**
+ * Extended slow-stream chunks: same paragraph-granularity + 60ms pacing as
+ * the default slow path, only sourced from getExtendedSlowStreamReply.
+ */
+function buildExtendedSlowChatCompletionChunks(model: string) {
+  const reply = getExtendedSlowStreamReply(model)
+  const id = `chatcmpl-mock-${Date.now()}`
+  const created = Math.floor(Date.now() / 1000)
+
+  const chunks: Array<Record<string, unknown>> = []
+  const paragraphs = reply.split('\n\n')
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    chunks.push({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: i === 0 ? { role: 'assistant', content: paragraphs[i] } : { content: `\n\n${paragraphs[i]}` },
+          finish_reason: null
+        }
+      ]
+    })
+  }
+
   chunks.push({
     id,
     object: 'chat.completion.chunk',
@@ -822,6 +896,10 @@ function createMockServer(): Promise<MockServerPort> {
                 .map((m: Record<string, unknown>) => m.content)
                 .at(-1)
             )
+            // Extended budget checked BEFORE the default marker so a future
+            // substring collision can never misroute the XL turn.
+            const extendedSlow =
+              typeof lastUserContent === 'string' && lastUserContent.includes(EXTENDED_SLOW_STREAM_MARKER)
             const slowStream = typeof lastUserContent === 'string' && lastUserContent.includes(SLOW_STREAM_MARKER)
             const model = (parsed.model as string) || 'mock-model'
 
@@ -832,6 +910,23 @@ function createMockServer(): Promise<MockServerPort> {
             })
 
             const reasoningLeak = typeof lastUserContent === 'string' && lastUserContent.includes(REASONING_LEAK_MARKER)
+
+            if (extendedSlow) {
+              const { chunks } = buildExtendedSlowChatCompletionChunks(model)
+              let i = 0
+              const timer = setInterval(() => {
+                res.write(`data: ${JSON.stringify(chunks[i])}\n\n`)
+                i += 1
+                if (i >= chunks.length) {
+                  clearInterval(timer)
+                  res.write('data: [DONE]\n\n')
+                  res.end()
+                }
+              }, SLOW_STREAM_CHUNK_DELAY_MS)
+              res.on('close', () => clearInterval(timer))
+              res.on('error', () => clearInterval(timer))
+              return
+            }
 
             if (slowStream) {
               const { chunks } = buildSlowChatCompletionChunks(model)

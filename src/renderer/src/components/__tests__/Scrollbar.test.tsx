@@ -54,9 +54,21 @@ describe('Scrollbar', () => {
       expect(scrollbar.className).toContain('custom-class')
     })
 
-    it('should match default styled snapshot', () => {
+    it('should keep the native host class stable across scroll gestures', () => {
       const { container } = render(<Scrollbar data-testid="scrollbar">内容</Scrollbar>)
-      expect(container.firstChild).toMatchSnapshot()
+      const host = container.firstChild as HTMLElement
+      const before = host.className
+      // Native gesture start: thumb paint flips via inherited CSS variable on
+      // the inline style — the styled host class (overflow/scroll rules) must
+      // not be replaced mid-gesture, otherwise the scrollable layout object
+      // rebuilds and aborts the in-flight native smooth animation.
+      fireEvent.scroll(screen.getByTestId('scrollbar'))
+      expect((container.firstChild as HTMLElement).className).toBe(before)
+      expect(container.firstChild as HTMLElement).toBe(host)
+      act(() => {
+        vi.advanceTimersByTime(1600)
+      })
+      expect((container.firstChild as HTMLElement).className).toBe(before)
     })
   })
 

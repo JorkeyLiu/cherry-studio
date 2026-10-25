@@ -14,8 +14,7 @@ import {
   attachmentFailedError,
   attachmentImageUrlError,
   attachmentTextExtractionError,
-  isAttachmentError,
-  webSearchEndpointError
+  isAttachmentError
 } from '../attachmentErrors'
 
 const t = vi.mocked(i18n.t)
@@ -63,12 +62,6 @@ describe('attachmentErrors translation keys and interpolation', () => {
       reason: 'malformed or non-base64 data URL'
     })
     expect(error.message).toContain('malformed or non-base64 data URL')
-  })
-
-  it('webSearchEndpointError uses web_search_unsupported with endpoint', () => {
-    const error = webSearchEndpointError('openai-compatible')
-    expect(t).toHaveBeenCalledWith('message.error.endpoint.web_search_unsupported', { endpoint: 'openai-compatible' })
-    expect(error.message).toContain('openai-compatible')
   })
 
   it('isAttachmentError rejects plain errors', () => {

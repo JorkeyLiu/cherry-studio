@@ -57,6 +57,14 @@ export interface MessageWindow {
     trimmedGroups: number
     /** Edge that was trimmed, if any. */
     trimmedEdge: 'older' | 'newer' | null
+
+    /**
+     * True when the bounded trim was reduced so the retained live reading row
+     * stayed inside the window. The window then exceeds the calibration default
+     * by at most the requested growth (it never leaves the provisional range),
+     * and `trimmedGroups` reports the trim that actually happened.
+     */
+    retentionClamped?: boolean
   }
 }
 
@@ -240,24 +248,105 @@ export const createTargetMessageWindow = (
   return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, boundedCapacity, 'fixed', authoritative)
 }
 
-const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
-  const groupIndexes = displayMessages.flatMap((message) => {
-    const group = model.messageIdToGroup.get(message.id)
-    return group ? [model.groups.indexOf(group)] : []
+/**
+ * Group-index lookup built once per derived range. `model.groups.indexOf(group)`
+ * is a linear scan, so resolving every displayed message that way costs
+ * O(displayed messages × groups) on a long topic. The identity-keyed map
+ * resolves each message in O(1) and is built in O(groups); `messageIdToGroup`
+ * only ever holds groups from the same `groups` array, so both forms always
+ * yield the same index.
+ */
+const buildGroupIndexes = (model: MessageViewportGroupModel): ReadonlyMap<MessageViewportGroup, number> => {
+  const groupIndexes = new Map<MessageViewportGroup, number>()
+  model.groups.forEach((group, index) => {
+    groupIndexes.set(group, index)
   })
-  if (groupIndexes.length === 0) return null
+  return groupIndexes
+}
+
+const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
+  // Nothing displayed → no range, and no need to build the lookup at all.
+  if (displayMessages.length === 0) return null
+  const groupIndexes = buildGroupIndexes(model)
+  const displayGroupIndexes = displayMessages.flatMap((message) => {
+    const group = model.messageIdToGroup.get(message.id)
+    const index = group ? groupIndexes.get(group) : undefined
+    return index === undefined ? [] : [index]
+  })
+  if (displayGroupIndexes.length === 0) return null
 
   return {
-    oldestGroupIndex: Math.min(...groupIndexes),
-    newestGroupIndex: Math.max(...groupIndexes)
+    oldestGroupIndex: Math.min(...displayGroupIndexes),
+    newestGroupIndex: Math.max(...displayGroupIndexes)
   }
 }
+
+/**
+ * Optional constraint for one bounded window expansion: the stable identity the
+ * caller must keep resident in the derived window (the live reading row the
+ * stable-anchor keeper holds). Resolution is id-keyed against the SAME model the
+ * range is derived from, so an identity that left the projection resolves to
+ * `null` and degrades to the unconstrained bounded trim (the caller's existing
+ * anchor fallback applies).
+ */
+export interface MessageWindowExpansionOptions {
+  retainMessageId?: string | null
+}
+
+const resolveRetainedGroupIndex = (
+  model: MessageViewportGroupModel,
+  options?: MessageWindowExpansionOptions
+): number | null => {
+  const id = options?.retainMessageId
+  if (typeof id !== 'string' || id.length === 0) return null
+  const group = model.messageIdToGroup.get(id)
+  if (!group) return null
+  const index = model.groups.indexOf(group)
+  return index >= 0 ? index : null
+}
+
+/**
+ * Retention limit for one edge-relative trim: how many groups may be trimmed
+ * from the trimmed edge while the retained row stays inside the derived window.
+ * `null` when nothing inside the PROVISIONAL range needs to stay resident — no
+ * retained id, or a retained id already outside the range the trim can affect
+ * (it is not in this window either way, so retention must not skip the trim).
+ */
+const retentionLimitGroups = (
+  retainedIndex: number | null,
+  provisionalOldest: number,
+  provisionalNewest: number,
+  edge: 'older' | 'newer'
+): number | null => {
+  if (retainedIndex === null) return null
+  if (retainedIndex < provisionalOldest || retainedIndex > provisionalNewest) return null
+  return edge === 'older' ? provisionalNewest - retainedIndex : retainedIndex - provisionalOldest
+}
+
+/**
+ * Bounded opposite-edge trim that never removes the retained live row.
+ *
+ * `required` keeps the window exactly at the calibration default; `retentionLimit`
+ * is the largest trim that still leaves the retained row resident (already
+ * edge-relative, `null` when there is nothing to retain). RETENTION ALWAYS WINS:
+ * losing the row would unmount the keeper's live anchor and let the viewport
+ * jump, so the trim is reduced instead of the row being dropped.
+ *
+ * The window this returns is therefore inside the PROVISIONAL range (current
+ * window plus this page) but may exceed the calibration default by more than one
+ * page when retention and the bound conflict. Boundedness is enforced one layer
+ * up by `canAdvancePaginationWindow`, which DECLINES such a transition instead
+ * of publishing an over-bound window (see `derivePaginationWindow`).
+ */
+const boundedTrimGroups = (required: number, retentionLimit: number | null): number =>
+  retentionLimit === null ? required : Math.min(required, Math.max(0, retentionLimit))
 
 export const expandMessageWindowOlder = (
   messages: Message[],
   currentWindow: MessageWindow,
   additionalGroupCount: number,
-  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  options?: MessageWindowExpansionOptions
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
@@ -284,15 +373,25 @@ export const expandMessageWindowOlder = (
   const provisionalNewest = currentRange.newestGroupIndex
   const provisionalCount = provisionalNewest - provisionalOldest + 1
   if (provisionalCount > calibrationDefault) {
-    const trimmedGroups = provisionalCount - calibrationDefault
+    const requiredTrim = provisionalCount - calibrationDefault
+    const retainedIndex = resolveRetainedGroupIndex(model, options)
+    // Growing older trims the NEWER edge: the retained live row stays resident
+    // while the trim keeps `boundedNewest >= retainedIndex`. Retention wins —
+    // the retained row is never trimmed away here; a state where that would
+    // exceed the one-page bound is declined before this derivation runs.
+    const trimmedGroups = boundedTrimGroups(
+      requiredTrim,
+      retentionLimitGroups(retainedIndex, provisionalOldest, provisionalNewest, 'older')
+    )
     const boundedNewest = provisionalNewest - trimmedGroups
     const boundedCapacity = calibrationDefault
     const observability: MessageWindow['boundedViewportObservability'] = {
       calibrationDefault,
       boundedCapacity,
-      didTrim: true,
+      didTrim: trimmedGroups > 0,
       trimmedGroups,
-      trimmedEdge: 'newer'
+      trimmedEdge: 'newer',
+      retentionClamped: trimmedGroups < requiredTrim
     }
     return createWindowFromRange(
       model,
@@ -328,7 +427,8 @@ export const expandMessageWindowNewer = (
   messages: Message[],
   currentWindow: MessageWindow,
   additionalGroupCount: number,
-  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  options?: MessageWindowExpansionOptions
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
@@ -355,15 +455,25 @@ export const expandMessageWindowNewer = (
   const provisionalNewest = desiredNewest
   const provisionalCount = provisionalNewest - provisionalOldest + 1
   if (provisionalCount > calibrationDefault) {
-    const trimmedGroups = provisionalCount - calibrationDefault
+    const requiredTrim = provisionalCount - calibrationDefault
+    const retainedIndex = resolveRetainedGroupIndex(model, options)
+    // Growing newer trims the OLDER edge: the retained live row stays resident
+    // while the trim keeps `boundedOldest <= retainedIndex`. Mirror of the older
+    // direction: retention wins identically, and a state where retention cannot
+    // fit inside the one-page bound is declined before this derivation runs.
+    const trimmedGroups = boundedTrimGroups(
+      requiredTrim,
+      retentionLimitGroups(retainedIndex, provisionalOldest, provisionalNewest, 'newer')
+    )
     const boundedOldest = provisionalOldest + trimmedGroups
     const boundedCapacity = calibrationDefault
     const observability: MessageWindow['boundedViewportObservability'] = {
       calibrationDefault,
       boundedCapacity,
-      didTrim: true,
+      didTrim: trimmedGroups > 0,
       trimmedGroups,
-      trimmedEdge: 'older'
+      trimmedEdge: 'older',
+      retentionClamped: trimmedGroups < requiredTrim
     }
     return createWindowFromRange(
       model,
@@ -398,11 +508,157 @@ export const expandMessageWindowNewer = (
   )
 }
 
-/** Refreshes a historical range, or follows the latest edge, at the same group capacity. */
+/**
+ * Feasibility of ONE bounded pagination transition (pure, production).
+ *
+ * The two properties a published window must keep at the same time — the
+ * display window stays inside `calibrationDefault + one page`, and the live
+ * reading row stays resident — can conflict. When they do, the transition is
+ * DECLINED: the projection keeps the window it already has (the user's reading
+ * position and DOM stay exactly as they are) instead of publishing a window
+ * that would unmount the row being read.
+ *
+ * This is not a stall in normal browsing: the reading row moves as the user
+ * scrolls, so paging becomes feasible again as soon as the row has left the
+ * trimmed edge (the accumulated one-page overshoot is reclaimed by that same
+ * transition, since the required trim is then affordable).
+ *
+ * Cheap by construction: no group model is built while the requested page still
+ * fits under the cap, which is every window below capacity.
+ */
+export type PaginationWindowDeclineReason = 'retention-exceeds-bound'
+
+export type PaginationWindowGuard = { allowed: true } | { allowed: false; reason: PaginationWindowDeclineReason }
+
+export interface PaginationWindowGuardInput {
+  direction: 'older' | 'newer'
+  /** Current resident projection in route order (oldest-first). */
+  messages: Message[]
+  /** The committed window the page would grow from. */
+  currentWindow: MessageWindow
+  /** Groups to add on the loaded edge (the requested page size). */
+  additionalGroupCount: number
+  /** Live reading row that must stay resident (null when none is provable). */
+  retainMessageId?: string | null
+}
+
+export const canAdvancePaginationWindow = (input: PaginationWindowGuardInput): PaginationWindowGuard => {
+  const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  const added = Math.max(0, input.additionalGroupCount)
+  // Under capacity there is no trim at all: nothing can be unmounted.
+  if (input.currentWindow.groupCount + added <= calibrationDefault) return { allowed: true }
+
+  const model = createMessageViewportGroupModel(input.messages)
+  const currentRange = getRangeFromDisplayMessages(model, input.currentWindow.displayMessages)
+  // No provable current range (a rebuild from scratch follows): the caller's
+  // existing fallback owns it, so this guard has no verdict to add.
+  if (!currentRange) return { allowed: true }
+
+  const older = input.direction === 'older'
+  const provisionalOldest = older ? Math.max(0, currentRange.oldestGroupIndex - added) : currentRange.oldestGroupIndex
+  const provisionalNewest = older
+    ? currentRange.newestGroupIndex
+    : Math.min(model.groups.length - 1, currentRange.newestGroupIndex + added)
+  const provisionalCount = provisionalNewest - provisionalOldest + 1
+  if (provisionalCount <= calibrationDefault) return { allowed: true }
+
+  // The one-page allowance: the smallest trim that keeps the window inside
+  // `calibrationDefault + added`. It can never exceed `added` because the
+  // committed window is itself bounded by `calibrationDefault + added`.
+  const minimumTrim = Math.max(0, provisionalCount - (calibrationDefault + added))
+  if (minimumTrim === 0) return { allowed: true }
+
+  const retainedIndex = resolveRetainedGroupIndex(model, { retainMessageId: input.retainMessageId })
+  const retentionLimit = retentionLimitGroups(
+    retainedIndex,
+    provisionalOldest,
+    provisionalNewest,
+    older ? 'older' : 'newer'
+  )
+  // Nothing inside the provisional range needs to stay resident: the exact
+  // bounded trim applies.
+  if (retentionLimit === null) return { allowed: true }
+  // Keeping the row (trim ≤ retentionLimit) and staying bounded
+  // (trim ≥ minimumTrim) can only hold together in this interval.
+  return retentionLimit >= minimumTrim ? { allowed: true } : { allowed: false, reason: 'retention-exceeds-bound' }
+}
+
+/**
+ * One ordinary bidirectional pagination window transition (pure, production).
+ *
+ * Both directions share this single derivation: the accepted merge result and
+ * the CURRENT committed window decide the next window, grown on the requested
+ * edge by the same group count, with the opposite edge bounded exactly as
+ * before. Only the edge-relative authority mapping differs:
+ * - the loaded edge takes the validated Main response's own completeness flag
+ *   (authoritative `hasMoreBefore` when growing older, `hasMoreAfter` when
+ *   growing newer);
+ * - the untouched edge keeps the CURRENT window's own traversability, whether
+ *   that is authoritative Main truth or the local derived value of a bounded
+ *   trim. The distinction stays explicit: `hasMore*` on the derived window is
+ *   "can this display still be traversed locally", while
+ *   `authoritativeHasMoreBefore/After` carries the Main response verbatim.
+ *
+ * `retainMessageId` is the live reading row the stable-anchor keeper holds: a
+ * bounded trim that would remove it is reduced instead (see `boundedTrimGroups`),
+ * so an ACCEPTED commit never unmounts the anchor it must hold. When holding the
+ * row and staying bounded cannot both hold, the transition is DECLINED
+ * (`canAdvancePaginationWindow`) and the caller must publish nothing at all —
+ * the committed projection, its traversability flags and the DOM stay untouched.
+ * The result is always derived from route-ordered input and is never re-sorted.
+ */
+export interface PaginationWindowTransitionInput extends PaginationWindowGuardInput {
+  /** Completeness flags of the validated Main response window. */
+  responseWindow: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+}
+
+export type PaginationWindowTransition =
+  | { status: 'accepted'; window: MessageWindow }
+  | { status: 'declined'; reason: PaginationWindowDeclineReason }
+
+export const derivePaginationWindow = (input: PaginationWindowTransitionInput): PaginationWindowTransition => {
+  // Boundedness and retention are decided BEFORE any derivation: a decline
+  // produces no window at all, so the caller cannot publish a half-state.
+  const guard = canAdvancePaginationWindow(input)
+  if (!guard.allowed) return { status: 'declined', reason: guard.reason }
+  const { direction, messages, currentWindow, additionalGroupCount, responseWindow, retainMessageId } = input
+  const options: MessageWindowExpansionOptions = { retainMessageId: retainMessageId ?? null }
+  const window =
+    direction === 'older'
+      ? expandMessageWindowOlder(
+          messages,
+          currentWindow,
+          additionalGroupCount,
+          { hasMoreBefore: responseWindow.hasMoreBefore, hasMoreAfter: currentWindow.hasMoreNewer },
+          options
+        )
+      : expandMessageWindowNewer(
+          messages,
+          currentWindow,
+          additionalGroupCount,
+          { hasMoreBefore: currentWindow.hasMoreOlder, hasMoreAfter: responseWindow.hasMoreAfter },
+          options
+        )
+  return { status: 'accepted', window }
+}
+
+/**
+ * Refreshes a historical range, or follows the latest edge, at the same group
+ * capacity.
+ *
+ * `options.retainMessageId` is the row the shared viewport keeper currently holds
+ * (active interaction region owner, else the live reading anchor). A latest-edge
+ * reconcile that would slide the newest-capacity range past it keeps it — and the
+ * older context already on screen — resident inside the same bounded capacity,
+ * trimming the newer edge instead. Without that, an insertion inside the resident
+ * span unmounts the held region, its hold fails closed, and the arriving rows
+ * displace the view.
+ */
 export const reconcileMessageWindow = (
   messages: Message[],
   previousMessages: Message[],
-  currentWindow: MessageWindow
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
 ): MessageWindow => {
   const rawCapacity = currentWindow.groupCapacity
   const capacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
@@ -415,18 +671,50 @@ export const reconcileMessageWindow = (
       : undefined
   const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
   if (currentWindow.edge === 'latest') {
-    return createLatestMessageWindow(messages, capacity, cleanAuth)
+    const boundedCapacity = Math.min(Math.max(0, capacity), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+    const model = boundedCapacity === 0 ? null : createMessageViewportGroupModel(messages)
+    const retainedIndex = model ? resolveRetainedGroupIndex(model, options) : null
+    const latestOldest = model ? Math.max(0, model.groups.length - boundedCapacity) : 0
+    if (!model || retainedIndex === null || retainedIndex >= latestOldest) {
+      return createLatestMessageWindow(messages, capacity, cleanAuth)
+    }
+    // Retention: the newest-capacity range would evict the held row. Keep the
+    // older context the current window already shows (never less than the held
+    // row) and trim the OPPOSITE (newer) edge by exactly the growth, so the
+    // mounted region and the content above it stay put while the window stays
+    // inside the same bounded capacity. The trim is reported honestly on the
+    // newer edge, which then reads as traversable (`hasMoreNewer`).
+    const previousRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+    const oldest = Math.max(0, Math.min(retainedIndex, previousRange?.oldestGroupIndex ?? retainedIndex))
+    const newest = Math.min(model.groups.length - 1, oldest + boundedCapacity - 1)
+    const trimmedGroups = Math.max(0, model.groups.length - 1 - newest)
+    const observability: MessageWindow['boundedViewportObservability'] = {
+      calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+      boundedCapacity,
+      didTrim: trimmedGroups > 0,
+      trimmedGroups,
+      trimmedEdge: 'newer'
+    }
+    return createWindowFromRange(
+      model,
+      { oldestGroupIndex: oldest, newestGroupIndex: newest },
+      boundedCapacity,
+      'latest',
+      cleanAuth,
+      observability
+    )
   }
 
   const model = createMessageViewportGroupModel(messages)
-  const retainedIndexes = currentWindow.displayMessages.flatMap((message) => {
-    const group = model.messageIdToGroup.get(message.id)
-    return group ? [model.groups.indexOf(group)] : []
-  })
-  if (retainedIndexes.length === 0) {
-    const previousModel = createMessageViewportGroupModel(previousMessages)
+  // Same id-keyed resolution used by every other derived range (one group-index
+  // lookup built once) instead of a linear group scan per displayed message.
+  const retainedRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  if (!retainedRange) {
     const previousRange = currentWindow.range
-    if (!previousRange || previousModel.groups.length === 0) {
+    // The group builder emits at least one group for every message, so an empty
+    // group list is exactly an empty previous projection — no need to build the
+    // previous model just to read its group count.
+    if (!previousRange || previousMessages.length === 0) {
       return createWindowFromRange(model, null, capacity, 'fixed', cleanAuth)
     }
     // Clamp previous range to bounded capacity deterministically (trim newer edge if needed).
@@ -450,8 +738,8 @@ export const reconcileMessageWindow = (
     return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth)
   }
 
-  let oldestGroupIndex = Math.min(...retainedIndexes)
-  let newestGroupIndex = Math.max(...retainedIndexes)
+  let oldestGroupIndex = retainedRange.oldestGroupIndex
+  let newestGroupIndex = retainedRange.newestGroupIndex
   let didTrim = false
   let trimmedGroups = 0
   let trimmedEdge: 'older' | 'newer' | null = null
@@ -491,50 +779,135 @@ export const reconcileMessageWindow = (
 // --- S6.1 helpers transplanted from Messages.tsx (single production implementation) ---
 
 /**
- * Canonical disjoint authoritative window union by stable ID with deterministic sort.
- * Deduplicates by stable `id`, preserves all resident tail entries, adds any new
- * incoming entries, and sorts deterministically: ascending `sortOrder` when present,
- * tie-broken by lexicographic `id`, otherwise lexicographic `id` only.
- * Used by R-04 search-hit navigation when the anchor is not resident.
+ * In-bound navigation union: attach an authoritative `around` window for a
+ * target that is NOT resident yet.
+ *
+ * Route-order contract (same rule as `mergeWindowIntoTopic`): when the window
+ * shares at least one resident neighbour, the window's new run is spliced at
+ * the shared neighbour that precedes it in window order and the RESIDENT order
+ * is preserved verbatim. On a branch route the resident order composes several
+ * owners' layers, so a global `sortOrder`/id sort would fabricate an order the
+ * authority never published.
+ *
+ * Only a window that shares NO resident id has no provable route position. That
+ * disjoint case is FAIL-CLOSED: no sort, and no concatenation at a guessed end.
+ * (`sortOrder` is an owner-local layer index, so sorting by it is exactly the
+ * fabrication the route-order contract forbids.) The caller must take the
+ * existing authoritative route-window rebase instead — Main's own stable-ID
+ * window order replaces the projection — which keeps navigation to the target
+ * valid without inventing an order.
  */
-export function unionWindowMessages(existing: Message[], incoming: Message[]): Message[] {
+export type NavigationWindowUnion = { status: 'merged'; messages: Message[] } | { status: 'disjoint' }
+
+export function unionWindowMessages(existing: Message[], incoming: Message[]): NavigationWindowUnion {
   const existingIds = new Set(existing.map((m) => m.id))
   const newIncoming = incoming.filter((m) => !existingIds.has(m.id))
-  if (newIncoming.length === 0) return existing
-  const combined = [...existing, ...newIncoming]
-  const hasSortOrder = combined.some((m) => typeof (m as any).sortOrder === 'number')
-  if (hasSortOrder) {
-    return combined.slice().sort((a: any, b: any) => {
-      const sa = typeof a.sortOrder === 'number' ? a.sortOrder : Number.MAX_SAFE_INTEGER
-      const sb = typeof b.sortOrder === 'number' ? b.sortOrder : Number.MAX_SAFE_INTEGER
-      if (sa !== sb) return sa - sb
-      return a.id.localeCompare(b.id)
-    })
+  if (newIncoming.length === 0) return { status: 'merged', messages: existing }
+  const firstShared = incoming.find((m) => existingIds.has(m.id))
+  if (firstShared) {
+    const spliced = mergeWindowIntoTopic(existing, incoming, firstShared.id)
+    if (spliced.status === 'merged') return { status: 'merged', messages: spliced.messages }
   }
-  return combined.slice().sort((a, b) => a.id.localeCompare(b.id))
+  return { status: 'disjoint' }
 }
 
-export function mergeWindowIntoTopic(existing: Message[], incoming: Message[], anchorId: string): Message[] {
-  const existingIds = new Set(existing.map((m) => m.id))
-  const newIds = incoming.filter((m) => !existingIds.has(m.id))
-  if (newIds.length === 0) return existing
+/**
+ * Outcome of merging one authoritative `around` window response into the
+ * CURRENT resident projection (pure, production decision).
+ */
+export type WindowMergeOutcome =
+  | { status: 'merged'; messages: Message[]; addedIds: string[] }
+  | { status: 'anchor-not-in-window' }
+  | { status: 'anchor-not-resident' }
 
-  const anchorIdxExisting = existing.findIndex((m) => m.id === anchorId)
-  const anchorIdxIncoming = incoming.findIndex((m) => m.id === anchorId)
-  if (anchorIdxIncoming === -1) return existing
+/**
+ * Merge an authoritative pagination window into the resident route order.
+ *
+ * Ordering contract (route order only): `existing` is the current resident
+ * projection in route order and `incoming` is the authoritative response
+ * window in route order (oldest-first). Every window response is a CONTIGUOUS
+ * run of the route, so its new ids are placed relative to the resident ids it
+ * shares (`existing ∩ incoming`, route order): a new run is emitted
+ * immediately after the shared id that precedes it in the window, or
+ * immediately before the first shared id when nothing precedes it. Relative
+ * order inside every run is the window's own order.
+ *
+ * The merged list is never re-sorted: on a branch route the resident order
+ * composes several owners' layers, so a global `sortOrder` sort would
+ * fabricate an order the authority never published.
+ *
+ * Fail-closed outcomes never guess a concatenation position:
+ * - `anchor-not-in-window`: the response does not carry the requested stable
+ *   anchor, so it is not a valid around window for this request;
+ * - `anchor-not-resident`: the requested anchor is absent from the CURRENT
+ *   resident projection (evicted/rebased/replaced while the read was in
+ *   flight), so no route-order position is provable. The caller must drop the
+ *   page and take its existing reload/rebase path instead of publishing.
+ *
+ * Deterministic id-keyed dedupe: ids already resident (and repeats inside the
+ * window) are skipped, never duplicated.
+ */
+export function mergeWindowIntoTopic(
+  existing: readonly Message[],
+  incoming: readonly Message[],
+  anchorId: string
+): WindowMergeOutcome {
+  if (typeof anchorId !== 'string' || anchorId.length === 0) return { status: 'anchor-not-in-window' }
+  if (!incoming.some((message) => message.id === anchorId)) return { status: 'anchor-not-in-window' }
+  if (!existing.some((message) => message.id === anchorId)) return { status: 'anchor-not-resident' }
 
-  const beforeIncoming = incoming.slice(0, anchorIdxIncoming).filter((m) => !existingIds.has(m.id))
-  const afterIncoming = incoming.slice(anchorIdxIncoming + 1).filter((m) => !existingIds.has(m.id))
+  const residentIds = new Set(existing.map((message) => message.id))
+  const sharedIds = new Set<string>()
+  // New ids grouped by the shared resident id they follow in window order; ids
+  // before the first shared id form the head run. Window repeats and resident
+  // ids are skipped (deterministic id-keyed dedupe).
+  const runsAfter = new Map<string, Message[]>()
+  const headRun: Message[] = []
+  const added: Message[] = []
+  const seen = new Set<string>()
+  let pending: Message[] = []
+  let lastSharedId: string | null = null
 
-  if (anchorIdxExisting === -1) {
-    return [...beforeIncoming, ...existing, ...afterIncoming]
+  const flushPending = (): void => {
+    if (pending.length === 0) return
+    if (lastSharedId === null) {
+      headRun.push(...pending)
+    } else {
+      const run = runsAfter.get(lastSharedId)
+      if (run) run.push(...pending)
+      else runsAfter.set(lastSharedId, pending)
+    }
+    pending = []
   }
 
-  const result = [...existing]
-  result.splice(anchorIdxExisting, 0, ...beforeIncoming)
-  const newAnchorPos = result.findIndex((m) => m.id === anchorId)
-  result.splice(newAnchorPos + 1, 0, ...afterIncoming)
-  return result
+  for (const message of incoming) {
+    if (residentIds.has(message.id)) {
+      flushPending()
+      sharedIds.add(message.id)
+      lastSharedId = message.id
+      continue
+    }
+    if (seen.has(message.id)) continue
+    seen.add(message.id)
+    added.push(message)
+    pending.push(message)
+  }
+  flushPending()
+
+  // Emit the resident route order, splicing each new run at its shared
+  // neighbour (the head run immediately before the first shared id).
+  const result: Message[] = []
+  let headEmitted = false
+  for (const message of existing) {
+    if (!headEmitted && sharedIds.has(message.id)) {
+      if (headRun.length > 0) result.push(...headRun)
+      headEmitted = true
+    }
+    result.push(message)
+    const run = runsAfter.get(message.id)
+    if (run) result.push(...run)
+  }
+  return { status: 'merged', messages: result, addedIds: added.map((message) => message.id) }
 }
 
 export function clampWindowCount(n: number): number {
@@ -670,6 +1043,43 @@ export function markLoadedRouteFailed(route: RouteKey): LoadedRouteState {
  */
 export function isLoadedRouteCurrent(state: LoadedRouteState, activeRoute: RouteKey): boolean {
   return !state.loadFailed && state.route === activeRoute
+}
+
+/**
+ * One-shot reference-reload obligation for the resident route effect.
+ *
+ * An authoritative Main→renderer history-reference invalidation obliges the
+ * ACTIVE reference target to re-read its window from Main (the relation status
+ * and the foreign prefix are Main's answer, never renderer guesswork). The
+ * obligation is a monotonic token bound to the topic it was raised for, kept
+ * separately from the controller's mutable DOM provenance: an ordinary
+ * projection apply between the hint and the passive route effect re-stamps
+ * provenance clean (`noteSameRouteWindowUpdate` / `rebaseClean`), so a
+ * provenance-only signal can be undone before the effect reads it and the
+ * effect would then idle-skip — leaving a degraded relation displayed until the
+ * next activation. The token survives that; it is consumed exactly when the
+ * re-read pipeline starts, and a newer token always outlives an older consume.
+ */
+export interface ReferenceReloadObligation {
+  /** Monotonic token, raised by each invalidation hint. */
+  token: number
+  /** Topic the obligation belongs to (a hint for another topic never applies). */
+  topicId: string
+}
+
+/**
+ * Whether a re-read is owed for `topicId`: a pending obligation exists, it has
+ * not been consumed yet, and it belongs to the requested topic. Pure decision
+ * helper — no controller/DOM truth of its own.
+ */
+export function isReferenceReloadObliged(
+  pending: ReferenceReloadObligation | null,
+  consumedToken: number,
+  topicId: string
+): boolean {
+  if (!pending) return false
+  if (!Number.isFinite(pending.token) || pending.token <= consumedToken) return false
+  return pending.topicId === topicId
 }
 
 export interface DividerDoubleFailureSnapshot {

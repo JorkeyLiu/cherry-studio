@@ -51,12 +51,12 @@ import type { TestRelayHandle } from '../../utils/sync-relay'
 import { startTestRelay } from '../../utils/sync-relay'
 
 // Verified against packages/shared/sync/baselineWire.ts (actual source):
-// WIRE_VERSION_V5 = 'sync-baseline-wire-v5',
-// INVENTORY_VERSION_V5 = 'topic-message-stable-block-order-branch-assistant-attachment-v5'.
+// WIRE_VERSION_V6 = 'sync-baseline-wire-v6',
+// INVENTORY_VERSION_V6 = 'topic-message-stable-block-order-branch-assistant-attachment-reference-v6'.
 // Inlined (not imported) so this Playwright spec never pulls a Vitest-side
 // module graph; the relay contract spec pins the same literals by import.
-const BASELINE_WIRE_V5 = 'sync-baseline-wire-v5'
-const BASELINE_INVENTORY_V5 = 'topic-message-stable-block-order-branch-assistant-attachment-v5'
+const BASELINE_WIRE_V6 = 'sync-baseline-wire-v6'
+const BASELINE_INVENTORY_V6 = 'topic-message-stable-block-order-branch-assistant-attachment-reference-v6'
 
 // ---------------------------------------------------------------------------
 // Narrow branch-IPC typings (spec-local; no `any` on owner differences)
@@ -494,20 +494,21 @@ async function pollForRelayBaselineV3(
       const payload = body.payload as Record<string, unknown> | null
       const inventoryVersion = payload?.inventoryVersion
       if (
-        wireVersion === BASELINE_WIRE_V5 &&
+        wireVersion === BASELINE_WIRE_V6 &&
         typeof watermark === 'number' &&
         Number.isSafeInteger(watermark) &&
         watermark > 0 &&
         payload !== null &&
         typeof payload === 'object' &&
-        inventoryVersion === BASELINE_INVENTORY_V5 &&
+        inventoryVersion === BASELINE_INVENTORY_V6 &&
         Array.isArray(payload.branches) &&
         Array.isArray(payload.orderFrames) &&
         Array.isArray(payload.topics) &&
         Array.isArray(payload.messages) &&
         Array.isArray(payload.messageBlocks) &&
         Array.isArray((payload as Record<string, unknown>).assistantConfigs) &&
-        Array.isArray((payload as Record<string, unknown>).fileAssets)
+        Array.isArray((payload as Record<string, unknown>).fileAssets) &&
+        Array.isArray((payload as Record<string, unknown>).topicReferences)
       ) {
         const branchIds: string[] = []
         for (const b of payload.branches as unknown[]) {
@@ -525,7 +526,8 @@ async function pollForRelayBaselineV3(
             branchSuffixParents.push(frame.parentId)
           }
         }
-        // V5 completeness: manifest must be present and complete, all 3 domain arrays present (branch/assistant/attachment)
+        // V6 completeness: manifest complete, all domain arrays present
+        // (branch/assistant/attachment/reference)
         const manifest = payload.manifest as Record<string, unknown> | undefined
         if (manifest?.completeness !== 'complete') {
           last = `manifest-incomplete`
@@ -542,7 +544,7 @@ async function pollForRelayBaselineV3(
     }
     await sleep(1000)
   }
-  throw new Error(`relay-baseline-v5 timeout: ${last}`)
+  throw new Error(`relay-baseline-v6 timeout: ${last}`)
 }
 
 test.describe('Branch sync two-profile real path', () => {

@@ -30,23 +30,75 @@ export interface ClipboardSegmentSnapshot {
 }
 
 // 剪贴板 state
+/**
+ * Cut-time source projection eligibility for a staged cut.
+ *
+ * Captured once at `cutMessages` time AFTER the edit-selection gate proves
+ * the source selection writable through the active loaded route. It records
+ * WHICH source rows were loaded (eligible for immediate Redux visibility on
+ * undo) — never the authority restore payload itself. Main remains the
+ * source of full messages/blocks/anchors at deletion time.
+ *
+ * `sourceBranchId` uses the same null = main encoding as the staged route and
+ * must exactly equal the staged `sourceBranchId` (null vs undefined stays
+ * distinct; undefined is legacy/missing and must fail closed).
+ */
+export interface StagedCutSourceProjection {
+  sourceTopicId: string
+  sourceBranchId: string | null
+  loadedMessageIds: string[]
+}
+
 export interface ClipboardState {
   mode: ClipboardMode | null
   items: ClipboardItem[]
   sourceTopicId: string | null
+  /**
+   * Staged source route captured at cut time (null = main route).
+   * Cut-only authority provenance: paste addresses the Main source delete
+   * with this route without rerequiring projection capability. Undefined is
+   * legacy/missing provenance and must fail closed before any paste write.
+   */
+  sourceBranchId: string | null
   timestamp: number
   /** Snapshots of fully-selected segments for segment reconstruction on paste */
   segmentSnapshots: ClipboardSegmentSnapshot[]
+  /**
+   * Cut-time source projection eligibility (cut mode only). Undefined is
+   * legacy/missing provenance and must fail closed before any paste write;
+   * null is never used (copy mode leaves this undefined). The object route
+   * must match `sourceBranchId` exactly when present.
+   */
+  sourceProjection?: StagedCutSourceProjection | null
 }
 
 // 编辑模式 state
 export interface EditModeState {
   enabled: boolean
   selectedGroupIds: string[] // askId 列表
-  lastSelectedIndex: number | null // Shift 区域选的锚点
-  focusedIndex: number | null // 当前焦点位置
+  lastSelectedIndex: number | null // 当前已加载组顺序中的 Shift 锚点索引（兼容派生）
+  focusedIndex: number | null // 当前已加载组顺序中的活动端点索引（兼容派生）
+  anchorGroupId?: string | null // 稳定 Shift 锚点 askId
+  focusedGroupId?: string | null // 稳定活动端点 askId
   isProcessing: boolean // 全局操作锁
 }
+
+/**
+ * Direction of the bounded message-window page an edit-selection edge needs.
+ * `older` is toward earlier messages (visual up), `newer` toward later ones.
+ */
+export type EditSelectionBoundaryDirection = 'older' | 'newer'
+
+/**
+ * Selection-boundary page request provided by the chat viewport owner.
+ *
+ * Resolves `true` once an ordinary bounded page attempt for that direction
+ * settled (its window commit or its cancellation) and `false` when no attempt
+ * was started — no history left, one already in flight, or another owner holds
+ * the viewport. Repeat key auto-repeat must therefore be safe to issue: a
+ * request never starts a second copy of an in-flight read.
+ */
+export type EditSelectionBoundaryPageRequest = (direction: EditSelectionBoundaryDirection) => Promise<boolean>
 
 /**
  * Snapshot of a TopicSegment before message deletion.
@@ -127,6 +179,14 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   /** Source topic ID */
   sourceTopicId: string
   /**
+   * Route-bound authority provenance for staged-cut actions (null = main).
+   * New actions always carry both; legacy in-memory actions omit them and
+   * retain the previous live-route behavior only where safe. New actions with
+   * missing fields must fail closed before any write (no silent live fallback).
+   */
+  sourceBranchId?: string | null
+  targetBranchId?: string | null
+  /**
    * Stable member roots sent to the semantic delete at paste time: all
    * complete clipboard member message IDs (deduped, authority order).
    * Redo re-issues exactly these roots (Main re-expands user dependents).
@@ -134,6 +194,13 @@ export interface CutPasteUndoAction extends BaseUndoAction {
    * redo fails closed when source restoration is needed but roots are absent.
    */
   sourceRootIds?: string[]
+  /**
+   * Cut-time source projection eligibility propagated from the clipboard
+   * lifecycle into the undo payload. Redo re-issues the staged source delete
+   * with this eligibility (never the live target projection). Undefined is
+   * legacy/missing; new staged actions must carry it or fail closed.
+   */
+  sourceProjection?: StagedCutSourceProjection | null
   /** Per-group anchors for restoring source groups to their original positions */
   sourceGroupAnchors: GroupAnchor[]
   /** Snapshots of affected source segments before deletion (for undo source segment restoration) */

@@ -10,7 +10,10 @@ import {
   distanceFromBottom,
   distanceFromOldest,
   isAtBottom,
-  isAtOldest
+  isAtOldest,
+  layoutDisplacement,
+  rebaseLayoutHold,
+  resolveLayoutHold
 } from '../columnReverseGeometry'
 
 describe('columnReverseGeometry (single production primitive)', () => {
@@ -48,5 +51,54 @@ describe('columnReverseGeometry (single production primitive)', () => {
     // Bottom vicinity (≈0) is the farthest point from the oldest edge.
     expect(distanceFromOldest({ ...overflow, scrollTop: 0 })).toBeGreaterThan(200)
     expect(distanceFromBottom(0)).toBe(0)
+  })
+})
+
+describe('layout-space hold metric (the keeper hold coordinate, split from scrolling)', () => {
+  it('a pure user scroll is zero layout displacement, in both scroll directions', () => {
+    // Δoffset = −ΔscrollTop is the container's coupling; the metric must cancel
+    // it entirely (this is what makes a hold safe during a live gesture).
+    expect(layoutDisplacement({ viewportOffset: -60, scrollTop: 0 }, { viewportOffset: -260, scrollTop: 200 })).toBe(0)
+    expect(layoutDisplacement({ viewportOffset: -60, scrollTop: 0 }, { viewportOffset: 140, scrollTop: -200 })).toBe(0)
+    expect(
+      resolveLayoutHold({ viewportOffset: -60, scrollTop: 0 }, { viewportOffset: -260, scrollTop: 200 })
+    ).toBeNull()
+    // Sub-pixel noise stays inside the shared tolerance.
+    expect(resolveLayoutHold({ viewportOffset: 0.5, scrollTop: -0.5 }, { viewportOffset: 0, scrollTop: 0 })).toBeNull()
+  })
+
+  it('a pure layout change is the displacement to hold, with the user scroll removed', () => {
+    // +180 content growth under the reading row, no scroll in between.
+    expect(resolveLayoutHold({ viewportOffset: -60, scrollTop: 0 }, { viewportOffset: 120, scrollTop: 0 })).toBe(180)
+    // Same growth while the user also moved 200 (pure scroll subtraction).
+    expect(resolveLayoutHold({ viewportOffset: -60, scrollTop: 0 }, { viewportOffset: -80, scrollTop: 200 })).toBe(180)
+    // Symmetric sign: growth that pulls the row up holds negative.
+    expect(resolveLayoutHold({ viewportOffset: -60, scrollTop: -20 }, { viewportOffset: -260, scrollTop: -20 })).toBe(
+      -200
+    )
+    // The tolerance is a real gate (a 1px wobble is not a hold).
+    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 1, scrollTop: 0 })).toBeNull()
+    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 1.5, scrollTop: 0 })).toBe(1.5)
+  })
+
+  it('re-baselines analytically so the next trigger measures only post-write change', () => {
+    const sample = { viewportOffset: 120, scrollTop: 0 }
+    const displacement = resolveLayoutHold({ viewportOffset: -60, scrollTop: 0 }, sample)
+    expect(displacement).toBe(180)
+    const rebased = rebaseLayoutHold(sample, displacement as number)
+    // The write itself moves the offset back and the scroll forward by the same
+    // amount: the same geometry re-observed is then a no-op (idempotent hold).
+    expect(rebased).toEqual({ viewportOffset: -60, scrollTop: 180 })
+    expect(resolveLayoutHold(rebased, { viewportOffset: -60, scrollTop: 180 })).toBeNull()
+    // A user scroll after the write stays cancelled out as well.
+    expect(resolveLayoutHold(rebased, { viewportOffset: -260, scrollTop: 380 })).toBeNull()
+  })
+
+  it('fails closed on non-finite geometry (never a fabricated hold)', () => {
+    expect(resolveLayoutHold({ viewportOffset: NaN, scrollTop: 0 }, { viewportOffset: 10, scrollTop: 0 })).toBeNull()
+    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 10, scrollTop: NaN })).toBeNull()
+    expect(
+      resolveLayoutHold({ viewportOffset: 0, scrollTop: Infinity }, { viewportOffset: 10, scrollTop: 0 })
+    ).toBeNull()
   })
 })

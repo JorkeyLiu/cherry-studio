@@ -11,12 +11,30 @@ import { AssistantMessageStatus, type Message } from '@renderer/types/newMessage
 import { lightbulbSoftVariants } from '@renderer/utils/motionVariants'
 import { Tooltip } from 'antd'
 import { motion } from 'motion/react'
-import type { FC } from 'react'
+import type { CSSProperties, FC } from 'react'
 import { Fragment, memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { captureAnswerTabSwitchIntent, useOptionalRouteViewport } from './routeViewportContext'
+import { captureAnswerTabSwitchIntent, useOptionalRouteViewportCommands } from './routeViewportContext'
+
+/**
+ * Shared horizontal answer-strip layout primitive.
+ *
+ * The enabled branch renders through `Sortable` (a horizontal flex list, which
+ * the read-only branch cannot use because it must stay inert — no dnd context,
+ * no drag reorder). Applied to BOTH branch containers so a non-owned group
+ * (cross-topic reference prefix, inherited branch/fold group) keeps the exact
+ * same expanded presentation as an owned group: model tabs side by side in a
+ * single row instead of stacked full-width rows. Layout only — inert
+ * interaction gating is governed separately.
+ */
+export const answerGroupStripLayout: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'row',
+  alignItems: 'center',
+  flexWrap: 'nowrap'
+}
 
 interface MessageGroupModelListProps {
   messages: Message[]
@@ -39,7 +57,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
   const { foldDisplayMode } = useSettings()
-  const viewport = useOptionalRouteViewport()
+  // Stable commands only (tab-switch intent capture needs the controller).
+  const viewport = useOptionalRouteViewportCommands()
   const isCompact = foldDisplayMode === 'compact'
 
   const isMessageProcessing = useCallback((message: Message) => {
@@ -88,6 +107,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
               $isSelected={message.id === selectMessageId}
               data-testid="answer-group-selector"
               data-message-id={message.id}
+              data-interaction-region="answer-tab"
               aria-disabled={disabled}
               onClick={handleSelect}>
               <motion.span variants={lightbulbSoftVariants} animate={isProcessing ? 'active' : 'idle'} initial="idle">
@@ -102,6 +122,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
           $isSelected={message.id === selectMessageId}
           data-testid="answer-group-selector"
           data-message-id={message.id}
+          data-interaction-region="answer-tab"
           aria-disabled={disabled}
           onClick={handleSelect}>
           <SegmentedLabel>
@@ -127,6 +148,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         mouseLeaveDelay={0}>
         <DisplayModeToggle
           displayMode={foldDisplayMode}
+          data-testid="fold-display-mode-toggle"
+          data-interaction-region="fold-controls"
           onClick={() => dispatch(setFoldDisplayMode(isCompact ? 'expanded' : 'compact'))}>
           {isCompact ? <ArrowsAltOutlined /> : <ShrinkOutlined />}
         </DisplayModeToggle>
@@ -138,8 +161,13 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
           // Fragment keeps each selector a direct child of the layout
           // container, matching the enabled Sortable structure (no extra
           // span wrapper that would break the avatar-group/segmented-list
-          // direct-child selectors).
-          <div className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'} aria-disabled="true">
+          // direct-child selectors). `answerGroupStripLayout` gives the plain
+          // div the same horizontal strip layout Sortable provides for the
+          // enabled branch.
+          <div
+            className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'}
+            style={answerGroupStripLayout}
+            aria-disabled="true">
             {messages.map((message) => (
               <Fragment key={message.id}>{renderLabel(message)}</Fragment>
             ))}
@@ -153,6 +181,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
             horizontal
             useDragOverlay
             className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'}
+            listStyle={answerGroupStripLayout}
           />
         )}
       </ModelsContainer>

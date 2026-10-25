@@ -52,7 +52,8 @@ vi.mock('@renderer/utils/formats', () => ({
 vi.mock('@renderer/utils/markdown', () => ({
   findCitationInChildren: vi.fn(() => '{"id": 1, "url": "https://example.com"}'),
   getCodeBlockId: vi.fn(() => 'code-block-1'),
-  processLatexBrackets: vi.fn((str) => str)
+  processLatexBrackets: vi.fn((str) => str),
+  normalizeAttachedBlockMathClose: vi.fn((str) => str)
 }))
 
 // Mock components with more realistic behavior

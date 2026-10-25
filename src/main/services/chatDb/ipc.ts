@@ -33,6 +33,7 @@ import type {
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
+  CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
   DeleteMessageRequest,
@@ -43,6 +44,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -53,6 +55,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  ImportTopicDataRequest,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
@@ -102,7 +105,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { logMainDiagnostic } from '../diagnostics'
 import { handleChatDbSuccessForSync, isCapturableSyncChannel } from '../sync/chatDbHook'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
-import { broadcastChatProjectionInvalidation } from './chatProjectionBroadcast'
+import { broadcastChatProjectionInvalidation, broadcastHistoryReferenceInvalidation } from './chatProjectionBroadcast'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
 
@@ -257,6 +260,55 @@ function branchIdsFromRequest(request: unknown): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// History-reference invalidation broadcast — Main → all renderer windows
+//
+// When a referenced SOURCE topic changes (rename/mutation/delete), each target
+// topic's projection (its LIVE foreign prefix) becomes stale. Reuse the
+// existing per-window push pattern: look up target topic IDs for the mutated
+// source (indexed) and notify renderers so they re-read affected targets. The
+// query is skipped entirely when no target points at the source. Never throws.
+// ---------------------------------------------------------------------------
+
+/**
+ * Source-mutation channels whose success may stale a reference target. The
+ * handler resolves targets by the request `topicId` and broadcasts only when
+ * at least one target exists.
+ */
+const REFERENCE_SOURCE_INVALIDATION_CHANNELS: ReadonlySet<string> = new Set<string>([
+  IpcChannel.ChatDb_UpdateTopicMetadata,
+  IpcChannel.ChatDb_SoftDeleteTopic,
+  IpcChannel.ChatDb_RestoreTopic,
+  IpcChannel.ChatDb_UpdateMessage,
+  IpcChannel.ChatDb_UpdateMessageAndBlocks,
+  IpcChannel.ChatDb_UpdateBlocks,
+  IpcChannel.ChatDb_UpdateSingleBlock,
+  IpcChannel.ChatDb_BulkAddBlocks,
+  IpcChannel.ChatDb_DeleteBlocks,
+  IpcChannel.ChatDb_DeleteMessage,
+  IpcChannel.ChatDb_DeleteMessages,
+  IpcChannel.ChatDb_ReorderMessages,
+  IpcChannel.ChatDb_SelectAnswerMessage,
+  IpcChannel.ChatDb_SelectUsefulAnswer,
+  IpcChannel.ChatDb_ReorderAnswerGroup,
+  IpcChannel.ChatDb_InsertMessagesAfterAnchor,
+  IpcChannel.ChatDb_InsertMessageGroups,
+  IpcChannel.ChatDb_AppendMessage,
+  IpcChannel.ChatDb_CloneMessagesToTopic,
+  IpcChannel.ChatDb_PasteMessagesToTopic,
+  IpcChannel.ChatDb_ResetMessagesForResend,
+  IpcChannel.ChatDb_ResendUserMessages,
+  IpcChannel.ChatDb_RegenerateAssistantMessage,
+  IpcChannel.ChatDb_UpsertSegment,
+  IpcChannel.ChatDb_UpdateSegmentMetadata,
+  IpcChannel.ChatDb_DeleteSegment,
+  IpcChannel.ChatDb_ReplaceSegmentMembership,
+  // Branch removal changes a source route: a target whose captured source
+  // branch (or an ancestor of it) is removed stales to 'missing', so the
+  // source topic's targets re-read.
+  IpcChannel.ChatDb_DeleteBranch
+])
+
+// ---------------------------------------------------------------------------
 // Channel → aggregate method mapping
 // ---------------------------------------------------------------------------
 
@@ -378,6 +430,33 @@ export function registerChatDbIpc(): () => void {
           if (ids && ids.length > 0) {
             const senderId = _event.sender?.id
             broadcastTopicDeletion(ids, senderId)
+            // Referenced sources that were deleted stale their targets.
+            for (const deletedId of ids) {
+              try {
+                const targets = aggregate.listReferenceTargets(deletedId)
+                if (targets.ok === true && targets.value.targetTopicIds.length > 0) {
+                  broadcastHistoryReferenceInvalidation(deletedId, targets.value.targetTopicIds)
+                }
+              } catch {
+                // best-effort invalidation only
+              }
+            }
+          }
+        }
+
+        // History-reference invalidation for source-topic mutations (rename,
+        // content/order/segment edits): notify target renderers to re-read.
+        if (result.ok === true && REFERENCE_SOURCE_INVALIDATION_CHANNELS.has(channel)) {
+          const sourceTopicId = (request as { topicId?: unknown })?.topicId
+          if (typeof sourceTopicId === 'string' && sourceTopicId.length > 0) {
+            try {
+              const targets = aggregate.listReferenceTargets(sourceTopicId)
+              if (targets.ok === true && targets.value.targetTopicIds.length > 0) {
+                broadcastHistoryReferenceInvalidation(sourceTopicId, targets.value.targetTopicIds)
+              }
+            } catch {
+              // best-effort invalidation only
+            }
           }
         }
 
@@ -493,6 +572,16 @@ export function registerChatDbIpc(): () => void {
     return agg.fetchWholeTopicSnapshot(req)
   })
 
+  // 1e3. export-topic-data (standalone JSON export: ONE ENTIRE topic incl. all branches)
+  handleCommand(IpcChannel.ChatDb_ExportTopicData, (agg, req: ExportTopicDataRequest) => {
+    return agg.exportTopicData(req)
+  })
+
+  // 1e4. import-topic-data (standalone JSON import: new topic under the target assistant)
+  handleCommand(IpcChannel.ChatDb_ImportTopicData, (agg, req: ImportTopicDataRequest) => {
+    return agg.importTopicData(req)
+  })
+
   // 1e2. fetch-clipboard-groups (group-scoped copy/cut; selected groups only, never whole-topic)
   handleCommand(IpcChannel.ChatDb_FetchClipboardGroups, (agg, req: FetchClipboardGroupsRequest) => {
     return agg.fetchClipboardGroups(req)
@@ -531,11 +620,12 @@ export function registerChatDbIpc(): () => void {
     })
   })
 
-  // 6. update-message
+  // 6. update-message (optional conditional usage mode threaded through)
   handleCommand(IpcChannel.ChatDb_UpdateMessage, (agg, req: UpdateMessageRequest) => {
     return agg.updateMessage(req.topicId, req.messageId, req.updates, {
       resendAttemptId: req.resendAttemptId,
-      branchId: req.branchId
+      branchId: req.branchId,
+      usageCondition: req.usageCondition
     })
   })
 
@@ -574,24 +664,34 @@ export function registerChatDbIpc(): () => void {
 
   // 10. update-blocks
   handleCommand(IpcChannel.ChatDb_UpdateBlocks, (agg, req: UpdateBlocksRequest) => {
-    return agg.updateBlocks(req.blocks, req.diagnostics, { resendAttemptId: req.resendAttemptId })
+    return agg.updateBlocks(req.blocks, req.diagnostics, {
+      resendAttemptId: req.resendAttemptId,
+      topicId: req.topicId,
+      branchId: req.branchId
+    })
   })
 
   // 11. update-single-block
   handleCommand(IpcChannel.ChatDb_UpdateSingleBlock, (agg, req: UpdateSingleBlockRequest) => {
     return agg.updateSingleBlock(req.blockId, req.updates, req.diagnostics, {
-      resendAttemptId: req.resendAttemptId
+      resendAttemptId: req.resendAttemptId,
+      topicId: req.topicId,
+      branchId: req.branchId
     })
   })
 
   // 12. bulk-add-blocks
   handleCommand(IpcChannel.ChatDb_BulkAddBlocks, (agg, req: BulkAddBlocksRequest) => {
-    return agg.bulkAddBlocks(req.blocks, { resendAttemptId: req.resendAttemptId })
+    return agg.bulkAddBlocks(req.blocks, {
+      resendAttemptId: req.resendAttemptId,
+      topicId: req.topicId,
+      branchId: req.branchId
+    })
   })
 
   // 13. delete-blocks
   handleCommand(IpcChannel.ChatDb_DeleteBlocks, (agg, req: DeleteBlocksRequest) => {
-    return agg.deleteBlocks(req.blockIds)
+    return agg.deleteBlocks(req.blockIds, { topicId: req.topicId, branchId: req.branchId })
   })
 
   // 14. list-segments (Phase 5.1A)
@@ -646,7 +746,15 @@ export function registerChatDbIpc(): () => void {
 
   // 23. update-topic-metadata (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_UpdateTopicMetadata, (agg, req: UpdateTopicMetadataRequest) => {
-    return agg.updateTopicMetadata(req.topicId, req.name, req.pinned, req.prompt, req.isNameManuallyEdited)
+    return agg.updateTopicMetadata(
+      req.topicId,
+      req.name,
+      req.pinned,
+      req.prompt,
+      req.isNameManuallyEdited,
+      req.expectedName,
+      req.expectedIsNameManuallyEdited
+    )
   })
 
   // 24. soft-delete-topic (Phase 5.1B)
@@ -708,7 +816,21 @@ export function registerChatDbIpc(): () => void {
       req.sourceBranchId,
       req.selectedGroupIds,
       req.name,
-      req.expectedSelectedMessageIds
+      req.expectedSelectedMessageIds,
+      req.contextAnchorInheritance
+    )
+  })
+
+  // 29d. cross-topic history references (Reference/Copy = Reference): atomic
+  // topic + relation creation; local-only live foreign prefix, no duplication.
+  handleCommand(IpcChannel.ChatDb_CreateReferencedTopic, (agg, req: CreateReferencedTopicRequest) => {
+    return agg.createReferencedTopic(
+      req.sourceTopicId,
+      req.branchId,
+      req.targetTopicId,
+      req.anchorMessageId,
+      req.assistantId,
+      req.name
     )
   })
 

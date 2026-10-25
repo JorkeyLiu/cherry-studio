@@ -70,12 +70,22 @@ export const INVENTORY_VERSION_V5 = 'topic-message-stable-block-order-branch-ass
 export const SCOPE_V5 = 'chat-core-baseline-v5:topic-message-stable-block-order-branch-assistant-attachment-v5' as const
 
 /** Rank for regressive-wire rejection (higher never downgrades to lower). */
+// Baseline v6 literals (cross-topic history reference full sync).
+// Inventory: ...-attachment-reference-v6 at sync-baseline-wire-v6 /
+// chat-core-baseline-v6. Order-frame family stays parent-order-frame-v1.
+export const WIRE_VERSION_V6 = 'sync-baseline-wire-v6' as const
+export const PAYLOAD_SCHEMA_V6 = 'chat-core-baseline-v6' as const
+export const INVENTORY_VERSION_V6 = 'topic-message-stable-block-order-branch-assistant-attachment-reference-v6' as const
+export const SCOPE_V6 =
+  'chat-core-baseline-v6:topic-message-stable-block-order-branch-assistant-attachment-reference-v6' as const
+
 export const WIRE_VERSION_RANK: Record<string, number> = {
   'sync-baseline-wire-v1': 1,
   'sync-baseline-wire-v2': 2,
   'sync-baseline-wire-v3': 3,
   'sync-baseline-wire-v4': 4,
-  'sync-baseline-wire-v5': 5
+  'sync-baseline-wire-v5': 5,
+  'sync-baseline-wire-v6': 6
 }
 
 export const MAX_SAFE_INT = Number.MAX_SAFE_INTEGER
@@ -262,20 +272,28 @@ export interface SyncEnvelopeV2 {
   payload: SyncPayloadV2
 }
 
-export type SyncPayloadAny = SyncPayload | SyncPayloadV2 | SyncPayloadV3 | SyncPayloadV4 | SyncPayloadV5
-export type SyncEnvelopeAny = SyncEnvelope | SyncEnvelopeV2 | SyncEnvelopeV3 | SyncEnvelopeV4 | SyncEnvelopeV5
+export type SyncPayloadAny = SyncPayload | SyncPayloadV2 | SyncPayloadV3 | SyncPayloadV4 | SyncPayloadV5 | SyncPayloadV6
+export type SyncEnvelopeAny =
+  | SyncEnvelope
+  | SyncEnvelopeV2
+  | SyncEnvelopeV3
+  | SyncEnvelopeV4
+  | SyncEnvelopeV5
+  | SyncEnvelopeV6
 export type ValidatedSyncPayloadAny =
   | ValidatedSyncPayload
   | (SyncPayloadV2 & { readonly [ValidatedPayloadBrand]: true })
   | (SyncPayloadV3 & { readonly [ValidatedPayloadBrand]: true })
   | (SyncPayloadV4 & { readonly [ValidatedPayloadBrand]: true })
   | (SyncPayloadV5 & { readonly [ValidatedPayloadBrand]: true })
+  | (SyncPayloadV6 & { readonly [ValidatedPayloadBrand]: true })
 export type ValidatedSyncEnvelopeAny =
   | ValidatedSyncEnvelope
   | (SyncEnvelopeV2 & { readonly [ValidatedEnvelopeBrand]: true })
   | (SyncEnvelopeV3 & { readonly [ValidatedEnvelopeBrand]: true })
   | (SyncEnvelopeV4 & { readonly [ValidatedEnvelopeBrand]: true })
   | (SyncEnvelopeV5 & { readonly [ValidatedEnvelopeBrand]: true })
+  | (SyncEnvelopeV6 & { readonly [ValidatedEnvelopeBrand]: true })
 
 // Branded validated types: ensures only strictly validated values are used for digest.
 // The brand is compile-time only; runtime validation is still enforced in digest helpers.
@@ -1324,6 +1342,7 @@ export function validatePayloadV2(value: unknown): SyncPayloadV2 & { readonly [V
 }
 
 export function validatePayloadAny(value: unknown): ValidatedSyncPayloadAny {
+  if (isV6PayloadLike(value)) return validatePayloadV6(value) as ValidatedSyncPayloadAny
   if (isV5PayloadLike(value)) return validatePayloadV5(value) as ValidatedSyncPayloadAny
   if (isV4PayloadLike(value)) return validatePayloadV4(value) as ValidatedSyncPayloadAny
   if (isV3PayloadLike(value)) return validatePayloadV3(value) as ValidatedSyncPayloadAny
@@ -1378,6 +1397,7 @@ export function validateEnvelopeV2(value: unknown): SyncEnvelopeV2 & { readonly 
 }
 
 export function validateEnvelopeAny(value: unknown): ValidatedSyncEnvelopeAny {
+  if (isV6EnvelopeLike(value)) return validateEnvelopeV6(value) as ValidatedSyncEnvelopeAny
   if (isV5EnvelopeLike(value)) return validateEnvelopeV5(value) as ValidatedSyncEnvelopeAny
   if (isV4EnvelopeLike(value)) return validateEnvelopeV4(value) as ValidatedSyncEnvelopeAny
   if (isV3EnvelopeLike(value)) return validateEnvelopeV3(value) as ValidatedSyncEnvelopeAny
@@ -3317,6 +3337,499 @@ export function validateEnvelopeV5(value: unknown): SyncEnvelopeV5 & { readonly 
 export function isSyncPayloadV5(value: unknown): value is SyncPayloadV5 {
   try {
     validatePayloadV5(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Baseline v6: cross-topic history reference full sync
+// Inventory: topic-message-stable-block-order-branch-assistant-attachment-
+// reference-v6 at sync-baseline-wire-v6 / chat-core-baseline-v6 /
+// parent-order-frame-v1.
+//
+// - V5 chat/branch/assistant/attachment content unchanged; every v5 entity
+//   validator is reused verbatim.
+// - New `topicReferences` array: ONE coherent relation entity per reference
+//   target topic (`targetTopicId` is the entity identity). The tuple
+//   (source topic, optional source branch route, precise anchor message) is
+//   carried whole — never mixed key-by-key across competing updates — and
+//   converges by whole-entity LWW on `entityClock`. The referenced prefix is
+//   NOT copied: it stays owned by the source topic and is read through the
+//   relation, so no message/block/file entity is duplicated.
+// - New `topicReference` tombstone type: target deletion cascades the
+//   relation with ordinary tombstone/clock bookkeeping so a stale relation
+//   upsert can never resurrect a deleted target.
+// - A live relation requires its target topic live in the same payload
+//   (target owns the relation). Source topic/branch/anchor absence is legal
+//   and resolves to the existing fail-closed "missing" read state, which
+//   recovers automatically when the dependency arrives.
+// - Manifest gains `topicReference` live/tombstone counts; digest input stays
+//   payload-only (`jcs-sha256-v1`). v1-v5 validators are unchanged, so their
+//   parsing and digest behavior stay byte/semantic compatible.
+// ---------------------------------------------------------------------------
+
+export interface TopicReferenceEntityV6 {
+  targetTopicId: string
+  sourceTopicId: string
+  sourceBranchId: string | null
+  anchorMessageId: string
+  entityClock: SyncClock
+}
+
+const TOPIC_REFERENCE_ENTITY_KEYS_V6 = new Set<string>([
+  'targetTopicId',
+  'sourceTopicId',
+  'sourceBranchId',
+  'anchorMessageId',
+  'entityClock'
+])
+
+export type TombstoneEntityTypeV6 =
+  | 'topic'
+  | 'message'
+  | 'messageBlock'
+  | 'topicBranch'
+  | 'topicReference'
+  | 'fileAsset'
+
+export interface TombstoneV6 {
+  entityType: TombstoneEntityTypeV6
+  entityId: string
+  deletionClock: DeletionClock
+  survivingEntityClock: SyncClock | null
+}
+
+export interface ManifestV6 {
+  payloadSchema: typeof PAYLOAD_SCHEMA_V6
+  inventoryVersion: typeof INVENTORY_VERSION_V6
+  orderFrameVersion: typeof ORDER_FRAME_VERSION
+  scope: typeof SCOPE_V6
+  liveCounts: {
+    topic: number
+    message: number
+    messageBlock: number
+    branch: number
+    assistantConfig: number
+    fileAsset: number
+    topicReference: number
+  }
+  tombstoneCounts: {
+    topic: number
+    message: number
+    messageBlock: number
+    topicBranch: number
+    fileAsset: number
+    assistantConfig: number
+    topicReference: number
+  }
+  frameCounts: { topicMessage: number; messageBlock: number; branchSuffix: number }
+  replacementCount: number
+  completeness: typeof COMPLETENESS_COMPLETE
+}
+
+export interface SyncPayloadV6 {
+  payloadSchema: typeof PAYLOAD_SCHEMA_V6
+  inventoryVersion: typeof INVENTORY_VERSION_V6
+  orderFrameVersion: typeof ORDER_FRAME_VERSION
+  scope: typeof SCOPE_V6
+  topics: TopicEntity[]
+  messages: MessageEntityV3[]
+  messageBlocks: MessageBlockEntityV5[]
+  branches: BranchEntityV3[]
+  assistantConfigs: AssistantConfigEntityV4[]
+  fileAssets: FileAssetEntityV5[]
+  topicReferences: TopicReferenceEntityV6[]
+  tombstones: TombstoneV6[]
+  assistantTombstones: AssistantTombstoneV4[]
+  orderFrames: OrderFrameV3[]
+  replacementRegisters: ReplacementRegisterV3[]
+  manifest: ManifestV6
+}
+
+export interface SyncEnvelopeV6 {
+  wireVersion: typeof WIRE_VERSION_V6
+  channelId: string
+  watermark: number
+  digestScheme: typeof DIGEST_SCHEME
+  digest: string
+  payload: SyncPayloadV6
+}
+
+const PAYLOAD_V6_KEYS = new Set<string>([
+  'payloadSchema',
+  'inventoryVersion',
+  'orderFrameVersion',
+  'scope',
+  'topics',
+  'messages',
+  'messageBlocks',
+  'branches',
+  'assistantConfigs',
+  'fileAssets',
+  'topicReferences',
+  'tombstones',
+  'assistantTombstones',
+  'orderFrames',
+  'replacementRegisters',
+  'manifest'
+])
+const MANIFEST_V6_KEYS = new Set<string>([
+  'payloadSchema',
+  'inventoryVersion',
+  'orderFrameVersion',
+  'scope',
+  'liveCounts',
+  'tombstoneCounts',
+  'frameCounts',
+  'replacementCount',
+  'completeness'
+])
+const LIVE_COUNTS_KEYS_V6 = new Set<string>([
+  'topic',
+  'message',
+  'messageBlock',
+  'branch',
+  'assistantConfig',
+  'fileAsset',
+  'topicReference'
+])
+const TOMBSTONE_COUNTS_KEYS_V6 = new Set<string>([
+  'topic',
+  'message',
+  'messageBlock',
+  'topicBranch',
+  'fileAsset',
+  'assistantConfig',
+  'topicReference'
+])
+const FRAME_COUNTS_KEYS_V6 = new Set<string>(['topicMessage', 'messageBlock', 'branchSuffix'])
+const TOMBSTONE_KEYS_V6 = new Set<string>(['entityType', 'entityId', 'deletionClock', 'survivingEntityClock'])
+const TOMBSTONE_ENTITY_TYPES_V6: ReadonlySet<string> = new Set([
+  'topic',
+  'message',
+  'messageBlock',
+  'topicBranch',
+  'topicReference',
+  'fileAsset'
+])
+
+export function validateTopicReferenceEntityV6(value: unknown, path: string): void {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, TOPIC_REFERENCE_ENTITY_KEYS_V6, path)
+  assertNonEmptyValidUnicodeScalarString(obj.targetTopicId, `${path}.targetTopicId`)
+  assertNonEmptyValidUnicodeScalarString(obj.sourceTopicId, `${path}.sourceTopicId`)
+  if (obj.sourceTopicId === obj.targetTopicId) {
+    throw new ValidationError('sourceTopicId must differ from targetTopicId', `${path}.sourceTopicId`)
+  }
+  assertNullableValidUnicodeScalarString(obj.sourceBranchId, `${path}.sourceBranchId`)
+  assertNonEmptyValidUnicodeScalarString(obj.anchorMessageId, `${path}.anchorMessageId`)
+  validateClock(obj.entityClock, `${path}.entityClock`, false)
+}
+
+export function validateTombstoneV6(value: unknown, path: string): void {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, TOMBSTONE_KEYS_V6, path)
+  if (typeof obj.entityType !== 'string' || !TOMBSTONE_ENTITY_TYPES_V6.has(obj.entityType)) {
+    throw new ValidationError(
+      'entityType must be one of topic,message,messageBlock,topicBranch,topicReference,fileAsset',
+      `${path}.entityType`
+    )
+  }
+  assertValidUnicodeScalarString(obj.entityType, `${path}.entityType`)
+  assertNonEmptyValidUnicodeScalarString(obj.entityId, `${path}.entityId`)
+  validateClock(obj.deletionClock, `${path}.deletionClock`, true)
+  if (obj.survivingEntityClock === null) {
+    // ok
+  } else {
+    validateClock(obj.survivingEntityClock, `${path}.survivingEntityClock`, false)
+  }
+}
+
+function validateManifestV6(value: unknown, path: string): void {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, MANIFEST_V6_KEYS, path)
+  if (obj.payloadSchema !== PAYLOAD_SCHEMA_V6)
+    throw new ValidationError(`payloadSchema must be "${PAYLOAD_SCHEMA_V6}"`, `${path}.payloadSchema`)
+  if (obj.inventoryVersion !== INVENTORY_VERSION_V6)
+    throw new ValidationError(`inventoryVersion must be "${INVENTORY_VERSION_V6}"`, `${path}.inventoryVersion`)
+  if (obj.orderFrameVersion !== ORDER_FRAME_VERSION)
+    throw new ValidationError(`orderFrameVersion must be "${ORDER_FRAME_VERSION}"`, `${path}.orderFrameVersion`)
+  if (obj.scope !== SCOPE_V6) throw new ValidationError(`scope must be "${SCOPE_V6}"`, `${path}.scope`)
+  const liveCounts = assertPlainObject(obj.liveCounts, `${path}.liveCounts`)
+  assertExactKeys(liveCounts, LIVE_COUNTS_KEYS_V6, `${path}.liveCounts`)
+  for (const k of LIVE_COUNTS_KEYS_V6) assertSafeNonNegativeInt(liveCounts[k], `${path}.liveCounts.${k}`)
+  const tCounts = assertPlainObject(obj.tombstoneCounts, `${path}.tombstoneCounts`)
+  assertExactKeys(tCounts, TOMBSTONE_COUNTS_KEYS_V6, `${path}.tombstoneCounts`)
+  for (const k of TOMBSTONE_COUNTS_KEYS_V6) assertSafeNonNegativeInt(tCounts[k], `${path}.tombstoneCounts.${k}`)
+  const fCounts = assertPlainObject(obj.frameCounts, `${path}.frameCounts`)
+  assertExactKeys(fCounts, FRAME_COUNTS_KEYS_V6, `${path}.frameCounts`)
+  for (const k of FRAME_COUNTS_KEYS_V6) assertSafeNonNegativeInt(fCounts[k], `${path}.frameCounts.${k}`)
+  assertSafeNonNegativeInt(obj.replacementCount, `${path}.replacementCount`)
+  if (obj.completeness !== COMPLETENESS_COMPLETE)
+    throw new ValidationError('completeness must be "complete"', `${path}.completeness`)
+}
+
+function validatePayloadV6Structure(value: unknown, path: string): SyncPayloadV6 {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, PAYLOAD_V6_KEYS, path)
+  if (obj.payloadSchema !== PAYLOAD_SCHEMA_V6)
+    throw new ValidationError(`payloadSchema must be "${PAYLOAD_SCHEMA_V6}"`, `${path}.payloadSchema`)
+  if (obj.inventoryVersion !== INVENTORY_VERSION_V6)
+    throw new ValidationError(`inventoryVersion must be "${INVENTORY_VERSION_V6}"`, `${path}.inventoryVersion`)
+  if (obj.orderFrameVersion !== ORDER_FRAME_VERSION)
+    throw new ValidationError(`orderFrameVersion must be "${ORDER_FRAME_VERSION}"`, `${path}.orderFrameVersion`)
+  if (obj.scope !== SCOPE_V6) throw new ValidationError(`scope must be "${SCOPE_V6}"`, `${path}.scope`)
+  const topics = assertPlainArray(obj.topics, `${path}.topics`)
+  topics.forEach((t, idx) => validateTopic(t, `${path}.topics[${idx}]`))
+  const messages = assertPlainArray(obj.messages, `${path}.messages`)
+  messages.forEach((m, idx) => validateMessageV3(m, `${path}.messages[${idx}]`))
+  const blocks = assertPlainArray(obj.messageBlocks, `${path}.messageBlocks`)
+  blocks.forEach((b, idx) => validateMessageBlockV5(b, `${path}.messageBlocks[${idx}]`))
+  const branches = assertPlainArray(obj.branches, `${path}.branches`)
+  branches.forEach((b, idx) => validateBranchV3(b, `${path}.branches[${idx}]`))
+  const assistantConfigs = assertPlainArray(obj.assistantConfigs, `${path}.assistantConfigs`)
+  assistantConfigs.forEach((c, idx) => validateAssistantConfigEntityV4(c, `${path}.assistantConfigs[${idx}]`))
+  const fileAssets = assertPlainArray(obj.fileAssets, `${path}.fileAssets`)
+  fileAssets.forEach((a, idx) => validateFileAssetEntityV5(a, `${path}.fileAssets[${idx}]`))
+  const topicReferences = assertPlainArray(obj.topicReferences, `${path}.topicReferences`)
+  topicReferences.forEach((r, idx) => validateTopicReferenceEntityV6(r, `${path}.topicReferences[${idx}]`))
+  const tombstones = assertPlainArray(obj.tombstones, `${path}.tombstones`)
+  tombstones.forEach((t, idx) => validateTombstoneV6(t, `${path}.tombstones[${idx}]`))
+  const assistantTombstones = assertPlainArray(obj.assistantTombstones, `${path}.assistantTombstones`)
+  assistantTombstones.forEach((t, idx) => validateAssistantTombstoneV4(t, `${path}.assistantTombstones[${idx}]`))
+  const frames = assertPlainArray(obj.orderFrames, `${path}.orderFrames`)
+  frames.forEach((f, idx) => validateOrderFrameV3(f, `${path}.orderFrames[${idx}]`))
+  const registers = assertPlainArray(obj.replacementRegisters, `${path}.replacementRegisters`)
+  registers.forEach((r, idx) => validateReplacementRegister(r, `${path}.replacementRegisters[${idx}]`))
+  validateManifestV6(obj.manifest, `${path}.manifest`)
+  assertStrictlySortedByUtf8(topics as TopicEntity[], (v) => v.id, `${path}.topics`)
+  assertStrictlySortedByUtf8(messages as MessageEntityV3[], (v) => v.id, `${path}.messages`)
+  assertStrictlySortedByUtf8(blocks as MessageBlockEntity[], (v) => v.id, `${path}.messageBlocks`)
+  assertStrictlySortedByUtf8(branches as BranchEntityV3[], (v) => v.id, `${path}.branches`)
+  assertStrictlySortedByUtf8(assistantConfigs as AssistantConfigEntityV4[], (v) => v.key, `${path}.assistantConfigs`)
+  assertStrictlySortedByUtf8(fileAssets as FileAssetEntityV5[], (v) => v.id, `${path}.fileAssets`)
+  assertStrictlySortedByUtf8(
+    topicReferences as TopicReferenceEntityV6[],
+    (v) => v.targetTopicId,
+    `${path}.topicReferences`
+  )
+  assertStrictlySortedByUtf8(registers as ReplacementRegisterV3[], (v) => v.messageId, `${path}.replacementRegisters`)
+  // Tombstones: type rank then UTF-8 byte lex
+  // (topic < message < messageBlock < topicBranch < topicReference < fileAsset)
+  {
+    const rank = (t: { entityType: string }): number => {
+      if (t.entityType === 'topic') return 0
+      if (t.entityType === 'message') return 1
+      if (t.entityType === 'messageBlock') return 2
+      if (t.entityType === 'topicBranch') return 3
+      if (t.entityType === 'topicReference') return 4
+      return 5
+    }
+    for (let i = 1; i < tombstones.length; i++) {
+      const prev = tombstones[i - 1] as { entityType: string; entityId: string }
+      const cur = tombstones[i] as { entityType: string; entityId: string }
+      const pr = rank(prev)
+      const cr = rank(cur)
+      if (cr < pr) throw new ValidationError('tombstones not sorted by type rank', `${path}.tombstones`)
+      if (cr === pr) {
+        const cmp = compareUtf8ByteLex(prev.entityId, cur.entityId)
+        if (cmp >= 0) {
+          if (cmp === 0)
+            throw new ValidationError(
+              `duplicate tombstone ${cur.entityType}:${cur.entityId}`,
+              `${path}.tombstones[${i}]`
+            )
+          throw new ValidationError('tombstones not sorted by entityId', `${path}.tombstones`)
+        }
+      }
+    }
+  }
+  // Chat/branch closure reuses the V3 closure on the chat subset only.
+  const tombstonesV3Only = (tombstones as Array<{ entityType: string }>).filter(
+    (t) => t.entityType !== 'fileAsset' && t.entityType !== 'topicReference'
+  )
+  validatePayloadV3ClosureShim(
+    {
+      topics: obj.topics,
+      messages: obj.messages,
+      messageBlocks: obj.messageBlocks,
+      branches: obj.branches,
+      tombstones: tombstonesV3Only,
+      orderFrames: obj.orderFrames
+    } as unknown as SyncPayloadV3,
+    path
+  )
+  // FileAsset live/tombstone overlap
+  {
+    const fileAssetIds = new Set<string>((fileAssets as FileAssetEntityV5[]).map((a) => a.id))
+    for (const t of tombstones as Array<{ entityType: string; entityId: string }>) {
+      if (t.entityType !== 'fileAsset') continue
+      if (fileAssetIds.has(t.entityId)) {
+        throw new ValidationError(`entity both live and tombstoned: fileAsset ${t.entityId}`, `${path}.tombstones`)
+      }
+    }
+  }
+  // Assistant live/tombstone overlap
+  {
+    const liveKeys = new Set<string>((assistantConfigs as AssistantConfigEntityV4[]).map((c) => c.key))
+    const tombKeys = new Set<string>()
+    for (const t of assistantTombstones as AssistantTombstoneV4[]) {
+      if (tombKeys.has(t.key))
+        throw new ValidationError(`duplicate assistant tombstone ${t.key}`, `${path}.assistantTombstones`)
+      tombKeys.add(t.key)
+      if (liveKeys.has(t.key))
+        throw new ValidationError(`assistant both live and tombstoned: ${t.key}`, `${path}.assistantTombstones`)
+    }
+  }
+  // FileAsset closure: block assetIds must reference a live fileAsset.
+  {
+    const fileAssetIdSet = new Set<string>((fileAssets as FileAssetEntityV5[]).map((a) => a.id))
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i] as MessageBlockEntityV5
+      for (const aid of b.assetIds) {
+        if (!fileAssetIdSet.has(aid)) {
+          throw new ValidationError(
+            `block assetIds "${aid}" must reference a live fileAsset`,
+            `${path}.messageBlocks[${i}].assetIds`
+          )
+        }
+      }
+    }
+  }
+  // Reference closure: every live relation is owned by a live target topic in
+  // this same payload, and a relation is never simultaneously live and
+  // tombstoned. Source topic/branch/anchor are deliberately not required.
+  {
+    const topicIdSet = new Set<string>((topics as TopicEntity[]).map((t) => t.id))
+    for (let i = 0; i < topicReferences.length; i++) {
+      const r = topicReferences[i] as TopicReferenceEntityV6
+      if (!topicIdSet.has(r.targetTopicId)) {
+        throw new ValidationError(
+          `topicReferences[${i}] target topic "${r.targetTopicId}" must be a live topic`,
+          `${path}.topicReferences[${i}].targetTopicId`
+        )
+      }
+    }
+    const refTombKeys = new Set<string>()
+    for (const t of tombstones as Array<{ entityType: string; entityId: string }>) {
+      if (t.entityType !== 'topicReference') continue
+      if (refTombKeys.has(t.entityId)) {
+        throw new ValidationError(`duplicate tombstone topicReference:${t.entityId}`, `${path}.tombstones`)
+      }
+      refTombKeys.add(t.entityId)
+    }
+    for (const r of topicReferences as TopicReferenceEntityV6[]) {
+      if (refTombKeys.has(r.targetTopicId)) {
+        throw new ValidationError(
+          `entity both live and tombstoned: topicReference ${r.targetTopicId}`,
+          `${path}.tombstones`
+        )
+      }
+    }
+  }
+  validateManifestV6Recompute(obj as unknown as SyncPayloadV6, path)
+  return obj as unknown as SyncPayloadV6
+}
+
+function validateManifestV6Recompute(payload: SyncPayloadV6, path: string): void {
+  const manifest = payload.manifest
+  const tCounts = { topic: 0, message: 0, messageBlock: 0, topicBranch: 0, fileAsset: 0, topicReference: 0 }
+  for (const t of payload.tombstones as Array<{ entityType: string }>) {
+    if (t.entityType === 'topic') tCounts.topic++
+    else if (t.entityType === 'message') tCounts.message++
+    else if (t.entityType === 'messageBlock') tCounts.messageBlock++
+    else if (t.entityType === 'topicBranch') tCounts.topicBranch++
+    else if (t.entityType === 'fileAsset') tCounts.fileAsset++
+    else if (t.entityType === 'topicReference') tCounts.topicReference++
+  }
+  const fCounts = { topicMessage: 0, messageBlock: 0, branchSuffix: 0 }
+  for (const f of payload.orderFrames) {
+    if (f.kind === 'topicMessage') fCounts.topicMessage++
+    else if (f.kind === 'messageBlock') fCounts.messageBlock++
+    else fCounts.branchSuffix++
+  }
+  if (
+    manifest.liveCounts.topic !== payload.topics.length ||
+    manifest.liveCounts.message !== payload.messages.length ||
+    manifest.liveCounts.messageBlock !== payload.messageBlocks.length ||
+    manifest.liveCounts.branch !== (payload.branches as unknown[]).length ||
+    manifest.liveCounts.assistantConfig !== (payload.assistantConfigs as unknown[]).length ||
+    manifest.liveCounts.fileAsset !== (payload.fileAssets as unknown[]).length ||
+    manifest.liveCounts.topicReference !== (payload.topicReferences as unknown[]).length
+  ) {
+    throw new ValidationError('manifest liveCounts mismatch', `${path}.manifest.liveCounts`)
+  }
+  if (
+    manifest.tombstoneCounts.topic !== tCounts.topic ||
+    manifest.tombstoneCounts.message !== tCounts.message ||
+    manifest.tombstoneCounts.messageBlock !== tCounts.messageBlock ||
+    manifest.tombstoneCounts.topicBranch !== tCounts.topicBranch ||
+    manifest.tombstoneCounts.fileAsset !== tCounts.fileAsset ||
+    manifest.tombstoneCounts.topicReference !== tCounts.topicReference ||
+    manifest.tombstoneCounts.assistantConfig !== (payload.assistantTombstones as unknown[]).length
+  ) {
+    throw new ValidationError('manifest tombstoneCounts mismatch', `${path}.manifest.tombstoneCounts`)
+  }
+  if (
+    manifest.frameCounts.topicMessage !== fCounts.topicMessage ||
+    manifest.frameCounts.messageBlock !== fCounts.messageBlock ||
+    manifest.frameCounts.branchSuffix !== fCounts.branchSuffix
+  ) {
+    throw new ValidationError('manifest frameCounts mismatch', `${path}.manifest.frameCounts`)
+  }
+  if (manifest.replacementCount !== (payload.replacementRegisters as unknown[]).length) {
+    throw new ValidationError('manifest replacementCount mismatch', `${path}.manifest.replacementCount`)
+  }
+  if (manifest.completeness !== COMPLETENESS_COMPLETE) {
+    throw new ValidationError('manifest completeness must be "complete"', `${path}.manifest.completeness`)
+  }
+}
+
+function isV6PayloadLike(value: unknown): boolean {
+  if (!isPlainObject(value)) return false
+  const obj = value as Record<string, unknown>
+  return obj.payloadSchema === PAYLOAD_SCHEMA_V6 || obj.inventoryVersion === INVENTORY_VERSION_V6
+}
+
+export function isV6EnvelopeLike(value: unknown): boolean {
+  if (!isPlainObject(value)) return false
+  return (value as Record<string, unknown>).wireVersion === WIRE_VERSION_V6
+}
+
+export function validatePayloadV6(value: unknown): SyncPayloadV6 & { readonly [ValidatedPayloadBrand]: true } {
+  return validatePayloadV6Structure(value, 'payload') as SyncPayloadV6 & {
+    readonly [ValidatedPayloadBrand]: true
+  }
+}
+
+export function validateEnvelopeV6(value: unknown): SyncEnvelopeV6 & { readonly [ValidatedEnvelopeBrand]: true } {
+  const obj = assertPlainObject(value, '$')
+  assertExactKeys(obj, ENVELOPE_KEYS, '$')
+  if (obj.wireVersion !== WIRE_VERSION_V6)
+    throw new ValidationError(`wireVersion must be "${WIRE_VERSION_V6}"`, '$.wireVersion')
+  assertNonEmptyValidUnicodeScalarString(obj.channelId, '$.channelId')
+  assertSafeNonNegativeInt(obj.watermark, '$.watermark')
+  if (obj.digestScheme !== DIGEST_SCHEME)
+    throw new ValidationError(`digestScheme must be "${DIGEST_SCHEME}"`, '$.digestScheme')
+  if (typeof obj.digest !== 'string' || !/^[0-9a-f]{64}$/.test(obj.digest)) {
+    throw new ValidationError('digest must be lowercase 64hex', '$.digest')
+  }
+  const payload = validatePayloadV6Structure(obj.payload, '$.payload')
+  return {
+    wireVersion: obj.wireVersion as typeof WIRE_VERSION_V6,
+    channelId: obj.channelId as string,
+    watermark: obj.watermark as number,
+    digestScheme: obj.digestScheme as typeof DIGEST_SCHEME,
+    digest: obj.digest,
+    payload
+  } as SyncEnvelopeV6 & { readonly [ValidatedEnvelopeBrand]: true }
+}
+
+export function isSyncPayloadV6(value: unknown): value is SyncPayloadV6 {
+  try {
+    validatePayloadV6(value)
     return true
   } catch {
     return false

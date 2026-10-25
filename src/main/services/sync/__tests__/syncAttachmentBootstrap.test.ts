@@ -428,7 +428,7 @@ describe('attachment V5 bootstrap three domains over real relay', () => {
       }
       expect(env.watermark).toBe(published.watermark)
       expect(env.digest).toBe(published.digest)
-      expect(env.wireVersion).toBe('sync-baseline-wire-v5')
+      expect(env.wireVersion).toBe('sync-baseline-wire-v6')
       baselineWatermark = env.watermark
       // verify counts truthful via envelope
       const payload = env.payload

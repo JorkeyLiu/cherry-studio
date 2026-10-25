@@ -24,7 +24,6 @@ import { apiServerService } from './services/ApiServerService'
 import { saveDataHandshake } from './services/SaveDataHandshake'
 import { appMenuService } from './services/AppMenuService'
 import { configManager } from './services/ConfigManager'
-import mcpService from './services/MCPService'
 import { nodeTraceService } from './services/NodeTraceService'
 import powerMonitorService from './services/PowerMonitorService'
 import {
@@ -509,12 +508,6 @@ if (!app.requestSingleInstanceLock()) {
       await analyticsService.destroy()
     } catch (error) {
       logger.warn('Error cleaning up analyticsService:', error as Error)
-    }
-
-    try {
-      await mcpService.cleanup()
-    } catch (error) {
-      logger.warn('Error cleaning up mcpService:', error as Error)
     }
 
     try {

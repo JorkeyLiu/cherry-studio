@@ -22,12 +22,11 @@ export interface PromptToolUseConfig extends BaseToolUsePluginConfig {
   buildSystemPrompt?: (userSystemPrompt: string, tools: ToolSet) => string
   // 自定义工具解析函数（可选，有默认实现）
   parseToolUse?: (content: string, tools: ToolSet) => { results: ToolUseResult[]; content: string }
-  mcpMode?: string
 }
 
 /**
- * 扩展的 AI 请求上下文，支持 MCP 工具存储
+ * 扩展的 AI 请求上下文，支持 prompt 模式工具存储
  */
 export interface ToolUseRequestContext extends AiRequestContext {
-  mcpTools: ToolSet
+  promptTools: ToolSet
 }

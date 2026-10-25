@@ -1,10 +1,16 @@
 import type * as SnapshotBlocksModule from '@renderer/utils/messageUtils/snapshotBlocks'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { dbServiceMocks, persistMock, summaryMock, settingMock, dispatchMock, getStateMock, updateTopicMock } =
+const { dbServiceMocks, persistAutoMock, summaryMock, settingMock, dispatchMock, getStateMock, updateTopicMock } =
   vi.hoisted(() => ({
     dbServiceMocks: { fetchTopicNamingContext: vi.fn() },
-    persistMock: vi.fn().mockResolvedValue(undefined),
+    persistAutoMock: vi.fn(
+      async (
+        _topicId: string,
+        name: string,
+        _expected: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
+      ) => ({ name })
+    ),
     summaryMock: vi.fn(),
     settingMock: vi.fn(),
     dispatchMock: vi.fn(),
@@ -13,7 +19,7 @@ const { dbServiceMocks, persistMock, summaryMock, settingMock, dispatchMock, get
   }))
 
 vi.mock('@renderer/services/db', () => ({ dbService: dbServiceMocks }))
-vi.mock('@renderer/services/db/topicMetadataPersist', () => ({ persistTopicMetadata: persistMock }))
+vi.mock('@renderer/services/db/topicMetadataPersist', () => ({ persistAutomaticTopicName: persistAutoMock }))
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({ consumeFileCleanupResult: vi.fn() }))
 vi.mock('@renderer/services/ApiService', () => ({ fetchMessagesSummary: summaryMock }))
 vi.mock('@renderer/services/EventService', () => ({ EVENT_NAMES: {}, EventEmitter: { emit: vi.fn() } }))
@@ -79,9 +85,20 @@ function seedStore(reduxTopic: any = { id: 'topic-1', assistantId: 'assistant-1'
 describe('autoRenameTopic — bounded naming authority', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Clear once-queues so a prior delayed test never leaks a pending
+    // implementation into the next test (which would hang it).
+    persistAutoMock.mockReset()
+    persistAutoMock.mockImplementation(
+      async (
+        _topicId: string,
+        name: string,
+        _expected: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
+      ) => ({ name })
+    )
+    summaryMock.mockReset()
+    summaryMock.mockResolvedValue({ text: 'Summarized Name' })
     seedStore()
     settingMock.mockReturnValue(true)
-    summaryMock.mockResolvedValue({ text: 'Summarized Name' })
     ;(window as any).toast = { error: vi.fn() }
   })
 
@@ -98,7 +115,13 @@ describe('autoRenameTopic — bounded naming authority', () => {
     const args = summaryMock.mock.calls[0][0]
     expect(args.messages.map((m: any) => m.id)).toEqual(['m1', 'm2'])
     expect(args.blocksById.get('b1').content).toContain('First message')
-    expect(persistMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock.mock.calls[0][0]).toBe('topic-1')
+    expect(persistAutoMock.mock.calls[0][1]).toBe('Summarized Name')
+    expect(persistAutoMock.mock.calls[0][2]).toEqual({
+      expectedName: 'New Topic',
+      expectedIsNameManuallyEdited: false
+    })
     expect(dispatchMock).toHaveBeenCalled()
   })
 
@@ -126,9 +149,9 @@ describe('autoRenameTopic — bounded naming authority', () => {
     dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
     summaryMock.mockResolvedValue({ text: null, error: 'boom' })
     await autoRenameTopic(assistant, 'topic-1')
-    expect(persistMock).toHaveBeenCalledOnce()
-    const persisted = persistMock.mock.calls[0][0]
-    expect(persisted.name).toContain('First message')
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    const persistedName = persistAutoMock.mock.calls[0][1]
+    expect(persistedName).toContain('First message')
     expect((window as any).toast.error).toHaveBeenCalled()
   })
 
@@ -137,7 +160,7 @@ describe('autoRenameTopic — bounded naming authority', () => {
     dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).not.toHaveBeenCalled()
-    expect(persistMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock).toHaveBeenCalledOnce()
   })
 
   it('manual-name guard skips rename without summary', async () => {
@@ -146,7 +169,7 @@ describe('autoRenameTopic — bounded naming authority', () => {
     )
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).not.toHaveBeenCalled()
-    expect(persistMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
   })
 
   it('count <2 and empty topic skip summary', async () => {
@@ -190,7 +213,7 @@ describe('autoRenameTopic — bounded naming authority', () => {
     dbServiceMocks.fetchTopicNamingContext.mockRejectedValue(err)
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).not.toHaveBeenCalled()
-    expect(persistMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
   })
 
   it('null authority name (legacy/lazy Main row) with Redux default proceeds to summary', async () => {
@@ -199,7 +222,11 @@ describe('autoRenameTopic — bounded naming authority', () => {
     )
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).toHaveBeenCalledOnce()
-    expect(persistMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock.mock.calls[0][2]).toEqual({
+      expectedName: null,
+      expectedIsNameManuallyEdited: false
+    })
   })
 
   it('empty authority name (legacy/lazy Main row) with Redux default proceeds to summary', async () => {
@@ -208,7 +235,7 @@ describe('autoRenameTopic — bounded naming authority', () => {
     )
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).toHaveBeenCalledOnce()
-    expect(persistMock).toHaveBeenCalledOnce()
+    expect(persistAutoMock).toHaveBeenCalledOnce()
   })
 
   it('manually edited legacy row still skips even with empty authority name', async () => {
@@ -217,6 +244,131 @@ describe('autoRenameTopic — bounded naming authority', () => {
     )
     await autoRenameTopic(assistant, 'topic-1')
     expect(summaryMock).not.toHaveBeenCalled()
-    expect(persistMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
+  })
+
+  it('null authority with non-default Redux fallback is preserved (no summary, no persist)', async () => {
+    seedStore({ id: 'topic-1', assistantId: 'assistant-1', name: 'My Manual Title' })
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(
+      namingContext({ topic: { id: 'topic-1', name: null, isNameManuallyEdited: false } })
+    )
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(summaryMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
+    expect(dispatchMock).not.toHaveBeenCalled()
+  })
+
+  it('empty authority with non-default Redux fallback is preserved', async () => {
+    seedStore({ id: 'topic-1', assistantId: 'assistant-1', name: 'Branch Inherited Title' })
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(
+      namingContext({ topic: { id: 'topic-1', name: '', isNameManuallyEdited: false } })
+    )
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(summaryMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
+  })
+
+  it('Redux manual flag blocks even when authority flag is false', async () => {
+    seedStore({ id: 'topic-1', assistantId: 'assistant-1', name: 'New Topic', isNameManuallyEdited: true })
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(summaryMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
+  })
+
+  it('non-default authority name is preserved without summary', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(
+      namingContext({ topic: { id: 'topic-1', name: 'Already Named', isNameManuallyEdited: false } })
+    )
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(summaryMock).not.toHaveBeenCalled()
+    expect(persistAutoMock).not.toHaveBeenCalled()
+  })
+
+  it('delayed summary + intervening manual rename: manual name and flag survive (guarded no-op)', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    let resolveSummary!: (v: any) => void
+    summaryMock.mockImplementationOnce(() => new Promise((resolve) => (resolveSummary = resolve as any)))
+    const run = autoRenameTopic(assistant, 'topic-1')
+    // Wait until the summary request is actually in flight (initial authority
+    // read already captured), then intervene before resolving.
+    await vi.waitFor(() => expect(summaryMock).toHaveBeenCalledTimes(1))
+    persistAutoMock.mockImplementationOnce(async () => ({ name: 'My Manual Title' }))
+    seedStore({ id: 'topic-1', assistantId: 'assistant-1', name: 'My Manual Title', isNameManuallyEdited: true })
+    resolveSummary({ text: 'Stale Summary' })
+    await run
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    // Guarded no-op: the topic update is never dispatched (renaming indicator
+    // dispatches still run); Redux keeps the manual title/flag.
+    expect(updateTopicMock).not.toHaveBeenCalled()
+  })
+
+  it('intervening successful auto name discards stale result (changed preimage no-op)', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    summaryMock.mockResolvedValue({ text: 'Stale Summary' })
+    persistAutoMock.mockResolvedValueOnce({ name: 'Fresh Auto Name' })
+    seedStore({ id: 'topic-1', assistantId: 'assistant-1', name: 'Fresh Auto Name' })
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    expect(updateTopicMock).not.toHaveBeenCalled()
+  })
+
+  it('conditional write NOT_FOUND (topic deleted mid-flight) is a graceful no-op', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    summaryMock.mockResolvedValue({ text: 'Late Summary' })
+    const err: any = new Error('gone')
+    err.code = 'NOT_FOUND'
+    persistAutoMock.mockRejectedValueOnce(err)
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+    expect(updateTopicMock).not.toHaveBeenCalled()
+  })
+
+  it('missing Redux topic at commit time never reintroduces the topic', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    summaryMock.mockResolvedValue({ text: 'Late Summary' })
+    persistAutoMock.mockResolvedValueOnce({ name: 'Late Summary' })
+    getStateMock.mockReturnValue({
+      assistants: { assistants: [{ id: 'assistant-1', topics: [] }] },
+      runtime: { chat: { renamingTopics: [], newlyRenamedTopics: [] } }
+    })
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(updateTopicMock).not.toHaveBeenCalled()
+  })
+
+  it('successful conditional write updates only the intended name from latest Redux (no stale flag revert)', async () => {
+    seedStore({
+      id: 'topic-1',
+      assistantId: 'assistant-1',
+      name: 'New Topic',
+      pinned: true,
+      prompt: 'keep-me',
+      isNameManuallyEdited: false
+    })
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    summaryMock.mockResolvedValue({ text: 'Fresh Name' })
+    persistAutoMock.mockResolvedValueOnce({ name: 'Fresh Name' })
+    await autoRenameTopic(assistant, 'topic-1')
+    expect(updateTopicMock).toHaveBeenCalledOnce()
+    const payload = updateTopicMock.mock.calls[0][0]
+    expect(payload.topic.name).toBe('Fresh Name')
+    expect(payload.topic.pinned).toBe(true)
+    expect(payload.topic.prompt).toBe('keep-me')
+    expect(payload.topic.isNameManuallyEdited).toBe(false)
+  })
+
+  it('passes the captured branch route through (true-branch send preserves logical name contract)', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    await autoRenameTopic(assistant, 'topic-1', 'branch-1')
+    expect(dbServiceMocks.fetchTopicNamingContext).toHaveBeenCalledExactlyOnceWith('topic-1', 'branch-1')
+    expect(persistAutoMock).toHaveBeenCalledOnce()
+  })
+
+  it('branch-row names stay separate: logical topic write never targets a branch row', async () => {
+    dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
+    await autoRenameTopic(assistant, 'topic-1', 'branch-1')
+    // Conditional write addresses the logical topic only (topicId, never branchId).
+    expect(persistAutoMock.mock.calls[0][0]).toBe('topic-1')
+    expect(persistAutoMock.mock.calls[0][1]).toBe('Summarized Name')
   })
 })

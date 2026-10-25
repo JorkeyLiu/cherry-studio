@@ -76,11 +76,6 @@ export const isSupportUrlContextProvider = (provider: Provider) => {
   return SUPPORT_URL_CONTEXT_PROVIDER_TYPES.some((type) => type === provider.type)
 }
 
-/** Gemini native websearch follows protocol only: `type === 'gemini'`. */
-export const isGeminiWebSearchProvider = (provider: Provider) => {
-  return provider.type === 'gemini'
-}
-
 /**
  * Active OpenAI-compatible check: generic `openai` protocol only.
  * `openai-response` (Responses API) has its own branch; `anthropic`/`gemini`

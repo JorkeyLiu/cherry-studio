@@ -256,4 +256,375 @@ describe('insertMessageGroups — stable intents, atomic multi-group', () => {
     expect(fetched.messages.map((m: any) => m.id)).toEqual([m0, uNew])
     expect(fetched.blocks.map((b: any) => b.id)).toContain(userBlock.id)
   })
+
+  it('acknowledgment carries exact canonical ids/order/route/mutable subset with per-group placement', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0 }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1 }) as any, [])
+    const beforeId = `b-${uid()}`
+    const tailId = `tl-${uid()}`
+    const tailBlock = makeBlockJson(tailId, 'main_text')
+    const res = agg.insertMessageGroups(topic, [
+      {
+        entries: [{ message: makeMessageJson(topic, { id: beforeId }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: tailId }) as any, blocks: [tailBlock as any] }],
+        intent: { kind: 'topic-tail' } as any
+      }
+    ])
+    expect(res.ok).toBe(true)
+    validateChatDbResult('chatdb:insert-message-groups', res)
+    const value = okValue(res) as unknown as {
+      topicId: string
+      branchId: string | null
+      insertedMessages: Array<{ id: string }>
+      insertedBlocks: Array<{ id: string; messageId: string }>
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ insertedMessageIds: string[]; beforeMessageId: string | null; nextMessageId: string | null }>
+    }
+    expect(value.topicId).toBe(topic)
+    expect(value.branchId).toBeNull()
+    // Flat ids follow flat request-group order and match wires in order.
+    expect(value.insertedMessageIds).toEqual([beforeId, tailId])
+    expect(value.insertedMessages.map((m) => m.id)).toEqual([beforeId, tailId])
+    // Capability is the Main-produced subset of actual inserted ids.
+    expect(value.mutableMessageIds).toEqual([beforeId, tailId])
+    // Per-group runs preserve transaction ordering with stable neighbors.
+    expect(value.groups).toHaveLength(2)
+    expect(value.groups[0].insertedMessageIds).toEqual([beforeId])
+    expect(value.groups[0].beforeMessageId).toBe(m0)
+    expect(value.groups[0].nextMessageId).toBe(m1)
+    expect(value.groups[1].insertedMessageIds).toEqual([tailId])
+    expect(value.groups[1].nextMessageId).toBeNull()
+    expect(value.insertedBlocks.map((b) => b.id)).toContain(tailBlock.id)
+  })
+
+  it('three same-anchor groups chain through batch neighbors with request-order flat ids', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0 }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1 }) as any, [])
+    const g0 = `g0-${uid()}`
+    const g1 = `g1-${uid()}`
+    const g2 = `g2-${uid()}`
+    const res = agg.insertMessageGroups(topic, [
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g0 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g1 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g2 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      }
+    ])
+    expect(res.ok).toBe(true)
+    validateChatDbResult('chatdb:insert-message-groups', res)
+    const value = okValue(res) as unknown as {
+      insertedMessages: Array<{ id: string }>
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ insertedMessageIds: string[]; beforeMessageId: string | null; nextMessageId: string | null }>
+    }
+    // Flat ids follow flat request-group concatenated order.
+    expect(value.insertedMessageIds).toEqual([g0, g1, g2])
+    expect(value.insertedMessages.map((m) => m.id)).toEqual([g0, g1, g2])
+    expect(value.mutableMessageIds).toEqual([g0, g1, g2])
+    // Same-anchor stacking preserves request order physically; middle group
+    // neighbors are same-batch inserted ids (the partial-load gap trigger).
+    expect(value.groups).toHaveLength(3)
+    expect(value.groups[0].insertedMessageIds).toEqual([g0])
+    expect(value.groups[0].beforeMessageId).toBe(m0)
+    expect(value.groups[0].nextMessageId).toBe(g1)
+    expect(value.groups[1].insertedMessageIds).toEqual([g1])
+    expect(value.groups[1].beforeMessageId).toBe(g0)
+    expect(value.groups[1].nextMessageId).toBe(g2)
+    expect(value.groups[2].insertedMessageIds).toEqual([g2])
+    expect(value.groups[2].beforeMessageId).toBe(g1)
+    expect(value.groups[2].nextMessageId).toBe(m1)
+    const order = okValue(agg.fetchMessages(topic)).messages.map((m: any) => m.id)
+    expect(order).toEqual([m0, g0, g1, g2, m1])
+  })
+
+  describe('bounded fork-boundary paste (branch owner head)', () => {
+    function seedBranchWithSuffix(): {
+      topic: string
+      u0: string
+      a0a: string
+      fork: string
+      s1: string
+      s2: string
+      branchId: string
+      prefix: string[]
+    } {
+      const topic = `t-${uid()}`
+      const u0 = `u0-${uid()}`
+      const a0a = `a0a-${uid()}`
+      const fork = `fork-${uid()}`
+      agg.ensureTopic(topic, 'as-1', `topic-${topic}`)
+      agg.appendMessage(topic, makeMessageJson(topic, { id: u0, role: 'user' }) as any, [])
+      agg.appendMessage(topic, makeMessageJson(topic, { id: a0a, role: 'assistant', askId: u0 }) as any, [])
+      agg.appendMessage(topic, makeMessageJson(topic, { id: fork, role: 'assistant', askId: u0 }) as any, [])
+      const branchId = (okValue(agg.createBranch(topic, null, fork, 'B1')).branch as { id: string }).id
+      const s1 = `s1-${uid()}`
+      const s2 = `s2-${uid()}`
+      agg.appendMessage(topic, makeMessageJson(topic, { id: s1, role: 'user' }) as any, [], undefined, undefined, {
+        branchId
+      } as any)
+      agg.appendMessage(
+        topic,
+        makeMessageJson(topic, { id: s2, role: 'assistant', askId: s1 }) as any,
+        [],
+        undefined,
+        undefined,
+        {
+          branchId
+        } as any
+      )
+      return { topic, u0, a0a, fork, s1, s2, branchId, prefix: [u0, a0a, fork] }
+    }
+
+    it('group user anchor at final inherited boundary lands at owner head before suffix', () => {
+      const { topic, u0, fork, s1, s2, branchId, prefix } = seedBranchWithSuffix()
+      const n1 = `n1-${uid()}`
+      const n2 = `n2-${uid()}`
+      const res = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [
+              { message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] },
+              { message: makeMessageJson(topic, { id: n2, role: 'assistant', askId: n1 }) as any, blocks: [] }
+            ],
+            intent: { kind: 'after-group-tail', messageId: u0 } as any
+          }
+        ],
+        branchId
+      )
+      expect(res.ok).toBe(true)
+      const value = okValue(res) as any
+      expect(value.branchId).toBe(branchId)
+      expect(value.insertedMessageIds).toEqual([n1, n2])
+      // Ack neighbors: before is the fork, next is the former suffix head.
+      expect(value.groups).toHaveLength(1)
+      expect(value.groups[0].beforeMessageId).toBe(fork)
+      expect(value.groups[0].nextMessageId).toBe(s1)
+      // Effective order: prefix + new + suffix.
+      const effective = okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)
+      expect(effective).toEqual([...prefix, n1, n2, s1, s2])
+      // Inherited rows/order unchanged; new rows owned by the branch.
+      const mainOwned = okValue(agg.getRawTopic(topic, null))!.messages.map((m: any) => m.id)
+      expect(mainOwned).toEqual(prefix)
+      const branchOwned = okValue(agg.getRawTopic(topic, branchId))!.messages.map((m: any) => m.id)
+      expect(branchOwned).toEqual([n1, n2, s1, s2])
+      const wires = (value.insertedMessages as Array<Record<string, unknown>>).map((w) => w.branchId)
+      for (const b of wires) expect(b).toBe(branchId)
+    })
+
+    it('exact fork assistant anchor also lands at owner head', () => {
+      const { topic, fork, s1, s2, branchId, prefix } = seedBranchWithSuffix()
+      const n1 = `n1-${uid()}`
+      const res = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'after-group-tail', messageId: fork } as any
+          }
+        ],
+        branchId
+      )
+      expect(res.ok).toBe(true)
+      const value = okValue(res) as any
+      expect(value.groups[0].beforeMessageId).toBe(fork)
+      expect(value.groups[0].nextMessageId).toBe(s1)
+      const effective = okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)
+      expect(effective).toEqual([...prefix, n1, s1, s2])
+      // Simpler durable assertion: new row sits between fork and former suffix head.
+      const idx = effective.indexOf(n1)
+      expect(effective[idx - 1]).toBe(fork)
+      expect(effective[idx + 1]).toBe(s1)
+    })
+
+    it('older inherited prefix anchor rejects with zero writes', () => {
+      const topic = `t-${uid()}`
+      const ou = `ou-${uid()}`
+      const oa = `oa-${uid()}`
+      const u0 = `u0-${uid()}`
+      const fork = `fork-${uid()}`
+      agg.ensureTopic(topic, 'as-1', `topic-${topic}`)
+      agg.appendMessage(topic, makeMessageJson(topic, { id: ou, role: 'user' }) as any, [])
+      agg.appendMessage(topic, makeMessageJson(topic, { id: oa, role: 'assistant', askId: ou }) as any, [])
+      agg.appendMessage(topic, makeMessageJson(topic, { id: u0, role: 'user' }) as any, [])
+      agg.appendMessage(topic, makeMessageJson(topic, { id: fork, role: 'assistant', askId: u0 }) as any, [])
+      const branchId = (okValue(agg.createBranch(topic, null, fork, 'B1')).branch as { id: string }).id
+      const s1 = `s1-${uid()}`
+      agg.appendMessage(topic, makeMessageJson(topic, { id: s1, role: 'user' }) as any, [], undefined, undefined, {
+        branchId
+      } as any)
+      const beforeEffective = okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)
+      const beforeOwned = okValue(agg.getRawTopic(topic, branchId))!.messages.map((m: any) => m.id)
+      const res = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: `n-${uid()}`, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'after-group-tail', messageId: ou } as any
+          }
+        ],
+        branchId
+      )
+      expect(res.ok).toBe(false)
+      expect(failError(res).code).toBe('VALIDATION_ERROR')
+      expect(okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)).toEqual(beforeEffective)
+      expect(okValue(agg.getRawTopic(topic, branchId))!.messages.map((m: any) => m.id)).toEqual(beforeOwned)
+    })
+
+    it('nested address-specific boundary: parent-boundary group rejects through nested, nested fork succeeds', () => {
+      const { topic, u0, fork, s1, branchId } = seedBranchWithSuffix()
+      // Nested branch forked at the parent-owned suffix head.
+      const nestedId = (okValue(agg.createBranch(topic, branchId, s1, 'B2')).branch as { id: string }).id
+      // Parent fork group (u0 -> fork) is an older ancestor through nested: reject.
+      const bad = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: `n-${uid()}`, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'after-group-tail', messageId: u0 } as any
+          }
+        ],
+        nestedId
+      )
+      expect(bad.ok).toBe(false)
+      expect(failError(bad).code).toBe('VALIDATION_ERROR')
+      // Nested fork anchor (s1, parent-owned through nested's parent) succeeds at nested head.
+      const n1 = `n-${uid()}`
+      const good = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'after-group-tail', messageId: s1 } as any
+          }
+        ],
+        nestedId
+      )
+      expect(good.ok).toBe(true)
+      const effective = okValue(agg.fetchMessages(topic, nestedId)).messages.map((m: any) => m.id)
+      // Nested effective: main prefix + parent suffix through s1, then new row.
+      // New row must sit immediately after s1 (nested owner head).
+      const idx = effective.indexOf(n1)
+      expect(effective[idx - 1]).toBe(s1)
+      // Parent route untouched by the nested insert.
+      void fork
+      void branchId
+    })
+
+    it('owned anchor placement and topic-tail append keep semantics', () => {
+      const { topic, s1, s2, branchId, prefix } = seedBranchWithSuffix()
+      // Owned after-group-tail: after s1's group (s1 + s2) lands at owner tail.
+      const nOwned = `no-${uid()}`
+      const ownedRes = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: nOwned, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'after-group-tail', messageId: s1 } as any
+          }
+        ],
+        branchId
+      )
+      expect(ownedRes.ok).toBe(true)
+      expect(okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)).toEqual([
+        ...prefix,
+        s1,
+        s2,
+        nOwned
+      ])
+      // Topic-tail appends after everything.
+      const nTail = `nt-${uid()}`
+      const tailRes = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [{ message: makeMessageJson(topic, { id: nTail, role: 'user' }) as any, blocks: [] }],
+            intent: { kind: 'topic-tail' } as any
+          }
+        ],
+        branchId
+      )
+      expect(tailRes.ok).toBe(true)
+      expect(okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)).toEqual([
+        ...prefix,
+        s1,
+        s2,
+        nOwned,
+        nTail
+      ])
+    })
+
+    it('same stable intent reinserts at head after undo-delete (redo stability)', () => {
+      const { topic, u0, fork, s1, s2, branchId, prefix } = seedBranchWithSuffix()
+      const intent = { kind: 'after-group-tail', messageId: u0 } as any
+      const n1 = `n1-${uid()}`
+      const n2 = `n2-${uid()}`
+      const first = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [
+              { message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] },
+              { message: makeMessageJson(topic, { id: n2, role: 'assistant', askId: n1 }) as any, blocks: [] }
+            ],
+            intent
+          }
+        ],
+        branchId
+      )
+      expect(first.ok).toBe(true)
+      expect(okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)).toEqual([
+        ...prefix,
+        n1,
+        n2,
+        s1,
+        s2
+      ])
+      // Undo: delete the pasted run through the addressed route.
+      expect(agg.deleteMessages(topic, [n1, n2], branchId).ok).toBe(true)
+      expect(okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)).toEqual([...prefix, s1, s2])
+      // Redo with the STORED intent (same object shape) lands at head again.
+      const r1 = `r1-${uid()}`
+      const r2 = `r2-${uid()}`
+      const redo = agg.insertMessageGroups(
+        topic,
+        [
+          {
+            entries: [
+              { message: makeMessageJson(topic, { id: r1, role: 'user' }) as any, blocks: [] },
+              { message: makeMessageJson(topic, { id: r2, role: 'assistant', askId: r1 }) as any, blocks: [] }
+            ],
+            intent
+          }
+        ],
+        branchId
+      )
+      expect(redo.ok).toBe(true)
+      const redoValue = okValue(redo) as any
+      expect(redoValue.groups[0].beforeMessageId).toBe(fork)
+      const s1Now = okValue(agg.getRawTopic(topic, branchId))!.messages.map((m: any) => m.id)[2]
+      expect(redoValue.groups[0].nextMessageId).toBe(s1Now)
+      const effective = okValue(agg.fetchMessages(topic, branchId)).messages.map((m: any) => m.id)
+      expect(effective.slice(0, prefix.length)).toEqual(prefix)
+      expect(effective.slice(prefix.length, prefix.length + 2)).toEqual([r1, r2])
+    })
+  })
 })

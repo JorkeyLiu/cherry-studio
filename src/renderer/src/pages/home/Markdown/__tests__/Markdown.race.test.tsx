@@ -83,7 +83,8 @@ vi.mock('@renderer/utils/formats', () => ({
 }))
 
 vi.mock('@renderer/utils/markdown', () => ({
-  processLatexBrackets: vi.fn((str: string) => str)
+  processLatexBrackets: vi.fn((str: string) => str),
+  normalizeAttachedBlockMathClose: vi.fn((str: string) => str)
 }))
 
 // LOCK-001 race seam: capture scheduled parsed-content commits and defer them.

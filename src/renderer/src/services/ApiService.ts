@@ -3,16 +3,13 @@
  */
 import { loggerService } from '@logger'
 import { buildStreamTextParams } from '@renderer/aiCore/prepareParams'
-import { buildOpencodeCheckSessionHeaders } from '@renderer/aiCore/prepareParams/header'
 import type { AiSdkMiddlewareConfig } from '@renderer/aiCore/types/middlewareConfig'
 import { buildProviderOptions } from '@renderer/aiCore/utils/options'
 import { isDedicatedImageGenerationModel, isEmbeddingModel } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import i18n from '@renderer/i18n'
-import store from '@renderer/store'
-import { hubMCPServer } from '@renderer/store/mcp'
-import type { Assistant, MCPServer, MCPTool, Model, Provider } from '@renderer/types'
-import { type FetchChatCompletionParams, getEffectiveMcpMode } from '@renderer/types'
+import type { Assistant, Model, Provider } from '@renderer/types'
+import type { FetchChatCompletionParams } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { type Chunk, ChunkType } from '@renderer/types/chunk'
 import type { Message, ResponseError } from '@renderer/types/newMessage'
@@ -31,7 +28,6 @@ import {
 } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { assertProviderMatchesModel, createNoModelError, isNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
-import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { isEmpty, takeRight } from 'lodash'
 
 import type { AiProviderConfig } from '../aiCore'
@@ -45,9 +41,9 @@ import {
   getQuickModel
 } from './AssistantService'
 import { type AuthorityUserSnapshot, ConversationService } from './ConversationService'
-import { logColdPathDiagnostic } from './db/sendTimingDiagnostics'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
+import type { RequestAttachmentFilter } from './requestAttachmentAvailability'
 import type { StreamProcessorCallbacks } from './StreamProcessingService'
 
 // FIXME: 这里太多重复逻辑，需要重构
@@ -69,100 +65,6 @@ export function resolveModelAndProvider(model: Model | undefined): { model: Mode
   const provider = getProviderByModel(model)
   assertProviderMatchesModel(model, provider)
   return { model, provider }
-}
-
-/**
- * Get the MCP servers to use based on the assistant's MCP mode.
- */
-export function getMcpServersForAssistant(assistant: Assistant): MCPServer[] {
-  const mode = getEffectiveMcpMode(assistant)
-  const allMcpServers = store.getState().mcp.servers || []
-  const activedMcpServers = allMcpServers.filter((s) => s.isActive)
-
-  switch (mode) {
-    case 'disabled':
-      return []
-    case 'auto':
-      return [hubMCPServer]
-    case 'manual': {
-      const assistantMcpServers = assistant.mcpServers || []
-      return activedMcpServers.filter((server) => assistantMcpServers.some((s) => s.id === server.id))
-    }
-    default:
-      return []
-  }
-}
-
-export async function fetchAllActiveServerTools(): Promise<MCPTool[]> {
-  const allMcpServers = store.getState().mcp.servers || []
-  const activedMcpServers = allMcpServers.filter((s) => s.isActive)
-
-  if (activedMcpServers.length === 0) {
-    return []
-  }
-
-  try {
-    const toolPromises = activedMcpServers.map(async (mcpServer: MCPServer) => {
-      try {
-        const tools = await window.api.mcp.listTools(mcpServer)
-        return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
-      } catch (error) {
-        logger.error(`Error fetching tools from MCP server ${mcpServer.name}:`, error as Error)
-        return []
-      }
-    })
-    const results = await Promise.allSettled(toolPromises)
-    return results
-      .filter((result): result is PromiseFulfilledResult<MCPTool[]> => result.status === 'fulfilled')
-      .map((result) => result.value)
-      .flat()
-  } catch (toolError) {
-    logger.error('Error fetching all active server tools:', toolError as Error)
-    return []
-  }
-}
-
-export async function fetchMcpTools(assistant: Assistant) {
-  let mcpTools: MCPTool[] = []
-  const enabledMCPs = getMcpServersForAssistant(assistant)
-
-  if (enabledMCPs && enabledMCPs.length > 0) {
-    // LOCK-001/003: bounded cold-path timing for the renderer→main MCP tool
-    // discovery round trip. Never logs server names/args/env.
-    const t0 = performance.now()
-    try {
-      const toolPromises = enabledMCPs.map(async (mcpServer: MCPServer) => {
-        try {
-          const tools = await window.api.mcp.listTools(mcpServer)
-          return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
-        } catch (error) {
-          // Per-server failure: log and swallow exactly as before, but rethrow
-          // so the settled result records the failure for the diagnostic.
-          logger.error(`Error fetching tools from MCP server ${mcpServer.name}:`, error as Error)
-          throw error
-        }
-      })
-      const results = await Promise.allSettled(toolPromises)
-      const failedCount = results.filter((result) => result.status === 'rejected').length
-      mcpTools = results
-        .filter((result): result is PromiseFulfilledResult<MCPTool[]> => result.status === 'fulfilled')
-        .map((result) => result.value)
-        .flat()
-      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
-        serverCount: enabledMCPs.length,
-        toolCount: mcpTools.length,
-        failedCount,
-        ok: failedCount === 0
-      })
-    } catch (toolError) {
-      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
-        serverCount: enabledMCPs.length,
-        ok: false
-      })
-      logger.error('Error fetching MCP tools:', toolError as Error)
-    }
-  }
-  return mcpTools
 }
 
 /**
@@ -193,13 +95,25 @@ export async function transformMessagesAndFetch(
   const { messages, assistant, topicId } = request
 
   try {
-    const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(
-      messages,
-      assistant,
-      topicId,
-      request.authorityUser,
-      request.branchId
-    )
+    const { modelMessages, uiMessages, nothingSendable, attachmentFilter } =
+      await ConversationService.prepareMessagesForModel(
+        messages,
+        assistant,
+        topicId,
+        request.authorityUser,
+        request.branchId
+      )
+
+    // Nothing sendable for this turn (every attachment it carries is
+    // unavailable on this device and no other content is left): the
+    // trigger-scoped top notice was already emitted during preparation, and the
+    // operation ends here as an explicit no-op. No provider request is issued
+    // and NO chunk is emitted — in particular no ERROR chunk — so no
+    // assistant/error block is created and the surrounding lifecycle simply
+    // finishes. This resets no persisted answer and writes nothing.
+    if (nothingSendable) {
+      return
+    }
 
     // replace prompt variables
     assistant.prompt = await replacePromptVariables(assistant.prompt, assistant.model?.name)
@@ -210,7 +124,13 @@ export async function transformMessagesAndFetch(
       await fetchImageGeneration({
         messages: uiMessages,
         assistant,
-        onChunkReceived
+        onChunkReceived,
+        // The dedicated path reads attachment blocks directly from the request
+        // view, so it must receive the very same request-local filter the
+        // conversion used — otherwise a block excluded from this request (for
+        // example historical media the user turned off) would still be read and
+        // sent as edit input.
+        attachmentFilter
       })
       return
     }
@@ -281,12 +201,8 @@ export async function fetchChatCompletion({
   const AI = new AiProvider(resolvedModel, providerWithRotatedKey)
   const provider = AI.getActualProvider()
 
-  const mcpTools: MCPTool[] = []
   onChunkReceived({ type: ChunkType.LLM_RESPONSE_CREATED })
 
-  if (isPromptToolUse(assistant) || isSupportedToolUse(assistant)) {
-    mcpTools.push(...(await fetchMcpTools(assistant)))
-  }
   if (prompt) {
     messages = [
       {
@@ -301,36 +217,25 @@ export async function fetchChatCompletion({
     params: aiSdkParams,
     modelId,
     capabilities,
-    webSearchPluginConfig,
     idleTimeout
   } = await buildStreamTextParams(messages, assistant, provider, {
-    mcpTools: mcpTools,
     allowedTools,
-    webSearchProviderId: assistant.webSearchProviderId,
-    // Stable per-conversation identity: topicId becomes `x-opencode-session`
-    // only for the official OpenCode Go endpoint (see isOpenCodeGoEndpoint).
-    topicId,
     requestOptions
   })
 
   // Unit B: prompt tool use applies only on explicit user selection. Native
   // `function` mode is never downgraded because of model function-calling
-  // metadata; protocol encode failures surface via the APICallError chain.
+  // metadata; protocol encode failures surface through the existing APICallError chain.
   const usePromptToolUse = isPromptToolUse(assistant)
 
-  const mcpMode = getEffectiveMcpMode(assistant)
   const middlewareConfig: AiSdkMiddlewareConfig = {
     streamOutput: assistant.settings?.streamOutput ?? true,
     onChunk: onChunkReceived,
     enableReasoning: capabilities.enableReasoning,
     isPromptToolUse: usePromptToolUse,
     isSupportedToolUse: isSupportedToolUse(assistant),
-    webSearchPluginConfig: webSearchPluginConfig,
-    enableWebSearch: capabilities.enableWebSearch,
     enableGenerateImage: capabilities.enableGenerateImage,
     enableUrlContext: capabilities.enableUrlContext,
-    mcpMode,
-    mcpTools,
     uiMessages,
     knowledgeRecognition: assistant.knowledgeRecognition,
     idleTimeout
@@ -359,10 +264,19 @@ export async function fetchChatCompletion({
  * 从消息中收集图像（用于图像编辑）
  * 收集用户消息中上传的图像和助手消息中生成的图像
  *
+ * `attachmentFilter` 是本次请求的 request-local 附件视图（与请求转换使用的是
+ * 同一个对象）：其中的块被排除于本次请求之外（载荷缺失，或历史媒体被用户关闭），
+ * 因此在读取任何载荷之前跳过 —— 既不做 IO，也不把被排除的历史图像当作编辑输入。
+ * 未提供过滤器时保持既有行为。
+ *
  * @internal 导出仅为聚焦测试（image collection 的 LOCK-UI-2 覆盖）；
  *           生产调用方仍只有 fetchImageGeneration。
  */
-export async function collectImagesFromMessages(userMessage: Message, assistantMessage?: Message): Promise<string[]> {
+export async function collectImagesFromMessages(
+  userMessage: Message,
+  assistantMessage?: Message,
+  attachmentFilter?: RequestAttachmentFilter
+): Promise<string[]> {
   const images: string[] = []
 
   // 收集用户消息中的图像
@@ -380,6 +294,10 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
     if (isBlockAttachmentUnavailable(block)) {
       continue
     }
+    // Request-local exclusion (same view the request conversion used).
+    if (attachmentFilter?.unavailableBlockIds.has(block.id)) {
+      continue
+    }
     if (block.file) {
       const { data } = await window.api.file.base64Image(block.file.name)
       images.push(data)
@@ -393,6 +311,11 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
       // LOCK-UI-2: degraded imported image — omitted from generation input,
       // no base64Image IPC and no url reuse (the attachment is unavailable).
       if (isBlockAttachmentUnavailable(block)) {
+        continue
+      }
+      // Request-local exclusion: a historical image omitted from this request
+      // (media context off) is neither read nor reused as edit input.
+      if (attachmentFilter?.unavailableBlockIds.has(block.id)) {
         continue
       }
       if (block.file) {
@@ -421,11 +344,17 @@ export async function collectImagesFromMessages(userMessage: Message, assistantM
 export async function fetchImageGeneration({
   messages,
   assistant,
-  onChunkReceived
+  onChunkReceived,
+  attachmentFilter
 }: {
   messages: Message[]
   assistant: Assistant
   onChunkReceived: (chunk: Chunk) => void
+  /**
+   * The request-local attachment view `messages` was prepared with. Blocks it
+   * excludes are never read as generation/edit input for this request.
+   */
+  attachmentFilter?: RequestAttachmentFilter
 }) {
   // Resolve the model and its provider. Throws before any provider/API/network
   // access when the model slot is unconfigured.
@@ -456,7 +385,10 @@ export async function fetchImageGeneration({
     }
 
     const prompt = getMainTextContent(lastUserMessage)
-    const inputImages = await collectImagesFromMessages(lastUserMessage, lastAssistantMessage)
+    // Same request-local filter the messages were prepared with: excluded
+    // blocks (unavailable payload, or historical media omitted by the media
+    // context switch) must not become edit input.
+    const inputImages = await collectImagesFromMessages(lastUserMessage, lastAssistantMessage, attachmentFilter)
 
     // 调用 generateImage 或 editImage
     // 使用默认图像生成配置
@@ -600,7 +532,6 @@ export async function fetchMessagesSummary({
 
   const { providerOptions, standardParams } = buildProviderOptions(summaryAssistant, model, actualProvider, {
     enableReasoning: false,
-    enableWebSearch: false,
     enableGenerateImage: false
   })
 
@@ -618,10 +549,8 @@ export async function fetchMessagesSummary({
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
-    enableUrlContext: false,
-    mcpTools: []
+    enableUrlContext: false
   }
   try {
     // 从 messages 中找到有 traceId 的助手消息，用于绑定现有 trace
@@ -720,10 +649,8 @@ export async function fetchNoteSummary({ content, assistant }: { content: string
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
-    enableUrlContext: false,
-    mcpTools: []
+    enableUrlContext: false
   }
 
   try {
@@ -822,7 +749,6 @@ export async function fetchGenerate({
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
     enableUrlContext: false
   }
@@ -975,23 +901,20 @@ export async function checkApi(provider: Provider, model: Model, timeout = 15000
     const abortId = uuid()
     const signal = readyToAbort(abortId)
     let streamError: ResponseError | undefined
-    // One-shot synthetic session identity for the OpenCode Go gateway
-    // (`x-opencode-session`, 400 MissingSessionID when absent). Detection
-    // requests have no real topic/conversation, so the per-check `abortId`
-    // is reused as the random session id — never userId/provider/model.
-    // Strictly gated by `isOpenCodeGoEndpoint`; non-Go hosts send nothing.
-    const checkSessionHeaders = buildOpencodeCheckSessionHeaders(provider.apiHost, abortId)
+    // Connection session identity (`x-opencode-session`) is owned exclusively
+    // by the AiProvider request boundary: this detection request carries no
+    // headers of its own (no topic, no synthetic check id here). On the Go
+    // endpoint the boundary mints one request-local opaque identity for this
+    // invocation; non-Go hosts send nothing.
     const params: StreamTextParams = {
       system: assistant.prompt,
       prompt: 'hi',
-      abortSignal: signal,
-      ...(checkSessionHeaders ? { headers: checkSessionHeaders } : {})
+      abortSignal: signal
     }
     const config: AiProviderConfig = {
       streamOutput: true,
       enableReasoning: false,
       isSupportedToolUse: false,
-      enableWebSearch: false,
       enableGenerateImage: false,
       isPromptToolUse: false,
       enableUrlContext: false,

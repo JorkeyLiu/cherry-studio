@@ -85,21 +85,38 @@ export const assistantsPersistTransform = createTransform(
   { whitelist: ['assistants'] }
 )
 
+// Removed MCP / external+provider-native websearch / global memory: strip legacy
+// backend capability fields so old imports/rehydration never reintroduce them.
+// Retains urlContext/knowledge/generateImage. Historic message/block storage untouched.
+const stripRemovedAssistantCapabilities = (a: any): void => {
+  if (!a || typeof a !== 'object') return
+  delete a.enableWebSearch
+  delete a.webSearchProviderId
+  delete a.mcpMode
+  delete a.mcpServers
+  delete a.enableMemory
+}
+
 const assistantsSlice = createSlice({
   name: 'assistants',
   initialState,
   reducers: {
     updateAssistantDefaults: (state, action: PayloadAction<Partial<AssistantDefaults>>) => {
-      state.assistantDefaults = { ...state.assistantDefaults, ...action.payload }
+      const stripped = { ...(action.payload as any) }
+      stripRemovedAssistantCapabilities(stripped)
+      state.assistantDefaults = { ...state.assistantDefaults, ...stripped }
     },
     updateAssistants: (state, action: PayloadAction<Assistant[]>) => {
+      for (const a of action.payload as any[]) stripRemovedAssistantCapabilities(a)
       state.assistants = action.payload
     },
     addAssistant: (state, action: PayloadAction<Assistant>) => {
+      stripRemovedAssistantCapabilities(action.payload as any)
       state.assistants.unshift(action.payload)
     },
     insertAssistant: (state, action: PayloadAction<{ index: number; assistant: Assistant }>) => {
       const { index, assistant } = action.payload
+      stripRemovedAssistantCapabilities(assistant as any)
 
       if (index < 0 || index > state.assistants.length) {
         throw new Error(`InsertAssistant: index ${index} is out of bounds [0, ${state.assistants.length}]`)
@@ -112,6 +129,7 @@ const assistantsSlice = createSlice({
     },
     updateAssistant: (state, action: PayloadAction<Partial<Assistant> & { id: string }>) => {
       const { id, ...update } = action.payload
+      stripRemovedAssistantCapabilities(update as any)
       // @ts-ignore ts2589
       state.assistants = state.assistants.map((c) => (c.id === id ? { ...c, ...update } : c))
     },
@@ -351,6 +369,9 @@ const assistantsSlice = createSlice({
             const decision = decodeModelSlotForApply(rawDefaultModel, prev.defaultModel)
             if (decision.action === 'set') next.defaultModel = decision.value as unknown
           }
+          // Removed capabilities (MCP / web search / memory) are stripped on every
+          // local reducer; a remote projection must not reintroduce them.
+          stripRemovedAssistantCapabilities(next)
           state.assistants[idx] = next as never
           if (settings && typeof settings === 'object') {
             const { defaultModel: rawSettingsDefault, ...otherSettings } = settings as Record<string, unknown>

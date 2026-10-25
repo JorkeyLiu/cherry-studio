@@ -16,6 +16,12 @@ interface CallbacksDependencies {
   getState: any
   topicId: string
   assistantMsgId: string
+  /**
+   * Captured request route pinned by the initiating operation (send/resend/
+   * regenerate/append). Threaded into base callbacks for naming + context so
+   * completion never re-derives the route from latest active.
+   */
+  requestRoute?: string | null
   executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
@@ -43,7 +49,8 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     assistantMsgId,
     saveUpdatesToDB,
     saveFinalUpdatesAtomically,
-    assistant
+    assistant,
+    requestRoute
   } = deps
   // Request-local execution state threads through every generation. When the
   // caller omits it (legacy/test harnesses), fall back to the BlockManager's
@@ -63,6 +70,7 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     getState,
     topicId,
     assistantMsgId,
+    requestRoute,
     saveUpdatesToDB,
     saveFinalUpdatesAtomically,
     assistant,

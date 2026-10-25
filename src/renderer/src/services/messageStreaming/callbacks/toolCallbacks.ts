@@ -1,9 +1,7 @@
 import { loggerService } from '@logger'
-import { BUILTIN_WEB_SEARCH_TOOL_NAME } from '@renderer/aiCore/tools/WebSearchTool'
 import type { AppDispatch } from '@renderer/store'
 import store from '@renderer/store'
 import type { MCPToolResponse, NormalToolResponse } from '@renderer/types'
-import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { createCitationBlock, createToolBlock } from '@renderer/utils/messageUtils/create'
@@ -162,20 +160,7 @@ export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
           }
         }
         blockManager.smartBlockUpdate(existingBlockId, changes, MessageBlockType.TOOL, true)
-        // Handle citation block creation for web search results
-        if (toolResponse.tool.name === BUILTIN_WEB_SEARCH_TOOL_NAME && toolResponse.response) {
-          const citationBlock = createCitationBlock(
-            assistantMsgId,
-            {
-              response: { results: toolResponse.response, source: WEB_SEARCH_SOURCE.WEBSEARCH }
-            },
-            {
-              status: MessageBlockStatus.SUCCESS
-            }
-          )
-          citationBlockId = citationBlock.id
-          void blockManager.handleBlockTransition(citationBlock, MessageBlockType.CITATION)
-        }
+        // Handle citation block creation for knowledge results only (websearch/memory removed)
         if (toolResponse.tool.name === 'builtin_knowledge_search' && toolResponse.response) {
           const citationBlock = createCitationBlock(
             assistantMsgId,

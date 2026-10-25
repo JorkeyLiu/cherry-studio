@@ -17,12 +17,12 @@ import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
+import { isAcceptedClosureForRoute } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { setTopicListWidth } from '@renderer/store/settings'
+import { setTopicListWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
@@ -37,8 +37,8 @@ import styled from 'styled-components'
 
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
-import ChatNavigation from './Messages/ChatNavigation'
-import Messages, { type MessagesHandle } from './Messages/Messages'
+import ConversationNavigation from './Messages/ConversationNavigation'
+import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
 import { RouteViewportProvider } from './Messages/routeViewportContext'
 import Tabs from './Tabs'
 
@@ -55,7 +55,7 @@ const Chat: FC<Props> = (props) => {
   const { assistant, updateAssistant, updateTopic } = useAssistant(props.assistant.id)
   const { t } = useTranslation()
   // LOCK-105: message style is always bubble; messageNavigation is a boolean
-  // off/on toggle for the conversation navigation buttons.
+  // off/on toggle for the conversation navigation list.
   const { messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
   const dispatch = useAppDispatch()
@@ -64,6 +64,7 @@ const Chat: FC<Props> = (props) => {
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
+  const [readingAnchor, setReadingAnchor] = useState<ReadingAnchorReport | null>(null)
   // S3.5: ContentSearch is parent-owned lazy activation — zero instance before invocation.
   const [isContentSearchActive, setIsContentSearchActive] = useState(false)
   const [pendingSearchText, setPendingSearchText] = useState<string | undefined>(undefined)
@@ -131,13 +132,26 @@ const Chat: FC<Props> = (props) => {
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
   const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
-  const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey, activeBranchId)
-  // R-06: authoritative closure supplies message lists and full-topic metadata; fallback preserves bounded behavior
-  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
+  const { closure: acceptedClosure } = useContextClosure(props.activeTopic.id, anchorGroupKey, activeBranchId)
+  // Root regression correction: UI context is the atomically ACCEPTED
+  // complete-route projection from the hook. For the SAME topic/route/anchor,
+  // ordinary streamed text/status updates (which bump strict cache generation
+  // every chunk) NEVER clear this — the hook retains it while background
+  // revalidation runs and commits the full result in one coherent step.
+  // Identity fail-closed here too: a retained projection for a different
+  // topic/anchor never displays (no previous-route counts/divider). Strict
+  // cache freshness (`getFreshValidatedClosure`) is intentionally NOT
+  // consulted for display; it remains the gate for cache reads/requests only.
+  // Route isolation is enforced by the hook's route-key identity
+  // (closureKeyForRoute); the acceptance helper below checks topic/anchor
+  // structural identity only and takes no branch param.
   const freshClosure = useMemo(() => {
-    void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
-    return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint, activeBranchId)
-  }, [props.activeTopic.id, anchorGroupKey, activeBranchId, currentFingerprint, closure])
+    if (!acceptedClosure) return null
+    if (!isAcceptedClosureForRoute(acceptedClosure, props.activeTopic.id, anchorGroupKey)) {
+      return null
+    }
+    return acceptedClosure
+  }, [acceptedClosure, props.activeTopic.id, anchorGroupKey])
   // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
   const closureBlockIds = useMemo(
     () => (freshClosure ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
@@ -147,7 +161,12 @@ const Chat: FC<Props> = (props) => {
   // Use closure blocks for memo invalidation when closure active; otherwise use viewport blocks
   const activeBlocksForContext = freshClosure ? closureBlocks : topicBlocks
   const sharedContextInfo = useMemo(() => {
-    // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
+    // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; persisted-anchor miss renders authority-pending (no viewport counts); only anchorless (empty/uninitialized) uses the bounded fallback
+    // Ordinary preexisting derivation: accepted retain alone solves the blank
+    // flicker. No id-only reference freeze here — same-ID updated blocks or
+    // new Message instances must flow through so the token-estimate input
+    // never references stale history. The scalar estimate updates via content
+    // reads; it is never zeroed per chunk.
     const result = resolveSharedContextInfo(
       topicMessages,
       assistant,
@@ -228,12 +247,8 @@ const Chat: FC<Props> = (props) => {
       filter: modelFilter
     })
     if (selectedModel) {
-      // Unit B: preserve the user's web-search toggle across model switches.
-      // Availability follows the current provider's search adapter at request
-      // time, never model metadata.
       updateAssistant({
-        model: selectedModel,
-        enableWebSearch: assistant.enableWebSearch
+        model: selectedModel
       })
     }
   })
@@ -341,15 +356,25 @@ const Chat: FC<Props> = (props) => {
               <div
                 className="flex flex-1 flex-col justify-between"
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-                <Messages
-                  ref={messagesRef}
-                  assistant={assistant}
-                  topic={props.activeTopic}
-                  setActiveTopic={props.setActiveTopic}
-                  onComponentUpdate={messagesComponentUpdateHandler}
-                  onFirstUpdate={messagesComponentFirstUpdateHandler}
-                  sharedContextInfo={sharedContextInfo}
-                />
+                <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+                  {messageNavigation && (
+                    <ConversationNavigation
+                      topicId={props.activeTopic.id}
+                      readingAnchor={readingAnchor}
+                      onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                    />
+                  )}
+                  <Messages
+                    ref={messagesRef}
+                    assistant={assistant}
+                    topic={props.activeTopic}
+                    setActiveTopic={props.setActiveTopic}
+                    onComponentUpdate={messagesComponentUpdateHandler}
+                    onFirstUpdate={messagesComponentFirstUpdateHandler}
+                    sharedContextInfo={sharedContextInfo}
+                    onReadingAnchor={setReadingAnchor}
+                  />
+                </div>
                 {isContentSearchActive && (
                   <ContentSearch
                     ref={contentSearchRef}
@@ -359,17 +384,6 @@ const Chat: FC<Props> = (props) => {
                     onIncludeUserChange={userOutlinedItemClickHandler}
                     initialText={pendingSearchText}
                     onClose={disableContentSearch}
-                  />
-                )}
-                {messageNavigation && (
-                  <ChatNavigation
-                    containerId="messages"
-                    scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}
-                    scrollToTop={() => messagesRef.current?.scrollToTop()}
-                    scrollToContextBoundary={() => messagesRef.current?.scrollToContextBoundary()}
-                    scrollToBottom={() => messagesRef.current?.scrollToBottom()}
-                    previousUserMessage={(id) => messagesRef.current?.previousUserMessage(id)}
-                    nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
                   />
                 )}
                 <Inputbar
@@ -385,6 +399,7 @@ const Chat: FC<Props> = (props) => {
         {showTopics && (
           <ResizableHandle
             cssVar="--topic-list-width"
+            minWidth={SIDEBAR_MIN_WIDTH}
             onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
             side="right"
           />

@@ -29,6 +29,7 @@
  * by capture and service enqueue sequencing, so no second allowlist exists.
  */
 
+import { eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import * as schema from '../chatDb/schema'
@@ -46,7 +47,7 @@ interface SeedAdoptionService {
   getDeviceId(): string
   enqueueUpsertInTx(
     tx: unknown,
-    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'topic_reference',
     entityId: string,
     payload: Record<string, unknown>,
     timestamp: number,
@@ -276,6 +277,38 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
         const parentId = expectedMembershipParent as string
         service.setMembershipClockInTx(tx, childType, entity.entityId, parentId, opTs, opId)
       }
+      mintedEntities += 1
+    }
+    // Cross-topic history references: a fully-local reference relation is
+    // adopted with a real monotonic clock so the target topic never publishes
+    // without its relation. The target topic must exist locally (the relation
+    // is target-owned); source topic/branch/anchor stay unresolved-by-design.
+    for (const ref of candidate.references ?? []) {
+      if (ref.entityClock) continue
+      const targetRow = txDb
+        .select({ id: schema.topics.id })
+        .from(schema.topics)
+        .where(eq(schema.topics.id, ref.targetTopicId))
+        .get()
+      if (!targetRow) {
+        throw new Error(`seed adoption reference target missing ${ref.targetTopicId}`)
+      }
+      if (!isSafeAdoptionTimestamp(adoptionTs) || adoptionTs >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('seed adoption timestamp exhausted')
+      }
+      service.enqueueUpsertInTx(
+        tx,
+        'topic_reference',
+        ref.targetTopicId,
+        {
+          targetTopicId: ref.targetTopicId,
+          sourceTopicId: ref.sourceTopicId,
+          sourceBranchId: ref.sourceBranchId,
+          anchorMessageId: ref.anchorMessageId
+        },
+        adoptionTs,
+        deviceId
+      )
       mintedEntities += 1
     }
     const parentTopics = new Set<string>()

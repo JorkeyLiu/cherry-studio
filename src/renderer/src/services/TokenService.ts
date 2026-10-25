@@ -59,8 +59,11 @@ export async function estimateUserPromptUsage({
  * @param {Partial<Message>} message - 消息对象，可以是完整或部分 Message
  * @returns {Promise<Usage>} 返回一个 Usage 对象，包含 prompt_tokens、completion_tokens、total_tokens
  */
-export async function estimateMessageUsage(message: Partial<Message>): Promise<Usage> {
-  const estimate = await estimateMessageTokens(message as Message)
+export async function estimateMessageUsage(
+  message: Partial<Message>,
+  options: { includeMedia?: boolean } = {}
+): Promise<Usage> {
+  const estimate = await estimateMessageTokens(message as Message, options)
 
   return {
     prompt_tokens: estimate.textTokens,
@@ -110,13 +113,21 @@ export async function estimateMessagesUsage({
  *
  * @param assistant - Used for the system prompt token estimate.
  * @param messages  - Pre-filtered message list.
+ * @param options.includeMedia - When false, image/audio/video attachments are
+ *   left out of the estimate (the media-context switch is off, so those
+ *   historical payloads are not sent). Text and document/PDF/text attachments
+ *   are always counted. Defaults to true.
  */
-export async function estimateHistoryTokens(assistant: Assistant, messages: Message[]): Promise<number> {
+export async function estimateHistoryTokens(
+  assistant: Assistant,
+  messages: Message[],
+  options: { includeMedia?: boolean } = {}
+): Promise<number> {
   let totalTokens = 0
 
   // Estimate each message from content (text + reasoning + files + images).
   for (const message of messages) {
-    const usage = await estimateMessageUsage(message)
+    const usage = await estimateMessageUsage(message, options)
     totalTokens += usage.total_tokens
   }
 

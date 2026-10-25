@@ -11,17 +11,17 @@ function msg(id: string): Message {
 /**
  * Production wiring for atomic pagination capability (A).
  *
- * Older/newer `fetchMessagesWindow` merges plus the navigation around-merge
- * must publish via the single-commit `messagesWindowMerged` action (merged
- * messages + route + response-window capability). A bare
- * `messagesReceived(merged)` would clear the mutable capability and publish
- * an intermediate all-immutable frame.
+ * Both ordinary pagination directions merge through ONE loader plus the
+ * navigation around-merge, and every one of them must publish via the
+ * single-commit `messagesWindowMerged` action (merged messages + route +
+ * response-window capability). A bare `messagesReceived(merged)` would clear the
+ * mutable capability and publish an intermediate all-immutable frame.
  */
 describe('Messages window-merge wiring (atomic capability)', () => {
   const source = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
 
-  it('older pagination publishes merged messages + route + capability atomically', () => {
-    const idx = source.indexOf('const startOlderWindowLoad')
+  it('ordinary pagination publishes merged messages + route + capability atomically', () => {
+    const idx = source.indexOf('const startWindowPageLoad')
     expect(idx).toBeGreaterThanOrEqual(0)
     const slice = source.slice(idx, idx + 26000)
     expect(slice).toMatch(/fetchMessagesWindow/)
@@ -36,20 +36,18 @@ describe('Messages window-merge wiring (atomic capability)', () => {
     expect(code).not.toMatch(/messagesReceived\(\{\s*topicId:\s*topicIdAtStart,\s*messages:\s*merged/)
   })
 
-  it('newer pagination publishes merged messages + route + capability atomically', () => {
-    const idx = source.indexOf('const loadNewerMessages')
-    expect(idx).toBeGreaterThanOrEqual(0)
-    const slice = source.slice(idx, idx + 22000)
-    expect(slice).toMatch(/fetchMessagesWindow/)
-    expect(slice).toMatch(/mergeWindowIntoTopic/)
-    expect(slice).toMatch(/messagesWindowMerged/)
-    expect(slice).toMatch(/mutableMessageIds/)
-    expect(slice).toMatch(/route:\s*routeAtStart/)
-    const code = slice
-      .split('\n')
-      .filter((l) => !l.trim().startsWith('//'))
-      .join('\n')
-    expect(code).not.toMatch(/messagesReceived\(\{\s*topicId:\s*topicIdAtStart,\s*messages:\s*merged/)
+  it('both directions share exactly ONE ordinary pagination loader', () => {
+    // One definition, reached for either direction through the shared
+    // directional parameter — never a second loader or a second compensation
+    // path for the newer direction.
+    expect((source.match(/const startWindowPageLoad/g) ?? []).length).toBe(1)
+    expect(source).not.toMatch(/const loadNewerMessages/)
+    expect(source).not.toMatch(/const startOlderWindowLoad/)
+    expect(source).toMatch(/startWindowPageLoad\(direction\)/)
+    const idx = source.indexOf('const startWindowPageLoad')
+    const slice = source.slice(idx, idx + 26000)
+    expect(slice).toMatch(/derivePaginationWindow/)
+    expect(slice).toMatch(/responseWindow:\s*response\.window/)
   })
 
   it('navigation around-merge publishes via the same atomic action', () => {
@@ -75,7 +73,7 @@ describe('Messages window-merge wiring (atomic capability)', () => {
     )
     const beforeCap = [...(s.mutableMessageIdsByTopic['t1'] ?? [])]
     expect(beforeCap).toEqual(['m2'])
-    // The production older/newer/navigate path dispatches exactly ONE action.
+    // The production pagination/navigate path dispatches exactly ONE action.
     s = reducer(
       s,
       newMessagesActions.messagesWindowMerged({

@@ -244,6 +244,69 @@ describe('messageConverter', () => {
       await expect(convertMessageToSdkParam(message, false, model)).rejects.toThrow(/Failed to attach/)
     })
 
+    it('excludes request-locally unavailable attachments and keeps text plus usable parts', async () => {
+      const model = createModel()
+      const message = createMessage('user')
+      message.__mockContent = 'text stays'
+      const missingImage = createImageBlock(message.id, {
+        id: 'image-unavailable',
+        url: undefined,
+        file: {
+          id: 'missing-image',
+          name: 'missing.png',
+          origin_name: 'missing.png',
+          path: '/managed/files/missing-image.png',
+          size: 10,
+          ext: '.png',
+          type: FILE_TYPE.IMAGE,
+          created_at: new Date(2024, 0, 1).toISOString(),
+          count: 1
+        }
+      })
+      const missingFile = createFileBlock(message.id, { id: 'file-unavailable' })
+      message.__mockImageBlocks = [missingImage]
+      message.__mockFileBlocks = [missingFile]
+
+      const result = await convertMessageToSdkParam(message, true, model, undefined, {
+        unavailableBlockIds: new Set(['image-unavailable', 'file-unavailable']),
+        urlFallbackBlockIds: new Set<string>()
+      })
+
+      expect(result).toEqual({ role: 'user', content: [{ type: 'text', text: 'text stays' }] })
+      expect(convertFileBlockToFilePartMock).not.toHaveBeenCalled()
+      expect(convertFileBlockToTextPartMock).not.toHaveBeenCalled()
+    })
+
+    it('keeps embedded image content via url when local file metadata is stale', async () => {
+      const model = createModel()
+      const message = createMessage('user')
+      message.__mockContent = ''
+      message.__mockImageBlocks = [
+        createImageBlock(message.id, {
+          id: 'image-stale',
+          url: 'data:image/png;base64,AAABBB',
+          file: {
+            id: 'stale-image',
+            name: 'stale.png',
+            origin_name: 'stale.png',
+            path: '/managed/files/stale-image.png',
+            size: 10,
+            ext: '.png',
+            type: FILE_TYPE.IMAGE,
+            created_at: new Date(2024, 0, 1).toISOString(),
+            count: 1
+          }
+        })
+      ]
+
+      const result = await convertMessageToSdkParam(message, true, model, undefined, {
+        unavailableBlockIds: new Set<string>(),
+        urlFallbackBlockIds: new Set(['image-stale'])
+      })
+
+      expect(result).toEqual({ role: 'user', content: [{ type: 'image', image: 'AAABBB', mediaType: 'image/png' }] })
+    })
+
     it('handles multiple large base64 images without stack overflow', async () => {
       const model = createModel()
       const message = createMessage('user')

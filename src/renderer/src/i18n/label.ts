@@ -5,8 +5,6 @@
  */
 
 import { loggerService } from '@logger'
-import type { BuiltinMCPServerName, BuiltinOcrProviderId } from '@renderer/types'
-import { BuiltinMCPServerNames } from '@renderer/types'
 
 import i18n from './index'
 
@@ -64,8 +62,6 @@ const titleKeyMap = {
   home: 'title.home',
   knowledge: 'title.knowledge',
   launchpad: 'title.launchpad',
-  'mcp-servers': 'title.mcp-servers',
-  memories: 'title.memories',
   notes: 'title.notes',
   settings: 'title.settings'
 } as const
@@ -140,30 +136,6 @@ export const getShortcutLabel = (key: string): string => {
   return getLabel(shortcutKeyMap, key)
 }
 
-const mcpTypeKeyMap = {
-  inMemory: 'settings.mcp.types.inMemory',
-  sse: 'settings.mcp.types.sse',
-  stdio: 'settings.mcp.types.stdio',
-  streamableHttp: 'settings.mcp.types.streamableHttp'
-} as const
-
-export const getMcpTypeLabel = (key: string): string => {
-  return getLabel(mcpTypeKeyMap, key)
-}
-
-const mcpProviderDescriptionKeyMap = {
-  '302ai': 'settings.mcp.sync.providerDescriptions.302ai',
-  bailian: 'settings.mcp.sync.providerDescriptions.bailian',
-  lanyun: 'settings.mcp.sync.providerDescriptions.lanyun',
-  mcprouter: 'settings.mcp.sync.providerDescriptions.mcprouter',
-  modelscope: 'settings.mcp.sync.providerDescriptions.modelscope',
-  tokenflux: 'settings.mcp.sync.providerDescriptions.tokenflux'
-} as const
-
-export const getMcpProviderDescriptionLabel = (key: string): string => {
-  return getLabel(mcpProviderDescriptionKeyMap, key)
-}
-
 const miniappsStatusKeyMap = {
   visible: 'settings.miniapps.visible',
   disabled: 'settings.miniapps.disabled'
@@ -197,38 +169,6 @@ const fileFieldKeyMap = {
 
 export const getFileFieldLabel = (key: string): string => {
   return getLabel(fileFieldKeyMap, key)
-}
-
-const builtInMcpDescriptionKeyMap: Record<BuiltinMCPServerName, string> = {
-  [BuiltinMCPServerNames.flomo]: 'settings.mcp.builtinServersDescriptions.flomo',
-  [BuiltinMCPServerNames.mcpAutoInstall]: 'settings.mcp.builtinServersDescriptions.mcp_auto_install',
-  [BuiltinMCPServerNames.memory]: 'settings.mcp.builtinServersDescriptions.memory',
-  [BuiltinMCPServerNames.sequentialThinking]: 'settings.mcp.builtinServersDescriptions.sequentialthinking',
-  [BuiltinMCPServerNames.braveSearch]: 'settings.mcp.builtinServersDescriptions.brave_search',
-  [BuiltinMCPServerNames.fetch]: 'settings.mcp.builtinServersDescriptions.fetch',
-  [BuiltinMCPServerNames.filesystem]: 'settings.mcp.builtinServersDescriptions.filesystem',
-  [BuiltinMCPServerNames.difyKnowledge]: 'settings.mcp.builtinServersDescriptions.dify_knowledge',
-  [BuiltinMCPServerNames.python]: 'settings.mcp.builtinServersDescriptions.python',
-  [BuiltinMCPServerNames.nowledgeMem]: 'settings.mcp.builtinServersDescriptions.nowledge_mem',
-  [BuiltinMCPServerNames.hub]: 'settings.mcp.builtinServersDescriptions.hub'
-} as const
-
-export const getBuiltInMcpServerDescriptionLabel = (key: string): string => {
-  return getLabel(builtInMcpDescriptionKeyMap, key, t('settings.mcp.builtinServersDescriptions.no'))
-}
-
-const builtinOcrProviderKeyMap = {
-  system: 'ocr.builtin.system',
-  tesseract: '',
-  paddleocr: '',
-  ovocr: ''
-} as const satisfies Record<BuiltinOcrProviderId, string>
-
-export const getBuiltinOcrProviderLabel = (key: BuiltinOcrProviderId) => {
-  if (key === 'tesseract') return 'Tesseract'
-  else if (key == 'paddleocr') return 'PaddleOCR'
-  else if (key == 'ovocr') return 'Intel OV(NPU) OCR'
-  else return getLabel(builtinOcrProviderKeyMap, key)
 }
 
 // oxlint-disable-next-line no-unused-vars -- placeholder for future agent type labels

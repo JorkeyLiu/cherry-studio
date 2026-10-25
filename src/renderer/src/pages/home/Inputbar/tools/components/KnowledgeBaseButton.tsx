@@ -1,9 +1,9 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import ToolPopover from '@renderer/pages/home/Inputbar/components/ToolPopover'
 import { useAppSelector } from '@renderer/store'
 import type { KnowledgeBase } from '@renderer/types'
 import { Tooltip } from 'antd'
-import { Check, CircleX, FileSearch, Plus } from 'lucide-react'
+import { BookOpen, Check, CircleX, Plus } from 'lucide-react'
 import type { FC } from 'react'
 import { memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -63,7 +63,7 @@ const KnowledgeBaseButton: FC<Props> = ({ selectedBases, onSelect, disabled }) =
                 data-testid={`kb-option-${base.id}`}
                 data-selected={isSelected}>
                 <Left>
-                  <FileSearch size={16} />
+                  <BookOpen size={16} />
                   <div>
                     <Label>{base.name}</Label>
                     <Desc>
@@ -101,9 +101,9 @@ const KnowledgeBaseButton: FC<Props> = ({ selectedBases, onSelect, disabled }) =
         mouseLeaveDelay={0}
         arrow
         open={open ? false : undefined}>
-        <ActionIconButton active={!!active} disabled={disabled} aria-label={t('chat.input.knowledge_base')}>
-          <FileSearch size={18} />
-        </ActionIconButton>
+        <ComposerIconButton active={!!active} disabled={disabled} aria-label={t('chat.input.knowledge_base')}>
+          <BookOpen size={16} />
+        </ComposerIconButton>
       </Tooltip>
     </ToolPopover>
   )

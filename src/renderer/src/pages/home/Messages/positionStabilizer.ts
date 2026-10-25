@@ -48,3 +48,141 @@ export const shouldCancelStabilizerForKeyDown = (
   if (isEditableTarget(target)) return false
   return true
 }
+
+/**
+ * Browse-direction input primitive (pure, semantic only).
+ *
+ * At a clamped edge no scroll event can fire (the viewport cannot move), so a
+ * genuine gesture would never page through the post-scroll path. The input
+ * adapter therefore reports the browse DIRECTION the input itself expresses;
+ * whether that direction may actually page is decided afterwards against live
+ * session, ownership, committed-viewport and edge geometry — one shared path
+ * for both directions, never a per-direction flow.
+ *
+ * - wheel: `deltaY` sign only (`< 0` toward older, `> 0` toward newer; sign,
+ *   never magnitude thresholds or event counts);
+ * - keys: `PageUp` / `ArrowUp` / `Home` toward older, `PageDown` /
+ *   `ArrowDown` / `End` toward newer, `Space` toward the native page
+ *   direction (`Shift+Space` toward older);
+ * - pointer / touch / focus carry no direction at all (a press at an edge is
+ *   not a browse gesture).
+ *
+ * The native default is always preserved (no preventDefault, no custom
+ * page-scroll arithmetic).
+ */
+export type BrowseInputDirection = 'older' | 'newer'
+
+export type BrowsePagingInput =
+  | { kind: 'wheel'; deltaY: number }
+  | { kind: 'key'; key: string; shiftKey?: boolean }
+  | { kind: 'pointer' }
+  | { kind: 'touch' }
+  | { kind: 'focus' }
+
+export const browseDirectionForClampedInput = (input: BrowsePagingInput): BrowseInputDirection | null => {
+  switch (input.kind) {
+    case 'wheel':
+      if (!Number.isFinite(input.deltaY) || input.deltaY === 0) return null
+      return input.deltaY < 0 ? 'older' : 'newer'
+    case 'key': {
+      if (input.key === 'PageUp' || input.key === 'ArrowUp' || input.key === 'Home') return 'older'
+      if (input.key === 'PageDown' || input.key === 'ArrowDown' || input.key === 'End') return 'newer'
+      if (input.key === ' ' || input.key === 'Spacebar') return input.shiftKey === true ? 'older' : 'newer'
+      return null
+    }
+    default:
+      return null
+  }
+}
+
+/**
+ * Edit-selection boundary page intent.
+ *
+ * An editable selection whose endpoint cannot advance sits on the displayed
+ * (rendered) edge — a SELECTION position, not a physical scroll position — so
+ * neither a live user scroll session nor exact clamped-edge geometry exists
+ * there. The selection therefore names only the browse DIRECTION it needs, and
+ * that direction is served by the same bounded message-window channel:
+ *
+ * - history must still exist in that direction (the committed window's
+ *   authoritative completeness flag);
+ * - one ordinary page read at a time: a page already in flight (loading flag or
+ *   the single-flight fetch lease) absorbs repeat key auto-repeat instead of
+ *   starting a second copy of the same read;
+ * - no route navigation and no restore-owned divider search may own the
+ *   viewport, because both cancel in-flight page timers.
+ *
+ * No session, no geometry and no synthesized scroll is consulted here; those
+ * belong to the input path, never to a selection edge.
+ */
+export type SelectionBoundaryPageInput = {
+  direction: BrowseInputDirection
+  hasMoreOlder: boolean
+  hasMoreNewer: boolean
+  loading: boolean
+  paginationLeaseFree: boolean
+  programmaticOwned: boolean
+  restoreSearchOwned: boolean
+}
+
+export type SelectionBoundaryPageDecision =
+  | { start: true }
+  | { start: false; reason: 'no-more-history' | 'page-in-flight' | 'navigation-owned' | 'restore-owned' }
+
+export const decideSelectionBoundaryPage = (input: SelectionBoundaryPageInput): SelectionBoundaryPageDecision => {
+  const hasMore = input.direction === 'older' ? input.hasMoreOlder : input.hasMoreNewer
+  if (!hasMore) return { start: false, reason: 'no-more-history' }
+  if (input.loading || !input.paginationLeaseFree) return { start: false, reason: 'page-in-flight' }
+  if (input.programmaticOwned) return { start: false, reason: 'navigation-owned' }
+  if (input.restoreSearchOwned) return { start: false, reason: 'restore-owned' }
+  return { start: true }
+}
+
+/**
+ * One viewport geometry sample of a row: its viewport-relative offset (row top
+ * minus scroll-container top, the same coordinate the stable anchor records)
+ * together with the container `scrollTop` measured at the SAME instant.
+ */
+export interface ViewportGeometrySample {
+  viewportOffset: number
+  scrollTop: number
+}
+
+/**
+ * Layout metric of a sampled row: `viewportOffset + scrollTop`.
+ *
+ * This sum is INVARIANT under user scrolling in both scroll conventions: input
+ * moves the scroll position and the row's viewport offset by equal and opposite
+ * amounts (column-reverse included, where `scrollTop` decreases as the viewport
+ * moves toward the visually older edge). It changes only when layout/content
+ * moves the row, so the DIFFERENCE of this metric is the layout-only
+ * displacement — compensating exactly that holds a row through layout growth
+ * without cancelling the movement the user's own input produced.
+ */
+export const viewportLayoutMetric = (sample: ViewportGeometrySample): number => sample.viewportOffset + sample.scrollTop
+
+/**
+ * Layout-only displacement of a sampled row since a captured baseline metric.
+ *
+ * `null` means "no input-independent baseline exists" (never captured, route or
+ * anchor identity moved, stale window generation, invalid numbers): the caller
+ * must fail closed to its existing behavior instead of inventing a baseline.
+ * A non-null result is the actuator input (`scrollTop += displacement`), which
+ * is the only value that corrects layout without undoing user movement.
+ */
+export const layoutOnlyDisplacement = (
+  baselineMetric: number | null,
+  current: ViewportGeometrySample
+): number | null => {
+  if (baselineMetric === null || !Number.isFinite(baselineMetric)) return null
+  const metric = viewportLayoutMetric(current)
+  if (!Number.isFinite(metric)) return null
+  return metric - baselineMetric
+}
+
+/** Subpixel tolerance of every layout/position comparison (same 1px budget). */
+export const VIEWPORT_GEOMETRY_EPSILON_PX = 1
+
+/** Whether a displacement is measurable beyond subpixel rounding. */
+export const isMeasurableDisplacement = (displacement: number | null): displacement is number =>
+  displacement !== null && Number.isFinite(displacement) && Math.abs(displacement) > VIEWPORT_GEOMETRY_EPSILON_PX

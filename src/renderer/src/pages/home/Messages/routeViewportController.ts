@@ -82,6 +82,33 @@ export interface RouteRef {
 }
 
 /**
+ * Stable structural scope of an interaction region: the layout owner whose
+ * dimensions prove whether the interaction had a real layout effect.
+ * - `message`: one message row (edit/footer/action areas, answer tabs).
+ * - `group`: one stable message group (fold expand/compress and other
+ *   group-level controls living outside any single row).
+ * The scope id is opaque structural identity (message id, stable group id),
+ * never a button name.
+ */
+export interface InteractionScope {
+  kind: 'message' | 'group'
+  id: string
+}
+
+/**
+ * Layout-owner fingerprint recorded BEFORE the mutation: the stable geometry
+ * of the scope element plus nothing else. Container scroll metrics are
+ * deliberately excluded (compensation writes move scrollTop; passive stream
+ * growth moves scrollHeight) so only the scope owner's own dimensions
+ * distinguish a real effect from a harmless no-effect click. The 1px budget
+ * below matches the keeper hold threshold.
+ */
+export interface InteractionFingerprint {
+  scopeH: number
+  scopeW: number
+}
+
+/**
  * Rendered DOM provenance: which route window the committed DOM actually
  * shows, at which session epoch, under which window identity.
  * - `routeId` mirrors `RouteRef.route` naming for the rendered side.
@@ -293,28 +320,71 @@ export class RouteViewportController {
    */
   private windowGenerationSeq = 0
   /**
-   * Bounded route-local answer-tab switch intent (same-route SWITCHING, not
-   * reading-position restoration). Captured synchronously in the tab click
-   * handler BEFORE selection/layout change: the clicked tab's viewport offset
-   * (tab top − container top) is the geometry to preserve, never a hidden
-   * body rect. The keeper holds this tab offset across the async DB-first
-   * selection + height swap and hands off to the post-switch visible geometry
-   * only after the target answer is actually visible + layout-quiet. Cleared
-   * on route change, supersession, detach, user intent, takeover,
-   * send-bottom, adopt, commit, or terminate — stale intents never survive.
-   * `gestureId` is the per-capture monotonic identity: a newer click
-   * overwrites, and a stale failure/completion carrying an older identity
-   * must never clear or rebase the newer gesture.
+   * Commit-scoped keeper hold permission for ordinary same-route pagination.
+   * Armed by `adoptOrdinaryPaginationWindow` with the post-commit window
+   * generation; consumed exactly once by the keeper's generation-layout path
+   * (`consumePaginationHold('generation-layout')`). Scroll/resize/mutate
+   * observers must never consume it: an earlier observer firing on pre-growth
+   * DOM would steal the one-shot and leave the actual commit unheld. Any
+   * newer window update, route change, or prior consume invalidates it
+   * naturally via the generation comparison — never a second truth, never a
+   * token count. Cleared by hand only where the generation is reset without
+   * a bump (`request`, `invalidateAll`, `syncDisplayed`,
+   * `markRenderedUnknown`).
    */
-  private answerTabIntent: {
+  private paginationHoldGeneration: number | null = null
+  /**
+   * Shared route-local interaction intent (same-route in-place geometry hold,
+   * not reading-position restoration). One reusable owner arbitrated by the
+   * controller + keeper for every ordinary control interaction — message
+   * edits, answer tabs, fold expand/compress, and any future region carrying
+   * a `data-interaction-region` annotation — never a per-control
+   * compensator.
+   *
+   * Captured synchronously BEFORE the layout-changing mutation through the
+   * shared structural region mechanism (see routeViewportContext
+   * `captureInteractionFromEvent`): the structural scope (message row or
+   * stable group) plus the interaction region's viewport offset (region
+   * top − container top) is the geometry to preserve, never a hidden
+   * body rect and never a per-button pixel. Regions are arbitrary stable
+   * layout identities (`answer-tab`, `message-controls`, `fold-controls`,
+   * …), never button names; the keeper re-resolves the same region key in
+   * the same scope after replacement (structural correspondence). The keeper
+   * holds the captured region offset across the mutation and hands off to
+   * the post-mutation visible geometry only after an observed layout change
+   * versus the fingerprint plus layout-quiet. A genuinely no-effect click
+   * is dropped WITHOUT adopting (no snapshot write, never a false success).
+   * Cleared on route change, supersession, detach, user intent, takeover,
+   * send-bottom, adopt, commit, or terminate — stale intents never survive.
+   * `gestureId` is the per-capture monotonic identity: a newer interaction
+   * overwrites, and a stale failure/completion carrying an older identity
+   * must never clear or rebase the newer gesture. `capturedAt` bounds
+   * pending correspondence waits fail-closed (a never-resolving target can
+   * never trap the hold).
+   */
+  private interactionIntent: {
     topicId: string
     route: RouteId
     epoch: number
-    tabMessageId: string
-    tabOffset: number
+    scopeKind: 'message' | 'group'
+    scopeId: string
+    region: string
+    offset: number
     gestureId: number
+    fingerprint?: InteractionFingerprint
+    capturedAt: number
+    /** Declared by the dispatching call site when this gesture's layout
+     * effect is produced by an asynchronous authority round-trip (rows land
+     * only after the IPC/Main commit) instead of by the click itself, and
+     * settled when that command resolves. While pending, an unchanged DOM
+     * cannot disprove the gesture — an un-landed insert looks exactly like a
+     * no-effect click — so it stays armed through the existing bounded
+     * pending path instead of the quiet-read drop. The hold baseline is
+     * unchanged: the captured region offset, which is why a deferred
+     * mutation needs no separate geometry. */
+    pendingLayoutMutation?: boolean
   } | null = null
-  private answerTabGestureSeq = 0
+  private interactionGestureSeq = 0
   /**
    * Displayed-route anchor cache across supersession (rapid A→B→A):
    * the outgoing route's stable anchor is stashed before a request to a
@@ -393,8 +463,10 @@ export class RouteViewportController {
 
   /**
    * Route-local tab-switch intent read (sole source for the keeper's tab
-   * hold). Returns a copy only when still bound to the current displayed
-   * route + epoch; otherwise null (stale intents are never observable).
+   * hold). Compatibility view over the shared interaction intent: returns a
+   * copy only when the live intent is an `answer-tab` region still bound to
+   * the current displayed route + epoch; otherwise null (stale intents are
+   * never observable). New code should read `activeInteractionIntent`.
    */
   get activeAnswerTabIntent(): {
     topicId: string
@@ -404,31 +476,72 @@ export class RouteViewportController {
     tabOffset: number
     gestureId: number
   } | null {
-    const it = this.answerTabIntent
+    const it = this.interactionIntent
     if (!it) return null
+    if (it.region !== 'answer-tab' || it.scopeKind !== 'message') return null
     if (it.epoch !== this.epoch) return null
     if (it.topicId !== this.displayed.topicId || it.route !== this.displayed.route) return null
-    return { ...it }
+    return {
+      topicId: it.topicId,
+      route: it.route,
+      epoch: it.epoch,
+      tabMessageId: it.scopeId,
+      tabOffset: it.offset,
+      gestureId: it.gestureId
+    }
   }
 
   /**
-   * Capture a tab-switch intent BEFORE selection/layout change. Fail-closed
-   * when a transition owns the viewport, provenance is dirty, a live user
-   * gesture exists, the target is not the displayed route, or phases are
-   * outside adoptable stable/aligned/idle/terminal. Never opens ownership,
-   * never touches anchor/cache/phase/epoch. A newer capture overwrites the
-   * pending gesture (new gestureId); stale completions must guard by that
-   * identity and never clear the newer gesture.
+   * Shared interaction intent read (sole source for the keeper's region
+   * hold). Returns a copy only when still bound to the current displayed
+   * route + epoch; otherwise null (stale intents are never observable).
    */
-  beginAnswerTabSwitch(
+  get activeInteractionIntent(): {
+    topicId: string
+    route: RouteId
+    epoch: number
+    scopeKind: 'message' | 'group'
+    scopeId: string
+    region: string
+    offset: number
+    gestureId: number
+    fingerprint?: InteractionFingerprint
+    capturedAt: number
+    pendingLayoutMutation?: boolean
+  } | null {
+    const it = this.interactionIntent
+    if (!it) return null
+    if (it.epoch !== this.epoch) return null
+    if (it.topicId !== this.displayed.topicId || it.route !== this.displayed.route) return null
+    return { ...it, ...(it.fingerprint ? { fingerprint: { ...it.fingerprint } } : {}) }
+  }
+
+  /**
+   * Capture a shared interaction intent BEFORE the layout-changing mutation.
+   * Fail-closed when a transition owns the viewport, provenance is dirty, a
+   * live user gesture exists, the scope/region identity is empty, geometry
+   * is non-finite, the target is not the displayed route, or phases are
+   * outside adoptable stable/aligned/idle/terminal. Non-tab regions
+   * additionally require a live row anchor for the target route: at the true
+   * bottom (no row anchor) the keeper's bottom pin owns geometry and a
+   * region hold would pull away from the honest clamped bottom — so bottom
+   * refuses while the tab strip (which owns its own geometry) still arms.
+   * Never opens ownership, never touches anchor/cache/phase/epoch. A newer
+   * capture overwrites the pending gesture (new gestureId); stale
+   * completions must guard by that identity and never clear the newer one.
+   */
+  beginInteractionIntent(
     target: RouteRef,
-    tabMessageId: string,
-    tabOffset: number,
-    opts?: { expectedEpoch?: number }
+    scope: InteractionScope,
+    region: string,
+    offset: number,
+    opts?: { expectedEpoch?: number; fingerprint?: InteractionFingerprint }
   ): boolean {
     if (typeof opts?.expectedEpoch === 'number' && opts.expectedEpoch !== this.epoch) return false
-    if (typeof tabMessageId !== 'string' || tabMessageId.length === 0) return false
-    if (!Number.isFinite(tabOffset)) return false
+    if (!scope || (scope.kind !== 'message' && scope.kind !== 'group')) return false
+    if (typeof scope.id !== 'string' || scope.id.length === 0) return false
+    if (typeof region !== 'string' || region.length === 0) return false
+    if (!Number.isFinite(offset)) return false
     if (this.ownershipHeld) return false
     if (!this.isDomProvenanceClean) return false
     if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) return false
@@ -436,38 +549,135 @@ export class RouteViewportController {
       return false
     }
     if (this.hasActiveUserInteraction()) return false
-    this.answerTabGestureSeq += 1
-    this.answerTabIntent = {
+    if (region !== 'answer-tab') {
+      const live = this.anchor && this.anchorRoute ? this.anchor : null
+      if (!live || live.kind !== 'message') return false
+      if (!this.anchorRoute || this.anchorRoute.topicId !== target.topicId || this.anchorRoute.route !== target.route) {
+        return false
+      }
+    }
+    const fingerprint = opts?.fingerprint
+    if (fingerprint !== undefined) {
+      if (
+        typeof fingerprint.scopeH !== 'number' ||
+        !Number.isFinite(fingerprint.scopeH) ||
+        typeof fingerprint.scopeW !== 'number' ||
+        !Number.isFinite(fingerprint.scopeW)
+      ) {
+        return false
+      }
+    }
+    let capturedAt = 0
+    try {
+      capturedAt = Date.now()
+    } catch {
+      capturedAt = 0
+    }
+    this.interactionGestureSeq += 1
+    this.interactionIntent = {
       topicId: target.topicId,
       route: target.route,
       epoch: this.epoch,
-      tabMessageId,
-      tabOffset,
-      gestureId: this.answerTabGestureSeq
+      scopeKind: scope.kind,
+      scopeId: scope.id,
+      region,
+      offset,
+      gestureId: this.interactionGestureSeq,
+      ...(fingerprint ? { fingerprint: { ...fingerprint } } : {}),
+      capturedAt
     }
     return true
   }
 
   /**
-   * Clear the tab-switch intent (idempotent, gesture-guarded when supplied).
-   * A stale failure/completion must pass the gesture it belongs to
-   * (epoch + tab id + gestureId); when the live intent carries a newer
-   * gesture the clear refuses and the newer interaction survives. Callers
-   * without an identity (route/user/detach/send paths that own the viewport)
-   * clear unconditionally via the locked path.
+   * Clear the shared interaction intent (idempotent, gesture-guarded when
+   * supplied). A stale failure/completion must pass the gesture it belongs
+   * to (epoch + scope id + gestureId + region); when the live intent carries
+   * a newer gesture the clear refuses and the newer interaction survives.
+   * Callers without an identity (route/user/detach/send paths that own the
+   * viewport) clear unconditionally via the locked path.
    */
-  clearAnswerTabSwitch(expectedEpoch?: number, expectedTabMessageId?: string, expectedGestureId?: number): boolean {
-    if (!this.answerTabIntent) return false
-    if (typeof expectedEpoch === 'number' && this.answerTabIntent.epoch !== expectedEpoch) return false
-    if (typeof expectedTabMessageId === 'string' && this.answerTabIntent.tabMessageId !== expectedTabMessageId)
-      return false
-    if (typeof expectedGestureId === 'number' && this.answerTabIntent.gestureId !== expectedGestureId) return false
-    this.answerTabIntent = null
+  clearInteractionIntent(
+    expectedEpoch?: number,
+    expectedScopeId?: string,
+    expectedGestureId?: number,
+    expectedRegion?: string
+  ): boolean {
+    if (!this.interactionIntent) return false
+    if (typeof expectedEpoch === 'number' && this.interactionIntent.epoch !== expectedEpoch) return false
+    if (typeof expectedScopeId === 'string' && this.interactionIntent.scopeId !== expectedScopeId) return false
+    if (typeof expectedGestureId === 'number' && this.interactionIntent.gestureId !== expectedGestureId) return false
+    if (typeof expectedRegion === 'string' && this.interactionIntent.region !== expectedRegion) return false
+    this.interactionIntent = null
     return true
   }
 
+  /**
+   * Declare that the armed gesture's layout effect is produced by an
+   * asynchronous authority round-trip (the dispatching command's rows land
+   * only after the IPC/Main commit). Identifies the LIVE gesture by its own
+   * identity: a stale declaration never marks a newer gesture, so the shared
+   * owner keeps one arbitration point. Currency (route + epoch) is required,
+   * exactly like the read view. Does not modify geometry, phase, anchor,
+   * ownership or snapshot; it only forbids treating an unchanged DOM as proof
+   * that this gesture had no effect.
+   */
+  declareDeferredLayoutMutation(expectedGestureId: number): boolean {
+    const live = this.interactionIntent
+    if (!live) return false
+    if (live.gestureId !== expectedGestureId) return false
+    if (live.epoch !== this.epoch) return false
+    if (live.topicId !== this.displayed.topicId || live.route !== this.displayed.route) return false
+    live.pendingLayoutMutation = true
+    return true
+  }
+
+  /**
+   * Settle a deferred-layout gesture. `applied`: the authoritative command
+   * resolved, so ordinary completion (observed layout change + quiet) resumes
+   * on the live intent. `failed`: nothing will land, so the gesture is dropped
+   * fail-closed — no adopt, no snapshot, never a stale hold. A stale settle
+   * (older gesture identity) never touches the newer gesture.
+   */
+  settleDeferredLayoutMutation(expectedGestureId: number, outcome: 'applied' | 'failed'): boolean {
+    const live = this.interactionIntent
+    if (!live || live.gestureId !== expectedGestureId) return false
+    if (outcome === 'failed') {
+      this.interactionIntent = null
+      return true
+    }
+    if (live.pendingLayoutMutation !== true) return false
+    live.pendingLayoutMutation = false
+    return true
+  }
+
+  /**
+   * Capture a tab-switch intent BEFORE selection/layout change. Compatibility
+   * entry over the shared interaction intent (`answer-tab` region); the same
+   * fail-closed ownership/provenance/phase/gesture rules apply.
+   */
+  beginAnswerTabSwitch(
+    target: RouteRef,
+    tabMessageId: string,
+    tabOffset: number,
+    opts?: { expectedEpoch?: number; fingerprint?: InteractionFingerprint }
+  ): boolean {
+    return this.beginInteractionIntent(target, { kind: 'message', id: tabMessageId }, 'answer-tab', tabOffset, opts)
+  }
+
+  /**
+   * Clear the tab-switch intent (idempotent, gesture-guarded when supplied).
+   * Only clears when the live shared intent is an `answer-tab` gesture: a
+   * stale tab completion never clears a newer controls hold and vice versa.
+   */
+  clearAnswerTabSwitch(expectedEpoch?: number, expectedTabMessageId?: string, expectedGestureId?: number): boolean {
+    const live = this.interactionIntent
+    if (!live || live.region !== 'answer-tab') return false
+    return this.clearInteractionIntent(expectedEpoch, expectedTabMessageId, expectedGestureId, 'answer-tab')
+  }
+
   private clearAnswerTabLocked(): void {
-    this.answerTabIntent = null
+    this.interactionIntent = null
   }
 
   get releaseCount(): number {
@@ -531,6 +741,9 @@ export class RouteViewportController {
   syncDisplayed(displayed: RouteRef): void {
     if (this.ownershipHeld) return
     this.clearAnswerTabLocked()
+    // A topic/displayed change is an invalidation for any armed same-route
+    // pagination hold: the armed generation belongs to the previous DOM.
+    this.paginationHoldGeneration = null
     this.displayed = { ...displayed }
     this.rendered = null
     if (this.phase === 'terminal' || this.phase === 'stable') {
@@ -573,6 +786,9 @@ export class RouteViewportController {
 
   /** Failure clear (empty viewport): DOM no longer belongs to any route. */
   markRenderedUnknown(): void {
+    // Rendered-unknown invalidates any armed pagination hold with it: there
+    // is no committed DOM for the matching layout commit anymore.
+    this.paginationHoldGeneration = null
     this.rendered = null
   }
 
@@ -589,6 +805,10 @@ export class RouteViewportController {
   request(req: RouteTransitionRequest): { epoch: number; phase: RouteViewportPhase } {
     // A new route transition supersedes any pending same-route tab hold.
     this.clearAnswerTabLocked()
+    // A new route request supersedes any armed ordinary-pagination hold: the
+    // armed generation belongs to the outgoing DOM, never the incoming
+    // session (the generation is not bumped here, so this clear is explicit).
+    this.paginationHoldGeneration = null
     // A fresh guarded transaction consumes a pending detached reactivation:
     // the renewed connected lifetime owns its restore BEFORE any geometry is
     // admitted as stable. Single owner: this request is the activation.
@@ -893,6 +1113,81 @@ export class RouteViewportController {
   }
 
   /**
+   * Same-route ordinary pagination commit (older window growth, unowned).
+   *
+   * Publishes the precommit reading anchor (stable identity + offset captured
+   * BEFORE the Redux/window dispatch that grew the DOM) as the live anchor for
+   * the CURRENT displayed route, refreshes the rendered window identity, and
+   * bumps the window generation so the keeper re-resolves + holds prepaint.
+   * Arms a generation-bound one-shot hold (`consumePaginationHold`) so the
+   * commit instant holds even while a genuine user session is live
+   * (continuous upward paging across fetch flight). Later userTakeover
+   * measurements stay authoritative — the keeper always holds the LIVE
+   * anchor, never a stale capture — and any newer window update or route
+   * change invalidates the armed generation naturally. No phase/epoch/
+   * ownership change, no snapshot write (transient growth never creates one),
+   * no token. Fail-closed when owned, dirty, route-mismatched, unknown
+   * rendered, or outside adoptable phases. A null anchor keeps the existing
+   * live anchor (still refreshes the window identity so provenance stays
+   * current). Restore-owned divider search and route transitions never enter
+   * here — they own their own compensation.
+   */
+  adoptOrdinaryPaginationWindow(
+    target: RouteRef,
+    windowId: string,
+    anchor: { messageId: string; offset: number } | null
+  ): boolean {
+    if (this.ownershipHeld) return false
+    const cur = this.rendered
+    if (!cur) return false
+    if (cur.topicId !== target.topicId || cur.routeId !== target.route) return false
+    if (typeof windowId !== 'string' || windowId.length === 0) return false
+    if (this.phase !== 'stable' && this.phase !== 'aligned' && this.phase !== 'idle' && this.phase !== 'terminal') {
+      return false
+    }
+    if (!this.isDomProvenanceClean) return false
+    if (
+      anchor &&
+      typeof anchor.messageId === 'string' &&
+      anchor.messageId.length > 0 &&
+      Number.isFinite(anchor.offset)
+    ) {
+      this.setAnchorLocked({ kind: 'message', messageId: anchor.messageId, offset: anchor.offset }, { ...target })
+      try {
+        const key = routeViewportKey(target.topicId, target.route)
+        if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+      } catch {
+        // best-effort
+      }
+    }
+    this.rendered = { ...cur, windowId }
+    this.windowGenerationSeq += 1
+    this.paginationHoldGeneration = this.windowGenerationSeq
+    return true
+  }
+
+  /**
+   * One-shot commit-scope hold permission for the keeper: true exactly once
+   * for the generation-layout commit (`'generation-layout'`, the layout-phase
+   * hold on the freshly committed DOM for the armed window generation).
+   * Every other consumer (`'scroll'`, `'resize'`, `'mutate'`, …) returns false
+   * WITHOUT consuming: pre-commit observer callbacks must never steal the
+   * one-shot from the matching layout commit. Any newer window update, route
+   * change, or prior consume returns false fail-closed. Never touches
+   * anchor/phase/ownership.
+   */
+  consumePaginationHold(consumer: string): boolean {
+    if (consumer !== 'generation-layout') return false
+    if (this.paginationHoldGeneration === null) return false
+    if (this.paginationHoldGeneration !== this.windowGenerationSeq) {
+      this.paginationHoldGeneration = null
+      return false
+    }
+    this.paginationHoldGeneration = null
+    return true
+  }
+
+  /**
    * Pre-paint first position applied.
    * - `placed`: requested identity resident and aligned → `aligned` candidate.
    * - `searching`: intermediate edge parking → stays `searching` (must paginate).
@@ -1076,8 +1371,8 @@ export class RouteViewportController {
    * `request()`/supersede and `invalidateAll()`. No timers, no fences.
    */
   declareUserIntent(): UserInteractionToken {
-    // Genuine input cancels a pending tab hold: the user's own scroll owns
-    // the viewport from here, never the click-captured tab geometry.
+    // Genuine input cancels a pending shared hold: the user's own scroll owns
+    // the viewport from here, never the click-captured region geometry.
     this.clearAnswerTabLocked()
     if (this.activeInteractionId === null) {
       this.interactionSeq += 1
@@ -1205,13 +1500,23 @@ export class RouteViewportController {
    *   mismatch: fail-closed, no write, no fake stable (scroll count NOT
    *   incremented — a rejected scroll is not a gesture scroll).
    *
+   * Bottom-follow opt-in (`opts.bottomFollow`, default preserves the row):
+   * genuine user SCROLL landing at the exact physical bottom clears the live
+   * row anchor (keeper pins bottom through growth) while the returned snapshot
+   * stays TRUTHFUL (measured messageId/offset/isAtBottom untouched — never a
+   * synthesized bottom record). The exact gate is `abs(scrollTop) <= 1` (1px
+   * subpixel rounding tolerance, same as the oldest-edge exact gate — never
+   * the 50px snapshot vicinity, so reading near-bottom never jumps). Opt-in
+   * only: the click-to-pause path omits it and keeps the row even at bottom.
+   *
    * Only the returned `{taken:true, routeKey, snapshot}` authorizes a
    * `commitSnapshotForRoute(routeKey, snapshot)` user-source write.
    */
   userTakeover(
     measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
     liveWindowId?: string,
-    interactionToken?: UserInteractionTokenLike
+    interactionToken?: UserInteractionTokenLike,
+    opts?: { bottomFollow?: boolean }
   ):
     | {
         taken: true
@@ -1263,9 +1568,14 @@ export class RouteViewportController {
         intraRowOffset: measured.intraRowOffset,
         isAtBottom: measured.isAtBottom
       }
-      const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
-        ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
-        : null
+      // Genuine scroll landing at the exact physical bottom resumes follow:
+      // live anchor null, snapshot truthful. Re-validated here so a stale
+      // opt-in at a wide offset can never null a reading row.
+      const ownedFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+      const nextAnchor: RouteVisualAnchor | null =
+        ownedFollowBottom || !snapshot.messageId
+          ? null
+          : { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
       const oldEpoch = this.epoch
       this.displayed = { ...takeover }
       // Owned takeover provenance: the measured viewport belongs to the
@@ -1319,9 +1629,12 @@ export class RouteViewportController {
       intraRowOffset: measured.intraRowOffset,
       isAtBottom: measured.isAtBottom
     }
-    const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
-      ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
-      : null
+    // Same exact-bottom follow rule as the owned path above (see method doc).
+    const stableFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+    const nextAnchor: RouteVisualAnchor | null =
+      stableFollowBottom || !snapshot.messageId
+        ? null
+        : { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
     // Stable takeover provenance: clean displayed == rendered, so the
     // measured viewport belongs to the displayed route. (Non-bottom null was
     // already refused above: null here is proven bottom only.)
@@ -1366,9 +1679,9 @@ export class RouteViewportController {
     opts?: { correctedOffset?: number }
   ): boolean {
     if (typeof visibleMessageId !== 'string' || visibleMessageId.length === 0) return false
-    // A pending tab-switch hold owns same-route geometry: the body-anchor
-    // transfer must not fight the clicked-tab hold.
-    if (this.answerTabIntent) return false
+    // A pending shared interaction hold owns same-route geometry: the
+    // body-anchor transfer must not fight the captured region hold.
+    if (this.interactionIntent) return false
     if (this.ownershipHeld) return false
     if (!this.isDomProvenanceClean) return false
     if (this.phase !== 'stable' && this.phase !== 'aligned' && this.phase !== 'idle' && this.phase !== 'terminal') {
@@ -1516,6 +1829,89 @@ export class RouteViewportController {
   }
 
   /**
+   * Same-route shared-interaction handoff (message/group controls, answer
+   * tabs, fold toggles, …) through the single controller owner.
+   *
+   * Same currency guards as `adoptProgrammaticViewport` (unowned, clean
+   * provenance, route match, adoptable phase, epoch, nonbottom-null) and the
+   * same truthful snapshot (measured identity + `isAtBottom` untouched).
+   * Anchor differs: an explicit row identity is ALWAYS kept as the live row
+   * anchor, even when the measured viewport is truthfully at the bottom
+   * vicinity. Snapshot vicinity is never permission to follow — only a true
+   * user scroll to the exact physical bottom (`userTakeover` with
+   * `bottomFollow`) or an explicit send/bottom (`beginSendBottom` +
+   * `adoptProgrammaticViewport`) resumes follow (live anchor null). A
+   * missing identity with proven bottom still pins bottom (null); a missing
+   * identity without proven bottom refuses. No button metadata, no duration
+   * branch, no paused flag — generic row preservation for every region.
+   */
+  adoptInteractionViewport(
+    target: RouteRef,
+    measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+    opts?: { expectedEpoch?: number }
+  ):
+    | { taken: true; routeKey: string; snapshot: RouteViewportSnapshot; epoch: number }
+    | {
+        taken: false
+        reason:
+          | 'owned-active'
+          | 'unknown-rendered'
+          | 'not-owned-dirty'
+          | 'route-mismatch'
+          | 'stale-epoch'
+          | 'phase-not-adoptable'
+          | 'nonbottom-null'
+        epoch: number
+      } {
+    if (typeof opts?.expectedEpoch === 'number' && opts.expectedEpoch !== this.epoch) {
+      return { taken: false, reason: 'stale-epoch', epoch: this.epoch }
+    }
+    if (this.ownershipHeld) {
+      return { taken: false, reason: 'owned-active', epoch: this.epoch }
+    }
+    if (!this.rendered) {
+      return { taken: false, reason: 'unknown-rendered', epoch: this.epoch }
+    }
+    if (!this.isDomProvenanceClean) {
+      return { taken: false, reason: 'not-owned-dirty', epoch: this.epoch }
+    }
+    if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) {
+      return { taken: false, reason: 'route-mismatch', epoch: this.epoch }
+    }
+    if (this.phase !== 'stable' && this.phase !== 'idle' && this.phase !== 'terminal') {
+      return { taken: false, reason: 'phase-not-adoptable', epoch: this.epoch }
+    }
+    if (!measured.messageId && measured.isAtBottom !== true) {
+      return { taken: false, reason: 'nonbottom-null', epoch: this.epoch }
+    }
+    const snapshot: RouteViewportSnapshot = {
+      scrollTop: measured.scrollTop,
+      messageId: measured.messageId,
+      intraRowOffset: measured.intraRowOffset,
+      isAtBottom: measured.isAtBottom
+    }
+    const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
+      ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
+      : null
+    this.clearAnswerTabLocked()
+    this.setAnchorLocked(nextAnchor, nextAnchor ? { ...this.displayed } : null)
+    try {
+      const key = routeViewportKey(this.displayed.topicId, this.displayed.route)
+      if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+      else this.anchorCache.delete(key)
+    } catch {
+      // best-effort
+    }
+    this.phase = 'stable'
+    return {
+      taken: true,
+      routeKey: routeViewportKey(this.displayed.topicId, this.displayed.route),
+      snapshot,
+      epoch: this.epoch
+    }
+  }
+
+  /**
    * Epoch-guarded idempotent release for `finally` blocks. Only the current
    * epoch can release, and only once. Stale sessions return false and touch
    * nothing — old `finally` blocks can never disturb the new session.
@@ -1579,6 +1975,10 @@ export class RouteViewportController {
   invalidateAll(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     this.closeInteractionLocked()
     this.clearAnswerTabLocked()
+    // Invalidation (unmount / topic disposal / Activity detach) releases any
+    // armed pagination hold with the session it belonged to. `detach()` runs
+    // through here, so the detached lifetime never inherits a stale arm.
+    this.paginationHoldGeneration = null
     this.activationSession = false
     this.continuationEpoch = null
     if (!this.ownershipHeld) {
@@ -1628,3 +2028,32 @@ export class RouteViewportController {
 
 /** Displayed-route key helper for outgoing freeze (always the DISPLAYED route). */
 export const displayedRouteKey = (displayed: RouteRef): string => routeViewportKey(displayed.topicId, displayed.route)
+
+/** Minimal session surface the shared input-declaration helper needs. */
+export type UserIntentDeclarer = Pick<RouteViewportController, 'hasActiveUserInteraction' | 'declareUserIntent'>
+
+/**
+ * Shared input-adapter declaration (ONE implementation for every genuine-input
+ * boundary: the capture-phase adapter on the message container and the React
+ * bubble handler for the same gesture).
+ *
+ * Both boundaries observe the same input: capture runs first and opens the
+ * session, the bubble call then refreshes that live session. Genuine repeats
+ * (native key auto-repeat, wheel momentum, a drag's scrolls) only refresh the
+ * session counters, which no projection surface renders; the ONLY observable
+ * transition is idle → live, when a session is opened. The helper performs the
+ * unchanged open/refresh/supersede declaration and reports that transition, so
+ * callers publish exactly one projection notification per gesture instead of
+ * one per repeat (a repeat notification re-rendered the whole mounted
+ * conversation for no visible change). No gate, no timer, no keyboard
+ * interception, no lifecycle change: declaration semantics are untouched.
+ */
+export const declareUserIntentSession = (controller: UserIntentDeclarer): boolean => {
+  try {
+    const wasLive = controller.hasActiveUserInteraction()
+    controller.declareUserIntent()
+    return !wasLive
+  } catch {
+    return false
+  }
+}

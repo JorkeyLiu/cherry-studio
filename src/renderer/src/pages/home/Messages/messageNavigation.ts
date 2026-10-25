@@ -44,8 +44,86 @@ export const resolveColumnReverseScrollTarget = (
  */
 export interface ColumnReverseScrollContainer {
   readonly scrollHeight: number
+  readonly clientHeight: number
+  readonly scrollTop: number
   scrollTo(options: { top: number }): void
 }
+
+/**
+ * Pure geometry for positioning a message row inside a column-reverse
+ * container (`#messages`: scrollTop 0 is the newest bottom, negative values
+ * read toward the oldest top).
+ *
+ * `elementTopWithinContainer` is the row's content offset
+ * (`elRect.top - containerRect.top + container.scrollTop`); `minScrollTop`
+ * is the clamped oldest edge (`-(scrollHeight - clientHeight)`, `<= 0`).
+ * Returns the finite clamped `scrollTo` top for the requested alignment, or
+ * `null` when any input is non-finite (fail-closed: caller skips the write).
+ *
+ * Native `scrollIntoView({ block: 'start' })` is a no-op for resident rows in
+ * this layout (verified: unchanged far-negative target offsets, scrollTop
+ * pinned at 0), so navigation scrolls the explicit container arithmetically.
+ */
+export const computeColumnReverseMessageScrollTop = (args: {
+  elementTopWithinContainer: number
+  containerClientHeight: number
+  elementHeight: number
+  alignment: MessageNavigationAlignment
+  minScrollTop: number
+}): number | null => {
+  const { elementTopWithinContainer, containerClientHeight, elementHeight, alignment, minScrollTop } = args
+  for (const value of [elementTopWithinContainer, containerClientHeight, elementHeight, minScrollTop]) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  }
+  const freeSpace = Math.max(0, containerClientHeight - elementHeight)
+  const desired =
+    alignment === 'center'
+      ? elementTopWithinContainer - freeSpace / 2
+      : alignment === 'end'
+        ? elementTopWithinContainer - freeSpace
+        : elementTopWithinContainer
+  if (!Number.isFinite(desired)) return null
+  const lower = Math.min(0, minScrollTop)
+  return Math.max(lower, Math.min(0, desired))
+}
+
+/**
+ * Pure geometry for a saved-offset restore inside a column-reverse container.
+ *
+ * `elementTopWithinContainer` is the row's content offset
+ * (`elRect.top - containerRect.top + container.scrollTop`, i.e. the scrollTop
+ * at which the row would sit at offset 0); `restoreOffset` is the saved
+ * stable intra-row offset (row top minus container top, negative above the
+ * fold). Returns the finite clamped `scrollTo` top that lands the row exactly
+ * at its saved offset, or `null` when the offset is not a finite number
+ * (fail-closed: the caller keeps its alignment path).
+ */
+export const computeRestoreMessageScrollTop = (args: {
+  elementTopWithinContainer: number
+  restoreOffset: number | null | undefined
+  minScrollTop: number
+}): number | null => {
+  const { elementTopWithinContainer, restoreOffset, minScrollTop } = args
+  if (typeof restoreOffset !== 'number' || !Number.isFinite(restoreOffset)) return null
+  if (!Number.isFinite(elementTopWithinContainer) || !Number.isFinite(minScrollTop)) return null
+  const desired = elementTopWithinContainer - restoreOffset
+  if (!Number.isFinite(desired)) return null
+  const lower = Math.min(0, minScrollTop)
+  return Math.max(lower, Math.min(0, desired))
+}
+
+/**
+ * Truthful scroll outcome for the existing transaction `scroll` callback.
+ * Reuses the navigation result contract — no new lifecycle or state:
+ * - `cancelled`: currency/topic/route/epoch/new-interaction/unmounted/
+ *   owned/controller-refusal skipped the write (preserve pending).
+ * - `not-found`: physical target missing/hidden/unmeasurable (authoritative
+ *   missing clears pending).
+ * - `success`: actually positioned (top/bottom/scrollTop written, or message
+ *   row arithmetically positioned). A clamped already-visible target is still
+ *   success — no arbitrary delta is required.
+ */
+export type MessageNavigationScrollOutcome = MessageNavigationResult
 
 /**
  * Applies the concrete scroll for a resolved navigation intent in a column-reverse container.
@@ -53,20 +131,38 @@ export interface ColumnReverseScrollContainer {
  * - top/bottom/scrollTop: delegates to `container.scrollTo`.
  * - message: delegates to the `scrollElementIntoView` callback (DOM element lookup).
  *
+ * Returns the truthful outcome so the transaction can cancel without
+ * finish/savePosition on skipped writes. A `void` callback return is treated
+ * as `success` for focused legacy mocks; production callbacks return explicit
+ * outcomes.
+ *
  * This is the single call-site for navigation scroll execution — Messages.tsx's
  * transaction `scroll` callback calls this rather than duplicating the switch.
  */
 export const applyColumnReverseScroll = (
   resolved: ResolvedMessageNavigation,
   container: ColumnReverseScrollContainer | null | undefined,
-  scrollElementIntoView: (targetId: string, alignment: MessageNavigationAlignment) => void
-): void => {
+  scrollElementIntoView: (
+    targetId: string,
+    alignment: MessageNavigationAlignment
+  ) => MessageNavigationScrollOutcome | void
+): MessageNavigationScrollOutcome => {
   const scrollTarget = resolveColumnReverseScrollTarget(resolved, container?.scrollHeight ?? 0)
   if (scrollTarget) {
-    container?.scrollTo(scrollTarget)
-  } else if (resolved.kind === 'message') {
-    scrollElementIntoView(resolved.targetId, resolved.alignment)
+    if (!container) return 'cancelled'
+    try {
+      container.scrollTo(scrollTarget)
+    } catch {
+      return 'cancelled'
+    }
+    return 'success'
   }
+  if (resolved.kind === 'message') {
+    const outcome = scrollElementIntoView(resolved.targetId, resolved.alignment)
+    if (outcome === 'cancelled' || outcome === 'not-found' || outcome === 'success') return outcome
+    return 'success'
+  }
+  return 'cancelled'
 }
 
 export type MessageNavigationIntent =
@@ -75,6 +171,14 @@ export type MessageNavigationIntent =
       targetId: string
       source: MessageViewportNavigationSource
       alignment?: MessageNavigationAlignment
+      /**
+       * Saved stable intra-row offset (row top minus container top) carried
+       * ONLY by bootstrap restore intents. The transaction scroll lands the
+       * row at this offset and skips the write when the pre-paint first
+       * placement already holds it — so no second (start-aligned) write can
+       * cover the correct position. Explicit navigations never set it.
+       */
+      restoreOffset?: number | null
     }
   | {
       kind: 'group'
@@ -87,7 +191,7 @@ export type MessageNavigationIntent =
   | { kind: 'scrollTop'; scrollTop: number; source: 'restore' }
 
 export type ResolvedMessageNavigation =
-  | { kind: 'message'; targetId: string; alignment: MessageNavigationAlignment }
+  | { kind: 'message'; targetId: string; alignment: MessageNavigationAlignment; restoreOffset?: number | null }
   | { kind: 'bottom' }
   | { kind: 'top' }
   | { kind: 'scrollTop'; scrollTop: number }
@@ -141,6 +245,14 @@ export type BootstrapDecision =
 /**
  * Pure decision function for topic-mount navigation bootstrap.
  * Priority: matching pending > saved restore > default (latest).
+ *
+ * Lifecycle responsibility (single transaction recovery): topic-mount
+ * restores run as ONE bootstrap transaction — the armed plan carries the
+ * saved offset for the pre-paint first placement, and the SAME transaction's
+ * scroll below converges on the passed-through `restoreOffset` (skipping its
+ * write when first placement already holds it). The transaction never falls
+ * back to `start` alignment for a restore with a finite saved offset, so no
+ * wrong frame can land after first placement. No new owner or subsystem.
  * Returns the action the caller should take.
  */
 export const resolveBootstrapDecision = (input: BootstrapDecisionInput): BootstrapDecision => {
@@ -150,19 +262,25 @@ export const resolveBootstrapDecision = (input: BootstrapDecisionInput): Bootstr
   if (phase === 'done') return { action: 'done' }
   if (phase === 'pending-in-flight') return { action: 'wait' }
 
-  // Priority 1: matching pending
+  // Priority 1: matching pending (explicit navigation, never a restore).
   if (pending && pending.topicId === topicId) {
     return { action: 'pending', intent: { kind: 'message', targetId: pending.messageId, source: 'pending' } }
   }
 
   // Priority 2: saved restore (only when no matching pending exists).
   // Route-saved-row-anchor: messageId canonical, anchorId legacy alias.
+  // The finite saved intra-row offset rides on the intent so the transaction
+  // scroll restores the stable offset instead of start-aligning the row.
   if (!savedRestoreHandled && savedPosition) {
     const rowAnchor = savedPosition.messageId ?? savedPosition.anchorId
+    const restoreOffset =
+      typeof savedPosition.intraRowOffset === 'number' && Number.isFinite(savedPosition.intraRowOffset)
+        ? savedPosition.intraRowOffset
+        : null
     const intent: MessageNavigationIntent | null = savedPosition.isAtBottom
       ? { kind: 'bottom', source: 'restore' }
       : rowAnchor
-        ? { kind: 'message', targetId: rowAnchor, source: 'restore' }
+        ? { kind: 'message', targetId: rowAnchor, source: 'restore', restoreOffset }
         : savedPosition.scrollTop !== undefined
           ? { kind: 'scrollTop', scrollTop: savedPosition.scrollTop, source: 'restore' }
           : null
@@ -181,7 +299,8 @@ export const resolveBootstrapDecision = (input: BootstrapDecisionInput): Bootstr
  * Returns the target user message ID, or `null` when the baseline is already
  * at the true topic boundary (first/last user message in the full sequence).
  *
- * Used by Messages→ChatNavigation to navigate beyond the rendered viewport window.
+ * Used by Messages (stable-ID navigation callbacks) to navigate beyond
+ * the rendered viewport window.
  * Pure function — no DOM, no side-effects.
  */
 export const resolveAdjacentUserMessage = (
@@ -218,7 +337,15 @@ export const resolveMessageNavigation = (
 
   if (intent.kind === 'message') {
     return messages.some((message) => message.id === intent.targetId)
-      ? { kind: 'message', targetId: intent.targetId, alignment: intent.alignment ?? 'start' }
+      ? {
+          kind: 'message',
+          targetId: intent.targetId,
+          alignment: intent.alignment ?? 'start',
+          restoreOffset:
+            typeof intent.restoreOffset === 'number' && Number.isFinite(intent.restoreOffset)
+              ? intent.restoreOffset
+              : null
+        }
       : null
   }
 
@@ -251,12 +378,17 @@ export const chooseNavigationWindow = (
 }
 
 interface MessageNavigationTransactionDependencies {
+  /**
+   * `true` may be returned synchronously by a caller that already owns the
+   * navigation without an observable commit (resident selection follow); the
+   * runner only ever `await`s the value.
+   */
   begin: (
     token: MessageViewportNavigationToken,
     targetId: string | null,
     source: MessageViewportNavigationSource,
     alignment: MessageNavigationAlignment
-  ) => Promise<boolean>
+  ) => boolean | Promise<boolean>
   isCurrent: (token: MessageViewportNavigationToken) => boolean
   cancelLoadsAndTimers: () => void
   resolve: (intent: MessageNavigationIntent) => ResolvedMessageNavigation | null
@@ -265,12 +397,19 @@ interface MessageNavigationTransactionDependencies {
   getTargetStatus: (targetId: string) => 'visible' | 'hidden' | 'missing'
   revealTarget: (targetId: string) => Promise<void>
   settleDom: () => Promise<void>
-  beginProgrammaticScroll: (token: MessageViewportNavigationToken) => Promise<boolean>
-  scroll: (resolved: ResolvedMessageNavigation) => void
+  /* Same as `begin`: `true` may be reported synchronously (resident follow). */
+  beginProgrammaticScroll: (token: MessageViewportNavigationToken) => boolean | Promise<boolean>
+  scroll: (resolved: ResolvedMessageNavigation) => MessageNavigationScrollOutcome | void
   finish: (token: MessageViewportNavigationToken) => void
   cancel: (token: MessageViewportNavigationToken) => void
+  /**
+   * Resident-follow shape: the resolved endpoint row is already resident and
+   * visible, so the geometry write runs first and the navigation state machine
+   * is told afterwards (dispatch-only). No commit, frame, timer or reveal is
+   * awaited on this path.
+   */
+  resident?: boolean
 }
-
 // ---------------------------------------------------------------------------
 // Pending event coordination
 // ---------------------------------------------------------------------------
@@ -338,7 +477,20 @@ export const handlePendingNavigateEvent = async (
 // Transaction runner
 // ---------------------------------------------------------------------------
 
-/** Runs every message/restoration navigation through one last-navigation-wins transaction. */
+/**
+ * Runs every message/restoration navigation through one last-navigation-wins
+ * transaction.
+ *
+ * `dependencies.resident` selects the resident-follow shape: the caller proved
+ * the endpoint row is already resident and visible, so the geometry write is
+ * the FIRST thing this transaction does — before any dispatch, commit, frame,
+ * timer or reveal. Nothing a repeat key can outrun therefore stands between the
+ * input and the scroll write. The navigation state machine is then told about
+ * the same navigation (begin + finish/cancel, both dispatch-only) so an older
+ * in-flight navigation is still superseded. Currency is unchanged: the
+ * caller's `scroll` callback owns the topic/route/epoch/interaction gates and
+ * the controller adoption, exactly as in the generic path.
+ */
 export const runMessageNavigationTransaction = async (
   intent: MessageNavigationIntent,
   dependencies: MessageNavigationTransactionDependencies
@@ -346,6 +498,25 @@ export const runMessageNavigationTransaction = async (
   const token: MessageViewportNavigationToken = {}
   const requestedTarget = intent.kind === 'message' ? intent.targetId : null
   const alignment = 'alignment' in intent ? (intent.alignment ?? 'start') : 'start'
+
+  if (dependencies.resident === true) {
+    const residentResolved = dependencies.resolve(intent)
+    if (!residentResolved) {
+      dependencies.cancel(token)
+      return 'not-found'
+    }
+    const residentOutcome = dependencies.scroll(residentResolved)
+    const outcome: MessageNavigationScrollOutcome =
+      residentOutcome === 'cancelled' || residentOutcome === 'not-found' ? residentOutcome : 'success'
+    // State coherence only: the geometry above is already written.
+    void dependencies.begin(token, requestedTarget, intent.source, alignment)
+    if (outcome === 'success') {
+      dependencies.finish(token)
+      return 'success'
+    }
+    dependencies.cancel(token)
+    return outcome
+  }
 
   if (!(await dependencies.begin(token, requestedTarget, intent.source, alignment))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'
@@ -381,7 +552,11 @@ export const runMessageNavigationTransaction = async (
 
   if (!(await dependencies.beginProgrammaticScroll(token))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'
-  dependencies.scroll(resolved)
+  const scrollOutcome = dependencies.scroll(resolved)
+  if (scrollOutcome === 'cancelled' || scrollOutcome === 'not-found') {
+    dependencies.cancel(token)
+    return scrollOutcome
+  }
   await dependencies.settleDom()
   if (!dependencies.isCurrent(token)) return 'cancelled'
   dependencies.finish(token)

@@ -64,7 +64,8 @@ interface EffectiveBuilderConfig {
   publish?: unknown
   releaseInfo?: { releaseNotes?: string | null } | null
   buildVersion?: string
-  mac?: { artifactName?: string }
+  mac?: { artifactName?: string; target?: unknown }
+  dmg?: { writeUpdateInfo?: boolean }
   beforePack?: string
   afterSign?: string
   artifactBuildCompleted?: string
@@ -79,6 +80,11 @@ function asProtocolArray(protocols: EffectiveBuilderConfig['protocols']): Locked
     return []
   }
   return Array.isArray(protocols) ? protocols : [protocols]
+}
+
+function asMacTargetNames(target: unknown): string[] {
+  const list = target == null ? [] : Array.isArray(target) ? target : [target]
+  return list.map((entry) => (typeof entry === 'string' ? entry : ((entry as { target?: string }).target ?? '')))
 }
 
 /** Minimal debug logger accepted by the installed schema validator. */
@@ -140,6 +146,15 @@ describe('electron-builder base config — single Cherry Chat identity (LOCK-RET
     expect(config.mac?.artifactName).toContain(`\${env.${BUILD_ID_ENV_NAME}}`)
     // Product version macro is preserved: app.getVersion() stays 0.1.0.
     expect(config.mac?.artifactName).toContain('${version}')
+  })
+
+  it('packages macOS as DMG only — no standalone ZIP or ZIP blockmap', () => {
+    // DMG-only default saves the redundant ZIP compression resources. The
+    // effective config (via the installed loader) must list exactly one mac
+    // target (`dmg`) and keep `dmg.writeUpdateInfo=false` so no ZIP update
+    // metadata is emitted alongside the DMG.
+    expect(asMacTargetNames(config.mac?.target)).toEqual(['dmg'])
+    expect(config.dmg?.writeUpdateInfo).toBe(false)
   })
 
   it('derives the numeric macOS build version via the beforePack hook, not a static macro (VERSION-003)', () => {
@@ -224,7 +239,6 @@ describe('package contract — migration-portable stable assertions (REPO-MIGRAT
   const REQUIRED_SCRIPTS = [
     'dev',
     'build',
-    'build:check',
     'build:mac:arm64',
     'build:unpack',
     'test',

@@ -31,6 +31,7 @@ import {
   INVENTORY_VERSION_V2,
   INVENTORY_VERSION_V3,
   INVENTORY_VERSION_V5,
+  INVENTORY_VERSION_V6,
   type MessageBlockEntity,
   type MessageEntity,
   ORDER_FRAME_VERSION,
@@ -38,17 +39,21 @@ import {
   PAYLOAD_SCHEMA_V2,
   PAYLOAD_SCHEMA_V3,
   PAYLOAD_SCHEMA_V5,
+  PAYLOAD_SCHEMA_V6,
   type ReplacementRegister,
   SCOPE_V2,
   SCOPE_V3,
   SCOPE_V5,
+  SCOPE_V6,
   type SyncPayloadV2,
   type SyncPayloadV3,
   type SyncPayloadV4,
   type SyncPayloadV5,
+  type SyncPayloadV6,
   type Tombstone,
   type TopicEntity,
   validatePayload,
+  validatePayloadV6,
   ValidationError,
   verifySyncDigest
 } from '@shared/sync'
@@ -1359,4 +1364,158 @@ export function verifyWirePayloadDigestV5(payload: SyncPayloadV5, expectedDigest
     throw e
   }
   return verifySyncDigest(payload, expectedDigest, hashHex)
+}
+
+// ---------------------------------------------------------------------------
+// V6 projection: V5 chat/branch/assistant/attachment content + the coherent
+// cross-topic history reference inventory. The referenced prefix is never
+// copied — only the relation tuple and its entity clock go on the wire.
+// ---------------------------------------------------------------------------
+
+const REFERENCE_TOMBSTONE_TYPE = 'topic_reference' as const
+
+/**
+ * Project a complete local baseline candidate + assistant section to the
+ * locked v6 wire `payload` (`chat-core-baseline-v6`).
+ *
+ * Delegates all V5 content projection to the single existing V5 projector
+ * (same validation/locks) with reference tombstones withheld, then adds the
+ * reference relations and their tombstones and re-validates strictly as V6.
+ * The referenced prefix never enters the payload.
+ */
+export function projectLocalBaselineToWirePayloadV6(
+  candidate: LocalSyncBaselineCandidate,
+  assistantSection?: { configs: unknown[]; tombstones: unknown[] }
+): SyncPayloadV6 {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    fail('candidate must be a plain object')
+  }
+  const c = candidate as LocalSyncBaselineCandidate & {
+    references?: Array<{
+      targetTopicId: string
+      sourceTopicId: string
+      sourceBranchId: string | null
+      anchorMessageId: string
+      entityClock: { timestamp: number; operationId: string } | null
+    }>
+  }
+  const referenceTombstones = c.tombstones.filter(
+    (t) => (t as { entityType?: unknown }).entityType === REFERENCE_TOMBSTONE_TYPE
+  )
+  const v5Candidate = {
+    ...(c as unknown as Record<string, unknown>),
+    tombstones: c.tombstones.filter((t) => (t as { entityType?: unknown }).entityType !== REFERENCE_TOMBSTONE_TYPE)
+  } as unknown as LocalSyncBaselineCandidate
+  const v5 = projectLocalBaselineToWirePayloadV5(v5Candidate, assistantSection)
+
+  const topicReferences: SyncPayloadV6['topicReferences'] = []
+  for (const ref of c.references ?? []) {
+    if (!ref || typeof ref !== 'object') fail('candidate reference must be an object')
+    if (!ref.entityClock) {
+      fail(`candidate reference ${String(ref.targetTopicId)} has no entity clock (not adoptable)`)
+    }
+    topicReferences.push({
+      targetTopicId: ref.targetTopicId,
+      sourceTopicId: ref.sourceTopicId,
+      sourceBranchId: ref.sourceBranchId ?? null,
+      anchorMessageId: ref.anchorMessageId,
+      entityClock: { timestamp: ref.entityClock.timestamp, operationId: ref.entityClock.operationId }
+    })
+  }
+  topicReferences.sort((a, b) => compareUtf8ByteLex(a.targetTopicId, b.targetTopicId))
+
+  const tombstones: SyncPayloadV6['tombstones'] = [
+    ...(v5.tombstones as unknown as SyncPayloadV6['tombstones']),
+    ...referenceTombstones.map((t) => ({
+      entityType: 'topicReference' as const,
+      entityId: t.entityId,
+      deletionClock: { timestamp: t.timestamp, operationId: t.operationId },
+      survivingEntityClock: t.entityClock
+        ? { timestamp: t.entityClock.timestamp, operationId: t.entityClock.operationId }
+        : null
+    }))
+  ].sort((a, b) => {
+    const rank = (t: string): number => {
+      if (t === 'topic') return 0
+      if (t === 'message') return 1
+      if (t === 'messageBlock') return 2
+      if (t === 'topicBranch') return 3
+      if (t === 'topicReference') return 4
+      return 5
+    }
+    const r = rank(a.entityType)
+    const r2 = rank(b.entityType)
+    if (r !== r2) return r - r2
+    return compareUtf8ByteLex(a.entityId, b.entityId)
+  })
+
+  const payload: SyncPayloadV6 = {
+    payloadSchema: PAYLOAD_SCHEMA_V6,
+    inventoryVersion: INVENTORY_VERSION_V6,
+    orderFrameVersion: ORDER_FRAME_VERSION,
+    scope: SCOPE_V6,
+    topics: v5.topics,
+    messages: v5.messages,
+    messageBlocks: v5.messageBlocks,
+    branches: v5.branches,
+    assistantConfigs: v5.assistantConfigs,
+    fileAssets: v5.fileAssets,
+    topicReferences,
+    tombstones,
+    assistantTombstones: v5.assistantTombstones,
+    orderFrames: v5.orderFrames,
+    replacementRegisters: v5.replacementRegisters,
+    manifest: {
+      payloadSchema: PAYLOAD_SCHEMA_V6,
+      inventoryVersion: INVENTORY_VERSION_V6,
+      orderFrameVersion: ORDER_FRAME_VERSION,
+      scope: SCOPE_V6,
+      liveCounts: {
+        topic: v5.topics.length,
+        message: v5.messages.length,
+        messageBlock: v5.messageBlocks.length,
+        branch: (v5.branches as unknown[]).length,
+        assistantConfig: (v5.assistantConfigs as unknown[]).length,
+        fileAsset: (v5.fileAssets as unknown[]).length,
+        topicReference: topicReferences.length
+      },
+      tombstoneCounts: {
+        topic: tombstones.filter((t) => t.entityType === 'topic').length,
+        message: tombstones.filter((t) => t.entityType === 'message').length,
+        messageBlock: tombstones.filter((t) => t.entityType === 'messageBlock').length,
+        topicBranch: tombstones.filter((t) => t.entityType === 'topicBranch').length,
+        fileAsset: tombstones.filter((t) => t.entityType === 'fileAsset').length,
+        assistantConfig: (v5.assistantTombstones as unknown[]).length,
+        topicReference: tombstones.filter((t) => t.entityType === 'topicReference').length
+      },
+      frameCounts: {
+        topicMessage: v5.orderFrames.filter((f) => f.kind === 'topicMessage').length,
+        messageBlock: v5.orderFrames.filter((f) => f.kind === 'messageBlock').length,
+        branchSuffix: v5.orderFrames.filter((f) => (f as { kind: string }).kind === 'branchSuffix').length
+      },
+      replacementCount: (v5.replacementRegisters as unknown[]).length,
+      completeness: COMPLETENESS_COMPLETE
+    }
+  }
+
+  try {
+    validatePayloadV6(payload)
+  } catch (e) {
+    if (e instanceof ValidationError) {
+      fail(`projected v6 payload failed wire validation: ${e.message}`, e)
+    }
+    throw e
+  }
+  return payload
+}
+
+export function computeWirePayloadDigestV6(payload: SyncPayloadV6): string {
+  try {
+    return computeSyncDigest(payload, hashHex)
+  } catch (e) {
+    if (e instanceof ValidationError) {
+      fail(`v6 payload digest rejected: ${e.message}`, e)
+    }
+    throw e
+  }
 }

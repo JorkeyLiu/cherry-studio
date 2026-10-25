@@ -1,9 +1,9 @@
-import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
+import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { Popover } from 'antd'
 import { Layers } from 'lucide-react'
-import { memo, useCallback, useMemo } from 'react'
+import { memo, useCallback, useMemo, useRef } from 'react'
 import styled from 'styled-components'
 
 interface TopicSegmentDrawerProps {
@@ -11,23 +11,30 @@ interface TopicSegmentDrawerProps {
 }
 
 const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
-  const { orderedSegmentsForTopic } = useTopicSegments(topicId)
+  // Route-scoped projection of the topic-wide catalog: only the active route's
+  // reachable members/counts, with 0-intersection (other-route) segments hidden.
+  // The projected `firstMessageId` is always reachable on the current route, so
+  // the Messages unified navigate path only needs its window complement.
+  const { segments, routeKey } = useRouteScopedSegments(topicId)
 
-  // Always navigate to the segment's authoritative first message ID.
-  // Window complement for targets outside the loaded projection happens in
-  // the Messages unified navigate path; no window-local fallback here.
-  const scrollToSegment = useCallback((firstMessageId: string | null) => {
+  // Live route key: a queued click whose row was rendered under a previous
+  // route must not navigate the new route to an off-route member.
+  const liveRouteKeyRef = useRef(routeKey)
+  liveRouteKeyRef.current = routeKey
+
+  const scrollToSegment = useCallback((firstMessageId: string | null, itemRouteKey: string) => {
     if (!firstMessageId) return
+    if (liveRouteKeyRef.current !== itemRouteKey) return
     void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstMessageId)
   }, [])
 
   const popoverContent = useMemo(() => {
-    if (orderedSegmentsForTopic.length === 0) return null
+    if (segments.length === 0) return null
 
     return (
       <PopoverList>
-        {orderedSegmentsForTopic.map((segment) => (
-          <PopoverItem key={segment.id} onClick={() => scrollToSegment(segment.firstMessageId)}>
+        {segments.map((segment) => (
+          <PopoverItem key={segment.id} onClick={() => scrollToSegment(segment.firstMessageId, routeKey)}>
             <Dot $color={segment.color || getSegmentColor(segment.id)} />
             <SegmentName>{segment.name}</SegmentName>
             <MessageCount>{segment.messageCount}</MessageCount>
@@ -35,15 +42,15 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
         ))}
       </PopoverList>
     )
-  }, [orderedSegmentsForTopic, scrollToSegment])
+  }, [segments, routeKey, scrollToSegment])
 
-  if (orderedSegmentsForTopic.length === 0) return null
+  if (segments.length === 0) return null
 
   return (
     <Popover
       content={popoverContent}
       trigger={['hover', 'click']}
-      placement="topRight"
+      placement="topLeft"
       arrow={false}
       mouseEnterDelay={0.3}
       overlayInnerStyle={{ padding: '4px 0' }}>
@@ -56,7 +63,10 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 
 const TriggerWrapper = styled.div`
   position: absolute;
-  right: 8px;
+  // Composer-left lane: sits above the LEFT side of the inputbar; the
+  // original simple navigation rows are unchanged (no action buttons).
+  left: 8px;
+  right: auto;
   bottom: calc(100% + 8px);
   top: auto;
   z-index: 3;

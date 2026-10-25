@@ -1,13 +1,14 @@
 ---
 name: ui-verify-change
-description: Implementation-time UI verification and regression-coverage routing for Cherry Studio. Use when asked to verify a UI change, confirm a fix, test changed UI behavior, or decide UI regression coverage while implementing or reviewing a change (no PR required). Routes evidence to Playwright E2E for contract-worthy cross-component/IPC/persistence/lifecycle/native/multi-window behavior, to Vitest/component tests for isolated stable UI, and to the local `pnpm ui:observe` harness for diagnostic rendered/interactive observation — which is diagnostic evidence only, never regression proof.
+description: Implementation-time UI verification and regression-coverage routing for Cherry Chat. Use when asked to verify a UI change, confirm a fix, test changed UI behavior, or decide UI regression coverage while implementing or reviewing a change (no PR required). Separates proving the current change (observation can close the current rendered/interactive claim within observed scope) from admitting a durable Playwright E2E asset (lasting protection/reuse value of the workflow and its interrelated business constraints); routes isolated behavior to Vitest and reuses existing E2E assets before creating new ones.
 ---
 
 # UI Verify Change
 
-Implementation-time UI verification. Decides the right evidence tier for a
-changed UI behavior, maps it to existing coverage, executes it, and reports
-evidence without inflated regression claims.
+Implementation-time UI verification. Separates two independent decisions —
+how to prove the current change vs. whether to create or extend a durable
+regression asset — maps each to the right evidence, executes it, and reports
+without inflated claims.
 
 ## When to use
 
@@ -22,37 +23,59 @@ No PR is required — this runs during implementation. PR-focused exploratory
 validation stays in the `cherry-pr-test` skill; this skill does not check out
 PRs, launch debug/CDP sessions, or duplicate that workflow (LOCK-SKILL-8).
 
-## Decision matrix (LOCK-SKILL-5)
+## Two decisions (LOCK-SKILL-5)
 
-E2E is risk-based, not mandatory for every UI edit.
+Proving the current change and admitting a long-term asset are separate
+decisions; neither automatically triggers the other.
 
-| Changed behavior | Evidence tier |
-|---|---|
-| Historically regressing behavior; user-visible contract meant to stay stable | Playwright E2E |
-| Integrated cross-component workflows (multiple pages/components cooperate) | Playwright E2E |
-| IPC round-trips, persistence (Dexie/SQLite), app lifecycle, relaunch survival, native, multi-window | Playwright E2E |
-| Isolated stable presentation/logic (pure utils, reducers, selectors, single component) | Vitest/component test |
-| Rendering cannot be statically established from component tests | Component test + one diagnostic observation (`pnpm ui:observe`) |
+- **Decision A — prove the current change.** UI observation (`pnpm ui:observe`)
+  validates the current rendered/interactive outcome or investigates a problem,
+  and can close the current UI correctness claim within its observed scope. It
+  does not create durable regression protection. Vitest/component tests cover
+  isolated stable behavior. An existing E2E spec may be run where relevant
+  without creating a new asset.
+- **Decision B — admit a durable asset.** A Playwright E2E spec is a reusable
+  test asset: a frozen UI operation sequence plus expected results — an
+  executable UI-result-level design document protecting a coherent business
+  behavior model against silent future regression. Prefer reusing an existing
+  asset before creating one; extend it when the workflow already exists.
 
-## Evidence hierarchy (LOCK-SKILL-3, LOCK-SKILL-4)
+## Durable E2E asset admission
 
-Regression evidence comes ONLY from the repository Playwright suite:
+Admit a new E2E asset only for lasting protection/reuse value of the workflow
+and its interrelated business constraints/transitions — not for needing actual
+Electron/UI as such, not for component count, not merely because one bug
+occurred, and not for lower-level inability to prove the current visual.
+Complexity supports value but sets no module-count threshold; a genuinely
+valuable simple workflow may qualify. Assertions and scenarios bound coverage;
+they never promise absolute no-regressions.
 
-- fresh production build (`pnpm build`) produced immediately before the run
-- the standard shared `tests/e2e` fixture — never hand-rolled onboarding,
-  profile, or mock setup
-- a unique disposable user profile
-- mocked external providers and deterministic assertions
-- scoped runs: `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts`
-  or the full suite: `pnpm test:e2e`
+- **Typically worth an asset:** workflows where interrelated constraints must
+  stay consistent — e.g. context-window settings count, anchors, fallback, and
+  token-count interrelationships, or branch routing and position behavior.
+- **Typically observation only:** local presentation with no interrelated
+  business transitions — e.g. scrollbar hit region, layout, icon, color, hover.
+  No new E2E spec for this local case; one `pnpm ui:observe` run can close the
+  current claim within its observed scope.
 
-Diagnostic observation goes through the repository's own harness —
-`pnpm ui:observe` (see the dedicated section below) — which reuses the E2E
-ownership, launch, mock-server, readiness, and cleanup helpers. Generic Kilo
-browser MCP, agent-browser, ad-hoc CDP sessions, screenshots, and dev-mode
-runs are **diagnostic only** (LOCK-SKILL-4): they may help investigate a
-change but cannot establish regression completion. They are not forbidden —
-they are simply not regression evidence.
+## Evidence tiers (LOCK-SKILL-3, LOCK-SKILL-4)
+
+- **Vitest/component tests** are valid component regression evidence for
+  isolated stable presentation and logic (pure utils, reducers, selectors,
+  single component). Pure-presentation, low-impact tweaks need no new tests
+  mirroring implementation detail.
+- **Playwright E2E** is the valid integrated-behavior asset tier: the
+  repository Playwright suite on a fresh production build (`pnpm build`), the
+  standard shared `tests/e2e` fixture, a unique disposable user profile, mocked
+  external providers, and deterministic assertions — scoped
+  (`pnpm test:e2e tests/e2e/specs/<spec>.spec.ts`) or full (`pnpm test:e2e`).
+- **Observation** (`pnpm ui:observe`, screenshots, manual CDP sessions,
+  agent-driven browsers, dev-mode runs) validates or investigates the current
+  rendered/interactive outcome and can close the current claim within its
+  observed scope. It creates no durable regression protection and is never
+  claimed as regression proof (LOCK-SKILL-4). Generic browser tooling remains
+  allowed for this current-outcome work — only its status as non-regression
+  evidence is fixed.
 
 Authoring and harness details for the E2E suite live in `tests/e2e/README.md`
 (single source of truth); the observation harness contract lives below and in
@@ -60,16 +83,16 @@ Authoring and harness details for the E2E suite live in `tests/e2e/README.md`
 
 ## Observation harness (`pnpm ui:observe`)
 
-Implementation-time diagnostic observation runs through the repository's own
-harness, never generic browser tooling (LOCK-OBS-001). `pnpm ui:observe` launches
+Implementation-time observation runs through the repository's own
+harness for harness-backed claims (LOCK-OBS-001). `pnpm ui:observe` launches
 the built Cherry Chat app via the repository's Playwright Electron runtime
 with a unique disposable profile, runs exactly one plain async scenario,
 captures screenshots/text artifacts, and cleans up exactly what it owns.
 
-- **When to use**: the last row of the decision matrix, or when investigating
-  rendered/interactive behavior that component tests cannot statically
-  establish. Use it instead of Kilo browser MCP, agent-browser, or ad-hoc CDP
-  sessions. It does NOT replace E2E regression specs.
+- **When to use**: to prove the current rendered/interactive outcome (Decision A)
+  or to investigate behavior component tests cannot statically establish. Use it
+  instead of Kilo browser MCP, agent-browser, or ad-hoc CDP sessions for
+  harness-backed observation. It does NOT create a durable regression asset.
 - **Prerequisite**: a fresh production build — `pnpm build` immediately before
   the run (the harness launches `electron .` against the built output, exactly
   like E2E).
@@ -125,10 +148,11 @@ captures screenshots/text artifacts, and cleans up exactly what it owns.
   temp root in a `finally`, even when the scenario throws (verified). Leftover
   `cherry-e2e-owned-*` roots in `$TMPDIR` are the documented accepted residual
   of the E2E ownership contract — remove by exact path only.
-- **Evidence classification**: `ui:observe` output is DIAGNOSTIC evidence. It
-  never establishes regression completion — only the repository Playwright E2E
-  suite does (LOCK-OBS-002). Report observations as diagnostics, never as pass
-  evidence.
+- **Evidence classification**: `ui:observe` output validates the current
+  rendered/interactive outcome within its observed scope (LOCK-OBS-002) — it can
+  close the current UI correctness claim at that scope. It creates no durable
+  regression protection; only a Playwright E2E asset does. Report the run as
+  current-outcome evidence with its scope, never as regression proof.
 
 ## Workflow
 
@@ -137,12 +161,13 @@ captures screenshots/text artifacts, and cleans up exactly what it owns.
 List the changed behavior from the diff — files touched and user-visible
 effects — and identify the components, services, and IPC involved.
 
-### Phase 2: Decide the evidence tier
+### Phase 2: Decide the evidence (two decisions)
 
-Apply the decision matrix. Default to Vitest/component tests for isolated
-stable UI; choose E2E only when the behavior matches an E2E row; choose one
-`pnpm ui:observe` diagnostic observation when rendering cannot be statically
-established from component tests.
+Separate the calls. For Decision A, default to Vitest/component tests for
+isolated stable UI and to one `pnpm ui:observe` run where the current
+rendered/interactive outcome must be seen; an existing E2E spec may be run
+where relevant without creating a new asset. For Decision B, admit a new E2E
+asset only per the admission section above.
 
 ### Phase 3: Map to existing coverage (LOCK-SKILL-6)
 
@@ -150,43 +175,46 @@ Before writing anything:
 
 - Search for component/unit coverage (`src/renderer/src/**/__tests__`, `*.test.*`)
   covering the changed behavior.
-- Search `tests/e2e/specs/` for Playwright specs covering it.
+- Search `tests/e2e/specs/` for Playwright specs covering it; prefer reusing or
+  extending an existing asset over creating one.
 - Read `tests/e2e/README.md` before touching the E2E harness.
-- If the behavior is contract-worthy and uncovered, extend an existing spec or
-  add a focused spec under `tests/e2e/specs/`. Always use the shared fixture;
-  never hand-roll onboarding/profile/mock setup.
+- Create a new spec under `tests/e2e/specs/` only when the workflow earns a
+  durable asset per the admission section and is uncovered. Always use the
+  shared fixture; never hand-roll onboarding/profile/mock setup.
 
 ### Phase 4: Execute
 
 - Component tier: `pnpm test:renderer` or a scoped `pnpm vitest run <file>`.
-- E2E tier: `pnpm build`, then
+- Existing E2E asset: `pnpm build`, then
   `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts` (Electron runtime — the shared
   Node-API prebuilt loads as-is, no manual `native:check:electron` prefix
   is needed), or `pnpm test:e2e` for the full suite.
-- Diagnostics: `pnpm build`, then `pnpm ui:observe app-ready` (baseline) or a
+- Observation: `pnpm build`, then `pnpm ui:observe app-ready` (baseline) or a
   scenario file (see the observation harness section above). Record the run
-  explicitly as diagnostic.
+  with its observed scope as current-outcome evidence.
 
 ### Phase 5: Report (LOCK-SKILL-7)
 
 The final report MUST separate:
 
-1. Automated Playwright evidence — spec, command, PASS/FAIL
-2. Component/unit evidence
-3. Diagnostics — `pnpm ui:observe` observations and screenshots, not
-   regression proof
-4. Missing coverage — behavior no test covers
+1. Current-change proof — Playwright specs run, component/unit results, and
+   `pnpm ui:observe` observations with scope, each with command and PASS/FAIL
+2. Durable-asset decision — reused, extended, newly created, or explicitly
+   declined (with the value reason), and the workflow's coverage bounds
+3. Missing coverage — behavior no test or observation covers
 
-Never claim regression completion from diagnostics alone.
+Claim the current outcome only within its observed scope; never promise
+absolute no-regressions from any single run or asset.
 
 ## Constraints
 
 - Ownership-scoped cleanup; never kill broad process trees (see
   `tests/e2e/README.md`).
-- Diagnostic observation goes through `pnpm ui:observe`; generic browser
-  tooling remains allowed for diagnostics — never claim it is forbidden, only
-  that it is not regression evidence (LOCK-SKILL-4).
+- Observation goes through `pnpm ui:observe`; generic browser
+  tooling remains allowed for current-outcome work — never claim it is forbidden, only
+  that it is not durable regression protection (LOCK-SKILL-4).
 - No PR checkout/review workflow — that is `cherry-pr-test`'s scope
   (LOCK-SKILL-8).
-- Features without tests are not complete (AGENTS.md), but the cheapest
-  sufficient test level wins (see `tests/e2e/README.md` §1).
+- Product features without tests are not complete (AGENTS.md); pure-presentation,
+  low-impact tweaks need no new tests mirroring implementation detail (see
+  `tests/e2e/README.md` §1).

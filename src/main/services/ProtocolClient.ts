@@ -8,7 +8,6 @@ import { appIdentity } from '@shared/config/identity'
 import { app } from 'electron'
 
 import { handleProvidersProtocolUrl } from './urlschema/handle-providers'
-import { handleMcpProtocolUrl } from './urlschema/mcp-install'
 import { windowService } from './WindowService'
 
 const logger = loggerService.withContext('ProtocolClient')
@@ -35,9 +34,6 @@ export function handleProtocolUrl(url: string) {
   const params = new URLSearchParams(urlObj.search)
 
   switch (urlObj.hostname.toLowerCase()) {
-    case 'mcp':
-      handleMcpProtocolUrl(urlObj)
-      return
     case 'providers':
       void handleProvidersProtocolUrl(urlObj)
       return

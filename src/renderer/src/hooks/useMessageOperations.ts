@@ -13,9 +13,11 @@ import {
   selectLoadedTopicProjection
 } from '@renderer/store/newMessage'
 import {
+  activeRouteOf,
   appendAssistantResponseThunk,
   branchMessagesToTopicThunk,
   createBranchThunk,
+  createReferencedTopicThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
   moveSelectedTurnsToNewBranchThunk,
@@ -260,6 +262,12 @@ export function useMessageOperations(topic: Topic) {
         return null
       }
 
+      // Translation writes are addressed to the UI target: the active topic and
+      // its active route (the translate action was gated to that route's mutable
+      // messages at initiation). Pin the tuple once so the stream of updates
+      // carries the same addressed route instead of re-resolving at write time.
+      const route = { topicId: topic.id, branchId: activeRouteOf(store.getState, topic.id) }
+
       let existingTranslationBlockId: string | undefined
       if (message.blocks && message.blocks.length > 0) {
         for (const blockId of message.blocks) {
@@ -284,7 +292,7 @@ export function useMessageOperations(topic: Topic) {
           }
         }
         dispatch(withClosureTopics(updateOneBlock({ id: blockId, changes }), topic.id))
-        await dispatch(updateTranslationBlockThunk(blockId, '', false))
+        await dispatch(updateTranslationBlockThunk(blockId, '', false, route))
       } else {
         blockId = await dispatch(
           initiateTranslationThunk(messageId, topic.id, targetLanguage, sourceBlockId, sourceLanguage)
@@ -298,7 +306,7 @@ export function useMessageOperations(topic: Topic) {
 
       return throttle(
         (accumulatedText: string, isComplete: boolean = false) => {
-          void dispatch(updateTranslationBlockThunk(blockId, accumulatedText, isComplete))
+          void dispatch(updateTranslationBlockThunk(blockId, accumulatedText, isComplete, route))
         },
         200,
         { leading: true, trailing: true }
@@ -317,6 +325,27 @@ export function useMessageOperations(topic: Topic) {
         `Branching messages from topic ${sourceTopicId} at anchor ${anchorMessageId} to new topic ${newTopic.id}`
       )
       return dispatch(branchMessagesToTopicThunk(sourceTopicId, anchorMessageId, newTopic))
+    },
+    [dispatch]
+  )
+
+  /**
+   * Cross-topic history reference creation (Reference/Copy = Reference).
+   * Read-only source operation: Main atomically creates the target topic and
+   * its live foreign prefix. No DB row is pre-created here.
+   */
+  const createReferencedTopicByAnchor = useCallback(
+    (
+      sourceTopicId: string,
+      sourceBranchId: string | null,
+      anchorMessageId: string,
+      newTopic: Topic,
+      assistantId?: string
+    ) => {
+      logger.info(
+        `Referencing history from topic ${sourceTopicId} at anchor ${anchorMessageId} to new topic ${newTopic.id}`
+      )
+      return dispatch(createReferencedTopicThunk(sourceTopicId, sourceBranchId, anchorMessageId, newTopic, assistantId))
     },
     [dispatch]
   )
@@ -561,6 +590,7 @@ export function useMessageOperations(topic: Topic) {
     resumeMessage,
     getTranslationUpdater,
     createTopicBranchByAnchor,
+    createReferencedTopicByAnchor,
     createBranch,
     moveSelectionToNewBranch,
     editMessageBlocks,

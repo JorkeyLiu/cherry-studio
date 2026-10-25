@@ -47,12 +47,6 @@ export interface ProviderCapabilities {
   enableReasoning: boolean
 
   /**
-   * Whether provider-native web search should be enabled.
-   * True when no external search provider is configured AND the model supports built-in web search.
-   */
-  enableWebSearch: boolean
-
-  /**
    * Whether the model should generate images inline.
    * True when the model supports image generation AND the assistant has it enabled.
    */

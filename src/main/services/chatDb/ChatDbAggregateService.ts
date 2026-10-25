@@ -24,10 +24,13 @@ import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
   AppendMessageResponse,
+  CreateReferencedTopicResponse,
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
   EnsureAssistantTopicsResponse,
+  ExportTopicDataRequest,
+  ExportTopicDataResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -45,11 +48,17 @@ import type {
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
+  HistoryReferenceMeta,
+  ImportTopicDataRequest,
+  ImportTopicDataResponse,
+  InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   JsonObject,
   JsonValue,
   ListLiveAssistantTopicsResponse,
   MessageBlockEntry,
+  MoveContextAnchorInheritanceInput,
+  MoveSourceContextAnchorTransfer,
   PurgeExpiredTopicsResponse,
   ReorderAnswerGroupResponse,
   ResendAttemptMapping,
@@ -64,8 +73,10 @@ import type {
   SemanticResendResponse,
   StreamWriteDiagnostics,
   TopicBranchWire,
+  TopicReferenceWire,
   TopicWire
 } from '@shared/chatDb'
+import type { UpdateMessageResult, UpdateMessageUsageResult, UpdateMessageUsageSource } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
@@ -86,13 +97,28 @@ import {
   type StoredResendAttempt
 } from '../sync/syncResendAttempt'
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
-import type { FileReferenceData, MessageBlockData, MessageData, TopicBranchData, TopicData } from './domain/types'
+import type {
+  EntityPatchInput,
+  FileReferenceData,
+  MessageBlockData,
+  MessageData,
+  TopicBranchData,
+  TopicData,
+  TopicReferenceData
+} from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import { hydratePortableMediaFileOverflowInTx } from './mediaReadAssembly'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
+import { createImportWriter } from './repository/ImportWriter'
 import { SearchRepository } from './repository/SearchRepository'
 import * as schema from './schema'
+import {
+  buildTopicDataExport,
+  planTopicDataImport,
+  type TopicDataHistoryPrefixInput,
+  validateTopicDataImport
+} from './topicDataExchange'
 import { computeTrashRetentionDecision, parseStrictCanonicalIsoMs } from './trashRetention'
 import {
   blocksToWire,
@@ -124,6 +150,161 @@ export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
 export type FetchTopicActivityResult = FetchTopicActivityResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
+
+/**
+ * Maximum cross-topic reference recursion depth (cycle/depth guard). A chain
+ * deeper than this (or a cycle) resolves as 'missing' — the foreign prefix is
+ * omitted rather than looping or failing the read.
+ */
+const MAX_REFERENCE_DEPTH = 32
+
+/** Result of resolving the foreign reference base of a topic. */
+type ReferenceBaseResolution = {
+  /** Foreign prefix messages (canonical source rows), empty when none/missing. */
+  messages: MessageData[]
+  /** The relation row, or null when the topic is not a reference target. */
+  reference: TopicReferenceData | null
+  status: 'none' | 'available' | 'missing'
+}
+
+/**
+ * Optional provenance accumulator threaded through reference-base resolution.
+ * When supplied, it is flagged whenever ANY reference segment in the resolved
+ * source chain is missing — including a nested reference deeper than the
+ * immediate one (e.g. the immediate source resolves but its own referenced
+ * history is gone). Ordinary reads omit it and keep immediate-status-only
+ * semantics; the standalone export uses it to disclose an incomplete prefix.
+ */
+type ReferenceChainMissingFlag = { missing: boolean }
+
+/**
+ * Optional addressed route context for block commands. The block channel has
+ * no inherent topic context; when the caller knows the addressed route it may
+ * carry `topicId`/`branchId` so Main enforces parent ownership against that
+ * route (cross-topic foreign prefixes fail closed). Absent = legacy behavior
+ * (route resolved from the committed parent row).
+ */
+export interface BlockRouteContext {
+  resendAttemptId?: string
+  topicId?: string
+  branchId?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Conditional usage-estimate source (optional display metadata)
+// ---------------------------------------------------------------------------
+
+/**
+ * The estimate source of one user prompt, derived from its blocks: the MAIN_TEXT
+ * contents and the FILE/IMAGE attachment IDs the local estimator consumes.
+ *
+ * Both arrays are canonicalized (empty entries dropped, sorted) so the renderer
+ * snapshot and the authority rows compare as multisets: block order is a rendering
+ * detail and never changes the token total.
+ */
+function usageSourceOfBlocks(blocks: MessageBlockData[]): UpdateMessageUsageSource {
+  const textContents: string[] = []
+  const fileIds: string[] = []
+  for (const block of blocks) {
+    if (block.type === 'main_text') {
+      const content = block.content ?? ''
+      if (content.length > 0) textContents.push(content)
+      continue
+    }
+    if (block.type !== 'file' && block.type !== 'image') continue
+    const fileId = attachmentIdOfBlock(block)
+    if (fileId) fileIds.push(fileId)
+  }
+  return { textContents: textContents.sort(), fileIds: fileIds.sort() }
+}
+
+/**
+ * Attachment ID of a FILE/IMAGE block row. The renderer persists its
+ * `FileMetadata` object at `overflow.file` (with a `fileId` fallback) — the same
+ * shape the read adapters resolve, read here without re-deriving metadata.
+ */
+function attachmentIdOfBlock(block: MessageBlockData): string | null {
+  const overflowFile = block.overflow?.file
+  if (overflowFile && typeof overflowFile === 'object' && !Array.isArray(overflowFile)) {
+    const file = overflowFile as Record<string, unknown>
+    const id = file.id ?? file.fileId
+    if (typeof id === 'string' && id.length > 0) return id
+  }
+  const directId = block.overflow?.fileId ?? block.overflow?.file_id
+  return typeof directId === 'string' && directId.length > 0 ? directId : null
+}
+
+/** Multiset equality of two canonicalized estimate sources. */
+function sameUsageSource(a: UpdateMessageUsageSource, b: UpdateMessageUsageSource): boolean {
+  if (a.textContents.length !== b.textContents.length) return false
+  if (a.fileIds.length !== b.fileIds.length) return false
+  for (let i = 0; i < a.textContents.length; i++) {
+    if (a.textContents[i] !== b.textContents[i]) return false
+  }
+  for (let i = 0; i < a.fileIds.length; i++) {
+    if (a.fileIds[i] !== b.fileIds[i]) return false
+  }
+  return true
+}
+
+/**
+ * Canonical context-window turn derivation over one route's ordered messages.
+ *
+ * A `system` or `user` message starts a turn keyed by its own ID; an assistant
+ * joins the turn named by its `askId`; an assistant whose `askId` names no
+ * current turn starts a turn keyed by that `askId` (or by its own ID when
+ * `askId` is absent). Ignored roles are skipped. Turn keys are stable message
+ * IDs, so the same derivation serves the pre-move source route, the
+ * post-move destination route, and index-preserving inheritance between them.
+ */
+type ContextAnchorTurn = { key: string; messages: MessageData[] }
+
+function buildContextAnchorTurns(rows: MessageData[]): ContextAnchorTurn[] {
+  const turns: ContextAnchorTurn[] = []
+  let currentKey: string | null = null
+  for (const msg of rows) {
+    const askId = (msg as unknown as { askId: string | null }).askId
+    if (msg.role === 'system' || msg.role === 'user') {
+      currentKey = msg.id
+      turns.push({ key: currentKey, messages: [msg] })
+    } else if (msg.role === 'assistant') {
+      if (askId && askId === currentKey) {
+        turns[turns.length - 1].messages.push(msg)
+      } else {
+        currentKey = askId ? askId : msg.id
+        turns.push({ key: currentKey, messages: [msg] })
+      }
+    }
+  }
+  return turns
+}
+
+/**
+ * Canonical 3-step group-key match inside one turn list: the user message's
+ * own ID, then the assistant `askId` owner, then any non-user message ID.
+ * Returns -1 when the key names no turn.
+ */
+function resolveContextAnchorTurnIndex(turns: ContextAnchorTurn[], groupKey: string): number {
+  let idx = turns.findIndex((t) => t.messages.some((m) => m.role === 'user' && m.id === groupKey))
+  if (idx !== -1) return idx
+  idx = turns.findIndex((t) =>
+    t.messages.some((m) => m.role === 'assistant' && (m as unknown as { askId: string | null }).askId === groupKey)
+  )
+  if (idx !== -1) return idx
+  return turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+}
+
+/**
+ * Default window start index (never a clamp): `null` => the first turn,
+ * finite N => `max(0, total - max(1, floor(N)))` — the same position a
+ * TokenCount re-anchor uses.
+ */
+function resolveContextAnchorDefaultIndex(total: number, contextCount: number | null | undefined): number {
+  if (total <= 0) return -1
+  if (contextCount === null || contextCount === undefined) return 0
+  const n = Math.max(1, Math.floor(contextCount))
+  return Math.max(0, total - n)
+}
 
 // ---------------------------------------------------------------------------
 // ChatDbAggregateService
@@ -1104,6 +1285,23 @@ export class ChatDbAggregateService {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
 
+        // Cross-topic history reference metadata (null for ordinary topics).
+        // Resolved once in this same snapshot; drives both the reference-aware
+        // route projection (in-memory path) and the response metadata.
+        const referenceBase = this.resolveReferenceBaseInTx(repos, request.topicId, new Set<string>(), 0)
+        const referenceMeta: HistoryReferenceMeta | null = referenceBase.reference
+          ? {
+              sourceTopicId: referenceBase.reference.sourceTopicId,
+              sourceBranchId: referenceBase.reference.sourceBranchId,
+              anchorMessageId: referenceBase.reference.anchorMessageId,
+              sourceName: repos.topics.getById(referenceBase.reference.sourceTopicId).found
+                ? (repos.topics.getById(referenceBase.reference.sourceTopicId).data?.name ?? null)
+                : null,
+              status: referenceBase.status === 'available' ? 'available' : 'missing',
+              boundaryMessageId: referenceBase.status === 'available' ? referenceBase.reference.anchorMessageId : null
+            }
+          : null
+
         type WindowMessage = MessageData
         type WindowGroup = { semanticKey: string; start: number; end: number }
         const WINDOW_SCAN_CHUNK = 256
@@ -1150,17 +1348,18 @@ export class ChatDbAggregateService {
           const wireBlocks = blocksToWire(allBlocks)
           const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
           // Mutation capability (BRANCH-9): same-tx consistent view. Owner must
-          // equal the requested route; every owned row in the window is
-          // mutable even when referenced by live descendants (true-branch
-          // owner equality only). Content untouched; metadata only.
+          // equal the requested route AND the row must belong to the addressed
+          // topic; a foreign read-only reference prefix (canonical source
+          // topicId) is never mutable. Content untouched; metadata only.
           const requestedOwner = this.normalizeBranchId(request.branchId)
           const mutableMessageIds = windowMessages
-            .filter((m) => (m.branchId ?? null) === requestedOwner)
+            .filter((m) => m.topicId === request.topicId && (m.branchId ?? null) === requestedOwner)
             .map((m) => m.id)
           return {
             messages: messagesWithBlocks,
             blocks: wireBlocks,
             mutableMessageIds,
+            reference: referenceMeta,
             window: {
               kind: meta.kind,
               completeness: 'window' as const,
@@ -1176,13 +1375,13 @@ export class ChatDbAggregateService {
           }
         }
 
-        // Branch-route window path: the effective route (shared prefix
-        // through each anchor + owned suffix) is resolved once, then
-        // windowed in memory with identical group semantics and completeness
-        // contracts. Stable IDs preserved; no renderer splicing. Main routes
-        // keep the SQL-level path below.
+        // Branch-route OR reference-target window path: the effective route
+        // (reference base + shared prefix through each anchor + owned suffix)
+        // is resolved once, then windowed in memory with identical group
+        // semantics and completeness contracts. Stable IDs preserved; no
+        // renderer splicing. Ordinary main routes keep the SQL-level path below.
         const windowBranchId = this.normalizeBranchId(request.branchId)
-        if (windowBranchId !== null) {
+        if (windowBranchId !== null || referenceMeta !== null) {
           const effective = this.resolveRouteMessagesInTx(repos, request.topicId, windowBranchId).messages
           if (request.kind === 'latest') {
             if (effective.length === 0) {
@@ -1219,12 +1418,17 @@ export class ChatDbAggregateService {
           const backMerged = backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
           const backBeyond = backMerged ? backGroups.slice(0, -1) : backGroups
           const backStartGroupIdx = Math.max(0, backBeyond.length - request.before)
-          const backStartMsgIdx = backBeyond.length === 0 ? backSlice.length : backBeyond[backStartGroupIdx].start
+          // No beyond group on a side ⇒ every row on that side of the anchor
+          // belongs to the anchor's own group, so the whole slice must be kept
+          // (the anchor group is always returned complete). A non-empty beyond
+          // set means the retained frontier group is the first complete
+          // beyond-group, never a partial one.
+          const backStartMsgIdx = backBeyond.length === 0 ? 0 : backBeyond[backStartGroupIdx].start
           const fwdGroups = computeGroups(fwdSlice)
           const fwdMerged = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
           const fwdBeyond = fwdMerged ? fwdGroups.slice(1) : fwdGroups
           const fwdEndGroupIdx = Math.min(fwdBeyond.length - 1, request.after - 1)
-          const fwdEndExclusive = fwdBeyond.length === 0 ? 0 : fwdBeyond[fwdEndGroupIdx].end + 1
+          const fwdEndExclusive = fwdBeyond.length === 0 ? fwdSlice.length : fwdBeyond[fwdEndGroupIdx].end + 1
           const windowMessages = [...backSlice.slice(backStartMsgIdx), anchorMsg, ...fwdSlice.slice(0, fwdEndExclusive)]
           return buildWindowResponse(windowMessages, {
             kind: 'around',
@@ -1543,7 +1747,8 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const allMessages = repos.messages.listByTopic(request.topicId)
+        const routeBranchId = this.normalizeBranchId(request.branchId)
+        const allMessages = this.resolveRouteMessagesInTx(repos, request.topicId, routeBranchId).messages
         // Build context turns deterministically in authority order.
         type ContextTurn = { key: string; messages: MessageData[] }
         const turns: ContextTurn[] = []
@@ -1660,8 +1865,11 @@ export class ChatDbAggregateService {
    *   reject as validation); groupKey uses the canonical 3-step anchor match.
    *   Missing message/target is NOT_FOUND.
    * - inherit(sourceTopicId, sourceAnchor, contextCount, current target anchor):
-   *   valid source index maps to the target by index with clamp to the last
-   *   target turn; invalid source anchor falls back to the target default.
+   *   valid source index inside the target maps to the target by index
+   *   (clone remaps fresh UUID/askId IDs, index preserved); missing/invalid
+   *   source or an index outside the target falls back to the target
+   *   default at CURRENT contextCount (null => first, same position as a
+   *   TokenCount click), never clamped to last. Empty target stays null.
    *   Missing source/target topic is NOT_FOUND.
    *
    * Existing empty target succeeds with null anchor and zero counts; missing
@@ -1749,14 +1957,20 @@ export class ChatDbAggregateService {
           }
           // Branch routes resolve `detail:'anchor'` against the route's
           // effective messages (shared prefix through each anchor plus the
-          // branch-owned suffix, stable IDs) in memory. The bounded-scan
-          // fast path below only observes main-route rows, so a fresh
-          // branch with an empty own suffix would report a null anchor and
-          // inherited/default/reanchor/move/inherit semantics would diverge
-          // from the full closure path. Ordinary topics keep the bounded
-          // scans below untouched.
+          // branch-owned suffix, stable IDs) in memory. A cross-topic history
+          // reference target's MAIN route has the same problem: its effective
+          // history begins with a LIVE foreign prefix that the bounded scans
+          // (which only observe target-owned rows) cannot see, so establish/
+          // reanchor-default/move/inherit would diverge from the full closure
+          // path. The bounded-scan fast path below only observes main-route
+          // rows, so a fresh branch with an empty own suffix (or a reference
+          // target's foreign prefix) would report a null anchor. Non-reference
+          // ordinary topics keep the bounded scans below untouched.
           const anchorRouteBranchId = this.normalizeBranchId(request.branchId)
-          if (anchorRouteBranchId !== null) {
+          const anchorNeedsEffectiveRoute =
+            anchorRouteBranchId !== null ||
+            this.topicHasReferenceInTx(tx as unknown as BetterSQLite3Database<typeof schema>, request.topicId)
+          if (anchorNeedsEffectiveRoute) {
             const effectiveForAnchor = this.resolveRouteMessagesInTx(
               repos,
               request.topicId,
@@ -1823,9 +2037,10 @@ export class ChatDbAggregateService {
               }
               throw new ChatDbValidationError('move requires messageId or groupKey')
             }
-            // inherit: valid source index maps to the target by index with
-            // clamp to the last target turn; invalid source falls back to the
-            // target default. Both sides use effective routes.
+            // inherit: valid source index inside the target maps to the target
+            // by index (clone remaps IDs, index preserved); missing/invalid
+            // source or an index outside the target falls back to the target
+            // default at CURRENT contextCount. Both sides use effective routes.
             if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
               throw new ChatDbValidationError('inherit requires sourceTopicId')
             }
@@ -1843,11 +2058,8 @@ export class ChatDbAggregateService {
             const anchorSourceKey =
               typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
             const sourceIdx = anchorSourceKey !== null ? resolveAnchorIndexOf(sourceTurns, anchorSourceKey) : -1
-            if (sourceIdx !== -1) {
-              if (anchorTurns.length === 0) {
-                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
-              }
-              const resolved = anchorTurns[Math.min(sourceIdx, anchorTurns.length - 1)].key
+            if (sourceIdx !== -1 && sourceIdx < anchorTurns.length) {
+              const resolved = anchorTurns[sourceIdx].key
               return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
             }
             return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
@@ -1988,9 +2200,11 @@ export class ChatDbAggregateService {
             }
             throw new ChatDbValidationError('move requires messageId or groupKey')
           }
-          // inherit: valid source index maps to the target by index with clamp
-          // to the last target turn; invalid source falls back to the target
-          // default. Bounded forward scans only — no listByTopic, no blocks.
+          // inherit: valid source index inside the target maps to the target by
+          // index; missing/invalid source or an index outside the target falls
+          // back to the target default at CURRENT contextCount (null => first,
+          // same position as a TokenCount click), never clamped to last.
+          // Bounded forward scans only — no listByTopic, no blocks.
           // A pathological single turn may expand across chunks, but the topic
           // is never materialized wholesale via listByTopic.
           if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
@@ -2030,8 +2244,9 @@ export class ChatDbAggregateService {
               const tail = acc[acc.length - 1]
               const page = repos.messages.listAfter(dstTopicId, tail.sortOrder, tail.id, HEAD_CHUNK)
               if (page.length === 0) {
-                if (turns.length === 0) return null
-                return turns[turns.length - 1].key
+                // Index outside the target (or empty target): no clamp.
+                // Caller falls back to the CURRENT-contextCount default.
+                return null
               }
               acc = [...acc, ...page]
             }
@@ -2039,10 +2254,11 @@ export class ChatDbAggregateService {
           const sourceIdx = sourceKey !== null ? findSourceIndex(sourceId, sourceKey) : -1
           if (sourceIdx !== -1) {
             const targetKey = findTargetKeyAtIndex(request.topicId, sourceIdx)
-            if (targetKey === null) {
-              return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+            if (targetKey !== null) {
+              return { resolvedAnchorGroupKey: targetKey, changed: targetKey !== currentKey }
             }
-            return { resolvedAnchorGroupKey: targetKey, changed: targetKey !== currentKey }
+            // Outside the target (or empty target): default at CURRENT
+            // contextCount; empty resolves null via the default path.
           }
           return resolveDefaultAnchor(request.topicId, request.contextCount ?? null, currentKey)
         }
@@ -2123,11 +2339,8 @@ export class ChatDbAggregateService {
 
         let resolvedIdx = -1
         if (request.intent === 'establish') {
-          if (currentKey !== null && resolveAnchorIndex(turns, currentKey) !== -1) {
-            resolvedIdx = resolveAnchorIndex(turns, currentKey)
-          } else {
-            resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
-          }
+          const currentIdx = currentKey !== null ? resolveAnchorIndex(turns, currentKey) : -1
+          resolvedIdx = currentIdx !== -1 ? currentIdx : resolveDefaultIndex(total, request.contextCount ?? null)
         } else if (request.intent === 'reanchor-default') {
           resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
         } else if (request.intent === 'move') {
@@ -2169,8 +2382,8 @@ export class ChatDbAggregateService {
           const sourceTurns = buildTurns(sourceMessages)
           const sourceKey = typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
           const sourceIdx = sourceKey !== null ? resolveAnchorIndex(sourceTurns, sourceKey) : -1
-          if (sourceIdx !== -1) {
-            resolvedIdx = Math.min(sourceIdx, total - 1)
+          if (sourceIdx !== -1 && sourceIdx < total) {
+            resolvedIdx = sourceIdx
           } else {
             resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
           }
@@ -2277,6 +2490,292 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Standalone JSON export READ — snapshot ONE ENTIRE logical topic.
+   *
+   * One authoritative SQLite transaction:
+   * - Validates the topic exists; missing topic → NOT_FOUND.
+   * - Reads ALL owned rows across ALL branches (main + every nested/sibling
+   *   branch via listAllByTopic — never one effective route, never the
+   *   renderer loaded projection), with complete block relations, the full
+   *   branch catalog, segments plus ordered memberships, and file-reference
+   *   index rows. When the topic is itself a reference target, the referenced
+   *   history's effective prefix is MATERIALIZED as target-MAIN-owned snapshot
+   *   rows (recursive references and source branch rows flattened, exactly
+   *   once, ahead of the topic's own main rows) so the export is standalone —
+   *   never a live external relation. A missing source is recorded explicitly
+   *   (provenance `historySnapshot.status = 'missing'`), never faked complete.
+   * - Builds the versioned payload via the shared exchange serializers, so
+   *   wire values never contradict stored rows. Identity/scope columns,
+   *   attachment payloads, the file catalog, and credentials are excluded.
+   * - Empty topic (exists, no messages) → valid payload with empty arrays.
+   * - Pure read: never creates/mutates rows (source rows and any persisted
+   *   reference relation are untouched), never logs content.
+   */
+  exportTopicData(request: ExportTopicDataRequest): ChatDbResult<ExportTopicDataResponse> {
+    return wrapResult(() => {
+      if (!request || typeof request.topicId !== 'string' || request.topicId.length === 0) {
+        throw new ChatDbValidationError('topicId must be a non-empty string')
+      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const messages = repos.messages.listAllByTopic(request.topicId)
+        const messageIds = messages.map((m) => m.id)
+        const blockDataMap = repos.blocks.listByMessages(messageIds)
+        const branches = repos.branches.listByTopic(request.topicId)
+        const segments = repos.segments.listByTopic(request.topicId).map((segment) => ({
+          segment,
+          messageIds: repos.segments.getMessageIds(segment.id)
+        }))
+        const fileReferences = repos.fileRefs.listByMessages(messageIds)
+        // Materialize the referenced-history prefix (recursive, cycle-guarded)
+        // so the export is standalone: the foreign effective prefix becomes
+        // target-MAIN-owned snapshot rows exactly once, ahead of the topic's
+        // own main rows. A missing source is flagged, never faked complete.
+        // Ordinary topics are not reference targets → no prefix/provenance.
+        // Provenance is export-scoped closure status: when any nested
+        // reference-history segment in the source chain is missing, the
+        // snapshot is `missing` even though the immediate source and its
+        // surviving rows resolve (`chainMissing`); surviving prefix rows are
+        // still carried. Ordinary runtime reads keep immediate-status semantics.
+        const chainMissing: ReferenceChainMissingFlag = { missing: false }
+        const base = this.resolveReferenceBaseInTx(repos, request.topicId, new Set<string>(), 0, chainMissing)
+        let historyPrefix: TopicDataHistoryPrefixInput | null = null
+        if (base.reference) {
+          const prefixMessages = base.status === 'available' ? base.messages : []
+          const prefixIds = prefixMessages.map((m) => m.id)
+          historyPrefix = {
+            status: base.status === 'available' && !chainMissing.missing ? 'materialized' : 'missing',
+            messages: prefixMessages,
+            blocksByMessage: repos.blocks.listByMessages(prefixIds),
+            fileReferences: repos.fileRefs.listByMessages(prefixIds)
+          }
+        }
+        return {
+          payload: buildTopicDataExport({
+            topic: topic.data,
+            messages,
+            blocksByMessage: blockDataMap,
+            branches,
+            segments,
+            fileReferences,
+            historyPrefix,
+            exportedAt: new Date().toISOString()
+          })
+        }
+      })
+    }, `exportTopicData(${request?.topicId})`)
+  }
+
+  /**
+   * Standalone JSON import WRITE — create a new topic from an untrusted
+   * payload under the target assistant.
+   *
+   * - Deep-validates the payload (format marker, schema version, unique
+   *   IDs, referential links, branch parent cycles, anchor owner
+   *   relationships) BEFORE any write; unsupported versions and every
+   *   structural defect fail with zero rows written.
+   * - One atomic transaction inserts the new topic (rebound to the target
+   *   assistant), fresh-ID messages (assistant rebound, askId remapped),
+   *   blocks, branches (parents/anchors remapped), segments plus ordered
+   *   memberships, and file references (attachment identities preserved,
+   *   catalog untouched). Dangling branch anchors preserve missing-anchor
+   *   state without repair.
+   * - No dedup/merge/overwrite: every call mints a new topic id, so
+   *   repeated imports intentionally duplicate.
+   * - A materialized referenced-history prefix arrives as ordinary
+   *   main-owned rows and is imported as fresh target-owned rows: the new
+   *   topic is fully independent and writable, with no live reference
+   *   relation and no foreign read-only permission. No relation is created,
+   *   and deleting the original source never affects the imported topic.
+   * - Sync intent captures the imported topic's FULL content: main and
+   *   branch-owned messages/blocks, every branch node, membership, and the
+   *   complete frames — plus supported local attachments through the existing
+   *   durable capture-intent pipeline (same transaction). Another device
+   *   therefore reads the imported branches and media, not just counts.
+   */
+  importTopicData(request: ImportTopicDataRequest): ChatDbResult<ImportTopicDataResponse> {
+    return wrapResult(() => {
+      if (!request || typeof request.assistantId !== 'string' || request.assistantId.length === 0) {
+        throw new ChatDbValidationError('assistantId must be a non-empty string')
+      }
+      const validated = validateTopicDataImport(request.payload)
+      const plan = planTopicDataImport(validated, request.assistantId, new Date().toISOString())
+      const ctx = this.syncCtxForTopic('importTopicData', plan.topic.id)
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: ImportTopicDataResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const writer = createImportWriter(tx as BetterSQLite3Database<typeof schema>)
+
+          writer.insertTopics([plan.topic])
+          writer.insertBranches(plan.branches)
+          writer.insertMessages(plan.messages)
+          writer.insertBlocks(plan.blocks)
+          writer.insertSegments(plan.segments)
+          for (const membership of plan.memberships) {
+            writer.insertSegmentMembership(membership.segmentId, membership.messageIds)
+          }
+          writer.insertFileReferences(plan.fileReferences)
+
+          // NOTE: no history-reference relation is recreated. A referenced
+          // topic's prefix arrives fully materialized as ordinary main-owned
+          // rows in the payload, so the imported topic is independent,
+          // target-owned, and fully writable — with no live relationship and
+          // no foreign read-only permission.
+
+          // Transaction-bound sync intent (same atomic boundary as the
+          // cross-topic clone): the imported topic's FULL content is captured
+          // — main and branch-owned messages/blocks, every branch node,
+          // membership clocks, and the complete frames. Supported local
+          // attachments go through the existing durable capture-intent
+          // pipeline (same Tx): portable file/image/video blocks defer to the
+          // established safe asset upload path, so a peer receives real bytes
+          // and never a device-local raw path. Transient/unsupported rows emit
+          // nothing so frames stay truthful.
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            const created = repos.topics.getById(plan.topic.id)
+            if (!created.found) throw new Error(`importTopicData topic ${plan.topic.id} missing after insert`)
+            syncService.enqueueUpsertInTx(
+              stx,
+              'topic',
+              plan.topic.id,
+              this.syncTopicPayload(created.data),
+              Math.max(0, ctx.ts - 3),
+              ctx.deviceId
+            )
+            syncNotify = true
+            // Branch nodes: plan order is already parents-before-children.
+            for (const branch of plan.branches) {
+              const postBranch = repos.branches.getById(branch.id)
+              if (!postBranch.found) {
+                throw new Error(`importTopicData branch ${branch.id} missing in transaction`)
+              }
+              const opTs = nextTs()
+              this.ensureTopicClosureInTx(stx, plan.topic.id, opTs, ctx.deviceId)
+              syncService.enqueueUpsertInTx(
+                stx,
+                'topic_branch',
+                branch.id,
+                this.syncBranchPayloadFull(postBranch.data),
+                opTs,
+                ctx.deviceId
+              )
+              syncNotify = true
+            }
+            // Portable media: authoritative file_references rows were written
+            // above; capture (blockId,fileId) intents in this same Tx and skip
+            // the immediate shell enqueue — the attachment drain fulfills the
+            // block with validated ordered assetIds.
+            const deferredMediaBlocks = this.capturePortableMediaDeferredInTx(
+              stx,
+              plan.blocks,
+              ctx.ts,
+              unsupportedBlockIds
+            )
+            let hasNewInclusion = false
+            for (const m of plan.messages) {
+              const postRow = repos.messages.getById(m.id)
+              if (!postRow.found) throw new Error(`importTopicData message ${m.id} missing in transaction`)
+              if (!isStableMessageStatus(postRow.data.status)) continue
+              hasNewInclusion = true
+              if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+              const opTs = nextTs()
+              this.ensureTopicClosureInTx(stx, plan.topic.id, opTs, ctx.deviceId)
+              const full = this.syncMessagePayloadFull(postRow.data)
+              delete full.sortOrder
+              const owner = this.syncMembershipParentForMessage(postRow.data)
+              if (owner !== postRow.data.topicId) {
+                this.ensureBranchClosureInTx(stx, owner, opTs, ctx.deviceId)
+              }
+              const opId = syncService.enqueueUpsertInTx(stx, 'message', m.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message', m.id, owner, opTs, opId)
+              syncNotify = true
+            }
+            for (const blk of plan.blocks) {
+              const postBlk = repos.blocks.getById(blk.id)
+              if (!postBlk.found) throw new Error(`importTopicData block ${blk.id} missing in transaction`)
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
+              if (!isStableBlockStatus(postBlk.data.status)) continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(blk.id)
+                continue
+              }
+              if (deferredMediaBlocks.has(blk.id)) continue
+              const opTs = nextTs()
+              this.ensureBlockParentClosureInTx(stx, blk.id, opTs, ctx.deviceId)
+              const full = this.syncBlockPayloadFull(postBlk.data)
+              delete full.sortOrder
+              const opId = syncService.enqueueUpsertInTx(stx, 'message_block', blk.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message_block', blk.id, postBlk.data.messageId, opTs, opId)
+              syncNotify = true
+            }
+            if (hasNewInclusion) {
+              if (
+                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, plan.topic.id, ctx.deviceId) === 'refreshed'
+              ) {
+                syncNotify = true
+              }
+            }
+            for (const branch of plan.branches) {
+              if (syncService.tryRefreshBranchSuffixFrameAndEnqueueInTx(stx, branch.id, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+            for (const m of plan.messages) {
+              const postMsg = repos.messages.getById(m.id)
+              if (!postMsg.found) continue
+              if (!isStableMessageStatus(postMsg.data.status)) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', m.id)
+                continue
+              }
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, m.id, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+          } else {
+            // Capture disabled: preserve existing truthful invalidation, no ops.
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', plan.topic.id)
+            {
+              const mids = new Set<string>()
+              for (const blk of plan.blocks) mids.add(blk.messageId)
+              for (const mid of mids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
+            }
+          }
+
+          const created = repos.topics.getById(plan.topic.id)
+          if (!created.found) throw new Error(`importTopicData topic ${plan.topic.id} missing in transaction`)
+          return {
+            topic: topicToWireFull(created.data) as unknown as TopicWire,
+            messageCount: plan.messages.length,
+            blockCount: plan.blocks.length,
+            branchCount: plan.branches.length,
+            segmentCount: plan.segments.length,
+            fileReferenceCount: plan.fileReferences.length
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('importTopicData', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('importTopicData', unsupportedBlockIds)
+      return result
+    }, `importTopicData(assistant=${request?.assistantId})`)
+  }
+
+  /**
    * Group-scoped clipboard READ for copy/cut (selected groups only).
    *
    * One authoritative SQLite transaction resolves every requested stable
@@ -2305,6 +2804,7 @@ export class ChatDbAggregateService {
           if (!topic.found) {
             throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
           }
+
           const seen = new Set<string>()
           const requested: string[] = []
           for (const gid of request.groupIds ?? []) {
@@ -2798,26 +3298,36 @@ export class ChatDbAggregateService {
             throw new ChatDbNotFoundError(`Anchor message ${afterMessageId} does not belong to topic ${topicId}`)
           }
           const ownerMessages = repos.messages.listByTopic(topicId, route)
-          const anchorOwned = (anchorData.branchId ?? null) === route
+          const anchorOwned = (anchorData.branchId ?? null) === route && anchorData.topicId === topicId
           let resolvedInsertIndex: number
           if (anchorOwned) {
             resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData)
           } else {
             if (route === null) {
-              throw new ChatDbValidationError(
-                `Anchor message ${afterMessageId} is not owned by this route and insertion is read-only`
-              )
+              // Cross-topic reference fork boundary: the exact foreign endpoint
+              // (the reference anchor) may receive insertions at the START of
+              // the target's own suffix; older foreign prefix messages stay
+              // read-only.
+              const ref = repos.topicReferences.getByTarget(topicId)
+              if (ref.found && ref.data.anchorMessageId === afterMessageId) {
+                resolvedInsertIndex = 0
+              } else {
+                throw new ChatDbValidationError(
+                  `Anchor message ${afterMessageId} is not owned by this route and insertion is read-only`
+                )
+              }
+            } else {
+              const addressedBranch = repos.branches.getById(route)
+              if (!addressedBranch.found || addressedBranch.data.topicId !== topicId) {
+                throw new ChatDbNotFoundError(`Branch ${route} does not exist in topic ${topicId}`)
+              }
+              if (afterMessageId !== addressedBranch.data.anchorMessageId) {
+                throw new ChatDbValidationError(
+                  `Anchor message ${afterMessageId} is an ancestor reference and is read-only through this route`
+                )
+              }
+              resolvedInsertIndex = 0
             }
-            const addressedBranch = repos.branches.getById(route)
-            if (!addressedBranch.found || addressedBranch.data.topicId !== topicId) {
-              throw new ChatDbNotFoundError(`Branch ${route} does not exist in topic ${topicId}`)
-            }
-            if (afterMessageId !== addressedBranch.data.anchorMessageId) {
-              throw new ChatDbValidationError(
-                `Anchor message ${afterMessageId} is an ancestor reference and is read-only through this route`
-              )
-            }
-            resolvedInsertIndex = 0
           }
 
           // BRANCH-4/11: genuinely new suffixes never require existing-group
@@ -3254,19 +3764,21 @@ export class ChatDbAggregateService {
    * New message/block IDs must be truly new: any same-topic or cross-topic
    * collision fails the whole transaction (no silent patch). Blocks upsert +
    * file-ref sync + sync/frame capture reuse the established paste patterns.
-   * Returns FileCleanupResult (empty for pure inserts).
+   * Returns the typed batch insertion acknowledgment with exact final
+   * committed canonical wires, flat ids, per-group stable placement, and the
+   * Main-produced mutability delta (subset of actual inserted IDs).
    */
   insertMessageGroups(
     topicId: string,
     groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>,
     branchId?: string | null
-  ): ChatDbResult<FileCleanupResult> {
+  ): ChatDbResult<InsertMessageGroupsResponse> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(branchId)
       const ctx = this.syncCtxForTopic('insertMessageGroups', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
-      let result: FileCleanupResult
+      let result: InsertMessageGroupsResponse
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -3278,10 +3790,17 @@ export class ChatDbAggregateService {
           }
 
           // Route-owner start order: intent anchors resolve inside the
-          // addressed route (inherited anchors valid); insertion indexes are
-          // planned against the owner's rows — never across owners. An
-          // inherited anchor lands at the owner tail.
-          const routeStart = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          // addressed route. Owned anchors plan against the owner's rows —
+          // never across owners. An inherited after-group-tail anchor is
+          // bounded: only the group containing the addressed branch's final
+          // inherited boundary (fork anchor) inserts, at the owner head
+          // (first group after the fork, before any existing suffix). Older
+          // or missing non-boundary inherited anchors fail closed with zero
+          // writes; inherited rows are never moved or modified. Main-route
+          // inherited anchors reject (read-only through main).
+          const resolvedRoute = this.resolveRouteMessagesInTx(repos, topicId, route)
+          const routeStart = resolvedRoute.messages
+          const forkBoundaryIndex = resolvedRoute.forkBoundaryIndex
           const ownerStart = repos.messages.listByTopic(topicId, route)
           const ownerIndexById = new Map<string, number>()
           for (let i = 0; i < ownerStart.length; i++) ownerIndexById.set(ownerStart[i].id, i)
@@ -3329,9 +3848,52 @@ export class ChatDbAggregateService {
               if (!anchor) {
                 throw new ChatDbNotFoundError(`Anchor message ${messageId} does not belong to topic ${topicId}`)
               }
-              if ((anchor.branchId ?? null) !== route) {
-                // Inherited anchor: land at the owner tail (suffix append).
-                baseIndex = ownerStart.length
+              if ((anchor.branchId ?? null) !== route || anchor.topicId !== topicId) {
+                // Inherited anchor: after-group-tail is bounded to the fork
+                // boundary (owner head); before-message keeps legacy owner-tail
+                // semantics. The UI selection is a GROUP anchor (stable askId,
+                // usually the user id), so exact-ID equality with the branch
+                // fork anchor is insufficient: resolve the anchor's group tail
+                // in the effective addressed route and require it to be the
+                // final inherited boundary (the addressed branch's immutable
+                // anchorMessageId).
+                if (route === null) {
+                  // Cross-topic reference fork boundary: only the exact foreign
+                  // endpoint (the reference anchor, or its resolved group tail)
+                  // may receive insertions at the START of the target's own
+                  // suffix; older foreign prefix messages stay read-only.
+                  const ref = repos.topicReferences.getByTarget(topicId)
+                  let isReferenceFork = ref.found && ref.data.anchorMessageId === messageId
+                  if (!isReferenceFork && ref.found && kind === 'after-group-tail') {
+                    const tailPlusOne = this.resolveAfterGroupTailFullIndex(routeStart, anchor)
+                    isReferenceFork = routeStart[tailPlusOne - 1]?.id === ref.data.anchorMessageId
+                  }
+                  if (!isReferenceFork) {
+                    throw new ChatDbValidationError(
+                      `Anchor message ${messageId} is not owned by this route and insertion is read-only`
+                    )
+                  }
+                  baseIndex = 0
+                } else if (kind !== 'after-group-tail') {
+                  // before-message restoration keeps legacy semantics (owner
+                  // tail) — no expansion or contraction here.
+                  baseIndex = ownerStart.length
+                } else {
+                  const addressedBranch = repos.branches.getById(route)
+                  if (!addressedBranch.found || addressedBranch.data.topicId !== topicId) {
+                    throw new ChatDbNotFoundError(`Branch ${route} does not exist in topic ${topicId}`)
+                  }
+                  const forkId = addressedBranch.data.anchorMessageId
+                  const effectiveTailPlusOne = this.resolveAfterGroupTailFullIndex(routeStart, anchor)
+                  const effectiveTailIdx = effectiveTailPlusOne - 1
+                  const tailId = routeStart[effectiveTailIdx]?.id ?? null
+                  if (tailId !== forkId || effectiveTailIdx !== forkBoundaryIndex - 1) {
+                    throw new ChatDbValidationError(
+                      `Anchor message ${messageId} is an ancestor reference and is read-only through this route`
+                    )
+                  }
+                  baseIndex = 0
+                }
               } else if (kind === 'before-message') {
                 baseIndex = ownerIndexById.get(messageId) as number
               } else {
@@ -3617,7 +4179,49 @@ export class ChatDbAggregateService {
             }
           }
 
-          return buildFileCleanupResult(repos, [])
+          const cleanup = buildFileCleanupResult(repos, [])
+          // Canonical authoritative batch acknowledgment: truly inserted rows
+          // only (no patch path — collisions fail above). Flat ids follow
+          // flat request-group concatenated order; per-group runs carry
+          // stable neighbors in post-insert effective order (InsertAfter
+          // convention, never numeric order) so multi-group restores preserve
+          // their pre-delete relation.
+          const flatInsertedMessages = planned.flatMap((p) => p.messages)
+          const insertedIds = flatInsertedMessages.map((m) => m.id)
+          const durableBlocks = insertedIds.flatMap((mid) => repos.blocks.listByMessage(mid))
+          const messagesWithBlocks =
+            insertedIds.length > 0
+              ? reconstructMessageBlockRelations(messagesToWire(flatInsertedMessages), blocksToWire(durableBlocks))
+              : []
+          const effective = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          const groupRuns = planned.map((plan) => {
+            const gids = plan.messages.map((m) => m.id)
+            const firstIdx = effective.findIndex((m) => m.id === gids[0])
+            const lastIdx = effective.findIndex((m) => m.id === gids[gids.length - 1])
+            if (firstIdx === -1 || lastIdx === -1 || lastIdx - firstIdx + 1 !== gids.length) {
+              throw new Error('insertMessageGroups inserted run is not contiguous in effective order')
+            }
+            for (let k = 0; k < gids.length; k++) {
+              if (effective[firstIdx + k].id !== gids[k]) {
+                throw new Error('insertMessageGroups inserted run order mismatch in effective order')
+              }
+            }
+            return {
+              insertedMessageIds: [...gids],
+              beforeMessageId: firstIdx > 0 ? effective[firstIdx - 1].id : null,
+              nextMessageId: lastIdx + 1 < effective.length ? effective[lastIdx + 1].id : null
+            }
+          })
+          return {
+            ...cleanup,
+            topicId,
+            branchId: route,
+            insertedMessages: messagesWithBlocks,
+            insertedBlocks: blocksToWire(durableBlocks),
+            insertedMessageIds: insertedIds,
+            mutableMessageIds: [...insertedIds],
+            groups: groupRuns
+          }
         })
       } catch (e) {
         this.recordSyncTxFailure('insertMessageGroups', ctx, e)
@@ -3635,13 +4239,24 @@ export class ChatDbAggregateService {
    */
   getRawTopic(topicId: string, branchId?: string | null): ChatDbResult<GetRawTopicResult> {
     return wrapResult(() => {
-      const { topics, messages: msgRepo, blocks } = this.repos()
+      const repos = this.repos()
+      const { topics, messages: msgRepo, blocks } = repos
 
       const topic = topics.getById(topicId)
       if (!topic.found) return null
 
       const route = this.normalizeBranchId(branchId)
-      const messageData = msgRepo.listByTopic(topicId, route)
+      // Whole-topic authority read: the MAIN route denotes the topic's
+      // effective history, so a cross-topic history-reference target includes
+      // its live foreign prefix (canonical source rows, stable IDs; the
+      // prefix is omitted when the source route/anchor is unavailable —
+      // 'whole-topic' completeness means the complete effective current
+      // route, never a partial owned-only read). An explicit branch route
+      // keeps the existing owned-rows contract used by Main ownership probes.
+      const messageData =
+        route === null
+          ? this.resolveRouteMessagesInTx(repos, topicId, null).messages
+          : msgRepo.listByTopic(topicId, route)
       const messageIds = messageData.map((m) => m.id)
       const blockDataMap = blocks.listByMessages(messageIds)
 
@@ -4172,13 +4787,28 @@ export class ChatDbAggregateService {
    * Identity/reparenting fields rejected at contract level.
    * Supported stable field patches enqueue sync intent atomically in the
    * same tx (field patch only; transient statuses skip capture, no failure).
+   *
+   * Optional conditional usage mode (`options.usageCondition`, from the optional
+   * user-prompt token estimate): the patch must be exactly `{usage}` and Main
+   * decides INSIDE one transaction whether to apply it. It applies only when the
+   * target still exists in this topic/route, is a user message, owns no usage
+   * yet, and its estimate source (MAIN_TEXT contents + FILE/IMAGE IDs) still
+   * equals the renderer snapshot. Everything else is a successful no-op carrying
+   * a rejection code, so an estimate that lost the race to an edit/resend/delete
+   * can never overwrite newer metadata. `usage` is not a synced field (not in the
+   * sync patch allowlist), so the conditional path skips the sync frame/rescan
+   * work entirely and emits nothing on rejection or apply.
    */
   updateMessage(
     topicId: string,
     messageId: string,
     updatesJson: JsonObject,
-    options?: { resendAttemptId?: string; branchId?: string | null }
-  ): ChatDbResult<null> {
+    options?: {
+      resendAttemptId?: string
+      branchId?: string | null
+      usageCondition?: UpdateMessageUsageSource
+    }
+  ): ChatDbResult<UpdateMessageResult> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(options?.branchId)
       const patch = wireToMessagePatch(updatesJson)
@@ -4191,6 +4821,10 @@ export class ChatDbAggregateService {
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx([messageId], resendAttemptId)
+
+      if (options?.usageCondition) {
+        return this.applyConditionalUsageEstimate(topicId, messageId, patch, route, options.usageCondition)
+      }
 
       const ctx = this.syncCtxForTopic('updateMessage', topicId, route)
       // Empty patch (no mutable keys): no mutation intent; keep read-only.
@@ -4390,6 +5024,67 @@ export class ChatDbAggregateService {
       this.recordUnsupportedBlocksAfterCommit('updateMessage', unsupportedBlockIds)
       return result
     }, `updateMessage(${topicId}, ${messageId})`)
+  }
+
+  /**
+   * Conditional usage-only write (optional prompt-token estimate).
+   *
+   * One Main transaction: ownership/route guard (foreign route and non-owned rows
+   * fail closed with the ordinary BRANCH-4 error), then the condition — target
+   * present, user row, no usage yet, and the authority estimate source equal to the
+   * renderer snapshot — and only then the usage patch. A failed condition returns
+   * a rejection code without mutating anything; it never throws and never emits.
+   *
+   * The patch is exactly `{usage}`: the conditional mode is a display-metadata
+   * mode, not a general compare-and-swap. `usage` is not in the sync field
+   * allowlist, so this path deliberately bypasses the sync capture machinery —
+   * an applied usage write enqueues no operation (identical outcome to the
+   * ordinary path for a usage-only patch) and a rejected one can emit nothing.
+   */
+  private applyConditionalUsageEstimate(
+    topicId: string,
+    messageId: string,
+    patch: EntityPatchInput<MessageData>,
+    route: string | null,
+    source: UpdateMessageUsageSource
+  ): UpdateMessageUsageResult {
+    // Defensive mirror of the contract: exactly the usage overflow key.
+    const patchKeys = Object.keys(patch).filter((key) => key !== 'overflow')
+    const overflowKeys = Object.keys(patch.overflow ?? {})
+    if (patchKeys.length > 0 || overflowKeys.length !== 1 || overflowKeys[0] !== 'usage') {
+      throw new ChatDbValidationError('Conditional usage mode accepts exactly one "usage" update (defensive check)')
+    }
+    return this.db.transaction((tx): UpdateMessageUsageResult => {
+      const repos = createRepositories(tx)
+      const row = repos.messages.getInTopic(messageId, topicId)
+      if (!row.found) return { applied: false, rejection: 'target-missing' }
+      // Ownership/route guard: a row owned by another route is immutable through
+      // this one — fail closed exactly like the ordinary update path.
+      this.assertMutableMessageInTx(
+        repos,
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        topicId,
+        route,
+        messageId
+      )
+      if (row.data.role !== 'user') return { applied: false, rejection: 'not-user-message' }
+      // Usage already owned (edit / resend / an earlier estimate): never overwrite.
+      const existingUsage = (row.data.overflow as Record<string, unknown> | undefined)?.usage
+      if (existingUsage !== undefined && existingUsage !== null) {
+        return { applied: false, rejection: 'usage-present' }
+      }
+      const authoritySource = usageSourceOfBlocks(repos.blocks.listByMessage(messageId))
+      const requestedSource: UpdateMessageUsageSource = {
+        textContents: [...source.textContents].sort(),
+        fileIds: [...source.fileIds].sort()
+      }
+      if (!sameUsageSource(authoritySource, requestedSource)) {
+        return { applied: false, rejection: 'source-changed' }
+      }
+      const applied = repos.messages.update(topicId, messageId, patch)
+      if (applied.affected === 0) return { applied: false, rejection: 'target-missing' }
+      return { applied: true }
+    })
   }
 
   /**
@@ -5195,6 +5890,21 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Resolve the addressed route context for a block command.
+   *
+   * When a caller supplies an explicit topic context, the block's parent must
+   * be owned by exactly that route — a cross-topic foreign prefix row written
+   * through a reference target fails closed. When absent, the route is
+   * resolved from the committed parent (topicId/branchId of the row), so
+   * canonical source-stream callers keep their existing behavior.
+   */
+  private blockGuardContext(options?: BlockRouteContext): { topicId: string | null; branchId: string | null } {
+    const topicId = typeof options?.topicId === 'string' && options.topicId.length > 0 ? options.topicId : null
+    if (topicId === null) return { topicId: null, branchId: null }
+    return { topicId, branchId: options?.branchId ?? null }
+  }
+
+  /**
    * Upsert blocks. Existing order preserved, new blocks append per input order.
    * No reparent. Reference sync for file/image blocks.
    *
@@ -5207,7 +5917,7 @@ export class ChatDbAggregateService {
   updateBlocks(
     blocksJson: JsonObject[],
     diagnostics?: StreamWriteDiagnostics,
-    options?: { resendAttemptId?: string }
+    options?: BlockRouteContext
   ): ChatDbResult<null> {
     void diagnostics
     const result = wrapResult(() => {
@@ -5216,11 +5926,12 @@ export class ChatDbAggregateService {
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
+      const guardCtx = this.blockGuardContext(options)
       const blockOwnerRoute = this.resolveBlockOwnerRoute(blocksJson)
       const syncCtx = this.syncCtxForTopic(
         'updateBlocks',
-        blockOwnerRoute?.topicId ?? '',
-        blockOwnerRoute?.branchId ?? null
+        guardCtx.topicId ?? blockOwnerRoute?.topicId ?? '',
+        guardCtx.topicId !== null ? guardCtx.branchId : (blockOwnerRoute?.branchId ?? null)
       )
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -5234,7 +5945,14 @@ export class ChatDbAggregateService {
           {
             const dbForBlockGuard = tx as unknown as BetterSQLite3Database<typeof schema>
             for (const block of blockDataList) {
-              this.assertMutableBlockInTx(repos, dbForBlockGuard, null, null, block.id, block.messageId)
+              this.assertMutableBlockInTx(
+                repos,
+                dbForBlockGuard,
+                guardCtx.topicId,
+                guardCtx.branchId,
+                block.id,
+                block.messageId
+              )
             }
           }
           // Pre-state snapshot for field-patch diffing (same tx, pre-write).
@@ -5475,7 +6193,7 @@ export class ChatDbAggregateService {
     blockId: string,
     updatesJson: JsonObject,
     diagnostics?: StreamWriteDiagnostics,
-    options?: { resendAttemptId?: string }
+    options?: BlockRouteContext
   ): ChatDbResult<null> {
     void diagnostics
     const result = wrapResult(() => {
@@ -5489,11 +6207,12 @@ export class ChatDbAggregateService {
       // Stale-attempt fail-closed before any SQLite write transaction opens
       // (best-effort parent resolution; authoritative check is in-tx).
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx([{ id: blockId } as JsonObject]), resendAttemptId)
+      const guardCtx = this.blockGuardContext(options)
       const singleOwnerRoute = this.resolveBlockOwnerRouteByIds([blockId])
       const syncCtx = this.syncCtxForTopic(
         'updateSingleBlock',
-        singleOwnerRoute?.topicId ?? '',
-        singleOwnerRoute?.branchId ?? null
+        guardCtx.topicId ?? singleOwnerRoute?.topicId ?? '',
+        guardCtx.topicId !== null ? guardCtx.branchId : (singleOwnerRoute?.branchId ?? null)
       )
       let syncNotify = false
       let singlePromotionTriggered = false
@@ -5506,7 +6225,13 @@ export class ChatDbAggregateService {
           const existing = repos.blocks.getById(blockId)
           if (!existing.found) return // no-op for missing
           // Route immutability: blocks under shared parents reject.
-          this.assertMutableBlockInTx(repos, tx as unknown as BetterSQLite3Database<typeof schema>, null, null, blockId)
+          this.assertMutableBlockInTx(
+            repos,
+            tx as unknown as BetterSQLite3Database<typeof schema>,
+            guardCtx.topicId,
+            guardCtx.branchId,
+            blockId
+          )
 
           // Apply patch to the existing block to get the merged result
           const merged: Record<string, unknown> = { ...existing.data }
@@ -5716,17 +6441,18 @@ export class ChatDbAggregateService {
    * Atomicity: one root transaction with tx-bound repositories.
    * Duplicate IDs throw ChatDbConflictError (typed).
    */
-  bulkAddBlocks(blocksJson: JsonObject[], options?: { resendAttemptId?: string }): ChatDbResult<null> {
+  bulkAddBlocks(blocksJson: JsonObject[], options?: BlockRouteContext): ChatDbResult<null> {
     return wrapResult(() => {
       const blockDataList = blocksJson.map(wireToBlock)
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
+      const guardCtx = this.blockGuardContext(options)
       const bulkOwnerRoute = this.resolveBlockOwnerRoute(blocksJson)
       const syncCtx = this.syncCtxForTopic(
         'bulkAddBlocks',
-        bulkOwnerRoute?.topicId ?? '',
-        bulkOwnerRoute?.branchId ?? null
+        guardCtx.topicId ?? bulkOwnerRoute?.topicId ?? '',
+        guardCtx.topicId !== null ? guardCtx.branchId : (bulkOwnerRoute?.branchId ?? null)
       )
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -5750,7 +6476,14 @@ export class ChatDbAggregateService {
           {
             const dbForBulkGuard = tx as unknown as BetterSQLite3Database<typeof schema>
             for (const block of blockDataList) {
-              this.assertMutableBlockInTx(repos, dbForBulkGuard, null, null, block.id, block.messageId)
+              this.assertMutableBlockInTx(
+                repos,
+                dbForBulkGuard,
+                guardCtx.topicId,
+                guardCtx.branchId,
+                block.id,
+                block.messageId
+              )
             }
           }
 
@@ -5866,13 +6599,14 @@ export class ChatDbAggregateService {
    * Normalize affected message block order via repository.
    * Known-entity deletes enqueue intent atomically in the same tx.
    */
-  deleteBlocks(blockIds: string[]): ChatDbResult<FileCleanupResult> {
+  deleteBlocks(blockIds: string[], options?: BlockRouteContext): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      const guardCtx = this.blockGuardContext(options)
       const deleteOwnerRoute = this.resolveBlockOwnerRouteByIds(blockIds)
       const syncCtx = this.syncCtxForTopic(
         'deleteBlocks',
-        deleteOwnerRoute?.topicId ?? '',
-        deleteOwnerRoute?.branchId ?? null
+        guardCtx.topicId ?? deleteOwnerRoute?.topicId ?? '',
+        guardCtx.topicId !== null ? guardCtx.branchId : (deleteOwnerRoute?.branchId ?? null)
       )
       let syncNotify = false
       let result: FileCleanupResult
@@ -5914,7 +6648,7 @@ export class ChatDbAggregateService {
           {
             const dbForDeleteBlockGuard = tx as unknown as BetterSQLite3Database<typeof schema>
             for (const bid of blockIds) {
-              this.assertMutableBlockInTx(repos, dbForDeleteBlockGuard, null, null, bid)
+              this.assertMutableBlockInTx(repos, dbForDeleteBlockGuard, guardCtx.topicId, guardCtx.branchId, bid)
             }
           }
           for (const bid of blockIds) {
@@ -6492,6 +7226,12 @@ export class ChatDbAggregateService {
    * Identity fields (id, assistantId, createdAt, deletedAt, messages) are
    * NOT mutable through this path.
    *
+   * Optional atomic preimage guards (automatic naming only): when
+   * expectedName / expectedIsNameManuallyEdited are defined, the current
+   * authority values are compared inside the same transaction; on mismatch
+   * the current wire is returned unchanged (graceful no-op, no write, no
+   * sync intent, no updatedAt bump). Missing topic still throws NOT_FOUND.
+   *
    * Returns ERR_NOT_FOUND if topic does not exist.
    */
   updateTopicMetadata(
@@ -6499,7 +7239,9 @@ export class ChatDbAggregateService {
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expectedName?: string | null,
+    expectedIsNameManuallyEdited?: boolean | null
   ): ChatDbResult<JsonObject> {
     return wrapResult(() => {
       const ctx = this.syncCtxForTopic('updateTopicMetadata', topicId)
@@ -6513,6 +7255,24 @@ export class ChatDbAggregateService {
           const existing = repos.topics.getById(topicId)
           if (!existing.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+
+          // Bounded atomic preimage guard for automatic naming: compare inside
+          // the same transaction; mismatch returns the current wire unchanged.
+          if (expectedName !== undefined) {
+            const currentName = (existing.data as { name?: string | null }).name ?? null
+            const wantName = expectedName ?? null
+            if (currentName !== wantName) {
+              return topicToWireFull(existing.data)
+            }
+          }
+          if (expectedIsNameManuallyEdited !== undefined) {
+            const raw = (existing.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
+            const currentFlag = typeof raw === 'boolean' ? raw : null
+            const wantFlag = expectedIsNameManuallyEdited ?? null
+            if (currentFlag !== wantFlag) {
+              return topicToWireFull(existing.data)
+            }
           }
 
           // Build patch from allowed fields
@@ -6764,9 +7524,19 @@ export class ChatDbAggregateService {
             // Proven pre-016: no branch inventory exists.
           }
 
+          // Target-owned reference relation cascades with the target topic.
+          // Capture it before the FK cascade so the relation tombstone is
+          // emitted with coherent clock bookkeeping (its own delete op).
+          let hadReferenceRelation = false
+          try {
+            hadReferenceRelation = repos.topicReferences.exists(topicId)
+          } catch {
+            hadReferenceRelation = false
+          }
           // FK cascade: topic → messages → blocks → file_references;
           // topic → topic_segments → topic_segment_messages;
-          // topic → topic_branches → owned messages (branch_id CASCADE).
+          // topic → topic_branches → owned messages (branch_id CASCADE);
+          // topic → topic_references (target-owned relation).
           repos.topics.hardDelete(topicId)
           // Resend intent (SYNC-DATA-055): the wiped topic carries no
           // unfinished attempt — clear in the same transaction.
@@ -6776,6 +7546,10 @@ export class ChatDbAggregateService {
           // atomic boundary (known entities only — unknown ids never emit).
           if (ctx && known) {
             syncService.enqueueDeleteInTx(stx, 'topic', topicId, ctx.ts, ctx.deviceId)
+            if (hadReferenceRelation) {
+              const refOpId = syncService.enqueueDeleteInTx(stx, 'topic_reference', topicId, ctx.ts, ctx.deviceId)
+              void refOpId
+            }
             syncNotify = true
           }
 
@@ -7334,16 +8108,21 @@ export class ChatDbAggregateService {
    * syncCtx(). Branch routes capture like main routes (true-branch full
    * sync): branch-owned messages carry branchId owner + branchId membership
    * and branchSuffix frames; topicMessage frames stay main-owned only.
+   *
+   * Reference-target topics sync like ordinary topics: the historical
+   * relation is carried as its own versioned entity (target-owned coherent
+   * tuple), while the LIVE foreign prefix stays owned by the source topic and
+   * is never copied. The target's own suffix/branches capture normally, so a
+   * peer resolves the same reference instead of receiving an incomplete copy.
    */
   private syncCtxForTopic(
     channel: string,
-    _topicId: string,
+    topicId: string,
     branchId?: string | null
   ): { deviceId: string; ts: number } | null {
+    void topicId
     void branchId
-    const ctx = this.syncCtx(channel)
-    if (!ctx) return null
-    return ctx
+    return this.syncCtx(channel)
   }
 
   /**
@@ -7578,31 +8357,153 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Resolve the effective ordered messages for one route: recursively take
-   * each ancestor route only through the child anchor, then append messages
-   * owned by the current branch. Deterministic sort_order ASC, id ASC order
-   * at every level. Stable message IDs are shared; nothing is cloned.
-   *
-   * `branchId = null` is the main route (owned rows only). A missing anchor
-   * in any parent route fails closed (NOT_FOUND) — the route is broken and
-   * must not silently truncate, clamp, copy, or repair (BRANCH-5).
+   * True when the topic owns a history-reference relation (is a reference
+   * target). Tolerates pre-018 databases. Used to fail cross-topic foreign
+   * prefix writes closed (never silently skipped) and to route windowed reads
+   * through the reference-aware resolver.
    */
-  private resolveRouteMessagesInTx(
+  private topicHasReferenceInTx(db: BetterSQLite3Database<typeof schema>, topicId: string): boolean {
+    try {
+      const row = db
+        .select({ targetTopicId: schema.topicReferences.targetTopicId })
+        .from(schema.topicReferences)
+        .where(eq(schema.topicReferences.targetTopicId, topicId))
+        .limit(1)
+        .get()
+      return row !== undefined
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return false
+      throw e
+    }
+  }
+
+  /** Domain reference node → wire (exact TopicReferenceWire keys; live source name). */
+  private referenceToWire(ref: TopicReferenceData, sourceName: string | null): TopicReferenceWire {
+    return {
+      targetTopicId: ref.targetTopicId,
+      sourceTopicId: ref.sourceTopicId,
+      sourceBranchId: ref.sourceBranchId,
+      anchorMessageId: ref.anchorMessageId,
+      sourceName,
+      createdAt: ref.createdAt,
+      updatedAt: ref.updatedAt
+    }
+  }
+
+  /**
+   * Resolve the foreign reference base prefix of a target topic (recursive,
+   * cycle/depth-guarded). Returns:
+   * - status 'none' when the topic is not a reference target;
+   * - status 'missing' when the source topic is gone/trashed, the source
+   *   route cannot resolve, the anchor endpoint is absent, or a cycle/depth
+   *   limit is hit — `messages` is then empty (prefix omitted);
+   * - status 'available' with the source-route prefix through the anchor
+   *   inclusive (canonical source rows; stable IDs; no copy).
+   *
+   * `chainMissing` (optional) is provenance-only: when supplied it is flagged
+   * at EVERY missing reference segment in the resolved source chain, so a
+   * caller can distinguish a fully materialized prefix from one whose nested
+   * source history is incomplete. Ordinary reads omit it.
+   */
+  private resolveReferenceBaseInTx(
     repos: ChatDbRepositories,
     topicId: string,
-    branchId: string | null
-  ): { messages: MessageData[]; forkBoundaryIndex: number } {
+    visited: Set<string>,
+    depth: number,
+    chainMissing?: ReferenceChainMissingFlag
+  ): ReferenceBaseResolution {
+    let refRow: { found: boolean; data?: TopicReferenceData }
+    try {
+      refRow = repos.topicReferences.getByTarget(topicId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        return { messages: [], reference: null, status: 'none' }
+      }
+      throw e
+    }
+    if (!refRow.found || !refRow.data) return { messages: [], reference: null, status: 'none' }
+    const ref = refRow.data
+    if (depth >= MAX_REFERENCE_DEPTH || visited.has(topicId)) {
+      if (chainMissing) chainMissing.missing = true
+      return { messages: [], reference: ref, status: 'missing' }
+    }
+    visited.add(topicId)
+    try {
+      const sourceTopic = repos.topics.getById(ref.sourceTopicId)
+      if (!sourceTopic.found || sourceTopic.data.deletedAt != null) {
+        if (chainMissing) chainMissing.missing = true
+        return { messages: [], reference: ref, status: 'missing' }
+      }
+      // A source route whose own branch anchor was removed (source branch
+      // removal) resolves NOT_FOUND in the strict effective-route resolver.
+      // Per the reference model that is a missing reference, not a read
+      // failure: the prefix is omitted while the target and its owned suffix
+      // survive and recovery re-enables it.
+      let sourceRoute: MessageData[]
+      try {
+        sourceRoute = this.resolveRouteMessagesGuardedInTx(
+          repos,
+          ref.sourceTopicId,
+          this.normalizeBranchId(ref.sourceBranchId),
+          visited,
+          depth + 1,
+          chainMissing
+        )
+      } catch (e) {
+        if (e instanceof ChatDbNotFoundError) {
+          if (chainMissing) chainMissing.missing = true
+          return { messages: [], reference: ref, status: 'missing' }
+        }
+        throw e
+      }
+      const anchorIdx = sourceRoute.findIndex((m) => m.id === ref.anchorMessageId)
+      if (anchorIdx === -1) {
+        if (chainMissing) chainMissing.missing = true
+        return { messages: [], reference: ref, status: 'missing' }
+      }
+      return { messages: sourceRoute.slice(0, anchorIdx + 1), reference: ref, status: 'available' }
+    } finally {
+      visited.delete(topicId)
+    }
+  }
+
+  /**
+   * Cycle/depth-guarded effective-route resolution shared by cross-topic
+   * reference recursion. The base of any topic is its foreign reference
+   * prefix (when it is a reference target) followed by its own main rows;
+   * intra-topic branches then compose atop that base through the same
+   * anchor-slice algorithm. Missing anchors still fail closed (NOT_FOUND);
+   * missing/gone reference sources omit the prefix (status is surfaced by
+   * the caller-facing metadata).
+   *
+   * `chainMissing` (optional) is threaded into the reference base so a nested
+   * missing segment in the source chain is reported to provenance callers.
+   */
+  private resolveRouteMessagesGuardedInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null,
+    visited: Set<string>,
+    depth: number,
+    chainMissing?: ReferenceChainMissingFlag
+  ): MessageData[] {
+    let base: MessageData[]
+    if (depth >= MAX_REFERENCE_DEPTH) {
+      if (chainMissing) chainMissing.missing = true
+      base = []
+    } else {
+      base = this.resolveReferenceBaseInTx(repos, topicId, visited, depth, chainMissing).messages
+    }
     const owner = this.normalizeBranchId(branchId)
     if (owner === null) {
-      const main = repos.messages.listByTopic(topicId, null)
-      return { messages: main, forkBoundaryIndex: main.length }
+      return [...base, ...repos.messages.listByTopic(topicId, null)]
     }
     const path = this.branchPathInTx(repos, owner)
     const leaf = path.length > 0 ? path[path.length - 1] : null
     if (!leaf || leaf.topicId !== topicId) {
       throw new ChatDbNotFoundError(`Branch ${owner} does not exist in topic ${topicId}`)
     }
-    let effective: MessageData[] = [...repos.messages.listByTopic(topicId, null)]
+    let effective: MessageData[] = [...base, ...repos.messages.listByTopic(topicId, null)]
     for (const node of path) {
       const anchorIdx = effective.findIndex((m) => m.id === node.anchorMessageId)
       if (anchorIdx === -1) {
@@ -7612,8 +8513,39 @@ export class ChatDbAggregateService {
       }
       effective = [...effective.slice(0, anchorIdx + 1), ...repos.messages.listByTopic(topicId, node.id)]
     }
-    const ownCount = repos.messages.listByTopic(topicId, owner).length
-    return { messages: effective, forkBoundaryIndex: effective.length - ownCount }
+    return effective
+  }
+
+  /**
+   * Resolve the effective ordered messages for one route: recursively take
+   * each ancestor route only through the child anchor, then append messages
+   * owned by the current branch. Deterministic sort_order ASC, id ASC order
+   * at every level. Stable message IDs are shared; nothing is cloned.
+   *
+   * Cross-topic history references extend the base: a reference target's
+   * effective route additionally begins with a LIVE read-only prefix of the
+   * source route through the reference anchor (canonical source IDs/topicId).
+   * The target's own main rows and any intra-topic branches compose atop it.
+   *
+   * `branchId = null` is the main route (base + owned rows). A missing anchor
+   * in any parent route fails closed (NOT_FOUND) — the route is broken and
+   * must not silently truncate, clamp, copy, or repair (BRANCH-5). A missing
+   * reference source omits the prefix (status surfaced by metadata).
+   */
+  private resolveRouteMessagesInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null
+  ): { messages: MessageData[]; forkBoundaryIndex: number } {
+    const owner = this.normalizeBranchId(branchId)
+    const messages = this.resolveRouteMessagesGuardedInTx(repos, topicId, owner, new Set<string>(), 0)
+    // Boundary only needs the owned-row count: the route above already
+    // materialized the ancestor/reference prefix plus these same own rows, so
+    // a second full materialization of the owner route is pure overhead. The
+    // count uses the identical route-owner predicate (branch_id IS NULL for
+    // the main route, branch_id = owner otherwise).
+    const ownCount = repos.messages.countByTopic(topicId, owner)
+    return { messages, forkBoundaryIndex: messages.length - ownCount }
   }
 
   /**
@@ -7623,9 +8555,10 @@ export class ChatDbAggregateService {
    * - Cross-topic references keep legacy skip semantics (returns false) only
    *   for the pure non-branch case: addressed route is main (null), the
    *   foreign row is main-owned (branchId null), and the addressed topic has
-   *   no true branches. Bulk paths filter to owned IDs and silently skip
-   *   those foreign rows. Any branch lineage — addressed route non-null,
-   *   foreign row branch-owned, or addressed topic with branches — fails
+   *   no true branches and no history-reference relation. Bulk paths filter to
+   *   owned IDs and silently skip those foreign rows. Any branch lineage —
+   *   addressed route non-null, foreign row branch-owned, addressed topic with
+   *   branches, or a reference target with a read-only foreign prefix — fails
    *   closed with ChatDbValidationError (same logical-topic non-owner
    *   fail-closed applies across topics; never silently ok).
    * - Same-topic rows owned by another route (inherited/read-only reference)
@@ -7648,7 +8581,12 @@ export class ChatDbAggregateService {
     if (!ownerRow.found) return false
     const row = ownerRow.data
     if (row.topicId !== topicId) {
-      if (route !== null || (row.branchId ?? null) !== null || this.topicHasBranchesInTx(db, topicId)) {
+      if (
+        route !== null ||
+        (row.branchId ?? null) !== null ||
+        this.topicHasBranchesInTx(db, topicId) ||
+        this.topicHasReferenceInTx(db, topicId)
+      ) {
         throw new ChatDbValidationError(
           `Message ${messageId} belongs to topic ${row.topicId} and is immutable through topic ${topicId}`
         )
@@ -8133,6 +9071,182 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Create a new target topic that references a source route through a
+   * precise anchor (Reference/Copy = Reference).
+   *
+   * One atomic Main transaction:
+   * - validates the source topic exists (trash rejects) and the source route
+   *   exists (null = main route, otherwise a branch of the source topic);
+   * - validates the anchor belongs to the source route's current effective
+   *   route;
+   * - requires the target topic to be distinct and not already present;
+   * - creates the target topic AND the one topic-level reference relation
+   *   together (no orphan topic on failure);
+   * - stores no messages/blocks/files at all: the target's effective route is
+   *   a LIVE stable-ID prefix of the source route (canonical source
+   *   IDs/topicId) plus its own empty suffix.
+   *
+   * Sync: the target topic + its coherent reference relation are captured in
+   * the SAME transaction as their outbox intent, so a peer resolves the same
+   * history reference. The referenced prefix is never copied — it stays owned
+   * by the source topic (source edits/deletes therefore propagate through the
+   * relation rather than through duplicated rows).
+   */
+  createReferencedTopic(
+    sourceTopicId: string,
+    sourceBranchId: string | null | undefined,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    name?: string
+  ): ChatDbResult<CreateReferencedTopicResponse> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('createReferencedTopic')
+      const sourceRoute = this.normalizeBranchId(sourceBranchId)
+      if (!sourceTopicId || !targetTopicId || !anchorMessageId) {
+        throw new ChatDbValidationError(
+          'createReferencedTopic requires sourceTopicId, targetTopicId, and anchorMessageId'
+        )
+      }
+      if (sourceTopicId === targetTopicId) {
+        throw new ChatDbValidationError('createReferencedTopic requires distinct source and target topics')
+      }
+      const ctx = this.syncCtxForTopic('createReferencedTopic', targetTopicId)
+      let syncNotify = false
+      const result = this.db.transaction((tx) => {
+        const stx = tx as unknown as SyncTxExecutor
+        const repos = createRepositories(tx)
+        const sourceTopic = repos.topics.getById(sourceTopicId)
+        if (!sourceTopic.found) {
+          throw new ChatDbNotFoundError(`Topic ${sourceTopicId} does not exist`)
+        }
+        if (sourceTopic.data.deletedAt != null) {
+          throw new ChatDbValidationError(`Topic ${sourceTopicId} is in trash and cannot be referenced`)
+        }
+        if (sourceRoute !== null) {
+          this.requireBranchInTx(repos, sourceTopicId, sourceRoute)
+        }
+        if (repos.topics.getById(targetTopicId).found) {
+          throw new ChatDbValidationError(`Reference target topic ${targetTopicId} already exists`)
+        }
+        // Validate the anchor against the source effective route (recursive,
+        // reference-aware: a nested reference source resolves its own base).
+        const sourceEffective = this.resolveRouteMessagesInTx(repos, sourceTopicId, sourceRoute).messages
+        if (!sourceEffective.some((m) => m.id === anchorMessageId)) {
+          throw new ChatDbNotFoundError(
+            `Anchor message ${anchorMessageId} does not belong to the source route of topic ${sourceTopicId}`
+          )
+        }
+        const now = new Date().toISOString()
+        // Create target topic + relation atomically. No sync intent: this is
+        // a local-only reference relation whose foreign prefix is not
+        // representable on the wire; the source topic's sync is untouched.
+        const targetName = typeof name === 'string' && name.length > 0 ? name : null
+        repos.topics.create({
+          id: targetTopicId,
+          assistantId: assistantId ?? sourceTopic.data.assistantId ?? null,
+          name: targetName,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          overflow: {}
+        })
+        const created = repos.topicReferences.create({
+          targetTopicId,
+          sourceTopicId,
+          sourceBranchId: sourceRoute,
+          anchorMessageId,
+          createdAt: now,
+          updatedAt: now,
+          overflow: {}
+        })
+        // Transaction-bound capture: the target topic and its one coherent
+        // relation tuple commit together with their sync intent. The
+        // referenced prefix stays owned by the source topic (not copied), so
+        // only the target row + relation + the target's own (empty) order
+        // frame are emitted.
+        if (ctx) {
+          const createdTarget = repos.topics.getById(targetTopicId)
+          if (!createdTarget.found)
+            throw new Error(`createReferencedTopic target ${targetTopicId} missing in transaction`)
+          syncService.enqueueUpsertInTx(
+            stx,
+            'topic',
+            targetTopicId,
+            this.syncTopicPayload(createdTarget.data),
+            Math.max(0, ctx.ts - 2),
+            ctx.deviceId
+          )
+          syncService.enqueueUpsertInTx(
+            stx,
+            'topic_reference',
+            targetTopicId,
+            {
+              targetTopicId,
+              sourceTopicId,
+              sourceBranchId: sourceRoute,
+              anchorMessageId
+            },
+            ctx.ts,
+            ctx.deviceId
+          )
+          if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, targetTopicId, ctx.deviceId) === 'refreshed') {
+            syncNotify = true
+          }
+          syncNotify = true
+        }
+        // Effective projection for the new route (live foreign prefix, empty
+        // owned suffix).
+        const resolved = this.resolveRouteMessagesInTx(repos, targetTopicId, null).messages
+        const messageIds = resolved.map((m) => m.id)
+        const blockDataMap = repos.blocks.listByMessages(messageIds)
+        const allBlocks: MessageBlockData[] = []
+        for (const id of messageIds) allBlocks.push(...(blockDataMap.get(id) ?? []))
+        const wireMessages = messagesToWire(resolved)
+        const wireBlocks = blocksToWire(allBlocks)
+        return {
+          topicId: targetTopicId,
+          reference: this.referenceToWire(created, sourceTopic.data.name ?? null),
+          messages: reconstructMessageBlockRelations(wireMessages, wireBlocks),
+          blocks: wireBlocks
+        }
+      })
+      if (syncNotify) syncService.notifyEnqueued()
+      return result
+    }, `createReferencedTopic(${sourceTopicId} -> ${targetTopicId}, anchor=${anchorMessageId})`)
+  }
+
+  /**
+   * Reference target topic IDs transitively staled by one source topic. Used
+   * by the IPC layer to fan out history-reference invalidation to renderers.
+   *
+   * A reference target's live prefix may itself compose a base reference, so
+   * a mutation of the base source also stales transitive dependents
+   * (target-of-target). The relation graph is walked bounded by
+   * MAX_REFERENCE_DEPTH with a visited guard; the origin and repeats are
+   * excluded and the result is deterministic (sorted, unique).
+   */
+  listReferenceTargets(sourceTopicId: string): ChatDbResult<{ sourceTopicId: string; targetTopicIds: string[] }> {
+    return wrapResult(() => {
+      const repos = this.repos()
+      const seen = new Set<string>()
+      let frontier: string[] = [sourceTopicId]
+      for (let depth = 0; depth < MAX_REFERENCE_DEPTH && frontier.length > 0; depth++) {
+        const next: string[] = []
+        for (const topicId of frontier) {
+          for (const targetId of repos.topicReferences.listTargetsBySource(topicId)) {
+            if (targetId === sourceTopicId || seen.has(targetId)) continue
+            seen.add(targetId)
+            next.push(targetId)
+          }
+        }
+        frontier = next
+      }
+      return { sourceTopicId, targetTopicIds: [...seen].sort() }
+    }, `listReferenceTargets(${sourceTopicId})`)
+  }
+
+  /**
    * List all branch nodes of one logical topic in (createdAt, id) order.
    * Pure read; missing topic fails. Empty when never branched.
    */
@@ -8366,13 +9480,23 @@ export class ChatDbAggregateService {
    * message or block fails the capture closed (whole move rolls back) so no
    * transient payload ever rides the wire. Sync-disabled stays local-only
    * with no outbox/membership/frame writes.
+   *
+   * Context-window inheritance (optional): when the caller supplies the
+   * source route's anchor and the assistant window size, the destination
+   * anchor is resolved INSIDE this transaction from the PRE-MOVE source route
+   * (index-preserving map, default position when the source anchor is missing
+   * or out of the destination's range, no anchor for an empty destination).
+   * A post-commit resolution would read the already-mutated source route. The
+   * resolved key is returned as a fact only; Main never persists renderer
+   * assistant settings.
    */
   moveSelectedTurnsToNewBranch(
     topicId: string,
     sourceBranchId: string | null | undefined,
     selectedGroupIds: string[],
     name?: string,
-    expectedSelectedMessageIds?: string[]
+    expectedSelectedMessageIds?: string[],
+    contextAnchorInheritance?: MoveContextAnchorInheritanceInput | null
   ): ChatDbResult<{
     branch: TopicBranchWire
     movedMessageIds: string[]
@@ -8381,6 +9505,8 @@ export class ChatDbAggregateService {
     parentBlocks: JsonObject[]
     messages: JsonObject[]
     blocks: JsonObject[]
+    resolvedContextAnchorGroupKey?: string | null
+    sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
   }> {
     return wrapResult(
       () => {
@@ -8690,6 +9816,78 @@ export class ChatDbAggregateService {
             const parentWireBlocks = blocksToWire(parentBlocks)
             const childWireMessages = messagesToWire(childEffective)
             const childWireBlocks = blocksToWire(childBlocks)
+            // Context-window inheritance fact (optional): resolved from the
+            // PRE-MOVE source route (`effective`, captured before any write) into
+            // the destination route (`childEffective`) by index. A post-commit
+            // resolution would read the mutated source route and silently fall
+            // back to the default window position.
+            let resolvedContextAnchorGroupKey: string | null | undefined
+            let sourceContextAnchorTransfer: { fromGroupKey: string; toGroupKey: string | null } | undefined
+            if (contextAnchorInheritance) {
+              const sourceAnchorGroupKey =
+                typeof contextAnchorInheritance.sourceAnchorGroupKey === 'string' &&
+                contextAnchorInheritance.sourceAnchorGroupKey.length > 0
+                  ? contextAnchorInheritance.sourceAnchorGroupKey
+                  : null
+              const contextCount =
+                typeof contextAnchorInheritance.contextCount === 'number' ? contextAnchorInheritance.contextCount : null
+              const sourceTurnsBefore = buildContextAnchorTurns(effective)
+              const destinationTurns = buildContextAnchorTurns(childEffective)
+              if (destinationTurns.length === 0) {
+                // Empty destination route has no anchor (I-1).
+                resolvedContextAnchorGroupKey = null
+              } else {
+                const sourceIdx =
+                  sourceAnchorGroupKey !== null
+                    ? resolveContextAnchorTurnIndex(sourceTurnsBefore, sourceAnchorGroupKey)
+                    : -1
+                resolvedContextAnchorGroupKey =
+                  sourceIdx !== -1 && sourceIdx < destinationTurns.length
+                    ? // In range: index map only, never a `contextCount` recompute.
+                      destinationTurns[sourceIdx].key
+                    : // Missing/invalid source anchor or out of range: the CURRENT
+                      // `contextCount` default position, never clamped to last.
+                      destinationTurns[resolveContextAnchorDefaultIndex(destinationTurns.length, contextCount)].key
+              }
+              // Source-route anchor repair (context-window governance §9,
+              // deterministic delete transfer). Only when the caller supplied an
+              // ACTIVE source anchor that the move actually removed from the
+              // source route: the anchor turn was part of the selection. A
+              // surviving anchor (or a key that names no source turn) produces NO
+              // fact — the caller must never rebuild/rewrite the source anchor.
+              if (sourceAnchorGroupKey !== null) {
+                const sourceTurnsAfter = buildContextAnchorTurns(parentEffective)
+                const beforeIdx = resolveContextAnchorTurnIndex(sourceTurnsBefore, sourceAnchorGroupKey)
+                const survives = resolveContextAnchorTurnIndex(sourceTurnsAfter, sourceAnchorGroupKey) !== -1
+                if (beforeIdx !== -1 && !survives) {
+                  // Deleted anchor turn: fall to the nearest SURVIVING OLDER turn
+                  // by stable group identity — scan the PRE-move order backwards
+                  // from the anchor and pick the first turn that still exists in
+                  // the post-move source route. Index arithmetic against the
+                  // post list is wrong: removing a contiguous range compresses
+                  // it, so `beforeIdx - 1` can run past the end (throw/rollback)
+                  // or land on a NEWER turn (before=[A..F], anchor E, moved D,E
+                  // → after=[A,B,C,F]; index 3 would wrongly pick F).
+                  const survivingAfter = new Set(sourceTurnsAfter.map((t) => t.key))
+                  let toGroupKey: string | null = null
+                  for (let i = beforeIdx - 1; i >= 0; i--) {
+                    const candidate = sourceTurnsBefore[i].key
+                    if (survivingAfter.has(candidate)) {
+                      toGroupKey = candidate
+                      break
+                    }
+                  }
+                  // No older surviving turn (deleted first group, or every older
+                  // turn was moved too): the post-route's first turn; an emptied
+                  // source route loses its anchor. Never the `contextCount`
+                  // default — an anchor migration is not a re-anchoring.
+                  if (toGroupKey === null) {
+                    toGroupKey = sourceTurnsAfter.length > 0 ? sourceTurnsAfter[0].key : null
+                  }
+                  sourceContextAnchorTransfer = { fromGroupKey: sourceAnchorGroupKey, toGroupKey }
+                }
+              }
+            }
             return {
               branch: this.branchToWire(created),
               movedMessageIds: [...movedIds],
@@ -8697,7 +9895,9 @@ export class ChatDbAggregateService {
               parentMessages: reconstructMessageBlockRelations(parentWireMessages, parentWireBlocks),
               parentBlocks: parentWireBlocks,
               messages: reconstructMessageBlockRelations(childWireMessages, childWireBlocks),
-              blocks: childWireBlocks
+              blocks: childWireBlocks,
+              ...(contextAnchorInheritance ? { resolvedContextAnchorGroupKey } : {}),
+              ...(sourceContextAnchorTransfer ? { sourceContextAnchorTransfer } : {})
             }
           })
         } catch (e) {

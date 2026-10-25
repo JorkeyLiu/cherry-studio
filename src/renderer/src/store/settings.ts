@@ -42,6 +42,22 @@ import type { RemoteSyncState } from './backup'
 
 export type SendMessageShortcut = 'Enter' | 'Shift+Enter' | 'Ctrl+Enter' | 'Command+Enter' | 'Alt+Enter'
 
+// Canonical resizable sidebar width bounds (single source of truth — do not
+// scatter width literals elsewhere; import these instead).
+// Both home sidebars share one 220px minimum: the topic header carries
+// 新建话题 plus three 28px icon slots beside a flexible add button, and the
+// left assistants pane is unified to the same floor. Default and maximum are
+// shared as well.
+export const SIDEBAR_DEFAULT_WIDTH = 275
+export const SIDEBAR_MAX_WIDTH = 600
+export const SIDEBAR_MIN_WIDTH = 220
+
+/** Normalize any home sidebar width (persisted load or resize dispatch). */
+export const normalizeSidebarWidth = (width: unknown): number => {
+  if (typeof width !== 'number' || !Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width))
+}
+
 // Re-export for backward compatibility
 export { DEFAULT_SIDEBAR_ICONS }
 
@@ -192,6 +208,14 @@ export interface SettingsState {
   enableSpellCheck: boolean
   spellCheckLanguages: string[]
   injectContextTimestamp: boolean
+  /**
+   * Media-context switch (global, default ON). When ON, historical
+   * image/audio/video attachments stay part of the outbound request; when OFF
+   * those historical payloads are omitted from the request only. The current
+   * triggering turn's media is always sent, and persisted messages/history UI
+   * are never touched. A missing persisted key means ON.
+   */
+  includeHistoryMediaContext: boolean
   // 硬件加速设置
   disableHardwareAcceleration: boolean
   // 使用系统标题栏 (仅Linux)
@@ -241,6 +265,8 @@ export interface SettingsState {
   // API Server
   apiServer: ApiServerConfig
   showMessageOutline: boolean
+  /** @deprecated per-message heading outline retired; the persisted
+   *  `showMessageOutline` key stays inert for data compatibility. */
   // Sidebar widths (resizable)
   assistantsWidth: number
   topicListWidth: number
@@ -349,6 +375,8 @@ export const initialState: SettingsState = {
   enableSpellCheck: false,
   spellCheckLanguages: [],
   injectContextTimestamp: false,
+  // Default ON: historical media stays part of the request context.
+  includeHistoryMediaContext: true,
   // 消息操作确认设置
   confirmDeleteMessage: true,
   confirmRegenerateMessage: true,
@@ -414,8 +442,8 @@ export const initialState: SettingsState = {
     apiKey: `cs-sk-${uuid()}`
   },
   showMessageOutline: false,
-  assistantsWidth: 275,
-  topicListWidth: 275
+  assistantsWidth: SIDEBAR_DEFAULT_WIDTH,
+  topicListWidth: SIDEBAR_DEFAULT_WIDTH
 }
 
 const settingsSlice = createSlice({
@@ -666,6 +694,9 @@ const settingsSlice = createSlice({
     setInjectContextTimestamp: (state, action: PayloadAction<boolean>) => {
       state.injectContextTimestamp = action.payload
     },
+    setIncludeHistoryMediaContext: (state, action: PayloadAction<boolean>) => {
+      state.includeHistoryMediaContext = action.payload
+    },
     setConfirmDeleteMessage: (state, action: PayloadAction<boolean>) => {
       state.confirmDeleteMessage = action.payload
     },
@@ -741,10 +772,10 @@ const settingsSlice = createSlice({
       state.showMessageOutline = action.payload
     },
     setAssistantsWidth: (state, action: PayloadAction<number>) => {
-      state.assistantsWidth = action.payload
+      state.assistantsWidth = normalizeSidebarWidth(action.payload)
     },
     setTopicListWidth: (state, action: PayloadAction<number>) => {
-      state.topicListWidth = action.payload
+      state.topicListWidth = normalizeSidebarWidth(action.payload)
     }
   }
 })
@@ -828,6 +859,7 @@ export const {
   setSpellCheckLanguages,
   setExportMenuOptions,
   setInjectContextTimestamp,
+  setIncludeHistoryMediaContext,
   setConfirmDeleteMessage,
   setConfirmRegenerateMessage,
   setDisableHardwareAcceleration,

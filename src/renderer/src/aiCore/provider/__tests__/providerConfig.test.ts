@@ -367,6 +367,24 @@ describe('providerToAiSdkConfig (slice 3: protocol-based, no brand builders)', (
       expect(settings.headers!['X-Custom']).toBe('custom-value')
     })
 
+    it('preserves a provider extra session header for the boundary precedence (no automatic injection here)', async () => {
+      const provider = makeProvider({
+        id: 'opencode-go',
+        type: 'openai',
+        apiHost: 'https://opencode.ai/zen/go/v1',
+        extra_headers: { 'x-opencode-session': 'provider-extra' }
+      })
+
+      const config = (await providerToAiSdkConfig(
+        provider,
+        makeModel('some-model', provider.id)
+      )) as ProviderConfig<'openai-compatible'>
+
+      // Config only carries the provider value through; the AiProvider
+      // boundary decides automatic vs provider vs explicit precedence.
+      expect(config.providerSettings.headers?.['x-opencode-session']).toBe('provider-extra')
+    })
+
     it('adds X-Api-Key header for openai-response (approved Responses)', async () => {
       const provider = makeProvider({
         id: 'openai',

@@ -2,9 +2,6 @@
  * Pagination-compensation anchor behavior (pure helper, no transition truth).
  *
  * Covers without DOM:
- * - queued intents carry a detached preferred snapshot (stable identity +
- *   targetOffset, never a live ref); route change discards via the existing
- *   guard;
  * - compensation prefers the anchor offset, falls back only when the target
  *   is missing/disconnected, and ordinary pagination is unchanged.
  *
@@ -15,86 +12,7 @@ import * as fs from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { createPendingOlderIntent, decidePendingOlderReplay } from '../messagePaginationIntent'
-import { createMessageViewportState } from '../messageViewportReducer'
 import { decidePaginationCompensation } from '../routeRestoreAnchor'
-
-describe('pending intent carries a detached snapshot', () => {
-  it('copies divider and message anchors by value, never by ref', () => {
-    const snap = { kind: 'divider-row', dividerKey: 'm15::main', targetOffset: 120 } as const
-    const intent = createPendingOlderIntent({
-      topicId: 't1',
-      routeId: 'b1',
-      topicGeneration: 3,
-      deletionGeneration: 0,
-      residentGeneration: 7,
-      preferredAnchor: snap
-    })
-    expect(intent.preferredAnchor).toEqual({ kind: 'divider-row', dividerKey: 'm15::main', targetOffset: 120 })
-    // Mutating the snapshot source afterwards cannot move the queued copy.
-    ;(snap as { targetOffset: number }).targetOffset = 999
-    expect(intent.preferredAnchor).toEqual({ kind: 'divider-row', dividerKey: 'm15::main', targetOffset: 120 })
-
-    const savedIntent = createPendingOlderIntent({
-      topicId: 't1',
-      routeId: 'b1',
-      topicGeneration: 3,
-      deletionGeneration: 0,
-      residentGeneration: 7,
-      preferredAnchor: { kind: 'message-row', messageId: 'm7', targetOffset: 34 }
-    })
-    expect(savedIntent.preferredAnchor).toEqual({ kind: 'message-row', messageId: 'm7', targetOffset: 34 })
-  })
-
-  it('ordinary pagination snapshots null (behavior unchanged)', () => {
-    const intent = createPendingOlderIntent({
-      topicId: 't1',
-      routeId: 'b1',
-      topicGeneration: 3,
-      deletionGeneration: 0,
-      residentGeneration: 7
-    })
-    expect(intent.preferredAnchor).toBeNull()
-  })
-
-  it('replay retains the snapshot; the existing five-tuple guard still discards cross-generation use', () => {
-    const pending = createPendingOlderIntent({
-      topicId: 't1',
-      routeId: 'b1',
-      topicGeneration: 3,
-      deletionGeneration: 0,
-      residentGeneration: 7,
-      preferredAnchor: { kind: 'divider-row', dividerKey: 'm15::main', targetOffset: 120 }
-    })
-    const idle = createMessageViewportState().navigation
-    const baseLive = {
-      topicId: 't1',
-      routeId: 'b1' as string | null,
-      topicGeneration: 3,
-      deletionGeneration: 0,
-      residentGeneration: 7,
-      hasMoreOlder: true,
-      loadingOlder: false
-    }
-    const committed = { navigation: idle, scrollMode: 'user' as const, topicGeneration: 3 }
-    expect(decidePendingOlderReplay({ pending, live: baseLive, committed, atOldestEdge: true })).toEqual({
-      action: 'replay'
-    })
-    // The snapshot travels with the replay call (caller passes
-    // pending.preferredAnchor into startOlderWindowLoad); the decision itself
-    // stays generation-bound.
-    expect(pending.preferredAnchor).toEqual({ kind: 'divider-row', dividerKey: 'm15::main', targetOffset: 120 })
-    // Route change discards — the snapshot never crosses generations.
-    expect(
-      decidePendingOlderReplay({
-        pending,
-        live: { ...baseLive, routeId: 'b2' },
-        committed,
-        atOldestEdge: true
-      })
-    ).toEqual({ action: 'discard', reason: 'route' })
-  })
-})
 
 describe('pagination compensation prefers the restore anchor', () => {
   it('computes the preferred delta from the current element offset', () => {
@@ -143,50 +61,69 @@ describe('pagination compensation prefers the restore anchor', () => {
   })
 })
 
-describe('pagination compensation (single session, no second stabilizer)', () => {
-  it('restore-owned pages apply a direct delta under the search session (never a competing token)', () => {
+describe('pagination compensation (single keeper owner, no second writer)', () => {
+  it('restore-owned pages apply a direct delta under the search session (never the keeper path)', () => {
     const code = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
     // Restore-owned pagination (divider search active for this load): the
-    // search owns the token/lifecycle — direct delta, no beginScroll, no
+    // search owns the lifecycle — direct delta, no keeper publish, no
     // stabilizer start. Epoch truth is the controller's session.
     expect(code).toMatch(/owningSearch\.ownerEpoch/)
     expect(code).toMatch(/controller\.isSessionCurrent\(owningSearch\.ownerEpoch\)/)
     expect(code).not.toMatch(/runBoundedPositionStabilizer/)
   })
 
-  it('a transition in flight owns compensation: ordinary pagination never starts a competing token', () => {
+  it('a transition in flight owns compensation: ordinary pagination never writes over it', () => {
     const code = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
     const ownedIdx = code.indexOf('A route transition in flight owns compensation')
     expect(ownedIdx).toBeGreaterThan(-1)
-    // Bound to the owned branch only (up to the ordinary path's own token).
-    const endIdx = code.indexOf('const scrollToken = {}', ownedIdx)
-    expect(endIdx).toBeGreaterThan(ownedIdx)
-    const branch = code.slice(ownedIdx, endIdx)
+    // Scope to the branch itself (its own end marker), never a fixed character
+    // budget that could spill into the ordinary keeper publication below.
+    const branchEnd = code.indexOf('Ordinary same-route window growth', ownedIdx)
+    expect(branchEnd).toBeGreaterThan(ownedIdx)
+    const branch = code.slice(ownedIdx, branchEnd)
     expect(branch).toMatch(/controller\.programmaticOwned/)
-    expect(branch).toMatch(/live\.scrollTop \+= delta/)
+    expect(branch).toMatch(/applyOwnedDirectDelta\(\)/)
     expect(branch).not.toMatch(/beginScroll/)
+    expect(branch).not.toMatch(/adoptOrdinaryPaginationWindow/)
   })
 
-  it('ordinary pagination compensates once under its own token, then ends it (keeper holds afterwards)', () => {
+  it('ordinary pagination (both directions) publishes the precommit identity to the keeper (no rAF writer, no token)', () => {
     const code = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
-    expect(code).toMatch(/await beginScroll\('anchoring', scrollToken\)/)
-    expect(code).toMatch(/Single compensation only/)
+    // Single owner: the precommit identity + offset is captured BEFORE the
+    // merge dispatch and published through the existing same-route API, so
+    // the keeper holds it prepaint. No second scroll writer beside it.
+    expect(code).toMatch(/adoptOrdinaryPaginationWindow/)
+    expect(code).toMatch(/Precommit capture/)
+    expect(code).toMatch(/findViewportTopAnchorWithOffset/)
+    expect(code).not.toMatch(/const commitScrollToken = \{\}/)
+    expect(code).not.toMatch(/Re-resolve the SAME precommit identity/)
     expect(code).not.toMatch(/activeStabilizerRef/)
     expect(code).not.toMatch(/armStabilizerSuppress/)
+    expect(code).not.toMatch(/runBoundedPositionStabilizer/)
+    expect(code).not.toMatch(/decideOrdinaryCompensationGate/)
+    expect(code).not.toMatch(/isPaginationAnchorStale/)
+    expect(code).not.toMatch(/PAGINATION_VIEWPORT_MOVE_PX/)
   })
 })
 
 describe('production wiring (behavior-adjacent guards)', () => {
   const src = (): string => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
 
-  it('queues the controller anchor snapshot and replays it into startOlderWindowLoad', () => {
+  it('browse paging is app-owned in both directions: edge trigger from live geometry, no external latch or replay', () => {
     const code = src()
-    expect(code).toMatch(/snapshotPreferredAnchor/)
-    expect(code).toMatch(/controller\.getAnchorFor/)
-    expect(code).toMatch(/preferredAnchor/)
-    expect(code).toMatch(/startOlderWindowLoad\(replayAnchor\)/)
-    expect(code).toMatch(/decidePaginationCompensation/)
-    expect(code).not.toMatch(/activeRestoreAnchorRef/)
+    expect(code).toMatch(/maybePageAtEdge/)
+    expect(code).toMatch(/isColumnReverseAtOldest/)
+    expect(code).toMatch(/isColumnReverseAtNewest/)
+    expect(code).toMatch(/isExactlyAtOldest/)
+    expect(code).toMatch(/isExactlyAtNewest/)
+    expect(code).toMatch(/hasActiveUserInteraction/)
+    expect(code).toMatch(/data-older-paging="app-owned"/)
+    expect(code).not.toMatch(/react-infinite-scroll-component/)
+    expect(code).not.toMatch(/messagePaginationIntent/)
+    expect(code).not.toMatch(/pendingOlderIntentRef/)
+    expect(code).not.toMatch(/decidePendingOlderReplay/)
+    expect(code).not.toMatch(/shouldQueueOlderIntent/)
+    expect(code).not.toMatch(/totalInteractionDeclares/)
   })
 
   it('anchor lifecycle is the controller session (invalidate on deletion/unmount/cancel, release on commit/terminate/takeover)', () => {

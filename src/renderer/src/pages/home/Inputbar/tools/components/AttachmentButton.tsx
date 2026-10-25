@@ -1,4 +1,4 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import type { FileMetadata } from '@renderer/types'
 import { filterSupportedFiles } from '@renderer/utils/file'
 import { Tooltip } from 'antd'
@@ -45,13 +45,13 @@ const AttachmentButton: FC<Props> = ({ couldAddImageFile, extensions, files, set
 
   return (
     <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow>
-      <ActionIconButton
+      <ComposerIconButton
         onClick={openFileSelectDialog}
         active={files.length > 0}
         disabled={disabled}
         aria-label={ariaLabel}>
-        <Paperclip size={18} />
-      </ActionIconButton>
+        <Paperclip size={16} />
+      </ComposerIconButton>
     </Tooltip>
   )
 }

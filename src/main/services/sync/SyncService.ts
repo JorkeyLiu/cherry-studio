@@ -19,6 +19,7 @@ import {
   filterBranchPayload,
   filterMessagePayload,
   filterTopicPayload,
+  filterTopicReferencePayload,
   isBaselineRegisterSentinel,
   isStableBlockStatus,
   isStableMessageStatus,
@@ -44,7 +45,10 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { BrowserWindow } from 'electron'
 
 import { chatDbService } from '../chatDb'
-import { broadcastChatProjectionInvalidation } from '../chatDb/chatProjectionBroadcast'
+import {
+  broadcastChatProjectionInvalidation,
+  broadcastHistoryReferenceInvalidation
+} from '../chatDb/chatProjectionBroadcast'
 import * as schema from '../chatDb/schema'
 import {
   buildRepairedAdoptionPortablePayload,
@@ -60,7 +64,7 @@ import { buildBaselineCandidateInTx, captureLocalSyncBaselineCandidate } from '.
 import { mergeValidatedBaselineInTx, SyncBaselineApplyError } from './syncBaselineApply'
 import { assertBarrierSnapshotProof, SyncBaselinePublishError } from './syncBaselinePublish'
 import { mapWireEnvelopeToMergeInput } from './syncBaselineWireApply'
-import { computeWirePayloadDigestV5, projectLocalBaselineToWirePayloadV5 } from './syncBaselineWireProjection'
+import { computeWirePayloadDigestV6, projectLocalBaselineToWirePayloadV6 } from './syncBaselineWireProjection'
 import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
@@ -102,10 +106,18 @@ const TOMBSTONE_BRANCH_PREFIX = 'tombstone:topic_branch:'
 // key = `tombstone:${entityId}` where entityId = `assistant_config:<kind>:<id>`.
 // Parsed by the assistant prefix below (entityType implied).
 const TOMBSTONE_ASSISTANT_CONFIG_PREFIX = 'tombstone:assistant_config:'
+// Cross-topic history reference tombstones key on the target topic id (the
+// relation identity). Target deletion cascades the relation and records this
+// tombstone with ordinary clock bookkeeping so stale relation replay can
+// never resurrect a deleted target.
+const TOMBSTONE_REFERENCE_PREFIX = 'tombstone:topic_reference:'
 // Bounded cross-page orphan buffer: a single sync() cycle never buffers more
 // than this many retryable orphans in memory. Past the budget the cycle fails
 // closed with a durable blocked error (cursor unmoved, no skip).
 const MAX_DEFERRED_ORPHANS = 500
+// Bounded transitive walk when fanning out history-reference invalidation
+// (mirrors the aggregate's MAX_REFERENCE_DEPTH; target-of-target chains).
+const MAX_REFERENCE_INVALIDATION_DEPTH = 32
 
 // Outbox push priority: parents before children so relay seq preserves
 // dependency order (assistant_config < topic < branch < message < block <
@@ -120,6 +132,9 @@ const ENTITY_PUSH_PRIORITY: Record<string, number> = {
   topic: 0,
   topic_branch: 1,
   file_asset: 1,
+  // A reference relation is target-owned: the target topic op must sort
+  // before it, and it must sort before the target's own suffix messages.
+  topic_reference: 1,
   message: 2,
   message_block: 3
 }
@@ -449,6 +464,10 @@ const BLOCK_CLOCKED = new Set<string>([...(SYNC_BLOCK_PATCH_FIELDS as readonly s
 const BRANCH_CLOCKED = new Set<string>(SYNC_BRANCH_PATCH_FIELDS as readonly string[])
 const ASSISTANT_CONFIG_CLOCKED = new Set<string>(SYNC_ASSISTANT_CONFIG_PATCH_FIELDS as readonly string[])
 const FILE_ASSET_CLOCKED = new Set<string>(['mimeType', 'originalName', 'createdAt'])
+// Reference relations have NO per-field clocks: the tuple
+// (sourceTopicId, sourceBranchId, anchorMessageId) converges as one coherent
+// unit under the entity clock and is never mixed across competing updates.
+const TOPIC_REFERENCE_CLOCKED = new Set<string>()
 
 function clockedFieldsFor(entityType: SyncOperation['entityType']): Set<string> {
   if (entityType === 'topic') return TOPIC_CLOCKED
@@ -456,6 +475,7 @@ function clockedFieldsFor(entityType: SyncOperation['entityType']): Set<string> 
   if (entityType === 'topic_branch') return BRANCH_CLOCKED
   if (entityType === 'assistant_config') return ASSISTANT_CONFIG_CLOCKED
   if (entityType === 'file_asset') return FILE_ASSET_CLOCKED
+  if (entityType === 'topic_reference') return TOPIC_REFERENCE_CLOCKED
   return BLOCK_CLOCKED
 }
 
@@ -2149,7 +2169,8 @@ export class SyncService {
           op.entityType === 'message' ||
           op.entityType === 'message_block' ||
           op.entityType === 'topic_branch' ||
-          op.entityType === 'assistant_config')
+          op.entityType === 'assistant_config' ||
+          op.entityType === 'topic_reference')
       ) {
         this.setTombstoneInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
         this.tombstoneDeleteDescendantsInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
@@ -3163,7 +3184,7 @@ export class SyncService {
   /** Tx-bound tombstone read (fail-closed on malformed stored value, like the root read). */
   private getTombstoneInTx(
     tx: SyncTxExecutor,
-    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'topic_reference',
     entityId: string
   ): { timestamp: number; operationId: string | null } | null {
     const row = tx
@@ -3261,7 +3282,8 @@ export class SyncService {
         op.entityType === 'message' ||
         op.entityType === 'message_block' ||
         op.entityType === 'topic_branch' ||
-        op.entityType === 'assistant_config')
+        op.entityType === 'assistant_config' ||
+        op.entityType === 'topic_reference')
     ) {
       this.setTombstoneInDb(
         tx as unknown as BetterSQLite3Database<typeof schema>,
@@ -3547,7 +3569,8 @@ export class SyncService {
       entityType === 'topic' ||
       entityType === 'message' ||
       entityType === 'message_block' ||
-      entityType === 'topic_branch'
+      entityType === 'topic_branch' ||
+      entityType === 'topic_reference'
     )
   }
 
@@ -3670,6 +3693,13 @@ export class SyncService {
         if (!tid && typeof payload.topicId === 'string') pushTopic(payload.topicId)
         const topic = topicIds[0]
         if (topic) assistant = this.readTopicAssistant(topic)
+      } else if (op.entityType === 'topic_reference') {
+        // The relation target owns the reference: refresh its open view so
+        // the live prefix/own suffix reflect the new or removed relation.
+        pushTopic(op.entityId)
+        if (typeof payload.targetTopicId === 'string') pushTopic(payload.targetTopicId)
+        const topic = topicIds[0]
+        if (topic) assistant = this.readTopicAssistant(topic)
       }
       // Compound ops ride the same entity types through the generic path
       // above (order_frame/message_stable_replace/move_turns_to_branch carry
@@ -3709,6 +3739,145 @@ export class SyncService {
         branchIds: [],
         reason: 'sync-baseline'
       })
+    } catch {
+      // hint broadcast never affects sync status
+    }
+  }
+
+  /**
+   * Reference target topics transitively staled by one SOURCE topic, resolved
+   * from committed authority. Same bounded depth/visited guard as the
+   * aggregate capability (transitive target-of-target), tolerates pre-018
+   * databases, and never throws to the caller.
+   */
+  private resolveReferenceTargets(sourceTopicId: string): string[] {
+    if (typeof sourceTopicId !== 'string' || sourceTopicId.length === 0) return []
+    try {
+      const db = this.getDb()
+      const readTargets = (id: string): string[] => {
+        try {
+          return db
+            .select({ targetTopicId: schema.topicReferences.targetTopicId })
+            .from(schema.topicReferences)
+            .where(eq(schema.topicReferences.sourceTopicId, id))
+            .all()
+            .map((r) => r.targetTopicId)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return []
+          throw e
+        }
+      }
+      const seen = new Set<string>()
+      let frontier: string[] = [sourceTopicId]
+      for (let depth = 0; depth < MAX_REFERENCE_INVALIDATION_DEPTH && frontier.length > 0; depth++) {
+        const next: string[] = []
+        for (const id of frontier) {
+          for (const target of readTargets(id)) {
+            if (target === sourceTopicId || seen.has(target)) continue
+            seen.add(target)
+            next.push(target)
+          }
+        }
+        frontier = next
+      }
+      return [...seen].sort()
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Post-commit history-reference invalidation for one applied remote op.
+   *
+   * The relation target renders a LIVE foreign prefix, so a remote change to
+   * the SOURCE topic (rename/metadata, message or block edit/delete, branch
+   * delete, order/stable-replace/move compounds, source delete) stales every
+   * open target's window and divider. A remote relation arrival/change/removal
+   * stales the target itself. Uses the existing
+   * `ChatDb_HistoryReferenceInvalidated` contract (same channel/shape as the
+   * local IPC fan-out) — no new subsystem; best-effort and never throws.
+   */
+  private broadcastReferenceInvalidationForAppliedOp(
+    op: SyncOperation,
+    appliedEntity: boolean,
+    preCommitReferenceSourceTopicId: string | null
+  ): void {
+    if (!appliedEntity) return
+    try {
+      const payload = op.payload ?? {}
+      if (op.entityType === 'topic_reference') {
+        // The relation is target-owned: the TARGET must re-read (new, changed
+        // or removed relation ⇒ different prefix/divider).
+        const source =
+          typeof payload.sourceTopicId === 'string' && payload.sourceTopicId.length > 0
+            ? payload.sourceTopicId
+            : (preCommitReferenceSourceTopicId ?? op.entityId)
+        broadcastHistoryReferenceInvalidation(source, [op.entityId])
+        return
+      }
+      const sources = new Set<string>()
+      const addSource = (tid: string | null | undefined): void => {
+        if (typeof tid === 'string' && tid.length > 0) sources.add(tid)
+      }
+      if (op.entityType === 'topic') {
+        addSource(op.entityId)
+      } else if (op.entityType === 'message') {
+        const route = this.readMessageRoute(op.entityId)
+        addSource(route.topicId)
+        if (typeof payload.topicId === 'string') addSource(payload.topicId)
+      } else if (op.entityType === 'message_block') {
+        const parentMessage =
+          this.readBlockParent(op.entityId) ?? (typeof payload.messageId === 'string' ? payload.messageId : null)
+        if (parentMessage) addSource(this.readMessageRoute(parentMessage).topicId)
+      } else if (op.entityType === 'topic_branch') {
+        addSource(this.readBranchTopic(op.entityId))
+        if (typeof payload.topicId === 'string') addSource(payload.topicId)
+      } else {
+        // Compound ops (order_frame / message_stable_replace /
+        // move_turns_to_branch): resolve their own scope from the payload.
+        if (typeof payload.topicId === 'string') addSource(payload.topicId)
+        const parentId = typeof payload.parentId === 'string' ? payload.parentId : null
+        if (parentId) {
+          if (payload.kind === 'topicMessage') addSource(parentId)
+          else if (payload.kind === 'messageBlock') addSource(this.readMessageRoute(parentId).topicId)
+          else if (payload.kind === 'branchSuffix') addSource(this.readBranchTopic(parentId))
+        }
+      }
+      for (const source of sources) {
+        const targets = this.resolveReferenceTargets(source)
+        if (targets.length > 0) broadcastHistoryReferenceInvalidation(source, targets)
+      }
+    } catch {
+      // hint broadcast never affects sync status
+    }
+  }
+
+  /**
+   * Post-commit coarse history-reference invalidation after a baseline merge:
+   * a bootstrap can add, retarget or remove relations, so every target open on
+   * a window re-reads. Grouped by source (the existing contract shape), bounded
+   * by the live relation inventory, best-effort and never throwing.
+   */
+  private broadcastReferenceInvalidationForBaseline(): void {
+    try {
+      const rows = this.getDb()
+        .select({
+          sourceTopicId: schema.topicReferences.sourceTopicId,
+          targetTopicId: schema.topicReferences.targetTopicId
+        })
+        .from(schema.topicReferences)
+        .all() as Array<{ sourceTopicId: string; targetTopicId: string }>
+      const bySource = new Map<string, string[]>()
+      for (const row of rows) {
+        if (typeof row.sourceTopicId !== 'string' || row.sourceTopicId.length === 0) continue
+        if (typeof row.targetTopicId !== 'string' || row.targetTopicId.length === 0) continue
+        const list = bySource.get(row.sourceTopicId) ?? []
+        list.push(row.targetTopicId)
+        bySource.set(row.sourceTopicId, list)
+      }
+      for (const [source, targets] of bySource) {
+        broadcastHistoryReferenceInvalidation(source, targets)
+      }
     } catch {
       // hint broadcast never affects sync status
     }
@@ -4083,6 +4252,7 @@ export class SyncService {
     if (entityType === 'assistant_config')
       return `${TOMBSTONE_ASSISTANT_CONFIG_PREFIX}${entityId.slice('assistant_config:'.length)}`
     if (entityType === 'file_asset') return `tombstone:file_asset:${entityId}`
+    if (entityType === 'topic_reference') return `${TOMBSTONE_REFERENCE_PREFIX}${entityId}`
     return `${TOMBSTONE_MESSAGE_PREFIX}${entityId}`
   }
 
@@ -4121,7 +4291,14 @@ export class SyncService {
 
   private setTombstoneInDb(
     db: BetterSQLite3Database<typeof schema>,
-    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'file_asset',
+    entityType:
+      | 'topic'
+      | 'message'
+      | 'message_block'
+      | 'topic_branch'
+      | 'assistant_config'
+      | 'file_asset'
+      | 'topic_reference',
     entityId: string,
     timestamp: number,
     operationId: string | null
@@ -4199,7 +4376,7 @@ export class SyncService {
    */
   private tombstoneDeleteDescendantsInDb(
     db: BetterSQLite3Database<typeof schema>,
-    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'topic_reference',
     entityId: string,
     timestamp: number,
     operationId: string | null
@@ -4212,6 +4389,23 @@ export class SyncService {
         for (const r of rows) {
           if (r.childEntityType === 'message' && r.parentId === entityId) {
             this.setTombstoneInDb(db, 'message', r.childEntityId, timestamp, operationId)
+          }
+        }
+        // Target-owned reference relation: FK cascade removed the row (if it
+        // still existed); the explicit tombstone keeps replay delete-win
+        // closed. A target without a relation is an ordinary topic.
+        try {
+          const refRow = db
+            .select({ targetTopicId: schema.topicReferences.targetTopicId })
+            .from(schema.topicReferences)
+            .where(eq(schema.topicReferences.targetTopicId, entityId))
+            .get()
+          if (refRow) this.setTombstoneInDb(db, 'topic_reference', entityId, timestamp, operationId)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) {
+            // Proven pre-018: no reference inventory exists.
+          } else {
+            throw e instanceof Error ? e : new Error(String(e))
           }
         }
         try {
@@ -5163,7 +5357,7 @@ export class SyncService {
   }
 
   private getTombstone(
-    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'topic_reference',
     entityId: string
   ): { timestamp: number; operationId: string | null } | null {
     // Fail closed: a read failure or a malformed stored value must propagate
@@ -5432,6 +5626,24 @@ export class SyncService {
     if (op.op === 'delete' && op.entityType === 'topic') {
       preCommitTopicAssistant = this.readTopicAssistant(op.entityId)
     }
+    // Reference deletes remove the relation row: capture the source it pointed
+    // at BEFORE the transaction so the target invalidation hint names the real
+    // source (best-effort only; a read failure never blocks the apply).
+    let preCommitReferenceSourceTopicId: string | null = null
+    if (op.op === 'delete' && op.entityType === 'topic_reference') {
+      try {
+        const row = db
+          .select({ sourceTopicId: schema.topicReferences.sourceTopicId })
+          .from(schema.topicReferences)
+          .where(eq(schema.topicReferences.targetTopicId, op.entityId))
+          .get() as { sourceTopicId?: unknown } | undefined
+        if (typeof row?.sourceTopicId === 'string' && row.sourceTopicId.length > 0) {
+          preCommitReferenceSourceTopicId = row.sourceTopicId
+        }
+      } catch {
+        // best-effort; the fallback label below is still a valid target hint
+      }
+    }
 
     sqlite.exec('BEGIN IMMEDIATE')
     let appliedEntity = false
@@ -5504,6 +5716,13 @@ export class SyncService {
       // hint and by startup directory reconcile. Never affects the return.
       try {
         this.broadcastChatProjectionForAppliedOp(op, appliedEntity, preCommitTopicAssistant, 'sync-incremental')
+      } catch {}
+      // Post-commit history-reference invalidation (never before commit, never
+      // on LWW loss/rollback): an open reference target of this SOURCE must
+      // re-read its live prefix + divider. Same contract as the local IPC
+      // fan-out; best-effort, loss covered by the next mutation or activation.
+      try {
+        this.broadcastReferenceInvalidationForAppliedOp(op, appliedEntity, preCommitReferenceSourceTopicId)
       } catch {}
       return appliedEntity
     } catch (e) {
@@ -8388,6 +8607,9 @@ export class SyncService {
     if (op.entityType === 'assistant_config') {
       return this.applyAssistantConfigUpsert(op)
     }
+    if (op.entityType === 'topic_reference') {
+      return this.applyTopicReferenceUpsert(op)
+    }
     if (op.entityType === 'topic') {
       const id = op.entityId
       // Fail closed on wrong metadata types so a malformed op never silently
@@ -9336,6 +9558,109 @@ export class SyncService {
     return true
   }
 
+  /**
+   * Cross-topic history reference upsert (v6): the relation is ONE coherent
+   * tuple owned by `targetTopicId` (source topic, optional source branch
+   * route, precise anchor message). It has no per-field clocks, so an
+   * update either wins whole under the entity clock or is suppressed whole —
+   * competing updates are never mixed key by key.
+   *
+   * The target topic is the relation owner and must be locally present
+   * (the FK is the structural guarantee); a missing target defers as an
+   * orphan so the op is retried when the target arrives instead of being
+   * dropped. Source topic/branch/anchor are deliberately NOT required here:
+   * their absence is the existing read-time fail-closed "missing" state and
+   * recovers automatically when the dependency arrives.
+   */
+  private applyTopicReferenceUpsert(op: SyncOperation): boolean {
+    const db = this.getDb()
+    const raw = op.payload ?? {}
+    const filtered = filterTopicReferencePayload(raw)
+    if (!filtered) throw new Error(`topic_reference upsert malformed payload for ${op.entityId}`)
+    const allowErr = validateSyncPayloadAllowlist({ entityType: 'topic_reference', payload: filtered })
+    if (allowErr) throw new Error(`topic_reference upsert rejected for ${op.entityId}: ${allowErr}`)
+    if (filtered.targetTopicId !== op.entityId) {
+      throw new Error(`topic_reference upsert targetTopicId must agree with entityId ${op.entityId}`)
+    }
+    const sourceTopicId = filtered.sourceTopicId
+    const anchorMessageId = filtered.anchorMessageId
+    if (typeof sourceTopicId !== 'string' || typeof anchorMessageId !== 'string') {
+      throw new Error(`topic_reference upsert missing tuple for ${op.entityId}`)
+    }
+    const sourceBranchId = typeof filtered.sourceBranchId === 'string' ? filtered.sourceBranchId : null
+    // Own-tombstone delete-wins: a stale relation replay never resurrects a
+    // hard-deleted target relation.
+    const ownTomb = this.getTombstone('topic_reference', op.entityId)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) {
+      logger.warn(`[applyUpsert] topic_reference ${op.entityId} suppressed by own tombstone (delete-wins)`)
+      return false
+    }
+    // A relation cannot exist without its target topic. When the target is
+    // already tombstoned, the relation op is a stale late arrival: suppress it
+    // (delete-wins) instead of retrying forever for a row that must not exist.
+    const targetTomb = this.getTombstone('topic', op.entityId)
+    if (targetTomb) {
+      logger.warn(`[applyUpsert] topic_reference ${op.entityId} suppressed: target topic deleted (delete-wins)`)
+      return false
+    }
+    const target = db
+      .select({ id: schema.topics.id })
+      .from(schema.topics)
+      .where(eq(schema.topics.id, op.entityId))
+      .get()
+    if (!target) {
+      // Target-owned relation: the target topic op sorts before this one.
+      // A genuine arrival gap defers (retryable orphan), never a silent drop.
+      throw new SyncOrphanError(`orphan topic_reference ${op.entityId}: target topic missing`)
+    }
+    // Whole-entity LWW on the entity clock (no field clocks).
+    const prior = db
+      .select()
+      .from(schema.syncEntityClock)
+      .where(eq(schema.syncEntityClock.entityType, 'topic_reference'))
+      .all()
+      .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+    if (prior && this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) <= 0) return false
+    const existing = db
+      .select()
+      .from(schema.topicReferences)
+      .where(eq(schema.topicReferences.targetTopicId, op.entityId))
+      .get()
+    const stampIso = new Date(op.timestamp).toISOString()
+    if (!existing) {
+      db.insert(schema.topicReferences)
+        .values({
+          targetTopicId: op.entityId,
+          sourceTopicId,
+          sourceBranchId,
+          anchorMessageId,
+          createdAt: stampIso,
+          updatedAt: stampIso
+        })
+        .run()
+    } else {
+      // Same identity, possibly new source route/anchor: replace the tuple
+      // whole. Created-at stays local history, never rewired.
+      db.update(schema.topicReferences)
+        .set({ sourceTopicId, sourceBranchId, anchorMessageId, updatedAt: stampIso })
+        .where(eq(schema.topicReferences.targetTopicId, op.entityId))
+        .run()
+    }
+    db.insert(schema.syncEntityClock)
+      .values({
+        entityType: 'topic_reference',
+        entityId: op.entityId,
+        timestamp: op.timestamp,
+        operationId: op.id
+      })
+      .onConflictDoUpdate({
+        target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+        set: { timestamp: op.timestamp, operationId: op.id }
+      })
+      .run()
+    return true
+  }
+
   private applyDelete(op: SyncOperation): void {
     const db = this.getDb()
     if (op.entityType === 'topic') {
@@ -9373,8 +9698,24 @@ export class SyncService {
           // Proven pre-018: no branchSuffix frame inventory exists.
         } else throw e
       }
+      // Target-owned reference relation must be tombstoned before its row is
+      // cascaded away, so stale relation replay stays delete-win closed.
+      let hasReferenceRelation = false
+      try {
+        hasReferenceRelation = !!db
+          .select({ targetTopicId: schema.topicReferences.targetTopicId })
+          .from(schema.topicReferences)
+          .where(eq(schema.topicReferences.targetTopicId, op.entityId))
+          .get()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) hasReferenceRelation = false
+        else throw e
+      }
       db.delete(schema.topics).where(eq(schema.topics.id, op.entityId)).run()
       this.setTombstoneInDb(db, 'topic', op.entityId, op.timestamp, op.id)
+      if (hasReferenceRelation) {
+        this.setTombstoneInDb(db, 'topic_reference', op.entityId, op.timestamp, op.id)
+      }
       for (const mid of childMessageIds) {
         this.setTombstoneInDb(db, 'message', mid, op.timestamp, op.id)
       }
@@ -9455,6 +9796,17 @@ export class SyncService {
       for (const mid of ownedMessageIds) {
         this.setTombstoneInDb(db, 'message', mid, op.timestamp, op.id)
       }
+    } else if (op.entityType === 'topic_reference') {
+      // Relation delete: remove the row (idempotent when the target cascade
+      // already removed it) and keep the delete-wins tombstone.
+      try {
+        db.delete(schema.topicReferences).where(eq(schema.topicReferences.targetTopicId, op.entityId)).run()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          // Proven pre-018: nothing to delete.
+        } else throw e
+      }
+      this.setTombstoneInDb(db, 'topic_reference', op.entityId, op.timestamp, op.id)
     } else if (op.entityType === 'file_asset') {
       try {
         db.delete(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, op.entityId)).run()
@@ -10579,6 +10931,11 @@ export class SyncService {
     try {
       this.broadcastChatProjectionForBaseline()
     } catch {}
+    // Post-commit reference fan-out: a bootstrap can add/retarget/remove
+    // relations, so open targets re-derive their prefix and divider.
+    try {
+      this.broadcastReferenceInvalidationForBaseline()
+    } catch {}
     return watermark
   }
 
@@ -10803,31 +11160,34 @@ export class SyncService {
         this.throwIfShutdown()
         this.throwIfStaleConfig(syncGen)
         proof = assertBarrierSnapshotProof(candidate!, channelKey, cursor)
-        // V5: direct projection with file assets + assistant, no V3/V4 downgrade
-        const v5payload = projectLocalBaselineToWirePayloadV5(candidate!, assistantSection!)
-        const v5digest = computeWirePayloadDigestV5(v5payload as never)
-        const v5envelope = {
-          wireVersion: 'sync-baseline-wire-v5' as const,
+        // V6: direct projection with file assets + assistant + the coherent
+        // cross-topic history reference inventory. No V3/V4/V5 downgrade (old
+        // peers fail closed on the unsupported version rather than silently
+        // receiving a payload with the relations discarded).
+        const v6payload = projectLocalBaselineToWirePayloadV6(candidate!, assistantSection!)
+        const v6digest = computeWirePayloadDigestV6(v6payload)
+        const v6envelope = {
+          wireVersion: 'sync-baseline-wire-v6' as const,
           channelId: channelKey,
           watermark: proof.watermarkN,
           digestScheme: 'jcs-sha256-v1' as const,
-          digest: v5digest,
-          payload: v5payload
+          digest: v6digest,
+          payload: v6payload
         }
         // Self-validate via shared strict validator (exact keys/channel/digest)
         const { validateEnvelope } = await import('@shared/sync')
-        validateEnvelope(v5envelope as unknown)
+        validateEnvelope(v6envelope as unknown)
         // Verify digest
         const { verifyEnvelopeDigest } = await import('@shared/sync')
-        const ok = verifyEnvelopeDigest(v5envelope as unknown as Parameters<typeof verifyEnvelopeDigest>[0], (b) =>
+        const ok = verifyEnvelopeDigest(v6envelope as unknown as Parameters<typeof verifyEnvelopeDigest>[0], (b) =>
           createHash('sha256').update(b).digest('hex')
         )
         if (!ok)
           throw new SyncBaselinePublishError(
-            'publish blocked: built v5 envelope digest mismatch (never PUT a mismatched digest)'
+            'publish blocked: built v6 envelope digest mismatch (never PUT a mismatched digest)'
           )
-        envelope = v5envelope as unknown as BaselinePublishResult['envelope']
-        digest = v5digest
+        envelope = v6envelope as unknown as BaselinePublishResult['envelope']
+        digest = v6digest
       } catch (e) {
         if (e instanceof SyncShutdownError) throw e
         if (e instanceof SyncStaleConfigError) throw e

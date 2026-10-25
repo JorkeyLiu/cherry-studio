@@ -77,6 +77,7 @@ import type {
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
+  UpdateMessageResult,
   UpdateSegmentMetadataRequest,
   UpdateSegmentMetadataResponse,
   UpdateSingleBlockRequest,
@@ -122,7 +123,7 @@ function makeApiSpy() {
     topicExists: vi.fn<(request: TopicExistsRequest) => Promise<ChatDbResult<boolean>>>(),
     ensureTopic: vi.fn<(request: EnsureTopicRequest) => Promise<ChatDbResult<null>>>(),
     appendMessage: vi.fn<(request: AppendMessageRequest) => Promise<ChatDbResult<AppendMessageResponse>>>(),
-    updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<null>>>(),
+    updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<UpdateMessageResult>>>(),
     updateMessageAndBlocks:
       vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
     selectAnswerMessage:
@@ -275,6 +276,39 @@ describe('SqliteMessageDataSource', () => {
       expect(req.topicId).toBe('topic-1')
       expect(req.messageId).toBe('msg-1')
       expect(req.updates.content).toBe('updated')
+    })
+
+    it('updateMessageUsageIfUnchanged sends the condition on the same command and returns the outcome', async () => {
+      api.updateMessage.mockResolvedValue(successResult({ applied: false, rejection: 'source-changed' }))
+      const usage = { prompt_tokens: 2, completion_tokens: 2, total_tokens: 3 }
+      const outcome = await ds.updateMessageUsageIfUnchanged(
+        'topic-1',
+        'msg-1',
+        usage as never,
+        { textContents: ['hello'], fileIds: ['file-1'] },
+        null
+      )
+
+      expect(api.updateMessage).toHaveBeenCalledOnce()
+      const req = api.updateMessage.mock.calls[0][0]
+      expect(req.topicId).toBe('topic-1')
+      expect(req.messageId).toBe('msg-1')
+      expect(req.branchId).toBeNull()
+      // Exactly one patch key: the conditional mode is usage-only.
+      expect(Object.keys(req.updates)).toEqual(['usage'])
+      expect(req.updates.usage).toEqual(usage)
+      expect(req.usageCondition).toEqual({ textContents: ['hello'], fileIds: ['file-1'] })
+      // Main's decision is returned verbatim; a rejection is not an error.
+      expect(outcome).toEqual({ applied: false, rejection: 'source-changed' })
+    })
+
+    it('updateMessageUsageIfUnchanged reports an applied write', async () => {
+      api.updateMessage.mockResolvedValue(successResult({ applied: true }))
+      const outcome = await ds.updateMessageUsageIfUnchanged('topic-1', 'msg-1', { total_tokens: 3 } as never, {
+        textContents: [],
+        fileIds: []
+      })
+      expect(outcome).toEqual({ applied: true })
     })
 
     it('updateMessageAndBlocks calls api.updateMessageAndBlocks (strips topicId/sortOrder)', async () => {

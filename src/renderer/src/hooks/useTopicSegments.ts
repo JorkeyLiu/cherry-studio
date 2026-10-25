@@ -1,9 +1,8 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { useAppDispatch, useAppSelector, useAppStore } from '@renderer/store'
 import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
@@ -28,6 +27,7 @@ const logger = loggerService.withContext('useTopicSegments')
 
 export function useTopicSegments(topicId: string) {
   const dispatch = useAppDispatch()
+  const appStore = useAppStore()
 
   const segmentsEntities = useAppSelector((state) => state.topicSegments.segments.entities)
   const segmentsByTopic = useAppSelector((state) => state.topicSegments.segmentsByTopic)
@@ -78,10 +78,11 @@ export function useTopicSegments(topicId: string) {
       if (tid === topicId) {
         requireIdsMutableForRoute(routeCapability, tid, messageIds)
       }
-      // DB-first with read-after catalog convergence: the single upsert wire
-      // cannot carry shifted siblings, so follow with exactly one list+replace.
-      // listSegments failure must not roll back the successful Main mutation:
-      // keep at least the new wire visible and log via the safe logger.
+      // DB-first with read-after catalog convergence through the ONE explicit
+      // segment-catalog publication path (preserves the resident message
+      // window, installs the full authority catalog, no transient blank).
+      // Genuine list failure throws typed after fenced invalidation; stale
+      // reads discard silently — never a fabricated single-wire success.
       const id = uuid()
       const color = getSegmentColor(id)
       const wire = await dbService.upsertSegment(
@@ -93,39 +94,26 @@ export function useTopicSegments(topicId: string) {
         tid === topicId ? activeBranchId : null
       )
       const segment = mapSegmentWireToTopicSegment(wire)
-      try {
-        await convergeTopicSegmentCatalog(dispatch, tid)
-      } catch (error) {
-        logger.warn('[createSegment] catalog convergence failed, keeping new segment wire', error as Error)
-        dispatch(addSegment(segment))
-      }
+      await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
       logger.info(`Created segment "${name}" with ${segment.messageCount} messages`)
       return segment
     },
-    [dispatch, topicId, activeBranchId, routeCapability]
+    [dispatch, topicId, activeBranchId, routeCapability, appStore]
   )
 
   const updateSegmentName = useCallback(
     async (segmentId: string, name: string) => {
-      // DB-first enriched: Redux converges from the Main wire, not fabricated now.
-      const wire = await dbService.updateSegmentMetadata(segmentId, name)
-      const changes: Record<string, unknown> = {
-        name: wire.name ?? name,
-        messageIds: [...wire.messageIds],
-        sortOrder: wire.sortOrder,
-        firstMessageId: wire.firstMessageId,
-        lastMessageId: wire.lastMessageId,
-        messageCount: wire.messageCount,
-        createdAt: wire.createdAt ?? undefined,
-        updatedAt: wire.updatedAt ?? new Date().toISOString()
-      }
-      // Omit color unless the wire carries a legal string (never `color: undefined`).
-      if (typeof wire.color === 'string') {
-        changes.color = wire.color
-      }
-      dispatch(updateSegment({ id: segmentId, changes: changes as any }))
+      // DB-first metadata mutation converged through the ONE shared authority
+      // catalog publication (preserves the resident window, installs the full
+      // catalog). Never a raw `updateSegment` with messageIds — that would
+      // invalidate residency and blank until reload.
+      const before = appStore.getState() as any
+      const existing = before?.topicSegments?.segments?.entities?.[segmentId]
+      const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
+      await dbService.updateSegmentMetadata(segmentId, name)
+      await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
     },
-    [dispatch]
+    [dispatch, appStore, topicId]
   )
 
   const updateSegmentMessageIds = useCallback(
@@ -134,37 +122,28 @@ export function useTopicSegments(topicId: string) {
       // fail closed with zero IPC calls unless every member is owned.
       // The segment's topic is the hook topic; Main validates atomically.
       requireIdsMutableForRoute(routeCapability, topicId, newMessageIds)
-      // DB-first enriched: empty membership deletes per repo semantics (null wire).
-      const wire = await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
-      if (wire === null) {
-        dispatch(removeSegment(segmentId))
-        return
-      }
-      dispatch(
-        updateSegment({
-          id: segmentId,
-          changes: {
-            messageIds: [...wire.messageIds],
-            sortOrder: wire.sortOrder,
-            firstMessageId: wire.firstMessageId,
-            lastMessageId: wire.lastMessageId,
-            messageCount: wire.messageCount,
-            updatedAt: wire.updatedAt ?? new Date().toISOString()
-          }
-        })
-      )
+      // DB-first with catalog convergence through the preserving publication
+      // path (empty membership deletes in Main; the converged list reflects
+      // it). No raw update/remove — those would invalidate the resident
+      // window and blank until reload.
+      await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
+      await convergeTopicSegmentCatalog(dispatch, topicId, appStore.getState)
     },
-    [dispatch, activeBranchId, routeCapability, topicId]
+    [dispatch, activeBranchId, routeCapability, topicId, appStore]
   )
 
   const deleteSegment = useCallback(
     async (segmentId: string) => {
-      // DB-first
+      // DB-first dissolve with catalog convergence through the preserving
+      // publication path. No raw remove — it would invalidate residency.
+      const before = appStore.getState() as any
+      const existing = before?.topicSegments?.segments?.entities?.[segmentId]
+      const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
       await dbService.deleteSegment(segmentId)
-      dispatch(removeSegment(segmentId))
+      await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
       logger.info(`Deleted segment ${segmentId}`)
     },
-    [dispatch]
+    [dispatch, appStore, topicId]
   )
 
   const getSegmentForMessage = useCallback(

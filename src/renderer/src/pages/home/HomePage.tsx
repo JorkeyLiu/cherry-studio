@@ -13,7 +13,7 @@ import NavigationService from '@renderer/services/NavigationService'
 import store from '@renderer/store'
 import { addTopic } from '@renderer/store/assistants'
 import { newMessagesActions } from '@renderer/store/newMessage'
-import { setAssistantsWidth } from '@renderer/store/settings'
+import { setAssistantsWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import type { Assistant, Topic } from '@renderer/types'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { Alert, Button, Spin } from 'antd'
@@ -308,7 +308,12 @@ const HomePage: FC = () => {
           )}
         </AnimatePresence>
         {showAssistants && (
-          <ResizableHandle cssVar="--assistants-width" onResizeEnd={handleLeftResizeEnd} side="left" />
+          <ResizableHandle
+            cssVar="--assistants-width"
+            minWidth={SIDEBAR_MIN_WIDTH}
+            onResizeEnd={handleLeftResizeEnd}
+            side="left"
+          />
         )}
         <ErrorBoundary>
           <Chat

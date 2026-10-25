@@ -21,6 +21,7 @@ import {
 } from '../editSelection'
 import {
   isLoadedAnswerGroupMutable,
+  isMutableForActiveRoute,
   loadedAnswerMemberIds,
   requireAnswerGroupForMember,
   requireLoadedAnswerMembersMutable,
@@ -42,8 +43,17 @@ function rootState(opts: {
   mutableRoute?: string | null
   activeRoute?: string | null
   selectedGroupIds?: string[]
+  messageBlocks?: Record<string, unknown>
 }) {
-  const { loadedIds, entities, mutableIds, mutableRoute, activeRoute = null, selectedGroupIds = [] } = opts
+  const {
+    loadedIds,
+    entities,
+    mutableIds,
+    mutableRoute,
+    activeRoute = null,
+    selectedGroupIds = [],
+    messageBlocks = {}
+  } = opts
   return {
     messages: {
       entities,
@@ -51,6 +61,7 @@ function rootState(opts: {
       mutableMessageIdsByTopic: mutableIds === undefined ? {} : { t1: mutableIds },
       mutableRouteByTopic: mutableRoute === undefined ? {} : { t1: mutableRoute }
     },
+    messageBlocks: { entities: messageBlocks },
     topicBranch: {
       activeBranchIdByTopic: activeRoute === null ? {} : { t1: activeRoute }
     },
@@ -73,6 +84,35 @@ describe('resolveLoadedAnswerGroup', () => {
     expect(group?.allIds).toEqual(['u1', 'a1', 'a2'])
   })
 
+  it('shares group derivation for identical message inputs and rebuilds for projection or entity changes', () => {
+    const loadedIds = ['u1', 'a1', 'a2']
+    const entities = { u1: userMsg('u1'), a1: assistantMsg('a1', 'u1'), a2: assistantMsg('a2', 'u1') }
+    const state = rootState({ loadedIds, entities })
+    const first = resolveLoadedAnswerGroup(state, 't1', 'a1')
+    // An unrelated store notification (different root object, untouched message slices).
+    const unrelatedUpdate = rootState({ loadedIds, entities, messageBlocks: { b1: {} } })
+    expect(resolveLoadedAnswerGroup(unrelatedUpdate, 't1', 'a2')).toBe(first)
+    expect(loadedAnswerMemberIds(unrelatedUpdate, 't1', 'u1')).toBe(first?.memberIds)
+
+    const appended = rootState({
+      loadedIds: [...loadedIds, 'a3'],
+      entities: { ...entities, a3: assistantMsg('a3', 'u1') }
+    })
+    expect(resolveLoadedAnswerGroup(appended, 't1', 'a1')?.memberIds).toEqual(['a1', 'a2', 'a3'])
+    expect(resolveLoadedAnswerGroup(appended, 't1', 'a1')).not.toBe(first)
+
+    const changedRole = rootState({
+      loadedIds,
+      entities: { ...entities, a2: userMsg('a2') }
+    })
+    expect(resolveLoadedAnswerGroup(changedRole, 't1', 'a1')?.memberIds).toEqual(['a1'])
+    const changedAskId = rootState({
+      loadedIds,
+      entities: { ...entities, a2: assistantMsg('a2', 'other-root') }
+    })
+    expect(resolveLoadedAnswerGroup(changedAskId, 't1', 'a1')?.memberIds).toEqual(['a1'])
+  })
+
   it('resolves from the user root id and tolerates a window-outside root', () => {
     const fromRoot = rootState({
       loadedIds: ['u1', 'a1'],
@@ -86,6 +126,36 @@ describe('resolveLoadedAnswerGroup', () => {
     const group = resolveLoadedAnswerGroup(rootOutside, 't1', 'a1')
     expect(group?.userRootId).toBeNull()
     expect(group?.allIds).toEqual(['a1', 'a2'])
+  })
+
+  it('reuses membership sets across checks and invalidates loaded/mutable arrays and active route', () => {
+    const loadedIds = ['u1', 'a1']
+    const mutableIds = ['a1']
+    const entities = { u1: userMsg('u1'), a1: assistantMsg('a1', 'u1') }
+    const state = rootState({ loadedIds, mutableIds, mutableRoute: null, entities })
+    expect(isMutableForActiveRoute(state, 't1', 'a1')).toBe(true)
+    // A block-only stream commit changes no message ID, mutability, or route input.
+    const blockOnlyUpdate = rootState({
+      loadedIds,
+      mutableIds,
+      mutableRoute: null,
+      entities,
+      messageBlocks: { b1: {} }
+    })
+    expect(isMutableForActiveRoute(blockOnlyUpdate, 't1', 'a1')).toBe(true)
+    expect(
+      isMutableForActiveRoute(
+        rootState({ loadedIds, mutableIds: ['a1'], mutableRoute: null, activeRoute: 'b1', entities }),
+        't1',
+        'a1'
+      )
+    ).toBe(false)
+    expect(
+      isMutableForActiveRoute(rootState({ loadedIds: ['u1'], mutableIds, mutableRoute: null, entities }), 't1', 'a1')
+    ).toBe(false)
+    expect(
+      isMutableForActiveRoute(rootState({ loadedIds, mutableIds: [], mutableRoute: null, entities }), 't1', 'a1')
+    ).toBe(false)
   })
 
   it('returns null for unknown ids and group-less messages', () => {

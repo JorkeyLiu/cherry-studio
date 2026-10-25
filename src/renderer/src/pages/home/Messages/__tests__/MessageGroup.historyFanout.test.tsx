@@ -55,8 +55,7 @@ const mocks = vi.hoisted(() => ({
   MessageEditor: vi.fn(() => <div>editor</div>),
   MessageErrorBoundary: vi.fn(({ children }: { children: ReactNode }) => <>{children}</>),
   MessageHeader: vi.fn(() => <div className="message-header">header</div>),
-  MessageMenubar: vi.fn(() => <div className="message-menubar">menubar</div>),
-  MessageOutline: vi.fn(() => null)
+  MessageMenubar: vi.fn(() => <div className="message-menubar">menubar</div>)
 }))
 
 const fakeGroupState = vi.hoisted(() => {
@@ -251,10 +250,6 @@ vi.mock('../MessageMenubar', () => ({
   default: mocks.MessageMenubar
 }))
 
-vi.mock('../MessageOutline', () => ({
-  default: mocks.MessageOutline
-}))
-
 const { default: MessageGroup } = await import('../MessageGroup')
 
 type ProjectedMessage = Message & { index: number }
@@ -299,16 +294,19 @@ const renderCountFor = (id: string): number =>
   mocks.MessageContent.mock.calls.filter((call) => (call[0] as { message: Message }).message.id === id).length
 
 const wrapperClassesFor = (container: HTMLElement, id: string): string =>
-  container.querySelector(`#message-${id}`)?.className ?? ''
+  container
+    .querySelector(`#message-${id}[data-message-id="${id}"]:not([data-testid="answer-group-selector"])`)
+    ?.closest('.fold')?.className ?? ''
 
 /**
- * Baseline DOM trait (production, unchanged): the outer MessageWrapper
- * (MessageGroup) and the inner MessageContainer (MessageItem) both carry
- * `id="message-<id>"`, so an `#message-<id>` selector double-hits each
- * answer (3 answers -> 6 hits). Only the inner host carries
- * `data-message-id`, so mounted-answer counts use that attribute and never
- * the `#message-*` id selector. `selected` lives on the outer wrapper, so
- * selection assertions keep reading the wrapper via `wrapperClassesFor`.
+ * DOM trait (post duplicate-id repair): stable row identity lives solely on
+ * the inner MessageContainer (`id="message-<id>"` + `data-message-id="<id>"`);
+ * the outer MessageWrapper (MessageGroup) carries no id, only `fold` /
+ * `selected` for layout. An `#message-<id>` selector now single-hits the
+ * inner host, so selection assertions resolve the authoritative wrapper via
+ * the stable inner scope (`closest('.fold')`, mirroring the E2E `.selected`
+ * containing inner). Mounted-answer counts keep using `data-message-id`
+ * and never the `#message-*` id selector.
  */
 const assistantHostCount = (container: HTMLElement): number =>
   container.querySelectorAll('[data-message-id="hist-a0"],[data-message-id="hist-a1"],[data-message-id="hist-a2"]')
@@ -380,8 +378,7 @@ describe('MessageGroup history fanout (real assembly)', () => {
     // Fold layout: only the selected wrapper carries `selected`; hidden
     // siblings stay mounted (no display:none assertion on layout, only that
     // every inner answer host exists exactly once — counted via
-    // `data-message-id` because the duplicate-`id` baseline double-hits
-    // `#message-*` selectors).
+    // `data-message-id` stable inner scope).
     expect(wrapperClassesFor(container, 'hist-a1')).toContain('selected')
     expect(wrapperClassesFor(container, 'hist-a0')).not.toContain('selected')
     expect(assistantHostCount(container)).toBe(3)

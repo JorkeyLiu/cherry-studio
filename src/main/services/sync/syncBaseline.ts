@@ -105,7 +105,7 @@ export interface LocalSyncBaselineParentMembershipClock {
 }
 
 export interface LocalSyncBaselineEntity {
-  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset' | 'topic_reference'
   entityId: string
   /** Full allowlisted current state for the emitted entity (sortOrder excluded per SYNC-DATA-038). */
   payload: Record<string, unknown>
@@ -118,7 +118,7 @@ export interface LocalSyncBaselineEntity {
 }
 
 export interface LocalSyncBaselineTombstone {
-  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset' | 'topic_reference'
   entityId: string
   timestamp: number
   operationId: string | null
@@ -146,6 +146,8 @@ export interface LocalSyncBaselineManifest {
   orderFrameVersion: string
   scope: string
   entityCounts: { topic: number; message: number; message_block: number; total: number }
+  /** Live cross-topic history reference relation count (V6). */
+  referenceCount: number
   tombstoneCount: number
   unversionedEntityCount: number
   unversionedFieldCount: number
@@ -171,6 +173,21 @@ export interface LocalSyncBaselineReplacementRegister {
   timestamp: number
   operationId: string
   activeBlockIds: string[]
+}
+
+/**
+ * Cross-topic history reference relation (V6). ONE coherent tuple owned by
+ * `targetTopicId`; the referenced prefix stays owned by the source topic and
+ * is never copied. Entity-clock only (no per-field clocks) so competing
+ * updates are never mixed key by key. `entityClock` null = unversioned
+ * (fully local pre-sync relation awaiting seed/receiver adoption).
+ */
+export interface LocalSyncBaselineReference {
+  targetTopicId: string
+  sourceTopicId: string
+  sourceBranchId: string | null
+  anchorMessageId: string
+  entityClock: LocalSyncBaselineEntityClock | null
 }
 
 export interface LocalSyncBaselineFileAsset {
@@ -201,6 +218,12 @@ export interface LocalSyncBaselineCandidate {
   replacementRegisters: LocalSyncBaselineReplacementRegister[]
   /** File asset inventory in same snapshot (V5). Sorted lexical. */
   fileAssets: LocalSyncBaselineFileAsset[]
+  /**
+   * Cross-topic history reference relations in the same snapshot (V6).
+   * Sorted by targetTopicId lexical (wire projection re-sorts to UTF-8 byte
+   * lex). Empty when no relation exists or the table is absent.
+   */
+  references: LocalSyncBaselineReference[]
   /** Pending attachment intent/job counts truthful diagnostics */
   pendingAttachmentCount: number
   /**
@@ -231,6 +254,8 @@ const ENTITY_TYPE_PRIORITY: Record<LocalSyncBaselineEntity['entityType'], number
   topic: 0,
   topic_branch: 1,
   file_asset: 2,
+  // Relations are target-owned and never precede their target topic.
+  topic_reference: 2,
   message: 3,
   message_block: 4
 }
@@ -238,6 +263,9 @@ const ENTITY_TYPE_PRIORITY: Record<LocalSyncBaselineEntity['entityType'], number
 // Field-clock allowlists: identity/immutable relation fields never clocked; sortOrder
 // is intentionally excluded per SYNC-DATA-038 (wire truth is parent order frames).
 const FIELD_CLOCK_ALLOW: Record<LocalSyncBaselineEntity['entityType'], ReadonlySet<string>> = {
+  // Reference relations carry NO per-field clocks: the tuple is one coherent
+  // unit under the entity clock (never mixed across competing updates).
+  topic_reference: new Set<string>(),
   topic: new Set<string>(SYNC_TOPIC_PATCH_FIELDS as readonly string[]),
   message: new Set<string>(SYNC_MESSAGE_PATCH_FIELDS as readonly string[]),
   message_block: new Set<string>(SYNC_BLOCK_PATCH_FIELDS as readonly string[]),
@@ -314,6 +342,7 @@ export function computeLocalSyncBaselineDigest(candidate: LocalSyncBaselineCandi
     orderFrames: candidate.orderFrames,
     replacementRegisters: (candidate as { replacementRegisters?: unknown }).replacementRegisters ?? [],
     fileAssets: (candidate as { fileAssets?: unknown }).fileAssets ?? [],
+    references: (candidate as { references?: unknown }).references ?? [],
     pendingAttachmentCount: (candidate as { pendingAttachmentCount?: unknown }).pendingAttachmentCount ?? 0,
     observedLocalChannelKey: candidate.observedLocalChannelKey,
     observedLocalCursor: candidate.observedLocalCursor,
@@ -1162,6 +1191,70 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
 
   fileAssets.sort((a, b) => compareLexical(a.entityId, b.entityId))
 
+  // Cross-topic history references (V6): every live topic_references row is
+  // inventory. The relation is the coherent tuple owned by the target topic;
+  // the referenced prefix stays owned by the source topic (never copied).
+  // Fully-local pre-sync relations surface as unversioned (truthful
+  // completeness reason) and are adopted with real clocks by the seed /
+  // receiver-union paths — never fabricated here.
+  const references: LocalSyncBaselineReference[] = []
+  {
+    let refRows: Array<{
+      targetTopicId: string
+      sourceTopicId: string
+      sourceBranchId: string | null
+      anchorMessageId: string
+    }> = []
+    try {
+      refRows = tx
+        .select({
+          targetTopicId: schema.topicReferences.targetTopicId,
+          sourceTopicId: schema.topicReferences.sourceTopicId,
+          sourceBranchId: schema.topicReferences.sourceBranchId,
+          anchorMessageId: schema.topicReferences.anchorMessageId
+        })
+        .from(schema.topicReferences)
+        .all() as typeof refRows
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (/no such table/i.test(msg)) refRows = []
+      else throw e
+    }
+    for (const row of refRows) {
+      try {
+        validateOrdinaryIdStrict(row.targetTopicId, `topic_reference/${String(row.targetTopicId)}`)
+        validateOrdinaryIdStrict(row.sourceTopicId, `topic_reference/${String(row.targetTopicId)}/source`)
+        validateOrdinaryIdStrict(row.anchorMessageId, `topic_reference/${String(row.targetTopicId)}/anchor`)
+      } catch (e) {
+        fail(
+          `baseline malformed reference relation for ${String(row.targetTopicId)}: ${e instanceof Error ? e.message : String(e)}`,
+          e
+        )
+      }
+      const sourceBranchId =
+        typeof row.sourceBranchId === 'string' && row.sourceBranchId.length > 0 ? row.sourceBranchId : null
+      if (sourceBranchId !== null) {
+        try {
+          validateOrdinaryIdStrict(sourceBranchId, `topic_reference/${String(row.targetTopicId)}/branch`)
+        } catch (e) {
+          fail(
+            `baseline malformed reference source branch for ${String(row.targetTopicId)}: ${e instanceof Error ? e.message : String(e)}`,
+            e
+          )
+        }
+      }
+      const key = `topic_reference:${row.targetTopicId}`
+      references.push({
+        targetTopicId: row.targetTopicId,
+        sourceTopicId: row.sourceTopicId,
+        sourceBranchId,
+        anchorMessageId: row.anchorMessageId,
+        entityClock: entityClockByKey.get(key) ?? null
+      })
+    }
+    references.sort((a, b) => compareLexical(a.targetTopicId, b.targetTopicId))
+  }
+
   entities.sort((a, b) => {
     const priority = ENTITY_TYPE_PRIORITY[a.entityType] - ENTITY_TYPE_PRIORITY[b.entityType]
     if (priority !== 0) return priority
@@ -1191,6 +1284,9 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     } else if (key.startsWith('tombstone:file_asset:')) {
       entityType = 'file_asset'
       entityId = key.slice('tombstone:file_asset:'.length)
+    } else if (key.startsWith('tombstone:topic_reference:')) {
+      entityType = 'topic_reference'
+      entityId = key.slice('tombstone:topic_reference:'.length)
     } else {
       fail(`baseline malformed tombstone key ${JSON.stringify(key).slice(0, 80)}`)
     }
@@ -1772,6 +1868,9 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   for (const fa of fileAssets) {
     if (!fa.entityClock) unversionedEntityCount += 1
   }
+  for (const ref of references) {
+    if (!ref.entityClock) unversionedEntityCount += 1
+  }
   if (unversionedEntityCount > 0) reasons.add('unversioned-entity')
   let unversionedFieldCount = 0
   for (const entity of entities) {
@@ -1849,6 +1948,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     orderFrameVersion: LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION,
     scope: LOCAL_SYNC_BASELINE_SCOPE,
     entityCounts,
+    referenceCount: references.length,
     tombstoneCount: tombstones.length,
     unversionedEntityCount,
     unversionedFieldCount,
@@ -1876,6 +1976,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     orderFrames: sortedFrames,
     replacementRegisters,
     fileAssets,
+    references,
     pendingAttachmentCount,
     observedLocalChannelKey,
     observedLocalCursor,

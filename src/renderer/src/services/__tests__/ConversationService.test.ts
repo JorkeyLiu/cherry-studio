@@ -18,7 +18,8 @@ vi.mock('@renderer/services/contextInfoService', () => ({
     boundaryMessageId: null,
     contextCount: { current: 0, max: null },
     anchorGroupKey: null
-  }))
+  })),
+  filterContextUiMessages: vi.fn(() => [])
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
@@ -73,7 +74,12 @@ describe('ConversationService.prepareMessagesForModel — no-model branch', () =
 
     const result = await ConversationService.prepareMessagesForModel([userMessage], assistantWithModel)
 
-    expect(convertMessagesToSdkMessages).toHaveBeenCalledWith([userMessage], selectedModel, undefined)
+    // The request-local attachment availability view rides along as the 4th
+    // argument (empty here: no attachment blocks in this message).
+    expect(convertMessagesToSdkMessages).toHaveBeenCalledWith([userMessage], selectedModel, undefined, {
+      unavailableBlockIds: new Set(),
+      urlFallbackBlockIds: new Set()
+    })
     expect(result.uiMessages).toEqual([userMessage])
   })
 })

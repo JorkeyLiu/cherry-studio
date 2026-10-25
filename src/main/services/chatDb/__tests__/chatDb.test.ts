@@ -732,8 +732,8 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly twenty-one migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012 + 013 + 014 + 015 + 016 + 017 + 018 + 019 + 020 + 021)', () => {
-    expect(MIGRATIONS).toHaveLength(21)
+  it('should have exactly twenty-two migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012 + 013 + 014 + 015 + 016 + 017 + 018_branch_sync_frames + 018_topic_references + 019 + 020 + 021)', () => {
+    expect(MIGRATIONS).toHaveLength(22)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
@@ -752,9 +752,10 @@ describe('Migration registry', () => {
     expect(MIGRATIONS[15].key).toBe('016_topic_branches')
     expect(MIGRATIONS[16].key).toBe('017_cleanup_route_message_overlay')
     expect(MIGRATIONS[17].key).toBe('018_branch_sync_frames')
-    expect(MIGRATIONS[18].key).toBe('019_assistant_config_mirror')
-    expect(MIGRATIONS[19].key).toBe('020_attachment_sync')
-    expect(MIGRATIONS[20].key).toBe('021_attachment_capture_intent')
+    expect(MIGRATIONS[18].key).toBe('018_topic_references')
+    expect(MIGRATIONS[19].key).toBe('019_assistant_config_mirror')
+    expect(MIGRATIONS[20].key).toBe('020_attachment_sync')
+    expect(MIGRATIONS[21].key).toBe('021_attachment_capture_intent')
   })
 
   it('001_initial_schema should have SQL statements', () => {

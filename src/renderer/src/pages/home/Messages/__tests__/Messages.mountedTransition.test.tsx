@@ -538,10 +538,6 @@ vi.mock('@renderer/config/constant', () => ({
   LOAD_MORE_COUNT: 20
 }))
 
-vi.mock('react-infinite-scroll-component', () => ({
-  default: ({ children }: any) => <div data-testid="infinite-scroll">{children}</div>
-}))
-
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: mocks.t
@@ -1045,10 +1041,12 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
-    // The actual child components should be rendered (via mocked versions)
+    // The actual child components should be rendered (via mocked versions).
+    // Older paging is app-owned: the layout-only wrapper (not an external
+    // scroll library) wraps the context menu under the #messages host.
     expect(screen.getByTestId('message-context-menu')).toBeTruthy()
     expect(screen.getByTestId('prompt')).toBeTruthy()
-    expect(screen.getByTestId('infinite-scroll')).toBeTruthy()
+    expect(document.querySelector('#messages [data-older-paging="app-owned"]')).not.toBeNull()
   })
 
   // -----------------------------------------------------------------------

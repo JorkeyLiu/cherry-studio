@@ -9,6 +9,14 @@ export interface ScrollbarProps extends Omit<React.HTMLAttributes<HTMLDivElement
 }
 
 const Scrollbar: FC<ScrollbarProps> = ({ ref: passedRef, children, onScroll: externalOnScroll, ...htmlProps }) => {
+  // isScrolling drives ONLY the thumb paint via an inherited CSS variable on
+  // the host inline style. The host styled class stays identical across
+  // scroll gestures: the previous `$isScrolling` styled interpolation
+  // replaced the host class mid-gesture (transparent <-> thumb rule), which
+  // rebuilt the scrollable layout object and aborted the in-flight native
+  // smooth paging. Inline custom-property inheritance repaints the
+  // `::-webkit-scrollbar-thumb` without touching host class/overflow rules.
+  // The 1500ms visible-fade semantics are unchanged.
   const [isScrolling, setIsScrolling] = useState(false)
   const timeoutRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -48,10 +56,16 @@ const Scrollbar: FC<ScrollbarProps> = ({ ref: passedRef, children, onScroll: ext
     }
   }, [throttledInternalScrollHandler, clearScrollingTimeout])
 
+  const { style: htmlStyle, ...restHtmlProps } = htmlProps
   return (
     <ScrollBarContainer
-      {...htmlProps} // Pass other HTML attributes
-      $isScrolling={isScrolling}
+      {...restHtmlProps} // Pass other HTML attributes
+      style={
+        {
+          ...htmlStyle,
+          '--scrollbar-thumb-color': isScrolling ? 'var(--color-scrollbar-thumb)' : 'transparent'
+        } as React.CSSProperties
+      }
       onScroll={combinedOnScroll} // Use the combined handler
       ref={passedRef}>
       {children}
@@ -59,12 +73,12 @@ const Scrollbar: FC<ScrollbarProps> = ({ ref: passedRef, children, onScroll: ext
   )
 }
 
-const ScrollBarContainer = styled.div<{ $isScrolling: boolean }>`
+const ScrollBarContainer = styled.div`
   overflow-y: auto;
   scrollbar-gutter: stable;
   &::-webkit-scrollbar-thumb {
     transition: background 2s ease;
-    background: ${(props) => (props.$isScrolling ? 'var(--color-scrollbar-thumb)' : 'transparent')};
+    background: var(--scrollbar-thumb-color, transparent);
     &:hover {
       background: var(--color-scrollbar-thumb-hover);
     }

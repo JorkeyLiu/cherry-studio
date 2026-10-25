@@ -71,6 +71,95 @@ export function resolveContextDividerGroupKey(
   return null
 }
 
+/**
+ * History-reference divider placement (stable, non-arbitrary). The divider
+ * marks the boundary between the read-only foreign prefix and the target-owned
+ * writable suffix.
+ *
+ * Priority:
+ * 1. `status: 'missing'` → the prefix is absent, so the divider marks where the
+ *    reference would begin: the loaded beginning (top).
+ * 2. `boundaryMessageId` resident in the projected groups → place directly
+ *    after that group (the authoritative Main-reported boundary).
+ * 3. Boundary outside the loaded window → derive the transition from the
+ *    loaded ownership order, never a guessed boundary. The foreign readonly
+ *    prefix precedes the target-owned suffix in oldest→newest order, so the
+ *    divider belongs after the LAST foreign-owned group — the first
+ *    foreign-owned group encountered scanning newest→oldest. Foreign/target
+ *    ownership is compared against `targetTopicId` (never a single
+ *    `sourceTopicId`): recursive references keep their own canonical
+ *    grand-source topicIds, so a `sourceTopicId` scan would miss them.
+ *
+ *    The fallback is admitted ONLY when a real foreign→target-owned transition
+ *    is demonstrable in the loaded window: the immediately newer neighbor of
+ *    that foreign group must be target-owned. When the loaded window contains
+ *    foreign groups but NO target-owned successor the boundary is offscreen
+ *    (the window is a slice of the readonly prefix alone), so the divider is
+ *    DEFERRED (null) until the boundary is loaded — never misplaced inside the
+ *    prefix. A window with no foreign message at all keeps the
+ *    missing/no-prefix beginning placement.
+ */
+export interface ReferenceBoundary {
+  groupKey: string | null
+  placement: 'after-boundary' | 'beginning'
+}
+
+export function resolveReferenceBoundary(
+  groupedMessages: readonly MessageViewportProjectedGroup[],
+  reference:
+    | { sourceTopicId: string; status: 'available' | 'missing'; boundaryMessageId: string | null }
+    | null
+    | undefined,
+  targetTopicId: string
+): ReferenceBoundary | null {
+  if (!reference) return null
+  if (reference.status === 'missing') {
+    return { groupKey: null, placement: 'beginning' }
+  }
+  if (reference.boundaryMessageId) {
+    for (const [key, groupMessages] of groupedMessages) {
+      if (groupMessages.some((m) => m.id === reference.boundaryMessageId)) {
+        return { groupKey: key, placement: 'after-boundary' }
+      }
+    }
+  }
+  // Boundary not resident: walk the loaded window newest→oldest. The first
+  // (newest) group holding a foreign-owned message is the newest loaded
+  // foreign group. It is the true prefix/suffix boundary only if the group
+  // immediately newer than it (already visited) is target-owned — a
+  // demonstrable foreign→owned transition. Otherwise the suffix is offscreen
+  // and the divider is deferred rather than misplaced inside the prefix.
+  let newerGroupIsTargetOwned = false
+  for (const [key, groupMessages] of groupedMessages) {
+    if (groupMessages.some((m) => isForeignOwnedMessage(m, targetTopicId))) {
+      return newerGroupIsTargetOwned ? { groupKey: key, placement: 'after-boundary' } : null
+    }
+    newerGroupIsTargetOwned = groupMessages.some((m) => isTargetOwnedMessage(m, targetTopicId))
+  }
+  // No foreign-owned message is loaded: the whole loaded window is the
+  // target's own content. Missing/no-prefix beginning placement stays independent.
+  return { groupKey: null, placement: 'beginning' }
+}
+
+/**
+ * A projected message is part of the read-only foreign prefix when it carries
+ * an explicit topicId that is not the rendered target topic. Messages without a
+ * canonical topicId never count as foreign (fail-closed, never misplace).
+ */
+function isForeignOwnedMessage(message: Message, targetTopicId: string): boolean {
+  return typeof message.topicId === 'string' && message.topicId.length > 0 && message.topicId !== targetTopicId
+}
+
+/**
+ * A projected message is target-owned (the writable suffix) when its canonical
+ * topicId is exactly the rendered target topic. Explicit positive ownership
+ * only: an unowned/blank topicId never counts (fail-closed — the fallback then
+ * defers instead of placing a divider on an unprovable transition).
+ */
+function isTargetOwnedMessage(message: Message, targetTopicId: string): boolean {
+  return message.topicId === targetTopicId
+}
+
 /** Resolved per-group topic-segment flags feeding the body injector. */
 export interface MessageFlowBodyArgs {
   kind: string
@@ -106,6 +195,9 @@ export interface BuildMessageFlowNodesInput {
   renderBody: (args: MessageFlowBodyArgs) => ReactNode
   renderForkBoundary: (args: MessageFlowForkArgs) => ReactNode
   renderContextBoundary: (legacyKey: string) => ReactNode
+  /** History-reference divider placement (absent/null = no reference target). */
+  referenceBoundary?: ReferenceBoundary | null
+  renderReferenceBoundary?: () => ReactNode
 }
 
 /**
@@ -119,6 +211,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   const {
     layerRuns,
     contextDividerGroupKey,
+    referenceBoundary,
     forkAnchorIds,
     childrenByAnchor,
     branchPath,
@@ -129,7 +222,8 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     isMessageLastInSegment,
     renderBody,
     renderForkBoundary,
-    renderContextBoundary
+    renderContextBoundary,
+    renderReferenceBoundary
   } = input
   const nodes: FlowNode[] = []
 
@@ -190,6 +284,20 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             }
           })
         }
+        // History-reference divider: placed DOM-before the boundary group so it
+        // renders visually directly below the last foreign-prefix message (the
+        // same placement family as a fork divider). Missing/absent boundary is
+        // handled once at the beginning after the loop.
+        if (referenceBoundary?.placement === 'after-boundary' && legacyKey === referenceBoundary.groupKey) {
+          nodes.push({
+            kind: 'boundary',
+            entry: {
+              boundaryKey: 'history-reference-boundary',
+              boundaryKind: 'reference',
+              node: renderReferenceBoundary?.()
+            }
+          })
+        }
         const bodyNode = renderBody({
           kind,
           stableGroupId,
@@ -209,6 +317,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             segmentIsLive: seg.isLive,
             kind,
             layerRunId: layer.stableLayerId,
+            segment,
+            segmentIsFirst: isFirst,
+            segmentIsLast: isLast,
             bodyNode
           }
         })
@@ -228,6 +339,20 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         }
       }
     }
+  }
+
+  // Missing reference (or a loaded window with no foreign prefix): the divider
+  // marks the beginning (top) of the target's own content. Appended last in
+  // newest→oldest DOM order so it renders at the visual beginning.
+  if (referenceBoundary?.placement === 'beginning') {
+    nodes.push({
+      kind: 'boundary',
+      entry: {
+        boundaryKey: 'history-reference-boundary',
+        boundaryKind: 'reference',
+        node: renderReferenceBoundary?.()
+      }
+    })
   }
 
   return nodes

@@ -182,17 +182,21 @@ describe('messageFlowNodes production wiring', () => {
       'edit-turn',
       'body-a-new',
       'body-u-new',
+      'edit-turn-cover',
       'edit-turn',
       'body-a-anchor',
+      'edit-turn-cover',
       FORK_TESTID,
       'edit-turn',
       'body-u-anchor',
+      'edit-turn-cover',
       'context-boundary',
       'edit-turn',
       'body-a-old',
-      'body-u-old'
+      'body-u-old',
+      'edit-turn-cover'
     ])
-    const ids = domTestIds(container).filter((id) => id !== 'edit-turn')
+    const ids = domTestIds(container).filter((id) => id !== 'edit-turn' && id !== 'edit-turn-cover')
     expect(new Set(ids).size).toBe(ids.length)
 
     const fork = container.querySelector(`[data-testid="${FORK_TESTID}"]`) as Element

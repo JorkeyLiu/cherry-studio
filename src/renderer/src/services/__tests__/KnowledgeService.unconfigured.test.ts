@@ -112,4 +112,26 @@ describe('KnowledgeService explicit-unconfigured embedding model', () => {
     expect(params.embedApiClient.baseURL).toBe('https://emb.example.com/v1')
     expect(params.rerankApiClient?.model).toBe('re-1')
   })
+
+  it('forwards optional provider custom headers into the ApiClient slice (no required migration)', () => {
+    mockGetProviderByModel.mockImplementation(((model: { provider?: string } | undefined) => {
+      if (!model) return undefined
+      if (model.provider === 'emb-provider') return { ...embeddingProvider, extra_headers: { 'X-Custom': 'emb-keep' } }
+      if (model.provider === 'rerank-provider')
+        return { ...rerankProvider, extra_headers: { 'X-Custom': 'rerank-keep' } }
+      return undefined
+    }) as typeof getProviderByModel)
+
+    const params = getKnowledgeBaseParams(makeBase())
+
+    expect(params.embedApiClient.extra_headers).toEqual({ 'X-Custom': 'emb-keep' })
+    expect(params.rerankApiClient?.extra_headers).toEqual({ 'X-Custom': 'rerank-keep' })
+  })
+
+  it('omits the optional headers field when the connection defines none', () => {
+    const params = getKnowledgeBaseParams(makeBase())
+
+    expect(params.embedApiClient).not.toHaveProperty('extra_headers')
+    expect(params.rerankApiClient).not.toHaveProperty('extra_headers')
+  })
 })

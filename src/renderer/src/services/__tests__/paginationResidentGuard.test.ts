@@ -1,8 +1,15 @@
 import { configureStore } from '@reduxjs/toolkit'
 import residentRegistryReducer, { bumpGeneration } from '@renderer/store/residentRegistry'
+import topicBranchReducer, { activeBranchSet } from '@renderer/store/topicBranch'
 import { describe, expect, it } from 'vitest'
 
-import { captureResidentGeneration, shouldDiscardPaginationForResident } from '../paginationResidentGuard'
+import {
+  captureResidentGeneration,
+  captureRouteGeneration,
+  isPaginationAttemptApplicable,
+  type PaginationAttemptSnapshot,
+  shouldDiscardPaginationForResident
+} from '../paginationResidentGuard'
 
 describe('pagination resident generation guard (B-06)', () => {
   it('capture returns 0 when no entry, returns generation after bump', () => {
@@ -81,5 +88,81 @@ describe('pagination resident generation guard (B-06)', () => {
     expect(afterStandaloneGen).toBe(2)
     expect(shouldDiscardPaginationForResident(capturedPaginationGen, afterStandaloneGen)).toBe(true)
     // No messages/blocks/window should have been published for that pagination — verified via guard
+  })
+})
+
+describe('pagination request applicability (topic/route generation)', () => {
+  const buildStore = () =>
+    configureStore({ reducer: { topicBranch: topicBranchReducer, residentRegistry: residentRegistryReducer } })
+
+  const attemptRequest = (overrides: Partial<PaginationAttemptSnapshot> = {}): PaginationAttemptSnapshot => ({
+    topicId: 't-pag',
+    route: 'b1',
+    routeGeneration: 1,
+    topicGeneration: 0,
+    residentGeneration: 0,
+    ...overrides
+  })
+
+  it('route generation capture starts at 0 and advances on every route switch', () => {
+    const store = buildStore()
+    expect(captureRouteGeneration(() => store.getState(), 't-pag')).toBe(0)
+    store.dispatch(activeBranchSet({ topicId: 't-pag', branchId: 'b1' }))
+    expect(captureRouteGeneration(() => store.getState(), 't-pag')).toBe(1)
+  })
+
+  it('discards an away-and-back excursion: identical route value, bumped generation', () => {
+    const store = buildStore()
+    store.dispatch(activeBranchSet({ topicId: 't-pag', branchId: 'b1' }))
+    const captured = captureRouteGeneration(() => store.getState(), 't-pag')
+    const issue = attemptRequest({ routeGeneration: captured, route: 'b1' })
+    expect(
+      isPaginationAttemptApplicable({
+        state: store.getState(),
+        request: issue,
+        live: { topicId: 't-pag', route: 'b1', topicGeneration: 0 }
+      })
+    ).toBe(true)
+
+    // Away … back: the route VALUE returns identical while the token advanced.
+    store.dispatch(activeBranchSet({ topicId: 't-pag', branchId: 'b2' }))
+    store.dispatch(activeBranchSet({ topicId: 't-pag', branchId: 'b1' }))
+    expect(
+      isPaginationAttemptApplicable({
+        state: store.getState(),
+        request: issue,
+        live: { topicId: 't-pag', route: 'b1', topicGeneration: 0 }
+      })
+    ).toBe(false)
+  })
+
+  it('discards on topic, route value, viewport generation or resident generation movement', () => {
+    const store = buildStore()
+    store.dispatch(activeBranchSet({ topicId: 't-pag', branchId: 'b2' }))
+    const captured = captureRouteGeneration(() => store.getState(), 't-pag')
+    const issue = attemptRequest({ routeGeneration: captured, route: 'b2' })
+    const applicable = (live: { topicId: string; route: string | null; topicGeneration: number }) =>
+      isPaginationAttemptApplicable({ state: store.getState(), request: issue, live })
+
+    expect(applicable({ topicId: 't-pag', route: 'b2', topicGeneration: 0 })).toBe(true)
+    expect(applicable({ topicId: 't-other', route: 'b2', topicGeneration: 0 })).toBe(false)
+    expect(applicable({ topicId: 't-pag', route: 'b1', topicGeneration: 0 })).toBe(false)
+    expect(applicable({ topicId: 't-pag', route: 'b2', topicGeneration: 1 })).toBe(false)
+
+    // Resident applicability generation advanced (eviction/standalone segment
+    // replacement) while the page was in flight.
+    store.dispatch(bumpGeneration('t-pag'))
+    expect(applicable({ topicId: 't-pag', route: 'b2', topicGeneration: 0 })).toBe(false)
+  })
+
+  it('keeps a never-switched main route (generation 0) applicable while nothing moved', () => {
+    const store = buildStore()
+    expect(
+      isPaginationAttemptApplicable({
+        state: store.getState(),
+        request: attemptRequest({ topicId: 't-main', route: null, routeGeneration: 0, topicGeneration: 3 }),
+        live: { topicId: 't-main', route: null, topicGeneration: 3 }
+      })
+    ).toBe(true)
   })
 })

@@ -21,8 +21,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
-import { estimateUserPromptUsage } from '@renderer/services/TokenService'
-import WebSearchService from '@renderer/services/WebSearchService'
+import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
@@ -34,7 +33,7 @@ import {
   type Topic,
   TopicType
 } from '@renderer/types'
-import type { MessageInputBaseParams } from '@renderer/types/newMessage'
+import type { Message, MessageInputBaseParams } from '@renderer/types/newMessage'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { FC } from 'react'
@@ -155,7 +154,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const { assistant, addTopic, model, setModel, updateAssistant, updateAssistantSettings } = useAssistant(
     initialAssistant.id
   )
-  const { sendMessageShortcut } = useSettings()
+  const { sendMessageShortcut, includeHistoryMediaContext } = useSettings()
   // In-chat send path addresses the active route of the logical topic.
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
 
@@ -172,13 +171,25 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   // Phase 2B: This is now the shared projection computed once at Chat level.
   const previewContextInfo = sharedContextInfo
 
+  // Media-context switch: when OFF the request omits historical image/audio/
+  // video payloads, so the token preview must not count them either. The
+  // estimator identity is stable per switch state, so toggling the switch
+  // re-estimates immediately.
+  const includeHistoryMedia = includeHistoryMediaContext !== false
+  const estimateHistory = useCallback(
+    (targetAssistant: Assistant, historyMessages: Message[]) =>
+      estimateHistoryTokens(targetAssistant, historyMessages, { includeMedia: includeHistoryMedia }),
+    [includeHistoryMedia]
+  )
+
   // Async, debounced, race-safe estimate: selected history + current draft
   // (text + attachments) combined into one scalar.
   const estimateTokenCount = usePromptTokenEstimate({
     assistant,
     tokenEstimationMessages: previewContextInfo.tokenEstimationMessages,
     text,
-    files
+    files,
+    estimateHistory
   })
 
   // contextCount from computeContextInfo: selected context turns / total turns
@@ -253,8 +264,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({
           baseUserMessage.mentions = mentionedModels
         }
 
-        baseUserMessage.usage = await estimateUserPromptUsage(baseUserMessage)
-
+        // The optional prompt-token estimate is NOT computed here: it must never
+        // delay the authoritative user echo. The send thunk persists and
+        // publishes the user message first, then fills `usage` as best-effort
+        // display metadata on the pinned route (the message simply carries no
+        // usage until that lands). Files are already uploaded above, so the
+        // deferred estimate still sees stored file metadata.
         const { message, blocks } = getUserMessage(baseUserMessage)
         message.traceId = parent?.spanContext().traceId
 
@@ -293,12 +308,19 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     if (!config.showTokenCount || estimateTokenCount === undefined) {
       return undefined
     }
+    // Authority-pending: a persisted anchor exists but no fresh authoritative
+    // closure is available yet (initial fetch / pending branch switch). Never
+    // display viewport-derived partial counts — hide until the authoritative
+    // result arrives. Empty/no-anchor routes are not pending and render normally.
+    if (previewContextInfo.isAuthoritativePending) {
+      return undefined
+    }
 
     return {
       estimateTokenCount,
       contextCount
     }
-  }, [config.showTokenCount, contextCount, estimateTokenCount])
+  }, [config.showTokenCount, contextCount, estimateTokenCount, previewContextInfo.isAuthoritativePending])
 
   // Context-window anchor control (stable anchor semantics): the persisted
   // `contextWindowAnchor[topicId]` is the stable topic context start. The
@@ -387,15 +409,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     if (!document.querySelector('.topview-fullscreen-container')) {
       focusTextarea()
     }
-  }, [
-    topic.id,
-    assistant.mcpServers,
-    assistant.knowledge_bases,
-    assistant.enableWebSearch,
-    assistant.webSearchProviderId,
-    mentionedModels,
-    focusTextarea
-  ])
+  }, [topic.id, assistant.knowledge_bases, mentionedModels, focusTextarea])
 
   // TODO: Just use assistant.knowledge_bases as selectedKnowledgeBases. context state is overdesigned.
   useEffect(() => {
@@ -407,9 +421,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     // follows the current provider's explicit search adapter at request time
     // (missing adapter fails explicitly there); the user's toggle is preserved.
     // Clear web search provider if disabled
-    if (assistant.webSearchProviderId && !WebSearchService.isWebSearchEnabled(assistant.webSearchProviderId)) {
-      updateAssistant({ ...assistant, webSearchProviderId: undefined })
-    }
+    // Removed targets (external websearch/MCP/memory) never re-enter the assistant here.
 
     // Auto-enable/disable image generation based on model capabilities
     if (isGenerateImageModel(model)) {

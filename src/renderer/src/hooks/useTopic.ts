@@ -1,7 +1,7 @@
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
-import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
+import { persistAutomaticTopicName } from '@renderer/services/db/topicMetadataPersist'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import store from '@renderer/store'
@@ -135,7 +135,8 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string, bra
     topicRenamingLocks.add(topicId)
 
     // Bounded naming authority: exact count + first + latest ≤5 + their blocks.
-    // Never loads the whole topic into Redux for naming.
+    // Never loads the whole topic into Redux for naming. branchId is the
+    // captured request route (never re-derived from latest active here).
     let namingContext: {
       topic: { id: string; name: string | null; isNameManuallyEdited: boolean | null }
       messageCount: number
@@ -146,6 +147,7 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string, bra
     try {
       namingContext = await dbService.fetchTopicNamingContext(topicId, branchId ?? null)
     } catch {
+      // Missing topic / transport: graceful no-op, no metadata creation.
       return
     }
     const { topic: authorityTopic, messageCount, firstMessage, latestMessages, blocks } = namingContext
@@ -154,34 +156,68 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string, bra
       return
     }
 
-    if (authorityTopic.isNameManuallyEdited) {
-      return
-    }
-
-    // Base Topic for persistence comes from the loaded Redux projection (no
-    // message load); authority naming metadata drives all rename gates.
-    const reduxTopic = store
+    // Real manual state from both authority and projection: either true blocks.
+    const reduxTopicAtRead = store
       .getState()
       .assistants.assistants.flatMap((a) => a.topics)
       .find((t) => t.id === topicId)
-    const baseTopic = (reduxTopic ?? { id: topicId, name: authorityTopic.name }) as Topic
-    // Default-eligible: effective current name is the default name, OR the
-    // authority (Main) name is null/empty (legacy/lazy Main row). Authority
-    // name stays primary with Redux fallback; never ensureTopic/create a row.
-    const currentName = authorityTopic.name ?? reduxTopic?.name ?? ''
+    if (authorityTopic.isNameManuallyEdited || reduxTopicAtRead?.isNameManuallyEdited) {
+      return
+    }
+
+    // Effective current name: authority wins when non-empty; a null/empty
+    // authority (legacy/lazy Main row) falls back to the Redux projection so a
+    // non-default inherited title is preserved. Never ensureTopic/create a row.
+    const authorityName = authorityTopic.name
+    const effectiveName =
+      authorityName !== null && authorityName !== undefined && authorityName !== ''
+        ? authorityName
+        : (reduxTopicAtRead?.name ?? '')
     const defaultTopicName = i18n.t('chat.default.topic.name')
-    const isDefaultEligible =
-      currentName === defaultTopicName || authorityTopic.name == null || authorityTopic.name === ''
+    const isDefaultEligible = effectiveName === defaultTopicName
+    // Capture the Main-authoritative preimage for the atomic conditional
+    // write after the summary await. Null preserves legacy null (matches
+    // null/absent authority, never creates metadata).
+    const expectedPreimage = {
+      expectedName: authorityName ?? null,
+      expectedIsNameManuallyEdited: authorityTopic.isNameManuallyEdited ?? null
+    }
     const enableTopicNaming = getStoreSetting('enableTopicNaming')
 
     const applyTopicName = async (name: string) => {
-      const data = { ...baseTopic, name } as Topic
-      // Phase 5.2B: persist metadata to SQLite before Redux mutation (LOCK-528).
-      await persistTopicMetadata(data)
+      if (!name) {
+        return false
+      }
+      let wire: { name?: string | null }
+      try {
+        // Atomic Main guard: stale preimage (intervening manual rename,
+        // non-default change, flag flip) returns the current wire unchanged.
+        // Missing topic throws NOT_FOUND → graceful no-op.
+        wire = await persistAutomaticTopicName(topicId, name, expectedPreimage)
+      } catch {
+        return false
+      }
+      // Guarded no-op: Main kept the old name (changed preimage) or the topic
+      // is gone → never touch the projection, never reintroduce the topic.
+      if (wire.name !== name) {
+        return false
+      }
+      // Projection update only after the authoritative change, built from the
+      // latest Redux topic (never the stale pre-await snapshot) so only the
+      // intended name changes and stale whole-topic flags are never reverted.
+      const latest = store
+        .getState()
+        .assistants.assistants.flatMap((a) => a.topics)
+        .find((t) => t.id === topicId)
+      if (!latest) {
+        return false
+      }
+      const data = { ...latest, name: wire.name ?? name } as Topic
       if (topicId === _activeTopic?.id) {
         _setActiveTopic(data)
       }
-      store.dispatch(updateTopic({ assistantId: assistant.id, topic: data }))
+      store.dispatch(updateTopic({ assistantId: latest.assistantId ?? assistant.id, topic: data }))
+      return true
     }
 
     const snapshotBlocksById = createSnapshotBlockMap(blocks)
@@ -192,6 +228,12 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string, bra
     }
 
     if (!enableTopicNaming) {
+      // Same default safeguard as the summary path: a non-default effective
+      // title (including a Redux fallback over a null/empty authority) is
+      // preserved; the atomic guard below still discards late races.
+      if (!isDefaultEligible) {
+        return
+      }
       const topicName = getFirstMessageName()
       if (topicName) {
         try {

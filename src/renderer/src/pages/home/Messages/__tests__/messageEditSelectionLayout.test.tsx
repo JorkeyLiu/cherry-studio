@@ -24,6 +24,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   buildOrderedFlowItems,
+  deriveRunSegmentChrome,
   deriveSelectionRangeKey,
   deriveTurnAskId,
   deriveTurnKey,
@@ -142,8 +143,17 @@ describe('flow turns and boundaries', () => {
       forkBoundary('branch-fork-anchor-main', 'div-fork'),
       turnNode('g-anchor', 'ask-a')
     ])
-    // DOM order preserved exactly.
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'div-fork', 'edit-turn', 'body-g-anchor'])
+    // DOM order preserved exactly (the edit-only cover closes each turn;
+    // boundaries stay siblings outside turns).
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'div-fork',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover'
+    ])
     // Column-reverse: DOM-earlier is visually lower, so the boundary
     // (DOM between newer and anchor) sits visually below the anchor and
     // above the newer content.
@@ -157,7 +167,15 @@ describe('flow turns and boundaries', () => {
       turnNode('g-anchor', 'ask-a'),
       contextBoundary('legacy-anchor')
     ])
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'edit-turn', 'body-g-anchor', 'context-boundary'])
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover',
+      'context-boundary'
+    ])
     // DOM-later is visually higher, so the line sits visually above the
     // anchor on the older side — same visual placement as legacy.
     const line = container.querySelector('[data-testid="context-boundary"]') as Element
@@ -204,7 +222,15 @@ describe('flow turns and boundaries', () => {
     const line = container.querySelector('[data-testid="div-span-main"]') as Element
     expect(line.closest('[data-stable-segment-id]')).toBe(outlines[0])
     expect(container.querySelectorAll('[data-testid="div-span-main"]').length).toBe(1)
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'div-span-main', 'edit-turn', 'body-g-anchor'])
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'div-span-main',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover'
+    ])
   })
 
   it('multiple adjacent fork boundaries keep stable relative order (outside edge, inside span)', () => {
@@ -230,10 +256,12 @@ describe('flow turns and boundaries', () => {
     expect(testIds(edge.container)).toEqual([
       'edit-turn',
       'body-g-newer',
+      'edit-turn-cover',
       'div-main',
       'div-b1',
       'edit-turn',
-      'body-g-anchor'
+      'body-g-anchor',
+      'edit-turn-cover'
     ])
     edge.unmount()
 
@@ -253,10 +281,12 @@ describe('flow turns and boundaries', () => {
     expect(testIds(span.container)).toEqual([
       'edit-turn',
       'body-g-newer',
+      'edit-turn-cover',
       'div-main',
       'div-b1',
       'edit-turn',
-      'body-g-anchor'
+      'body-g-anchor',
+      'edit-turn-cover'
     ])
     span.unmount()
     expect(adjacent().length).toBe(4)
@@ -455,14 +485,19 @@ describe('turn runs with boundary flush', () => {
 })
 
 describe('renderEditFlowNodes', () => {
-  it('encloses a normal user + assistant turn in exactly one container with no geometry overlay', () => {
-    // Render order is newest→oldest: assistant first, user second.
+  it('encloses a normal user + assistant turn in exactly one container with an out-of-flow cover only', () => {
+    // Render order is newest→oldest: assistant first, user second. The
+    // edit-only cover is absolutely positioned (out of flow), so turn
+    // geometry matches normal mode exactly.
     const { container } = renderFlow([turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')])
     const turns = container.querySelectorAll('[data-testid="edit-turn"]')
     expect(turns.length).toBe(1)
     expect(turns[0].getAttribute('data-turn-ask')).toBe('u1')
     expect(turns[0].querySelector('[data-testid="body-g-assistant"]')).not.toBeNull()
     expect(turns[0].querySelector('[data-testid="body-g-user"]')).not.toBeNull()
+    const cover = turns[0].querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(cover).not.toBeNull()
+    expect(window.getComputedStyle(cover).position).toBe('absolute')
     expect(container.querySelector('[data-testid="edit-preview-frame"]')).toBeNull()
     expect(container.querySelector('[data-group-ask]')).toBeNull()
   })
@@ -655,6 +690,151 @@ describe('renderEditFlowNodes', () => {
     expect(onTurnClick).toHaveBeenCalledTimes(4)
   })
 
+  it('edit mode shields content with inert display:contents and an edit-only cover, hiding the footer immediately', () => {
+    // Single-owner contract: the turn preserves the original body mount
+    // (markers, Sortable structure, label bar) with no per-child edit
+    // branches; the inert content + absolute cover block pointer/hover/
+    // drag/focus while the same edit-class commit hides the message footer
+    // with no transition (height reserved). The multi-answer label bar is
+    // intentionally unaffected.
+    const shieldTurn: FlowNode = {
+      kind: 'turn',
+      entry: {
+        groupKey: 'g-assistant',
+        turnAskId: 'u1',
+        selected: false,
+        segmentId: 'seg:edit',
+        segmentIsLive: false,
+        kind: 'history',
+        layerRunId: 'layer:x',
+        bodyNode: (
+          <div data-testid="body-shield">
+            <div data-testid="answer-group-selector" data-message-id="a2" data-interaction-region="answer-tab">
+              model b label
+            </div>
+            <div className="group-menu-bar" data-testid="shield-bar">
+              bar
+            </div>
+            <div className="MessageFooter" data-testid="shield-footer">
+              <div className="menubar show" data-testid="shield-menubar">
+                <div className="message-action-button" data-testid="shield-action">
+                  action
+                </div>
+              </div>
+              <span className="message-footer-metadata" data-testid="shield-metadata">
+                meta
+              </span>
+            </div>
+          </div>
+        )
+      }
+    }
+    const { container, rerender } = renderFlow([shieldTurn, turnNode('g-user', 'u1')], true, vi.fn())
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(turn.classList.contains('edit-turn-interactive')).toBe(true)
+    // Preserved geometry: relative positioning adds no offset; the cover
+    // is out of flow.
+    expect(window.getComputedStyle(turn).position).toBe('relative')
+    // Stable content wrapper present with no box-layout change + inert.
+    const body = turn.querySelector('[data-testid="body-shield"]') as HTMLElement
+    expect(body).not.toBeNull()
+    const content = body.parentElement
+    expect(content).not.toBeNull()
+    expect(content!.hasAttribute('inert')).toBe(true)
+    expect(window.getComputedStyle(content!).display).toBe('contents')
+    // Original child identity preserved verbatim (no child rewrites).
+    expect(turn.querySelector('[data-testid="answer-group-selector"]')).not.toBeNull()
+    expect(turn.querySelector('[data-testid="answer-group-selector"]')?.getAttribute('data-interaction-region')).toBe(
+      'answer-tab'
+    )
+    // Edit-only cover: non-focusable descriptive layer receiving pointer.
+    const cover = turn.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(cover).not.toBeNull()
+    expect(cover.getAttribute('aria-hidden')).toBe('true')
+    expect(cover.hasAttribute('tabindex')).toBe(false)
+    expect(cover.getAttribute('role')).toBeNull()
+    expect(window.getComputedStyle(cover).position).toBe('absolute')
+    expect(window.getComputedStyle(cover).zIndex).toBe('1')
+    // Immediate footer hide in the same commit: no transition, height
+    // reserved (visibility, not display:none).
+    const footer = turn.querySelector('[data-testid="shield-footer"]') as HTMLElement
+    expect(window.getComputedStyle(footer).visibility).toBe('hidden')
+    expect(window.getComputedStyle(footer).opacity).toBe('0')
+    expect(window.getComputedStyle(footer).transition).toBe('none')
+    expect(window.getComputedStyle(footer).display).not.toBe('none')
+    for (const testId of ['shield-menubar', 'shield-action', 'shield-metadata']) {
+      const el = turn.querySelector(`[data-testid="${testId}"]`) as HTMLElement
+      expect(window.getComputedStyle(el).visibility).toBe('hidden')
+      expect(window.getComputedStyle(el).opacity).toBe('0')
+      expect(window.getComputedStyle(el).transition).toBe('none')
+    }
+    // Multi-answer label bar is NOT affected by the footer hide.
+    const bar = turn.querySelector('[data-testid="shield-bar"]') as HTMLElement
+    expect(window.getComputedStyle(bar).visibility).not.toBe('hidden')
+    // Normal mode restores: no cover, no inert, footer visible, static box.
+    rerender(<>{renderEditFlowNodes({ nodes: [shieldTurn, turnNode('g-user', 'u1')], isEditMode: false })}</>)
+    const plain = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(plain.querySelector('[data-testid="edit-turn-cover"]')).toBeNull()
+    const plainBody = plain.querySelector('[data-testid="body-shield"]') as HTMLElement
+    expect(plainBody.parentElement?.hasAttribute('inert')).toBe(false)
+    expect(window.getComputedStyle(plain).position).not.toBe('relative')
+    const plainFooter = plain.querySelector('[data-testid="shield-footer"]') as HTMLElement
+    expect(window.getComputedStyle(plainFooter).visibility).not.toBe('hidden')
+  })
+
+  it('cover click selects the whole turn once with modifier forwarding', () => {
+    const onTurnClick = vi.fn()
+    const { container } = renderFlow([turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')], true, onTurnClick)
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    fireEvent.click(cover)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+    fireEvent.click(cover, { ctrlKey: true })
+    expect(onTurnClick).toHaveBeenCalledWith('u1', true, false)
+    fireEvent.click(cover, { shiftKey: true })
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, true)
+  })
+
+  it('right-click auto-selects a non-selected turn and preserves selection without suppressing the batch menu', () => {
+    const parentMenu = vi.fn()
+    const { container, rerender } = render(
+      <div onContextMenu={parentMenu}>
+        {renderEditFlowNodes({
+          nodes: [turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')],
+          isEditMode: true,
+          onTurnClick: vi.fn()
+        })}
+      </div>
+    )
+    // Replace the turn click spy via a fresh flow with a known handler.
+    const onTurnClick = vi.fn()
+    rerender(
+      <div onContextMenu={parentMenu}>
+        {renderEditFlowNodes({
+          nodes: [turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')],
+          isEditMode: true,
+          onTurnClick
+        })}
+      </div>
+    )
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    const result = fireEvent.contextMenu(cover)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+    // No blanket suppression: the ancestor batch menu still receives the
+    // bubbled event (not canceled).
+    expect(result).toBe(true)
+    expect(parentMenu).toHaveBeenCalledTimes(1)
+    // An already-selected turn preserves the selection (no toggle-clear).
+    const keep = vi.fn()
+    const selectedNode: FlowNode = turnNode('g-assistant', 'u1', { selected: true, segmentId: 'seg:sel' })
+    const userNode: FlowNode = turnNode('g-user', 'u1', { selected: true, segmentId: 'seg:sel' })
+    const { container: selectedContainer } = renderFlow([selectedNode, userNode], true, keep)
+    const selectedCover = selectedContainer.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    fireEvent.contextMenu(selectedCover)
+    expect(keep).not.toHaveBeenCalled()
+  })
+
   it('selected turns show the selected outline only, with no preview ring', () => {
     const selected = (groupKey: string, turnAskId: string, segmentId: string): FlowNode =>
       turnNode(groupKey, turnAskId, { selected: true, segmentId, segmentIsLive: false })
@@ -721,5 +901,468 @@ describe('renderEditFlowNodes', () => {
     expect(turn.classList.contains('edit-turn-interactive')).toBe(false)
     fireEvent.click(turn)
     expect(onTurnClick).not.toHaveBeenCalled()
+  })
+})
+
+describe('segment chrome ownership (group/run host sibling)', () => {
+  const segmentFixture = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['u1'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'u1',
+      lastMessageId: 'u1',
+      messageCount: 7,
+      ...overrides
+    }) as any
+
+  const segmentedTurn = (groupKey: string, opts?: Partial<FlowBodyEntry>): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? 'u1',
+      selected: opts?.selected ?? false,
+      segmentId: opts?.segmentId ?? 'seg:edit',
+      segmentIsLive: opts?.segmentIsLive ?? false,
+      kind: opts?.kind ?? 'history',
+      layerRunId: opts?.layerRunId ?? 'layer:x',
+      segment: opts?.segment ?? segmentFixture(),
+      segmentIsFirst: opts?.segmentIsFirst,
+      segmentIsLast: opts?.segmentIsLast,
+      bodyNode: opts?.bodyNode ?? (
+        <div
+          data-layer-kind="history"
+          data-layer-run-id="layer:x"
+          data-stable-group-id={groupKey}
+          data-testid={`body-${groupKey}`}>
+          {groupKey}
+        </div>
+      )
+    }
+  })
+
+  it('renders segment chrome as a sibling of the turn, outside inert content and the click cover', () => {
+    const onTurnClick = vi.fn()
+    const nodes: FlowNode[] = [
+      segmentedTurn('g-assistant', { segmentIsFirst: false, segmentIsLast: true }),
+      segmentedTurn('g-user', { segmentIsFirst: true })
+    ]
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          onTurnClick,
+          renderSegmentChrome: ({ isFirst, isLast, messageCount }) => (
+            <div
+              data-testid="segment-chrome"
+              data-first={String(isFirst)}
+              data-last={String(isLast)}
+              data-count={messageCount}
+            />
+          )
+        })}
+      </>
+    )
+    const chrome = container.querySelector('[data-testid="segment-chrome"]') as HTMLElement
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(chrome).not.toBeNull()
+    // Chrome is a sibling of the turn — never inside its inert content/capture
+    // subtree.
+    expect(turn.contains(chrome)).toBe(false)
+    expect(chrome.closest('[data-testid="edit-turn"]')).toBeNull()
+    const content = container.querySelector('[data-testid="body-g-user"]')!.parentElement as HTMLElement
+    expect(content.hasAttribute('inert')).toBe(true)
+    expect(content.contains(chrome)).toBe(false)
+    // Run-level first/last spans: first from the segment-first member, last
+    // from the segment-last member; count only on first.
+    expect(chrome.getAttribute('data-first')).toBe('true')
+    expect(chrome.getAttribute('data-last')).toBe('true')
+    expect(chrome.getAttribute('data-count')).toBe('7')
+    // Chrome click does not select the turn; original content still does.
+    fireEvent.click(chrome)
+    expect(onTurnClick).not.toHaveBeenCalled()
+    fireEvent.click(container.querySelector('[data-testid="body-g-user"]') as HTMLElement)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+  })
+
+  it('keeps chrome in normal mode too (shared rendering, no edit-mode variant)', () => {
+    const nodes: FlowNode[] = [segmentedTurn('g-user', { segmentIsFirst: true, segmentIsLast: true })]
+    const { container, rerender } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: false,
+          renderSegmentChrome: () => <div data-testid="segment-chrome" />
+        })}
+      </>
+    )
+    expect(container.querySelector('[data-testid="segment-chrome"]')).not.toBeNull()
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(turn.classList.contains('edit-turn-interactive')).toBe(false)
+    expect(turn.querySelector('[data-testid="edit-turn-cover"]')).toBeNull()
+    // Toggle edit mode keeps the chrome present.
+    rerender(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          renderSegmentChrome: () => <div data-testid="segment-chrome" />
+        })}
+      </>
+    )
+    expect(container.querySelector('[data-testid="segment-chrome"]')).not.toBeNull()
+    expect(
+      (container.querySelector('[data-testid="segment-chrome"]') as Element).closest('[data-testid="edit-turn"]')
+    ).toBeNull()
+  })
+
+  it('renders no chrome when no run member belongs to a segment', () => {
+    const nodes: FlowNode[] = [
+      { kind: 'turn', entry: { ...(segmentedTurn('g-user').entry as FlowBodyEntry), segment: undefined } }
+    ]
+    const renderChrome = vi.fn()
+    render(<>{renderEditFlowNodes({ nodes, isEditMode: true, renderSegmentChrome: renderChrome })}</>)
+    expect(renderChrome).not.toHaveBeenCalled()
+  })
+
+  it('deriveRunSegmentChrome anchors on the segment-first member and spans run-wide last', () => {
+    const run: FlowBodyEntry[] = [
+      { ...(segmentedTurn('g-assistant', { segmentIsLast: true }).entry as FlowBodyEntry) },
+      { ...(segmentedTurn('g-user', { segmentIsFirst: true }).entry as FlowBodyEntry) }
+    ]
+    const chrome = deriveRunSegmentChrome(run)
+    expect(chrome).not.toBeNull()
+    expect(chrome!.isFirst).toBe(true)
+    expect(chrome!.isLast).toBe(true)
+    expect(chrome!.messageCount).toBe(7)
+    expect(chrome!.segment.id).toBe('seg-1')
+
+    const middle: FlowBodyEntry[] = [{ ...(segmentedTurn('g-mid').entry as FlowBodyEntry) }]
+    const mid = deriveRunSegmentChrome(middle)
+    expect(mid!.isFirst).toBe(false)
+    expect(mid!.isLast).toBe(false)
+    expect(mid!.messageCount).toBeUndefined()
+
+    expect(
+      deriveRunSegmentChrome([{ ...(segmentedTurn('g-user').entry as FlowBodyEntry), segment: undefined }])
+    ).toBeNull()
+  })
+})
+
+describe('segment-homogeneous run invariant', () => {
+  const segmentFixture = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['u1'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'u1',
+      lastMessageId: 'u1',
+      messageCount: 7,
+      ...overrides
+    }) as any
+
+  const segmentedTurn = (groupKey: string, opts?: Partial<FlowBodyEntry>): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? 'u1',
+      selected: opts?.selected ?? false,
+      segmentId: opts?.segmentId ?? 'seg:edit',
+      segmentIsLive: opts?.segmentIsLive ?? false,
+      kind: opts?.kind ?? 'history',
+      layerRunId: opts?.layerRunId ?? 'layer:x',
+      segment: opts?.segment,
+      segmentIsFirst: opts?.segmentIsFirst,
+      segmentIsLast: opts?.segmentIsLast,
+      bodyNode: opts?.bodyNode ?? (
+        <div
+          data-layer-kind="history"
+          data-layer-run-id="layer:x"
+          data-stable-group-id={groupKey}
+          data-testid={`body-${groupKey}`}>
+          {groupKey}
+        </div>
+      )
+    }
+  })
+
+  const runsOf = (nodes: FlowNode[]): FlowBodyEntry[][] =>
+    buildOrderedFlowItems(nodes)
+      .filter((i) => i.kind === 'turn-run')
+      .map((i) => (i as { run: FlowBodyEntry[] }).run)
+
+  it('splits a same-askId turn at an unsegmented↔segment transition at the assistant subgroup', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const runs = runsOf([
+      segmentedTurn('g-assistant-seg', { turnAskId: 'u1', segment: segA, segmentIsFirst: true, segmentIsLast: true }),
+      segmentedTurn('g-user-plain', { turnAskId: 'u1', segment: undefined })
+    ])
+    expect(runs.length).toBe(2)
+    expect(runs[0].map((g) => g.groupKey)).toEqual(['g-assistant-seg'])
+    expect(runs[1].map((g) => g.groupKey)).toEqual(['g-user-plain'])
+    expect(runs[0][0].segment?.id).toBe('seg-a')
+    expect(runs[1][0].segment).toBeUndefined()
+  })
+
+  it('keeps first/last flags of one segment in a single run (flags alone never split)', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const runs = runsOf([
+      segmentedTurn('g-assistant', { turnAskId: 'u1', segment: segA, segmentIsLast: true }),
+      segmentedTurn('g-user', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ])
+    expect(runs.length).toBe(1)
+    expect(runs[0].map((g) => g.groupKey)).toEqual(['g-assistant', 'g-user'])
+    const chrome = deriveRunSegmentChrome(runs[0])
+    expect(chrome!.isFirst).toBe(true)
+    expect(chrome!.isLast).toBe(true)
+    expect(chrome!.segment.id).toBe('seg-a')
+  })
+
+  it('retains one chrome per segment for adjacent same-askId runs in distinct segments (no bleed); selection stays on the shared askId', () => {
+    const onTurnClick = vi.fn()
+    const segA = segmentFixture({ id: 'seg-a', messageCount: 3 })
+    const segB = segmentFixture({ id: 'seg-b', messageCount: 5 })
+    const nodes: FlowNode[] = [
+      segmentedTurn('g-b', { turnAskId: 'u1', segment: segB, segmentIsLast: true }),
+      segmentedTurn('g-a', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ]
+    const seen: string[] = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          onTurnClick,
+          renderSegmentChrome: ({ segment }) => {
+            seen.push(segment.id)
+            return <div data-testid={`chrome-${segment.id}`} />
+          }
+        })}
+      </>
+    )
+    // One homogeneous run per segment, each with its own chrome, in flow order.
+    expect(seen).toEqual(['seg-b', 'seg-a'])
+    expect(container.querySelectorAll('[data-testid="chrome-seg-a"]').length).toBe(1)
+    expect(container.querySelectorAll('[data-testid="chrome-seg-b"]').length).toBe(1)
+    // No bleed: each chrome sits beside its own turn only.
+    const turns = Array.from(container.querySelectorAll('[data-testid="edit-turn"]')) as HTMLElement[]
+    const turnA = turns.find((t) => t.querySelector('[data-testid="body-g-a"]')) as HTMLElement
+    const turnB = turns.find((t) => t.querySelector('[data-testid="body-g-b"]')) as HTMLElement
+    expect(turnA.querySelector('[data-testid="chrome-seg-a"]')).toBeNull()
+    expect(turnB.querySelector('[data-testid="chrome-seg-b"]')).toBeNull()
+    const hostA = turnA.parentElement as HTMLElement
+    const hostB = turnB.parentElement as HTMLElement
+    expect(hostA.querySelector('[data-testid="chrome-seg-a"]')).not.toBeNull()
+    expect(hostA.querySelector('[data-testid="chrome-seg-b"]')).toBeNull()
+    expect(hostB.querySelector('[data-testid="chrome-seg-b"]')).not.toBeNull()
+    expect(hostB.querySelector('[data-testid="chrome-seg-a"]')).toBeNull()
+    // Selection identity is the shared askId on both runs.
+    expect(turnA.getAttribute('data-turn-ask')).toBe('u1')
+    expect(turnB.getAttribute('data-turn-ask')).toBe('u1')
+    fireEvent.click(container.querySelector('[data-testid="body-g-a"]') as HTMLElement)
+    fireEvent.click(container.querySelector('[data-testid="body-g-b"]') as HTMLElement)
+    expect(onTurnClick).toHaveBeenNthCalledWith(1, 'u1', false, false)
+    expect(onTurnClick).toHaveBeenNthCalledWith(2, 'u1', false, false)
+  })
+
+  it('derives distinct stable run ids for adjacent same-askId runs split by segment membership', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const segB = segmentFixture({ id: 'seg-b' })
+    const runs = runsOf([
+      segmentedTurn('g-b', { turnAskId: 'u1', segment: segB }),
+      segmentedTurn('g-a', { turnAskId: 'u1', segment: segA })
+    ])
+    expect(runs.length).toBe(2)
+    const keys = runs.map((run) => deriveTurnKey(run))
+    expect(new Set(keys).size).toBe(2)
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  it('still joins a normal whole-turn run (same segment, same askId) and keeps boundaries split', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const joined = runsOf([
+      segmentedTurn('g-assistant', { turnAskId: 'u1', segment: segA, segmentIsLast: true }),
+      segmentedTurn('g-user', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ])
+    expect(joined.length).toBe(1)
+    expect(joined[0].map((g) => g.groupKey)).toEqual(['g-assistant', 'g-user'])
+    const split = buildOrderedFlowItems([
+      segmentedTurn('g1', { turnAskId: 'ask-x', segment: segA }),
+      {
+        kind: 'boundary',
+        entry: { boundaryKey: 'b1', boundaryKind: 'fork', node: <div data-testid="div-1" /> }
+      },
+      segmentedTurn('g2', { turnAskId: 'ask-x', segment: segA })
+    ])
+    expect(split.filter((i) => i.kind === 'turn-run').length).toBe(2)
+  })
+})
+
+describe('edit-mode native selection suppression owned by the turn', () => {
+  // One segmented run (renders sibling chrome) + one plain turn. The chrome
+  // sits beside the turn inside RunHost, never inside it.
+  const chromeSegment = { id: 'seg-chrome', topicId: 't1', name: 'Chrome', messageIds: ['u1'], messageCount: 4 } as any
+
+  const suppressionNodes = (): FlowNode[] => [
+    {
+      kind: 'turn',
+      entry: {
+        groupKey: 'g-chrome',
+        turnAskId: 'ask-chrome',
+        selected: false,
+        segmentId: 'seg:chrome',
+        segmentIsLive: false,
+        kind: 'history',
+        layerRunId: 'layer:x',
+        segment: chromeSegment,
+        segmentIsFirst: true,
+        segmentIsLast: true,
+        bodyNode: bodyDiv('g-chrome')
+      }
+    },
+    turnNode('g-plain', 'ask-plain')
+  ]
+
+  function renderFlowWithSiblingChrome(isEditMode: boolean) {
+    return render(
+      <div>
+        <button type="button" data-testid="plain-sibling-control">
+          ordinary non-message control
+        </button>
+        {renderEditFlowNodes({
+          nodes: suppressionNodes(),
+          isEditMode,
+          onTurnClick: vi.fn(),
+          renderSegmentChrome: () => (
+            <div data-testid="segment-chrome">
+              <input data-testid="segment-rename-input" defaultValue="Seg" />
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  function dispatchSelectStart(el: Element): Event {
+    const ev = new Event('selectstart', { bubbles: true, cancelable: true })
+    el.dispatchEvent(ev)
+    return ev
+  }
+
+  it('cancels selectstart inside the edit turn (inert content and cover)', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const body = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(dispatchSelectStart(body).defaultPrevented).toBe(true)
+    expect(dispatchSelectStart(cover).defaultPrevented).toBe(true)
+  })
+
+  it('keeps native selectstart on the sibling segment chrome/rename field and ordinary non-message controls', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const chrome = container.querySelector('[data-testid="segment-chrome"]') as HTMLElement
+    const input = container.querySelector('[data-testid="segment-rename-input"]') as HTMLElement
+    const sibling = container.querySelector('[data-testid="plain-sibling-control"]') as HTMLElement
+    // None of these live inside a turn, so the turn-scoped listener never
+    // sees (or cancels) their native selection.
+    expect(chrome.closest('[data-testid="edit-turn"]')).toBeNull()
+    expect(input.closest('[data-testid="edit-turn"]')).toBeNull()
+    for (const el of [chrome, input, sibling]) {
+      expect(dispatchSelectStart(el).defaultPrevented).toBe(false)
+    }
+  })
+
+  it('keeps the native mousedown boundary scoped to the turn, leaving right/secondary and outside untouched', () => {
+    const { container } = renderFlowWithSiblingChrome(true)
+    const body = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    const sibling = container.querySelector('[data-testid="plain-sibling-control"]') as HTMLElement
+    // Primary button inside the turn is blocked (no native range; the click
+    // capture still performs group selection).
+    expect(fireEvent.mouseDown(body, { button: 0 })).toBe(false)
+    expect(fireEvent.mouseDown(cover, { button: 0 })).toBe(false)
+    // Secondary button inside the turn is untouched so the batch context
+    // menu is preserved.
+    expect(fireEvent.mouseDown(cover, { button: 2 })).toBe(true)
+    // Primary button outside any turn is untouched.
+    expect(fireEvent.mouseDown(sibling, { button: 0 })).toBe(true)
+  })
+
+  it('moves focus from an editable to the stable message viewport on primary mousedown', () => {
+    const onTurnClick = vi.fn()
+    const makeNodes = (selected: boolean): FlowNode[] => [
+      turnNode('g-plain', 'ask-plain', { selected, segmentId: 'seg:plain' })
+    ]
+    const { container, rerender } = render(
+      <div id="messages" tabIndex={-1}>
+        <textarea data-testid="composer" />
+        {renderEditFlowNodes({ nodes: makeNodes(false), isEditMode: true, onTurnClick })}
+      </div>
+    )
+    const viewport = container.querySelector('#messages') as HTMLElement
+    const composer = container.querySelector('[data-testid="composer"]') as HTMLTextAreaElement
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    composer.focus()
+    expect(document.activeElement).toBe(composer)
+
+    expect(fireEvent.mouseDown(cover, { button: 0 })).toBe(false)
+    expect(document.activeElement).toBe(viewport)
+    fireEvent.click(cover)
+    expect(onTurnClick).toHaveBeenCalledWith('ask-plain', false, false)
+
+    rerender(
+      <div id="messages" tabIndex={-1}>
+        <textarea data-testid="composer" />
+        {renderEditFlowNodes({ nodes: makeNodes(true), isEditMode: true, onTurnClick })}
+      </div>
+    )
+    expect(container.querySelector('#messages')).toBe(viewport)
+    expect(document.activeElement).toBe(viewport)
+    expect(container.querySelector('[data-stable-segment-id="seg:plain"]')).not.toBeNull()
+  })
+
+  it('restores native selection on mode exit without remounting the turn or its content', () => {
+    const { container, rerender } = render(
+      <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>
+    )
+    const turnBefore = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    const bodyBefore = container.querySelector('[data-testid="body-g-plain"]') as HTMLElement
+    expect(dispatchSelectStart(bodyBefore).defaultPrevented).toBe(true)
+    expect(fireEvent.mouseDown(bodyBefore, { button: 0 })).toBe(false)
+
+    rerender(<>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: false, onTurnClick: vi.fn() })}</>)
+    // Same turn/body node identity: suppression toggles without a remount.
+    expect(container.querySelector('[data-testid="edit-turn"]')).toBe(turnBefore)
+    expect(container.querySelector('[data-testid="body-g-plain"]')).toBe(bodyBefore)
+    // Normal mode: neither selectstart nor mousedown is canceled.
+    expect(dispatchSelectStart(bodyBefore).defaultPrevented).toBe(false)
+    expect(fireEvent.mouseDown(bodyBefore, { button: 0 })).toBe(true)
+  })
+
+  it('attaches the turn selectstart listener in edit mode and detaches it on unmount', () => {
+    const addSpy = vi.spyOn(HTMLElement.prototype, 'addEventListener')
+    const removeSpy = vi.spyOn(HTMLElement.prototype, 'removeEventListener')
+    try {
+      const { unmount } = render(
+        <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>
+      )
+      const added = addSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
+      expect(added).toBeGreaterThan(0)
+      unmount()
+      const removed = removeSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
+      expect(removed).toBeGreaterThanOrEqual(added)
+    } finally {
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    }
   })
 })

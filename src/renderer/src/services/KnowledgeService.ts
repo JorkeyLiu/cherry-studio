@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import type { Span } from '@opentelemetry/api'
 import { AiProvider } from '@renderer/aiCore'
-import { getMessageContent } from '@renderer/aiCore/plugins/searchOrchestrationPlugin'
+import { getMessageContent } from '@renderer/aiCore/plugins/knowledgeOrchestrationPlugin'
 import { DEFAULT_KNOWLEDGE_DOCUMENT_COUNT, DEFAULT_KNOWLEDGE_THRESHOLD } from '@renderer/config/constant'
 import { getEmbeddingMaxContext } from '@renderer/config/embedings'
 import { REFERENCE_PROMPT } from '@renderer/config/prompts'
@@ -62,6 +62,7 @@ export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams
     : base.preprocessProvider
 
   const actualProvider = aiProvider.getActualProvider()
+  const rerankActualProvider = rerankAiProvider.getActualProvider()
 
   let { baseURL } = routeToEndpoint(actualProvider.apiHost)
 
@@ -91,7 +92,8 @@ export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams
       model: base.model.id,
       provider: base.model.provider,
       apiKey: aiProvider.getApiKey() || 'secret',
-      baseURL
+      baseURL,
+      ...(actualProvider.extra_headers ? { extra_headers: { ...actualProvider.extra_headers } } : {})
     },
     chunkSize,
     chunkOverlap: base.chunkOverlap,
@@ -99,7 +101,8 @@ export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams
       model: base.rerankModel?.id || '',
       provider: rerankProvider.name.toLowerCase(),
       apiKey: rerankAiProvider.getApiKey() || 'secret',
-      baseURL: rerankHost
+      baseURL: rerankHost,
+      ...(rerankActualProvider.extra_headers ? { extra_headers: { ...rerankActualProvider.extra_headers } } : {})
     },
     documentCount: base.documentCount,
     preprocessProvider: updatedPreprocessProvider

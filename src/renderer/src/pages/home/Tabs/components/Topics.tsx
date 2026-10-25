@@ -3,7 +3,7 @@ import AddButton from '@renderer/components/AddButton'
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import type { DraggableVirtualListRef } from '@renderer/components/DraggableList'
 import { DraggableVirtualList } from '@renderer/components/DraggableList'
-import { CopyIcon, DeleteIcon, EditIcon } from '@renderer/components/Icons'
+import { DeleteIcon, EditIcon } from '@renderer/components/Icons'
 import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
@@ -24,12 +24,14 @@ import {
   restoreOrdinaryTopic
 } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { exportTopicDataToFile, importTopicDataFromFile } from '@renderer/services/topicDataJson'
 import type { RootState } from '@renderer/store'
+import store from '@renderer/store'
+import { updateTopic as updateTopicAction } from '@renderer/store/assistants'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
-import { copyTopicAsMarkdown, copyTopicAsPlainText } from '@renderer/utils/copy'
 import {
   exportMarkdownToJoplin,
   exportMarkdownToSiyuan,
@@ -48,17 +50,16 @@ import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
   CheckSquare,
-  FolderOpen,
-  HelpCircle,
-  ListChecks,
+  FileDown,
+  FolderOutput,
+  ListTodo,
   NotebookPen,
-  PackagePlus,
   PinIcon,
   PinOffIcon,
   Save,
   Sparkles,
   Square,
-  UploadIcon,
+  SquareArrowOutUpLeft,
   XIcon
 } from 'lucide-react'
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
@@ -67,6 +68,31 @@ import { useDispatch, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
 import { deleteTopicFlow } from './topicDeletionFlow'
+
+// Local book-search icon: exact official lucide `book-search` nodes.
+// Installed lucide-react@0.525.0 has no BookSearch export (verified
+// `typeof BookSearch === 'undefined'`), so this local SVG carries the
+// requested shape without a dependency upgrade.
+function BookSearchIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="lucide lucide-book-search">
+      <path d="M11 22H5.5a1 1 0 0 1 0-5h4.501" />
+      <path d="m21 22-1.879-1.878" />
+      <path d="M3 19.5v-15A2.5 2.5 0 0 1 5.5 2H18a1 1 0 0 1 1 1v8" />
+      <circle cx="17" cy="18" r="3" />
+    </svg>
+  )
+}
 import { TopicManagePanel, useTopicManageMode } from './TopicManageMode'
 import { TopicTrashPanel } from './TopicTrashPanel'
 
@@ -74,6 +100,55 @@ interface Props {
   assistant: Assistant
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
+}
+
+// Manual Auto Rename projection guard (bounded same-name collision fix).
+// Main returns the current wire unchanged on preimage mismatch (graceful
+// no-op). A name-only `wire.name === summaryText` check is insufficient: an
+// intervening manual rename to exactly `summaryText` no-ops atomically but
+// still matches by name. The projection must therefore require the
+// authoritative returned flag to equal the requested `false`; any other flag
+// (true/null/undefined) means the automatic write did not win and the Redux
+// projection — including a manual `true` flag — must be left untouched.
+// Returns the projected Topic on authoritative success, otherwise null.
+export function resolveManualAutoRenameProjection(
+  wire: { name?: string | null; isNameManuallyEdited?: boolean | null },
+  summaryText: string,
+  latest: Topic
+): Topic | null {
+  if (wire.name !== summaryText) {
+    return null
+  }
+  if (wire.isNameManuallyEdited !== false) {
+    return null
+  }
+  return {
+    ...latest,
+    name: wire.name ?? summaryText,
+    isNameManuallyEdited: wire.isNameManuallyEdited ?? false
+  } as Topic
+}
+
+// Header + manage-mode topic filter: case-insensitive, space-separated
+// keywords (all must match). Shared by the ordinary list and multi-select so
+// a single header search filters both without a dual bottom search UI.
+export function filterTopicsBySearch<T extends { name: string }>(topics: T[], searchText: string): T[] {
+  if (!searchText.trim()) {
+    return topics
+  }
+  // Split by spaces and filter out empty strings
+  const keywords = searchText
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((k) => k.length > 0)
+  if (keywords.length === 0) {
+    return topics
+  }
+  // All keywords must match (AND logic)
+  return topics.filter((topic) => {
+    const lowerName = topic.name.toLowerCase()
+    return keywords.every((keyword) => lowerName.includes(keyword))
+  })
 }
 
 // LOCK-002: topics always render on the right; topic time is always shown and
@@ -99,9 +174,29 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const [trashRefreshVersion, setTrashRefreshVersion] = useState(0)
   const listRef = useRef<DraggableVirtualListRef>(null)
 
-  // 管理模式状态
+  // 管理模式状态 (searchText is shared: header search filters both the
+  // ordinary list and multi-select; no separate bottom search state)
   const manageState = useTopicManageMode()
-  const { isManageMode, selectedIds, searchText, enterManageMode, exitManageMode, toggleSelectTopic } = manageState
+  const { isManageMode, selectedIds, searchText, setSearchText, enterManageMode, exitManageMode, toggleSelectTopic } =
+    manageState
+
+  // Header search: replaces New Topic + search button with a focused input.
+  // Live-filters on change (Enter not required); Escape/X closes + clears.
+  const [isHeaderSearchOpen, setIsHeaderSearchOpen] = useState(false)
+  const headerSearchInputRef = useRef<HTMLInputElement>(null)
+  const openHeaderSearch = useCallback(() => {
+    setIsHeaderSearchOpen(true)
+  }, [])
+  const closeHeaderSearch = useCallback(() => {
+    setIsHeaderSearchOpen(false)
+    setSearchText('')
+  }, [setSearchText])
+
+  useEffect(() => {
+    if (isHeaderSearchOpen) {
+      headerSearchInputRef.current?.focus()
+    }
+  }, [isHeaderSearchOpen])
 
   const { startEdit, isEditing, inputProps } = useInPlaceEdit({
     onSave: async (name: string) => {
@@ -306,6 +401,21 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     [setActiveTopic]
   )
 
+  // Standalone topic JSON import: Main creates the new topic under the
+  // current assistant first; only the returned wire is projected to Redux
+  // and selected. Cancellation returns null silently (no toast).
+  const onImportTopicData = useCallback(async () => {
+    try {
+      const imported = await importTopicDataFromFile(assistant.id)
+      if (imported) {
+        addTopic(imported)
+        setActiveTopic(imported)
+      }
+    } catch (error) {
+      logger.error('Failed to import topic data', error as Error)
+    }
+  }, [assistant.id, addTopic, setActiveTopic, logger])
+
   const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
 
   const [_targetTopic, setTargetTopic] = useState<Topic | null>(null)
@@ -323,38 +433,76 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         async onClick() {
           // Bounded naming authority: exact count + latest ≤5 + their blocks.
           // Never materializes the whole topic for manual auto-rename.
+          // The authority preimage is captured before the summary await so a
+          // delayed result never overwrites a later manual title/flag; Main
+          // enforces it atomically (graceful no-op on mismatch/missing).
+          const topicIdForRename = topic.id
           let namingContext: {
+            topic: { id: string; name: string | null; isNameManuallyEdited: boolean | null }
             messageCount: number
             latestMessages: Message[]
             blocks: MessageBlock[]
           }
           try {
-            namingContext = await dbService.fetchTopicNamingContext(topic.id)
+            namingContext = await dbService.fetchTopicNamingContext(topicIdForRename)
           } catch (err) {
             logger.error('Failed to load naming context for auto-rename', err as Error)
             return
           }
           if (namingContext.messageCount >= 2) {
-            startTopicRenaming(topic.id)
+            const expectedPreimage = {
+              expectedName: namingContext.topic.name ?? null,
+              expectedIsNameManuallyEdited: namingContext.topic.isNameManuallyEdited ?? null
+            }
+            startTopicRenaming(topicIdForRename)
             try {
               const { text: summaryText, error } = await fetchMessagesSummary({
                 messages: namingContext.latestMessages,
                 blocksById: createSnapshotBlockMap(namingContext.blocks)
               })
               if (summaryText) {
-                const updatedTopic = { ...topic, name: summaryText, isNameManuallyEdited: false }
+                let wire: { name?: string | null; isNameManuallyEdited?: boolean | null }
                 try {
-                  // Phase 5.2B: SQLite persists before Redux (LOCK-528); on
-                  // failure Redux is left unchanged and the toast stays unrenameed.
-                  await updateTopic(updatedTopic)
+                  // Name + clear manual flag only; Main guards the preimage
+                  // atomically. Missing topic throws NOT_FOUND → no-op.
+                  wire = await dbService.updateTopicMetadata(
+                    topicIdForRename,
+                    summaryText,
+                    undefined,
+                    undefined,
+                    false,
+                    expectedPreimage
+                  )
                 } catch (err) {
                   logger.error('Failed to persist auto-renamed topic', err as Error)
+                  return
                 }
+                // Projection only after authoritative success, built from the
+                // latest Redux topic so only the intended fields change.
+                const latest = store
+                  .getState()
+                  .assistants.assistants.flatMap((a) => a.topics)
+                  .find((t) => t.id === topicIdForRename)
+                if (!latest) {
+                  return
+                }
+                // Authoritative flag guard: same-name collision (intervening
+                // manual rename to exactly summaryText) no-ops atomically with
+                // flag true — never clear the projection flag. Null/skip when
+                // the returned flag is not the requested false.
+                const data = resolveManualAutoRenameProjection(wire, summaryText, latest)
+                if (!data) {
+                  return
+                }
+                const ownerAssistantId =
+                  store.getState().assistants.assistants.find((a) => a.topics?.some((t) => t.id === topicIdForRename))
+                    ?.id ?? assistant.id
+                store.dispatch(updateTopicAction({ assistantId: ownerAssistantId, topic: data }))
               } else if (error) {
                 window.toast?.error(`${t('message.error.fetchTopicName')}: ${error}`)
               }
             } finally {
-              finishTopicRenaming(topic.id)
+              finishTopicRenaming(topicIdForRename)
             }
           }
         }
@@ -385,42 +533,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
-        label: t('chat.topics.prompt.label'),
-        key: 'topic-prompt',
-        icon: <PackagePlus size={14} />,
-        extra: (
-          <Tooltip title={t('chat.topics.prompt.tips')}>
-            <HelpCircle size={14} />
-          </Tooltip>
-        ),
-        async onClick() {
-          const prompt = await PromptPopup.show({
-            title: t('chat.topics.prompt.edit.title'),
-            message: '',
-            defaultValue: topic?.prompt || '',
-            inputProps: {
-              rows: 8,
-              allowClear: true
-            }
-          })
-
-          if (prompt !== null) {
-            void (async () => {
-              const updatedTopic = { ...topic, prompt: prompt.trim() }
-              try {
-                // Phase 5.2B: SQLite persists before Redux (LOCK-528).
-                await updateTopic(updatedTopic)
-                if (topic.id === activeTopic.id) {
-                  setActiveTopic(updatedTopic)
-                }
-              } catch (err) {
-                logger.error('Failed to persist topic prompt', err as Error)
-              }
-            })()
-          }
-        }
-      },
-      {
         label: topic.pinned ? t('chat.topics.unpin') : t('chat.topics.pin'),
         key: 'pin',
         icon: topic.pinned ? <PinOffIcon size={14} /> : <PinIcon size={14} />,
@@ -429,40 +541,18 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
-        label: t('notes.save'),
-        key: 'notes',
-        icon: <NotebookPen size={14} />,
-        onClick: async () => {
-          void exportTopicToNotes(topic, notesPath)
-        }
-      },
-      {
-        label: t('chat.topics.copy.title'),
-        key: 'copy',
-        icon: <CopyIcon size={14} />,
-        children: [
-          {
-            label: t('chat.topics.copy.image'),
-            key: 'img',
-            onClick: () => EventEmitter.emit(EVENT_NAMES.COPY_TOPIC_IMAGE, topic)
-          },
-          {
-            label: t('chat.topics.copy.md'),
-            key: 'md',
-            onClick: () => copyTopicAsMarkdown(topic)
-          },
-          {
-            label: t('chat.topics.copy.plain_text'),
-            key: 'plain_text',
-            onClick: () => copyTopicAsPlainText(topic)
-          }
-        ]
-      },
-      {
         label: t('chat.save.label'),
         key: 'save',
         icon: <Save size={14} />,
         children: [
+          {
+            label: t('notes.save'),
+            key: 'notes',
+            icon: <NotebookPen size={14} />,
+            onClick: async () => {
+              void exportTopicToNotes(topic, notesPath)
+            }
+          },
           {
             label: t('chat.save.topic.knowledge.title'),
             key: 'knowledge',
@@ -482,7 +572,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       {
         label: t('chat.topics.export.title'),
         key: 'export',
-        icon: <UploadIcon size={14} />,
+        icon: <SquareArrowOutUpLeft size={14} />,
         children: [
           exportMenuOptions.image && {
             label: t('chat.topics.export.image'),
@@ -545,6 +635,16 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
               const markdown = await topicToMarkdown(topic)
               void exportMarkdownToSiyuan(topic.name, markdown)
             }
+          },
+          // Standalone topic JSON data (whole logical topic incl. all
+          // branches). Always available — no ExportMenuSettings toggle.
+          // No icon by request: this item renders as bare text.
+          {
+            label: t('chat.topics.export.json.label'),
+            key: 'json',
+            onClick: () => {
+              void exportTopicDataToFile(topic)
+            }
           }
         ].filter(Boolean) as ItemType<MenuItemType>[]
       }
@@ -554,7 +654,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       menus.push({
         label: t('chat.topics.move_to'),
         key: 'move',
-        icon: <FolderOpen size={14} />,
+        icon: <FolderOutput size={14} />,
         popupClassName: 'move-to-submenu',
         children: assistants
           .filter((a) => a.id !== assistant.id)
@@ -597,8 +697,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     notesPath,
     assistant,
     updateTopic,
-    activeTopic.id,
-    setActiveTopic,
     onPinTopic,
     onMoveTopic,
     onDeleteTopic
@@ -607,27 +705,14 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   // LOCK-002: pinned topics always sort to the top.
   const sortedTopics = useMemo(() => sortTopicsPinnedFirst(assistant.topics), [assistant.topics])
 
-  // Filter topics based on search text (only in manage mode)
-  // Supports: case-insensitive, space-separated keywords (all must match)
+  // Filter topics based on header search text (ordinary list + manage mode).
+  // Supports: case-insensitive, space-separated keywords (all must match).
+  // Live-filtered via deferred value — Enter is not required.
   const deferredSearchText = useDeferredValue(searchText)
-  const filteredTopics = useMemo(() => {
-    if (!isManageMode || !deferredSearchText.trim()) {
-      return sortedTopics
-    }
-    // Split by spaces and filter out empty strings
-    const keywords = deferredSearchText
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((k) => k.length > 0)
-    if (keywords.length === 0) {
-      return sortedTopics
-    }
-    // All keywords must match (AND logic)
-    return sortedTopics.filter((topic) => {
-      const lowerName = topic.name.toLowerCase()
-      return keywords.every((keyword) => lowerName.includes(keyword))
-    })
-  }, [sortedTopics, deferredSearchText, isManageMode])
+  const filteredTopics = useMemo(
+    () => filterTopicsBySearch(sortedTopics, deferredSearchText),
+    [sortedTopics, deferredSearchText]
+  )
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -640,22 +725,108 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           flex: '1 1 auto',
           minHeight: 0,
           height: 'auto',
-          padding: '8px 0 10px 10px',
-          paddingBottom: isManageMode ? 70 : 10
+          padding: '8px 0 10px 10px'
         }}
         itemContainerStyle={{ paddingBottom: '8px' }}
         header={
           <HeaderRow>
-            <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
-              {t('chat.add.topic.title')}
-            </AddButton>
-            <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
-              <HeaderIconButton
-                onClick={isManageMode ? exitManageMode : enterManageMode}
-                className={isManageMode ? 'active' : ''}>
-                <ListChecks size={14} />
-              </HeaderIconButton>
-            </Tooltip>
+            {isHeaderSearchOpen ? (
+              <HeaderSearchInputWrapper>
+                <HeaderSearchInput
+                  ref={headerSearchInputRef}
+                  type="text"
+                  placeholder={t('chat.topics.search.placeholder')}
+                  aria-label={t('chat.topics.search.title')}
+                  data-testid="topic-search-input"
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      closeHeaderSearch()
+                    }
+                  }}
+                />
+              </HeaderSearchInputWrapper>
+            ) : (
+              <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
+                {t('chat.add.topic.title')}
+              </AddButton>
+            )}
+            <HeaderIconGroup>
+              {isHeaderSearchOpen ? (
+                <Tooltip title={t('common.close')} mouseEnterDelay={0.5}>
+                  <HeaderIconButton
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('common.close')}
+                    data-testid="topic-search-close"
+                    onClick={closeHeaderSearch}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        closeHeaderSearch()
+                      }
+                    }}>
+                    <XIcon size={14} />
+                  </HeaderIconButton>
+                </Tooltip>
+              ) : (
+                <Tooltip title={t('chat.topics.search.title')} mouseEnterDelay={0.5}>
+                  <HeaderIconButton
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('chat.topics.search.title')}
+                    data-testid="topic-search-btn"
+                    onClick={openHeaderSearch}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        openHeaderSearch()
+                      }
+                    }}>
+                    <BookSearchIcon size={14} />
+                  </HeaderIconButton>
+                </Tooltip>
+              )}
+              <Tooltip title={t('chat.topics.import.action')} mouseEnterDelay={0.5}>
+                <HeaderIconButton
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t('chat.topics.import.action')}
+                  data-testid="topic-import-btn"
+                  onClick={() => void onImportTopicData()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      void onImportTopicData()
+                    }
+                  }}>
+                  <FileDown size={14} />
+                </HeaderIconButton>
+              </Tooltip>
+              <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
+                <HeaderIconButton
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t('chat.topics.manage.title')}
+                  data-testid="topic-manage-btn"
+                  onClick={isManageMode ? exitManageMode : enterManageMode}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      if (isManageMode) {
+                        exitManageMode()
+                      } else {
+                        enterManageMode()
+                      }
+                    }
+                  }}
+                  className={isManageMode ? 'active' : ''}>
+                  <ListTodo size={14} />
+                </HeaderIconButton>
+              </Tooltip>
+            </HeaderIconGroup>
           </HeaderRow>
         }
         disabled={isManageMode}>
@@ -795,29 +966,33 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         onTrashChanged={refreshTrashTopics}
       />
 
-      {/* 回收站面板 */}
-      <TopicTrashPanel
-        assistantId={assistant.id}
-        refreshVersion={trashRefreshVersion}
-        onRestore={handleRestoreTopic}
-        onPermanentDelete={async (topicId) => {
-          // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
-          // cleanup result is consumed (LOCK-525).
-          await hardDeleteOrdinaryTopic(topicId)
-          refreshTrashTopics()
-        }}
-        onEmptyTrash={async () => {
-          try {
-            // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
-            // transaction with one aggregate cleanup result (LOCK-531).
-            await emptyOrdinaryTrash(assistant.id)
-          } finally {
-            // Reconcile the panel with the persisted state even when a
-            // mutation failed part-way (LOCK-528).
+      {/* 回收站面板: hidden while management is active to prevent stacked
+          border/occlusion with the normal-flow management toolbar. Normal
+          recycle-bin behavior is unchanged outside management. */}
+      {!isManageMode && (
+        <TopicTrashPanel
+          assistantId={assistant.id}
+          refreshVersion={trashRefreshVersion}
+          onRestore={handleRestoreTopic}
+          onPermanentDelete={async (topicId) => {
+            // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
+            // cleanup result is consumed (LOCK-525).
+            await hardDeleteOrdinaryTopic(topicId)
             refreshTrashTopics()
-          }
-        }}
-      />
+          }}
+          onEmptyTrash={async () => {
+            try {
+              // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
+              // transaction with one aggregate cleanup result (LOCK-531).
+              await emptyOrdinaryTrash(assistant.id)
+            } finally {
+              // Reconcile the panel with the persisted state even when a
+              // mutation failed part-way (LOCK-528).
+              refreshTrashTopics()
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -959,6 +1134,8 @@ const MenuButton = styled.div`
   }
 `
 
+// Reason: AddButton is 36px tall while the previous 32px search controls
+// collapsed the header by 4px when search opened. Keep both modes at 36px.
 const HeaderRow = styled.div`
   display: flex;
   flex-direction: row;
@@ -967,16 +1144,31 @@ const HeaderRow = styled.div`
   padding-right: 10px;
   margin-bottom: 8px;
   margin-top: 2px;
+  min-height: 36px;
+  box-sizing: border-box;
+`
+
+const HeaderIconGroup = styled.div`
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  flex: none;
+  flex-shrink: 0;
+  margin-left: 0;
+  width: auto;
 `
 
 const HeaderIconButton = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: 28px;
+  height: 36px;
+  min-width: 28px;
+  min-height: 36px;
+  flex: none;
+  box-sizing: border-box;
   border-radius: var(--list-item-border-radius);
   cursor: pointer;
   color: var(--color-text-2);
@@ -993,6 +1185,33 @@ const HeaderIconButton = styled.div`
     &:hover {
       background-color: var(--color-background-mute);
     }
+  }
+`
+
+const HeaderSearchInputWrapper = styled.div`
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  min-height: 36px;
+  box-sizing: border-box;
+`
+
+const HeaderSearchInput = styled.input`
+  height: 36px;
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 36px;
+  color: var(--color-text-1);
+  outline: none;
+  box-sizing: border-box;
+
+  &::placeholder {
+    color: var(--color-text-3);
   }
 `
 

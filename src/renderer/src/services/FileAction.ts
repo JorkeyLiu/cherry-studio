@@ -69,6 +69,12 @@ export async function handleDelete(fileId: string, t: (key: string) => string) {
       logger.info(`Deleted file ${fileId} (no referencing blocks)`)
     } else {
       // Blocks reference this file — atomic delete via Main cleanup result.
+      // No addressed route is supplied: file deletion is a topic-agnostic
+      // FileManager operation and the referencing blocks may span topics/routes
+      // (including a reference target's readonly foreign prefix), so there is no
+      // single UI-addressed `{ topicId, branchId }` tuple to assert. Main
+      // resolves each block's canonical owner from its committed parent, which
+      // is the only correct address for this cross-topic sweep.
       const blockIdsToDelete = relatedBlocks.map((b) => b.id as string)
       const cleanup = await dbService.deleteBlocks(blockIdsToDelete)
       await consumeFileCleanupResult(cleanup)

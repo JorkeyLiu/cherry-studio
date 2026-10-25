@@ -12,6 +12,7 @@ import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import AiSdkToChunkAdapter from './chunk/AiSdkToChunkAdapter'
 import { buildPlugins } from './plugins/PluginBuilder'
+import { resolveOutboundRequestHeaders } from './prepareParams/header'
 import { adaptProvider, getActualProvider, providerToAiSdkConfig } from './provider/providerConfig'
 import { listModels } from './services/listModels'
 import type { AppProviderSettingsMap, CompletionsResult, ProviderConfig } from './types'
@@ -239,6 +240,22 @@ export default class AiProvider {
       config: middlewareConfig
     })
 
+    // Single request-boundary policy for connection headers/session identity:
+    // topic-scoped calls reuse the stable topic id, topicless calls get one
+    // request-local opaque identity (constant for this invocation/retries),
+    // strictly gated to the exact HTTPS OpenCode Go endpoint variants.
+    // Explicit per-request headers win case-insensitively over provider extra
+    // headers; provider extra session wins over the automatic identity.
+    // Unrelated headers, credentials and abort behavior pass through untouched.
+    const outboundHeaders = resolveOutboundRequestHeaders({
+      apiHost: this.actualProvider.apiHost,
+      topicId: middlewareConfig.topicId,
+      explicitHeaders: (params as { headers?: Record<string, string | undefined> }).headers,
+      providerExtraHeaders: this.actualProvider.extra_headers as Record<string, string | undefined> | undefined
+    })
+    const requestParams =
+      outboundHeaders === (params as { headers?: unknown }).headers ? params : { ...params, headers: outboundHeaders }
+
     // 用构建好的插件数组创建executor
     // LOCK-001/003: bounded cold-path timing for provider executor creation.
     const tExecutor = performance.now()
@@ -268,15 +285,15 @@ export default class AiProvider {
       const accumulate = this.model!.supported_text_delta !== false // true and undefined
       const adapter = new AiSdkToChunkAdapter(
         middlewareConfig.onChunk,
-        middlewareConfig.mcpTools,
+        [],
         accumulate,
-        middlewareConfig.enableWebSearch,
+        false,
         providerConfig.providerId,
         middlewareConfig.idleTimeout
       )
 
       const streamResult = await executor.streamText({
-        ...params,
+        ...requestParams,
         model: modelId,
         experimental_context: { onChunk: middlewareConfig.onChunk }
       })
@@ -295,7 +312,7 @@ export default class AiProvider {
       let streamError: unknown = undefined
 
       const streamResult = await executor.streamText({
-        ...params,
+        ...requestParams,
         model: modelId,
         onError({ error }) {
           streamError = error
@@ -354,10 +371,19 @@ export default class AiProvider {
       []
     )
 
+    // Same header policy at the embedding protocol boundary: topicless
+    // request-local opaque identity on Go only, via the existing transport
+    // headers option (no new transport lifecycle, no body conflation).
+    const outboundHeaders = resolveOutboundRequestHeaders({
+      apiHost: this.actualProvider.apiHost,
+      providerExtraHeaders: this.actualProvider.extra_headers as Record<string, string | undefined> | undefined
+    })
+
     // 使用 AI SDK embedMany 测试获取维度
     const result = await executor.embedMany({
       model: model.id,
-      values: ['test']
+      values: ['test'],
+      ...(outboundHeaders ? { headers: outboundHeaders as Record<string, string> } : {})
     })
 
     return result.embeddings[0].length
@@ -420,9 +446,16 @@ export default class AiProvider {
       providerConfig.providerSettings,
       []
     )
+    // Same header policy at the image protocol boundary (existing headers
+    // option only; abort/signal behavior preserved).
+    const outboundHeaders = resolveOutboundRequestHeaders({
+      apiHost: this.actualProvider.apiHost,
+      providerExtraHeaders: this.actualProvider.extra_headers as Record<string, string | undefined> | undefined
+    })
     const result = await executor.generateImage({
       model: model, // 直接使用 model ID 字符串，由 executor 内部解析
-      ...aiSdkParams
+      ...aiSdkParams,
+      ...(outboundHeaders ? { headers: outboundHeaders as Record<string, string> } : {})
     })
 
     return this.convertImageResult(result)
@@ -442,6 +475,10 @@ export default class AiProvider {
     )
 
     // 使用 AI SDK 的 generateImage，通过 prompt.images 实现编辑
+    const outboundEditHeaders = resolveOutboundRequestHeaders({
+      apiHost: this.actualProvider.apiHost,
+      providerExtraHeaders: this.actualProvider.extra_headers as Record<string, string | undefined> | undefined
+    })
     const result = await executor.generateImage({
       model: model,
       prompt: {
@@ -450,7 +487,8 @@ export default class AiProvider {
         ...(mask && { mask }) // 可选的 mask（用于 inpainting）
       },
       size: (imageSize || '1024x1024') as `${number}x${number}`,
-      ...(signal && { abortSignal: signal })
+      ...(signal && { abortSignal: signal }),
+      ...(outboundEditHeaders ? { headers: outboundEditHeaders as Record<string, string> } : {})
     })
 
     return this.convertImageResult(result)

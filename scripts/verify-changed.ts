@@ -1,11 +1,12 @@
 /**
  * verify:changed — strict renderer-only fast-feedback command.
  *
- * Locked decisions (LOCK-VG-001..006):
- * - build:check remains sole authoritative aggregate pre-commit gate.
- * - verify:changed is local feedback only, never CI proof, never a substitute.
+ * Design constraints:
+ * - Validation commands are independent; verify:changed is local feedback only.
+ * - verify:changed is never CI proof and never a completion gate.
  * - Fast path is renderer-only; any Main/preload/shared/package/config/scripts/unknown
- *   path must fail closed with instruction to run `pnpm build:check`.
+ *   path must fail closed with instruction to run the affected standalone commands
+ *   (`pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm build`).
  * - Fast renderer test execution must enter the shared native runtime via
  *   `pnpm native:run node -- ...` and preserve real exit codes.
  * - CI workflows remain unchanged; no pool caps changed here.
@@ -212,10 +213,11 @@ function usage(): string {
     '  --help, -h     show this help',
     '',
     'Strict renderer-only fast-feedback. Any Main/preload/shared/package/config/scripts/unknown',
-    'path fails closed and instructs to run `pnpm build:check`. Renderer-only changes enter',
-    'the shared native runtime via `pnpm native:run node -- vitest --changed=<base>` and',
-    'include untracked renderer files via explicit related invocation. Docs-only exits 0 with',
-    'a no-op message and no validation claim. Never a substitute for `pnpm build:check` or CI proof.'
+    'path fails closed and instructs to run the affected standalone validation commands.',
+    'Renderer-only changes enter the shared native runtime via',
+    '`pnpm native:run node -- vitest --changed=<base>` and include untracked renderer files',
+    'via explicit related invocation. Docs-only exits 0 with a no-op message and no validation',
+    'claim. Never a completion gate and never CI proof.'
   ].join('\n')
 }
 
@@ -469,9 +471,8 @@ function failClosed(message: string, base: string, extra?: string): never {
   if (extra) console.error(`  ${extra}`)
   console.error('')
   console.error('This command is local feedback only and cannot validate cross-process, package, or config changes.')
-  console.error('Run `pnpm build:check` for the authoritative aggregate gate (lint + openapi:check + full test).')
   console.error(
-    'Do not run `pnpm format`, `pnpm lint`, and `pnpm test` separately before `pnpm build:check`; `build:check` already proves those.'
+    'Run the affected standalone commands instead (`pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm build`).'
   )
   process.exit(1)
 }
@@ -512,9 +513,8 @@ export function mainWithDeps(deps: Deps = defaultDeps): void {
     }
     console.error('')
     console.error('This command is local feedback only and cannot validate cross-process, package, or config changes.')
-    console.error('Run `pnpm build:check` for the authoritative aggregate gate (lint + openapi:check + full test).')
     console.error(
-      'Do not run `pnpm format`, `pnpm lint`, and `pnpm test` separately before `pnpm build:check`; `build:check` already proves those.'
+      'Run the affected standalone commands instead (`pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm build`).'
     )
     process.exit(1)
   }
@@ -522,7 +522,7 @@ export function mainWithDeps(deps: Deps = defaultDeps): void {
   if (result.verdict === 'docs-only') {
     console.log('verify:changed: no renderer code changes detected (docs-only or no changes).')
     console.log('No validation performed — this is local no-op feedback, not proof of full validation.')
-    console.log('For code-surface changes, run `pnpm build:check` (sole authoritative pre-commit gate).')
+    console.log('For code-surface changes, run the affected standalone validation commands.')
     process.exit(0)
   }
 
@@ -553,7 +553,7 @@ export function mainWithDeps(deps: Deps = defaultDeps): void {
 
   console.log('')
   console.log('verify:changed: renderer fast-feedback passed (local only).')
-  console.log('This is NOT proof of full validation and NOT a substitute for `pnpm build:check` or CI.')
+  console.log('This is NOT proof of full validation and is NOT CI proof.')
   process.exit(0)
 }
 
