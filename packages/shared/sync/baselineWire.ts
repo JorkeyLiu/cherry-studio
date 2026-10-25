@@ -24,8 +24,10 @@ const canonicalize: (value: unknown) => string | undefined = (() => {
   return canonicalizeImport as unknown as (v: unknown) => string | undefined
 })()
 
+// Portable persisted message result metadata (single shared sanitized shape).
 // Strict portable assistant-config DTO (shared contract, single source).
 import { validateAssistantConfigPayload } from './assistantConfig'
+import { RESULT_META_FIELD, validateResultMeta } from './portableResult'
 
 // ---------------------------------------------------------------------------
 // Constants (locked per SYNC-DATA-027/032/040/041/045 + §10A.1)
@@ -481,6 +483,59 @@ function validateFieldClocks(value: unknown, expectedKeys: ReadonlySet<string>, 
 }
 
 // ---------------------------------------------------------------------------
+// Portable result container (`resultMeta`) — optional declared extension
+//
+// Latest-version entity shapes (v6 + the dedicated stable-replace unit) may
+// carry ONE extra declared key, `resultMeta`, holding the sanitized portable
+// message result state (see portableResult.ts). It is optional so additive
+// peers and previously captured entities stay valid, but whenever it is
+// present its value is strictly validated and its per-field clock is
+// REQUIRED; a payload without the key must not carry its clock.
+// Historical v1-v5 entity shapes remain byte-for-byte unchanged.
+// ---------------------------------------------------------------------------
+
+const RESULT_META_OPTIONAL_KEYS: ReadonlySet<string> = new Set<string>([RESULT_META_FIELD])
+
+function assertKeysWithOptional(
+  obj: Record<string, unknown>,
+  required: ReadonlySet<string>,
+  optional: ReadonlySet<string>,
+  path: string
+): void {
+  for (const k of Object.keys(obj)) {
+    if (!required.has(k) && !optional.has(k)) throw new ValidationError(`unexpected key "${k}"`, path)
+  }
+  for (const k of required) {
+    if (!(k in obj)) throw new ValidationError(`missing key "${k}"`, path)
+  }
+}
+
+/**
+ * Validate the optional portable container and its clock binding.
+ * `present` states whether the entity payload declares the key.
+ */
+function validateOptionalResultMeta(
+  obj: Record<string, unknown>,
+  fieldClocks: unknown,
+  kind: 'message' | 'message_block',
+  present: boolean,
+  path: string
+): void {
+  const clocksObj = assertPlainObject(fieldClocks, `${path}.fieldClocks`)
+  const hasClock = Object.prototype.hasOwnProperty.call(clocksObj, RESULT_META_FIELD)
+  if (!present) {
+    if (hasClock) {
+      throw new ValidationError(`${RESULT_META_FIELD} clock without payload value`, `${path}.fieldClocks`)
+    }
+    return
+  }
+  const err = validateResultMeta(kind, obj[RESULT_META_FIELD], `${path}.${RESULT_META_FIELD}`)
+  if (err) throw new ValidationError(err, `${path}.${RESULT_META_FIELD}`)
+  if (!hasClock) {
+    throw new ValidationError(`missing fieldClock "${RESULT_META_FIELD}"`, `${path}.fieldClocks`)
+  }
+}
+// ---------------------------------------------------------------------------
 // Entity validators
 // ---------------------------------------------------------------------------
 
@@ -545,11 +600,53 @@ function validateTopic(value: unknown, path: string): void {
   validateFieldClocks(obj.fieldClocks, TOPIC_FIELD_CLOCK_KEYS, `${path}.fieldClocks`)
 }
 
-export function validateMessage(value: unknown, path: string): void {
+const NO_OPTIONAL_KEYS: ReadonlySet<string> = new Set<string>()
+
+function validateFieldClocksWithOptional(
+  value: unknown,
+  requiredKeys: ReadonlySet<string>,
+  optionalKeys: ReadonlySet<string>,
+  path: string
+): void {
   const obj = assertPlainObject(value, path)
-  assertExactKeys(obj, MESSAGE_KEYS, path)
+  for (const k of Object.keys(obj)) {
+    if (!requiredKeys.has(k) && !optionalKeys.has(k)) throw new ValidationError(`unknown key "${k}"`, path)
+  }
+  for (const k of requiredKeys) {
+    if (!(k in obj)) throw new ValidationError(`missing required key "${k}"`, path)
+    validateClock(obj[k], `${path}.${k}`, false)
+  }
+  for (const k of optionalKeys) {
+    if (!(k in obj)) continue
+    validateClock(obj[k], `${path}.${k}`, false)
+  }
+}
+
+interface MessageShapeSpec {
+  keys: ReadonlySet<string>
+  fieldClockKeys: ReadonlySet<string>
+  /** v3+ message shape carries the immutable owner `branchId`. */
+  branchId: boolean
+  /** Latest-version shapes accept the optional portable result container. */
+  resultMeta: boolean
+}
+
+/**
+ * Single message-entity body shared by every wire version. Only the required
+ * key set, the clocked-field set, and the additive optional portable result
+ * container differ per version — never the value rules.
+ */
+export function validateMessageShape(value: unknown, path: string, spec: MessageShapeSpec): void {
+  const obj = assertPlainObject(value, path)
+  if (spec.resultMeta) assertKeysWithOptional(obj, spec.keys, RESULT_META_OPTIONAL_KEYS, path)
+  else assertExactKeys(obj, spec.keys, path)
   assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
   assertNonEmptyValidUnicodeScalarString(obj.topicId, `${path}.topicId`)
+  if (spec.branchId) {
+    if (obj.branchId !== null) {
+      assertNonEmptyValidUnicodeScalarString(obj.branchId, `${path}.branchId`)
+    }
+  }
   assertNullableValidUnicodeScalarString(obj.role, `${path}.role`)
   assertNullableValidUnicodeScalarString(obj.content, `${path}.content`)
   const status = assertNullableValidUnicodeScalarString(obj.status, `${path}.status`)
@@ -563,21 +660,46 @@ export function validateMessage(value: unknown, path: string): void {
   assertNullableValidUnicodeScalarString(obj.createdAt, `${path}.createdAt`)
   assertNullableValidUnicodeScalarString(obj.updatedAt, `${path}.updatedAt`)
   validateClock(obj.entityClock, `${path}.entityClock`, false)
-  validateFieldClocks(obj.fieldClocks, MESSAGE_FIELD_CLOCK_KEYS, `${path}.fieldClocks`)
+  validateFieldClocksWithOptional(
+    obj.fieldClocks,
+    spec.fieldClockKeys,
+    spec.resultMeta ? RESULT_META_OPTIONAL_KEYS : NO_OPTIONAL_KEYS,
+    `${path}.fieldClocks`
+  )
+  if (spec.resultMeta) {
+    validateOptionalResultMeta(
+      obj,
+      obj.fieldClocks,
+      'message',
+      Object.prototype.hasOwnProperty.call(obj, RESULT_META_FIELD),
+      path
+    )
+  }
   validateClock(obj.parentMembershipClock, `${path}.parentMembershipClock`, false)
 }
 
-export function validateMessageBlock(value: unknown, path: string): void {
+interface BlockShapeSpec {
+  keys: ReadonlySet<string>
+  fieldClockKeys: ReadonlySet<string>
+  /** v5+ block shape carries portable `assetIds` and its strict media rules. */
+  assetIds: boolean
+  resultMeta: boolean
+}
+
+/** Single message-block entity body shared by every wire version. */
+export function validateMessageBlockShape(value: unknown, path: string, spec: BlockShapeSpec): void {
   const obj = assertPlainObject(value, path)
-  assertExactKeys(obj, MESSAGE_BLOCK_KEYS, path)
+  if (spec.resultMeta) assertKeysWithOptional(obj, spec.keys, RESULT_META_OPTIONAL_KEYS, path)
+  else assertExactKeys(obj, spec.keys, path)
   assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
   assertNonEmptyValidUnicodeScalarString(obj.messageId, `${path}.messageId`)
   const typeVal = assertNullableValidUnicodeScalarString(obj.type, `${path}.type`)
   if (typeVal !== null) {
     const canonical = typeVal.trim().toLowerCase()
-    if (UNSUPPORTED_BLOCK_TYPE_SET.has(canonical)) {
-      throw new ValidationError(`unsupported block type "${typeVal}"`, `${path}.type`)
-    }
+    const banned = spec.assetIds
+      ? canonical === 'tool' || canonical === 'citation'
+      : UNSUPPORTED_BLOCK_TYPE_SET.has(canonical)
+    if (banned) throw new ValidationError(`unsupported block type "${typeVal}"`, `${path}.type`)
   }
   assertNullableValidUnicodeScalarString(obj.content, `${path}.content`)
   const status = assertNullableValidUnicodeScalarString(obj.status, `${path}.status`)
@@ -586,14 +708,69 @@ export function validateMessageBlock(value: unknown, path: string): void {
   }
   assertNullableValidUnicodeScalarString(obj.createdAt, `${path}.createdAt`)
   assertNullableValidUnicodeScalarString(obj.updatedAt, `${path}.updatedAt`)
+  if (spec.assetIds) {
+    const assetIdsRaw = obj.assetIds
+    if (!Array.isArray(assetIdsRaw)) throw new ValidationError('assetIds must be array', `${path}.assetIds`)
+    if (Object.getPrototypeOf(assetIdsRaw as unknown[]) !== Array.prototype) {
+      throw new ValidationError('must be plain JSON array', `${path}.assetIds`)
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < assetIdsRaw.length; i++) {
+      const v = assetIdsRaw[i]
+      const p = `${path}.assetIds[${i}]`
+      assertNonEmptyValidUnicodeScalarString(v, p)
+      if ((v as string).includes('/') || (v as string).includes('\\') || (v as string).includes('..')) {
+        throw new ValidationError('assetIds entry must not contain path separators', p)
+      }
+      if (seen.has(v as string)) throw new ValidationError(`duplicate assetIds "${v}"`, p)
+      seen.add(v as string)
+    }
+    const typeCanonical = typeVal ? typeVal.trim().toLowerCase() : ''
+    const isMedia = typeCanonical === 'file' || typeCanonical === 'image' || typeCanonical === 'video'
+    if (isMedia) {
+      if (assetIdsRaw.length === 0) {
+        throw new ValidationError('media block must carry non-empty assetIds', `${path}.assetIds`)
+      }
+    } else if (assetIdsRaw.length !== 0) {
+      throw new ValidationError('non-media block must carry empty assetIds', `${path}.assetIds`)
+    }
+  }
   validateClock(obj.entityClock, `${path}.entityClock`, false)
-  validateFieldClocks(obj.fieldClocks, BLOCK_FIELD_CLOCK_KEYS, `${path}.fieldClocks`)
+  validateFieldClocksWithOptional(
+    obj.fieldClocks,
+    spec.fieldClockKeys,
+    spec.resultMeta ? RESULT_META_OPTIONAL_KEYS : NO_OPTIONAL_KEYS,
+    `${path}.fieldClocks`
+  )
+  if (spec.resultMeta) {
+    validateOptionalResultMeta(
+      obj,
+      obj.fieldClocks,
+      'message_block',
+      Object.prototype.hasOwnProperty.call(obj, RESULT_META_FIELD),
+      path
+    )
+  }
   validateClock(obj.parentMembershipClock, `${path}.parentMembershipClock`, false)
 }
 
-// ---------------------------------------------------------------------------
-// Tombstone / OrderFrame / Manifest
-// ---------------------------------------------------------------------------
+export function validateMessage(value: unknown, path: string): void {
+  validateMessageShape(value, path, {
+    keys: MESSAGE_KEYS,
+    fieldClockKeys: MESSAGE_FIELD_CLOCK_KEYS,
+    branchId: false,
+    resultMeta: false
+  })
+}
+
+export function validateMessageBlock(value: unknown, path: string): void {
+  validateMessageBlockShape(value, path, {
+    keys: MESSAGE_BLOCK_KEYS,
+    fieldClockKeys: BLOCK_FIELD_CLOCK_KEYS,
+    assetIds: false,
+    resultMeta: false
+  })
+}
 
 const TOMBSTONE_KEYS = new Set<string>(['entityType', 'entityId', 'deletionClock', 'survivingEntityClock'])
 const TOMBSTONE_ENTITY_TYPES: ReadonlySet<string> = new Set(['topic', 'message', 'messageBlock'])
@@ -1657,6 +1834,17 @@ export interface MessageEntityV3 extends Omit<MessageEntity, 'topicId'> {
   branchId: string | null
 }
 
+/**
+ * Latest-version (v6) message entity: the v3 shape plus the OPTIONAL declared
+ * `resultMeta` portable result container (see portableResult.ts). Optional so
+ * additive peers and previously captured entities stay valid; when present the
+ * value is strictly validated and its field clock is required.
+ */
+export interface MessageEntityV6 extends MessageEntityV3 {
+  resultMeta?: Record<string, unknown> | null
+  fieldClocks: Record<MessageFieldClockKey, SyncClock> & { resultMeta?: SyncClock }
+}
+
 export type TombstoneEntityTypeV3 = 'topic' | 'message' | 'messageBlock' | 'topicBranch'
 
 export interface TombstoneV3 {
@@ -1804,30 +1992,27 @@ export function validateBranchV3(value: unknown, path: string): void {
 }
 
 export function validateMessageV3(value: unknown, path: string): void {
-  const obj = assertPlainObject(value, path)
-  assertExactKeys(obj, MESSAGE_KEYS_V3, path)
-  assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
-  assertNonEmptyValidUnicodeScalarString(obj.topicId, `${path}.topicId`)
-  if (obj.branchId === null) {
-    // main route: ok
-  } else {
-    assertNonEmptyValidUnicodeScalarString(obj.branchId, `${path}.branchId`)
-  }
-  assertNullableValidUnicodeScalarString(obj.role, `${path}.role`)
-  assertNullableValidUnicodeScalarString(obj.content, `${path}.content`)
-  const status = assertNullableValidUnicodeScalarString(obj.status, `${path}.status`)
-  if (status !== null && TRANSIENT_SET.has(status)) {
-    throw new ValidationError(`transient status "${status}" not allowed on wire`, `${path}.status`)
-  }
-  assertNullableValidUnicodeScalarString(obj.askId, `${path}.askId`)
-  assertNullableValidUnicodeScalarString(obj.model, `${path}.model`)
-  assertNullableValidUnicodeScalarString(obj.modelId, `${path}.modelId`)
-  assertNullableValidUnicodeScalarString(obj.assistantId, `${path}.assistantId`)
-  assertNullableValidUnicodeScalarString(obj.createdAt, `${path}.createdAt`)
-  assertNullableValidUnicodeScalarString(obj.updatedAt, `${path}.updatedAt`)
-  validateClock(obj.entityClock, `${path}.entityClock`, false)
-  validateFieldClocks(obj.fieldClocks, MESSAGE_FIELD_CLOCK_KEYS, `${path}.fieldClocks`)
-  validateClock(obj.parentMembershipClock, `${path}.parentMembershipClock`, false)
+  validateMessageShape(value, path, {
+    keys: MESSAGE_KEYS_V3,
+    fieldClockKeys: MESSAGE_FIELD_CLOCK_KEYS,
+    branchId: true,
+    resultMeta: false
+  })
+}
+
+/**
+ * Latest-version (v6) message entity validation: the v3 shape plus the
+ * optional portable result container. The container value, when present, is
+ * strictly validated by the shared sanitized schema and requires its
+ * `resultMeta` field clock; a payload without it must not carry that clock.
+ */
+export function validateMessageEntityV6(value: unknown, path: string): void {
+  validateMessageShape(value, path, {
+    keys: MESSAGE_KEYS_V3,
+    fieldClockKeys: MESSAGE_FIELD_CLOCK_KEYS,
+    branchId: true,
+    resultMeta: true
+  })
 }
 
 function validateTombstoneV3(value: unknown, path: string): void {
@@ -2786,6 +2971,12 @@ export interface MessageBlockEntityV5 {
   parentMembershipClock: SyncClock
 }
 
+/** Latest-version (v6) block entity: the v5 shape plus optional `resultMeta`. */
+export interface MessageBlockEntityV6 extends MessageBlockEntityV5 {
+  resultMeta?: Record<string, unknown> | null
+  fieldClocks: Record<BlockFieldClockKeyV5, SyncClock> & { resultMeta?: SyncClock }
+}
+
 const MESSAGE_BLOCK_KEYS_V5 = new Set<string>([
   'id',
   'messageId',
@@ -2923,53 +3114,53 @@ const TOMBSTONE_COUNTS_KEYS_V5 = new Set<string>([
 const FRAME_COUNTS_KEYS_V5 = new Set<string>(['topicMessage', 'messageBlock', 'branchSuffix'])
 
 export function validateMessageBlockV5(value: unknown, path: string): void {
-  const obj = assertPlainObject(value, path)
-  assertExactKeys(obj, MESSAGE_BLOCK_KEYS_V5, path)
-  assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
-  assertNonEmptyValidUnicodeScalarString(obj.messageId, `${path}.messageId`)
-  const typeVal = assertNullableValidUnicodeScalarString(obj.type, `${path}.type`)
-  if (typeVal !== null) {
-    const canonical = typeVal.trim().toLowerCase()
-    // V5 permits file/image/video (media) with valid assetIds; other unsupported remain banned
-    const banned = new Set(['tool', 'citation'])
-    if (banned.has(canonical)) {
-      throw new ValidationError(`unsupported block type "${typeVal}"`, `${path}.type`)
-    }
-  }
-  assertNullableValidUnicodeScalarString(obj.content, `${path}.content`)
-  const status = assertNullableValidUnicodeScalarString(obj.status, `${path}.status`)
-  if (status !== null && TRANSIENT_SET.has(status)) {
-    throw new ValidationError(`transient status "${status}" not allowed on wire`, `${path}.status`)
-  }
-  assertNullableValidUnicodeScalarString(obj.createdAt, `${path}.createdAt`)
-  assertNullableValidUnicodeScalarString(obj.updatedAt, `${path}.updatedAt`)
-  const assetIdsRaw = obj.assetIds
-  if (!Array.isArray(assetIdsRaw)) throw new ValidationError('assetIds must be array', `${path}.assetIds`)
-  if (Object.getPrototypeOf(assetIdsRaw as unknown[]) !== Array.prototype)
-    throw new ValidationError('must be plain JSON array', `${path}.assetIds`)
-  const seen = new Set<string>()
-  for (let i = 0; i < assetIdsRaw.length; i++) {
-    const v = assetIdsRaw[i]
-    const p = `${path}.assetIds[${i}]`
-    assertNonEmptyValidUnicodeScalarString(v, p)
-    if ((v as string).includes('/') || (v as string).includes('\\') || (v as string).includes('..'))
-      throw new ValidationError('assetIds entry must not contain path separators', p)
-    if (seen.has(v as string)) throw new ValidationError(`duplicate assetIds "${v}"`, p)
-    seen.add(v as string)
-  }
-  // Media types require non-empty assetIds; non-media must be empty
-  const typeCanonical = typeVal ? typeVal.trim().toLowerCase() : ''
-  const isMedia = typeCanonical === 'file' || typeCanonical === 'image' || typeCanonical === 'video'
-  if (isMedia) {
-    if (assetIdsRaw.length === 0)
-      throw new ValidationError('media block must carry non-empty assetIds', `${path}.assetIds`)
-  } else {
-    if (assetIdsRaw.length !== 0)
-      throw new ValidationError('non-media block must carry empty assetIds', `${path}.assetIds`)
-  }
-  validateClock(obj.entityClock, `${path}.entityClock`, false)
-  validateFieldClocks(obj.fieldClocks, BLOCK_FIELD_CLOCK_KEYS_V5, `${path}.fieldClocks`)
-  validateClock(obj.parentMembershipClock, `${path}.parentMembershipClock`, false)
+  validateMessageBlockShape(value, path, {
+    keys: MESSAGE_BLOCK_KEYS_V5,
+    fieldClockKeys: BLOCK_FIELD_CLOCK_KEYS_V5,
+    assetIds: true,
+    resultMeta: false
+  })
+}
+
+/**
+ * Latest-version (v6) block entity validation: the v5 shape plus the optional
+ * portable result container (thinking duration, sanitized error display/
+ * classification, code language, translation identity). Present value is
+ * strictly validated and requires its `resultMeta` field clock.
+ */
+export function validateMessageBlockEntityV6(value: unknown, path: string): void {
+  validateMessageBlockShape(value, path, {
+    keys: MESSAGE_BLOCK_KEYS_V5,
+    fieldClockKeys: BLOCK_FIELD_CLOCK_KEYS_V5,
+    assetIds: true,
+    resultMeta: true
+  })
+}
+
+/**
+ * `message_stable_replace` message entity: the v1 stable-only message shape
+ * (no branchId, no sortOrder) plus the optional portable result container.
+ */
+export function validateMessageEntityStableReplace(value: unknown, path: string): void {
+  validateMessageShape(value, path, {
+    keys: MESSAGE_KEYS,
+    fieldClockKeys: MESSAGE_FIELD_CLOCK_KEYS,
+    branchId: false,
+    resultMeta: true
+  })
+}
+
+/**
+ * `message_stable_replace` block entity: the v1 stable-only block shape
+ * (no assetIds) plus the optional portable result container.
+ */
+export function validateMessageBlockEntityStableReplace(value: unknown, path: string): void {
+  validateMessageBlockShape(value, path, {
+    keys: MESSAGE_BLOCK_KEYS,
+    fieldClockKeys: BLOCK_FIELD_CLOCK_KEYS,
+    assetIds: false,
+    resultMeta: true
+  })
 }
 
 function validateFileAssetEntityV5(value: unknown, path: string): void {
@@ -3396,8 +3587,8 @@ export interface SyncPayloadV6 {
   orderFrameVersion: typeof ORDER_FRAME_VERSION
   scope: typeof SCOPE_V6
   topics: TopicEntity[]
-  messages: MessageEntityV3[]
-  messageBlocks: MessageBlockEntityV5[]
+  messages: MessageEntityV6[]
+  messageBlocks: MessageBlockEntityV6[]
   branches: BranchEntityV3[]
   assistantConfigs: AssistantConfigEntityV4[]
   fileAssets: FileAssetEntityV5[]
@@ -3545,9 +3736,9 @@ function validatePayloadV6Structure(value: unknown, path: string): SyncPayloadV6
   const topics = assertPlainArray(obj.topics, `${path}.topics`)
   topics.forEach((t, idx) => validateTopic(t, `${path}.topics[${idx}]`))
   const messages = assertPlainArray(obj.messages, `${path}.messages`)
-  messages.forEach((m, idx) => validateMessageV3(m, `${path}.messages[${idx}]`))
+  messages.forEach((m, idx) => validateMessageEntityV6(m, `${path}.messages[${idx}]`))
   const blocks = assertPlainArray(obj.messageBlocks, `${path}.messageBlocks`)
-  blocks.forEach((b, idx) => validateMessageBlockV5(b, `${path}.messageBlocks[${idx}]`))
+  blocks.forEach((b, idx) => validateMessageBlockEntityV6(b, `${path}.messageBlocks[${idx}]`))
   const branches = assertPlainArray(obj.branches, `${path}.branches`)
   branches.forEach((b, idx) => validateBranchV3(b, `${path}.branches[${idx}]`))
   const assistantConfigs = assertPlainArray(obj.assistantConfigs, `${path}.assistantConfigs`)

@@ -82,6 +82,12 @@ import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chat
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
 import { applyTopicSyncDefaults } from '@shared/sync'
+import {
+  extractBlockResultMeta,
+  extractMessageResultMeta,
+  RESULT_META_FIELD,
+  type ResultMetaExtraction
+} from '@shared/sync'
 import type Database from 'better-sqlite3'
 import { and, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
@@ -588,7 +594,7 @@ export class ChatDbAggregateService {
   }
 
   private syncMessagePayloadFull(data: MessageData): Record<string, unknown> {
-    return {
+    const payload: Record<string, unknown> = {
       id: data.id,
       topicId: data.topicId,
       // Immutable owner route (null = main). Never a synthetic composite key;
@@ -605,6 +611,8 @@ export class ChatDbAggregateService {
       updatedAt: data.updatedAt,
       sortOrder: data.sortOrder
     }
+    this.attachMessageResultMeta(payload, data)
+    return payload
   }
 
   private syncBlockPayloadFull(data: MessageBlockData): Record<string, unknown> {
@@ -626,7 +634,53 @@ export class ChatDbAggregateService {
     } else {
       base.assetIds = []
     }
+    this.attachBlockResultMeta(base, data)
     return base
+  }
+
+  /**
+   * Attach the ONE declared portable result container (sanitized
+   * usage/metrics/mentions/useful/model display snapshot) from persisted
+   * message overflow. Capture is best-effort: non-portable local-only keys are
+   * dropped (never widened, never transmitted) and can never fail the write.
+   */
+  private attachMessageResultMeta(payload: Record<string, unknown>, data: MessageData): void {
+    this.attachResultMeta(payload, extractMessageResultMeta(data.overflow), 'message', data.id)
+  }
+
+  /** Block counterpart (thinking duration, sanitized error, language, translation). */
+  private attachBlockResultMeta(payload: Record<string, unknown>, data: MessageBlockData): void {
+    this.attachResultMeta(payload, extractBlockResultMeta(data.overflow), 'message_block', data.id)
+  }
+
+  /**
+   * Attach the portable container to a sync payload.
+   *
+   * A non-empty extraction always wins. An EMPTY extraction is asymmetric by
+   * intent: when the entity never had a persisted `resultMeta` field clock the
+   * field is omitted (no intent, no speculative `null` noise for newly empty
+   * rows), but when an earlier capture DID publish portable state the empty
+   * post-state is a real clear and must ship `resultMeta: null` together with
+   * its clock — otherwise the peer keeps the stale portable subset forever
+   * (the full-capture/diff asymmetry defect).
+   */
+  private attachResultMeta(
+    payload: Record<string, unknown>,
+    extraction: ResultMetaExtraction,
+    kind: 'message' | 'message_block',
+    id: string
+  ): void {
+    if (extraction.meta !== null) {
+      payload[RESULT_META_FIELD] = extraction.meta
+    } else if (syncService.hasResultMetaFieldClock(kind, id)) {
+      // Previously synced and intentionally empty now: explicit clear intent.
+      payload[RESULT_META_FIELD] = null
+    }
+    if (extraction.dropped.length > 0) {
+      loggerService
+        .withContext('ChatDbAggregate')
+        .warn(`[sync capture] ${kind} ${id} dropped non-portable result metadata: ${extraction.dropped.join(',')}`)
+    }
   }
 
   /** Intentional message patch → sync field patch (allowlisted only, never identity/sortOrder). */
@@ -634,7 +688,8 @@ export class ChatDbAggregateService {
     topicId: string,
     messageId: string,
     patch: Record<string, unknown>,
-    branchId: string | null = null
+    branchId: string | null = null,
+    post?: MessageData
   ): Record<string, unknown> | null {
     const allow = new Set([
       'role',
@@ -657,6 +712,17 @@ export class ChatDbAggregateService {
         hasPatch = true
       }
     }
+    // Portable result container intent: a patch that touches any portable
+    // overflow key carries the FULL post-state container (atomic field
+    // convergence), never a partial slice that would clear sibling keys.
+    if (this.patchTouchesPortableOverflow(patch.overflow)) {
+      if (post) {
+        this.attachMessageResultMeta(out, post)
+      } else {
+        this.attachResultMeta(out, extractMessageResultMeta(patch.overflow), 'message', messageId)
+      }
+      hasPatch = true
+    }
     return hasPatch ? out : null
   }
 
@@ -664,16 +730,56 @@ export class ChatDbAggregateService {
   private syncBlockPatchPayload(
     messageId: string,
     blockId: string,
-    patch: Record<string, unknown>
+    patch: Record<string, unknown>,
+    post?: MessageBlockData
   ): Record<string, unknown> | null {
     const allow = new Set(['type', 'content', 'status', 'createdAt', 'updatedAt'])
     const out: Record<string, unknown> = { id: blockId, messageId }
+    let hasPatch = false
     for (const [k, v] of Object.entries(patch)) {
       if (k === 'overflow' || k === 'id' || k === 'messageId' || k === 'sortOrder') continue
       if (!allow.has(k)) continue
-      if (v !== undefined) out[k] = v
+      if (v !== undefined) {
+        out[k] = v
+        hasPatch = true
+      }
     }
-    return Object.keys(out).length > 2 ? out : null
+    // Portable result intent (thinking duration / error / language /
+    // translation): full post-state container, same rule as messages.
+    if (this.patchTouchesPortableOverflow(patch.overflow)) {
+      if (post) {
+        this.attachBlockResultMeta(out, post)
+      } else {
+        this.attachResultMeta(out, extractBlockResultMeta(patch.overflow), 'message_block', blockId)
+      }
+      hasPatch = true
+    }
+    return hasPatch ? out : null
+  }
+
+  /**
+   * True when an intentional write patch touches at least one portable result
+   * overflow key (message or block). Unknown local-only keys never report
+   * intent, so they can never clear remote portable state.
+   */
+  private patchTouchesPortableOverflow(overflow: unknown): boolean {
+    if (!overflow || typeof overflow !== 'object' || Array.isArray(overflow)) return false
+    const keys = Object.keys(overflow as Record<string, unknown>)
+    if (keys.length === 0) return false
+    const portable = new Set<string>([
+      'usage',
+      'metrics',
+      'mentions',
+      'useful',
+      'model',
+      'thinking_millsec',
+      'error',
+      'language',
+      'sourceBlockId',
+      'sourceLanguage',
+      'targetLanguage'
+    ])
+    return keys.some((key) => portable.has(key))
   }
 
   /**
@@ -1091,6 +1197,14 @@ export class ChatDbAggregateService {
         out['assetIds'] = postRefs
       }
     }
+    // Portable result container converges atomically: a changed portable set
+    // emits the FULL post-state container (explicit null when the local row now
+    // carries none, i.e. clear intent).
+    const preMetaB = extractBlockResultMeta(pre.overflow).meta
+    const postMetaB = extractBlockResultMeta(post.overflow).meta
+    if (JSON.stringify(preMetaB) !== JSON.stringify(postMetaB)) {
+      out[RESULT_META_FIELD] = postMetaB
+    }
     return Object.keys(out).length > 2 ? out : null
   }
 
@@ -1112,6 +1226,11 @@ export class ChatDbAggregateService {
       const a = pre[k] ?? null
       const b = post[k] ?? null
       if (!Object.is(a, b) && JSON.stringify(a) !== JSON.stringify(b)) out[k] = post[k]
+    }
+    const preMetaM = extractMessageResultMeta(pre.overflow).meta
+    const postMetaM = extractMessageResultMeta(post.overflow).meta
+    if (JSON.stringify(preMetaM) !== JSON.stringify(postMetaM)) {
+      out[RESULT_META_FIELD] = postMetaM
     }
     return Object.keys(out).length > 2 ? out : null
   }
@@ -4970,7 +5089,8 @@ export class ChatDbAggregateService {
                 topicId,
                 messageId,
                 patch as unknown as Record<string, unknown>,
-                route
+                route,
+                row.data
               )
               if (payload) {
                 syncService.enqueueUpsertInTx(stx, 'message', messageId, payload, ctx.ts, ctx.deviceId)
@@ -6340,7 +6460,8 @@ export class ChatDbAggregateService {
                     const payload = this.syncBlockPatchPayload(
                       post.data.messageId,
                       blockId,
-                      patch as unknown as Record<string, unknown>
+                      patch as unknown as Record<string, unknown>,
+                      post.data
                     )
                     if (payload) {
                       syncService.enqueueUpsertInTx(

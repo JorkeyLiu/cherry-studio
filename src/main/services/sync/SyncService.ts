@@ -15,6 +15,9 @@ import type {
 } from '@shared/sync'
 import {
   compareUtf8ByteLex,
+  encodeExtra,
+  extractBlockResultMeta,
+  extractMessageResultMeta,
   filterBlockPayload,
   filterBranchPayload,
   filterMessagePayload,
@@ -25,7 +28,10 @@ import {
   isStableMessageStatus,
   isUnsupportedBlockForSync,
   isValidSyncDeviceAuth,
+  localResultMetaValue,
+  mergeResultMetaIntoExtra,
   MESSAGE_STABLE_REPLACE_VERSION,
+  RESULT_META_FIELD,
   SYNC_ASSISTANT_CONFIG_PATCH_FIELDS,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_BRANCH_PATCH_FIELDS,
@@ -2888,6 +2894,10 @@ export class SyncService {
       for (const k of keys) out[k] = { ...clockWire }
       return out
     }
+    // Portable result container rides the stable-replace unit as full state
+    // (null when the row carries none), staying comparable with the
+    // incremental field and the v6 baseline entity.
+    const messageMetaWire = extractMessageResultMeta((msgRow as { extra?: string | null }).extra).meta
     const wireMessage: Record<string, unknown> = {
       id: messageId,
       topicId,
@@ -2900,6 +2910,7 @@ export class SyncService {
       assistantId: msgRow.assistantId ?? null,
       createdAt: msgRow.createdAt ?? null,
       updatedAt: msgRow.updatedAt ?? null,
+      resultMeta: messageMetaWire,
       entityClock: { ...clockWire },
       fieldClocks: fieldClockWire([
         'role',
@@ -2910,7 +2921,8 @@ export class SyncService {
         'modelId',
         'assistantId',
         'createdAt',
-        'updatedAt'
+        'updatedAt',
+        RESULT_META_FIELD
       ]),
       parentMembershipClock: msgMem
         ? { timestamp: msgMem.timestamp, operationId: msgMem.operationId }
@@ -2926,8 +2938,9 @@ export class SyncService {
         status: b.status ?? null,
         createdAt: b.createdAt ?? null,
         updatedAt: b.updatedAt ?? null,
+        resultMeta: extractBlockResultMeta(b.extra).meta,
         entityClock: { ...clockWire },
-        fieldClocks: fieldClockWire(['type', 'content', 'status', 'createdAt', 'updatedAt']),
+        fieldClocks: fieldClockWire(['type', 'content', 'status', 'createdAt', 'updatedAt', RESULT_META_FIELD]),
         parentMembershipClock: mem ? { timestamp: mem.timestamp, operationId: mem.operationId } : { ...clockWire }
       }
     })
@@ -2994,7 +3007,8 @@ export class SyncService {
         modelId: wireMessage.modelId,
         assistantId: wireMessage.assistantId,
         createdAt: wireMessage.createdAt,
-        updatedAt: wireMessage.updatedAt
+        updatedAt: wireMessage.updatedAt,
+        [RESULT_META_FIELD]: messageMetaWire
       },
       rc.timestamp,
       rc.operationId
@@ -3016,7 +3030,8 @@ export class SyncService {
           content: b.content ?? null,
           status: b.status ?? null,
           createdAt: b.createdAt ?? null,
-          updatedAt: b.updatedAt ?? null
+          updatedAt: b.updatedAt ?? null,
+          [RESULT_META_FIELD]: extractBlockResultMeta(b.extra).meta
         },
         rc.timestamp,
         rc.operationId
@@ -4661,6 +4676,26 @@ export class SyncService {
     }
   }
 
+  /**
+   * Has this entity ever captured/synced the portable `resultMeta` container?
+   *
+   * Full-state capture uses the answer to distinguish two states that would
+   * otherwise both look like "nothing portable present":
+   * - no persisted `resultMeta` field clock: the container was never synced, so
+   *   the field is omitted (no intent, no speculative `null` noise);
+   * - persisted `resultMeta` field clock: an earlier capture published portable
+   *   state, so an empty post-state is a REAL clear and must be emitted as an
+   *   explicit `resultMeta: null` (omission would strand the peer's stale
+   *   portable subset forever).
+   *
+   * Reads the local field-clock table on the active connection; inside a
+   * capture transaction the container's own clock has not been minted yet, so
+   * this truthfully reports the prior (pre-tx) sync state.
+   */
+  hasResultMetaFieldClock(entityType: 'message' | 'message_block', entityId: string): boolean {
+    const clocks = this.getFieldClocksInDb(this.getDb(), entityType, entityId)
+    return clocks.has(RESULT_META_FIELD)
+  }
   /** Tx-bound read for atomic checks inside same transaction. */
   getMembershipClockInTx(
     tx: SyncTxExecutor,
@@ -7939,11 +7974,23 @@ export class SyncService {
           createdAt: (message.createdAt as string | null) ?? nowIso,
           updatedAt: (message.updatedAt as string | null) ?? nowIso,
           sortOrder: 0,
-          extra: null
+          extra: encodeExtra(
+            mergeResultMetaIntoExtra(
+              'message',
+              null,
+              Object.prototype.hasOwnProperty.call(message, RESULT_META_FIELD) &&
+                message[RESULT_META_FIELD] !== undefined
+                ? (message[RESULT_META_FIELD] as Record<string, unknown> | null)
+                : null
+            )
+          )
         })
         .run()
       const provided: Record<string, unknown> = {}
       for (const f of MESSAGE_FIELDS) provided[f] = (message[f] ?? null) as unknown
+      if (Object.prototype.hasOwnProperty.call(message, RESULT_META_FIELD)) {
+        provided[RESULT_META_FIELD] = (message[RESULT_META_FIELD] ?? null) as unknown
+      }
       this.updateFieldClocksInDb(db, 'message', messageId, provided, rc.timestamp, rc.operationId)
       this.advanceEntityClock(db, 'message', messageId, rc.timestamp, rc.operationId)
       if (!retained) {
@@ -7965,6 +8012,22 @@ export class SyncService {
             colSet[f] = incomingVal
           }
           won[f] = message[f] ?? null
+        }
+      }
+      // Portable result container (optional declared field) converges as ONE
+      // clocked field against the `extra` JSON column; null clears it.
+      if (Object.prototype.hasOwnProperty.call(message, RESULT_META_FIELD)) {
+        const incomingMeta = (message[RESULT_META_FIELD] ?? null) as Record<string, unknown> | null
+        const priorMeta = fieldClocks.get(RESULT_META_FIELD)
+        if (
+          !priorMeta ||
+          this.compareLww(rc.timestamp, rc.operationId, priorMeta.timestamp, priorMeta.operationId) > 0
+        ) {
+          const curMeta = localResultMetaValue('message', existingMsg.extra)
+          if (!this.fieldValuesEqual(incomingMeta, curMeta)) {
+            colSet.extra = encodeExtra(mergeResultMetaIntoExtra('message', existingMsg.extra, incomingMeta))
+          }
+          won[RESULT_META_FIELD] = incomingMeta
         }
       }
       if (Object.keys(colSet).length > 0) {
@@ -8028,11 +8091,22 @@ export class SyncService {
             createdAt: (b.createdAt as string | null) ?? nowIso,
             updatedAt: (b.updatedAt as string | null) ?? nowIso,
             sortOrder: 0,
-            extra: null
+            extra: encodeExtra(
+              mergeResultMetaIntoExtra(
+                'message_block',
+                null,
+                Object.prototype.hasOwnProperty.call(b, RESULT_META_FIELD) && b[RESULT_META_FIELD] !== undefined
+                  ? (b[RESULT_META_FIELD] as Record<string, unknown> | null)
+                  : null
+              )
+            )
           })
           .run()
         const provided: Record<string, unknown> = {}
         for (const f of BLOCK_FIELDS) provided[f] = (b[f] ?? null) as unknown
+        if (Object.prototype.hasOwnProperty.call(b, RESULT_META_FIELD)) {
+          provided[RESULT_META_FIELD] = (b[RESULT_META_FIELD] ?? null) as unknown
+        }
         this.updateFieldClocksInDb(db, 'message_block', bid, provided, rc.timestamp, rc.operationId)
         this.advanceEntityClock(db, 'message_block', bid, rc.timestamp, rc.operationId)
         if (!retainedBlk) {
@@ -8054,6 +8128,20 @@ export class SyncService {
               colSet[f] = incomingVal
             }
             won[f] = b[f] ?? null
+          }
+        }
+        if (Object.prototype.hasOwnProperty.call(b, RESULT_META_FIELD)) {
+          const incomingMetaB = (b[RESULT_META_FIELD] ?? null) as Record<string, unknown> | null
+          const priorMetaB = fieldClocks.get(RESULT_META_FIELD)
+          if (
+            !priorMetaB ||
+            this.compareLww(rc.timestamp, rc.operationId, priorMetaB.timestamp, priorMetaB.operationId) > 0
+          ) {
+            const curMetaB = localResultMetaValue('message_block', existingBlk.extra)
+            if (!this.fieldValuesEqual(incomingMetaB, curMetaB)) {
+              colSet.extra = encodeExtra(mergeResultMetaIntoExtra('message_block', existingBlk.extra, incomingMetaB))
+            }
+            won[RESULT_META_FIELD] = incomingMetaB
           }
         }
         if (Object.keys(colSet).length > 0) {
@@ -8933,7 +9021,15 @@ export class SyncService {
             createdAt,
             updatedAt,
             sortOrder: insertSort,
-            extra: null
+            extra: encodeExtra(
+              mergeResultMetaIntoExtra(
+                'message',
+                null,
+                Object.prototype.hasOwnProperty.call(p, RESULT_META_FIELD) && p[RESULT_META_FIELD] !== undefined
+                  ? (p[RESULT_META_FIELD] as Record<string, unknown> | null)
+                  : null
+              )
+            )
           })
           .run()
         const provided: Record<string, unknown> = {}
@@ -8957,6 +9053,9 @@ export class SyncService {
       const fieldClocksM = this.getFieldClocksInDb(db, 'message', id)
       const currentM = (field: string): unknown => {
         if (field === 'sortOrder') return (existing as unknown as Record<string, unknown>).sortOrder ?? 0
+        // Portable result container lives in the `extra` JSON column, never a
+        // dedicated column: it compares as ONE value exactly as it converges.
+        if (field === RESULT_META_FIELD) return localResultMetaValue('message', existing.extra)
         return ((existing as unknown as Record<string, unknown>)[field] ?? null) as unknown
       }
       const winnersM: Array<{ field: string; value: unknown }> = []
@@ -9011,9 +9110,19 @@ export class SyncService {
       if (winnersM.length === 0) return false
       const setM: Record<string, unknown> = {}
       const wonM: Record<string, unknown> = {}
+      let wonMeta: { present: boolean; value: Record<string, unknown> | null } | null = null
       for (const w of winnersM) {
         wonM[w.field] = p[w.field]
+        if (w.field === RESULT_META_FIELD) {
+          wonMeta = { present: true, value: (w.value ?? null) as Record<string, unknown> | null }
+          continue
+        }
         setM[w.field] = w.value
+      }
+      if (wonMeta) {
+        // Winner replaces the portable subset atomically; unrelated local-only
+        // overflow keys are preserved untouched. Explicit null clears it.
+        setM.extra = encodeExtra(mergeResultMetaIntoExtra('message', existing.extra, wonMeta.value))
       }
       db.update(schema.messages).set(setM).where(eq(schema.messages.id, id)).run()
       this.updateFieldClocksInDb(db, 'message', id, wonM, op.timestamp, op.id)
@@ -9117,7 +9226,25 @@ export class SyncService {
           }
         }
         db.insert(schema.messageBlocks)
-          .values({ id, messageId, type, content, status, createdAt, updatedAt, sortOrder: insertSort, extra: null })
+          .values({
+            id,
+            messageId,
+            type,
+            content,
+            status,
+            createdAt,
+            updatedAt,
+            sortOrder: insertSort,
+            extra: encodeExtra(
+              mergeResultMetaIntoExtra(
+                'message_block',
+                null,
+                Object.prototype.hasOwnProperty.call(p, RESULT_META_FIELD) && p[RESULT_META_FIELD] !== undefined
+                  ? (p[RESULT_META_FIELD] as Record<string, unknown> | null)
+                  : null
+              )
+            )
+          })
           .run()
         // Maintain file_references for assetIds (full-or-none atomic with row/clocks/frames)
         if (Array.isArray((p as any).assetIds)) {
@@ -9193,6 +9320,8 @@ export class SyncService {
       const fieldClocksB = this.getFieldClocksInDb(db, 'message_block', id)
       const currentB = (field: string): unknown => {
         if (field === 'sortOrder') return (existing as unknown as Record<string, unknown>).sortOrder ?? 0
+        // Portable result container lives in the `extra` JSON column.
+        if (field === RESULT_META_FIELD) return localResultMetaValue('message_block', existing.extra)
         return ((existing as unknown as Record<string, unknown>)[field] ?? null) as unknown
       }
       const winnersB: Array<{ field: string; value: unknown }> = []
@@ -9243,9 +9372,19 @@ export class SyncService {
       if (winnersB.length === 0) return false
       const setB: Record<string, unknown> = {}
       const wonB: Record<string, unknown> = {}
+      let wonMetaB: Record<string, unknown> | null = null
+      let wonMetaBSet = false
       for (const w of winnersB) {
         wonB[w.field] = p[w.field]
+        if (w.field === RESULT_META_FIELD) {
+          wonMetaB = (w.value ?? null) as Record<string, unknown> | null
+          wonMetaBSet = true
+          continue
+        }
         setB[w.field] = w.value
+      }
+      if (wonMetaBSet) {
+        setB.extra = encodeExtra(mergeResultMetaIntoExtra('message_block', existing.extra, wonMetaB))
       }
       // Orphan check for assetIds on update path (if assetIds is a winning field, its assets must exist)
       if (Object.prototype.hasOwnProperty.call(p, 'assetIds') && Array.isArray((p as any).assetIds)) {

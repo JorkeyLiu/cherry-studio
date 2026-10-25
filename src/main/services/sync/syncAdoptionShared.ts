@@ -11,7 +11,15 @@
  * with each caller to avoid refactoring unrelated transaction contexts.
  */
 
-import { filterBlockPayload, filterBranchPayload, filterMessagePayload, filterTopicPayload } from '@shared/sync'
+import {
+  extractBlockResultMeta,
+  extractMessageResultMeta,
+  filterBlockPayload,
+  filterBranchPayload,
+  filterMessagePayload,
+  filterTopicPayload,
+  RESULT_META_FIELD
+} from '@shared/sync'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import * as schema from '../chatDb/schema'
@@ -142,6 +150,8 @@ export function buildAdoptionMessagePayload(row: {
   assistantId: string | null
   createdAt: string | null
   updatedAt: string | null
+  /** Persisted overflow JSON (`messages.extra`); portable container only. */
+  extra?: string | null
 }): Record<string, unknown> {
   const branchId = typeof row.branchId === 'string' && row.branchId.length > 0 ? row.branchId : null
   const raw: Record<string, unknown> = {
@@ -158,6 +168,11 @@ export function buildAdoptionMessagePayload(row: {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   }
+  // Portable persisted result metadata (sanitized container; the adoption
+  // enqueue mints its field clock, so adopted history keeps its usage/metrics/
+  // mentions/model display state on the peer).
+  const messageMeta = extractMessageResultMeta(row.extra ?? null).meta
+  if (messageMeta !== null) raw[RESULT_META_FIELD] = messageMeta
   const filtered = filterMessagePayload(raw)
   if (!filtered) fail(`adoption message payload filter rejected ${row.id}`)
   if (Object.prototype.hasOwnProperty.call(filtered, 'sortOrder')) fail(`sortOrder leak for ${row.id}`)
@@ -196,6 +211,8 @@ export function buildAdoptionBlockPayload(row: {
   createdAt: string | null
   updatedAt: string | null
   assetIds?: unknown
+  /** Persisted overflow JSON (`message_blocks.extra`); portable container only. */
+  extra?: string | null
 }): Record<string, unknown> {
   const portable = isAdoptionPortableMediaType(row.type)
   const normalized = normalizeAdoptionAssetIds((row as { assetIds?: unknown }).assetIds)
@@ -217,6 +234,8 @@ export function buildAdoptionBlockPayload(row: {
     updatedAt: row.updatedAt,
     assetIds: [...normalized]
   }
+  const blockMeta = extractBlockResultMeta(row.extra ?? null).meta
+  if (blockMeta !== null) raw[RESULT_META_FIELD] = blockMeta
   const filtered = filterBlockPayload(raw)
   if (!filtered) fail(`adoption block payload filter rejected ${row.id}`)
   if (Object.prototype.hasOwnProperty.call(filtered, 'sortOrder')) fail(`sortOrder leak for ${row.id}`)

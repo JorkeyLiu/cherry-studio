@@ -190,7 +190,8 @@ import {
   isTopRestoreNotFoundError,
   isTopStableCommittable,
   markLoadedRouteFailed,
-  type ReferenceReloadObligation
+  type ReferenceReloadObligation,
+  shouldRouteEffectHoldTerminal
 } from './messageWindow'
 import {
   browseDirectionForClampedInput,
@@ -7202,9 +7203,19 @@ const Messages = ({
       topic.id
     )
     if (!wasActivation) {
-      // Terminal no-retry (fail-closed): a released terminal viewport stays
-      // until the next genuine selected/connection trigger.
-      if (controller.currentPhase === 'terminal') return
+      // Terminal no-retry (fail-closed) unless an authoritative
+      // history-reference invalidation for THIS resident target is outstanding:
+      // that hint is an explicit external trigger (monotonic one-shot token,
+      // consumed where the re-read pipeline takes ownership), never a progress
+      // reentry, so it may open the single re-read session below.
+      if (
+        shouldRouteEffectHoldTerminal({
+          phase: controller.currentPhase,
+          referenceReloadObliged
+        })
+      ) {
+        return
+      }
       if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) {
         if (controller.isDomProvenanceClean && !referenceReloadObliged) return
       }

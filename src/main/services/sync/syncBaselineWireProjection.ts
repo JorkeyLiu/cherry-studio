@@ -41,6 +41,7 @@ import {
   PAYLOAD_SCHEMA_V5,
   PAYLOAD_SCHEMA_V6,
   type ReplacementRegister,
+  RESULT_META_FIELD,
   SCOPE_V2,
   SCOPE_V3,
   SCOPE_V5,
@@ -911,10 +912,19 @@ const FILE_ASSET_WIRE_FIELDS_V5 = ['mimeType', 'originalName', 'createdAt'] as c
  * v5 wire `payload` (`chat-core-baseline-v5`).
  * Direct V5 projection with full media, branch, assistant, replacement and fileAssets.
  * Validates via shared strict validatePayload (dispatched to V5).
+ *
+ * `opts.resultMeta` is used ONLY by the V6 entry below: the container is
+ * projected here (V5 content projection is shared, never forked) while the
+ * result is validated strictly as V6 there. Because a payload carrying
+ * `resultMeta` is by definition no longer a V5 payload, that caller also sets
+ * `deferStrictValidation`, and the single strict V6 validation afterwards is
+ * the only gate. Every real V5 caller keeps the default (container rejected,
+ * strict V5 validation retained).
  */
 export function projectLocalBaselineToWirePayloadV5(
   candidate: LocalSyncBaselineCandidate,
-  assistantSection?: { configs: unknown[]; tombstones: unknown[] }
+  assistantSection?: { configs: unknown[]; tombstones: unknown[] },
+  opts?: { resultMeta?: boolean; deferStrictValidation?: boolean }
 ): SyncPayloadV5 {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     fail('candidate must be a plain object')
@@ -1021,8 +1031,16 @@ export function projectLocalBaselineToWirePayloadV5(
       if (pm.parentId !== expectedParent) {
         fail(`message/${entity.entityId} membership parent mismatch`)
       }
-      const clockMap = toClockMap(entity, 9, MESSAGE_WIRE_FIELDS as readonly string[])
-      messages.push({
+      // Portable result container is an OPTIONAL declared key: published only
+      // when the candidate payload declares it, which baseline capture gates on
+      // a persisted `resultMeta` field clock (payload never outruns its clocks).
+      const messageHasMeta =
+        opts?.resultMeta === true && Object.prototype.hasOwnProperty.call(payload, RESULT_META_FIELD)
+      const messageClockFields = messageHasMeta
+        ? [...(MESSAGE_WIRE_FIELDS as readonly string[]), RESULT_META_FIELD]
+        : (MESSAGE_WIRE_FIELDS as readonly string[])
+      const clockMap = toClockMap(entity, messageClockFields.length, messageClockFields)
+      const wireMessage: Record<string, unknown> = {
         id: entity.entityId,
         topicId: requireNonEmptyString(payload['topicId'], `message/${entity.entityId} topicId`),
         branchId: ownerBranch,
@@ -1048,7 +1066,12 @@ export function projectLocalBaselineToWirePayloadV5(
           updatedAt: clockMap['updatedAt']
         } as MessageEntity['fieldClocks'],
         parentMembershipClock: { timestamp: pm.timestamp, operationId: pm.operationId }
-      })
+      }
+      if (messageHasMeta) {
+        wireMessage[RESULT_META_FIELD] = payload[RESULT_META_FIELD] ?? null
+        ;(wireMessage.fieldClocks as Record<string, unknown>)[RESULT_META_FIELD] = clockMap[RESULT_META_FIELD]
+      }
+      messages.push(wireMessage as unknown as SyncPayloadV5['messages'][number])
     } else if (entity.entityType === 'message_block') {
       const payload = entity.payload
       if (!payload || typeof payload !== 'object') fail(`message_block/${entity.entityId} payload must be an object`)
@@ -1058,14 +1081,18 @@ export function projectLocalBaselineToWirePayloadV5(
       if (pm.parentId !== (payload['messageId'] as string)) {
         fail(`message_block/${entity.entityId} membership parent mismatch`)
       }
-      const clockMap = toClockMap(entity, 6, BLOCK_WIRE_FIELDS_V5 as readonly string[])
+      const blockHasMeta = opts?.resultMeta === true && Object.prototype.hasOwnProperty.call(payload, RESULT_META_FIELD)
+      const blockClockFields = blockHasMeta
+        ? [...(BLOCK_WIRE_FIELDS_V5 as readonly string[]), RESULT_META_FIELD]
+        : (BLOCK_WIRE_FIELDS_V5 as readonly string[])
+      const clockMap = toClockMap(entity, blockClockFields.length, blockClockFields)
       const assetIdsRaw = payload['assetIds']
       if (!Array.isArray(assetIdsRaw)) fail(`message_block/${entity.entityId} assetIds must be array`)
       const assetIds = (assetIdsRaw as unknown[]).map((v) => {
         if (typeof v !== 'string') fail(`message_block/${entity.entityId} assetIds must be strings`)
         return v
       })
-      messageBlocks.push({
+      const wireBlock: Record<string, unknown> = {
         id: entity.entityId,
         messageId: requireNonEmptyString(payload['messageId'], `message_block/${entity.entityId} messageId`),
         type: fieldValue(payload, entity.entityId, 'type'),
@@ -1084,7 +1111,12 @@ export function projectLocalBaselineToWirePayloadV5(
           assetIds: clockMap['assetIds']
         } as SyncPayloadV5['messageBlocks'][number]['fieldClocks'],
         parentMembershipClock: { timestamp: pm.timestamp, operationId: pm.operationId }
-      })
+      }
+      if (blockHasMeta) {
+        wireBlock[RESULT_META_FIELD] = payload[RESULT_META_FIELD] ?? null
+        ;(wireBlock.fieldClocks as Record<string, unknown>)[RESULT_META_FIELD] = clockMap[RESULT_META_FIELD]
+      }
+      messageBlocks.push(wireBlock as unknown as SyncPayloadV5['messageBlocks'][number])
     } else if (entity.entityType === 'topic_branch') {
       const payload = entity.payload
       if (!payload || typeof payload !== 'object') fail(`branch/${entity.entityId} payload must be an object`)
@@ -1332,13 +1364,15 @@ export function projectLocalBaselineToWirePayloadV5(
     }
   }
 
-  try {
-    validatePayload(payload)
-  } catch (e) {
-    if (e instanceof ValidationError) {
-      fail(`projected v5 payload failed wire validation: ${e.message}`, e)
+  if (opts?.deferStrictValidation !== true) {
+    try {
+      validatePayload(payload)
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        fail(`projected v5 payload failed wire validation: ${e.message}`, e)
+      }
+      throw e
     }
-    throw e
   }
   return payload
 }
@@ -1406,7 +1440,12 @@ export function projectLocalBaselineToWirePayloadV6(
     ...(c as unknown as Record<string, unknown>),
     tombstones: c.tombstones.filter((t) => (t as { entityType?: unknown }).entityType !== REFERENCE_TOMBSTONE_TYPE)
   } as unknown as LocalSyncBaselineCandidate
-  const v5 = projectLocalBaselineToWirePayloadV5(v5Candidate, assistantSection)
+  const v5 = projectLocalBaselineToWirePayloadV5(v5Candidate, assistantSection, {
+    resultMeta: true,
+    // The container makes this intermediate object non-V5 by definition; the
+    // single strict V6 validation at the end of this function is the gate.
+    deferStrictValidation: true
+  })
 
   const topicReferences: SyncPayloadV6['topicReferences'] = []
   for (const ref of c.references ?? []) {

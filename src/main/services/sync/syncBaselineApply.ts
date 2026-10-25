@@ -33,6 +33,7 @@ import {
   validateSyncOperationStrict,
   validateSyncPayloadAllowlist
 } from '@shared/sync'
+import { encodeExtra, localResultMetaValue, mergeResultMetaIntoExtra, RESULT_META_FIELD } from '@shared/sync'
 import { and, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
@@ -1355,11 +1356,14 @@ function topicLocalFieldValue(
 }
 
 function messageLocalFieldValue(row: typeof schema.messages.$inferSelect, field: string): unknown {
+  // Portable result container lives in the `extra` JSON column, not a column.
+  if (field === RESULT_META_FIELD) return localResultMetaValue('message', row.extra)
   const record = row as unknown as Record<string, unknown>
   return record[field] ?? null
 }
 
 function blockLocalFieldValue(row: typeof schema.messageBlocks.$inferSelect, field: string): unknown {
+  if (field === RESULT_META_FIELD) return localResultMetaValue('message_block', row.extra)
   const record = row as unknown as Record<string, unknown>
   return record[field] ?? null
 }
@@ -2989,7 +2993,16 @@ export function mergeValidatedBaselineInTx(
             createdAt: (payload.createdAt as string | null) ?? null,
             updatedAt: (payload.updatedAt as string | null) ?? null,
             sortOrder,
-            extra: null
+            extra: encodeExtra(
+              mergeResultMetaIntoExtra(
+                'message',
+                null,
+                Object.prototype.hasOwnProperty.call(payload, RESULT_META_FIELD) &&
+                  payload[RESULT_META_FIELD] !== undefined
+                  ? (payload[RESULT_META_FIELD] as Record<string, unknown> | null)
+                  : null
+              )
+            )
           })
           .run()
         upsertEntityClock(
@@ -3116,7 +3129,19 @@ export function mergeValidatedBaselineInTx(
         continue
       }
       const setM: Record<string, unknown> = {}
-      for (const w of winners) setM[w.field] = w.value
+      let wonMetaM: Record<string, unknown> | null = null
+      let wonMetaMSet = false
+      for (const w of winners) {
+        if (w.field === RESULT_META_FIELD) {
+          wonMetaM = (w.value ?? null) as Record<string, unknown> | null
+          wonMetaMSet = true
+          continue
+        }
+        setM[w.field] = w.value
+      }
+      if (wonMetaMSet) {
+        setM.extra = encodeExtra(mergeResultMetaIntoExtra('message', local.extra, wonMetaM))
+      }
       inner.update(schema.messages).set(setM).where(eq(schema.messages.id, entity.entityId)).run()
       for (const w of winners) {
         const fc = incomingFcs.get(w.field)
@@ -3157,7 +3182,16 @@ export function mergeValidatedBaselineInTx(
             createdAt: (payload.createdAt as string | null) ?? null,
             updatedAt: (payload.updatedAt as string | null) ?? null,
             sortOrder,
-            extra: null
+            extra: encodeExtra(
+              mergeResultMetaIntoExtra(
+                'message_block',
+                null,
+                Object.prototype.hasOwnProperty.call(payload, RESULT_META_FIELD) &&
+                  payload[RESULT_META_FIELD] !== undefined
+                  ? (payload[RESULT_META_FIELD] as Record<string, unknown> | null)
+                  : null
+              )
+            )
           })
           .run()
         upsertEntityClock(
@@ -3336,12 +3370,25 @@ export function mergeValidatedBaselineInTx(
         continue
       }
       const setB: Record<string, unknown> = {}
-      for (const w of winners) setB[w.field] = w.value
-      // assetIds is not a column; only update real columns
+      let wonMetaB: Record<string, unknown> | null = null
+      let wonMetaBSet = false
+      for (const w of winners) {
+        if (w.field === RESULT_META_FIELD) {
+          wonMetaB = (w.value ?? null) as Record<string, unknown> | null
+          wonMetaBSet = true
+          continue
+        }
+        setB[w.field] = w.value
+      }
+      // assetIds is not a column; only update real columns. The portable result
+      // container is persisted into the `extra` JSON column instead.
       const setBForDb: Record<string, unknown> = {}
       for (const [k, v] of Object.entries(setB)) {
         if (k === 'assetIds') continue
         setBForDb[k] = v
+      }
+      if (wonMetaBSet) {
+        setBForDb.extra = encodeExtra(mergeResultMetaIntoExtra('message_block', local.extra, wonMetaB))
       }
       if (Object.keys(setBForDb).length > 0) {
         inner.update(schema.messageBlocks).set(setBForDb).where(eq(schema.messageBlocks.id, entity.entityId)).run()

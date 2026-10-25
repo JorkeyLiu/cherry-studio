@@ -1,6 +1,13 @@
 import { loggerService } from '@logger'
 import { IpcChannel } from '@shared/IpcChannel'
-import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
+import {
+  extractBlockResultMeta,
+  extractMessageResultMeta,
+  isStableBlockStatus,
+  isStableMessageStatus,
+  isUnsupportedBlockForSync,
+  RESULT_META_FIELD
+} from '@shared/sync'
 import { asc, eq } from 'drizzle-orm'
 
 import { chatDbService } from '../chatDb'
@@ -87,6 +94,14 @@ function enqueueMessageFull(messageId: string, ts: number): boolean {
     updatedAt: row.updatedAt,
     sortOrder: row.sortOrder
   }
+  // Portable persisted result metadata (sanitized container only; unknown
+  // local-only overflow keys are never transmitted). An empty post-state is
+  // omitted when the container was never synced, but becomes an explicit
+  // `null` clear once a persisted `resultMeta` field clock proves an earlier
+  // capture published it — otherwise the peer keeps the stale subset.
+  const messageMeta = extractMessageResultMeta((row as { extra?: unknown }).extra)
+  if (messageMeta.meta !== null) payload[RESULT_META_FIELD] = messageMeta.meta
+  else if (syncService.hasResultMetaFieldClock('message', messageId)) payload[RESULT_META_FIELD] = null
   const op = syncService.recordUpsert('message', messageId, payload, ts)
   return !!op
 }
@@ -108,6 +123,11 @@ function enqueueBlockFull(blockId: string, ts: number): boolean {
     updatedAt: row.updatedAt,
     sortOrder: row.sortOrder
   }
+  // Same clear rule as messages: explicit `null` only for an already-synced
+  // container, never a speculative null for a row that never carried one.
+  const blockMeta = extractBlockResultMeta((row as { extra?: unknown }).extra)
+  if (blockMeta.meta !== null) payload[RESULT_META_FIELD] = blockMeta.meta
+  else if (syncService.hasResultMetaFieldClock('message_block', blockId)) payload[RESULT_META_FIELD] = null
   const op = syncService.recordUpsert('message_block', blockId, payload, ts)
   return !!op
 }

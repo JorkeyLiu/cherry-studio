@@ -90,7 +90,10 @@ function isSafeAdoptionTimestamp(v: unknown): v is number {
 export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionService): SeedAdoptionResult {
   let candidate: ReturnType<typeof captureLocalSyncBaselineCandidate>
   try {
-    candidate = captureLocalSyncBaselineCandidate(db)
+    // Adoption holder capture: fully-unversioned rows declare their portable
+    // result container now because the enqueue below mints the matching field
+    // clock in the same write transaction (see BaselineCaptureOptions).
+    candidate = captureLocalSyncBaselineCandidate(db, { adoptionResultMeta: true })
   } catch (e) {
     const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
     return { kind: 'deferred', reason: 'candidate-capture-failed', detail }

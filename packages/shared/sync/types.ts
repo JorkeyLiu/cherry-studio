@@ -142,7 +142,12 @@ export const SYNC_TOPIC_PATCH_FIELDS = [
   'isNameManuallyEdited'
 ] as const
 
-/** Mutable allowlisted message fields with per-field clocks (`topicId` is immutable identity). */
+/**
+ * Mutable allowlisted message fields with per-field clocks (`topicId` is
+ * immutable identity). `resultMeta` is the single declared portable result
+ * container (persisted in `messages.extra`; see portableResult.ts) and is
+ * additive/optional: it is only present when a persisted clock exists.
+ */
 export const SYNC_MESSAGE_PATCH_FIELDS = [
   'role',
   'content',
@@ -152,11 +157,24 @@ export const SYNC_MESSAGE_PATCH_FIELDS = [
   'modelId',
   'assistantId',
   'createdAt',
-  'updatedAt'
+  'updatedAt',
+  'resultMeta'
 ] as const
 
-/** Mutable allowlisted block fields with per-field clocks (`messageId` is immutable identity). */
-export const SYNC_BLOCK_PATCH_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt', 'assetIds'] as const
+/**
+ * Mutable allowlisted block fields with per-field clocks (`messageId` is
+ * immutable identity). `resultMeta` is the single declared portable result
+ * container (persisted in `message_blocks.extra`).
+ */
+export const SYNC_BLOCK_PATCH_FIELDS = [
+  'type',
+  'content',
+  'status',
+  'createdAt',
+  'updatedAt',
+  'assetIds',
+  'resultMeta'
+] as const
 
 /** Mutable allowlisted file-asset fields with per-field clocks (`id`/`sha256`/`byteLength`/`extension` are immutable). */
 export const SYNC_FILE_ASSET_PATCH_FIELDS = ['mimeType', 'originalName', 'createdAt'] as const

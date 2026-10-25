@@ -3570,16 +3570,60 @@ function scheduleTopicAnchorEstablishment(
  * segments, route, guards) with an `around` window around a stable anchor so
  * a hint-driven resident refresh preserves the open window instead of
  * jumping to latest. Absent = latest bootstrap semantics (unchanged).
+ * A refresh of the route that is ALREADY displayed also keeps the residency
+ * marker for the whole round trip (no applicability-generation bump), so the
+ * existing rows never blank or remount between hints — see
+ * `canRefreshResidentInPlace`. Initial loads and real route changes keep the
+ * bump-then-publish safety.
  */
 export interface TopicReloadRefreshIntent {
   anchorMessageId?: string
   before?: number
   after?: number
 }
+/**
+ * Same-route in-place continuity eligibility for a hint-driven resident
+ * refresh.
+ *
+ * A hint-driven refresh re-reads the AUTHORITATIVE window for the route that
+ * is ALREADY the displayed resident projection. The cold-load path bumps the
+ * per-topic applicability generation first, which clears `chatData` /
+ * `segments` / `residentTopic`; the loaded projection then reads as
+ * `undefined` and the open window blanks (empty row list, remount) until the
+ * publication lands — visible once per invalidation hint. When the route is
+ * provably unchanged the residency marker must survive the round trip and the
+ * single joint publication replaces the window atomically instead.
+ *
+ * Fail-closed: every uncertainty (topic not the displayed one when the
+ * refresh started, nonresident/incomplete entry, no loaded ID list, unknown
+ * published route, pending deletion generation, published route != active
+ * route) returns false, so the existing bump path runs unchanged and initial
+ * loads / real route changes keep their visibility safety.
+ */
+function canRefreshResidentInPlace(getState: () => RootState, topicId: string, wasDisplayedTopic: boolean): boolean {
+  if (!wasDisplayedTopic) return false
+  try {
+    if (getDeletionGeneration(topicId) !== 0) return false
+    const state = getState() as any
+    const entry = state?.residentRegistry?.entries?.[topicId]
+    if (!entry || !entry.residentTopic || !entry.chatData || !entry.segments) return false
+    if (!Array.isArray(state?.messages?.messageIdsByTopic?.[topicId])) return false
+    const mutableRoutes = state?.messages?.mutableRouteByTopic
+    if (!mutableRoutes || !Object.prototype.hasOwnProperty.call(mutableRoutes, topicId)) return false
+    const publishedRoute = (mutableRoutes[topicId] ?? null) as string | null
+    return publishedRoute === activeRouteOf(getState, topicId)
+  } catch {
+    return false
+  }
+}
+
 export const loadTopicMessagesThunk =
   (topicId: string, forceReload: boolean = false, refresh?: TopicReloadRefreshIntent) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     const state = getState()
+    // Displayed-projection provenance at entry: an in-place continuity refresh
+    // is only legal for the topic that was ALREADY the displayed one.
+    const wasDisplayedTopic = state.messages.currentTopicId === topicId
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
@@ -3668,11 +3712,24 @@ export const loadTopicMessagesThunk =
       }
     }
 
+    // Same-route continuity: a hint-driven refresh of the route already being
+    // displayed keeps the residency marker (no generation bump) so the
+    // existing rows stay rendered while the authoritative re-read is in
+    // flight; the single joint publication below replaces the window
+    // atomically. The request-sequence, deletion-generation and route guards
+    // still fence a superseded read (it discards before publishing), and every
+    // other shape (initial load, real route change, nonresident projection)
+    // keeps the existing bump-then-publish visibility safety.
+    const continuityRefresh = refresh !== undefined && canRefreshResidentInPlace(getState, topicId, wasDisplayedTopic)
+    const continuityRoute = continuityRefresh ? activeRouteOf(getState, topicId) : null
+
     try {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
       // Capture/bump per-topic applicability generation before both reads
-      dispatch(bumpGeneration(topicId))
+      if (!continuityRefresh) {
+        dispatch(bumpGeneration(topicId))
+      }
       const generation = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
         0) as number
 
@@ -3759,6 +3816,15 @@ export const loadTopicMessagesThunk =
       if (currentGeneration !== generation) {
         recordResidentReadDiscard('generationMismatch')
         logger.warn(`[loadTopicMessagesThunk] stale generation discard for ${topicId} (generation mismatch)`)
+        return
+      }
+
+      // Continuity refreshes do not bump the generation, so the route itself
+      // is the remaining supersession fence: a route that moved while the read
+      // was in flight discards here and the newer route publication wins.
+      if (continuityRefresh && activeRouteOf(getState, topicId) !== continuityRoute) {
+        recordResidentReadDiscard('routeChanged')
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (route changed during refresh)`)
         return
       }
 

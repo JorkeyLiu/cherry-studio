@@ -4,6 +4,7 @@
  */
 
 import { parseAssistantConfigKey, validateAssistantConfigPayload } from './assistantConfig'
+import { validateBlockResultMeta, validateMessageResultMeta } from './portableResult'
 import { validateStableReplacePayloadStrict } from './stableReplace'
 
 // Allowlisted topic fields — deletedAt included for soft-delete sync (hard delete uses op=delete)
@@ -24,6 +25,9 @@ const TOPIC_ALLOW = new Set([
 // Message allowlist
 // `branchId` (string|null, absent = main route) is the immutable owner route.
 // `topicId` stays the immutable logical topic. No synthetic composite keys.
+// `resultMeta` is ONE declared portable result container (sanitized
+// usage/metrics/mentions/useful/model display state persisted in `extra`);
+// see portableResult.ts for the closed nested schema.
 const MESSAGE_ALLOW = new Set([
   'id',
   'topicId',
@@ -37,10 +41,13 @@ const MESSAGE_ALLOW = new Set([
   'assistantId',
   'createdAt',
   'updatedAt',
-  'sortOrder'
+  'sortOrder',
+  'resultMeta'
 ])
 // Block allowlist — never file_path, never binary, no extra file metadata.
 // assetIds is the portable ordered attachment identity (ordered unique asset IDs, no paths/blobs).
+// `resultMeta` is ONE declared portable result container (thinking duration,
+// sanitized error display/classification, code language, translation identity).
 const BLOCK_ALLOW = new Set([
   'id',
   'messageId',
@@ -50,7 +57,8 @@ const BLOCK_ALLOW = new Set([
   'createdAt',
   'updatedAt',
   'sortOrder',
-  'assetIds'
+  'assetIds',
+  'resultMeta'
 ])
 // File asset allowlist — strict 7-key FileAsset identity (no path/count/tokens/purpose/device/secret)
 const FILE_ASSET_ALLOW = new Set(['id', 'sha256', 'byteLength', 'extension', 'mimeType', 'originalName', 'createdAt'])
@@ -571,7 +579,14 @@ export function validateSyncOperationStrict(op: {
         !Number.isInteger(payload.sortOrder)
       ) {
         return 'invalid message sortOrder'
+        return 'invalid message sortOrder'
       }
+    }
+    // Portable result container: omitted = no intent; null = clear; otherwise
+    // the closed sanitized shape (no connection bindings, no raw blobs).
+    if ('resultMeta' in payload && payload.resultMeta !== undefined) {
+      const resultMetaErr = validateMessageResultMeta(payload.resultMeta, 'message resultMeta')
+      if (resultMetaErr) return resultMetaErr
     }
     return null
   }
@@ -666,6 +681,11 @@ export function validateSyncOperationStrict(op: {
     // Non-portable explicit type must not carry non-empty assetIds (empty [] is tolerated as absent)
     const ids = payload.assetIds as unknown[] | undefined | null
     if (Array.isArray(ids) && ids.length > 0) return 'non-media block must not have assetIds'
+  }
+  // Portable result container (block): omitted = no intent, null = clear.
+  if ('resultMeta' in payload && payload.resultMeta !== undefined) {
+    const resultMetaErr = validateBlockResultMeta(payload.resultMeta, 'block resultMeta')
+    if (resultMetaErr) return resultMetaErr
   }
   return null
 }

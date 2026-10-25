@@ -18,8 +18,8 @@ import {
   compareUtf8ByteLex,
   ORDER_FRAME_VERSION,
   validateClock,
-  validateMessage,
-  validateMessageBlock,
+  validateMessageBlockEntityStableReplace,
+  validateMessageEntityStableReplace,
   validateOrderFrame
 } from './baselineWire'
 
@@ -150,7 +150,7 @@ export function validateStableReplacePayloadStrict(op: {
   // keys, type/value domain, transient-status gate, field-clock closure,
   // parentMembershipClock, no sortOrder on wire).
   try {
-    validateMessage(payload.message, 'message')
+    validateMessageEntityStableReplace(payload.message, 'message')
   } catch (e) {
     return `message_stable_replace invalid message: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -165,7 +165,7 @@ export function validateStableReplacePayloadStrict(op: {
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i]
     try {
-      validateMessageBlock(b, `messageBlocks[${i}]`)
+      validateMessageBlockEntityStableReplace(b, `messageBlocks[${i}]`)
     } catch (e) {
       return `message_stable_replace invalid messageBlocks[${i}]: ${e instanceof Error ? e.message : String(e)}`
     }

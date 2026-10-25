@@ -47,6 +47,15 @@
  * per-assistant sequence ledger coalesces in-flight directory reads so the
  * final hint is never missed.
  *
+ * Overlapping invalidations coalesce, they never multiply work: one in-flight
+ * directory read per assistant and one in-flight resident refresh per topic,
+ * each with at most one trailing replay for a hint the running read does not
+ * already cover. A same-route refresh keeps the residency marker for the whole
+ * round trip (`loadTopicMessagesThunk` continuity path), so the open rows stay
+ * rendered and the single joint publication replaces the window atomically.
+ * The same coalesced entry point serves the history-reference invalidation, so
+ * a chat hint plus a reference hint for one commit refresh once.
+ *
  * Stale guards: per-assistant monotonic request sequence — a superseded
  * in-flight directory read discards before dispatch; an assistant deleted
  * while Main was in flight is never resurrected; unknown assistants
@@ -79,6 +88,70 @@ const pendingAssistantIds = new Set<string>()
 const pendingTopicIds = new Set<string>()
 const pendingBranchIds = new Set<string>()
 
+/**
+ * Overlapping-invalidation coalescing.
+ *
+ * A sync wave emits several hints for the same logical commit (chat hint then
+ * history-reference hint, directory + coarse baseline, re-minted equal-value
+ * ops). Each hint alone must not start an independent read/fetch: that
+ * produced one window reload per hint and therefore repeated blanking of the
+ * open projection. Every request takes a module sequence number; a job is
+ * either running (exactly one in-flight read per key) or idle. A hint whose
+ * commit the in-flight read already covers (`seq <= coveredThroughSeq`, taken
+ * the instant the read is dispatched — hints are only ever emitted after the
+ * Main commit) needs nothing; anything later marks ONE trailing replay, so the
+ * last invalidation is never lost and no burst can starve it. Bounded state:
+ * one job record per key per wave, deleted when settled. No timers, no new
+ * lifecycle subsystem.
+ */
+interface CoalescedRefreshJob {
+  running: boolean
+  /** Highest request sequence already covered by the dispatched read. */
+  coveredThroughSeq: number
+  dirty: boolean
+}
+
+const residentRefreshJobs = new Map<string, CoalescedRefreshJob>()
+const directoryRefreshJobs = new Map<string, CoalescedRefreshJob>()
+let projectionRequestSeq = 0
+
+async function runCoalescedRefresh(
+  jobs: Map<string, CoalescedRefreshJob>,
+  key: string,
+  seq: number,
+  run: (markCovered: () => void) => Promise<void>
+): Promise<void> {
+  const inFlight = jobs.get(key)
+  if (inFlight?.running) {
+    if (seq > inFlight.coveredThroughSeq) inFlight.dirty = true
+    return
+  }
+  const job: CoalescedRefreshJob = { running: true, coveredThroughSeq: seq, dirty: false }
+  jobs.set(key, job)
+  try {
+    for (;;) {
+      try {
+        await run(() => {
+          job.coveredThroughSeq = projectionRequestSeq
+        })
+      } catch {
+        // An async failure ends only this attempt; `dirty` is still honoured
+        // and the next hint starts a fresh bounded refresh — an error never
+        // wedges the sequence.
+      }
+      if (!job.dirty) break
+      job.dirty = false
+      job.coveredThroughSeq = projectionRequestSeq
+    }
+  } finally {
+    job.running = false
+    if (jobs.get(key) === job) jobs.delete(key)
+  }
+}
+
+function isResidentRefreshRunning(topicId: string): boolean {
+  return residentRefreshJobs.get(topicId)?.running === true
+}
 /**
  * Bounded current-route pending resident invalidation while a request
  * execution owns the open route. Exactly one entry (coalesced); cleared on
@@ -131,7 +204,12 @@ function flushPendingResident(): void {
   const currentTopicId = getCurrentTopicId()
   if (!currentTopicId || currentTopicId !== snapshot.topicId) return
   try {
-    void reloadCurrentTopicIfAffected(snapshot.topicIds, snapshot.branchIds, snapshot.assistantIds)
+    void reloadCurrentTopicIfAffected(
+      snapshot.topicIds,
+      snapshot.branchIds,
+      snapshot.assistantIds,
+      ++projectionRequestSeq
+    )
   } catch {
     // best-effort flush; never break the store subscriber
   }
@@ -256,15 +334,6 @@ function getActiveRoute(topicId: string): string | null {
   }
 }
 
-function getLoadedIds(topicId: string): string[] {
-  try {
-    const ids = store.getState().messages?.messageIdsByTopic?.[topicId]
-    return Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id.length > 0) : []
-  } catch {
-    return []
-  }
-}
-
 /**
  * Read the persisted route-local stable viewport snapshot anchor without
  * touching the DOM. Uses the existing viewport key format
@@ -295,19 +364,20 @@ function readPersistedViewportAnchor(topicId: string, route: string | null): str
     return null
   }
 }
-
 /**
  * Resolve the around-anchor for a hint-driven resident refresh: the
- * persisted viewport snapshot anchor first (old first-visible stable ID),
- * then the oldest resident loaded ID. Null means no anchor — the caller
- * falls back to the existing latest reload.
+ * persisted viewport snapshot anchor (the reader's own first-visible stable
+ * ID, written whenever the reader scrolls).
+ *
+ * Null means the reader has no reading position to preserve — the projection
+ * is at its default latest position (never scrolled). The caller then
+ * re-reads the LATEST window instead of inventing an anchor: anchoring on the
+ * oldest loaded ID would move the window BACKWARD on every invalidation
+ * (newest rows dropped, older rows pulled in), which is the visible jump this
+ * refresh must never cause.
  */
 export function resolveHintRefreshAnchorForTests(topicId: string, route: string | null): string | null {
-  const snapshotAnchor = readPersistedViewportAnchor(topicId, route)
-  if (snapshotAnchor) return snapshotAnchor
-  const loaded = getLoadedIds(topicId)
-  if (loaded.length > 0) return loaded[0]
-  return null
+  return readPersistedViewportAnchor(topicId, route)
 }
 
 /**
@@ -533,17 +603,31 @@ export async function reconcileAssistantDirectory(assistantId: string): Promise<
   return false
 }
 
-async function reloadCurrentResidentPreservingWindow(): Promise<void> {
+/**
+ * Re-read the displayed route's authoritative window without dropping the
+ * residency marker.
+ *
+ * `refresh` is ALWAYS supplied so the read takes the same-route continuity path
+ * (`canRefreshResidentInPlace`) instead of the cold bump-then-publish load that
+ * blanks the open rows. With the reader's persisted viewport anchor the window
+ * is re-read `around` that anchor (their scrolled interval is preserved); with
+ * no reading position at all the window is re-read as `latest`, which is what
+ * the default/following position displays — never an invented anchor, which
+ * would slide the window backwards behind the reader's back.
+ */
+async function reloadCurrentResidentPreservingWindow(markCovered: () => void): Promise<void> {
   const currentTopicId = getCurrentTopicId()
   if (!currentTopicId) return
   const route = getActiveRoute(currentTopicId)
   const anchor = resolveHintRefreshAnchorForTests(currentTopicId, route)
   try {
     const { loadTopicMessagesThunk } = await import('../store/thunk/messageThunk')
+    // Every hint received up to the dispatch of this read has already been
+    // committed in Main, so this read covers them all — record that before the
+    // request leaves, so an overlapping duplicate hint never forces a replay.
+    markCovered()
     await (store.dispatch as unknown as (t: unknown) => Promise<unknown>)(
-      (anchor
-        ? loadTopicMessagesThunk(currentTopicId, true, { anchorMessageId: anchor })
-        : loadTopicMessagesThunk(currentTopicId, true)) as unknown
+      loadTopicMessagesThunk(currentTopicId, true, anchor ? { anchorMessageId: anchor } : {}) as unknown
     )
   } catch (error) {
     logger.warn(`chat-projection resident reload failed for ${currentTopicId}`, error as Error)
@@ -551,16 +635,36 @@ async function reloadCurrentResidentPreservingWindow(): Promise<void> {
 }
 
 /**
+ * Serialize resident re-reads for one topic: at most one in-flight refresh,
+ * with a single trailing replay when a later invalidation arrives while it
+ * runs. The replay re-resolves the CURRENT projection, so a route that moved
+ * meanwhile is either skipped (topic no longer selected) or deferred through
+ * the existing execution-overlay pending entry (PROJ-9) instead of racing it.
+ */
+async function scheduleResidentRefresh(topicId: string, seq: number): Promise<void> {
+  await runCoalescedRefresh(residentRefreshJobs, topicId, seq, async (markCovered) => {
+    if (getCurrentTopicId() !== topicId) return
+    if (isRequestActive(topicId)) {
+      deferResidentWhileBusy(topicId, [topicId], [], [])
+      return
+    }
+    await reloadCurrentResidentPreservingWindow(markCovered)
+  })
+}
+
+/**
  * Decide whether the open resident route needs a bounded re-read for one
  * hint. Precise hints (current topic named) honor branch scope; coarse
  * baseline hints (empty topicIds) still reconcile the open route when its
  * assistant is named — directory-only would falsely claim completeness.
- * Exactly one resident re-read per hint, never whole-history.
+ * One coalesced resident re-read per invalidation wave (one in-flight plus at
+ * most one trailing replay), never whole-history.
  */
 async function reloadCurrentTopicIfAffected(
   topicIds: string[],
   branchIds: string[],
-  assistantIds: string[]
+  assistantIds: string[],
+  seq: number
 ): Promise<void> {
   const currentTopicId = getCurrentTopicId()
   if (!currentTopicId) return
@@ -578,22 +682,24 @@ async function reloadCurrentTopicIfAffected(
     // Execution overlay: while the open route produces (loadingByTopic),
     // skip the forced reload and keep ONE bounded pending invalidation for
     // this route; the store lifecycle transition flushes it once settled.
-    if (isRequestActive(currentTopicId)) {
+    // A refresh we already own is not an execution: coalesce into it instead
+    // of deferring on our own `loadingByTopic` flag.
+    if (!isResidentRefreshRunning(currentTopicId) && isRequestActive(currentTopicId)) {
       deferResidentWhileBusy(currentTopicId, topicIds, branchIds, assistantIds)
       return
     }
-    await reloadCurrentResidentPreservingWindow()
+    await scheduleResidentRefresh(currentTopicId, seq)
     return
   }
   // Coarse baseline: the open route's assistant is named but no topic is.
   if (Array.isArray(topicIds) && topicIds.length === 0) {
     const owner = findAssistantForTopic(currentTopicId)
     if (owner && Array.isArray(assistantIds) && assistantIds.includes(owner)) {
-      if (isRequestActive(currentTopicId)) {
+      if (!isResidentRefreshRunning(currentTopicId) && isRequestActive(currentTopicId)) {
         deferResidentWhileBusy(currentTopicId, topicIds, branchIds, assistantIds)
         return
       }
-      await reloadCurrentResidentPreservingWindow()
+      await scheduleResidentRefresh(currentTopicId, seq)
     }
   }
 }
@@ -637,6 +743,10 @@ export async function consumeChatProjectionHint(
     }
     return
   }
+  // This hint's wave position: every read dispatched after this point covers
+  // it (Main only emits the hint after committing), so overlapping hints that
+  // the in-flight read already covers never force a replay.
+  const seq = ++projectionRequestSeq
   const assistantIds = Array.isArray(event.assistantIds) ? event.assistantIds : []
   const topicIds = Array.isArray(event.topicIds) ? event.topicIds : []
   const branchIds = Array.isArray(event.branchIds) ? event.branchIds : []
@@ -644,12 +754,18 @@ export async function consumeChatProjectionHint(
     if (typeof assistantId !== 'string' || assistantId.length === 0) continue
     if (!findAssistant(assistantId)) continue
     try {
-      await reconcileAssistantDirectory(assistantId)
+      // One in-flight directory read per assistant, one trailing replay: a
+      // burst of hints for the same wave (chat + reference + re-minted ops)
+      // converges once instead of issuing an authoritative full read each.
+      await runCoalescedRefresh(directoryRefreshJobs, assistantId, seq, async (markCovered) => {
+        markCovered()
+        await reconcileAssistantDirectory(assistantId)
+      })
     } catch {
       // best-effort per assistant; never break the remaining scopes
     }
   }
-  await reloadCurrentTopicIfAffected(topicIds, branchIds, assistantIds)
+  await reloadCurrentTopicIfAffected(topicIds, branchIds, assistantIds, seq)
 }
 
 export function subscribeChatProjectionEvents(): () => void {
@@ -782,11 +898,22 @@ export function isRequestActiveForTests(topicId: string): boolean {
   return isRequestActive(topicId)
 }
 
+/** Coalescing state probes (focused tests only; no production reader). */
+export function isResidentRefreshInFlightForTests(topicId: string): boolean {
+  return isResidentRefreshRunning(topicId)
+}
+
+export function isDirectoryRefreshInFlightForTests(assistantId: string): boolean {
+  return directoryRefreshJobs.get(assistantId)?.running === true
+}
 export function unsubscribeChatProjectionEventsForTests(): void {
   if (unsubscribe) {
     try {
       unsubscribe()
     } catch {}
+    residentRefreshJobs.clear()
+    directoryRefreshJobs.clear()
+    projectionRequestSeq = 0
     unsubscribe = null
   }
   assistantSeq.clear()

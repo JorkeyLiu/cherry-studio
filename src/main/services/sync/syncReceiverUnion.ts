@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
+import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync, RESULT_META_FIELD } from '@shared/sync'
 import { eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
@@ -47,6 +47,20 @@ function isSafeTs(v: unknown): v is number {
 
 function fail(msg: string): never {
   throw new SyncBaselineApplyError(msg)
+}
+
+/**
+ * Canonical JSON (recursively sorted keys) for the optional `resultMeta`
+ * container only: the same sanitized value reaches this device through a JSON
+ * round-trip, so key order must never be read as a value divergence.
+ */
+function canonicalMetaJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(canonicalMetaJson).join(',')}]`
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalMetaJson(v)}`).join(',')}}`
 }
 
 function isEligibleMessageRow(row: { status: string | null }): boolean {
@@ -516,6 +530,15 @@ export function adoptReceiverExclusiveInTx(
     incomingBranchIds.size > 0 ||
     incoming.tombstones.some((t) => t.entityType === 'topic_branch') ||
     incoming.orderFrames.some((f) => (f as { kind?: string }).kind === 'branchSuffix')
+  // Result-container domain (v6): the incoming baseline actually declares the
+  // optional portable container. Adoption may only mint a `resultMeta` payload
+  // key (and its field clock) where the channel's wire can carry it — a v1..v5
+  // channel keeps the container local-only instead of failing publish later.
+  const resultMetaDomain = incoming.entities.some(
+    (e) =>
+      (e.entityType === 'message' || e.entityType === 'message_block') &&
+      Object.prototype.hasOwnProperty.call(e.payload, RESULT_META_FIELD)
+  )
   for (const t of incoming.tombstones) {
     incomingTombstoneKeys.add(`${t.entityType}:${t.entityId}`)
   }
@@ -783,15 +806,29 @@ export function adoptReceiverExclusiveInTx(
     local: Record<string, unknown>,
     inc: Record<string, unknown>,
     keys: string[],
-    ctx: string
+    ctx: string,
+    optionalKeys?: ReadonlySet<string>
   ): void => {
     for (const k of keys) {
+      if (optionalKeys?.has(k) && !Object.prototype.hasOwnProperty.call(inc, k)) {
+        // Optional declared container: an incoming payload that predates it (or
+        // deliberately omits it) expresses no intent, so it is never compared
+        // and never treated as a divergence. When present it IS compared, so a
+        // v6+ same-ID row cannot silently keep/merge divergent metadata.
+        continue
+      }
       if (k === 'assetIds') {
         // V5 portable identity: absent/null/[] normalize to [] for
         // non-media tolerance; portable mismatch still fails closed.
         const lv = normalizeAdoptionAssetIds(local[k] ?? [])
         const iv = normalizeAdoptionAssetIds(inc[k] ?? [])
         if (lv === null || iv === null || JSON.stringify(lv) !== JSON.stringify(iv)) {
+          fail(`receiver union same-ID value divergence for ${ctx} field ${k}`)
+        }
+        continue
+      }
+      if (k === RESULT_META_FIELD) {
+        if (canonicalMetaJson(local[k] ?? null) !== canonicalMetaJson(inc[k] ?? null)) {
           fail(`receiver union same-ID value divergence for ${ctx} field ${k}`)
         }
         continue
@@ -804,9 +841,12 @@ export function adoptReceiverExclusiveInTx(
     }
   }
   const TOPIC_COMPARE_KEYS = ['id', ...ADOPTION_TOPIC_FIELDS]
-  const MESSAGE_COMPARE_KEYS = ['id', 'topicId', 'branchId', ...ADOPTION_MESSAGE_FIELDS]
-  const BLOCK_COMPARE_KEYS = ['id', 'messageId', ...ADOPTION_BLOCK_FIELDS]
+  const MESSAGE_COMPARE_KEYS = ['id', 'topicId', 'branchId', ...ADOPTION_MESSAGE_FIELDS, RESULT_META_FIELD]
+  const BLOCK_COMPARE_KEYS = ['id', 'messageId', ...ADOPTION_BLOCK_FIELDS, RESULT_META_FIELD]
   const BRANCH_COMPARE_KEYS = ['id', 'topicId', 'parentBranchId', 'anchorMessageId', ...ADOPTION_BRANCH_FIELDS]
+  // Only the portable result container is conditional: every other compare key
+  // is a mandatory field of the adoption contract.
+  const OPTIONAL_COMPARE_KEYS: ReadonlySet<string> = new Set([RESULT_META_FIELD])
   for (const row of topicRows) {
     if (!incomingTopicIds.has(row.id)) continue
     if (!isFullyUnversioned('topic', row.id)) continue
@@ -834,7 +874,8 @@ export function adoptReceiverExclusiveInTx(
       buildAdoptionMessagePayload(row as Parameters<typeof buildAdoptionMessagePayload>[0]),
       incomingEntity.payload,
       MESSAGE_COMPARE_KEYS,
-      `message/${row.id}`
+      `message/${row.id}`,
+      OPTIONAL_COMPARE_KEYS
     )
   }
   for (const row of blockRows) {
@@ -854,7 +895,8 @@ export function adoptReceiverExclusiveInTx(
       buildAdoptionBlockPayload({ ...row, assetIds: portableSame ? (sameRefs as string[]) : [] }),
       incomingEntity.payload,
       BLOCK_COMPARE_KEYS,
-      `block/${row.id}`
+      `block/${row.id}`,
+      OPTIONAL_COMPARE_KEYS
     )
   }
 
@@ -913,6 +955,7 @@ export function adoptReceiverExclusiveInTx(
       fail(`receiver union orphan message ${id} missing branch ${ownerBranchId}`)
     }
     const payload = buildAdoptionMessagePayload(row as Parameters<typeof buildAdoptionMessagePayload>[0])
+    if (!resultMetaDomain) delete payload[RESULT_META_FIELD]
     if (isFullyUnversioned('message', id)) {
       candidates.push({ entityType: 'message', entityId: id, row, payload })
     } else if (isFullyVersionedComplete('message', id)) {
@@ -987,6 +1030,7 @@ export function adoptReceiverExclusiveInTx(
       payload = buildAdoptionBlockPayload({ ...row, assetIds: refs })
     }
     if (isFullyUnversioned('message_block', id)) {
+      if (!resultMetaDomain) delete payload[RESULT_META_FIELD]
       candidates.push({ entityType: 'message_block', entityId: id, row, payload })
     } else if (isFullyVersionedComplete('message_block', id)) {
       continue
@@ -1462,6 +1506,29 @@ export function adoptReceiverExclusiveInTx(
       if (!fieldAllow.has(k)) continue
       tx.insert(schema.syncFieldClock)
         .values({ entityType: c.entityType, entityId: c.entityId, field: k, timestamp: ts, operationId: opId })
+        .onConflictDoUpdate({
+          target: [schema.syncFieldClock.entityType, schema.syncFieldClock.entityId, schema.syncFieldClock.field],
+          set: { timestamp: ts, operationId: opId }
+        })
+        .run()
+    }
+    // Portable result container: it is NOT part of the always-present adoption
+    // allowlists (pre-v6 rows legitimately carry none), but when the adopted
+    // payload declares it the matching field clock must be minted in this same
+    // tx — a payload key may never outrun its clock, or the v6 wire projection
+    // (resultMeta present iff its field clock) would be unable to publish it.
+    if (
+      (c.entityType === 'message' || c.entityType === 'message_block') &&
+      Object.prototype.hasOwnProperty.call(c.payload, RESULT_META_FIELD)
+    ) {
+      tx.insert(schema.syncFieldClock)
+        .values({
+          entityType: c.entityType,
+          entityId: c.entityId,
+          field: RESULT_META_FIELD,
+          timestamp: ts,
+          operationId: opId
+        })
         .onConflictDoUpdate({
           target: [schema.syncFieldClock.entityType, schema.syncFieldClock.entityId, schema.syncFieldClock.field],
           set: { timestamp: ts, operationId: opId }

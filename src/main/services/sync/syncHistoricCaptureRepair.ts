@@ -18,6 +18,7 @@ import {
   isStableBlockStatus,
   isStableMessageStatus,
   isUnsupportedBlockForSync,
+  RESULT_META_FIELD,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_FILE_ASSET_PATCH_FIELDS,
   SYNC_MESSAGE_PATCH_FIELDS,
@@ -219,6 +220,11 @@ export function checkHistoricParentClosureProof(db: Db, parentMessageId: string)
   const messageFields = fieldSet(db, 'message', parentMessageId)
   if (!messageFields) return { eligible: false, reason: 'parent-unversioned-field' }
   for (const f of SYNC_MESSAGE_PATCH_FIELDS as readonly string[]) {
+    // The portable result container is an additive/optional declared field:
+    // history captured before it existed stays fully versioned for this narrow
+    // historic-repair eligibility proof (its presence/absence is neither a
+    // version defect nor evidence of a partial closure).
+    if (f === RESULT_META_FIELD) continue
     if (!messageFields.has(f)) return { eligible: false, reason: 'parent-unversioned-field' }
   }
   const messageMem = membershipOf(db, 'message', parentMessageId)

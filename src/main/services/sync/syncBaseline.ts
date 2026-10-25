@@ -24,6 +24,8 @@ import { createHash } from 'node:crypto'
 
 import {
   applyTopicSyncDefaults,
+  extractBlockResultMeta,
+  extractMessageResultMeta,
   filterBlockPayload,
   filterBranchPayload,
   filterMessagePayload,
@@ -31,6 +33,7 @@ import {
   isStableBlockStatus,
   isStableMessageStatus,
   isUnsupportedBlockForSync,
+  RESULT_META_FIELD,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_BRANCH_PATCH_FIELDS,
   SYNC_MESSAGE_PATCH_FIELDS,
@@ -432,6 +435,16 @@ function buildMessagePayload(data: {
   assistantId: string | null
   createdAt: string | null
   updatedAt: string | null
+  /** Persisted overflow JSON (`messages.extra`). */
+  extra?: string | null
+  /** Field names that carry a persisted field clock for this entity. */
+  clockedFields?: ReadonlySet<string>
+  /**
+   * Seed-adoption holder path only: declare the portable result container even
+   * though no persisted clock exists yet (the adoption enqueue mints one for
+   * every payload key in the same transaction).
+   */
+  includeResultMeta?: boolean
 }): Record<string, unknown> {
   const raw: Record<string, unknown> = {
     id: data.id,
@@ -448,6 +461,19 @@ function buildMessagePayload(data: {
     assistantId: data.assistantId,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt
+  }
+  // Portable result container: published when the local row carries its
+  // persisted field clock (payload keys must never outrun their clocks, or the
+  // candidate would truthfully degrade to unversioned-field/partial), or when
+  // the caller is the seed-adoption holder path that mints the clock with the
+  // enqueue itself (`includeResultMeta`). Adoption declares the container only
+  // when the local row actually produced a sanitized container: an absent row
+  // value must stay absent (no intent), never a minted null clock.
+  if (data.clockedFields?.has(RESULT_META_FIELD)) {
+    raw[RESULT_META_FIELD] = extractMessageResultMeta(data.extra ?? null).meta
+  } else if (data.includeResultMeta === true) {
+    const meta = extractMessageResultMeta(data.extra ?? null).meta
+    if (meta !== null) raw[RESULT_META_FIELD] = meta
   }
   const filtered = filterMessagePayload(raw)
   if (!filtered) fail(`baseline message payload filter rejected entity ${data.id}`)
@@ -494,6 +520,16 @@ function buildBlockPayload(data: {
   createdAt: string | null
   updatedAt: string | null
   assetIds: string[]
+  /** Persisted overflow JSON (`message_blocks.extra`). */
+  extra?: string | null
+  /** Field names that carry a persisted field clock for this entity. */
+  clockedFields?: ReadonlySet<string>
+  /**
+   * Seed-adoption holder path only: declare the portable result container even
+   * though no persisted clock exists yet (the adoption enqueue mints one for
+   * every payload key in the same transaction).
+   */
+  includeResultMeta?: boolean
 }): Record<string, unknown> {
   const raw: Record<string, unknown> = {
     id: data.id,
@@ -504,6 +540,12 @@ function buildBlockPayload(data: {
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
     assetIds: [...data.assetIds]
+  }
+  if (data.clockedFields?.has(RESULT_META_FIELD)) {
+    raw[RESULT_META_FIELD] = extractBlockResultMeta(data.extra ?? null).meta
+  } else if (data.includeResultMeta === true) {
+    const meta = extractBlockResultMeta(data.extra ?? null).meta
+    if (meta !== null) raw[RESULT_META_FIELD] = meta
   }
   const filtered = filterBlockPayload(raw)
   if (!filtered) fail(`baseline block payload filter rejected entity ${data.id}`)
@@ -556,8 +598,11 @@ type BaselineTx = BetterSQLite3Database<typeof schema>
  * Throws SyncBaselineError fail-closed on malformed known tombstone or
  * channel/cursor metadata, unreadable rows, or unrepresentable values.
  */
-export function captureLocalSyncBaselineCandidate(db: BaselineTx): LocalSyncBaselineCandidate {
-  return db.transaction((tx) => buildBaselineCandidate(tx as BaselineTx))
+export function captureLocalSyncBaselineCandidate(
+  db: BaselineTx,
+  opts?: BaselineCaptureOptions
+): LocalSyncBaselineCandidate {
+  return db.transaction((tx) => buildBaselineCandidate(tx as BaselineTx, opts))
 }
 
 /**
@@ -572,7 +617,20 @@ export function buildBaselineCandidateInTx(tx: BaselineTx): LocalSyncBaselineCan
   return buildBaselineCandidate(tx)
 }
 
-function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
+/**
+ * Capture options. `adoptionResultMeta` is ONLY for the seed-adoption holder
+ * path: there the adoption enqueue mints a real monotonic field clock for every
+ * payload key (including `resultMeta`), so a fully-unversioned local row may
+ * declare the portable result container even though no persisted clock exists
+ * yet. Every wire-publishing capture keeps the default (`false`), where the
+ * container stays gated on its persisted field clock so the payload can never
+ * outrun its clocks.
+ */
+export interface BaselineCaptureOptions {
+  adoptionResultMeta?: boolean
+}
+
+function buildBaselineCandidate(tx: BaselineTx, opts?: BaselineCaptureOptions): LocalSyncBaselineCandidate {
   // Materialize every input inside the single read transaction.
   const topicRows = tx.select().from(schema.topics).all()
   const messageRows = tx.select().from(schema.messages).all()
@@ -985,6 +1043,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     if (rowOwnerBranch !== null && !localBranchIdSet.has(rowOwnerBranch)) {
       fail(`baseline orphan message ${row.id} branch ${rowOwnerBranch} missing`)
     }
+    const key = `message:${row.id}`
     const payload = buildMessagePayload({
       id: row.id,
       topicId: row.topicId,
@@ -997,9 +1056,14 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       modelId: row.modelId,
       assistantId: row.assistantId,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
+      extra: (row as { extra?: string | null }).extra ?? null,
+      clockedFields: new Set((fieldClocksByKey.get(key) ?? []).map((entry) => entry.field)),
+      // Seed adoption only: a fully-unversioned row is about to be upserted
+      // with a freshly minted clock for every payload key, so its portable
+      // result container must travel with that first authoritative write.
+      includeResultMeta: opts?.adoptionResultMeta === true && !entityClockByKey.get(key)
     })
-    const key = `message:${row.id}`
     const membership = membershipByKey.get(key)
     // Membership binds the owner: branch id for branch-owned rows, topic id
     // for main-route rows. topicId stays the immutable logical topic.
@@ -1071,6 +1135,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       registerNonEmittedBlock(row.messageId)
       continue
     }
+    const key = `message_block:${row.id}`
     const payload = buildBlockPayload({
       id: row.id,
       messageId: row.messageId,
@@ -1079,9 +1144,13 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       status: row.status,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
-      assetIds
+      assetIds,
+      extra: (row as { extra?: string | null }).extra ?? null,
+      clockedFields: new Set((fieldClocksByKey.get(key) ?? []).map((entry) => entry.field)),
+      // Seed adoption only (see message call site): first authoritative write
+      // carries the sanitized portable container.
+      includeResultMeta: opts?.adoptionResultMeta === true && !entityClockByKey.get(key)
     })
-    const key = `message_block:${row.id}`
     const membership = membershipByKey.get(key)
     if (membership && membership.parentId !== row.messageId) {
       fail(

@@ -23,6 +23,7 @@ export type ResidentReadDiscardReason =
   | 'currentMoved'
   | 'deletedDuringFetch'
   | 'generationMismatch'
+  | 'routeChanged'
   | 'malformed'
 
 export interface ResidentReadDiagnostics {

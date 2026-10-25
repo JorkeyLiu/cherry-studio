@@ -1082,6 +1082,28 @@ export function isReferenceReloadObliged(
   return pending.topicId === topicId
 }
 
+/**
+ * Terminal no-retry gate for the resident route reload effect (pure).
+ *
+ * A released `terminal` viewport must not auto-retry on progress reentry, so
+ * the passive route effect stays inert there. An AUTHORITATIVE
+ * Main→renderer history-reference invalidation addressed to the resident
+ * target is not a progress reentry: it is an explicit external trigger with a
+ * monotonic one-shot token that the re-read pipeline consumes exactly when it
+ * takes ownership (one attempt per hint, never a loop). Such an obligation
+ * must therefore be allowed to start its single re-read session even from a
+ * terminal viewport — otherwise the hint is silently dropped and the target
+ * keeps rendering a stale relation (soft-deleted source, foreign prefix)
+ * until the next activation.
+ *
+ * Returns true only when the effect must hold (no read): terminal phase AND no
+ * outstanding reference obligation.
+ */
+export function shouldRouteEffectHoldTerminal(input: { phase: string; referenceReloadObliged: boolean }): boolean {
+  if (input.phase !== 'terminal') return false
+  return !input.referenceReloadObliged
+}
+
 export interface DividerDoubleFailureSnapshot {
   prevRoute: RouteKey
   targetRoute: RouteKey

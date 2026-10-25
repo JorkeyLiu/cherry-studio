@@ -188,4 +188,81 @@ describe('topic-data JSON import full-content sync capture', () => {
       expect(payload).not.toContain('"path"')
     }
   })
+
+  it('keeps the portable result container through a JSON import (outbox payload + local rows)', () => {
+    // One success assistant turn carrying a full portable result container plus
+    // deliberately non-portable local-only keys that must never be captured.
+    const srcTopic = 't-json-meta-src'
+    const answerId = 'm-json-meta-answer'
+    agg.appendMessage(
+      srcTopic,
+      msgJson(answerId, srcTopic, {
+        role: 'assistant',
+        model: { id: 'mock-model', name: 'Mock Model', group: 'Mock' },
+        modelId: 'mock-model',
+        usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+        metrics: { completion_tokens: 7, time_completion_millsec: 900, time_first_token_millsec: 120 },
+        mentions: [{ id: 'mock-model', name: 'Mock Model' }],
+        useful: true,
+        apiKey: 'sk-local-only-must-not-sync',
+        pricing: { input_per_million_tokens: 3, output_per_million_tokens: 9, currencySymbol: '$' }
+      }) as never,
+      [
+        blockJson('b-json-meta-think', answerId, {
+          type: 'thinking',
+          content: 'reasoning',
+          thinking_millsec: 2200
+        }) as never,
+        blockJson('b-json-meta-text', answerId) as never
+      ]
+    )
+    const exported = ok<{ payload: unknown }>(agg.exportTopicData({ topicId: srcTopic }) as never)
+    sqlite.prepare('DELETE FROM sync_outbox').run()
+    const imported = ok<{ topic: { id: string } }>(
+      agg.importTopicData({ payload: exported.payload, assistantId: 'assistant-import' } as never) as never
+    )
+
+    const repos = createRepositories(db)
+    const importedAnswer = repos.messages.listAllByTopic(imported.topic.id).find((m) => m.role === 'assistant')
+    expect(importedAnswer).toBeDefined()
+    const importedBlocks = repos.blocks.listByMessage(importedAnswer!.id)
+    const thinking = importedBlocks.find((b) => b.type === 'thinking')
+    // The measured thinking duration survives import locally (portable overflow).
+    const thinkingMs = (thinking as unknown as { thinking_millsec?: number } | undefined)?.thinking_millsec
+    expect(thinkingMs).toBe(2200)
+
+    const outbox = db
+      .select({
+        entityType: schema.syncOutbox.entityType,
+        entityId: schema.syncOutbox.entityId,
+        payloadJson: schema.syncOutbox.payloadJson
+      })
+      .from(schema.syncOutbox)
+      .all()
+
+    // …and the sanitized container is what the outbox would hand a receiver.
+    const messageOp = outbox.find((r) => r.entityType === 'message' && r.entityId === importedAnswer!.id)
+    expect(messageOp, 'the imported answer must be captured').toBeDefined()
+    const payload = JSON.parse(messageOp!.payloadJson as string) as Record<string, unknown>
+    const resultMeta = payload.resultMeta as Record<string, unknown>
+    expect(resultMeta, 'the captured message carries resultMeta').toBeDefined()
+    expect(resultMeta.usage).toMatchObject({ prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 })
+    expect(resultMeta.metrics).toMatchObject({ completion_tokens: 7, time_completion_millsec: 900 })
+    expect(resultMeta.mentions).toEqual([{ id: 'mock-model', name: 'Mock Model' }])
+    expect(resultMeta.useful).toBe(true)
+    expect(resultMeta.model).toMatchObject({ id: 'mock-model', name: 'Mock Model', group: 'Mock' })
+    for (const forbidden of ['apiKey', 'pricing']) {
+      expect(resultMeta[forbidden], `local-only ${forbidden} must never be captured`).toBeUndefined()
+      expect(payload[forbidden], `local-only ${forbidden} must never be captured`).toBeUndefined()
+    }
+
+    const blockOp = outbox.find((r) => r.entityType === 'message_block' && r.entityId === thinking!.id)
+    expect(blockOp, 'the thinking block must be captured').toBeDefined()
+    const blockMeta = (JSON.parse(blockOp!.payloadJson as string) as Record<string, unknown>).resultMeta as Record<
+      string,
+      unknown
+    >
+    // Wire field name for the block's measured thinking duration.
+    expect(blockMeta).toMatchObject({ thinkingMs: 2200 })
+  })
 })

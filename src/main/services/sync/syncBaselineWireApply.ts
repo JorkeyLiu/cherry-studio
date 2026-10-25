@@ -21,7 +21,13 @@
 
 import { createHash } from 'node:crypto'
 
-import { type SyncEnvelopeAny, validateEnvelope, ValidationError, verifyEnvelopeDigest } from '@shared/sync'
+import {
+  RESULT_META_FIELD,
+  type SyncEnvelopeAny,
+  validateEnvelope,
+  ValidationError,
+  verifyEnvelopeDigest
+} from '@shared/sync'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import type * as schema from '../chatDb/schema'
@@ -148,23 +154,29 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
     // have no branchId key (main route). Membership binds the owner.
     const branchId = (m as { branchId?: unknown }).branchId ?? null
     const ownerParent = typeof branchId === 'string' && branchId.length > 0 ? branchId : m.topicId
+    const messagePayload: Record<string, unknown> = {
+      id: m.id,
+      topicId: m.topicId,
+      branchId: typeof branchId === 'string' && branchId.length > 0 ? branchId : null,
+      role: m.role,
+      content: m.content,
+      status: m.status,
+      askId: m.askId,
+      model: m.model,
+      modelId: m.modelId,
+      assistantId: m.assistantId,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt
+    }
+    // Optional declared portable result container (v6): forwarded verbatim only
+    // when the envelope carried it (absent = no intent).
+    if (Object.prototype.hasOwnProperty.call(m, RESULT_META_FIELD)) {
+      messagePayload[RESULT_META_FIELD] = (m as unknown as Record<string, unknown>)[RESULT_META_FIELD] ?? null
+    }
     entities.push({
       entityType: 'message',
       entityId: m.id,
-      payload: {
-        id: m.id,
-        topicId: m.topicId,
-        branchId: typeof branchId === 'string' && branchId.length > 0 ? branchId : null,
-        role: m.role,
-        content: m.content,
-        status: m.status,
-        askId: m.askId,
-        model: m.model,
-        modelId: m.modelId,
-        assistantId: m.assistantId,
-        createdAt: m.createdAt,
-        updatedAt: m.updatedAt
-      },
+      payload: messagePayload,
       entityClock: { timestamp: m.entityClock.timestamp, operationId: m.entityClock.operationId },
       fieldClocks: Object.entries(m.fieldClocks)
         .map(([field, clock]) => ({ field, timestamp: clock.timestamp, operationId: clock.operationId }))
@@ -241,6 +253,9 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
     }
     if (Array.isArray(assetIds)) payloadWithAsset['assetIds'] = [...(assetIds as string[])]
     else payloadWithAsset['assetIds'] = []
+    if (Object.prototype.hasOwnProperty.call(b, RESULT_META_FIELD)) {
+      payloadWithAsset[RESULT_META_FIELD] = (b as unknown as Record<string, unknown>)[RESULT_META_FIELD] ?? null
+    }
     entities.push({
       entityType: 'message_block',
       entityId: b.id,

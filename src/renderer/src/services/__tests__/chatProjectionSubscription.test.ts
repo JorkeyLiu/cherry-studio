@@ -588,3 +588,254 @@ describe('chatProjectionSubscription', () => {
     expect(mod.getPendingResidentReloadForTests()).toBeNull()
   })
 })
+
+/**
+ * Bounded in-place continuity (per-invalidation-wave behavior).
+ *
+ * These exercise the REAL thunk + reducers: residency, generation, the loaded
+ * projection and the published window are observed exactly as the app sees
+ * them. Semantics under test:
+ *  - overlapping hints during one wave never multiply reads (one in-flight +
+ *    at most one trailing replay) and the LAST invalidation always wins;
+ *  - the open resident projection stays resident and keeps its rows for the
+ *    whole round trip (no blank window, no generation reset);
+ *  - a failed refresh clears itself so a later hint still refreshes;
+ *  - the same-route anchor drives an `around` read, never a latest reset;
+ *  - hints that do not address the open route do not refresh it at all.
+ */
+function windowFromRequest(req: unknown, ids: string[]): Record<string, unknown> {
+  const r = req as {
+    kind: 'latest' | 'around'
+    topicId: string
+    anchorMessageId?: string
+    before?: number
+    after?: number
+    limit?: number
+  }
+  const messages = ids.map((id) => ({ id, topicId: r.topicId }))
+  const requested = r.kind === 'around' ? { before: r.before ?? 10, after: r.after ?? 10 } : { limit: r.limit ?? 20 }
+  return {
+    window: {
+      kind: r.kind,
+      topicId: r.topicId,
+      ...(r.kind === 'around' ? { anchorMessageId: r.anchorMessageId } : {}),
+      completeness: 'window',
+      requested,
+      returnedCount: messages.length,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      firstMessageId: messages.length > 0 ? messages[0].id : null,
+      lastMessageId: messages.length > 0 ? messages[messages.length - 1].id : null
+    },
+    messages,
+    blocks: [],
+    mutableMessageIds: [...ids]
+  }
+}
+
+function deferredWindow() {
+  let resolve!: (value: Record<string, unknown>) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<Record<string, unknown>>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function residentEntry(topicId: string): Record<string, unknown> | undefined {
+  return (store.getState() as unknown as { residentRegistry?: { entries?: Record<string, unknown> } }).residentRegistry
+    ?.entries?.[topicId] as Record<string, unknown> | undefined
+}
+
+function loadedIds(topicId: string): readonly string[] | undefined {
+  return store.getState().messages.messageIdsByTopic[topicId] as readonly string[] | undefined
+}
+
+describe('bounded in-place refresh continuity', () => {
+  const TOPIC = 't-cont'
+  const ASSISTANT = 'a-cont'
+
+  async function establishResident(ids: string[]): Promise<void> {
+    await seedAssistant(ASSISTANT, [TOPIC])
+    seedMessages(TOPIC, ids)
+    store.dispatch(newMessagesActions.setCurrentTopicId(TOPIC))
+    store.dispatch(newMessagesActions.setTopicLoading({ topicId: TOPIC, loading: false }))
+    mockFetchWindow.mockImplementation(async (req: unknown) => windowFromRequest(req, ids))
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    await mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: [TOPIC],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+    expect(residentEntry(TOPIC)?.residentTopic).toBe(true)
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    mockImportReady.mockReturnValue(true)
+    mockListSegments.mockResolvedValue([])
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    mod.unsubscribeChatProjectionEventsForTests()
+    store.dispatch(newMessagesActions.setTopicLoading({ topicId: TOPIC, loading: false }))
+    clearKeyvSnapshot(TOPIC, null)
+  })
+
+  it('keeps the open resident rows and generation while a refresh is in flight', async () => {
+    await establishResident(['m-c-1', 'm-c-2'])
+    const generationBefore = residentEntry(TOPIC)?.applicabilityGeneration
+    const idsBefore = loadedIds(TOPIC)
+    expect(idsBefore).toEqual(['m-c-1', 'm-c-2'])
+    mockFetchWindow.mockClear()
+
+    const pending = deferredWindow()
+    let pendingRequest: unknown
+    mockFetchWindow.mockImplementation((req: unknown) => {
+      pendingRequest = req
+      return pending.promise
+    })
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    const hint = mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: [TOPIC],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+
+    // Mid-flight: the projection is still loaded and resident — the message
+    // area never blanks, so existing rows/DOM identities survive.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mod.isResidentRefreshInFlightForTests(TOPIC)).toBe(true)
+    expect(residentEntry(TOPIC)?.residentTopic).toBe(true)
+    expect(loadedIds(TOPIC)).toEqual(idsBefore)
+    expect(residentEntry(TOPIC)?.applicabilityGeneration).toBe(generationBefore)
+
+    pending.resolve(windowFromRequest(pendingRequest, ['m-c-1', 'm-c-2', 'm-c-3']))
+    await hint
+    // Completion applies the authoritative projection atomically, still resident.
+    expect(loadedIds(TOPIC)).toEqual(['m-c-1', 'm-c-2', 'm-c-3'])
+    expect(residentEntry(TOPIC)?.residentTopic).toBe(true)
+    expect(residentEntry(TOPIC)?.applicabilityGeneration).toBe(generationBefore)
+    expect(mod.isResidentRefreshInFlightForTests(TOPIC)).toBe(false)
+  })
+
+  it('coalesces overlapping hints into one in-flight read plus one replay, last hint wins', async () => {
+    await establishResident(['m-w-1'])
+    mockFetchWindow.mockClear()
+
+    const first = deferredWindow()
+    let firstRequest: unknown
+    mockFetchWindow.mockImplementationOnce((req: unknown) => {
+      firstRequest = req
+      return first.promise
+    })
+    mockFetchWindow.mockImplementation(async (req: unknown) => windowFromRequest(req, ['m-w-1', 'm-w-last']))
+
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    const wave = [
+      mod.consumeChatProjectionHint({
+        assistantIds: [ASSISTANT],
+        topicIds: [TOPIC],
+        branchIds: [],
+        reason: 'sync-incremental'
+      }),
+      mod.consumeChatProjectionHint({
+        assistantIds: [ASSISTANT],
+        topicIds: [TOPIC],
+        branchIds: [],
+        // A second hint for the same wave (e.g. the history-reference hint
+        // Main sends for the same commit).
+        reason: 'sync-incremental'
+      }),
+      mod.consumeChatProjectionHint({
+        assistantIds: [ASSISTANT],
+        topicIds: [TOPIC],
+        branchIds: [],
+        reason: 'local-commit'
+      })
+    ]
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // Still exactly one read in flight for the whole wave.
+    expect(mockFetchWindow).toHaveBeenCalledTimes(1)
+    // Rows stayed loaded the entire time.
+    expect(loadedIds(TOPIC)).toEqual(['m-w-1'])
+    expect(residentEntry(TOPIC)?.residentTopic).toBe(true)
+    first.resolve(windowFromRequest(firstRequest, ['m-w-1', 'm-w-2']))
+    await Promise.all(wave)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // Bounded: the initial read plus exactly one trailing replay.
+    expect(mockFetchWindow.mock.calls.length).toBeLessThanOrEqual(2)
+    // Last invalidation is never lost.
+    expect(loadedIds(TOPIC)).toEqual(['m-w-1', 'm-w-last'])
+    expect(mod.isResidentRefreshInFlightForTests(TOPIC)).toBe(false)
+  })
+
+  it('a failed refresh releases the wave so a later hint still refreshes', async () => {
+    await establishResident(['m-e-1'])
+    mockFetchWindow.mockClear()
+    mockFetchWindow.mockRejectedValueOnce(new Error('main unavailable'))
+    mockFetchWindow.mockImplementation(async (req: unknown) => windowFromRequest(req, ['m-e-1', 'm-e-2']))
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+
+    await mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: [TOPIC],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+    // Error path keeps the previous rows (no blank), and does not wedge.
+    expect(loadedIds(TOPIC)).toEqual(['m-e-1'])
+    expect(mod.isResidentRefreshInFlightForTests(TOPIC)).toBe(false)
+
+    await mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: [TOPIC],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+    expect(loadedIds(TOPIC)).toEqual(['m-e-1', 'm-e-2'])
+  })
+
+  it('preserves the same-route anchor: continuity refresh is an around read, never latest', async () => {
+    await establishResident(['m-a-1', 'm-a-2', 'm-a-3'])
+    // Persisted route viewport snapshot (the user's reading position) is the
+    // anchor; it must win over the oldest-loaded-id fallback and over latest.
+    setKeyvSnapshot(TOPIC, null, 'm-a-2')
+    const seen: Array<Record<string, unknown>> = []
+    mockFetchWindow.mockClear()
+    mockFetchWindow.mockImplementation(async (req: unknown) => {
+      seen.push(req as Record<string, unknown>)
+      return windowFromRequest(req, ['m-a-1', 'm-a-2', 'm-a-3'])
+    })
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    await mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: [TOPIC],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+    expect(seen.length).toBe(1)
+    expect(seen[0].kind).toBe('around')
+    expect(seen[0].anchorMessageId).toBe('m-a-2')
+    // Reading intent (viewport anchor) not reset to latest.
+    expect(loadedIds(TOPIC)?.[1]).toBe('m-a-2')
+    clearKeyvSnapshot(TOPIC, null)
+  })
+
+  it('a hint that does not address the open route never refreshes it', async () => {
+    await establishResident(['m-n-1'])
+    mockFetchWindow.mockClear()
+    const mod = await import('@renderer/services/chatProjectionSubscription')
+    await mod.consumeChatProjectionHint({
+      assistantIds: [ASSISTANT],
+      topicIds: ['t-somewhere-else'],
+      branchIds: [],
+      reason: 'sync-incremental'
+    })
+    expect(mockFetchWindow).not.toHaveBeenCalled()
+    expect(loadedIds(TOPIC)).toEqual(['m-n-1'])
+  })
+})
