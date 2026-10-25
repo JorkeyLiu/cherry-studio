@@ -16,7 +16,7 @@ const logger = loggerService.withContext('useRouteScopedSegments')
 export const ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS = 250
 
 export interface RouteScopedSegmentsResult {
-  /** Topic-wide catalog projected onto the active route, in authority order. */
+  /** Topic-wide catalog projected onto the active route, ordered by first reachable route position. */
   segments: RouteScopedSegment[]
   /** Token identifying the route the projection is valid for (`topic::branch`). */
   routeKey: string
@@ -36,9 +36,11 @@ interface TopicWithUpdatedAt {
  * snapshot (`loadWholeTopicSnapshot`, the same one-shot `whole-topic`
  * capability ConversationNavigation consumes) and projects the catalog onto
  * that route: members in effective-route order, count = intersection,
- * navigation target = first reachable member, and 0-intersection segments
- * hidden. It therefore never misses an off-screen valid member the way a
- * partial loaded window would.
+ * navigation target = first reachable member, 0-intersection segments hidden,
+ * and rows ordered by each segment's first reachable route position (catalog
+ * `sortOrder`/`id` only breaks equal-position ties) so the list reads
+ * top-to-bottom like the conversation. It therefore never misses an off-screen
+ * valid member the way a partial loaded window would.
  *
  * Refresh/guard mirror the ConversationNavigation pattern:
  * - the route key is derived synchronously every render, so a topic/branch

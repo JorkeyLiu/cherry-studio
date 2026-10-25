@@ -107,6 +107,25 @@ describe('useRouteScopedSegments route scope and guards', () => {
     expect(mockLoadSnapshot).toHaveBeenCalledWith(TOPIC, 'C')
   })
 
+  it('orders the projected groups by first reachable route position, not catalog order', async () => {
+    const store = makeStore()
+    // Catalog creation order says s-created-first, but m20 sits after m2 on the route.
+    seedCatalog(store, TOPIC, [seg('s-created-first', 0, ['m20']), seg('s-created-second', 1, ['m2'])])
+    mockLoadSnapshot.mockResolvedValue(snapshot(MAIN))
+
+    setBranch(store, TOPIC, null)
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+
+    await waitFor(() =>
+      expect(result.current.segments.map((s) => s.id)).toEqual(['s-created-second', 's-created-first'])
+    )
+    // Only the list order changes; navigation targets stay the route-reachable firsts.
+    expect(result.current.segments.map((s) => s.firstMessageId)).toEqual(['m2', 'm20'])
+    // The authority catalog itself keeps its own order.
+    const state = store.getState()
+    expect(state.topicSegments.segmentsByTopic[TOPIC]).toEqual(['s-created-first', 's-created-second'])
+  })
+
   it('shows the parent-only segment on the parent route but hides it on the child route', async () => {
     const store = makeStore()
     seedCatalog(store, TOPIC, [seg('s-parent-only', 0, ['p2'])])
@@ -117,6 +136,8 @@ describe('useRouteScopedSegments route scope and guards', () => {
     setBranch(store, TOPIC, 'P')
     const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
     await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-parent-only']))
+    // The parent route reaches p2, so that is its navigation target.
+    expect(result.current.segments[0].firstMessageId).toBe('p2')
 
     act(() => setBranch(store, TOPIC, 'C'))
     await waitFor(() => expect(result.current.segments).toEqual([]))

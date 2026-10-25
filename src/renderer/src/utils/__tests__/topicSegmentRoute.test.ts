@@ -102,17 +102,75 @@ describe('projectSegmentsOntoRoute', () => {
     const snapshot = JSON.parse(JSON.stringify(catalog))
     projectSegmentsOntoRoute(ROUTE_C, catalog)
     expect(JSON.parse(JSON.stringify(catalog))).toEqual(snapshot)
+    // The catalog array order itself is untouched by the route projection.
+    expect(catalog.map((s) => s.id)).toEqual(['s-b', 's-a'])
     // On C, s-b intersects only m3 -> projected count differs but catalog count stays 2.
     expect(catalog[0].messageCount).toBe(2)
     expect(catalog[0].messageIds).toEqual(['p2', 'm3'])
   })
 
-  it('returns authority order and preserves color only when present', () => {
+  it('orders groups by first reachable route position and preserves color only when present', () => {
+    // Catalog order (sortOrder 0 first) is the reverse of route order (m3 before m5).
     const catalog = [seg('s-late', 1, ['m3']), seg('s-early', 0, ['m5'], { color: '#123456' })]
     const projected = projectSegmentsOntoRoute(MAIN, catalog)
-    expect(projected.map((s) => s.id)).toEqual(['s-early', 's-late'])
-    expect(projected[0].color).toBe('#123456')
-    expect('color' in projected[1]).toBe(false)
+    expect(projected.map((s) => s.id)).toEqual(['s-late', 's-early'])
+    expect(projected[0].color).toBeUndefined()
+    expect(projected[1].color).toBe('#123456')
+    expect('color' in projected[0]).toBe(false)
+  })
+
+  it('reverses catalog creation order when the route positions run the other way', () => {
+    // Created first (sortOrder 0) but it starts later on this route.
+    const createdFirst = seg('s-created-first', 0, ['m12', 'm13'])
+    const createdSecond = seg('s-created-second', 1, ['m2', 'm3'])
+    expect(projectSegmentsOntoRoute(MAIN, [createdFirst, createdSecond]).map((s) => s.id)).toEqual([
+      's-created-second',
+      's-created-first'
+    ])
+    // Same catalog, unchanged by the projection.
+    expect([createdFirst.id, createdSecond.id]).toEqual(['s-created-first', 's-created-second'])
+  })
+
+  it('orders a branch route by the first REACHABLE member when the catalog first member is off-route', () => {
+    // s-off-head's catalog member order starts with the parent-only p2 (not on C);
+    // its reachable intersection starts at m15, still before c1 on C.
+    const offHead = seg('s-off-head', 1, ['p2', 'm15'])
+    const childTail = seg('s-child-tail', 0, ['c1'])
+    const onC = projectSegmentsOntoRoute(ROUTE_C, [childTail, offHead])
+    expect(onC.map((s) => s.id)).toEqual(['s-off-head', 's-child-tail'])
+    expect(onC[0].firstMessageId).toBe('m15')
+    expect(onC[0].memberIds).toEqual(['m15'])
+    // On the parent route both members are reachable; the intersection is still
+    // ordered by the route (m15 before p2), never by the catalog member order.
+    const onP = projectSegmentsOntoRoute(ROUTE_P, [childTail, offHead])
+    expect(onP.map((s) => s.id)).toEqual(['s-off-head'])
+    expect(onP[0].memberIds).toEqual(['m15', 'p2'])
+    expect(onP[0].firstMessageId).toBe('m15')
+  })
+
+  it('orders by route position even when membership was inserted out of route order', () => {
+    // s-inserted-first was authored with m20 before m8; the route starts at m8.
+    const insertedFirst = seg('s-inserted-first', 0, ['m20', 'm8'])
+    const insertedSecond = seg('s-inserted-second', 1, ['m4'])
+    const projected = projectSegmentsOntoRoute(MAIN, [insertedFirst, insertedSecond])
+    expect(projected.map((s) => s.id)).toEqual(['s-inserted-second', 's-inserted-first'])
+    expect(projected[1].memberIds).toEqual(['m8', 'm20'])
+    expect(projected[1].firstMessageId).toBe('m8')
+  })
+
+  it('breaks equal route positions deterministically by catalog sortOrder then id', () => {
+    // Overlapping groups that all start at m7: position ties resolve by
+    // sortOrder (s-b/s-c at 1) and then id (s-b before s-c), s-a last.
+    const a = seg('s-a', 2, ['m7', 'm9'])
+    const b = seg('s-b', 1, ['m7', 'm10'])
+    const c = seg('s-c', 1, ['m7'])
+    for (const input of [
+      [a, b, c],
+      [c, a, b],
+      [b, c, a]
+    ]) {
+      expect(projectSegmentsOntoRoute(MAIN, input).map((s) => s.id)).toEqual(['s-b', 's-c', 's-a'])
+    }
   })
 
   it('returns an empty projection for an empty route or an empty catalog', () => {

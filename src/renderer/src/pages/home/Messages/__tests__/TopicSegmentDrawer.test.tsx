@@ -11,7 +11,9 @@ const { emitMock, state } = vi.hoisted(() => ({
         id: 'seg-1',
         name: 'Segment One',
         color: '#fff',
-        sortOrder: 0,
+        // Catalog order puts this group BEFORE seg-2, but on the current route
+        // its first reachable member comes after seg-2's (see the ordering test).
+        sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
         firstMessageId: 'msg-offscreen'
@@ -20,7 +22,7 @@ const { emitMock, state } = vi.hoisted(() => ({
         id: 'seg-2',
         name: 'Segment Two',
         color: '#000',
-        sortOrder: 1,
+        sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
         firstMessageId: 'msg-4'
@@ -58,7 +60,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         id: 'seg-1',
         name: 'Segment One',
         color: '#fff',
-        sortOrder: 0,
+        sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
         firstMessageId: 'msg-offscreen'
@@ -67,7 +69,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         id: 'seg-2',
         name: 'Segment Two',
         color: '#000',
-        sortOrder: 1,
+        sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
         firstMessageId: 'msg-4'
@@ -89,9 +91,11 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
     expect(screen.getByText('1')).toBeTruthy()
   })
 
-  it('preserves authority order (sortOrder then id)', () => {
+  it('renders the projected route order, never re-sorting by catalog sortOrder', () => {
     render(<TopicSegmentDrawer topicId="topic-1" />)
     const items = screen.getAllByText(/Segment (One|Two)/).map((el) => el.textContent)
+    // The hook hands rows over in first-reachable-route-position order; seg-1 has
+    // the higher catalog sortOrder and still comes first on this route.
     expect(items).toEqual(['Segment One', 'Segment Two'])
   })
 
