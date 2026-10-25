@@ -42,7 +42,7 @@ import {
   verifyEnvelopeDigest,
   WIRE_VERSION_V4
 } from '@shared/sync'
-import { parseAssistantConfigKey } from '@shared/sync/assistantConfig'
+import { parseAssistantConfigKey, sanitizeAssistantConfigFields } from '@shared/sync/assistantConfig'
 import { eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
@@ -193,8 +193,11 @@ export function readAssistantBaselineSection(tx: BaselineTx): AssistantBaselineS
     const fieldClocks: Record<string, { timestamp: number; operationId: string }> = {}
     for (const [field, clock] of fieldMap)
       fieldClocks[field] = { timestamp: clock.timestamp, operationId: clock.operationId }
-    // Every present mutable field must carry a clock (fully-clocked completion).
-    const presentMutable = Object.keys(payload).filter((k) => ASSISTANT_CONFIG_FIELD_CLOCK_KEYS_V4.has(k))
+    // Publish boundary: only the portable surface leaves the device. A mirror
+    // row may legitimately own device-local model selection slots; they are
+    // dropped here rather than published.
+    const portable = sanitizeAssistantConfigFields(payload)
+    const presentMutable = Object.keys(portable).filter((k) => ASSISTANT_CONFIG_FIELD_CLOCK_KEYS_V4.has(k))
     for (const k of presentMutable) {
       if (!(k in fieldClocks)) fail(`assistant baseline missing fieldClock ${k} for ${row.key}`)
     }
@@ -202,7 +205,7 @@ export function readAssistantBaselineSection(tx: BaselineTx): AssistantBaselineS
       key: row.key,
       kind: parsedKey.kind,
       id: parsedKey.id,
-      config: payload,
+      config: { schemaVersion: 1, kind: parsedKey.kind, id: parsedKey.id, ...portable },
       entityClock: { timestamp: ec.timestamp, operationId: ec.operationId },
       fieldClocks
     })

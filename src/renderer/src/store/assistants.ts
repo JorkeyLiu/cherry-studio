@@ -26,13 +26,7 @@ import {
   getDefaultTopic
 } from '@renderer/services/assistantDefaults'
 import type { Assistant, AssistantPreset, AssistantSettings, Model, Topic } from '@renderer/types'
-import {
-  assistantsInboundForPersist,
-  assistantsOutboundFromPersist,
-  decodeModelSlotForApply
-} from '@renderer/utils/syncModelRef'
 import { isEmpty, uniqBy } from 'lodash'
-import { createTransform } from 'redux-persist'
 
 import type { RootState } from '.'
 
@@ -69,21 +63,6 @@ const initialState: AssistantsState = {
 }
 
 const normalizeTopics = (topics: unknown): Topic[] => (Array.isArray(topics) ? topics : [])
-
-/**
- * Persisted-read repair for already-polluted assistant storage.
- * Whitelisted to `assistants` only; runs on storage -> redux for every
- * inbound version (including higher 227 on a 225 build) where createMigrate
- * resolves higher versions untouched. Only recognizable valid DTO slots
- * (assistants[].model/defaultModel/settings.defaultModel and the same
- * assistantDefaults slots) decode to runtime Models; everything else keeps
- * identity. redux -> storage is identity (runtime Models persist as-is).
- */
-export const assistantsPersistTransform = createTransform(
-  (inboundState) => assistantsInboundForPersist(inboundState),
-  (outboundState) => assistantsOutboundFromPersist(outboundState),
-  { whitelist: ['assistants'] }
-)
 
 // Removed MCP / external+provider-native websearch / global memory: strip legacy
 // backend capability fields so old imports/rehydration never reintroduce them.
@@ -352,39 +331,24 @@ const assistantsSlice = createSlice({
             id: _i,
             deleted: _d,
             settings,
-            model: rawModel,
-            defaultModel: rawDefaultModel,
             ...otherRest
           } = payload as Record<string, unknown>
+          // Portable fields only. Device-local model selection slots (`model`,
+          // `defaultModel`, `settings.defaultModel`) and the model-indexed
+          // reasoning preferences are never carried by a remote projection, so
+          // the local selection object and its local metadata stay untouched.
           const next = { ...(prev as object), ...otherRest } as Record<string, unknown>
-          // DTO -> runtime Model decode at the sync boundary only. Absent keys
-          // preserve existing; explicit null clears to unconfigured; valid DTOs
-          // decode (same id/provider keeps local capability extras); unknown
-          // malformed values never overwrite.
-          if (payload !== null && typeof payload === 'object' && 'model' in (payload as object)) {
-            const decision = decodeModelSlotForApply(rawModel, prev.model)
-            if (decision.action === 'set') next.model = decision.value as unknown
-          }
-          if (payload !== null && typeof payload === 'object' && 'defaultModel' in (payload as object)) {
-            const decision = decodeModelSlotForApply(rawDefaultModel, prev.defaultModel)
-            if (decision.action === 'set') next.defaultModel = decision.value as unknown
-          }
           // Removed capabilities (MCP / web search / memory) are stripped on every
           // local reducer; a remote projection must not reintroduce them.
           stripRemovedAssistantCapabilities(next)
           state.assistants[idx] = next as never
           if (settings && typeof settings === 'object') {
-            const { defaultModel: rawSettingsDefault, ...otherSettings } = settings as Record<string, unknown>
-            const merged = {
+            // Shallow portable merge: local-only nested slots survive because a
+            // remote `settings` object never carries them.
+            state.assistants[idx].settings = {
               ...(prev.settings as object | undefined),
-              ...otherSettings
-            } as Record<string, unknown>
-            if ('defaultModel' in settings) {
-              const prevSettings = prev.settings as Record<string, unknown> | undefined
-              const decision = decodeModelSlotForApply(rawSettingsDefault, prevSettings?.defaultModel)
-              if (decision.action === 'set') merged.defaultModel = decision.value as unknown
-            }
-            state.assistants[idx].settings = merged as never
+              ...(settings as Record<string, unknown>)
+            } as never
           }
         }
       }

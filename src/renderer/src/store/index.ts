@@ -37,7 +37,7 @@ import {
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
-import assistants, { assistantsPersistTransform } from './assistants'
+import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
 import { getClosureTopicIds, isClosureReadOnly } from './closureOwnership'
@@ -484,7 +484,7 @@ const persistedReducer = persistReducer<RootState>(
     key: 'cherry-studio',
     storage,
     version: 227,
-    transforms: [topicBranchPersistTransform, assistantsPersistTransform],
+    transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',
       'messages',
@@ -666,18 +666,11 @@ export const assistantConfigSyncMiddleware: Middleware = (storeApi) => (next) =>
                   prompt: defaults.prompt,
                   description: defaults.description,
                   tags: defaults.tags,
-                  model: defaults.model,
-                  defaultModel: defaults.defaultModel,
                   settings: defaults.settings,
                   knowledge_bases: defaults.knowledge_bases,
-                  mcpMode: defaults.mcpMode,
-                  mcpServers: defaults.mcpServers,
-                  enableWebSearch: defaults.enableWebSearch,
-                  webSearchProviderId: defaults.webSearchProviderId,
                   enableUrlContext: defaults.enableUrlContext,
                   enableGenerateImage: defaults.enableGenerateImage,
-                  knowledgeRecognition: defaults.knowledgeRecognition,
-                  enableMemory: defaults.enableMemory
+                  knowledgeRecognition: defaults.knowledgeRecognition
                 }
                 // Reuse the assistant projector shape via a synthetic raw with
                 // defaults kind mapping: project manually to avoid name/emoji/type.

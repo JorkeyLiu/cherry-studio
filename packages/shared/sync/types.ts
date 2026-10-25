@@ -186,8 +186,9 @@ export const SYNC_TOPIC_REFERENCE_FIELDS = [
 /**
  * Mutable allowlisted assistant-config fields with per-field clocks.
  * Identity (`kind`, `id`, `schemaVersion`, `deleted`) is immutable/excluded.
- * Mirrors `ASSISTANT_CONFIG_TOP_LEVEL_FIELDS` (18 keys). `settings` converges
+ * Mirrors `ASSISTANT_CONFIG_TOP_LEVEL_FIELDS` (11 keys). `settings` converges
  * atomically as one field (never raw unvalidated JSON — full DTO validated).
+ * Device-local model selection slots are not sync fields.
  */
 export const SYNC_ASSISTANT_CONFIG_PATCH_FIELDS = [
   'name',
@@ -196,18 +197,11 @@ export const SYNC_ASSISTANT_CONFIG_PATCH_FIELDS = [
   'emoji',
   'description',
   'tags',
-  'model',
-  'defaultModel',
   'settings',
   'knowledgeBaseIds',
-  'mcpMode',
-  'mcpServerIds',
-  'enableWebSearch',
-  'webSearchProviderId',
   'enableUrlContext',
   'enableGenerateImage',
-  'knowledgeRecognition',
-  'enableMemory'
+  'knowledgeRecognition'
 ] as const
 
 /** Fixed bound for the durable same-field conflict record log. */

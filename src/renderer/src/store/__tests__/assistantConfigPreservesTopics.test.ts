@@ -93,3 +93,69 @@ describe('assistant config producers preserve live topics', () => {
     expect(topicIds(state)).toEqual(['t-local', 't-default'])
   })
 })
+
+describe('assistant config remote apply keeps device-local model selection', () => {
+  it('applies portable fields while local model slots and model-indexed settings survive', () => {
+    const localModel = { id: 'local-model-a', provider: 'conn-a', name: 'Local A', group: 'g' }
+    const localDefault = { id: 'local-model-b', provider: 'conn-a', name: 'Local B', group: 'g' }
+    const localSettingsDefault = { id: 'local-model-c', provider: 'conn-a', name: 'Local C', group: 'g' }
+    let state: AssistantsState = {
+      assistantDefaults: {} as never,
+      assistants: [
+        {
+          id: 'a1',
+          name: 'A',
+          prompt: 'old',
+          topics: [topic('t-local', 'a1')],
+          model: localModel,
+          defaultModel: localDefault,
+          settings: {
+            temperature: 0.7,
+            reasoning_effort: 'high',
+            reasoning_effort_by_model: { 'conn-a:local-model-a': 'high' },
+            reasoning_effort_show_all_by_model: { 'conn-a:local-model-a': true },
+            reasoning_effort_cache: 'high',
+            defaultModel: localSettingsDefault,
+            contextWindowAnchor: { t1: { kind: 'active', groupKey: 'g1' } }
+          }
+        }
+      ] as never,
+      tagsOrder: [],
+      collapsedTags: {},
+      presets: [],
+      unifiedListOrder: [],
+      assistantConfigSync: { pending: {}, projectionVersions: {} }
+    }
+    // Portable-only remote projection (no model/defaultModel keys possible).
+    state = reducer(state, {
+      ...applyRemoteAssistantConfig({
+        payload: {
+          schemaVersion: 1,
+          kind: 'assistant',
+          id: 'a1',
+          name: 'Renamed',
+          prompt: 'new',
+          settings: { temperature: 0.2, reasoning_effort: 'low' }
+        } as never,
+        projectionRevision: 1
+      }),
+      meta: { fromSync: true }
+    } as never)
+    const row = state.assistants[0] as unknown as Record<string, unknown>
+    expect(row.name).toBe('Renamed')
+    expect(row.prompt).toBe('new')
+    // Local selection objects (and their metadata) are untouched.
+    expect(row.model).toEqual(localModel)
+    expect(row.defaultModel).toEqual(localDefault)
+    const settings = row.settings as Record<string, unknown>
+    expect(settings.temperature).toBe(0.2)
+    expect(settings.reasoning_effort).toBe('low')
+    expect(settings.defaultModel).toEqual(localSettingsDefault)
+    expect(settings.reasoning_effort_by_model).toEqual({ 'conn-a:local-model-a': 'high' })
+    expect(settings.reasoning_effort_show_all_by_model).toEqual({ 'conn-a:local-model-a': true })
+    expect(settings.reasoning_effort_cache).toBe('high')
+    expect(settings.contextWindowAnchor).toEqual({ t1: { kind: 'active', groupKey: 'g1' } })
+    // Live topics still intact (no catalog write on this path).
+    expect(topicIds(state)).toEqual(['t-local'])
+  })
+})

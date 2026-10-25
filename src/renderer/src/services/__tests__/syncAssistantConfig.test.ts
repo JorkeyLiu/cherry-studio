@@ -49,6 +49,17 @@ describe('syncAssistantConfig renderer bridge', () => {
           key: 'assistant_config:assistant:bad',
           payload: { schemaVersion: 1, kind: 'assistant', id: 'bad', topics: [] } as never,
           projectionRevision: 4
+        },
+        {
+          // Device-local model selection is not a portable field: fail closed.
+          key: 'assistant_config:assistant:modeled',
+          payload: {
+            schemaVersion: 1,
+            kind: 'assistant',
+            id: 'modeled',
+            model: { connectionId: 'conn-x', modelId: 'model-x' }
+          } as never,
+          projectionRevision: 4
         }
       ],
       applyOne: (payload, meta) => {
@@ -58,7 +69,7 @@ describe('syncAssistantConfig renderer bridge', () => {
         acked.push([key, rev])
       }
     })
-    expect(result).toEqual({ applied: 1, skipped: 1 })
+    expect(result).toEqual({ applied: 1, skipped: 2 })
     expect(applied[0]).toMatchObject({ meta: { fromSync: true, projectionRevision: 4 } })
     expect(acked).toEqual([['assistant_config:assistant:a1', 4]])
     expect(vi.fn().mock.calls.length).toBe(0)

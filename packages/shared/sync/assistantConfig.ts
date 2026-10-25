@@ -11,6 +11,15 @@
  * `defaults` singleton). Canonical storage key:
  * `assistant_config:<kind>:<id>`. Kind-qualified so the defaults singleton
  * can never collide with an assistant id (prefix alone is not trusted).
+ *
+ * Model selection is device-local, never portable: application settings and
+ * provider connections do not sync, so a model/connection reference has no
+ * cross-device meaning. `model`, `defaultModel` and the model-indexed
+ * reasoning preferences (`settings.defaultModel`,
+ * `settings.reasoning_effort_by_model`,
+ * `settings.reasoning_effort_show_all_by_model`,
+ * `settings.reasoning_effort_cache`) are therefore absent from this contract
+ * and are never captured, published, merged or re-applied.
  */
 
 export const ASSISTANT_CONFIG_ENTITY = 'assistant_config' as const
@@ -18,25 +27,14 @@ export const ASSISTANT_CONFIG_KIND_ASSISTANT = 'assistant' as const
 export const ASSISTANT_CONFIG_KIND_DEFAULTS = 'defaults' as const
 export const ASSISTANT_CONFIG_DEFAULTS_ID = 'defaults' as const
 export const ASSISTANT_CONFIG_SCHEMA_VERSION = 1 as const
-
 export type AssistantConfigKind = 'assistant' | 'defaults'
-
-export interface AssistantModelRef {
-  /** Opaque owning connection id (provider id). Never a secret. */
-  connectionId: string
-  /** Opaque model id within the connection. */
-  modelId: string
-  /** Optional fixed display strings (never enrichment caches). */
-  displayName?: string
-  group?: string
-}
 
 export interface AssistantContextAnchor {
   kind: 'active' | 'disabled'
   groupKey: string
 }
 
-/** Strict allowlisted settings snapshot (atomic LWW per key downstream). */
+/** Portable (synced) assistant settings. Model-indexed reasoning slots stay local. */
 export interface AssistantConfigSettings {
   temperature?: number
   enableTemperature?: boolean
@@ -50,12 +48,8 @@ export interface AssistantConfigSettings {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   reasoning_effort?: string
-  reasoning_effort_by_model?: Record<string, string>
-  reasoning_effort_cache?: string
-  reasoning_effort_show_all_by_model?: Record<string, boolean>
   qwenThinkMode?: boolean
   customParameters?: Array<{ name: string; value: string | number | boolean | object | null; type: string }>
-  defaultModel?: AssistantModelRef | null
   contextWindowAnchor?: Record<string, AssistantContextAnchor>
 }
 
@@ -70,20 +64,12 @@ export interface AssistantConfigPayload {
   emoji?: string
   description?: string
   tags?: string[]
-  model?: AssistantModelRef | null
-  defaultModel?: AssistantModelRef | null
   settings?: AssistantConfigSettings
   /** Reference-only ids; external knowledge bodies are never synced. */
   knowledgeBaseIds?: string[]
-  mcpMode?: 'disabled' | 'auto' | 'manual'
-  /** Reference-only server ids; server configs/secrets are never synced. */
-  mcpServerIds?: string[]
-  enableWebSearch?: boolean
-  webSearchProviderId?: string
   enableUrlContext?: boolean
   enableGenerateImage?: boolean
   knowledgeRecognition?: 'off' | 'on'
-  enableMemory?: boolean
   /** Explicit deletion tombstone. Absence in a snapshot never means deleted. */
   deleted?: boolean
 }
@@ -102,6 +88,7 @@ export interface AssistantConfigDelta {
   deleted?: boolean
 }
 
+/** Portable top-level fields: the complete synced surface of this entity. */
 export const ASSISTANT_CONFIG_TOP_LEVEL_FIELDS = [
   'name',
   'prompt',
@@ -109,18 +96,11 @@ export const ASSISTANT_CONFIG_TOP_LEVEL_FIELDS = [
   'emoji',
   'description',
   'tags',
-  'model',
-  'defaultModel',
   'settings',
   'knowledgeBaseIds',
-  'mcpMode',
-  'mcpServerIds',
-  'enableWebSearch',
-  'webSearchProviderId',
   'enableUrlContext',
   'enableGenerateImage',
-  'knowledgeRecognition',
-  'enableMemory'
+  'knowledgeRecognition'
 ] as const
 
 export type AssistantConfigTopLevelField = (typeof ASSISTANT_CONFIG_TOP_LEVEL_FIELDS)[number]
@@ -138,13 +118,23 @@ export const ASSISTANT_CONFIG_SETTINGS_FIELDS = [
   'maxToolCalls',
   'enableMaxToolCalls',
   'reasoning_effort',
-  'reasoning_effort_by_model',
-  'reasoning_effort_cache',
-  'reasoning_effort_show_all_by_model',
   'qwenThinkMode',
   'customParameters',
-  'defaultModel',
   'contextWindowAnchor'
+] as const
+
+/**
+ * Device-local selection slots that live beside the portable surface and must
+ * never be captured or published: a model/connection reference only resolves
+ * on the device that owns that connection.
+ */
+export const ASSISTANT_CONFIG_LOCAL_ONLY_FIELDS = ['model', 'defaultModel'] as const
+
+export const ASSISTANT_CONFIG_SETTINGS_LOCAL_ONLY_FIELDS = [
+  'defaultModel',
+  'reasoning_effort_by_model',
+  'reasoning_effort_show_all_by_model',
+  'reasoning_effort_cache'
 ] as const
 
 /** Keys that must never appear as DTO keys (values are never scanned). */
@@ -214,23 +204,6 @@ export function validateAssistantConfigId(kind: AssistantConfigKind, id: unknown
   return null
 }
 
-function validateModelRef(v: unknown, path: string): string | null {
-  if (v === null || v === undefined) return null
-  if (!isPlainObject(v)) return `${path} must be object|null`
-  const o = v
-  const keys = Object.keys(o)
-  const allowed = new Set(['connectionId', 'modelId', 'displayName', 'group'])
-  for (const k of keys) if (!allowed.has(k)) return `${path}.${k} not allowlisted`
-  if (typeof o.connectionId !== 'string' || o.connectionId.length === 0) return `${path}.connectionId invalid`
-  if (typeof o.modelId !== 'string' || o.modelId.length === 0) return `${path}.modelId invalid`
-  if (o.displayName !== undefined && typeof o.displayName !== 'string') return `${path}.displayName invalid`
-  if (o.group !== undefined && typeof o.group !== 'string') return `${path}.group invalid`
-  if (!isValidUnicodeScalarString(o.connectionId) || !isValidUnicodeScalarString(o.modelId)) {
-    return `${path} invalid unicode`
-  }
-  return null
-}
-
 function validateAnchorMap(v: unknown): string | null {
   if (v === undefined) return null
   if (!isPlainObject(v)) return 'contextWindowAnchor must be object'
@@ -286,22 +259,8 @@ function validateSettings(s: unknown): string | null {
   if (o.enableMaxToolCalls !== undefined && typeof o.enableMaxToolCalls !== 'boolean') {
     return 'settings.enableMaxToolCalls invalid'
   }
-  for (const k of ['reasoning_effort', 'reasoning_effort_cache'] as const) {
-    if (o[k] !== undefined && typeof o[k] !== 'string') return `settings.${k} invalid`
-  }
-  if (o.reasoning_effort_by_model !== undefined) {
-    if (!isPlainObject(o.reasoning_effort_by_model)) return 'settings.reasoning_effort_by_model invalid'
-    for (const [k, v] of Object.entries(o.reasoning_effort_by_model)) {
-      if (typeof v !== 'string') return `settings.reasoning_effort_by_model[${k}] invalid`
-    }
-  }
-  if (o.reasoning_effort_show_all_by_model !== undefined) {
-    if (!isPlainObject(o.reasoning_effort_show_all_by_model)) {
-      return 'settings.reasoning_effort_show_all_by_model invalid'
-    }
-    for (const [k, v] of Object.entries(o.reasoning_effort_show_all_by_model)) {
-      if (typeof v !== 'boolean') return `settings.reasoning_effort_show_all_by_model[${k}] invalid`
-    }
+  if (o.reasoning_effort !== undefined && typeof o.reasoning_effort !== 'string') {
+    return 'settings.reasoning_effort invalid'
   }
   if (o.qwenThinkMode !== undefined && typeof o.qwenThinkMode !== 'boolean') return 'settings.qwenThinkMode invalid'
   if (o.customParameters !== undefined) {
@@ -335,8 +294,6 @@ function validateSettings(s: unknown): string | null {
       }
     }
   }
-  const dmErr = validateModelRef(o.defaultModel, 'settings.defaultModel')
-  if (dmErr) return dmErr
   const anchorErr = validateAnchorMap(o.contextWindowAnchor)
   if (anchorErr) return anchorErr
   return null
@@ -350,30 +307,7 @@ function validateSettings(s: unknown): string | null {
 export function validateAssistantConfigPayload(raw: unknown): string | null {
   if (!isPlainObject(raw)) return 'payload must be object'
   const o = raw
-  const allowed = new Set<string>([
-    'schemaVersion',
-    'kind',
-    'id',
-    'name',
-    'prompt',
-    'type',
-    'emoji',
-    'description',
-    'tags',
-    'model',
-    'defaultModel',
-    'settings',
-    'knowledgeBaseIds',
-    'mcpMode',
-    'mcpServerIds',
-    'enableWebSearch',
-    'webSearchProviderId',
-    'enableUrlContext',
-    'enableGenerateImage',
-    'knowledgeRecognition',
-    'enableMemory',
-    'deleted'
-  ])
+  const allowed = new Set<string>(['schemaVersion', 'kind', 'id', ...ASSISTANT_CONFIG_TOP_LEVEL_FIELDS, 'deleted'])
   for (const k of Object.keys(o)) {
     if (!allowed.has(k)) return `field ${k} not allowlisted`
     if (DENIED_CONFIG_KEYS.has(k.toLowerCase())) return `field ${k} denied`
@@ -398,10 +332,6 @@ export function validateAssistantConfigPayload(raw: unknown): string | null {
     if (!Array.isArray(o.tags)) return 'tags invalid'
     for (const t of o.tags as unknown[]) if (typeof t !== 'string') return 'tags entry invalid'
   }
-  const mErr = validateModelRef(o.model, 'model')
-  if (mErr) return mErr
-  const dmErr = validateModelRef(o.defaultModel, 'defaultModel')
-  if (dmErr) return dmErr
   const sErr = validateSettings(o.settings)
   if (sErr) return sErr
   if (o.knowledgeBaseIds !== undefined) {
@@ -410,19 +340,6 @@ export function validateAssistantConfigPayload(raw: unknown): string | null {
       if (typeof k !== 'string' || k.length === 0) return 'knowledgeBaseIds entry invalid'
     }
   }
-  if (o.mcpMode !== undefined && o.mcpMode !== 'disabled' && o.mcpMode !== 'auto' && o.mcpMode !== 'manual') {
-    return 'mcpMode invalid'
-  }
-  if (o.mcpServerIds !== undefined) {
-    if (!Array.isArray(o.mcpServerIds)) return 'mcpServerIds invalid'
-    for (const k of o.mcpServerIds as unknown[]) {
-      if (typeof k !== 'string' || k.length === 0) return 'mcpServerIds entry invalid'
-    }
-  }
-  if (o.enableWebSearch !== undefined && typeof o.enableWebSearch !== 'boolean') return 'enableWebSearch invalid'
-  if (o.webSearchProviderId !== undefined && typeof o.webSearchProviderId !== 'string') {
-    return 'webSearchProviderId invalid'
-  }
   if (o.enableUrlContext !== undefined && typeof o.enableUrlContext !== 'boolean') return 'enableUrlContext invalid'
   if (o.enableGenerateImage !== undefined && typeof o.enableGenerateImage !== 'boolean') {
     return 'enableGenerateImage invalid'
@@ -430,7 +347,6 @@ export function validateAssistantConfigPayload(raw: unknown): string | null {
   if (o.knowledgeRecognition !== undefined && o.knowledgeRecognition !== 'off' && o.knowledgeRecognition !== 'on') {
     return 'knowledgeRecognition invalid'
   }
-  if (o.enableMemory !== undefined && typeof o.enableMemory !== 'boolean') return 'enableMemory invalid'
   if (o.deleted !== undefined && typeof o.deleted !== 'boolean') return 'deleted invalid'
   return null
 }
@@ -496,31 +412,11 @@ export interface RawAssistantLike {
   emoji?: unknown
   description?: unknown
   tags?: unknown
-  model?: { provider?: unknown; id?: unknown; name?: unknown; group?: unknown } | null
-  defaultModel?: { provider?: unknown; id?: unknown; name?: unknown; group?: unknown } | null
   settings?: Record<string, unknown> | null
   knowledge_bases?: Array<{ id?: unknown }> | null
-  mcpMode?: unknown
-  mcpServers?: Array<{ id?: unknown } | string> | null
-  enableWebSearch?: unknown
-  webSearchProviderId?: unknown
   enableUrlContext?: unknown
   enableGenerateImage?: unknown
   knowledgeRecognition?: unknown
-  enableMemory?: unknown
-}
-
-function toModelRef(m: RawAssistantLike['model']): AssistantModelRef | null | undefined {
-  if (m === undefined) return undefined
-  if (m === null) return null
-  if (!m || typeof m !== 'object') return undefined
-  const provider = typeof m.provider === 'string' ? m.provider : ''
-  const id = typeof m.id === 'string' ? m.id : ''
-  if (!provider || !id) return undefined
-  const ref: AssistantModelRef = { connectionId: provider, modelId: id }
-  if (typeof m.name === 'string' && m.name.length > 0) ref.displayName = m.name
-  if (typeof m.group === 'string' && m.group.length > 0) ref.group = m.group
-  return ref
 }
 
 function pickSettings(raw: Record<string, unknown> | null | undefined): AssistantConfigSettings | undefined {
@@ -552,23 +448,6 @@ function pickSettings(raw: Record<string, unknown> | null | undefined): Assistan
   const emtc = bool('enableMaxToolCalls')
   if (emtc !== undefined) out.enableMaxToolCalls = emtc
   if (typeof raw['reasoning_effort'] === 'string') out.reasoning_effort = raw['reasoning_effort']
-  if (typeof raw['reasoning_effort_cache'] === 'string') {
-    out.reasoning_effort_cache = raw['reasoning_effort_cache']
-  }
-  if (raw['reasoning_effort_by_model'] && typeof raw['reasoning_effort_by_model'] === 'object') {
-    const m: Record<string, string> = {}
-    for (const [k, val] of Object.entries(raw['reasoning_effort_by_model'] as Record<string, unknown>)) {
-      if (typeof val === 'string') m[k] = val
-    }
-    out.reasoning_effort_by_model = m
-  }
-  if (raw['reasoning_effort_show_all_by_model'] && typeof raw['reasoning_effort_show_all_by_model'] === 'object') {
-    const m: Record<string, boolean> = {}
-    for (const [k, val] of Object.entries(raw['reasoning_effort_show_all_by_model'] as Record<string, unknown>)) {
-      if (typeof val === 'boolean') m[k] = val
-    }
-    out.reasoning_effort_show_all_by_model = m
-  }
   const qwen = bool('qwenThinkMode')
   if (qwen !== undefined) out.qwenThinkMode = qwen
   if (Array.isArray(raw['customParameters'])) {
@@ -587,20 +466,6 @@ function pickSettings(raw: Record<string, unknown> | null | undefined): Assistan
     }
     out.customParameters = arr
   }
-  const dm = raw['defaultModel']
-  if (dm && typeof dm === 'object') {
-    const d = dm as Record<string, unknown>
-    if (typeof d.provider === 'string' && typeof d.id === 'string') {
-      out.defaultModel = {
-        connectionId: d.provider,
-        modelId: d.id,
-        ...(typeof d.name === 'string' ? { displayName: d.name } : {}),
-        ...(typeof d.group === 'string' ? { group: d.group } : {})
-      }
-    }
-  } else if (dm === null) {
-    out.defaultModel = null
-  }
   if (raw['contextWindowAnchor'] && typeof raw['contextWindowAnchor'] === 'object') {
     const m: Record<string, AssistantContextAnchor> = {}
     for (const [k, val] of Object.entries(raw['contextWindowAnchor'] as Record<string, unknown>)) {
@@ -617,8 +482,8 @@ function pickSettings(raw: Record<string, unknown> | null | undefined): Assistan
 }
 
 /**
- * Projector: Assistant entity -> portable DTO. Drops topics/messages and all
- * non-allowlisted keys. Model refs stay opaque (no enrichment, no secrets).
+ * Projector: Assistant entity -> portable DTO. Drops topics/messages, every
+ * non-allowlisted key, and all device-local model selection slots.
  */
 export function projectAssistantToConfig(raw: RawAssistantLike): AssistantConfigPayload | null {
   if (!raw || typeof raw.id !== 'string') return null
@@ -635,10 +500,6 @@ export function projectAssistantToConfig(raw: RawAssistantLike): AssistantConfig
   if (typeof raw.emoji === 'string') dto.emoji = raw.emoji
   if (typeof raw.description === 'string') dto.description = raw.description
   if (Array.isArray(raw.tags)) dto.tags = (raw.tags as unknown[]).filter((t): t is string => typeof t === 'string')
-  const model = toModelRef(raw.model ?? undefined)
-  if (model !== undefined) dto.model = model
-  const dm = toModelRef(raw.defaultModel ?? undefined)
-  if (dm !== undefined) dto.defaultModel = dm
   const settings = pickSettings((raw.settings as Record<string, unknown> | undefined) ?? undefined)
   if (settings !== undefined) dto.settings = settings
   if (Array.isArray(raw.knowledge_bases)) {
@@ -646,20 +507,11 @@ export function projectAssistantToConfig(raw: RawAssistantLike): AssistantConfig
       .map((k) => (k && typeof k.id === 'string' ? k.id : null))
       .filter((v): v is string => typeof v === 'string' && v.length > 0)
   }
-  if (raw.mcpMode === 'disabled' || raw.mcpMode === 'auto' || raw.mcpMode === 'manual') dto.mcpMode = raw.mcpMode
-  if (Array.isArray(raw.mcpServers)) {
-    dto.mcpServerIds = raw.mcpServers
-      .map((s) => (typeof s === 'string' ? s : s && typeof s.id === 'string' ? s.id : null))
-      .filter((v): v is string => typeof v === 'string' && v.length > 0)
-  }
-  if (typeof raw.enableWebSearch === 'boolean') dto.enableWebSearch = raw.enableWebSearch
-  if (typeof raw.webSearchProviderId === 'string') dto.webSearchProviderId = raw.webSearchProviderId
   if (typeof raw.enableUrlContext === 'boolean') dto.enableUrlContext = raw.enableUrlContext
   if (typeof raw.enableGenerateImage === 'boolean') dto.enableGenerateImage = raw.enableGenerateImage
   if (raw.knowledgeRecognition === 'off' || raw.knowledgeRecognition === 'on') {
     dto.knowledgeRecognition = raw.knowledgeRecognition
   }
-  if (typeof raw.enableMemory === 'boolean') dto.enableMemory = raw.enableMemory
   return validateAssistantConfigPayload(dto) === null ? dto : null
 }
 
@@ -686,4 +538,72 @@ export function createAssistantConfigDelta(input: {
     ...(input.deleted !== undefined ? { deleted: input.deleted } : {})
   }
   return validateAssistantConfigDelta(delta) === null ? delta : null
+}
+
+const PORTABLE_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(ASSISTANT_CONFIG_TOP_LEVEL_FIELDS as unknown as string[])
+const PORTABLE_SETTINGS_KEYS: ReadonlySet<string> = new Set(ASSISTANT_CONFIG_SETTINGS_FIELDS as unknown as string[])
+
+/**
+ * Capture-side boundary: reduce a local field patch/record to the portable
+ * surface. Device-local model selection slots (and the model-indexed reasoning
+ * preferences) are dropped here so a local row that legitimately owns them can
+ * never leak into a delta, a mirror payload or a published baseline. The result
+ * is not validated (callers keep strict validation); unknown keys are dropped
+ * rather than forwarded.
+ */
+export function sanitizeAssistantConfigFields(fields: unknown): Record<string, unknown> {
+  if (!isPlainObject(fields)) return {}
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    if (!PORTABLE_TOP_LEVEL_KEYS.has(k)) continue
+    if (k === 'settings') {
+      if (!isPlainObject(v)) {
+        out.settings = v
+        continue
+      }
+      const settings: Record<string, unknown> = {}
+      for (const [sk, sv] of Object.entries(v)) {
+        if (PORTABLE_SETTINGS_KEYS.has(sk)) settings[sk] = sv
+      }
+      // A settings object whose only content is device-local (model-indexed
+      // reasoning slots / defaultModel) carries no portable intent at all.
+      if (Object.keys(settings).length === 0 && Object.keys(v).length > 0) continue
+      out.settings = settings
+      continue
+    }
+    out[k] = v
+  }
+  return out
+}
+
+/** Structural equality for JSON-shaped portable values (order-insensitive keys). */
+export function portableValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false
+    return a.every((v, i) => portableValuesEqual(v, b[i]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const ak = Object.keys(a)
+    const bk = Object.keys(b)
+    if (ak.length !== bk.length) return false
+    return ak.every((k) => k in b && portableValuesEqual(a[k], b[k]))
+  }
+  return false
+}
+
+/**
+ * Field-level diff for a local commit: only portable fields whose value
+ * actually changed. A model-only local edit therefore yields `{}` (no sync
+ * intent, no shared field clock advance) while a mixed edit yields just the
+ * portable fields.
+ */
+export function diffPortableAssistantConfigFields(previous: unknown, incoming: unknown): Record<string, unknown> {
+  const prev = sanitizeAssistantConfigFields(previous)
+  const next = sanitizeAssistantConfigFields(incoming)
+  const changed: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(next)) {
+    if (!portableValuesEqual(prev[k], v)) changed[k] = v
+  }
+  return changed
 }

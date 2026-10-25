@@ -24,6 +24,9 @@ const canonicalize: (value: unknown) => string | undefined = (() => {
   return canonicalizeImport as unknown as (v: unknown) => string | undefined
 })()
 
+// Strict portable assistant-config DTO (shared contract, single source).
+import { validateAssistantConfigPayload } from './assistantConfig'
+
 // ---------------------------------------------------------------------------
 // Constants (locked per SYNC-DATA-027/032/040/041/045 + §10A.1)
 // ---------------------------------------------------------------------------
@@ -2363,18 +2366,11 @@ export type AssistantConfigFieldClockKeyV4 =
   | 'emoji'
   | 'description'
   | 'tags'
-  | 'model'
-  | 'defaultModel'
   | 'settings'
   | 'knowledgeBaseIds'
-  | 'mcpMode'
-  | 'mcpServerIds'
-  | 'enableWebSearch'
-  | 'webSearchProviderId'
   | 'enableUrlContext'
   | 'enableGenerateImage'
   | 'knowledgeRecognition'
-  | 'enableMemory'
 
 export const ASSISTANT_CONFIG_FIELD_CLOCK_KEYS_V4: ReadonlySet<string> = new Set([
   'name',
@@ -2383,18 +2379,11 @@ export const ASSISTANT_CONFIG_FIELD_CLOCK_KEYS_V4: ReadonlySet<string> = new Set
   'emoji',
   'description',
   'tags',
-  'model',
-  'defaultModel',
   'settings',
   'knowledgeBaseIds',
-  'mcpMode',
-  'mcpServerIds',
-  'enableWebSearch',
-  'webSearchProviderId',
   'enableUrlContext',
   'enableGenerateImage',
-  'knowledgeRecognition',
-  'enableMemory'
+  'knowledgeRecognition'
 ])
 
 export interface AssistantConfigEntityV4 {
@@ -2506,40 +2495,12 @@ function validateAssistantConfigEntityV4(value: unknown, path: string): void {
   if (obj.kind === 'defaults' && obj.id !== 'defaults') {
     throw new ValidationError('defaults id must be "defaults"', `${path}.id`)
   }
-  // Full DTO strict via structural key check here (deep DTO validator lives in
-  // assistantConfig.ts; wire keeps exact-key + denied-key gate to avoid import).
-  // Validate config is a plain object with exact allowlisted top keys only.
+  // Strict portable DTO (shared contract): device-local model selection slots
+  // and the removed capability fields are not portable, so a config carrying
+  // them fails closed at the wire boundary instead of being ignored.
   const config = assertPlainObject(obj.config, `${path}.config`)
-  const allowed = new Set<string>([
-    'schemaVersion',
-    'kind',
-    'id',
-    'name',
-    'prompt',
-    'type',
-    'emoji',
-    'description',
-    'tags',
-    'model',
-    'defaultModel',
-    'settings',
-    'knowledgeBaseIds',
-    'mcpMode',
-    'mcpServerIds',
-    'enableWebSearch',
-    'webSearchProviderId',
-    'enableUrlContext',
-    'enableGenerateImage',
-    'knowledgeRecognition',
-    'enableMemory',
-    'deleted'
-  ])
-  for (const k of Object.keys(config)) {
-    if (!allowed.has(k)) throw new ValidationError(`config field "${k}" not allowlisted`, `${path}.config.${k}`)
-  }
-  if (config.schemaVersion !== 1) {
-    throw new ValidationError('config schemaVersion must be 1', `${path}.config.schemaVersion`)
-  }
+  const dtoErr = validateAssistantConfigPayload(config)
+  if (dtoErr) throw new ValidationError(dtoErr, `${path}.config`)
   if (config.kind !== obj.kind || config.id !== obj.id) {
     throw new ValidationError('config kind/id must agree with entity kind/id', `${path}.config`)
   }

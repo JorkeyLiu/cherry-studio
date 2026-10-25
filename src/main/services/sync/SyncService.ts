@@ -38,6 +38,7 @@ import {
   validateSyncPayloadAllowlist
 } from '@shared/sync'
 import { SYNC_MAX_OPERATIONS_PER_PULL, SYNC_MAX_OPERATIONS_PER_PUSH } from '@shared/sync'
+import { diffPortableAssistantConfigFields, sanitizeAssistantConfigFields } from '@shared/sync/assistantConfig'
 import type { FileAsset } from '@shared/sync/attachments'
 import type Database from 'better-sqlite3'
 import { and, asc, eq, isNull } from 'drizzle-orm'
@@ -3385,13 +3386,24 @@ export class SyncService {
       const prevPayload: Record<string, unknown> = existing?.payloadJson
         ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
         : {}
+      // Portable projection boundary: device-local model selection slots (and
+      // any other non-portable key) never enter the mirror or the wire.
+      const portableFields = sanitizeAssistantConfigFields(delta.fields)
       const nextPayload: Record<string, unknown> =
         delta.deleted === true
           ? { schemaVersion: 1, kind: delta.kind, id: delta.id, deleted: true }
-          : { schemaVersion: 1, kind: delta.kind, id: delta.id, ...stripAssistantMeta(prevPayload), ...delta.fields }
+          : { schemaVersion: 1, kind: delta.kind, id: delta.id, ...stripAssistantMeta(prevPayload), ...portableFields }
       if (nextPayload.schemaVersion !== 1) nextPayload.schemaVersion = 1
       nextPayload.kind = delta.kind
       nextPayload.id = delta.id
+      // Field-diff boundary: only portable fields whose value actually changed
+      // carry sync intent, so a local-only (model) edit enqueues no operation
+      // and advances no shared field clock.
+      const changedFields = delta.deleted === true ? {} : diffPortableAssistantConfigFields(prevPayload, nextPayload)
+      const hasIntent = delta.deleted === true || Object.keys(changedFields).length > 0
+      // Mirror + outbox + clocks share this connection's open transaction.
+      const tx = db as unknown as SyncTxExecutor
+      let alreadyQueued = false
       // Full DTO strict via op validator (fails closed on secrets/paths/raw JSON).
       // Op payload carries intent-only patch fields (+ identity), never the full
       // merged mirror DTO: absent keys carry no intent and are preserved on
@@ -3414,64 +3426,64 @@ export class SyncService {
               entityId: key,
               timestamp: delta.timestamp ?? now,
               deviceId,
-              payload: { schemaVersion: 1, kind: delta.kind, id: delta.id, ...delta.fields }
+              payload: { schemaVersion: 1, kind: delta.kind, id: delta.id, ...changedFields }
             }
-      const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
-      if (strictErr) throw new Error(`invalid assistant config op: ${strictErr}`)
-      if (op.op === 'upsert') {
-        const allowErr = validateSyncPayloadAllowlist(op)
-        if (allowErr) throw new Error(`invalid assistant config payload: ${allowErr}`)
-      }
-      // Outbox + clocks in the same Tx (drizzle tx executor is the same connection;
-      // enqueueOperationInTx performs no BEGIN/COMMIT itself).
-      const tx = db as unknown as SyncTxExecutor
-      const alreadyQueued = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
-      if (!alreadyQueued) {
-        tx.insert(schema.syncOutbox)
-          .values({
-            id: op.id,
-            entityType: op.entityType,
-            op: op.op,
-            entityId: op.entityId,
-            timestamp: op.timestamp,
-            deviceId: op.deviceId,
-            payloadJson: op.payload ? JSON.stringify(op.payload) : null,
-            createdAt: new Date().toISOString()
-          })
-          .onConflictDoNothing()
-          .run()
-        const clockRow = tx
-          .select()
-          .from(schema.syncEntityClock)
-          .where(eq(schema.syncEntityClock.entityType, op.entityType))
-          .all()
-          .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
-        if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
-          tx.insert(schema.syncEntityClock)
-            .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
-            .onConflictDoUpdate({
-              target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
-              set: { timestamp: op.timestamp, operationId: op.id }
-            })
-            .run()
+      if (hasIntent) {
+        const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+        if (strictErr) throw new Error(`invalid assistant config op: ${strictErr}`)
+        if (op.op === 'upsert') {
+          const allowErr = validateSyncPayloadAllowlist(op)
+          if (allowErr) throw new Error(`invalid assistant config payload: ${allowErr}`)
         }
-        if (op.op === 'delete') {
-          this.setTombstoneInDb(
-            tx as unknown as BetterSQLite3Database<typeof schema>,
-            'assistant_config',
-            op.entityId,
-            op.timestamp,
-            op.id
-          )
-        } else if (op.payload) {
-          this.updateFieldClocksInDb(
-            tx as unknown as BetterSQLite3Database<typeof schema>,
-            'assistant_config',
-            op.entityId,
-            op.payload,
-            op.timestamp,
-            op.id
-          )
+        // Outbox + clocks in the same Tx (drizzle tx executor is the same connection).
+        alreadyQueued = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get() !== undefined
+        if (!alreadyQueued) {
+          tx.insert(schema.syncOutbox)
+            .values({
+              id: op.id,
+              entityType: op.entityType,
+              op: op.op,
+              entityId: op.entityId,
+              timestamp: op.timestamp,
+              deviceId: op.deviceId,
+              payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+              createdAt: new Date().toISOString()
+            })
+            .onConflictDoNothing()
+            .run()
+          const clockRow = tx
+            .select()
+            .from(schema.syncEntityClock)
+            .where(eq(schema.syncEntityClock.entityType, op.entityType))
+            .all()
+            .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+          if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
+            tx.insert(schema.syncEntityClock)
+              .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
+              .onConflictDoUpdate({
+                target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+                set: { timestamp: op.timestamp, operationId: op.id }
+              })
+              .run()
+          }
+          if (op.op === 'delete') {
+            this.setTombstoneInDb(
+              tx as unknown as BetterSQLite3Database<typeof schema>,
+              'assistant_config',
+              op.entityId,
+              op.timestamp,
+              op.id
+            )
+          } else if (op.payload) {
+            this.updateFieldClocksInDb(
+              tx as unknown as BetterSQLite3Database<typeof schema>,
+              'assistant_config',
+              op.entityId,
+              op.payload,
+              op.timestamp,
+              op.id
+            )
+          }
         }
       }
       const version = (existing?.version ?? 0) + 1

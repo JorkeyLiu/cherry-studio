@@ -158,13 +158,14 @@ describe('assistant-config full sync (production paths)', () => {
       fields: {
         name: 'Helper',
         prompt: 'Be helpful. api_key inside prompt is literal, not a secret.',
-        model: { connectionId: 'conn-1', modelId: 'model-x' },
         settings: { temperature: 0.7, contextWindowAnchor: { t1: { kind: 'active', groupKey: 'g1' } } }
       }
     })
     expect(committed.key).toBe(key)
     expect(outboxCount('A')).toBe(1)
     // Forced invalid enqueue fails atomically (no mirror row, no outbox row).
+    // Non-portable keys are dropped at capture; a wrongly typed portable value
+    // still fails closed through the strict DTO validator.
     expect(() =>
       syncService.commitAssistantConfigDeltaProduction({
         kind: 'assistant',
@@ -172,7 +173,7 @@ describe('assistant-config full sync (production paths)', () => {
         mutationId: 'm-bad-1',
         revision: 1,
         timestamp: 1001,
-        fields: { name: 'x', secret: 'leak' } as never
+        fields: { name: 123, secret: 'leak' } as never
       })
     ).toThrow()
     expect(mirrorRow('A', 'assistant_config:assistant:bad')).toBeUndefined()
@@ -198,8 +199,11 @@ describe('assistant-config full sync (production paths)', () => {
     expect(payloadB.name).toBe('Helper')
     // User prompt literal preserved (never scanned for secrets).
     expect(payloadB.prompt).toContain('api_key')
-    // Opaque model ref preserved, no substitution.
-    expect(payloadB.model).toEqual({ connectionId: 'conn-1', modelId: 'model-x' })
+    // Device-local model selection is never portable: nothing model-shaped
+    // reaches the peer's mirror.
+    expect(payloadB).not.toHaveProperty('model')
+    expect(payloadB).not.toHaveProperty('defaultModel')
+    expect(JSON.stringify(payloadB)).not.toContain('connectionId')
     // No secret/path keys in payload.
     expect(JSON.stringify(payloadB)).not.toContain('"secret"')
     expect(JSON.stringify(payloadB)).not.toContain('file_path')
@@ -211,6 +215,85 @@ describe('assistant-config full sync (production paths)', () => {
     expect(batch.length).toBe(1)
     const rev = batch[0].projectionRevision
     expect(rev).toBeGreaterThanOrEqual(1)
+  })
+
+  it('local-only model selection yields no sync intent and no shared field clock', () => {
+    const key = 'assistant_config:assistant:a-local-model'
+    const clocksFor = (): string[] =>
+      dbA
+        .select()
+        .from(schema.syncFieldClock)
+        .all()
+        .filter((r) => r.entityType === 'assistant_config' && r.entityId === key)
+        .map((r) => `${r.field}:${r.timestamp}:${r.operationId}`)
+        .sort()
+    bind('A')
+    syncService.commitAssistantConfigDeltaProduction({
+      kind: 'assistant',
+      id: 'a-local-model',
+      mutationId: 'm-lm-1',
+      revision: 1,
+      timestamp: 1000,
+      fields: { name: 'Local Model Owner', settings: { temperature: 0.5 } }
+    })
+    expect(outboxCount('A')).toBe(1)
+    const clocksBefore = clocksFor()
+    expect(clocksBefore.length).toBe(2)
+
+    // Model-only local edit: the selection slots and the model-indexed reasoning
+    // preferences are device-local, so nothing is enqueued and no clock moves.
+    bind('A')
+    syncService.commitAssistantConfigDeltaProduction({
+      kind: 'assistant',
+      id: 'a-local-model',
+      mutationId: 'm-lm-2',
+      revision: 2,
+      timestamp: 2000,
+      fields: {
+        model: { connectionId: 'conn-local', modelId: 'model-local' },
+        defaultModel: { connectionId: 'conn-local', modelId: 'model-local-dm' },
+        settings: {
+          temperature: 0.5,
+          reasoning_effort_by_model: { 'conn-local:model-local': 'high' },
+          reasoning_effort_show_all_by_model: { 'conn-local:model-local': true },
+          reasoning_effort_cache: 'high',
+          defaultModel: { connectionId: 'conn-local', modelId: 'model-local-sdm' }
+        }
+      }
+    })
+    expect(outboxCount('A')).toBe(1)
+    expect(clocksFor()).toEqual(clocksBefore)
+    const localPayload = JSON.parse(mirrorRow('A', key)!.payloadJson) as Record<string, unknown>
+    expect(localPayload).not.toHaveProperty('model')
+    expect(localPayload).not.toHaveProperty('defaultModel')
+    expect(localPayload.settings).toEqual({ temperature: 0.5 })
+
+    // Mixed edit: only the portable changed field is intent.
+    bind('A')
+    syncService.commitAssistantConfigDeltaProduction({
+      kind: 'assistant',
+      id: 'a-local-model',
+      mutationId: 'm-lm-3',
+      revision: 3,
+      timestamp: 3000,
+      fields: {
+        prompt: 'Portable prompt',
+        model: { connectionId: 'conn-local', modelId: 'model-local-2' }
+      }
+    })
+    expect(outboxCount('A')).toBe(2)
+    const queued = dbA
+      .select()
+      .from(schema.syncOutbox)
+      .all()
+      .find((r) => r.id === 'm-lm-3')
+    expect(queued).toBeTruthy()
+    expect(JSON.parse(queued!.payloadJson as string)).toEqual({
+      schemaVersion: 1,
+      kind: 'assistant',
+      id: 'a-local-model',
+      prompt: 'Portable prompt'
+    })
   })
 
   it('fields-disjoint LWW converges without wipe; delete wins with tombstone', async () => {
@@ -333,7 +416,44 @@ describe('assistant-config full sync (production paths)', () => {
     const v3payload = projectLocalBaselineToWirePayloadV3(candidate)
     const section = dbA.transaction((tx) => readAssistantBaselineSection(tx as never))
     expect(section.configs.some((c) => c.key === key)).toBe(true)
-    const built = buildPublishEnvelopeV4(v3payload, section, 'chan-test', 7)
+    // Publish boundary: a mirror row that (defensively) owns device-local model
+    // slots still publishes only the portable surface.
+    sqliteA.prepare(`UPDATE sync_assistant_config_mirror SET payload_json = ? WHERE key = ?`).run(
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'assistant',
+        id: 'base1',
+        name: 'Base',
+        model: { connectionId: 'conn-local', modelId: 'model-local' },
+        defaultModel: { connectionId: 'conn-local', modelId: 'model-local-dm' }
+      }),
+      key
+    )
+    const sanitizedSection = dbA.transaction((tx) => readAssistantBaselineSection(tx as never))
+    const published = sanitizedSection.configs.find((c) => c.key === key)
+    expect(published).toBeTruthy()
+    expect(published!.config).not.toHaveProperty('model')
+    expect(published!.config).not.toHaveProperty('defaultModel')
+    expect(JSON.stringify(published!.config)).not.toContain('connectionId')
+    // The wire validator rejects a config that carries a device-local slot.
+    expect(() =>
+      buildPublishEnvelopeV4(
+        v3payload,
+        {
+          configs: [
+            {
+              ...published!,
+              config: { ...published!.config, model: { connectionId: 'conn-local', modelId: 'model-local' } },
+              fieldClocks: { ...published!.fieldClocks, model: { timestamp: 1, operationId: 'op' } }
+            }
+          ],
+          tombstones: []
+        },
+        'chan-test',
+        7
+      )
+    ).toThrow()
+    const built = buildPublishEnvelopeV4(v3payload, sanitizedSection, 'chan-test', 7)
     expect(built.envelope.wireVersion).toBe('sync-baseline-wire-v4')
     // Map + merge into B in a single Tx (chat core + assistant section, no outbox).
     bind('B')
