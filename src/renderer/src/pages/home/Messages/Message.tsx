@@ -55,6 +55,13 @@ interface Props {
    * undefined preserves the default active-chat Redux behavior.
    */
   snapshotBlocksById?: SnapshotBlockMap
+  /**
+   * Whether this row publishes the stable `message-<id>` / `data-message-id`
+   * DOM anchors. Defaults to true for the live chat list; offscreen renders
+   * (topic image export) pass false so a duplicate anchor can never divert the
+   * viewport geometry reads of the resident rows.
+   */
+  renderDomId?: boolean
 }
 
 /** Module-level stable reference — avoids creating a new [] on every render when editMode is null. */
@@ -82,7 +89,8 @@ const MessageItem: FC<Props> = ({
   isHorizontalMultiModelLayout = false,
   isEditMode = false,
   onGroupClick,
-  snapshotBlocksById
+  snapshotBlocksById,
+  renderDomId = true
 }) => {
   // Narrow presentation subscription: configuration only, never topics, so
   // ordinary-send topic updatedAt bumps cannot invalidate history messages.
@@ -263,8 +271,8 @@ const MessageItem: FC<Props> = ({
     <WrapperContainer isMultiSelectMode={isMultiSelectMode}>
       <MessageContainer
         key={message.id}
-        id={`message-${message.id}`}
-        data-message-id={message.id}
+        id={renderDomId ? `message-${message.id}` : undefined}
+        data-message-id={renderDomId ? message.id : undefined}
         data-ask-id={isAssistantMessage ? message.askId || message.id : undefined}
         className={classNames({
           message: true,
@@ -419,6 +427,7 @@ export const areMessageItemPropsEqual = (prev: Props, next: Props): boolean => {
   if (prev.onUpdateUseful !== next.onUpdateUseful) return false
   if (prev.onGroupClick !== next.onGroupClick) return false
   if (prev.snapshotBlocksById !== next.snapshotBlocksById) return false
+  if ((prev.renderDomId ?? true) !== (next.renderDomId ?? true)) return false
   return true
 }
 

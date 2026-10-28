@@ -118,11 +118,7 @@ import type { Assistant, Topic } from '@renderer/types'
 import type { EditSelectionBoundaryDirection } from '@renderer/types/editMode'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
-import {
-  captureScrollableAsBlob,
-  captureScrollableAsDataURL,
-  removeSpecialCharactersForFileName
-} from '@renderer/utils'
+import { captureScrollableAsBlob, removeSpecialCharactersForFileName } from '@renderer/utils'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
@@ -3313,10 +3309,48 @@ const Messages = ({
           }
         })
       }),
-      EventEmitter.on(EVENT_NAMES.EXPORT_TOPIC_IMAGE, async () => {
-        const imageData = await captureScrollableAsDataURL(scrollContainerRef)
-        if (imageData) {
-          void window.api.file.saveImage(removeSpecialCharactersForFileName(topic.name), imageData)
+      EventEmitter.on(EVENT_NAMES.EXPORT_TOPIC_IMAGE, async (targetTopic?: Topic) => {
+        // The menu emits the topic it belongs to. Image export reads that
+        // topic's complete snapshot from Main and renders it caller-locally, so
+        // the resident windowed projection, the viewport window/pagination and
+        // the live scroll container are neither the content source nor mutated.
+        const exportTopic = targetTopic?.id ? targetTopic : topic
+        // Route is bound to the same topic and frozen at export start: the
+        // addressed topic's own active route is read once from the store, so a
+        // target topic never borrows this topic's branch, and a route switch
+        // during the async capture cannot change what this export renders.
+        // `null` is the main route and is passed through unchanged.
+        const exportBranchId = selectActiveBranchId(store.getState(), exportTopic.id)
+        // Loaded on demand: the export renderer (and the message presentation
+        // graph it reuses) is only needed when an image export actually runs.
+        const { captureTopicExportImage } = await import('./topicExportImage')
+        const outcome = await captureTopicExportImage({
+          topic: exportTopic,
+          branchId: exportBranchId,
+          width: scrollContainerRef.current?.clientWidth
+        })
+        switch (outcome.status) {
+          case 'busy':
+            window.toast.warning(t('message.warn.export.exporting'))
+            return
+          case 'captured': {
+            const success = await window.api.file.saveImage(
+              removeSpecialCharactersForFileName(exportTopic.name),
+              outcome.dataUrl
+            )
+            if (success) window.toast.success(t('chat.topics.export.image_saved'))
+            return
+          }
+          case 'empty':
+            logger.warn(`[EXPORT_TOPIC_IMAGE] topic ${exportTopic.id} has no messages to export`)
+            return
+          case 'too-large':
+            // The capture helper already surfaced the explicit dimension
+            // rejection through its own user-facing error.
+            return
+          case 'failed':
+            logger.error('[EXPORT_TOPIC_IMAGE] failed to export topic image', outcome.error as Error)
+            window.toast.error(t('message.error.unknown'))
         }
       }),
       EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (messageId: string) => {
