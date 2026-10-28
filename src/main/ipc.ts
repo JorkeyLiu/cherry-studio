@@ -36,7 +36,6 @@ import { registerChatDbIpc } from './services/chatDb/ipc'
 import { registerChatImportIpc } from './services/chatDbImport'
 import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import { ConfigKeys, configManager } from './services/ConfigManager'
-import { ExportService } from './services/ExportService'
 import { externalAppsService } from './services/ExternalAppsService'
 import { fileStorage as fileManager } from './services/FileStorage'
 import FileService from './services/FileSystemService'
@@ -44,8 +43,6 @@ import KnowledgeService from './services/KnowledgeService'
 import { modelMetadataService, registerModelMetadataIpc } from './services/ModelMetadataService'
 import { openTraceWindow, setTraceWindowTitle } from './services/NodeTraceService'
 import NotificationService from './services/NotificationService'
-import * as NutstoreService from './services/NutstoreService'
-import ObsidianVaultService from './services/ObsidianVaultService'
 import powerMonitorService from './services/PowerMonitorService'
 import { providerLogoService, registerProviderLogoIpc } from './services/ProviderLogoService'
 import { proxyManager } from './services/ProxyManager'
@@ -89,8 +86,6 @@ import { compress, decompress } from './utils/zip'
 const logger = loggerService.withContext('IPC')
 
 const backupManager = new BackupManager()
-const exportService = new ExportService()
-const obsidianVaultService = new ObsidianVaultService()
 
 export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) {
   const appUpdater = new AppUpdater()
@@ -644,10 +639,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // fs
   ipcMain.handle(IpcChannel.Fs_Read, FileService.readFile.bind(FileService))
   ipcMain.handle(IpcChannel.Fs_ReadText, FileService.readTextFileWithAutoEncoding.bind(FileService))
-
-  // export
-  ipcMain.handle(IpcChannel.Export_Word, exportService.exportToWord.bind(exportService))
-
   // open path
   ipcMain.handle(IpcChannel.Open_Path, async (_, path: string) => {
     await shell.openPath(path)
@@ -748,22 +739,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.App_GetBinaryPath, (_, name: string) => getBinaryPath(name))
   ipcMain.handle(IpcChannel.App_InstallUvBinary, () => runInstallScript('install-uv.js'))
   ipcMain.handle(IpcChannel.App_InstallBunBinary, () => runInstallScript('install-bun.js'))
-
-  // Obsidian service
-  ipcMain.handle(IpcChannel.Obsidian_GetVaults, () => {
-    return obsidianVaultService.getVaults()
-  })
-
-  ipcMain.handle(IpcChannel.Obsidian_GetFiles, (_event, vaultName) => {
-    return obsidianVaultService.getFilesByVaultName(vaultName)
-  })
-
-  // nutstore
-  ipcMain.handle(IpcChannel.Nutstore_GetSsoUrl, NutstoreService.getNutstoreSSOUrl.bind(NutstoreService))
-  ipcMain.handle(IpcChannel.Nutstore_DecryptToken, (_, token: string) => NutstoreService.decryptToken(token))
-  ipcMain.handle(IpcChannel.Nutstore_GetDirectoryContents, (_, token: string, path: string) =>
-    NutstoreService.getDirectoryContents(token, path)
-  )
 
   // webview
   ipcMain.handle(IpcChannel.Webview_SetOpenLinkExternal, (_, webviewId: number, isExternal: boolean) =>

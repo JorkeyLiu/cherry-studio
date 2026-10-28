@@ -182,21 +182,13 @@ vi.mock('@renderer/utils', () => ({
 }))
 
 vi.mock('@renderer/utils/export', () => ({
-  exportMarkdownToJoplin: vi.fn(),
-  exportMarkdownToSiyuan: vi.fn(),
-  exportMarkdownToYuque: vi.fn(),
   exportTopicAsMarkdown: vi.fn(),
   exportTopicToNotes: vi.fn(),
-  exportTopicToNotion: vi.fn(),
   topicToMarkdown: vi.fn()
 }))
 
 vi.mock('@renderer/utils/messageUtils/snapshotBlocks', () => ({
   createSnapshotBlockMap: vi.fn(() => new Map())
-}))
-
-vi.mock('@renderer/components/Popups/ObsidianExportPopup', () => ({
-  default: { show: vi.fn() }
 }))
 
 vi.mock('@renderer/components/Popups/PromptPopup', () => ({

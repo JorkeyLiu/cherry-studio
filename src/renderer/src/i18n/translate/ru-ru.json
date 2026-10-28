@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "Скопировать как изображение",
         "md": "Скопировать как Markdown",
-        "plain_text": "Копировать как обычный текст (удалить Markdown)",
         "title": "Скопировать"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "Экспорт как изображение",
         "image_saved": "Изображение успешно сохранено",
-        "joplin": "Экспорт в Joplin",
         "md": {
-          "label": "Экспорт как markdown",
-          "reason": "Экспорт в Markdown (с рассуждениями)"
+          "label": "Экспорт как markdown"
         },
         "notes": "экспорт в заметки",
-        "notion": "Экспорт в Notion",
-        "obsidian": "Экспорт в Obsidian",
-        "obsidian_atributes": "Настроить атрибуты заметки",
-        "obsidian_btn": "Подтвердить",
-        "obsidian_created": "Дата создания",
-        "obsidian_created_placeholder": "Пожалуйста, выберите дату создания",
-        "obsidian_export_failed": "Экспорт не удалось",
-        "obsidian_export_success": "Экспорт успешно завершен",
-        "obsidian_fetch_error": "Не удалось получить хранилища Obsidian",
-        "obsidian_fetch_folders_error": "Не удалось получить структуру папок",
-        "obsidian_loading": "Загрузка...",
-        "obsidian_no_vault_selected": "Пожалуйста, сначала выберите хранилище",
-        "obsidian_no_vaults": "Хранилища Obsidian не найдены",
-        "obsidian_operate": "Метод обработки",
-        "obsidian_operate_append": "Добавить в конец",
-        "obsidian_operate_new_or_overwrite": "Создать новый (перезаписать, если уже существует)",
-        "obsidian_operate_placeholder": "Пожалуйста, выберите метод обработки",
-        "obsidian_operate_prepend": "Добавить в начало",
-        "obsidian_path": "Путь",
-        "obsidian_path_placeholder": "Выберите путь",
-        "obsidian_reasoning": "Включить цепочку рассуждений",
-        "obsidian_root_directory": "Корневая директория",
-        "obsidian_select_vault_first": "Пожалуйста, сначала выберите хранилище",
-        "obsidian_source": "Источник",
-        "obsidian_source_placeholder": "Пожалуйста, введите источник",
-        "obsidian_tags": "Тэги",
-        "obsidian_tags_placeholder": "Пожалуйста, введите имена тегов. Разделяйте несколько тегов запятыми на английском языке",
-        "obsidian_title": "Заголовок",
-        "obsidian_title_placeholder": "Пожалуйста, введите заголовок",
-        "obsidian_title_required": "Заголовок не может быть пустым",
-        "obsidian_vault": "Хранилище",
-        "obsidian_vault_placeholder": "Выберите имя хранилища",
-        "siyuan": "Экспорт в Siyuan Note",
-        "title": "Экспорт",
-        "title_naming_failed": "Не удалось создать заголовок, используется заголовок по умолчанию",
-        "title_naming_success": "Заголовок успешно создан",
-        "wait_for_title_naming": "Создание заголовка...",
-        "word": "Экспорт как Word",
-        "yuque": "Экспорт в Yuque"
+        "title": "Экспорт"
       },
       "list": "Список топиков",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "Создано",
     "last_updated": "Последнее обновление",
     "messages": "Сообщения",
-    "notion": {
-      "reasoning_truncated": "Цепочка мыслей не может быть разбита на блоки, обрезана"
-    },
     "user": "Пользователь"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "Пожалуйста, выберите модель"
         },
-        "nutstore": "Неверные настройки Nutstore",
-        "nutstore_token": "Неверный Nutstore токен",
         "proxy": {
           "url": "Неверный URL прокси"
         },
         "webdav": "Неверные настройки WebDAV"
-      },
-      "joplin": {
-        "export": "Не удалось экспортировать в Joplin, пожалуйста, убедитесь, что Joplin запущен и проверьте состояние подключения или настройки",
-        "no_config": "Joplin Authorization Token или URL не настроен"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "не удалось экспортировать заметку"
       },
-      "notion": {
-        "export": "Ошибка экспорта в Notion, пожалуйста, проверьте состояние подключения и настройки в документации",
-        "no_api_key": "Notion ApiKey или Notion DatabaseID не настроен",
-        "no_content": "Нет содержимого для экспорта в Notion"
-      },
-      "siyuan": {
-        "export": "Ошибка экспорта в Siyuan, пожалуйста, проверьте состояние подключения и настройки в документации",
-        "no_config": "Не настроен API адрес или токен Siyuan"
-      },
       "table": {
         "invalid": "Не удалось получить корректные данные таблицы"
       },
-      "unknown": "Неизвестная ошибка",
-      "yuque": {
-        "export": "Ошибка экспорта в Yuque, пожалуйста, проверьте состояние подключения и настройки в документации",
-        "no_config": "Yuque Token или Yuque Url не настроен"
-      }
+      "unknown": "Неизвестная ошибка"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "Режим сети включен, игнорировать базу знаний"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Экспорт в Notion ...",
-        "preparing": "Подготовка к экспорту в Notion..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Excel успешно экспортирован"
       },
-      "joplin": {
-        "export": "Успешный экспорт в Joplin"
-      },
       "markdown": {
         "export": {
           "preconf": "Файл Markdown успешно экспортирован в предуказанный путь",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "Успешно экспортировано в заметки"
-      },
-      "notion": {
-        "export": "Успешный экспорт в Notion"
-      },
-      "siyuan": {
-        "export": "Успешный экспорт в Siyuan"
-      },
-      "yuque": {
-        "export": "Успешный экспорт в Yuque"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "Основные настройки данных",
         "cloud_storage": "Настройки облачного резервирования",
         "export_settings": "Настройки экспорта",
-        "import_settings": "Импорт настроек",
-        "third_party": "Сторонние подключения"
+        "import_settings": "Импорт настроек"
       },
-      "export_menu": {
-        "docx": "Экспорт в Word",
-        "image": "Экспорт как изображение",
-        "joplin": "Экспорт в Joplin",
-        "markdown": "Экспорт в Markdown",
-        "markdown_reason": "Экспорт в Markdown (с рассуждениями)",
-        "notes": "экспорт в заметки",
-        "notion": "Экспорт в Notion",
-        "obsidian": "Экспорт в Obsidian",
-        "plain_text": "Копировать как чистый текст",
-        "siyuan": "Экспорт в SiYuan Note",
-        "title": "Настройки меню экспорта",
-        "yuque": "Экспорт в Yuque"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Исключить цитаты и ссылки при экспорте в Markdown, сохранив только основное содержание",
+          "title": "Исключить цитаты"
+        },
+        "help": "Если указано, файлы будут автоматически сохраняться в этот путь; в противном случае появится диалоговое окно сохранения.",
+        "include_thinking": {
+          "help": "Включать рассуждения при экспорте изображений или Markdown.",
+          "title": "Включить рассуждения"
+        },
+        "path": "Путь экспорта по умолчанию",
+        "path_placeholder": "Путь экспорта",
+        "select": "Выбрать",
+        "standardize_citations": {
+          "help": "Преобразовать цитаты в стандартный формат Markdown [^1], и форматировать список цитат",
+          "title": "Стандартизировать цитаты"
+        },
+        "title": "Параметры экспорта тем"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Импорт из ZIP Cherry Studio",
         "cherrystudio_button": "Импортировать ZIP-резервную копию",
         "title": "Импорт внешних данных приложения"
-      },
-      "joplin": {
-        "check": {
-          "button": "Проверить",
-          "empty_token": "Сначала введите токен Joplin",
-          "empty_url": "Сначала введите URL Joplin",
-          "fail": "Не удалось проверить подключение к Joplin",
-          "success": "Подключение к Joplin успешно проверено"
-        },
-        "export_reasoning": {
-          "help": "Если включено, экспортируемый контент будет содержать цепочку рассуждений, сгенерированную ассистентом.",
-          "title": "Включить цепочку рассуждений при экспорте"
-        },
-        "help": "Включите Joplin опцию, проверьте порт и скопируйте токен",
-        "title": "Настройка Joplin",
-        "token": "Токен Joplin",
-        "token_placeholder": "Введите токен Joplin",
-        "url": "URL Joplin",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Предупреждение о пространстве на диске",
@@ -4031,122 +3935,8 @@
         "syncStatus": "Статус копирования",
         "title": "Локальное резервное копирование"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Исключить цитаты и ссылки при экспорте в Markdown, сохранив только основное содержание",
-          "title": "Исключить цитаты"
-        },
-        "force_dollar_math": {
-          "help": "Если включено, при экспорте в Markdown для обозначения формул LaTeX будет принудительно использоваться $$. Примечание: Эта опция также влияет на все методы экспорта через Markdown, такие как Notion, Yuque и т.д.",
-          "title": "Принудительно использовать $$ для формул LaTeX"
-        },
-        "help": "Если указано, файлы будут автоматически сохраняться в этот путь; в противном случае появится диалоговое окно сохранения.",
-        "path": "Путь экспорта по умолчанию",
-        "path_placeholder": "Путь экспорта",
-        "select": "Выбрать",
-        "show_model_name": {
-          "help": "Если включено, при экспорте в Markdown будет отображаться имя модели. Примечание: Эта опция также влияет на все методы экспорта через Markdown, такие как Notion, Yuque и т.д.",
-          "title": "Использовать имя модели при экспорте"
-        },
-        "show_model_provider": {
-          "help": "Показывать поставщика модели (например, OpenAI, Gemini) при экспорте в Markdown",
-          "title": "Показать поставщика модели"
-        },
-        "standardize_citations": {
-          "help": "Преобразовать цитаты в стандартный формат Markdown [^1], и форматировать список цитат",
-          "title": "Стандартизировать цитаты"
-        },
-        "title": "Экспорт в Markdown"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "После включения заголовки экспортируемых сообщений будут назначаться с использованием быстрой модели. Эта настройка также влияет на все способы экспорта через Markdown",
-          "title": "Использование быстрой модели для наименования заголовков экспортированных сообщений"
-        }
-      },
       "minute_interval_one": "{{count}} минута",
       "minute_interval_other": "{{count}} минут",
-      "notion": {
-        "api_key": "Ключ API Notion",
-        "api_key_placeholder": "Введите ключ API Notion",
-        "check": {
-          "button": "Проверить",
-          "empty_api_key": "Не настроен API key",
-          "empty_database_id": "Не настроен Database ID",
-          "error": "Аномалия в подключении, пожалуйста, проверьте настройки сети, а также правильность API key и Database ID",
-          "fail": "Не удалось подключиться, пожалуйста, проверьте сеть и правильность API key и Database ID",
-          "success": "Подключение успешно"
-        },
-        "database_id": "ID базы данных Notion",
-        "database_id_placeholder": "Введите ID базы данных Notion",
-        "export_reasoning": {
-          "help": "При включении, содержимое цепочки рассуждений будет включено при экспорте в Notion.",
-          "title": "Включить цепочку рассуждений при экспорте"
-        },
-        "page_name_key": "Название поля заголовка страницы",
-        "page_name_key_placeholder": "Введите название поля заголовка страницы, по умолчанию Name",
-        "title": "Настройки Notion"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Резервное копирование в Nutstore",
-          "modal": {
-            "filename": {
-              "placeholder": "Пожалуйста, введите имя файла резервной копии"
-            },
-            "title": "Резервное копирование в Nutstore"
-          }
-        },
-        "checkConnection": {
-          "fail": "Ошибка подключения к Nutstore",
-          "name": "Проверить соединение",
-          "success": "Подключение к Nutstore установлено"
-        },
-        "isLogin": "Выполнен вход",
-        "login": {
-          "button": "Войти"
-        },
-        "logout": {
-          "button": "Выйти",
-          "content": "После выхода вы не сможете создавать резервные копии в Nutstore или восстанавливать данные из Nutstore.",
-          "title": "Вы уверены, что хотите выйти из Nutstore?"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Отмена",
-            "confirm": "Подтвердить",
-            "label": "Новая папка"
-          }
-        },
-        "notLogin": "Вход не выполнен",
-        "path": {
-          "label": "Путь хранения Nutstore",
-          "placeholder": "Введите путь хранения Nutstore"
-        },
-        "pathSelector": {
-          "currentPath": "Текущий путь",
-          "return": "Назад",
-          "title": "Путь хранения Nutstore"
-        },
-        "restore": {
-          "button": "Восстановление из Nutstore",
-          "confirm": {
-            "content": "Восстановление из Nutstore перезапишет текущие данные. Продолжить?",
-            "title": "Восстановить из Nutstore"
-          }
-        },
-        "title": "Настройки Nutstore",
-        "username": "Имя пользователя Nutstore"
-      },
-      "obsidian": {
-        "default_vault": "Хранилище Obsidian по умолчанию",
-        "default_vault_export_failed": "Ошибка экспорта",
-        "default_vault_fetch_error": "Не удалось получить хранилища Obsidian",
-        "default_vault_loading": "Получение хранилищ Obsidian...",
-        "default_vault_no_vaults": "Хранилища Obsidian не найдены",
-        "default_vault_placeholder": "Выберите хранилище Obsidian по умолчанию",
-        "title": "Настройки Obsidian"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4271,27 +4061,6 @@
           "label": "S3-совместимое хранилище"
         }
       },
-      "siyuan": {
-        "api_url": "API адрес",
-        "api_url_placeholder": "Например: http://127.0.0.1:6806",
-        "box_id": "ID блокнота",
-        "box_id_placeholder": "Введите ID блокнота",
-        "check": {
-          "button": "Проверить",
-          "empty_config": "Пожалуйста, заполните API адрес и токен",
-          "error": "Ошибка соединения, проверьте сетевое подключение",
-          "fail": "Не удалось подключиться, проверьте API адрес и токен",
-          "success": "Соединение успешно",
-          "title": "Проверка соединения"
-        },
-        "root_path": "Корневой путь документа",
-        "root_path_placeholder": "Например: /CherryStudio",
-        "title": "Конфигурация SiYuan Note",
-        "token": {
-          "label": "API токен"
-        },
-        "token_placeholder": "Введите токен SiYuan Note"
-      },
       "title": "Настройки данных",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "Статус резервного копирования",
         "title": "WebDAV",
         "user": "Пользователь WebDAV"
-      },
-      "yuque": {
-        "check": {
-          "button": "Проверить",
-          "empty_repo_url": "Сначала введите URL базы знаний",
-          "empty_token": "Сначала введите токен Yuque",
-          "fail": "Не удалось проверить подключение к Yuque",
-          "success": "Подключение к Yuque успешно проверено"
-        },
-        "help": "Получить токен Yuque",
-        "repo_url": "URL базы знаний",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Настройка Yuque",
-        "token": "Токен Yuque",
-        "token_placeholder": "Введите токен Yuque"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "Синхронизация данных",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

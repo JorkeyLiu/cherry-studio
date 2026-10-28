@@ -4,7 +4,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  convertMathFormula,
   findCitationInChildren,
   isHtmlCode,
   markdownToPlainText,
@@ -78,44 +77,6 @@ describe('markdown', () => {
       expect(findCitationInChildren(children)).toBe('mixed-citation')
     })
   })
-
-  describe('convertMathFormula', () => {
-    it('should convert LaTeX block delimiters to $$$$', () => {
-      // 验证将 LaTeX 块分隔符转换为 $$$$
-      const input = 'Some text \\[math formula\\] more text'
-      const result = convertMathFormula(input)
-      expect(result).toBe('Some text $$math formula$$ more text')
-    })
-
-    it('should convert LaTeX inline delimiters to $$', () => {
-      // 验证将 LaTeX 内联分隔符转换为 $$
-      const input = 'Some text \\(inline math\\) more text'
-      const result = convertMathFormula(input)
-      expect(result).toBe('Some text $inline math$ more text')
-    })
-
-    it('should handle multiple delimiters in input', () => {
-      // 验证处理输入中的多个分隔符
-      const input = 'Text \\[block1\\] and \\(inline\\) and \\[block2\\]'
-      const result = convertMathFormula(input)
-      expect(result).toBe('Text $$block1$$ and $inline$ and $$block2$$')
-    })
-
-    it('should return input unchanged if no delimiters', () => {
-      // 验证没有分隔符时返回原始输入
-      const input = 'Some text without math'
-      const result = convertMathFormula(input)
-      expect(result).toBe('Some text without math')
-    })
-
-    it('should return input if null or empty', () => {
-      // 验证空输入或 null 输入时返回原值
-      expect(convertMathFormula('')).toBe('')
-      // @ts-expect-error purposely pass wrong type to test error branch
-      expect(convertMathFormula(null)).toBe(null)
-    })
-  })
-
   describe('removeTrailingDoubleSpaces', () => {
     it('matches the copy-button normalization when combined with trimStart', () => {
       const input = '  Intro  \nBody  '

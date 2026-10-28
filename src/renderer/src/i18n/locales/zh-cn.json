@@ -1307,7 +1307,6 @@
       "copy": {
         "image": "复制为图片",
         "md": "复制为 Markdown",
-        "plain_text": "复制为纯文本（去除 Markdown）",
         "title": "复制"
       },
       "delete": {
@@ -1321,7 +1320,6 @@
       "export": {
         "image": "导出为图片",
         "image_saved": "图片保存成功",
-        "joplin": "导出到 Joplin",
         "json": {
           "error": "导出话题数据失败",
           "label": "导出为 JSON",
@@ -1330,49 +1328,10 @@
           "success": "话题数据已导出"
         },
         "md": {
-          "label": "导出为 Markdown",
-          "reason": "导出为 Markdown (包含思考)"
+          "label": "导出为 Markdown"
         },
         "notes": "导出到笔记",
-        "notion": "导出到 Notion",
-        "obsidian": "导出到 Obsidian",
-        "obsidian_atributes": "配置笔记属性",
-        "obsidian_btn": "确定",
-        "obsidian_created": "创建时间",
-        "obsidian_created_placeholder": "请选择创建时间",
-        "obsidian_export_failed": "导出到 Obsidian 失败",
-        "obsidian_export_success": "导出到 Obsidian 成功",
-        "obsidian_fetch_error": "获取 Obsidian 保管库失败",
-        "obsidian_fetch_folders_error": "获取文件夹结构失败",
-        "obsidian_loading": "加载中...",
-        "obsidian_no_vault_selected": "请先选择一个保管库",
-        "obsidian_no_vaults": "未找到 Obsidian 保管库",
-        "obsidian_operate": "处理方式",
-        "obsidian_operate_append": "追加",
-        "obsidian_operate_new_or_overwrite": "新建（如果存在就覆盖）",
-        "obsidian_operate_placeholder": "请选择处理方式",
-        "obsidian_operate_prepend": "前置",
-        "obsidian_path": "路径",
-        "obsidian_path_placeholder": "请选择路径",
-        "obsidian_reasoning": "导出思维链",
-        "obsidian_root_directory": "根目录",
-        "obsidian_select_vault_first": "请先选择保管库",
-        "obsidian_source": "来源",
-        "obsidian_source_placeholder": "请输入来源",
-        "obsidian_tags": "标签",
-        "obsidian_tags_placeholder": "请输入标签，多个标签用英文逗号分隔",
-        "obsidian_title": "标题",
-        "obsidian_title_placeholder": "请输入标题",
-        "obsidian_title_required": "标题不能为空",
-        "obsidian_vault": "保管库",
-        "obsidian_vault_placeholder": "请选择保管库名称",
-        "siyuan": "导出到思源笔记",
-        "title": "导出",
-        "title_naming_failed": "标题生成失败，使用默认标题",
-        "title_naming_success": "标题生成成功",
-        "wait_for_title_naming": "正在生成标题...",
-        "word": "导出为 Word",
-        "yuque": "导出到语雀"
+        "title": "导出"
       },
       "import": {
         "action": "从 JSON 导入话题",
@@ -1796,9 +1755,6 @@
     "created": "创建时间",
     "last_updated": "最后更新",
     "messages": "消息数",
-    "notion": {
-      "reasoning_truncated": "思维链无法分块，已截断"
-    },
     "user": "用户"
   },
   "files": {
@@ -2264,16 +2220,10 @@
         "enter": {
           "model": "请选择一个模型"
         },
-        "nutstore": "无效的坚果云设置",
-        "nutstore_token": "无效的坚果云 Token",
         "proxy": {
           "url": "无效的代理地址"
         },
         "webdav": "无效的 WebDAV 设置"
-      },
-      "joplin": {
-        "export": "导出 Joplin 失败，请保持 Joplin 已运行并检查连接状态或检查配置",
-        "no_config": "未配置 Joplin 授权令牌 或 URL"
       },
       "markdown": {
         "export": {
@@ -2284,23 +2234,10 @@
       "notes": {
         "export": "导出笔记失败"
       },
-      "notion": {
-        "export": "导出 Notion 错误，请检查连接状态并对照文档检查配置",
-        "no_api_key": "未配置 Notion API Key 或 Notion Database ID",
-        "no_content": "无可导出到 Notion 的内容"
-      },
-      "siyuan": {
-        "export": "导出思源笔记失败，请检查连接状态并对照文档检查配置",
-        "no_config": "未配置思源笔记 API 地址或令牌"
-      },
       "table": {
         "invalid": "无法获取有效的表格数据"
       },
-      "unknown": "未知错误",
-      "yuque": {
-        "export": "导出语雀错误，请检查连接状态并对照文档检查配置",
-        "no_config": "未配置语雀 Token 或 知识库 URL"
-      }
+      "unknown": "未知错误"
     },
     "group": {
       "delete": {
@@ -2312,12 +2249,6 @@
     "ignore": {
       "knowledge": {
         "base": "联网模式开启，忽略知识库"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "正在导出到 Notion ...",
-        "preparing": "正在准备导出到 Notion..."
       }
     },
     "mention": {
@@ -2381,9 +2312,6 @@
       "excel": {
         "export": "Excel 导出成功"
       },
-      "joplin": {
-        "export": "成功导出到 Joplin"
-      },
       "markdown": {
         "export": {
           "preconf": "成功导出 Markdown 文件到预先设定的路径",
@@ -2392,15 +2320,6 @@
       },
       "notes": {
         "export": "成功导出到笔记"
-      },
-      "notion": {
-        "export": "成功导出到 Notion"
-      },
-      "siyuan": {
-        "export": "导出到思源笔记成功"
-      },
-      "yuque": {
-        "export": "成功导出到语雀"
       }
     },
     "switch": {
@@ -3905,22 +3824,26 @@
         "basic": "基础数据设置",
         "cloud_storage": "云备份设置",
         "export_settings": "导出设置",
-        "import_settings": "导入设置",
-        "third_party": "第三方连接"
+        "import_settings": "导入设置"
       },
-      "export_menu": {
-        "docx": "导出为 Word",
-        "image": "导出为图片",
-        "joplin": "导出到 Joplin",
-        "markdown": "导出为 Markdown",
-        "markdown_reason": "导出为 Markdown（包含思考）",
-        "notes": "导出到笔记",
-        "notion": "导出到 Notion",
-        "obsidian": "导出到 Obsidian",
-        "plain_text": "复制为纯文本",
-        "siyuan": "导出到思源笔记",
-        "title": "导出菜单设置",
-        "yuque": "导出到语雀"
+      "export_options": {
+        "exclude_citations": {
+          "help": "导出 Markdown 时排除引用和参考文献，仅保留主要内容",
+          "title": "不导出引用内容"
+        },
+        "help": "若填入，则每次导出时将自动保存到该路径；否则，将弹出保存对话框",
+        "include_thinking": {
+          "help": "导出图片或Markdown时包含思考内容。",
+          "title": "包含思考内容"
+        },
+        "path": "默认导出路径",
+        "path_placeholder": "导出路径",
+        "select": "选择",
+        "standardize_citations": {
+          "help": "开启后，导出 Markdown 时会将引用标记转换为标准 Markdown 脚注格式 [^1]，并格式化引用列表",
+          "title": "标准化引用格式"
+        },
+        "title": "话题导出选项"
       },
       "export_to_phone": {
         "confirm": {
@@ -3999,25 +3922,6 @@
         "cherrystudio": "从 Cherry Studio ZIP 导入",
         "cherrystudio_button": "导入 ZIP 备份",
         "title": "导入外部应用数据"
-      },
-      "joplin": {
-        "check": {
-          "button": "检测",
-          "empty_token": "请先输入 Joplin 授权令牌",
-          "empty_url": "请先输入 Joplin 剪裁服务监听 URL",
-          "fail": "Joplin 连接验证失败",
-          "success": "Joplin 连接验证成功"
-        },
-        "export_reasoning": {
-          "help": "开启后，导出到 Joplin 时会包含思维链内容。",
-          "title": "导出时包含思维链"
-        },
-        "help": "在 Joplin 选项中，启用网页剪裁服务（无需安装浏览器插件），确认端口号，并复制授权令牌",
-        "title": "Joplin 配置",
-        "token": "Joplin 授权令牌",
-        "token_placeholder": "请输入 Joplin 授权令牌",
-        "url": "Joplin 剪裁服务监听 URL",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "磁盘空间警告",
@@ -4103,122 +4007,8 @@
         "syncStatus": "备份状态",
         "title": "本地备份"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "导出 Markdown 时排除引用和参考文献，仅保留主要内容",
-          "title": "不导出引用内容"
-        },
-        "force_dollar_math": {
-          "help": "开启后，导出 Markdown 时会将强制使用 $$ 来标记 LaTeX 公式。注意：该项也会影响所有通过 Markdown 导出的方式，如 Notion、语雀等",
-          "title": "强制使用 $$ 来标记 LaTeX 公式"
-        },
-        "help": "若填入，则每次导出时将自动保存到该路径；否则，将弹出保存对话框",
-        "path": "默认导出路径",
-        "path_placeholder": "导出路径",
-        "select": "选择",
-        "show_model_name": {
-          "help": "开启后，导出 Markdown 时会显示模型名称。注意：该项也会影响所有通过 Markdown 导出的方式，如 Notion、语雀等。",
-          "title": "导出时使用模型名称"
-        },
-        "show_model_provider": {
-          "help": "在导出 Markdown 时显示模型供应商，如 OpenAI、Gemini 等",
-          "title": "显示模型供应商"
-        },
-        "standardize_citations": {
-          "help": "开启后，导出 Markdown 时会将引用标记转换为标准 Markdown 脚注格式 [^1]，并格式化引用列表",
-          "title": "标准化引用格式"
-        },
-        "title": "Markdown 导出"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "开启后，使用快速模型为导出的消息命名标题。该项也会影响所有通过 Markdown 导出的方式",
-          "title": "使用快速模型为导出的消息命名标题"
-        }
-      },
       "minute_interval_one": "{{count}} 分钟",
       "minute_interval_other": "{{count}} 分钟",
-      "notion": {
-        "api_key": "Notion 密钥",
-        "api_key_placeholder": "请输入 Notion 密钥",
-        "check": {
-          "button": "检测",
-          "empty_api_key": "未配置 API key",
-          "empty_database_id": "未配置 Database ID",
-          "error": "连接异常，请检查网络及 API key 和 Database ID 是否正确",
-          "fail": "连接失败，请检查网络及 API key 和 Database ID 是否正确",
-          "success": "连接成功"
-        },
-        "database_id": "Notion 数据库 ID",
-        "database_id_placeholder": "请输入 Notion 数据库 ID",
-        "export_reasoning": {
-          "help": "开启后，导出到 Notion 时会包含思维链内容。",
-          "title": "导出时包含思维链"
-        },
-        "page_name_key": "页面标题字段名",
-        "page_name_key_placeholder": "请输入页面标题字段名，默认为 Name",
-        "title": "Notion 设置"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "备份到坚果云",
-          "modal": {
-            "filename": {
-              "placeholder": "请输入备份文件名"
-            },
-            "title": "备份到坚果云"
-          }
-        },
-        "checkConnection": {
-          "fail": "坚果云连接失败",
-          "name": "检查连接",
-          "success": "已连接坚果云"
-        },
-        "isLogin": "已登录",
-        "login": {
-          "button": "登录"
-        },
-        "logout": {
-          "button": "退出登录",
-          "content": "退出后将无法备份至坚果云和从坚果云恢复",
-          "title": "确定要退出坚果云登录？"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "取消",
-            "confirm": "确定",
-            "label": "新建文件夹"
-          }
-        },
-        "notLogin": "未登录",
-        "path": {
-          "label": "坚果云存储路径",
-          "placeholder": "请输入坚果云的存储路径"
-        },
-        "pathSelector": {
-          "currentPath": "当前路径",
-          "return": "返回",
-          "title": "坚果云存储路径"
-        },
-        "restore": {
-          "button": "从坚果云恢复",
-          "confirm": {
-            "content": "从坚果云恢复将会覆盖当前数据，是否继续？",
-            "title": "从坚果云恢复"
-          }
-        },
-        "title": "坚果云配置",
-        "username": "坚果云用户名"
-      },
-      "obsidian": {
-        "default_vault": "默认 Obsidian 仓库",
-        "default_vault_export_failed": "导出失败",
-        "default_vault_fetch_error": "获取 Obsidian 仓库失败",
-        "default_vault_loading": "正在获取 Obsidian 仓库...",
-        "default_vault_no_vaults": "未找到 Obsidian 仓库",
-        "default_vault_placeholder": "请选择默认 Obsidian 仓库",
-        "title": "Obsidian 配置"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4343,27 +4133,6 @@
           "label": "S3 兼容存储"
         }
       },
-      "siyuan": {
-        "api_url": "API 地址",
-        "api_url_placeholder": "例如：http://127.0.0.1:6806",
-        "box_id": "笔记本 ID",
-        "box_id_placeholder": "请输入笔记本 ID",
-        "check": {
-          "button": "检测",
-          "empty_config": "请填写 API 地址和令牌",
-          "error": "连接异常，请检查网络连接",
-          "fail": "连接失败，请检查 API 地址和令牌",
-          "success": "连接成功",
-          "title": "连接检测"
-        },
-        "root_path": "文档根路径",
-        "root_path_placeholder": "例如：/CherryStudio",
-        "title": "思源笔记配置",
-        "token": {
-          "label": "API 令牌"
-        },
-        "token_placeholder": "请输入思源笔记令牌"
-      },
       "title": "数据设置",
       "webdav": {
         "autoSync": {
@@ -4449,21 +4218,6 @@
         "syncStatus": "备份状态",
         "title": "WebDAV",
         "user": "WebDAV 用户名"
-      },
-      "yuque": {
-        "check": {
-          "button": "检测",
-          "empty_repo_url": ".key请先输入知识库 URL",
-          "empty_token": "请先输入语雀 Token",
-          "fail": "语雀连接验证失败",
-          "success": "语雀连接验证成功"
-        },
-        "help": "获取语雀 Token",
-        "repo_url": "知识库 URL",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "语雀配置",
-        "token": "语雀 Token",
-        "token_placeholder": "请输入语雀 Token"
       }
     },
     "developer": {
@@ -5207,7 +4961,7 @@
       "sync_success": "同步完成",
       "syncing": "同步中...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "同步",
+      "title": "数据同步",
       "token": "访问令牌",
       "token_help": "令牌不会包含在同步载荷或日志中。",
       "token_placeholder": "可选的 Bearer 令牌",

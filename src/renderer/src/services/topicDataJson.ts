@@ -3,6 +3,7 @@ import i18n from '@renderer/i18n'
 import { dbService } from '@renderer/services/db'
 import { topicWireToTopic } from '@renderer/services/db/topicTrashLifecycle'
 import type { Topic } from '@renderer/types'
+import { saveExportFile } from '@renderer/utils/exportFile'
 import { removeSpecialCharactersForFileName } from '@renderer/utils/file'
 import type { TopicDataExportPayload } from '@shared/chatDb'
 
@@ -52,11 +53,13 @@ export const exportTopicDataToFile = async (topic: Pick<Topic, 'id' | 'name'>): 
     const payload = await dbService.exportTopicData(topic.id)
     const json = JSON.stringify(payload, null, 2)
     const fileName = `${removeSpecialCharactersForFileName(topic.name || 'topic')}.json`
-    // Native `file:save` resolves the saved path (string) on success and
-    // REJECTS with `User canceled the save dialog` on cancellation — it
-    // never resolves `false`. A falsy resolution stays silent for robustness.
-    const result = await window.api.file.save(fileName, json)
-    if (result) {
+    // Shared export write path: the configured default directory writes
+    // directly, otherwise the native `file:save` dialog decides (it resolves
+    // the saved path, and REJECTS with `User canceled the save dialog` on
+    // cancellation — never `false`). A falsy result stays silent for
+    // robustness; the exported payload itself is untouched.
+    const saved = await saveExportFile(fileName, json)
+    if (saved) {
       window.toast.success(i18n.t('chat.topics.export.json.success'))
       notifyHistorySnapshot(payload.historySnapshot)
       return true

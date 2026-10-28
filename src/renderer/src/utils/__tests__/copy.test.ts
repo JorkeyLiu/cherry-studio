@@ -1,13 +1,12 @@
-import type { Message, Topic } from '@renderer/types'
+import type { Topic } from '@renderer/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { copyMessageAsPlainText, copyTopicAsMarkdown, copyTopicAsPlainText } from '../copy'
+import { copyTopicAsMarkdown, copyTopicAsPlainText } from '../copy'
 
 // Mock dependencies
 vi.mock('@renderer/utils/export', () => ({
   topicToMarkdown: vi.fn(),
-  topicToPlainText: vi.fn(),
-  messageToPlainText: vi.fn()
+  topicToPlainText: vi.fn()
 }))
 
 vi.mock('i18next', () => ({
@@ -37,20 +36,6 @@ function createTestTopic(partial: Partial<Topic> = {}): Topic {
     messages: [],
     ...partial
   }
-}
-
-function createTestMessage(partial: Partial<Message> = {}): Message {
-  return {
-    id: 'test-message-id',
-    role: 'user',
-    assistantId: 'test-assistant-id',
-    topicId: 'test-topic-id',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    status: 'success',
-    blocks: [],
-    ...partial
-  } as Message
 }
 
 describe('copy', () => {
@@ -142,55 +127,18 @@ describe('copy', () => {
       expect(mockedToast.success).not.toHaveBeenCalled()
     })
   })
-
-  describe('copyMessageAsPlainText', () => {
-    it('should copy message as plain text successfully', async () => {
-      // 测试成功复制消息纯文本
-      const message = createTestMessage()
-      const plainTextContent = 'This is the plain text content of the message'
-
-      const { messageToPlainText } = await import('@renderer/utils/export')
-      vi.mocked(messageToPlainText).mockReturnValue(plainTextContent)
-      mockClipboard.writeText.mockResolvedValue(undefined)
-
-      await copyMessageAsPlainText(message)
-
-      expect(messageToPlainText).toHaveBeenCalledWith(message)
-      expect(mockClipboard.writeText).toHaveBeenCalledWith(plainTextContent)
-      expect(mockedToast.success).toHaveBeenCalledWith('message.copy.success')
-    })
-
-    it('should handle messageToPlainText errors', async () => {
-      // 测试消息转换错误
-      const message = createTestMessage()
-      const { messageToPlainText } = await import('@renderer/utils/export')
-      vi.mocked(messageToPlainText).mockImplementation(() => {
-        throw new Error('Message conversion error')
-      })
-
-      await expect(copyMessageAsPlainText(message)).rejects.toThrow('Message conversion error')
-      expect(mockClipboard.writeText).not.toHaveBeenCalled()
-      expect(mockedToast.success).not.toHaveBeenCalled()
-    })
-  })
-
   describe('edge cases', () => {
     it('should handle null or undefined inputs gracefully', async () => {
       // 测试null/undefined输入的错误处理
-      const { topicToMarkdown, topicToPlainText, messageToPlainText } = await import('@renderer/utils/export')
+      const { topicToMarkdown, topicToPlainText } = await import('@renderer/utils/export')
 
       vi.mocked(topicToMarkdown).mockRejectedValue(new Error('Cannot read properties of null'))
       vi.mocked(topicToPlainText).mockRejectedValue(new Error('Cannot read properties of undefined'))
-      vi.mocked(messageToPlainText).mockImplementation(() => {
-        throw new Error('Cannot read properties of null')
-      })
 
       // @ts-expect-error 测试类型错误
       await expect(copyTopicAsMarkdown(null)).rejects.toThrow('Cannot read properties of null')
       // @ts-expect-error 测试类型错误
       await expect(copyTopicAsPlainText(undefined)).rejects.toThrow('Cannot read properties of undefined')
-      // @ts-expect-error 测试类型错误
-      await expect(copyMessageAsPlainText(null)).rejects.toThrow('Cannot read properties of null')
     })
   })
 })

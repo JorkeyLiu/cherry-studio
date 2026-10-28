@@ -481,10 +481,10 @@ describe('L3 Restore Hardening', () => {
   })
 
   // =========================================================================
-  // 8. Nutstore fix contract (LOCK-6006)
+  // 8. Generic remote-backup restore contract
   // =========================================================================
 
-  describe('Nutstore restore contract (LOCK-6006)', () => {
+  describe('BackupManager.restore() contract', () => {
     it('restore() returns Promise<void> — resolves on success, rejects on failure', () => {
       // LOCK-6026: Tests assert behavior, not method existence.
       // BackupManager.restore() is typed Promise<void>: success means app

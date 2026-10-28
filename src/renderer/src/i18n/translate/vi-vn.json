@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "Sao chép dưới dạng hình ảnh",
         "md": "Sao chép dưới dạng markdown",
-        "plain_text": "Sao chép dưới dạng văn bản thuần (loại bỏ Markdown)",
         "title": "Sao chép"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "Xuất dưới dạng hình ảnh",
         "image_saved": "Hình ảnh đã được lưu thành công",
-        "joplin": "Exporteren naar Joplin",
         "md": {
-          "label": "Xuất dưới dạng markdown",
-          "reason": "Xuất dưới dạng Markdown (kèm lý do)"
+          "label": "Xuất dưới dạng markdown"
         },
         "notes": "Xuất ra Ghi chú",
-        "notion": "Xuất ra Notion",
-        "obsidian": "Xuất sang Obsidian",
-        "obsidian_atributes": "Konfigurieren Sie Notizattribute",
-        "obsidian_btn": "Xác nhận",
-        "obsidian_created": "Thời gian tạo",
-        "obsidian_created_placeholder": "Vui lòng chọn thời gian tạo",
-        "obsidian_export_failed": "Xuất khẩu thất bại",
-        "obsidian_export_success": "Xuất khẩu thành công",
-        "obsidian_fetch_error": "Không thể tìm nạp kho Obsidian",
-        "obsidian_fetch_folders_error": "Không thể tải cấu trúc thư mục",
-        "obsidian_loading": "Đang tải...",
-        "obsidian_no_vault_selected": "Vui lòng chọn két trước",
-        "obsidian_no_vaults": "Không tìm thấy kho Obsidian nào",
-        "obsidian_operate": "Phương pháp vận hành",
-        "obsidian_operate_append": "Nối thêm",
-        "obsidian_operate_new_or_overwrite": "Tạo mới (Ghi đè nếu đã tồn tại)",
-        "obsidian_operate_placeholder": "Vui lòng chọn phương pháp vận hành",
-        "obsidian_operate_prepend": "Thêm vào đầu",
-        "obsidian_path": "Đường dẫn",
-        "obsidian_path_placeholder": "Vui lòng chọn đường dẫn",
-        "obsidian_reasoning": "Bao gồm Chuỗi Lý luận",
-        "obsidian_root_directory": "Thư mục gốc",
-        "obsidian_select_vault_first": "Vui lòng chọn một kho trước",
-        "obsidian_source": "Nguồn",
-        "obsidian_source_placeholder": "Vui lòng nhập nguồn",
-        "obsidian_tags": "Thẻ",
-        "obsidian_tags_placeholder": "Vui lòng nhập thẻ, phân tách nhiều thẻ bằng dấu phẩy",
-        "obsidian_title": "Tiêu đề",
-        "obsidian_title_placeholder": "Vui lòng nhập tiêu đề",
-        "obsidian_title_required": "Tiêu đề không được để trống",
-        "obsidian_vault": "Kho lưu trữ",
-        "obsidian_vault_placeholder": "Vui lòng chọn tên kho lưu trữ",
-        "siyuan": "Xuất sang Siyuan Note",
-        "title": "Xuất khẩu",
-        "title_naming_failed": "Không thể tạo tiêu đề, đang sử dụng tiêu đề mặc định",
-        "title_naming_success": "Tiêu đề đã được tạo thành công",
-        "wait_for_title_naming": "Đang tạo tiêu đề...",
-        "word": "Xuất ra Word",
-        "yuque": "Xuất sang Yuque"
+        "title": "Xuất khẩu"
       },
       "list": "Daftar Topik",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "Đã tạo",
     "last_updated": "Cập nhật lần cuối",
     "messages": "Tin nhắn",
-    "notion": {
-      "reasoning_truncated": "Chuỗi suy luận không thể chia nhỏ và đã bị cắt ngắn."
-    },
     "user": "Người dùng"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "Vui lòng chọn một mô hình"
         },
-        "nutstore": "Cài đặt Nutstore không hợp lệ",
-        "nutstore_token": "Token Nutstore không hợp lệ",
         "proxy": {
           "url": "URL proxy không hợp lệ"
         },
         "webdav": "Cài đặt WebDAV không hợp lệ"
-      },
-      "joplin": {
-        "export": "Không xuất được sang Joplin. Vui lòng giữ Joplin đang chạy và kiểm tra trạng thái kết nối hoặc cấu hình",
-        "no_config": "Mã thông báo ủy quyền hoặc URL của Joplin chưa được cấu hình"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "Không thể xuất ghi chú"
       },
-      "notion": {
-        "export": "Không xuất được sang Notion. Vui lòng kiểm tra trạng thái kết nối và cấu hình theo tài liệu",
-        "no_api_key": "Notion ApiKey hoặc Notion DatabaseID chưa được cấu hình",
-        "no_content": "No hay nada que exportar a Notion."
-      },
-      "siyuan": {
-        "export": "Không xuất được sang Siyuan Note, vui lòng kiểm tra trạng thái kết nối và cấu hình theo tài liệu",
-        "no_config": "Địa chỉ API hoặc mã thông báo của Siyuan Note chưa được cấu hình"
-      },
       "table": {
         "invalid": "Không thể truy xuất dữ liệu bảng hợp lệ"
       },
-      "unknown": "Lỗi không xác định",
-      "yuque": {
-        "export": "Không thể xuất ra Yuque. Vui lòng kiểm tra trạng thái kết nối và cấu hình theo tài liệu.",
-        "no_config": "Token Yuque hoặc URL Yuque chưa được cấu hình"
-      }
+      "unknown": "Lỗi không xác định"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "Chế độ tìm kiếm web đã được bật, bỏ qua cơ sở tri thức"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Exportando a Notion ...",
-        "preparing": "Đang chuẩn bị xuất sang Notion..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Excel exportado exitosamente"
       },
-      "joplin": {
-        "export": "Đã xuất thành công sang Joplin"
-      },
       "markdown": {
         "export": {
           "preconf": "Đã xuất thành công tệp Markdown đến đường dẫn được cấu hình trước",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "Đã xuất thành công sang ghi chú"
-      },
-      "notion": {
-        "export": "Exportación exitosa a Notion"
-      },
-      "siyuan": {
-        "export": "Đã xuất thành công sang Siyuan Note"
-      },
-      "yuque": {
-        "export": "Đã xuất thành công sang Yuque"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "Cài đặt Dữ liệu Cơ bản",
         "cloud_storage": "Cài đặt Sao lưu Đám mây",
         "export_settings": "Xuất Cài đặt",
-        "import_settings": "Nhập Cài đặt",
-        "third_party": "Kết nối của bên thứ ba"
+        "import_settings": "Nhập Cài đặt"
       },
-      "export_menu": {
-        "docx": "Xuất ra Word",
-        "image": "Xuất dưới dạng hình ảnh",
-        "joplin": "Xuất sang Joplin",
-        "markdown": "Xuất ra dạng Markdown",
-        "markdown_reason": "Xuất ra dạng Markdown (kèm lý do)",
-        "notes": "Xuất ra Ghi chú",
-        "notion": "Xuất sang Notion",
-        "obsidian": "Xuất sang Obsidian",
-        "plain_text": "Sao chép dưới dạng văn bản thuần",
-        "siyuan": "Xuất sang ghi chú SiYuan",
-        "title": "Xuất Cài Đặt Menu",
-        "yuque": "Xuất sang Yuque"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Loại trừ trích dẫn và tài liệu tham khảo khi xuất ra Markdown, chỉ giữ lại nội dung chính",
+          "title": "Loại trừ trích dẫn"
+        },
+        "help": "Nếu được cung cấp, các bản xuất sẽ tự động được lưu vào đường dẫn này; nếu không, hộp thoại lưu sẽ xuất hiện.",
+        "include_thinking": {
+          "help": "Bao gồm nội dung suy nghĩ khi xuất hình ảnh hoặc Markdown.",
+          "title": "Bao gồm nội dung suy nghĩ"
+        },
+        "path": "Đường dẫn Xuất Mặc định",
+        "path_placeholder": "Đường dẫn xuất",
+        "select": "Chọn",
+        "standardize_citations": {
+          "help": "Khi được bật, các đánh dấu trích dẫn sẽ được chuyển đổi sang định dạng chú thích Markdown tiêu chuẩn [^1] và danh sách trích dẫn sẽ được định dạng.",
+          "title": "Chuẩn hóa định dạng trích dẫn"
+        },
+        "title": "Tùy chọn xuất chủ đề"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Nhập từ ZIP Cherry Studio",
         "cherrystudio_button": "Nhập bản sao lưu ZIP",
         "title": "Nhập dữ liệu ứng dụng từ bên ngoài"
-      },
-      "joplin": {
-        "check": {
-          "button": "Kiểm tra",
-          "empty_token": "Vui lòng nhập Mã Ủy quyền Joplin",
-          "empty_url": "Vui lòng nhập URL của Dịch vụ Joplin Clipper",
-          "fail": "Việc xác minh kết nối Joplin không thành công",
-          "success": "Verificación de conexión de Joplin exitosa"
-        },
-        "export_reasoning": {
-          "help": "Khi được bật, nội dung xuất ra sẽ bao gồm chuỗi lý luận (quá trình suy nghĩ) do trợ lý tạo ra.",
-          "title": "Incluir Cadena de Razonamiento en la Exportación"
-        },
-        "help": "Trong tùy chọn của Joplin, hãy bật web clipper (không cần tiện ích mở rộng trình duyệt), xác nhận cổng và sao chép mã xác thực vào đây.",
-        "title": "Cấu hình Joplin",
-        "token": "Mã Ủy Quyền Joplin",
-        "token_placeholder": "Token de autorización de Joplin",
-        "url": "URL Dịch vụ Web Clipper của Joplin",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Cảnh báo Dung lượng Đĩa",
@@ -4031,122 +3935,8 @@
         "syncStatus": "Trạng thái sao lưu",
         "title": "Sao lưu cục bộ"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Loại trừ trích dẫn và tài liệu tham khảo khi xuất ra Markdown, chỉ giữ lại nội dung chính",
-          "title": "Loại trừ trích dẫn"
-        },
-        "force_dollar_math": {
-          "help": "Khi được bật, $$ sẽ được buộc dùng để đánh dấu công thức LaTeX khi xuất ra Markdown. Lưu ý: Tùy chọn này cũng ảnh hưởng đến mọi phương pháp xuất qua Markdown, như Notion, Yuque, v.v.",
-          "title": "Forza $$ per formule LaTeX"
-        },
-        "help": "Nếu được cung cấp, các bản xuất sẽ tự động được lưu vào đường dẫn này; nếu không, hộp thoại lưu sẽ xuất hiện.",
-        "path": "Đường dẫn Xuất Mặc định",
-        "path_placeholder": "Đường dẫn xuất",
-        "select": "Chọn",
-        "show_model_name": {
-          "help": "Khi được bật, tên mô hình sẽ được hiển thị khi xuất ra Markdown. Lưu ý: Tùy chọn này cũng ảnh hưởng đến tất cả các phương pháp xuất qua Markdown, như Notion, Yuque, v.v.",
-          "title": "Sử dụng Tên Mô hình khi Xuất"
-        },
-        "show_model_provider": {
-          "help": "Afficher le fournisseur du modèle (par exemple, OpenAI, Gemini) lors de l’exportation en Markdown",
-          "title": "Hiển thị Nhà cung cấp Mô hình"
-        },
-        "standardize_citations": {
-          "help": "Khi được bật, các đánh dấu trích dẫn sẽ được chuyển đổi sang định dạng chú thích Markdown tiêu chuẩn [^1] và danh sách trích dẫn sẽ được định dạng.",
-          "title": "Chuẩn hóa định dạng trích dẫn"
-        },
-        "title": "Xuất Markdown"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "Khi được bật, hãy sử dụng mô hình nhanh để đặt tiêu đề cho các tin nhắn được xuất. Cài đặt này cũng ảnh hưởng đến tất cả các phương pháp xuất qua Markdown.",
-          "title": "Dùng mô hình nhanh để đặt tiêu đề cho thông điệp được xuất"
-        }
-      },
       "minute_interval_one": "{{count}} minute",
       "minute_interval_other": "{{count}} phút",
-      "notion": {
-        "api_key": "Khóa API Notion",
-        "api_key_placeholder": "Nhập Khóa API của Notion",
-        "check": {
-          "button": "Kiểm tra",
-          "empty_api_key": "Khóa API chưa được cấu hình",
-          "empty_database_id": "ID cơ sở dữ liệu chưa được cấu hình",
-          "error": "Lỗi kết nối, vui lòng kiểm tra cấu hình mạng, khóa API và ID cơ sở dữ liệu",
-          "fail": "Kết nối thất bại, vui lòng kiểm tra mạng, khóa API và ID cơ sở dữ liệu",
-          "success": "Kết nối thành công"
-        },
-        "database_id": "ID Cơ sở dữ liệu Notion",
-        "database_id_placeholder": "Nhập ID cơ sở dữ liệu Notion",
-        "export_reasoning": {
-          "help": "Khi được bật, nội dung xuất ra sẽ bao gồm chuỗi lý do (quá trình suy nghĩ).",
-          "title": "Bao gồm Chuỗi Lý luận trong Xuất dữ liệu"
-        },
-        "page_name_key": "Trường Tên Tiêu Đề Trang",
-        "page_name_key_placeholder": "Nhập tên trường tiêu đề trang, mặc định là Tên",
-        "title": "Cài đặt Notion"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Sao lưu lên Nutstore",
-          "modal": {
-            "filename": {
-              "placeholder": "Nhập tên tập tin sao lưu"
-            },
-            "title": "Sao lưu vào Nutstore"
-          }
-        },
-        "checkConnection": {
-          "fail": "Kết nối Nutstore thất bại",
-          "name": "Kiểm tra kết nối",
-          "success": "Đã kết nối với Nutstore"
-        },
-        "isLogin": "Đã đăng nhập",
-        "login": {
-          "button": "Đăng nhập"
-        },
-        "logout": {
-          "button": "Đăng xuất",
-          "content": "Sau khi đăng xuất, bạn sẽ không thể sao lưu lên Nutstore hoặc khôi phục từ Nutstore.",
-          "title": "Bạn có chắc chắn muốn đăng xuất khỏi Nutstore không?"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Hủy",
-            "confirm": "Xác nhận",
-            "label": "Thư mục mới"
-          }
-        },
-        "notLogin": "Chưa đăng nhập",
-        "path": {
-          "label": "Đường dẫn lưu trữ Nutstore",
-          "placeholder": "Nhập đường dẫn lưu trữ Nutstore"
-        },
-        "pathSelector": {
-          "currentPath": "Đường dẫn hiện tại",
-          "return": "Trở lại",
-          "title": "Đường dẫn lưu trữ Nutstore"
-        },
-        "restore": {
-          "button": "Khôi phục từ Nutstore",
-          "confirm": {
-            "content": "Khôi phục từ Nutstore sẽ ghi đè lên dữ liệu hiện tại. Bạn có muốn tiếp tục?",
-            "title": "Khôi phục từ Nutstore"
-          }
-        },
-        "title": "Cấu hình Nutstore",
-        "username": "Tên người dùng Nutstore"
-      },
-      "obsidian": {
-        "default_vault": "Kho mặc định của Obsidian",
-        "default_vault_export_failed": "Xuất thất bại",
-        "default_vault_fetch_error": "Không thể tìm nạp kho Obsidian",
-        "default_vault_loading": "Đang tải kho Obsidian...",
-        "default_vault_no_vaults": "Không tìm thấy kho Obsidian nào",
-        "default_vault_placeholder": "Vui lòng chọn kho Obsidian mặc định",
-        "title": "Cấu hình Obsidian"
-      },
       "s3": {
         "accessKeyId": {
           "label": "ID Khóa Truy Cập",
@@ -4271,27 +4061,6 @@
           "label": "Lưu trữ tương thích S3"
         }
       },
-      "siyuan": {
-        "api_url": "URL API của Siyuan Note",
-        "api_url_placeholder": "ví dụ: http://127.0.0.1:6806",
-        "box_id": "ID Hộp Ghi chú Siyuan",
-        "box_id_placeholder": "Vui lòng nhập ID Hộp Ghi chú Siyuan",
-        "check": {
-          "button": "Kiểm tra",
-          "empty_config": "Vui lòng điền địa chỉ API và mã thông báo",
-          "error": "Lỗi kết nối, vui lòng kiểm tra kết nối mạng",
-          "fail": "Kết nối thất bại, vui lòng kiểm tra địa chỉ API và token",
-          "success": "Kết nối thành công",
-          "title": "Kiểm tra kết nối"
-        },
-        "root_path": "Đường dẫn gốc của Siyuan Note",
-        "root_path_placeholder": "ví dụ: /CherryStudio",
-        "title": "Cấu hình Siyuan Note",
-        "token": {
-          "label": "Mã thông báo Siyuan Note"
-        },
-        "token_placeholder": "Vui lòng nhập mã thông báo Siyuan Note"
-      },
       "title": "Cài đặt dữ liệu",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "Trạng thái sao lưu",
         "title": "WebDAV",
         "user": "Người dùng WebDAV"
-      },
-      "yuque": {
-        "check": {
-          "button": "Kiểm tra",
-          "empty_repo_url": "Vui lòng nhập URL của cơ sở kiến thức trước",
-          "empty_token": "Vui lòng nhập Token Yuque trước",
-          "fail": "Xác minh kết nối Yuque thất bại",
-          "success": "Kết nối Yuque đã được xác minh thành công"
-        },
-        "help": "Lấy Token Yuque",
-        "repo_url": "URL Yuque",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Cấu hình Yuque",
-        "token": "Mã thông báo Yuque",
-        "token_placeholder": "Vui lòng nhập Token Yuque"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "Đồng bộ dữ liệu",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

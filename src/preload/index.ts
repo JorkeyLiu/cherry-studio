@@ -281,8 +281,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.File_Save, path, content, options),
     selectFolder: (options?: OpenDialogOptions): Promise<string | null> =>
       ipcRenderer.invoke(IpcChannel.File_SelectFolder, options),
-    saveImage: (name: string, data: string): Promise<boolean> =>
-      ipcRenderer.invoke(IpcChannel.File_SaveImage, name, data),
+    saveImage: (name: string, data: string, defaultDirectory?: string): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannel.File_SaveImage, name, data, defaultDirectory),
     binaryImage: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_BinaryImage, fileId),
     base64Image: (fileId: string): Promise<{ mime: string; base64: string; data: string }> =>
       ipcRenderer.invoke(IpcChannel.File_Base64Image, fileId),
@@ -340,14 +340,6 @@ const api = {
   pdf: {
     extractText: (data: Uint8Array | ArrayBuffer | string): Promise<string> =>
       ipcRenderer.invoke(IpcChannel.Pdf_ExtractText, data)
-  },
-  export: {
-    toWord: (markdown: string, fileName: string) => ipcRenderer.invoke(IpcChannel.Export_Word, markdown, fileName)
-  },
-  obsidian: {
-    getVaults: () => ipcRenderer.invoke(IpcChannel.Obsidian_GetVaults),
-    getFolders: (vaultName: string) => ipcRenderer.invoke(IpcChannel.Obsidian_GetFiles, vaultName),
-    getFiles: (vaultName: string) => ipcRenderer.invoke(IpcChannel.Obsidian_GetFiles, vaultName)
   },
   openPath: (path: string) => ipcRenderer.invoke(IpcChannel.Open_Path, path),
   shortcuts: {
@@ -440,12 +432,6 @@ const api = {
   },
   externalApps: {
     detectInstalled: (): Promise<ExternalAppInfo[]> => ipcRenderer.invoke(IpcChannel.ExternalApps_DetectInstalled)
-  },
-  nutstore: {
-    getSSOUrl: () => ipcRenderer.invoke(IpcChannel.Nutstore_GetSsoUrl),
-    decryptToken: (token: string) => ipcRenderer.invoke(IpcChannel.Nutstore_DecryptToken, token),
-    getDirectoryContents: (token: string, path: string) =>
-      ipcRenderer.invoke(IpcChannel.Nutstore_GetDirectoryContents, token, path)
   },
   webview: {
     setOpenLinkExternal: (webviewId: number, isExternal: boolean) =>

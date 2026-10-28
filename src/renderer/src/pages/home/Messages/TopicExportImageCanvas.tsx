@@ -9,12 +9,24 @@ import { ConfigProvider } from 'antd'
 import { memo, type PropsWithChildren, useMemo } from 'react'
 import { Provider } from 'react-redux'
 
+import { ExportThinkingExpansionProvider } from './Blocks/exportThinkingExpansion'
 import MessageItem from './Message'
 import { createMessageViewportGroupModel } from './messageGroups'
 
+/**
+ * Which messages of the given snapshot are laid out.
+ *
+ * - `route`: a complete topic route, so the runtime multi-answer fold decides
+ *   which member of each group is displayed (exactly one).
+ * - `single`: exactly the addressed message, already resolved by the caller
+ *   from its own topic route by stable id — no group resolution, so exporting
+ *   one message never picks up a neighbouring answer.
+ */
+export type ExportImageScope = 'route' | 'single'
+
 interface Props {
   topic: Topic
-  /** Complete ordered topic messages from the caller-local whole-topic snapshot. */
+  /** Messages to lay out: a complete topic route, or exactly one addressed message. */
   messages: Message[]
   /** Caller-local snapshot blocks; never the loaded Redux block projection. */
   blocksById: SnapshotBlockMap
@@ -22,6 +34,14 @@ interface Props {
   width: number
   /** Effective theme of the live page (`dark`/`light`), read at export start. */
   themeMode: ThemeMode
+  /**
+   * Frozen export thinking expansion for this capture: `true` = thinking bodies
+   * expanded, `false` = collapsed. It overrides the live automatic-collapse
+   * setting and the streaming state, and is scoped to this export tree only.
+   */
+  exportIncludeThinking: boolean
+  /** Which messages of the snapshot are laid out; defaults to a whole route. */
+  scope?: ExportImageScope
 }
 
 /**
@@ -69,7 +89,8 @@ const TopicExportAntdTheme = ({ themeMode, children }: PropsWithChildren<{ theme
 }
 
 /**
- * Offscreen render of one complete topic for image export.
+ * Offscreen render of the export content for image export — either one complete
+ * topic route or exactly one addressed message, through the same renderer.
  *
  * The component is pure presentation over caller-local snapshot data: it reads
  * no windowed/loaded message projection, mounts no viewport/scroll machinery
@@ -77,9 +98,25 @@ const TopicExportAntdTheme = ({ themeMode, children }: PropsWithChildren<{ theme
  * message body (header + content blocks resolved from the injected snapshot
  * blocks) with the toolbars omitted, matching the existing read-only topic
  * rendering used by the history preview.
+ *
+ * The frozen `exportIncludeThinking` option is provided as an export-local
+ * context override for thinking blocks (including the ones nested in tool
+ * groups), so the exported image follows the export option without touching the
+ * live chat state.
  */
-const TopicExportImageCanvas = ({ topic, messages, blocksById, width, themeMode }: Props) => {
-  const visibleMessages = useMemo(() => selectVisibleExportMessages(messages), [messages])
+const TopicExportImageCanvas = ({
+  topic,
+  messages,
+  blocksById,
+  width,
+  themeMode,
+  exportIncludeThinking,
+  scope = 'route'
+}: Props) => {
+  const visibleMessages = useMemo(
+    () => (scope === 'single' ? messages : selectVisibleExportMessages(messages)),
+    [messages, scope]
+  )
 
   return (
     // The canvas mounts in a detached root (outside the app tree), so it owns
@@ -88,31 +125,33 @@ const TopicExportImageCanvas = ({ topic, messages, blocksById, width, themeMode 
     <Provider store={store}>
       <MessageEditingProvider>
         <TopicExportAntdTheme themeMode={themeMode}>
-          <div
-            className="bubble"
-            data-topic-export-content
-            style={{
-              width,
-              display: 'flex',
-              flexDirection: 'column',
-              boxSizing: 'border-box',
-              padding: '10px 10px 20px',
-              backgroundColor: 'var(--color-background)',
-              color: 'var(--color-text)'
-            }}>
-            {visibleMessages.map((message) => (
-              <MessageItem
-                key={message.id}
-                message={message}
-                topic={topic}
-                hideMenuBar
-                // Duplicate `message-<id>` DOM anchors would collide with the live
-                // chat rows and divert viewport geometry reads during the export.
-                renderDomId={false}
-                snapshotBlocksById={blocksById}
-              />
-            ))}
-          </div>
+          <ExportThinkingExpansionProvider value={exportIncludeThinking}>
+            <div
+              className="bubble"
+              data-topic-export-content
+              style={{
+                width,
+                display: 'flex',
+                flexDirection: 'column',
+                boxSizing: 'border-box',
+                padding: '10px 10px 20px',
+                backgroundColor: 'var(--color-background)',
+                color: 'var(--color-text)'
+              }}>
+              {visibleMessages.map((message) => (
+                <MessageItem
+                  key={message.id}
+                  message={message}
+                  topic={topic}
+                  hideMenuBar
+                  // Duplicate `message-<id>` DOM anchors would collide with the live
+                  // chat rows and divert viewport geometry reads during the export.
+                  renderDomId={false}
+                  snapshotBlocksById={blocksById}
+                />
+              ))}
+            </div>
+          </ExportThinkingExpansionProvider>
         </TopicExportAntdTheme>
       </MessageEditingProvider>
     </Provider>

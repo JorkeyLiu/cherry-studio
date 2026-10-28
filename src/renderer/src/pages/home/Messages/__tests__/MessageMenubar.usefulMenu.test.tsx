@@ -48,7 +48,6 @@ vi.mock('@renderer/components/Icons', () => ({
 }))
 
 vi.mock('@renderer/components/Popups/InspectMessagePopup', () => ({ default: { show: vi.fn() } }))
-vi.mock('@renderer/components/Popups/ObsidianExportPopup', () => ({ default: { show: vi.fn() } }))
 vi.mock('@renderer/components/Popups/SaveToKnowledgePopup', () => ({ default: { showForMessage: vi.fn() } }))
 vi.mock('@renderer/components/Popups/SelectModelPopup', () => ({
   SelectChatModelPopup: { show: vi.fn() }
@@ -179,11 +178,8 @@ vi.mock('@renderer/utils/copy', () => ({
 }))
 
 vi.mock('@renderer/utils/export', () => ({
-  exportMarkdownToJoplin: vi.fn(),
-  exportMarkdownToSiyuan: vi.fn(),
   exportMessageAsMarkdown: vi.fn(),
   exportMessageToNotes: vi.fn(),
-  exportMessageToNotion: vi.fn(),
   messageToMarkdown: vi.fn(() => ''),
   messageToPlainText: vi.fn(() => ''),
   topicToMarkdown: vi.fn(() => ''),
@@ -281,7 +277,6 @@ const emptyRef = { current: null } as unknown as React.RefObject<HTMLDivElement>
 function setOwnedGroup(entities: Record<string, Message>, loadedIds: string[], mutableIds: string[]) {
   fakeState.current = {
     settings: {
-      exportMenuOptions: {},
       confirmDeleteMessage: false,
       confirmRegenerateMessage: false
     },
@@ -346,6 +341,26 @@ describe('MessageMenubar useful-in-More-menu + Clone Topic', () => {
     emitNewBranchMock.mockReset()
     emitReferenceTopicMock.mockReset()
     dropdownCapture.items = []
+  })
+
+  it('offers only the fixed export surface (no Word / plain-text / reasoning variants)', () => {
+    // The export entry lives in the assistant More menu (user messages have no
+    // overflow menu at all).
+    const entities: Record<string, Message> = { u1: makeUserMessage('u1'), a1: makeAssistantMessage('a1', 'u1') }
+    setOwnedGroup(entities, ['u1', 'a1'], ['u1', 'a1'])
+
+    const view = renderMenubar(entities.a1, { isAssistantMessage: true })
+    const flatten = (items: any[]): any[] =>
+      items.flatMap((item) => [item, ...flatten((item?.children ?? []) as any[])])
+    const exportItem = flatten(dropdownCapture.items).find((item) => item?.key === 'export')
+    expect(exportItem).toBeDefined()
+    const labels = ((exportItem?.children ?? []) as Array<{ label?: unknown }>).map((child) => child?.label)
+    expect(labels).toContain('chat.topics.export.md.label')
+    expect(labels).toContain('chat.topics.export.image')
+    for (const removed of ['chat.topics.export.word', 'chat.topics.export.md.reason', 'chat.topics.copy.plain_text']) {
+      expect(labels).not.toContain(removed)
+    }
+    view.unmount()
   })
 
   it('never renders a useful toolbar button for grouped assistants (selected or not)', () => {

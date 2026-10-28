@@ -119,6 +119,7 @@ describe('TopicExportImageCanvas', () => {
         blocksById={blocksById}
         width={720}
         themeMode={ThemeMode.light}
+        exportIncludeThinking={false}
       />
     )
 
@@ -149,6 +150,7 @@ describe('TopicExportImageCanvas', () => {
         blocksById={blocksById}
         width={720}
         themeMode={ThemeMode.light}
+        exportIncludeThinking={false}
       />
     )
 
@@ -170,6 +172,7 @@ describe('TopicExportImageCanvas', () => {
         blocksById={blocksById}
         width={720}
         themeMode={ThemeMode.dark}
+        exportIncludeThinking={false}
       />
     )
 
@@ -189,6 +192,7 @@ describe('TopicExportImageCanvas', () => {
         blocksById={blocksById}
         width={720}
         themeMode={ThemeMode.light}
+        exportIncludeThinking={false}
       />
     )
 
@@ -209,6 +213,7 @@ describe('TopicExportImageCanvas', () => {
         blocksById={blocksById}
         width={720}
         themeMode={ThemeMode.dark}
+        exportIncludeThinking={false}
       />
     )
 

@@ -73,15 +73,6 @@ export enum IpcChannel {
   // Python — generic script execution channel (independent of removed MCP/DXT runtime).
   Python_Execute = 'python:execute',
 
-  // obsidian
-  Obsidian_GetVaults = 'obsidian:get-vaults',
-  Obsidian_GetFiles = 'obsidian:get-files',
-
-  // nutstore
-  Nutstore_GetSsoUrl = 'nutstore:get-sso-url',
-  Nutstore_DecryptToken = 'nutstore:decrypt-token',
-  Nutstore_GetDirectoryContents = 'nutstore:get-directory-contents',
-
   //aes
   Aes_Encrypt = 'aes:encrypt',
   Aes_Decrypt = 'aes:decrypt',
@@ -174,9 +165,6 @@ export enum IpcChannel {
   FileService_List = 'file-service:list',
   FileService_Delete = 'file-service:delete',
   FileService_Retrieve = 'file-service:retrieve',
-
-  Export_Word = 'export:word',
-
   Shortcuts_Update = 'shortcuts:update',
 
   // backup

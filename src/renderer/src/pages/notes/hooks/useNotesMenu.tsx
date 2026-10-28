@@ -2,7 +2,6 @@ import { loggerService } from '@logger'
 import { DeleteIcon } from '@renderer/components/Icons'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
 import { useKnowledgeBases } from '@renderer/hooks/useKnowledge'
-import type { RootState } from '@renderer/store'
 import type { NotesTreeNode } from '@renderer/types/note'
 import { exportNote } from '@renderer/utils/export'
 import type { MenuProps } from 'antd'
@@ -10,7 +9,6 @@ import type { ItemType, MenuItemType } from 'antd/es/menu/interface'
 import { Edit3, FilePlus, FileSearch, Folder, FolderOpen, Sparkles, Star, StarOff, UploadIcon } from 'lucide-react'
 import { useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useSelector } from 'react-redux'
 
 const logger = loggerService.withContext('UseNotesMenu')
 
@@ -40,7 +38,6 @@ export const useNotesMenu = ({
 }: UseNotesMenuProps) => {
   const { t } = useTranslation()
   const { bases } = useKnowledgeBases()
-  const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
 
   const handleExportKnowledge = useCallback(
     async (note: NotesTreeNode) => {
@@ -180,50 +177,20 @@ export const useNotesMenu = ({
             key: 'export',
             icon: <UploadIcon size={14} />,
             children: [
-              exportMenuOptions.image && {
+              {
                 label: t('chat.topics.copy.image'),
                 key: 'copy-image',
                 onClick: () => handleImageAction(node, 'copyImage')
               },
-              exportMenuOptions.image && {
+              {
                 label: t('chat.topics.export.image'),
                 key: 'export-image',
                 onClick: () => handleImageAction(node, 'exportImage')
               },
-              exportMenuOptions.markdown && {
+              {
                 label: t('chat.topics.export.md.label'),
                 key: 'markdown',
                 onClick: () => exportNote({ node, platform: 'markdown' })
-              },
-              exportMenuOptions.docx && {
-                label: t('chat.topics.export.word'),
-                key: 'word',
-                onClick: () => exportNote({ node, platform: 'docx' })
-              },
-              exportMenuOptions.notion && {
-                label: t('chat.topics.export.notion'),
-                key: 'notion',
-                onClick: () => exportNote({ node, platform: 'notion' })
-              },
-              exportMenuOptions.yuque && {
-                label: t('chat.topics.export.yuque'),
-                key: 'yuque',
-                onClick: () => exportNote({ node, platform: 'yuque' })
-              },
-              exportMenuOptions.obsidian && {
-                label: t('chat.topics.export.obsidian'),
-                key: 'obsidian',
-                onClick: () => exportNote({ node, platform: 'obsidian' })
-              },
-              exportMenuOptions.joplin && {
-                label: t('chat.topics.export.joplin'),
-                key: 'joplin',
-                onClick: () => exportNote({ node, platform: 'joplin' })
-              },
-              exportMenuOptions.siyuan && {
-                label: t('chat.topics.export.siyuan'),
-                key: 'siyuan',
-                onClick: () => exportNote({ node, platform: 'siyuan' })
               }
             ].filter(Boolean) as ItemType<MenuItemType>[]
           }
@@ -253,7 +220,6 @@ export const useNotesMenu = ({
       handleDeleteNodeWrapper,
       renamingNodeIds,
       handleAutoRename,
-      exportMenuOptions,
       onCreateNote,
       onCreateFolder
     ]

@@ -41,7 +41,6 @@ vi.mock('@renderer/components/Icons', () => ({
 }))
 
 vi.mock('@renderer/components/Popups/InspectMessagePopup', () => ({ default: { show: vi.fn() } }))
-vi.mock('@renderer/components/Popups/ObsidianExportPopup', () => ({ default: { show: vi.fn() } }))
 vi.mock('@renderer/components/Popups/SaveToKnowledgePopup', () => ({ default: { showForMessage: vi.fn() } }))
 vi.mock('@renderer/components/Popups/SelectModelPopup', () => ({
   SelectChatModelPopup: { show: vi.fn() }
@@ -159,12 +158,8 @@ vi.mock('@renderer/utils/error', () => ({
 }))
 
 vi.mock('@renderer/utils/export', () => ({
-  exportMarkdownToJoplin: vi.fn(),
-  exportMarkdownToSiyuan: vi.fn(),
-  exportMarkdownToYuque: vi.fn(),
   exportMessageAsMarkdown: vi.fn(),
   exportMessageToNotes: vi.fn(),
-  exportMessageToNotion: vi.fn(),
   messageToMarkdown: vi.fn(() => ''),
   messageToPlainText: vi.fn(() => ''),
   topicToMarkdown: vi.fn(() => ''),
@@ -277,11 +272,6 @@ const createStore = () =>
             image: false,
             markdown: false,
             markdown_reason: false,
-            notion: false,
-            yuque: false,
-            joplin: false,
-            obsidian: false,
-            siyuan: false,
             docx: false,
             plain_text: false,
             notes: false

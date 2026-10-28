@@ -79,6 +79,20 @@ function legacyTypeOf(provider: { type: string }): string {
   return (provider as { type: string }).type
 }
 
+// ---------------------------------------------------------------------------
+// History-only legacy export-menu defaults (migrations 93/114 replay).
+// `exportMenuOptions` is gone from the current settings slice; these literals
+// exist only so old persisted rows stay replayable through the version chain
+// (migration 228 removes the key again at the terminal end).
+// ---------------------------------------------------------------------------
+const HISTORIC_EXPORT_MENU_OPTIONS = {
+  image: true,
+  markdown: true,
+  markdown_reason: true,
+  docx: true,
+  plain_text: true
+} as const
+
 // Migration-local snapshot of the default assistant settings (mirrors
 // AssistantService.DEFAULT_ASSISTANT_SETTINGS). Defined locally so this
 // module never imports the store-linked AssistantService (which imports the
@@ -1540,8 +1554,11 @@ const migrateConfig = {
   },
   '93': (state: any) => {
     try {
+      // Historical step only: `exportMenuOptions` has since been removed from
+      // the settings slice, so this runs against a frozen local constant to
+      // keep the version chain intact (migration 228 deletes it again).
       if (!state?.settings?.exportMenuOptions) {
-        state.settings.exportMenuOptions = settingsInitialState.exportMenuOptions
+        state.settings.exportMenuOptions = { ...HISTORIC_EXPORT_MENU_OPTIONS }
         return state
       }
       return state
@@ -1915,7 +1932,7 @@ const migrateConfig = {
     try {
       if (state.settings && state.settings.exportMenuOptions) {
         if (typeof state.settings.exportMenuOptions.plain_text === 'undefined') {
-          state.settings.exportMenuOptions.plain_text = true
+          state.settings.exportMenuOptions.plain_text = HISTORIC_EXPORT_MENU_OPTIONS.plain_text
         }
       }
       if (state.settings) {
@@ -4745,6 +4762,91 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 227 error', error as Error)
+      return state
+    }
+  },
+  '228': (state: any) => {
+    try {
+      // Terminal scrub for the retired export surface and for the removed
+      // note-app connection integrations (Notion / Yuque / Joplin / Obsidian /
+      // Siyuan; user-authorized full removal).
+      // - Deletes only the settings this removal retires: each integration's
+      //   credentials/addresses/repository targets/export-reasoning flags and
+      //   their notes-app group switch, the whole `exportMenuOptions` container
+      //   (the export menu itself is now always available), and the four
+      //   retired Markdown switches (dollar-math conversion, quick-model
+      //   message-title naming, model name/provider labels).
+      // - `markdownExportPath` is carried over into the new `exportPath`
+      //   default directory shared by every file export, then removed. Every
+      //   unrelated setting is retained; unknown persisted keys are never
+      //   touched or created.
+      // - `exportIncludeThinking` is written explicitly (default false):
+      //   removing a key from `initialState` cannot reach already-persisted
+      //   state, because the redux-persist key/`autoMergeLevel1` config
+      //   replaces persisted slices wholesale (see store/index.ts).
+      // - Chat, assistant, provider, and branch state are not read or written.
+      // - No log line carries credential values (presence is not reported
+      //   either); only the migration outcome is logged.
+      // - Idempotent, and tolerant of missing/empty/null `settings` or
+      //   `exportMenuOptions`.
+      const s = state
+      if (s && typeof s === 'object') {
+        const settings = s.settings
+        if (settings && typeof settings === 'object') {
+          for (const key of [
+            'notionDatabaseID',
+            'notionApiKey',
+            'notionPageNameKey',
+            'notionExportReasoning',
+            'yuqueToken',
+            'yuqueUrl',
+            'yuqueRepoId',
+            'joplinToken',
+            'joplinUrl',
+            'joplinExportReasoning',
+            'defaultObsidianVault',
+            'siyuanApiUrl',
+            'siyuanToken',
+            'siyuanBoxId',
+            'siyuanRootPath'
+          ]) {
+            delete settings[key]
+          }
+          // The export menu is now always available, so the per-format
+          // toggles and their container are retired together.
+          delete settings.exportMenuOptions
+          // `markdownExportPath` applied to Markdown only; its value becomes
+          // the default directory for every file export (Markdown / JSON /
+          // image), so an existing choice is carried over once and removed.
+          if (typeof settings.exportPath === 'undefined') {
+            settings.exportPath =
+              typeof settings.markdownExportPath === 'string' && settings.markdownExportPath
+                ? settings.markdownExportPath
+                : null
+          }
+          delete settings.markdownExportPath
+          // Retired Markdown export switches.
+          delete settings.forceDollarMathInMarkdown
+          delete settings.useTopicNamingForMessageTitle
+          delete settings.showModelNameInMarkdown
+          delete settings.showModelProviderInMarkdown
+          // Written explicitly: a persisted slice is replaced wholesale on
+          // rehydrate, so `initialState` alone would never reach old rows.
+          settings.exportIncludeThinking = false
+        }
+      }
+      // The Nutstore backup integration is retired (user-authorized full
+      // removal): its dedicated slice is no longer registered, so a persisted
+      // `nutstore` slice is dropped wholesale — token/path/auto-sync/sync
+      // state/skip-file/max-backups and anything else it carried.
+      // Generic WebDAV / S3 / local backup settings are untouched, so a
+      // Nutstore user keeps working through the generic WebDAV backup form.
+      // Idempotent and tolerant of a missing slice.
+      delete s.nutstore
+      logger.info('migrate 228 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 228 error', error as Error)
       return state
     }
   }

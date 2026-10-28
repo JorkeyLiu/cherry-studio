@@ -76,23 +76,46 @@ vi.mock('@renderer/utils', async (importOriginal) => {
   }
 })
 
-// The canvas presentation is covered by its own component test; here it renders
-// message ids so the orchestration can be asserted without the message tree.
+/**
+ * Props of every export canvas render.
+ *
+ * The canvas presentation is covered by its own component test; here it renders
+ * message ids so the orchestration — the rendered message set, the render scope
+ * and the frozen export options — can be asserted without the message tree.
+ */
+const canvasProps = vi.hoisted(() => [] as Array<Record<string, any>>)
+
 vi.mock('../TopicExportImageCanvas', async () => {
   const React = await import('react')
   return {
-    default: ({ messages }: { messages: Message[] }) =>
-      React.createElement(
+    default: (props: { messages: Message[] }) => {
+      canvasProps.push(props as unknown as Record<string, any>)
+      return React.createElement(
         'div',
         { 'data-topic-export-content': true },
-        messages.map((message) =>
+        props.messages.map((message) =>
           React.createElement('span', { key: message.id, 'data-export-message-id': message.id }, message.id)
         )
       )
+    }
   }
 })
 
+/**
+ * The export path reads the frozen thinking option and the addressed topic's
+ * identity from the store. A plain read-only projection keeps this orchestration
+ * test free of the application store while still observing what is read — and
+ * what is (not) written.
+ */
+const storeState = vi.hoisted(() => ({
+  settings: {} as { exportIncludeThinking?: boolean },
+  assistants: { assistants: [] as Array<{ id: string; topics: unknown[] }> }
+}))
+
+vi.mock('@renderer/store', () => ({ default: { getState: () => storeState } }))
+
 import {
+  captureMessageExportImage,
   captureTopicExportImage,
   resetTopicExportImageStateForTests,
   TOPIC_EXPORT_CANVAS_WIDTH_FALLBACK
@@ -120,6 +143,9 @@ beforeEach(() => {
   loadWholeTopicSnapshot.mockReset()
   captureScrollable.mockReset()
   resetTopicExportImageStateForTests()
+  canvasProps.length = 0
+  storeState.settings = {}
+  storeState.assistants.assistants = []
   loadWholeTopicSnapshot.mockResolvedValue(createSnapshot())
   captureScrollable.mockImplementation(async () => ({
     width: 900,
@@ -320,5 +346,146 @@ describe('captureTopicExportImage', () => {
     expect(hostStyle?.position).toBe('fixed')
     expect(hostStyle?.pointerEvents).toBe('none')
     expect(hostStyle?.left).toBe('-100000px')
+  })
+})
+
+const seedExportTopic = (topic: Topic): void => {
+  storeState.assistants.assistants = [{ id: topic.assistantId, topics: [topic] }]
+}
+
+const addressedMessage = (overrides: Partial<Message> = {}): Message =>
+  ({
+    id: 'msg-31',
+    role: 'assistant',
+    assistantId: 'assistant-1',
+    topicId: 'topic-target',
+    branchId: null,
+    blocks: ['block-31'],
+    content: '',
+    ...overrides
+  }) as unknown as Message
+
+const lastCanvasProps = (): Record<string, any> => {
+  const props = canvasProps.at(-1)
+  if (!props) throw new Error('export canvas was never rendered')
+  return props
+}
+
+describe('captureMessageExportImage', () => {
+  it('exports exactly the addressed message, resolved from its own topic route', async () => {
+    seedExportTopic(makeTopic('topic-target'))
+
+    const outcome = await captureMessageExportImage({ message: addressedMessage(), width: 900 })
+
+    expect(outcome.status).toBe('captured')
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-target', null)
+    if (outcome.status === 'captured') {
+      expect(outcome.dataUrl).toBe('data:image/png;base64,complete')
+    }
+
+    const props = lastCanvasProps()
+    expect(props.scope).toBe('single')
+    const renderedIds = Array.from(capturedTarget().querySelectorAll('[data-export-message-id]')).map((element) =>
+      element.getAttribute('data-export-message-id')
+    )
+    expect(renderedIds).toEqual(['msg-31'])
+    // The addressed message keeps its complete snapshot block set.
+    expect(props.messages).toHaveLength(1)
+    expect(props.messages[0].blocks).toEqual(['block-31'])
+    expect(props.blocksById.get('block-31')).toBeDefined()
+  })
+
+  it('addresses the message owner route instead of borrowing the opened route', async () => {
+    seedExportTopic(makeTopic('topic-target'))
+    const message = addressedMessage({ branchId: 'branch-owner', topicId: 'topic-other' })
+    storeState.assistants.assistants = [
+      { id: 'assistant-1', topics: [makeTopic('topic-other')] },
+      { id: 'assistant-1', topics: [makeTopic('topic-target')] }
+    ]
+
+    const outcome = await captureMessageExportImage({ message, width: 900 })
+
+    expect(outcome.status).toBe('captured')
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-other', 'branch-owner')
+    expect(lastCanvasProps().messages).toHaveLength(1)
+    expect(lastCanvasProps().messages[0].id).toBe('msg-31')
+  })
+
+  it('fails closed when the addressed message is not part of its route', async () => {
+    seedExportTopic(makeTopic('topic-target'))
+
+    const outcome = await captureMessageExportImage({
+      message: addressedMessage({ id: 'msg-absent' }),
+      width: 900
+    })
+
+    expect(outcome.status).toBe('failed')
+    expect(captureScrollable).not.toHaveBeenCalled()
+    expect(exportHosts()).toHaveLength(0)
+  })
+
+  it('fails closed when the message topic is not loaded, without reading a foreign topic', async () => {
+    const outcome = await captureMessageExportImage({ message: addressedMessage(), width: 900 })
+
+    expect(outcome.status).toBe('failed')
+    expect(loadWholeTopicSnapshot).not.toHaveBeenCalled()
+    expect(captureScrollable).not.toHaveBeenCalled()
+  })
+
+  it('leaves the live projection, scroll container and settings untouched', async () => {
+    seedExportTopic(makeTopic('topic-target'))
+    storeState.settings.exportIncludeThinking = false
+    const live = liveMessagesContainer()
+    const liveHtmlBefore = live.innerHTML
+    const settingsBefore = { ...storeState.settings }
+
+    await captureMessageExportImage({ message: addressedMessage(), width: 900 })
+
+    expect(live.innerHTML).toBe(liveHtmlBefore)
+    expect(live.getAttribute('style')).toBe('height: 400px;')
+    expect(storeState.settings).toEqual(settingsBefore)
+    expect(exportHosts()).toHaveLength(0)
+  })
+})
+
+describe('export thinking option', () => {
+  it('collapses thinking by default when the option is absent (user default false)', async () => {
+    const outcome = await captureTopicExportImage({ topic: makeTopic('topic-target'), width: 900 })
+
+    expect(outcome.status).toBe('captured')
+    expect(lastCanvasProps().exportIncludeThinking).toBe(false)
+  })
+
+  it('passes the enabled option to both the topic and the single-message export', async () => {
+    storeState.settings.exportIncludeThinking = true
+    seedExportTopic(makeTopic('topic-target'))
+
+    await captureTopicExportImage({ topic: makeTopic('topic-target'), width: 900 })
+    expect(lastCanvasProps().exportIncludeThinking).toBe(true)
+
+    await captureMessageExportImage({ message: addressedMessage(), width: 900 })
+    expect(lastCanvasProps().exportIncludeThinking).toBe(true)
+  })
+
+  it('freezes the option before the snapshot load, so a mid-export change cannot alter the image', async () => {
+    storeState.settings.exportIncludeThinking = false
+    loadWholeTopicSnapshot.mockImplementation(async () => {
+      // The user flips the option while the export is already running.
+      storeState.settings.exportIncludeThinking = true
+      return createSnapshot()
+    })
+
+    const outcome = await captureTopicExportImage({ topic: makeTopic('topic-target'), width: 900 })
+
+    expect(outcome.status).toBe('captured')
+    expect(lastCanvasProps().exportIncludeThinking).toBe(false)
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the whole-route fold scope for a topic export', async () => {
+    await captureTopicExportImage({ topic: makeTopic('topic-target'), width: 900 })
+
+    expect(lastCanvasProps().scope).toBe('route')
   })
 })

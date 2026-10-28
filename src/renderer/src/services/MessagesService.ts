@@ -2,7 +2,6 @@ import { loggerService } from '@logger'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import { TopicManager } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
-import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import store from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
@@ -18,8 +17,7 @@ import {
   createFileBlock,
   createImageBlock,
   createMainTextBlock,
-  createMessage,
-  resetMessage
+  createMessage
 } from '@renderer/utils/messageUtils/create'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import dayjs from 'dayjs'
@@ -288,33 +286,13 @@ export function resetAssistantMessage(message: Message, model?: Model): Message 
   }
 }
 
+/**
+ * Deterministic file-name title for an exported message, derived from its own
+ * text. Export never asks a model for it any more: naming is local, so an
+ * export cannot block on or fail because of a provider call.
+ */
 export async function getMessageTitle(message: Message, length = 30): Promise<string> {
   const content = getMainTextContent(message)
-
-  if ((store.getState().settings as any).useTopicNamingForMessageTitle) {
-    try {
-      const tempMessage = resetMessage(message, {
-        status: AssistantMessageStatus.SUCCESS,
-        blocks: message.blocks
-      })
-
-      const titlePromise = fetchMessagesSummary({ messages: [tempMessage] })
-      window.toast.loading({ title: t('chat.topics.export.wait_for_title_naming'), promise: titlePromise })
-      const { text: title } = await titlePromise
-
-      // store.dispatch(messageBlocksActions.upsertOneBlock(tempTextBlock))
-
-      // store.dispatch(messageBlocksActions.removeOneBlock(tempTextBlock.id))
-      if (title) {
-        window.toast.success(t('chat.topics.export.title_naming_success'))
-        return title
-      }
-    } catch (e) {
-      window.toast.error(t('chat.topics.export.title_naming_failed'))
-      logger.error('Failed to generate title using topic naming, downgraded to default logic', e as Error)
-    }
-  }
-
   let title = getTitleFromString(content, length)
 
   if (!title) {

@@ -1307,7 +1307,6 @@
       "copy": {
         "image": "Copy as image",
         "md": "Copy as markdown",
-        "plain_text": "Copy as plain text (remove Markdown)",
         "title": "Copy"
       },
       "delete": {
@@ -1321,7 +1320,6 @@
       "export": {
         "image": "Export as image",
         "image_saved": "Image saved successfully",
-        "joplin": "Export to Joplin",
         "json": {
           "error": "Failed to export topic data",
           "label": "Export as JSON",
@@ -1330,49 +1328,10 @@
           "success": "Topic data exported"
         },
         "md": {
-          "label": "Export as markdown",
-          "reason": "Export as Markdown (with reasoning)"
+          "label": "Export as markdown"
         },
         "notes": "Export to Notes",
-        "notion": "Export to Notion",
-        "obsidian": "Export to Obsidian",
-        "obsidian_atributes": "Configure Note Attributes",
-        "obsidian_btn": "Confirm",
-        "obsidian_created": "Creation Time",
-        "obsidian_created_placeholder": "Please select the creation time",
-        "obsidian_export_failed": "Export failed",
-        "obsidian_export_success": "Export success",
-        "obsidian_fetch_error": "Failed to fetch Obsidian vaults",
-        "obsidian_fetch_folders_error": "Failed to fetch folder structure",
-        "obsidian_loading": "Loading...",
-        "obsidian_no_vault_selected": "Please select a vault first",
-        "obsidian_no_vaults": "No Obsidian vaults found",
-        "obsidian_operate": "Operation Method",
-        "obsidian_operate_append": "Append",
-        "obsidian_operate_new_or_overwrite": "Create New (Overwrite if it exists)",
-        "obsidian_operate_placeholder": "Please select the operation method",
-        "obsidian_operate_prepend": "Prepend",
-        "obsidian_path": "Path",
-        "obsidian_path_placeholder": "Please select the path",
-        "obsidian_reasoning": "Include Reasoning Chain",
-        "obsidian_root_directory": "Root Directory",
-        "obsidian_select_vault_first": "Please select a vault first",
-        "obsidian_source": "Source",
-        "obsidian_source_placeholder": "Please enter the source",
-        "obsidian_tags": "Tags",
-        "obsidian_tags_placeholder": "Please enter tags, separate multiple tags with commas",
-        "obsidian_title": "Title",
-        "obsidian_title_placeholder": "Please enter the title",
-        "obsidian_title_required": "The title cannot be empty",
-        "obsidian_vault": "Vault",
-        "obsidian_vault_placeholder": "Please select the vault name",
-        "siyuan": "Export to Siyuan Note",
-        "title": "Export",
-        "title_naming_failed": "Failed to generate title, using default title",
-        "title_naming_success": "Title generated successfully",
-        "wait_for_title_naming": "Generating title...",
-        "word": "Export as Word",
-        "yuque": "Export to Yuque"
+        "title": "Export"
       },
       "import": {
         "action": "Import topic from JSON",
@@ -1796,9 +1755,6 @@
     "created": "Created",
     "last_updated": "Last Updated",
     "messages": "Messages",
-    "notion": {
-      "reasoning_truncated": "Chain of thought cannot be chunked and has been truncated."
-    },
     "user": "User"
   },
   "files": {
@@ -2264,16 +2220,10 @@
         "enter": {
           "model": "Please select a model"
         },
-        "nutstore": "Invalid Nutstore settings",
-        "nutstore_token": "Invalid Nutstore Token",
         "proxy": {
           "url": "Invalid proxy URL"
         },
         "webdav": "Invalid WebDAV settings"
-      },
-      "joplin": {
-        "export": "Failed to export to Joplin. Please keep Joplin running and check connection status or configuration",
-        "no_config": "Joplin Authorization Token or URL is not configured"
       },
       "markdown": {
         "export": {
@@ -2284,23 +2234,10 @@
       "notes": {
         "export": "Failed to export notes"
       },
-      "notion": {
-        "export": "Failed to export to Notion. Please check connection status and configuration according to documentation",
-        "no_api_key": "Notion ApiKey or Notion DatabaseID is not configured",
-        "no_content": "There is nothing to export to Notion."
-      },
-      "siyuan": {
-        "export": "Failed to export to Siyuan Note, please check connection status and configuration according to documentation",
-        "no_config": "Siyuan Note API address or token is not configured"
-      },
       "table": {
         "invalid": "Unable to retrieve valid table data"
       },
-      "unknown": "Unknown error",
-      "yuque": {
-        "export": "Failed to export to Yuque. Please check connection status and configuration according to documentation",
-        "no_config": "Yuque Token or Yuque Url is not configured"
-      }
+      "unknown": "Unknown error"
     },
     "group": {
       "delete": {
@@ -2312,12 +2249,6 @@
     "ignore": {
       "knowledge": {
         "base": "Web search mode is enabled, ignore knowledge base"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Exporting to Notion ...",
-        "preparing": "Preparing to export to Notion..."
       }
     },
     "mention": {
@@ -2381,9 +2312,6 @@
       "excel": {
         "export": "Excel exported successfully"
       },
-      "joplin": {
-        "export": "Successfully exported to Joplin"
-      },
       "markdown": {
         "export": {
           "preconf": "Successfully exported the Markdown file to the preconfigured path",
@@ -2392,15 +2320,6 @@
       },
       "notes": {
         "export": "Successfully exported to notes"
-      },
-      "notion": {
-        "export": "Successfully exported to Notion"
-      },
-      "siyuan": {
-        "export": "Successfully exported to Siyuan Note"
-      },
-      "yuque": {
-        "export": "Successfully exported to Yuque"
       }
     },
     "switch": {
@@ -3905,22 +3824,26 @@
         "basic": "Basic Data Settings",
         "cloud_storage": "Cloud Backup Settings",
         "export_settings": "Export Settings",
-        "import_settings": "Import Settings",
-        "third_party": "Third-party Connections"
+        "import_settings": "Import Settings"
       },
-      "export_menu": {
-        "docx": "Export as Word",
-        "image": "Export as Image",
-        "joplin": "Export to Joplin",
-        "markdown": "Export as Markdown",
-        "markdown_reason": "Export as Markdown (with reasoning)",
-        "notes": "Export to Notes",
-        "notion": "Export to Notion",
-        "obsidian": "Export to Obsidian",
-        "plain_text": "Copy as Plain Text",
-        "siyuan": "Export to SiYuan Note",
-        "title": "Export Menu Settings",
-        "yuque": "Export to Yuque"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Exclude citations and references when exporting to Markdown, keeping only the main content",
+          "title": "Exclude Citations"
+        },
+        "help": "If provided, exports will be automatically saved to this path; otherwise, a save dialog will appear.",
+        "include_thinking": {
+          "help": "Include thinking content when exporting images or Markdown.",
+          "title": "Include thinking content"
+        },
+        "path": "Default Export Path",
+        "path_placeholder": "Export Path",
+        "select": "Select",
+        "standardize_citations": {
+          "help": "When enabled, citation markers will be converted to standard Markdown footnote format [^1] and citation lists will be formatted.",
+          "title": "Standardize Citation Format"
+        },
+        "title": "Topic Export Options"
       },
       "export_to_phone": {
         "confirm": {
@@ -3999,25 +3922,6 @@
         "cherrystudio": "Import from Cherry Studio ZIP",
         "cherrystudio_button": "Import ZIP Backup",
         "title": "Import Outside Application Data"
-      },
-      "joplin": {
-        "check": {
-          "button": "Check",
-          "empty_token": "Please enter Joplin Authorization Token",
-          "empty_url": "Please enter Joplin Clipper Service URL",
-          "fail": "Joplin connection verification failed",
-          "success": "Joplin connection verification successful"
-        },
-        "export_reasoning": {
-          "help": "When enabled, the exported content will include the reasoning chain (thought process) generated by the assistant.",
-          "title": "Include Reasoning Chain in Export"
-        },
-        "help": "In Joplin options, enable the web clipper (no browser extension needed), confirm the port, and copy the auth token here.",
-        "title": "Joplin Configuration",
-        "token": "Joplin Authorization Token",
-        "token_placeholder": "Joplin Authorization Token",
-        "url": "Joplin Web Clipper Service URL",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Disk Space Warning",
@@ -4103,122 +4007,8 @@
         "syncStatus": "Backup Status",
         "title": "Local Backup"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Exclude citations and references when exporting to Markdown, keeping only the main content",
-          "title": "Exclude Citations"
-        },
-        "force_dollar_math": {
-          "help": "When enabled, $$ will be forcibly used to mark LaTeX formulas when exporting to Markdown. Note: This option also affects all export methods through Markdown, such as Notion, Yuque, etc.",
-          "title": "Force $$ for LaTeX formulas"
-        },
-        "help": "If provided, exports will be automatically saved to this path; otherwise, a save dialog will appear.",
-        "path": "Default Export Path",
-        "path_placeholder": "Export Path",
-        "select": "Select",
-        "show_model_name": {
-          "help": "When enabled, the model name will be displayed when exporting to Markdown. Note: This option also affects all export methods through Markdown, such as Notion, Yuque, etc.",
-          "title": "Use Model Name on Export"
-        },
-        "show_model_provider": {
-          "help": "Display the model provider (e.g., OpenAI, Gemini) when exporting to Markdown",
-          "title": "Show Model Provider"
-        },
-        "standardize_citations": {
-          "help": "When enabled, citation markers will be converted to standard Markdown footnote format [^1] and citation lists will be formatted.",
-          "title": "Standardize Citation Format"
-        },
-        "title": "Markdown Export"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "When enabled, use the quick model to name the title for exported messages. This setting also affects all export methods through Markdown.",
-          "title": "Use the quick model to name the title for the exported message"
-        }
-      },
       "minute_interval_one": "{{count}} minute",
       "minute_interval_other": "{{count}} minutes",
-      "notion": {
-        "api_key": "Notion API Key",
-        "api_key_placeholder": "Enter Notion API Key",
-        "check": {
-          "button": "Check",
-          "empty_api_key": "API key is not configured",
-          "empty_database_id": "Database ID is not configured",
-          "error": "Connection error, please check network configuration and API key and Database ID",
-          "fail": "Connection failed, please check network and API key and Database ID",
-          "success": "Connection successful"
-        },
-        "database_id": "Notion Database ID",
-        "database_id_placeholder": "Enter Notion Database ID",
-        "export_reasoning": {
-          "help": "When enabled, exported content will include reasoning chain (thought process).",
-          "title": "Include Reasoning Chain in Export"
-        },
-        "page_name_key": "Page Title Field Name",
-        "page_name_key_placeholder": "Enter page title field name, default is Name",
-        "title": "Notion Settings"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Backup to Nutstore",
-          "modal": {
-            "filename": {
-              "placeholder": "Enter backup filename"
-            },
-            "title": "Backup to Nutstore"
-          }
-        },
-        "checkConnection": {
-          "fail": "Nutstore connection failed",
-          "name": "Check Connection",
-          "success": "Connected to Nutstore"
-        },
-        "isLogin": "Logged in",
-        "login": {
-          "button": "Login"
-        },
-        "logout": {
-          "button": "Logout",
-          "content": "After logout, you will not be able to backup to Nutstore or restore from Nutstore.",
-          "title": "Are you sure you want to logout from Nutstore?"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Cancel",
-            "confirm": "Confirm",
-            "label": "New Folder"
-          }
-        },
-        "notLogin": "Not logged in",
-        "path": {
-          "label": "Nutstore Storage Path",
-          "placeholder": "Enter Nutstore storage path"
-        },
-        "pathSelector": {
-          "currentPath": "Current Path",
-          "return": "Return",
-          "title": "Nutstore Storage Path"
-        },
-        "restore": {
-          "button": "Restore from Nutstore",
-          "confirm": {
-            "content": "Restoring from Nutstore will overwrite current data. Do you want to continue?",
-            "title": "Restore from Nutstore"
-          }
-        },
-        "title": "Nutstore Configuration",
-        "username": "Nutstore Username"
-      },
-      "obsidian": {
-        "default_vault": "Default Obsidian Vault",
-        "default_vault_export_failed": "Export failed",
-        "default_vault_fetch_error": "Failed to fetch Obsidian vault",
-        "default_vault_loading": "Loading Obsidian vault...",
-        "default_vault_no_vaults": "No Obsidian vaults found",
-        "default_vault_placeholder": "Please select the default Obsidian vault",
-        "title": "Obsidian Configuration"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4343,27 +4133,6 @@
           "label": "S3 Compatible Storage"
         }
       },
-      "siyuan": {
-        "api_url": "Siyuan Note API URL",
-        "api_url_placeholder": "e.g.: http://127.0.0.1:6806",
-        "box_id": "Siyuan Note Box ID",
-        "box_id_placeholder": "Please enter Siyuan Note Box ID",
-        "check": {
-          "button": "Check",
-          "empty_config": "Please fill in the API address and token",
-          "error": "Connection error, please check network connection",
-          "fail": "Connection failed, please check API address and token",
-          "success": "Connection successful",
-          "title": "Connection Check"
-        },
-        "root_path": "Siyuan Note Root Path",
-        "root_path_placeholder": "e.g.: /CherryStudio",
-        "title": "Siyuan Note Configuration",
-        "token": {
-          "label": "Siyuan Note Token"
-        },
-        "token_placeholder": "Please enter Siyuan Note Token"
-      },
       "title": "Data Settings",
       "webdav": {
         "autoSync": {
@@ -4449,21 +4218,6 @@
         "syncStatus": "Backup Status",
         "title": "WebDAV",
         "user": "WebDAV User"
-      },
-      "yuque": {
-        "check": {
-          "button": "Check",
-          "empty_repo_url": "Please enter the knowledge base URL first",
-          "empty_token": "Please enter the Yuque Token first",
-          "fail": "Yuque connection verification failed",
-          "success": "Yuque connection verified successfully"
-        },
-        "help": "Get Yuque Token",
-        "repo_url": "Yuque URL",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Yuque Configuration",
-        "token": "Yuque Token",
-        "token_placeholder": "Please enter the Yuque Token"
       }
     },
     "developer": {
@@ -5207,7 +4961,7 @@
       "sync_success": "Sync completed",
       "syncing": "Syncing...",
       "target_code_placeholder": "Other device code",
-      "title": "Synchronization",
+      "title": "Data Sync",
       "token": "Access Token",
       "token_help": "Token is never included in sync payload or logs.",
       "token_placeholder": "Optional bearer token",

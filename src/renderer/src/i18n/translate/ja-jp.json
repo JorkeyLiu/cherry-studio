@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "画像としてコピー",
         "md": "Markdownとしてコピー",
-        "plain_text": "プレーンテキストとしてコピー（Markdownを除去）",
         "title": "コピー"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "画像としてエクスポート",
         "image_saved": "画像が正常に保存されました",
-        "joplin": "Joplin にエクスポート",
         "md": {
-          "label": "Markdownとしてエクスポート",
-          "reason": "Markdown としてエクスポート (思考内容を含む)"
+          "label": "Markdownとしてエクスポート"
         },
         "notes": "ノートにエクスポート",
-        "notion": "Notion にエクスポート",
-        "obsidian": "Obsidian にエクスポート",
-        "obsidian_atributes": "ノートの属性を設定",
-        "obsidian_btn": "確定",
-        "obsidian_created": "作成日時",
-        "obsidian_created_placeholder": "作成日時を選択してください",
-        "obsidian_export_failed": "エクスポート失敗",
-        "obsidian_export_success": "エクスポート成功",
-        "obsidian_fetch_error": "Obsidianの保管庫の取得に失敗しました",
-        "obsidian_fetch_folders_error": "フォルダ構造の取得に失敗しました",
-        "obsidian_loading": "読み込み中...",
-        "obsidian_no_vault_selected": "保管庫を選択してください",
-        "obsidian_no_vaults": "Obsidianの保管庫が見つかりません",
-        "obsidian_operate": "処理方法",
-        "obsidian_operate_append": "追加",
-        "obsidian_operate_new_or_overwrite": "新規作成（既に存在する場合は上書き）",
-        "obsidian_operate_placeholder": "処理方法を選択してください",
-        "obsidian_operate_prepend": "先頭に追加",
-        "obsidian_path": "パス",
-        "obsidian_path_placeholder": "パスを選択してください",
-        "obsidian_reasoning": "思考過程を含める",
-        "obsidian_root_directory": "ルートディレクトリ",
-        "obsidian_select_vault_first": "最初に保管庫を選択してください",
-        "obsidian_source": "ソース",
-        "obsidian_source_placeholder": "ソースを入力してください",
-        "obsidian_tags": "タグ",
-        "obsidian_tags_placeholder": "タグを入力してください。複数のタグは英語のコンマで区切ってください",
-        "obsidian_title": "タイトル",
-        "obsidian_title_placeholder": "タイトルを入力してください",
-        "obsidian_title_required": "タイトルは空白にできません",
-        "obsidian_vault": "保管庫",
-        "obsidian_vault_placeholder": "保管庫名を選択してください",
-        "siyuan": "思源笔记にエクスポート",
-        "title": "エクスポート",
-        "title_naming_failed": "タイトルの生成に失敗しました。デフォルトのタイトルを使用します",
-        "title_naming_success": "タイトルの生成に成功しました",
-        "wait_for_title_naming": "タイトルを生成中...",
-        "word": "Wordとしてエクスポート",
-        "yuque": "語雀にエクスポート"
+        "title": "エクスポート"
       },
       "list": "トピックリスト",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "作成日",
     "last_updated": "最終更新日",
     "messages": "メッセージ",
-    "notion": {
-      "reasoning_truncated": "思考過程がブロック分割できません。切り捨てられています。"
-    },
     "user": "ユーザー"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "モデルを選択してください"
         },
-        "nutstore": "無効なNutstore設定です",
-        "nutstore_token": "無効なNutstoreトークンです",
         "proxy": {
           "url": "無効なプロキシURL"
         },
         "webdav": "無効なWebDAV設定"
-      },
-      "joplin": {
-        "export": "Joplin へのエクスポートに失敗しました。Joplin が実行中であることを確認してください",
-        "no_config": "Joplin 認証トークン または URL が設定されていません"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "ノートのエクスポートに失敗しました"
       },
-      "notion": {
-        "export": "Notionへのエクスポートに失敗しました。接続状態と設定を確認してください",
-        "no_api_key": "Notion ApiKey または Notion DatabaseID が設定されていません",
-        "no_content": "Notionにエクスポートできる内容がありません。"
-      },
-      "siyuan": {
-        "export": "思源ノートのエクスポートに失敗しました。接続状態を確認し、ドキュメントに従って設定を確認してください",
-        "no_config": "思源ノートのAPIアドレスまたはトークンが設定されていません"
-      },
       "table": {
         "invalid": "有効なテーブルデータを取得できません"
       },
-      "unknown": "未知のエラー",
-      "yuque": {
-        "export": "語雀へのエクスポートに失敗しました。接続状態と設定を確認してください",
-        "no_config": "語雀のAPIアドレスまたはトークンが設定されていません"
-      }
+      "unknown": "未知のエラー"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "インターネットモードが有効になっています。ナレッジベースを無視します"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Notionにエクスポート中 ...",
-        "preparing": "Notionへのエクスポートを準備中..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Excelのエクスポートが正常に完了しました"
       },
-      "joplin": {
-        "export": "Joplin へのエクスポートに成功しました"
-      },
       "markdown": {
         "export": {
           "preconf": "Markdown ファイルを事前設定されたパスに正常にエクスポートしました",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "成功的にノートにエクスポートされました"
-      },
-      "notion": {
-        "export": "Notionへのエクスポートに成功しました"
-      },
-      "siyuan": {
-        "export": "思源ノートへのエクスポートに成功しました"
-      },
-      "yuque": {
-        "export": "語雀へのエクスポートに成功しました"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "基本データ設定",
         "cloud_storage": "クラウドバックアップ設定",
         "export_settings": "エクスポート設定",
-        "import_settings": "設定のインポート",
-        "third_party": "サードパーティー連携"
+        "import_settings": "設定のインポート"
       },
-      "export_menu": {
-        "docx": "Wordとしてエクスポート",
-        "image": "画像としてエクスポート",
-        "joplin": "Joplinにエクスポート",
-        "markdown": "Markdownとしてエクスポート",
-        "markdown_reason": "Markdownとしてエクスポート（思考内容を含む）",
-        "notes": "ノートにエクスポートする",
-        "notion": "Notionにエクスポート",
-        "obsidian": "Obsidianにエクスポート",
-        "plain_text": "プレーンテキストとしてコピー",
-        "siyuan": "思源ノートにエクスポート",
-        "title": "エクスポートメニュー設定",
-        "yuque": "語雀にエクスポート"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Markdownエクスポート時に引用や参考文献を除外し、メインコンテンツのみを保持します。",
+          "title": "引用を除外"
+        },
+        "help": "入力された場合、エクスポート時に自動的にこのパスに保存されます。未入力の場合、保存ダイアログが表示されます。",
+        "include_thinking": {
+          "help": "画像または Markdown をエクスポートする際に思考内容を含めます。",
+          "title": "思考内容を含める"
+        },
+        "path": "デフォルトのエクスポートパス",
+        "path_placeholder": "エクスポートパス",
+        "select": "選択",
+        "standardize_citations": {
+          "help": "引用マークを標準の Markdown 脚注形式 [^1] に変換し、引用リストをフォーマットします。これにより、Markdown ドキュメントの引用が一貫性を持ち、読みやすくなります。",
+          "title": "引用を標準化"
+        },
+        "title": "トピックのエクスポートオプション"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Cherry Studio ZIPからインポート",
         "cherrystudio_button": "ZIPバックアップをインポート",
         "title": "外部アプリケーションデータをインポート"
-      },
-      "joplin": {
-        "check": {
-          "button": "確認",
-          "empty_token": "Joplin 認証トークン を先に入力してください",
-          "empty_url": "Joplin 剪輯服務 URL を先に入力してください",
-          "fail": "Joplin 接続確認に失敗しました",
-          "success": "Joplin 接続確認に成功しました"
-        },
-        "export_reasoning": {
-          "help": "有効にすると、エクスポートされる内容にアシスタントが生成した思考過程（リースニングチェーン）が含まれます。",
-          "title": "エクスポート時に思考過程を含める"
-        },
-        "help": "Joplin オプションで、剪輯サービスを有効にしてください。ポート番号を確認し、認証トークンをコピーしてください",
-        "title": "Joplin 設定",
-        "token": "Joplin 認証トークン",
-        "token_placeholder": "Joplin 認証トークンを入力してください",
-        "url": "Joplin 剪輯服務 URL",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "ディスク容量警告",
@@ -4031,122 +3935,8 @@
         "syncStatus": "バックアップ状態",
         "title": "ローカルバックアップ"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Markdownエクスポート時に引用や参考文献を除外し、メインコンテンツのみを保持します。",
-          "title": "引用を除外"
-        },
-        "force_dollar_math": {
-          "help": "有効にすると、Markdownにエクスポートする際にLaTeX数式を$$で強制的にマークします。注意：この設定はNotion、Yuqueなど、Markdownを通じたすべてのエクスポート方法にも影響します。",
-          "title": "LaTeX数式に$$を強制使用"
-        },
-        "help": "入力された場合、エクスポート時に自動的にこのパスに保存されます。未入力の場合、保存ダイアログが表示されます。",
-        "path": "デフォルトのエクスポートパス",
-        "path_placeholder": "エクスポートパス",
-        "select": "選択",
-        "show_model_name": {
-          "help": "有効にすると、Markdownエクスポート時にモデル名を表示します。注意：この設定はNotion、Yuqueなど、Markdownを通じたすべてのエクスポート方法にも影響します。",
-          "title": "エクスポート時にモデル名を使用"
-        },
-        "show_model_provider": {
-          "help": "Markdownエクスポート時にモデルプロバイダー（例：OpenAI、Geminiなど）を表示します。",
-          "title": "モデルプロバイダーを表示"
-        },
-        "standardize_citations": {
-          "help": "引用マークを標準の Markdown 脚注形式 [^1] に変換し、引用リストをフォーマットします。これにより、Markdown ドキュメントの引用が一貫性を持ち、読みやすくなります。",
-          "title": "引用を標準化"
-        },
-        "title": "Markdownエクスポート"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "有効にすると、エクスポートされたメッセージのタイトル名に高速モデルを使用します。この設定はMarkdownによるエクスポート方法全般にも影響します。",
-          "title": "高速モデルを使用してエクスポートされたメッセージのタイトルを命名"
-        }
-      },
       "minute_interval_one": "{{count}} 分",
       "minute_interval_other": "{{count}} 分",
-      "notion": {
-        "api_key": "Notion APIキー",
-        "api_key_placeholder": "Notion APIキーを入力してください",
-        "check": {
-          "button": "確認",
-          "empty_api_key": "Api_keyが設定されていません",
-          "empty_database_id": "Database_idが設定されていません",
-          "error": "接続エラー、ネットワーク設定とApi_keyとDatabase_idを確認してください",
-          "fail": "接続エラー、ネットワーク設定とApi_keyとDatabase_idを確認してください",
-          "success": "接続に成功しました。"
-        },
-        "database_id": "Notion データベースID",
-        "database_id_placeholder": "Notion データベースIDを入力してください",
-        "export_reasoning": {
-          "help": "有効にすると、Notionにエクスポートする際に思考チェーンの内容が含まれます。",
-          "title": "エクスポート時に思考チェーンを含める"
-        },
-        "page_name_key": "ページタイトルフィールド名",
-        "page_name_key_placeholder": "ページタイトルフィールド名を入力してください。デフォルトは Name です",
-        "title": "Notion 設定"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Nutstoreにバックアップ",
-          "modal": {
-            "filename": {
-              "placeholder": "バックアップファイル名を入力"
-            },
-            "title": "Nutstoreにバックアップ"
-          }
-        },
-        "checkConnection": {
-          "fail": "Nutstore接続に失敗しました",
-          "name": "接続確認",
-          "success": "Nutstoreに接続しました"
-        },
-        "isLogin": "ログイン済み",
-        "login": {
-          "button": "ログイン"
-        },
-        "logout": {
-          "button": "ログアウト",
-          "content": "ログアウト後、Nutstoreへのバックアップや復元ができなくなります。",
-          "title": "Nutstoreからログアウトしますか？"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "キャンセル",
-            "confirm": "確認",
-            "label": "新しいフォルダー"
-          }
-        },
-        "notLogin": "未ログイン",
-        "path": {
-          "label": "Nutstoreストレージパス",
-          "placeholder": "Nutstoreストレージパスを入力"
-        },
-        "pathSelector": {
-          "currentPath": "現在のパス",
-          "return": "戻る",
-          "title": "Nutstoreストレージパス"
-        },
-        "restore": {
-          "button": "Nutstoreから復元",
-          "confirm": {
-            "content": "Nutstoreからの復元により現在のデータが上書きされます。続行しますか？",
-            "title": "Nutstoreから復元"
-          }
-        },
-        "title": "Nutstore設定",
-        "username": "Nutstoreユーザー名"
-      },
-      "obsidian": {
-        "default_vault": "デフォルトの Obsidian 保管庫",
-        "default_vault_export_failed": "エクスポートに失敗しました",
-        "default_vault_fetch_error": "Obsidian 保管庫の取得に失敗しました",
-        "default_vault_loading": "Obsidian 保管庫を取得中...",
-        "default_vault_no_vaults": "Obsidian 保管庫が見つかりません",
-        "default_vault_placeholder": "デフォルトの Obsidian 保管庫を選択してください",
-        "title": "Obsidian 設定"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4271,27 +4061,6 @@
           "label": "S3互換ストレージ"
         }
       },
-      "siyuan": {
-        "api_url": "APIアドレス",
-        "api_url_placeholder": "例：http://127.0.0.1:6806",
-        "box_id": "ノートブックID",
-        "box_id_placeholder": "ノートブックIDを入力してください",
-        "check": {
-          "button": "チェック",
-          "empty_config": "APIアドレスとトークンを入力してください",
-          "error": "接続エラー、ネットワーク接続を確認してください",
-          "fail": "接続失敗、APIアドレスとトークンを確認してください",
-          "success": "接続成功",
-          "title": "接続チェック"
-        },
-        "root_path": "ドキュメントルートパス",
-        "root_path_placeholder": "例：/CherryStudio",
-        "title": "思源ノート設定",
-        "token": {
-          "label": "APIトークン"
-        },
-        "token_placeholder": "思源ノートトークンを入力してください"
-      },
       "title": "データ設定",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "バックアップ状態",
         "title": "WebDAV",
         "user": "WebDAVユーザー"
-      },
-      "yuque": {
-        "check": {
-          "button": "接続確認",
-          "empty_repo_url": "先にナレッジベースURLを入力してください",
-          "empty_token": "先にYuqueトークンを入力してください",
-          "fail": "Yuque接続確認に失敗しました",
-          "success": "Yuque接続確認に成功しました"
-        },
-        "help": "Yuqueトークンを取得",
-        "repo_url": "ナレッジベースURL",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Yuque設定",
-        "token": "Yuqueトークン",
-        "token_placeholder": "Yuqueトークンを入力してください"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "データ同期",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

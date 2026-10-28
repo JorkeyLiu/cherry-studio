@@ -82,9 +82,8 @@ describe('init.ts S7.10 — bootstrap topology and Keyv init — post-bootstrap 
     vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: vi.fn() }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: vi.fn() } }))
     vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
+    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {} })) } }))
     vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
 
     const { loggerService } = await import('@logger')
     const warnSpy = vi.fn()
@@ -148,9 +147,8 @@ describe('init.ts S7.10 — bootstrap topology and Keyv init — post-bootstrap 
     vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: vi.fn() }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: vi.fn() } }))
     vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
+    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {} })) } }))
     vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
 
     const { loggerService } = await import('@logger')
     const warnSpy = vi.fn()

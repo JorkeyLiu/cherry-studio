@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import Markdown from '../../Markdown/Markdown'
+import { useExportThinkingExpansion } from './exportThinkingExpansion'
 
 const logger = loggerService.withContext('ThinkingBlock')
 interface Props {
@@ -21,17 +22,20 @@ const ThinkingBlock: React.FC<Props> = ({ block }) => {
   const { t } = useTranslation()
   // LOCK-104: messages use the system font (fontSize remains user-configurable).
   const { fontSize, thoughtAutoCollapse } = useSettings()
-  const [activeKey, setActiveKey] = useState<'thought' | ''>(thoughtAutoCollapse ? '' : 'thought')
+  // An image export freezes its own expansion option (`true` = expanded,
+  // `false` = collapsed). It wins over both the live automatic-collapse setting
+  // and the streaming state, so the exported image never depends on the
+  // current chat toggle. Outside an export tree the override is `null` and the
+  // live behavior below is exactly the previous one.
+  const exportThinkingExpansion = useExportThinkingExpansion()
+  const autoCollapse = exportThinkingExpansion === null ? thoughtAutoCollapse : !exportThinkingExpansion
+  const [activeKey, setActiveKey] = useState<'thought' | ''>(autoCollapse ? '' : 'thought')
 
   const isThinking = useMemo(() => block.status === MessageBlockStatus.STREAMING, [block.status])
 
   useEffect(() => {
-    if (thoughtAutoCollapse) {
-      setActiveKey('')
-    } else {
-      setActiveKey('thought')
-    }
-  }, [isThinking, thoughtAutoCollapse])
+    setActiveKey(autoCollapse ? '' : 'thought')
+  }, [isThinking, autoCollapse])
 
   const copyThought = useCallback(() => {
     if (block.content) {

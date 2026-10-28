@@ -2,7 +2,6 @@
 import { loggerService } from '@logger'
 import { CopyIcon, DeleteIcon, EditIcon, RefreshIcon } from '@renderer/components/Icons'
 import InspectMessagePopup from '@renderer/components/Popups/InspectMessagePopup'
-import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
@@ -33,20 +32,11 @@ import { selectActiveBranchId, selectBranchNode } from '@renderer/store/topicBra
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Model, Topic, TranslateLanguage } from '@renderer/types'
 import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { captureScrollableAsBlob, captureScrollableAsDataURL, classNames } from '@renderer/utils'
+import { classNames } from '@renderer/utils'
 import { abortCompletion } from '@renderer/utils/abortController'
-import { copyMessageAsPlainText } from '@renderer/utils/copy'
 import { isAbortError } from '@renderer/utils/error'
-import {
-  exportMarkdownToJoplin,
-  exportMarkdownToSiyuan,
-  exportMarkdownToYuque,
-  exportMessageAsMarkdown,
-  exportMessageToNotes,
-  exportMessageToNotion,
-  messageToMarkdown
-} from '@renderer/utils/export'
-// import { withMessageThought } from '@renderer/utils/formats'
+import { exportMessageAsMarkdown, exportMessageToNotes, messageToMarkdown } from '@renderer/utils/export'
+import { saveExportImage } from '@renderer/utils/exportFile'
 import { removeTrailingDoubleSpaces } from '@renderer/utils/markdown'
 import {
   findMainTextBlocks,
@@ -367,7 +357,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
 
   const isUserMessage = message.role === 'user'
 
-  const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
   const dispatch = useAppDispatch()
   // Stable shared viewport command surface (never the versioned value): the
   // insert gesture's deferred-layout declaration/settlement goes to the SAME
@@ -697,95 +686,35 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
         key: 'export',
         icon: <Upload size={15} />,
         children: [
-          exportMenuOptions.plain_text && {
-            label: t('chat.topics.copy.plain_text'),
-            key: 'copy_message_plain_text',
-            onClick: () => copyMessageAsPlainText(message)
-          },
-          exportMenuOptions.image && {
+          {
             label: t('chat.topics.copy.image'),
             key: 'img',
             onClick: async () => {
-              await captureScrollableAsBlob(messageContainerRef, async (blob) => {
-                if (blob) {
-                  await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-                }
-              })
+              // Shared snapshot sampling with the image file export: the
+              // clipboard path only differs in how it consumes the capture.
+              const { captureMessageExportImage } = await import('./topicExportImage')
+              const result = await captureMessageExportImage({ message })
+              if (result.status !== 'captured') return
+              const blob = await (await fetch(result.dataUrl)).blob()
+              await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
             }
           },
-          exportMenuOptions.image && {
+          {
             label: t('chat.topics.export.image'),
             key: 'image',
             onClick: async () => {
-              const imageData = await captureScrollableAsDataURL(messageContainerRef)
+              const { captureMessageExportImage } = await import('./topicExportImage')
+              const result = await captureMessageExportImage({ message })
+              if (result.status !== 'captured') return
               const title = await getMessageTitle(message)
-              if (title && imageData) {
-                const success = await window.api.file.saveImage(title, imageData)
-                if (success) window.toast.success(t('chat.topics.export.image_saved'))
-              }
+              const saved = await saveExportImage(title, result.dataUrl)
+              if (saved) window.toast.success(t('chat.topics.export.image_saved'))
             }
           },
-          exportMenuOptions.markdown && {
+          {
             label: t('chat.topics.export.md.label'),
             key: 'markdown',
             onClick: () => exportMessageAsMarkdown(message)
-          },
-          exportMenuOptions.markdown_reason && {
-            label: t('chat.topics.export.md.reason'),
-            key: 'markdown_reason',
-            onClick: () => exportMessageAsMarkdown(message, true)
-          },
-          exportMenuOptions.docx && {
-            label: t('chat.topics.export.word'),
-            key: 'word',
-            onClick: async () => {
-              const markdown = messageToMarkdown(message)
-              const title = await getMessageTitle(message)
-              void window.api.export.toWord(markdown, title)
-            }
-          },
-          exportMenuOptions.notion && {
-            label: t('chat.topics.export.notion'),
-            key: 'notion',
-            onClick: async () => {
-              const title = await getMessageTitle(message)
-              const markdown = messageToMarkdown(message)
-              void exportMessageToNotion(title, markdown, message)
-            }
-          },
-          exportMenuOptions.yuque && {
-            label: t('chat.topics.export.yuque'),
-            key: 'yuque',
-            onClick: async () => {
-              const title = await getMessageTitle(message)
-              const markdown = messageToMarkdown(message)
-              void exportMarkdownToYuque(title, markdown)
-            }
-          },
-          exportMenuOptions.obsidian && {
-            label: t('chat.topics.export.obsidian'),
-            key: 'obsidian',
-            onClick: async () => {
-              const title = topic.name?.replace(/\\/g, '_') || 'Untitled'
-              await ObsidianExportPopup.show({ title, message, processingMethod: '1' })
-            }
-          },
-          exportMenuOptions.joplin && {
-            label: t('chat.topics.export.joplin'),
-            key: 'joplin',
-            onClick: async () => {
-              const title = await getMessageTitle(message)
-              void exportMarkdownToJoplin(title, message)
-            }
-          },
-          exportMenuOptions.siyuan && {
-            label: t('chat.topics.export.siyuan'),
-            key: 'siyuan',
-            onClick: async () => {
-              const title = await getMessageTitle(message)
-              const markdown = messageToMarkdown(message)
-              void exportMarkdownToSiyuan(title, markdown)
-            }
           }
         ].filter(Boolean)
       }
@@ -810,16 +739,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     })
   }, [
     dropdownRootAllowKeys,
-    exportMenuOptions.docx,
-    exportMenuOptions.image,
-    exportMenuOptions.joplin,
-    exportMenuOptions.markdown,
-    exportMenuOptions.markdown_reason,
-    exportMenuOptions.notion,
-    exportMenuOptions.obsidian,
-    exportMenuOptions.plain_text,
-    exportMenuOptions.siyuan,
-    exportMenuOptions.yuque,
     handleTranslate,
     isAssistantMessage,
     isGrouped,

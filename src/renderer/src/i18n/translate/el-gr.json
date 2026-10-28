@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "Αντιγραφή ως εικόνα",
         "md": "Αντιγραφή ως Markdown",
-        "plain_text": "Αντιγραφή ως απλό κείμενο (αφαίρεση Markdown)",
         "title": "Αντιγραφή"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "Εξαγωγή ως εικόνα",
         "image_saved": "Η εικόνα αποθηκεύτηκε με επιτυχία",
-        "joplin": "Εξαγωγή στο Joplin",
         "md": {
-          "label": "Εξαγωγή ως Markdown",
-          "reason": "Εξαγωγή σε Markdown (περιλαμβανομένης της σκέψης)"
+          "label": "Εξαγωγή ως Markdown"
         },
         "notes": "Εξαγωγή σε σημειώσεις",
-        "notion": "Εξαγωγή στο Notion",
-        "obsidian": "Εξαγωγή στο Obsidian",
-        "obsidian_atributes": "Ρυθμίσεις σημείου σημείωσης",
-        "obsidian_btn": "ΟΚ",
-        "obsidian_created": "Ημερομηνία δημιουργίας",
-        "obsidian_created_placeholder": "Επιλέξτε την ημερομηνία δημιουργίας",
-        "obsidian_export_failed": "Η εξαγωγή απέτυχε",
-        "obsidian_export_success": "Η εξαγωγή ήταν επιτυχής",
-        "obsidian_fetch_error": "Αποτυχία λήψης της αποθήκης Obsidian",
-        "obsidian_fetch_folders_error": "Αποτυχία λήψης της δομής φακέλων",
-        "obsidian_loading": "Φόρτωση...",
-        "obsidian_no_vault_selected": "Παρακαλώ επιλέξτε μια αποθήκη πρώτα",
-        "obsidian_no_vaults": "Δεν βρέθηκε αποθήκη Obsidian",
-        "obsidian_operate": "Επεξεργασία μεθόδου",
-        "obsidian_operate_append": "Επισυναγωγή",
-        "obsidian_operate_new_or_overwrite": "Νέο (επιστροφή σε επιστροφή)",
-        "obsidian_operate_placeholder": "Επιλέξτε την μεθόδο επεξεργασίας",
-        "obsidian_operate_prepend": "Προσθήκη",
-        "obsidian_path": "Διαδρομή",
-        "obsidian_path_placeholder": "Επιλέξτε διαδρομή",
-        "obsidian_reasoning": "Εξαγωγή αλυσίδας σκέψης",
-        "obsidian_root_directory": "Κυρίως κατάλογος",
-        "obsidian_select_vault_first": "Παρακαλώ επιλέξτε πρώτα μια αποθήκη",
-        "obsidian_source": "Πηγή",
-        "obsidian_source_placeholder": "Εισάγετε την πηγή",
-        "obsidian_tags": "Ετικέτες",
-        "obsidian_tags_placeholder": "Εισάγετε τις ετικέτες, χωρισμένες με κόμματα στα Αγγλικά, τα ετικέτα μπορεί να μην είναι μόνο αριθμοί",
-        "obsidian_title": "Τίτλος",
-        "obsidian_title_placeholder": "Εισάγετε τον τίτλο",
-        "obsidian_title_required": "Ο τίτλος δεν μπορεί να είναι κενός",
-        "obsidian_vault": "Αποθήκη Obsidian",
-        "obsidian_vault_placeholder": "Επιλέξτε το όνομα της αποθήκης",
-        "siyuan": "Εξαγωγή στο Siyuan Notepad",
-        "title": "Εξαγωγή",
-        "title_naming_failed": "Η δημιουργία του τίτλου απέτυχε, θα χρησιμοποιηθεί ο προεπιλεγμένος τίτλος",
-        "title_naming_success": "Ο τίτλος δημιουργήθηκε επιτυχώς",
-        "wait_for_title_naming": "Γενικευμένος τίτλος...",
-        "word": "Εξαγωγή ως Word",
-        "yuque": "Εξαγωγή στο Yuque"
+        "title": "Εξαγωγή"
       },
       "list": "Λίστα θεμάτων",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "Ημερομηνία Δημιουργίας",
     "last_updated": "Τελευταία ενημέρωση",
     "messages": "Αριθμός Μηνυμάτων",
-    "notion": {
-      "reasoning_truncated": "Η αλυσίδα σκέψης δεν μπορεί να διαιρεθεί, έχει κοπεί"
-    },
     "user": "Χρήστης"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "Παρακαλώ επιλέξτε ένα μοντέλο"
         },
-        "nutstore": "Μη έγκυρη ρύθμιση Nutstore",
-        "nutstore_token": "Μη έγκυρο Token Nutstore",
         "proxy": {
           "url": "Μη έγκυρη διεύθυνση προξενικού"
         },
         "webdav": "Μη έγκυρη ρύθμιση WebDAV"
-      },
-      "joplin": {
-        "export": "Η εξαγωγή του Joplin απέτυχε, παρακαλείστε να ελέγξετε τη σύνδεση και τη διαμόρφωση κατά τη διατύπωση του χειρισμού",
-        "no_config": "Δεν έχετε διαθέσιμο το Token εξουσιοδότησης του Joplin ή το URL του Joplin"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "απέτυχε η εξαγωγή των σημειώσεων"
       },
-      "notion": {
-        "export": "Σφάλμα στην εξαγωγή του Notion, παρακαλείστε να ελέγξετε τη σύνδεση και τη διαμόρφωση κατά τη διατύπωση του χειρισμού",
-        "no_api_key": "Δεν έχετε διαθέσιμο το API Key του Notion ή το ID της βάσης του Notion",
-        "no_content": "Δεν υπάρχει περιεχόμενο για εξαγωγή στο Notion"
-      },
-      "siyuan": {
-        "export": "Η έκθεση σημειώσεων Siyuan απέτυχε, ελέγξτε την κατάσταση σύνδεσης και τις ρυθμίσεις σύμφωνα με τα έγγραφα",
-        "no_config": "Δεν έχει ρυθμιστεί η διεύθυνση API ή το Token του Siyuan Notes"
-      },
       "table": {
         "invalid": "Αδυναμία ανάκτησης έγκυρων δεδομένων πίνακα"
       },
-      "unknown": "Άγνωστο σφάλμα",
-      "yuque": {
-        "export": "Σφάλμα στην εξαγωγή της Yuque, παρακαλείστε να ελέγξετε τη σύνδεση και τη διαμόρφωση κατά τη διατύπωση του χειρισμού",
-        "no_config": "Δεν έχετε διαθέσιμο το Token της Yuque ή το URL της βάσης της Yuque"
-      }
+      "unknown": "Άγνωστο σφάλμα"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "Λειτουργία σύνδεσης ενεργοποιημένη, αγνοείται η βάση γνώσεων"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Εξάγεται στο Notion ({{current}}/{{total}})...",
-        "preparing": "Ετοιμάζεται η εξαγωγή στο Notion..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Η εξαγωγή του Excel ολοκληρώθηκε με επιτυχία"
       },
-      "joplin": {
-        "export": "Η εξαγωγή στο Joplin ήταν επιτυχής"
-      },
       "markdown": {
         "export": {
           "preconf": "Η εξαγωγή αρχείου Markdown στο προϋπολογισμένο μοντέλο ήταν επιτυχής",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "Επιτυχής εξαγωγή σε σημείωση"
-      },
-      "notion": {
-        "export": "Η εξαγωγή στο Notion ήταν επιτυχής"
-      },
-      "siyuan": {
-        "export": "Επιτυχής εξαγωγή στις σημειώσεις Siyuan"
-      },
-      "yuque": {
-        "export": "Η εξαγωγή στη Yuque ήταν επιτυχής"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "Ρυθμίσεις βασικών δεδομένων",
         "cloud_storage": "Ρυθμίσεις αποθήκευσης στο νέφος",
         "export_settings": "Ρυθμίσεις εξαγωγής",
-        "import_settings": "Εισαγωγή Ρυθμίσεων",
-        "third_party": "Σύνδεση τρίτων"
+        "import_settings": "Εισαγωγή Ρυθμίσεων"
       },
-      "export_menu": {
-        "docx": "Εξαγωγή σε Word",
-        "image": "Εξαγωγή ως εικόνα",
-        "joplin": "Εξαγωγή στο Joplin",
-        "markdown": "Εξαγωγή σε Markdown",
-        "markdown_reason": "Εξαγωγή σε Markdown (περιλαμβάνει σκέψη)",
-        "notes": "εξαγωγή στις σημειώσεις",
-        "notion": "Εξαγωγή στο Notion",
-        "obsidian": "Εξαγωγή στο Obsidian",
-        "plain_text": "Αντιγραφή ως απλό κείμενο",
-        "siyuan": "Εξαγωγή στο Ση-Υάν",
-        "title": "Εξαγωγή ρυθμίσεων μενού",
-        "yuque": "Εξαγωγή στο Yuque"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Όταν ενεργοποιηθεί, θα εξαιρούνται οι αναφορές κατά την εξαγωγή σε Markdown.",
+          "title": "Εξαγωγή αναφορών"
+        },
+        "help": "Εάν συμπληρώσετε, κάθε φορά που θα εξαγάγετε θα αποθηκεύεται αυτόματα σε αυτή τη διαδρομή· διαφορετικά, θα εμφανιστεί μια διαβεβαίωση αποθήκευσης.",
+        "include_thinking": {
+          "help": "Συμπερίληψη του περιεχομένου σκέψης κατά την εξαγωγή εικόνων ή Markdown.",
+          "title": "Συμπερίληψη της σκέψης"
+        },
+        "path": "Προεπιλογή διαδρομής εξαγωγής",
+        "path_placeholder": "Διαδρομή εξαγωγής",
+        "select": "Επιλογή",
+        "standardize_citations": {
+          "help": "Εάν ενεργοποιηθεί, θα μετατρέψει τις σημειώσεις σε τυπικό μορφότυπο Markdown [^1] και θα μορφοποιήσει τη λίστα σημειώσεων.",
+          "title": "Μορφοποίηση σημειώσεων"
+        },
+        "title": "Επιλογές εξαγωγής θεμάτων"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Εισαγωγή από ZIP Cherry Studio",
         "cherrystudio_button": "Εισαγωγή αντιγράφου ασφαλείας ZIP",
         "title": "Εισαγωγή Δεδομένων Εξωτερικής Εφαρμογής"
-      },
-      "joplin": {
-        "check": {
-          "button": "Έλεγχος",
-          "empty_token": "Παρακαλούμε εισάγετε τον κωδικό προσβασιμότητας του Joplin",
-          "empty_url": "Παρακαλούμε εισάγετε την URL που είναι συνδεδεμένη με την υπηρεσία κοπής του Joplin",
-          "fail": "Η επαλήθευση σύνδεσης του Joplin απέτυχε",
-          "success": "Η επαλήθευση σύνδεσης του Joplin ήταν επιτυχής"
-        },
-        "export_reasoning": {
-          "help": "Όταν είναι ενεργοποιημένο, θα συμπεριλαμβάνει το περιεχόμενο της αλυσίδας σκέψης κατά την εξαγωγή στο Joplin.",
-          "title": "Συμπερίληψη Αλυσίδας Σκέψης κατά την Εξαγωγή"
-        },
-        "help": "Σ τις επιλογές του Joplin, ενεργοποιήστε την υπηρεσία περικοπής ιστότοπων (χωρίς εγκατάσταση πρόσθετων στο περιηγητή), επιβεβαιώστε τον θύραρι και αντιγράψτε τον κωδικό πρόσβασης.",
-        "title": "Ρύθμιση Joplin",
-        "token": "Κωδικός πρόσβασης Joplin",
-        "token_placeholder": "Εισαγάγετε τον κωδικό πρόσβασης Joplin",
-        "url": "URL υπηρεσίας περικοπής Joplin",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Προειδοποίηση χώρου δίσκου",
@@ -4031,122 +3935,8 @@
         "syncStatus": "Κατάσταση αντιγράφου ασφαλείας",
         "title": "Τοπικό αντίγραφο ασφαλείας"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Όταν ενεργοποιηθεί, θα εξαιρούνται οι αναφορές κατά την εξαγωγή σε Markdown.",
-          "title": "Εξαγωγή αναφορών"
-        },
-        "force_dollar_math": {
-          "help": "Κάνοντας το ενεργό, κατά την εξαγωγή Markdown, θα χρησιμοποιείται αναγκαστικά το $$ για να σημειώσετε την εξίσωση LaTeX. Νομίζετε: Αυτή η επιλογή θα επηρεάσει και όλες τις μεθόδους εξαγωγής μέσω Markdown, όπως το Notion, Yuyu κλπ.",
-          "title": "Ανάγκη χρήσης $$ για να σημειώσετε την εξίσωση LaTeX"
-        },
-        "help": "Εάν συμπληρώσετε, κάθε φορά που θα εξαγάγετε θα αποθηκεύεται αυτόματα σε αυτή τη διαδρομή· διαφορετικά, θα εμφανιστεί μια διαβεβαίωση αποθήκευσης.",
-        "path": "Προεπιλογή διαδρομής εξαγωγής",
-        "path_placeholder": "Διαδρομή εξαγωγής",
-        "select": "Επιλογή",
-        "show_model_name": {
-          "help": "Όταν ενεργοποιηθεί, το όνομα του μοντέλου θα εμφανίζεται κατά την εξαγωγή σε Markdown. Σημείωση: Αυτό επηρεάζει επίσης όλους τους τρόπους εξαγωγής μέσω Markdown, όπως Notion, Yuque κ.λπ.",
-          "title": "Χρήση ονόματος μοντέλου κατά την εξαγωγή"
-        },
-        "show_model_provider": {
-          "help": "Εμφάνιση του παρόχου μοντέλου κατά την εξαγωγή σε Markdown, π.χ. OpenAI, Gemini κ.λπ.",
-          "title": "Εμφάνιση παρόχου μοντέλου"
-        },
-        "standardize_citations": {
-          "help": "Εάν ενεργοποιηθεί, θα μετατρέψει τις σημειώσεις σε τυπικό μορφότυπο Markdown [^1] και θα μορφοποιήσει τη λίστα σημειώσεων.",
-          "title": "Μορφοποίηση σημειώσεων"
-        },
-        "title": "Εξαγωγή Markdown"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "Όταν ενεργοποιηθεί, χρησιμοποιεί το γρήγορο μοντέλο για να ονομάσει τον τίτλο των εξαγόμενων μηνυμάτων. Αυτό επηρεάζει επίσης όλους τους τρόπους εξαγωγής μέσω Markdown.",
-          "title": "Χρησιμοποιήστε το γρήγορο μοντέλο για να ονομάσετε τον τίτλο των εξαγόμενων μηνυμάτων"
-        }
-      },
       "minute_interval_one": "{{count}} λεπτά",
       "minute_interval_other": "{{count}} λεπτά",
-      "notion": {
-        "api_key": "Κλειδί Notion",
-        "api_key_placeholder": "Εισαγάγετε το κλειδί Notion",
-        "check": {
-          "button": "Έλεγχος",
-          "empty_api_key": "Δεν έχει ρυθμιστεί η κλειδιά API",
-          "empty_database_id": "Δεν έχει ρυθμιστεί ο ID της βάσης δεδομένων",
-          "error": "Σφάλμα σύνδεσης, παρακαλείστε ελέγξτε το δίκτυο και αν το API key και το Database ID είναι σωστά",
-          "fail": "Η σύνδεση απέτυχε, παρακαλείστε ελέγξτε το δίκτυο και αν το API key και το Database ID είναι σωστά",
-          "success": "Η σύνδεση ήταν επιτυχής"
-        },
-        "database_id": "ID Βάσης Δεδομένων Notion",
-        "database_id_placeholder": "Εισαγάγετε το ID Βάσης Δεδομένων Notion",
-        "export_reasoning": {
-          "help": "Όταν ενεργοποιηθεί, το αλυσίδωμα σκέψης θα συμπεριλαμβάνεται κατά την εξαγωγή στο Notion.",
-          "title": "Συμπερίληψη αλυσιδώματος σκέψης κατά την εξαγωγή"
-        },
-        "page_name_key": "Όνομα πεδίου τίτλου σελίδας",
-        "page_name_key_placeholder": "Εισαγάγετε το όνομα του πεδίου τίτλου σελίδας, προεπιλογή: Name",
-        "title": "Ρυθμίσεις του Notion"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Αντίγραφο ασφαλείας στο Jotunn Cloud",
-          "modal": {
-            "filename": {
-              "placeholder": "Παρακαλώ εισαγάγετε το όνομα του αρχείου δημιουργίας αντιγράφου ασφαλείας"
-            },
-            "title": "Δημιουργία αντιγράφων ασφαλείας στο Jianshu Cloud"
-          }
-        },
-        "checkConnection": {
-          "fail": "Αποτυχία σύνδεσης στο Jotunn Cloud",
-          "name": "Έλεγχος σύνδεσης",
-          "success": "Συνδεδεμένο στο Jotunn Cloud"
-        },
-        "isLogin": "Συνδεδεμένος",
-        "login": {
-          "button": "Σύνδεση"
-        },
-        "logout": {
-          "button": "Αποσύνδεση",
-          "content": "Μετά την αποσύνδεση δεν θα μπορείτε να κάνετε αντίγραφο ασφαλείας ή να ανακτήσετε δεδομένα από το Jotunn Cloud",
-          "title": "Επιβεβαίωση αποσύνδεσης από το Jotunn Cloud;"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Άκυρο",
-            "confirm": "Επιβεβαίωση",
-            "label": "Νέος φάκελος"
-          }
-        },
-        "notLogin": "Μη συνδεδεμένος",
-        "path": {
-          "label": "Διαδρομή αποθήκευσης Jotunn Cloud",
-          "placeholder": "Παρακαλώ εισάγετε τη διαδρομή αποθήκευσης του Jotunn Cloud"
-        },
-        "pathSelector": {
-          "currentPath": "Τρέχουσα διαδρομή",
-          "return": "Πίσω",
-          "title": "Διαδρομή αποθήκευσης Jotunn Cloud"
-        },
-        "restore": {
-          "button": "Επαναφορά από το Jotunn Cloud",
-          "confirm": {
-            "content": "Η επαναφορά από το Nutstore θα αντικαταστήσει τα τρέχοντα δεδομένα. Θέλετε να συνεχίσετε;",
-            "title": "Επαναφορά από το Nutstore"
-          }
-        },
-        "title": "Ρυθμίσεις Jotunn Cloud",
-        "username": "Όνομα χρήστη Jotunn Cloud"
-      },
-      "obsidian": {
-        "default_vault": "Προεπιλεγμένο αποθετήριο Obsidian",
-        "default_vault_export_failed": "Η εξαγωγή απέτυχε",
-        "default_vault_fetch_error": "Αποτυχία ανάκτησης αποθετηρίου Obsidian",
-        "default_vault_loading": "Ανάκτηση αποθετηρίου Obsidian...",
-        "default_vault_no_vaults": "Δεν βρέθηκε αποθετήριο Obsidian",
-        "default_vault_placeholder": "Επιλέξτε προεπιλεγμένο αποθετήριο Obsidian",
-        "title": "Ρύθμιση του Obsidian"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4271,27 +4061,6 @@
           "label": "Αποθήκευση συμβατή με S3"
         }
       },
-      "siyuan": {
-        "api_url": "Διεύθυνση API",
-        "api_url_placeholder": "Παράδειγμα: http://127.0.0.1:6806",
-        "box_id": "ID Υπολογιστή",
-        "box_id_placeholder": "Εισάγετε το ID υπολογιστή",
-        "check": {
-          "button": "Έλεγχος",
-          "empty_config": "Παρακαλώ εισάγετε τη διεύθυνση API και το token",
-          "error": "Αιφνίδια διακοπή σύνδεσης, παρακαλώ ελέγξτε τη σύνδεση δικτύου",
-          "fail": "Αποτυχία σύνδεσης, παρακαλώ ελέγξτε τη διεύθυνση API και το token",
-          "success": "Η σύνδεση ήταν επιτυχής",
-          "title": "Έλεγχος Σύνδεσης"
-        },
-        "root_path": "Κεντρική διαδρομή εγγράφων",
-        "root_path_placeholder": "Παράδειγμα: /CherryStudio",
-        "title": "Ρυθμίσεις του Siyuan Σημειώσεων",
-        "token": {
-          "label": "Κλειδί API"
-        },
-        "token_placeholder": "Εισάγετε το κλειδί των Siyuan Σημειώσεων"
-      },
       "title": "Ρυθμίσεις δεδομένων",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "Κατάσταση αντιγραφής ασφαλείας",
         "title": "WebDAV",
         "user": "Όνομα χρήστη WebDAV"
-      },
-      "yuque": {
-        "check": {
-          "button": "Έλεγχος",
-          "empty_repo_url": "Παρακαλώ εισάγετε το URL του βιβλιοθηκέυματος πρώτα",
-          "empty_token": "Παρακαλώ εισάγετε τον κλειδί του Yuluxian πρώτα",
-          "fail": "Απέτυχε η επαλήθευση σύνδεσης με το Yuluxian",
-          "success": "Η επαλήθευση σύνδεσης με το Yuluxian ήταν επιτυχής"
-        },
-        "help": "Λήψη Token του Yusi",
-        "repo_url": "Διεύθυνση URL του βιβλιοθικίου",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Ρύθμιση Yusi",
-        "token": "Token του Yusi",
-        "token_placeholder": "Παρακαλούμε εισάγετε το Token του Yusi"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "Συγχρονισμός δεδομένων",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

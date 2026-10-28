@@ -38,8 +38,6 @@ import type {
 import { API_SERVER_DEFAULTS, UpgradeChannel } from '@shared/config/constant'
 import { v4 as uuid } from 'uuid'
 
-import type { RemoteSyncState } from './backup'
-
 export type SendMessageShortcut = 'Enter' | 'Shift+Enter' | 'Ctrl+Enter' | 'Command+Enter' | 'Alt+Enter'
 
 // Canonical resizable sidebar width bounds (single source of truth — do not
@@ -60,8 +58,6 @@ export const normalizeSidebarWidth = (width: unknown): number => {
 
 // Re-export for backward compatibility
 export { DEFAULT_SIDEBAR_ICONS }
-
-export interface NutstoreSyncRuntime extends RemoteSyncState {}
 
 export type AssistantIconType = 'model' | 'emoji' | 'none'
 
@@ -174,32 +170,21 @@ export interface SettingsState {
    *  for Cherry Studio import compatibility; this settings-level default is
    *  removed (migration 218). */
   readClipboardAtStartup: boolean
-  notionDatabaseID: string | null
-  notionApiKey: string | null
-  notionPageNameKey: string | null
-  markdownExportPath: string | null
-  forceDollarMathInMarkdown: boolean
-  useTopicNamingForMessageTitle: boolean
-  showModelNameInMarkdown: boolean
-  showModelProviderInMarkdown: boolean
+  /**
+   * Default target directory for EVERY file export (Markdown / JSON / image).
+   * `null` means the native save dialog picks the location per export.
+   */
+  exportPath: string | null
+  /**
+   * Whether Markdown file exports include the assistant reasoning section.
+   * Document-level default only: JSON export payloads are never filtered by it.
+   */
+  exportIncludeThinking: boolean
   thoughtAutoCollapse: boolean
-  notionExportReasoning: boolean
   excludeCitationsInExport: boolean
   standardizeCitationsInExport: boolean
-  yuqueToken: string | null
-  yuqueUrl: string | null
-  yuqueRepoId: string | null
-  joplinToken: string | null
-  joplinUrl: string | null
-  joplinExportReasoning: boolean
-  defaultObsidianVault: string | null
   /** This state is actaully default assistant preset */
   defaultAgent: string | null
-  // 思源笔记配置
-  siyuanApiUrl: string | null
-  siyuanToken: string | null
-  siyuanBoxId: string | null
-  siyuanRootPath: string | null
   // 订阅的助手地址
   agentssubscribeUrl: string | null
   // 隐私设置
@@ -220,19 +205,6 @@ export interface SettingsState {
   disableHardwareAcceleration: boolean
   // 使用系统标题栏 (仅Linux)
   useSystemTitleBar: boolean
-  exportMenuOptions: {
-    image: boolean
-    markdown: boolean
-    markdown_reason: boolean
-    notion: boolean
-    yuque: boolean
-    joplin: boolean
-    obsidian: boolean
-    siyuan: boolean
-    docx: boolean
-    plain_text: boolean
-    notes: boolean
-  }
   // OpenAI
   openAI: {
     // TODO: it's a bad naming. rename it to reasoningSummary in v2.
@@ -345,30 +317,12 @@ export const initialState: SettingsState = {
   enableQuickAssistant: false,
   clickTrayToShowQuickAssistant: false,
   readClipboardAtStartup: true,
-  notionDatabaseID: '',
-  notionApiKey: '',
-  notionPageNameKey: 'Name',
-  markdownExportPath: null,
-  forceDollarMathInMarkdown: false,
-  useTopicNamingForMessageTitle: false,
-  showModelNameInMarkdown: false,
-  showModelProviderInMarkdown: false,
+  exportPath: null,
+  exportIncludeThinking: false,
   thoughtAutoCollapse: true,
-  notionExportReasoning: false,
   excludeCitationsInExport: false,
   standardizeCitationsInExport: false,
-  yuqueToken: '',
-  yuqueUrl: '',
-  yuqueRepoId: '',
-  joplinToken: '',
-  joplinUrl: '',
-  joplinExportReasoning: false,
-  defaultObsidianVault: null,
   defaultAgent: null,
-  siyuanApiUrl: null,
-  siyuanToken: null,
-  siyuanBoxId: null,
-  siyuanRootPath: null,
   agentssubscribeUrl: '',
   privacyPolicyVersion: LATEST_PRIVACY_POLICY_VERSION,
   enableDataCollection: true,
@@ -384,19 +338,6 @@ export const initialState: SettingsState = {
   disableHardwareAcceleration: false,
   // 使用系统标题栏 (仅Linux)
   useSystemTitleBar: false,
-  exportMenuOptions: {
-    image: true,
-    markdown: true,
-    markdown_reason: true,
-    notion: true,
-    yuque: true,
-    joplin: true,
-    obsidian: true,
-    siyuan: true,
-    docx: true,
-    plain_text: true,
-    notes: true
-  },
   // OpenAI
   openAI: {
     summaryText: 'auto',
@@ -598,35 +539,14 @@ const settingsSlice = createSlice({
         state.sidebarIcons.disabled = action.payload.disabled
       }
     },
-    setNotionDatabaseID: (state, action: PayloadAction<string>) => {
-      state.notionDatabaseID = action.payload
+    setExportPath: (state, action: PayloadAction<string | null>) => {
+      state.exportPath = action.payload
     },
-    setNotionApiKey: (state, action: PayloadAction<string>) => {
-      state.notionApiKey = action.payload
-    },
-    setNotionPageNameKey: (state, action: PayloadAction<string>) => {
-      state.notionPageNameKey = action.payload
-    },
-    setmarkdownExportPath: (state, action: PayloadAction<string | null>) => {
-      state.markdownExportPath = action.payload
-    },
-    setForceDollarMathInMarkdown: (state, action: PayloadAction<boolean>) => {
-      state.forceDollarMathInMarkdown = action.payload
-    },
-    setUseTopicNamingForMessageTitle: (state, action: PayloadAction<boolean>) => {
-      state.useTopicNamingForMessageTitle = action.payload
-    },
-    setShowModelNameInMarkdown: (state, action: PayloadAction<boolean>) => {
-      state.showModelNameInMarkdown = action.payload
-    },
-    setShowModelProviderInMarkdown: (state, action: PayloadAction<boolean>) => {
-      state.showModelProviderInMarkdown = action.payload
+    setExportIncludeThinking: (state, action: PayloadAction<boolean>) => {
+      state.exportIncludeThinking = action.payload
     },
     setThoughtAutoCollapse: (state, action: PayloadAction<boolean>) => {
       state.thoughtAutoCollapse = action.payload
-    },
-    setNotionExportReasoning: (state, action: PayloadAction<boolean>) => {
-      state.notionExportReasoning = action.payload
     },
     setExcludeCitationsInExport: (state, action: PayloadAction<boolean>) => {
       state.excludeCitationsInExport = action.payload
@@ -634,44 +554,11 @@ const settingsSlice = createSlice({
     setStandardizeCitationsInExport: (state, action: PayloadAction<boolean>) => {
       state.standardizeCitationsInExport = action.payload
     },
-    setYuqueToken: (state, action: PayloadAction<string>) => {
-      state.yuqueToken = action.payload
-    },
-    setYuqueRepoId: (state, action: PayloadAction<string>) => {
-      state.yuqueRepoId = action.payload
-    },
-    setYuqueUrl: (state, action: PayloadAction<string>) => {
-      state.yuqueUrl = action.payload
-    },
-    setJoplinToken: (state, action: PayloadAction<string>) => {
-      state.joplinToken = action.payload
-    },
-    setJoplinUrl: (state, action: PayloadAction<string>) => {
-      state.joplinUrl = action.payload
-    },
-    setJoplinExportReasoning: (state, action: PayloadAction<boolean>) => {
-      state.joplinExportReasoning = action.payload
-    },
     setMessageNavigation: (state, action: PayloadAction<boolean>) => {
       state.messageNavigation = action.payload
     },
-    setDefaultObsidianVault: (state, action: PayloadAction<string>) => {
-      state.defaultObsidianVault = action.payload
-    },
     setDefaultAgent: (state, action: PayloadAction<string>) => {
       state.defaultAgent = action.payload
-    },
-    setSiyuanApiUrl: (state, action: PayloadAction<string>) => {
-      state.siyuanApiUrl = action.payload
-    },
-    setSiyuanToken: (state, action: PayloadAction<string>) => {
-      state.siyuanToken = action.payload
-    },
-    setSiyuanBoxId: (state, action: PayloadAction<string>) => {
-      state.siyuanBoxId = action.payload
-    },
-    setSiyuanRootPath: (state, action: PayloadAction<string>) => {
-      state.siyuanRootPath = action.payload
     },
     setAgentssubscribeUrl: (state, action: PayloadAction<string>) => {
       state.agentssubscribeUrl = action.payload
@@ -687,9 +574,6 @@ const settingsSlice = createSlice({
     },
     setSpellCheckLanguages: (state, action: PayloadAction<string[]>) => {
       state.spellCheckLanguages = action.payload
-    },
-    setExportMenuOptions: (state, action: PayloadAction<typeof initialState.exportMenuOptions>) => {
-      state.exportMenuOptions = action.payload
     },
     setInjectContextTimestamp: (state, action: PayloadAction<boolean>) => {
       state.injectContextTimestamp = action.payload
@@ -781,8 +665,6 @@ const settingsSlice = createSlice({
 })
 
 export const {
-  setShowModelNameInMarkdown,
-  setShowModelProviderInMarkdown,
   setShowAssistants,
   toggleShowAssistants,
   setShowTopics,
@@ -829,35 +711,18 @@ export const {
   setCustomCss,
   setTopicNamingPrompt,
   setSidebarIcons,
-  setNotionDatabaseID,
-  setNotionApiKey,
-  setNotionPageNameKey,
-  setmarkdownExportPath,
-  setForceDollarMathInMarkdown,
-  setUseTopicNamingForMessageTitle,
+  setExportPath,
+  setExportIncludeThinking,
   setThoughtAutoCollapse,
-  setNotionExportReasoning,
   setExcludeCitationsInExport,
   setStandardizeCitationsInExport,
-  setYuqueToken,
-  setYuqueRepoId,
-  setYuqueUrl,
-  setJoplinToken,
-  setJoplinUrl,
-  setJoplinExportReasoning,
   setMessageNavigation,
-  setDefaultObsidianVault,
   setDefaultAgent,
-  setSiyuanApiUrl,
-  setSiyuanToken,
-  setSiyuanBoxId,
-  setSiyuanRootPath,
   setAgentssubscribeUrl,
   setEnableDataCollection,
   setPrivacyPolicyVersion,
   setEnableSpellCheck,
   setSpellCheckLanguages,
-  setExportMenuOptions,
   setInjectContextTimestamp,
   setIncludeHistoryMediaContext,
   setConfirmDeleteMessage,

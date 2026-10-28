@@ -1,7 +1,7 @@
 // Import Message, MessageBlock, and necessary enums
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
+import { beforeEach, describe, expect, it, test, vi } from 'vitest'
 
 // --- Mocks Setup ---
 
@@ -98,7 +98,6 @@ import { TopicType } from '@renderer/types'
 import { markdownToPlainText } from '@renderer/utils/markdown'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 
-import { copyMessageAsPlainText } from '../copy'
 import {
   getTitleFromString,
   messagesToMarkdown,
@@ -720,64 +719,6 @@ describe('export', () => {
 
       const result = await topicToPlainText(testTopic)
       expect(result).toBe('Null Messages Topic')
-    })
-  })
-
-  describe('copyMessageAsPlainText', () => {
-    // Mock navigator.clipboard.writeText
-    const writeTextMock = vi.fn()
-    beforeEach(() => {
-      vi.stubGlobal('navigator', {
-        clipboard: {
-          writeText: writeTextMock
-        }
-      })
-
-      // Mock window.toast methods
-      vi.stubGlobal('window', {
-        toast: {
-          success: vi.fn(),
-          error: vi.fn(),
-          warning: vi.fn(),
-          info: vi.fn()
-        }
-      })
-
-      // Mock i18next translation function
-      vi.mock('i18next', () => ({
-        default: {
-          t: vi.fn((key) => key)
-        }
-      }))
-
-      writeTextMock.mockReset()
-      // Ensure markdownToPlainText mock is set
-      ;(markdownToPlainText as any).mockImplementation((str: string) => str.replace(/[#*_]/g, ''))
-    })
-
-    afterEach(() => {
-      vi.unstubAllGlobals()
-    })
-
-    it('should call messageToPlainText and copy its result to clipboard', async () => {
-      const testMessage = createMessage({ role: 'user', id: 'copy_msg_plain' }, [
-        { type: MessageBlockType.MAIN_TEXT, content: '**Copy This Plain**' }
-      ])
-
-      await copyMessageAsPlainText(testMessage)
-
-      expect(markdownToPlainText).toHaveBeenCalledWith('**Copy This Plain**')
-      expect(writeTextMock).toHaveBeenCalledWith('Copy This Plain')
-    })
-
-    it('should handle empty message content', async () => {
-      const testMessage = createMessage({ role: 'user', id: 'copy_empty_msg_plain' }, [])
-      ;(markdownToPlainText as any).mockReturnValue('')
-
-      await copyMessageAsPlainText(testMessage)
-
-      expect(markdownToPlainText).toHaveBeenCalledWith('')
-      expect(writeTextMock).toHaveBeenCalledWith('')
     })
   })
 })

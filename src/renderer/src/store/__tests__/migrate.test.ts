@@ -2184,4 +2184,245 @@ describe('store migrations', () => {
       expect(migrated.llm.providers).toEqual([])
     })
   })
+
+  describe('migration 228: export options terminal state + note-app connection scrub', () => {
+    const removedSettingsKeys = [
+      'notionDatabaseID',
+      'notionApiKey',
+      'notionPageNameKey',
+      'notionExportReasoning',
+      'yuqueToken',
+      'yuqueUrl',
+      'yuqueRepoId',
+      'joplinToken',
+      'joplinUrl',
+      'joplinExportReasoning',
+      'defaultObsidianVault',
+      'siyuanApiUrl',
+      'siyuanToken',
+      'siyuanBoxId',
+      'siyuanRootPath'
+    ]
+    const retiredExportKeys = [
+      'markdownExportPath',
+      'forceDollarMathInMarkdown',
+      'useTopicNamingForMessageTitle',
+      'showModelNameInMarkdown',
+      'showModelProviderInMarkdown'
+    ]
+
+    const makeState = () => ({
+      settings: {
+        notionDatabaseID: 'db-secret',
+        notionApiKey: 'secret-notion',
+        notionPageNameKey: 'Title',
+        markdownExportPath: '/tmp/export',
+        forceDollarMathInMarkdown: true,
+        useTopicNamingForMessageTitle: true,
+        showModelNameInMarkdown: true,
+        showModelProviderInMarkdown: true,
+        thoughtAutoCollapse: false,
+        notionExportReasoning: true,
+        excludeCitationsInExport: true,
+        standardizeCitationsInExport: true,
+        yuqueToken: 'secret-yuque',
+        yuqueUrl: 'https://yuque.example/repo',
+        yuqueRepoId: '4242',
+        joplinToken: 'secret-joplin',
+        joplinUrl: 'http://localhost:41184',
+        joplinExportReasoning: true,
+        defaultObsidianVault: '/Users/someone/Vault',
+        defaultAgent: 'assistant-1',
+        siyuanApiUrl: 'http://127.0.0.1:6806',
+        siyuanToken: 'secret-siyuan',
+        siyuanBoxId: 'box-1',
+        siyuanRootPath: '/Notebook',
+        localBackupDir: '/tmp/backup',
+        s3: { endpoint: 'https://s3.example', bucket: 'chat' },
+        exportMenuOptions: {
+          image: false,
+          markdown: true,
+          markdown_reason: false,
+          notion: false,
+          yuque: true,
+          joplin: true,
+          obsidian: false,
+          siyuan: true,
+          docx: true,
+          plain_text: false,
+          notes: true
+        },
+        unknownFutureKey: { keep: 'me' }
+      },
+      llm: { providers: [{ id: 'openai', apiKey: 'provider-secret' }], settings: { mode: 'custom' } },
+      assistants: { assistants: [{ id: 'assistant-1', name: 'A' }], assistantDefaults: { temperature: 0.7 } },
+      topicBranches: { byId: { b1: { id: 'b1', topicId: 't1' } } },
+      nutstore: {
+        nutstoreToken: 'secret-nutstore-token',
+        nutstorePath: '/cherry-chat',
+        nutstoreAutoSync: true,
+        nutstoreSyncInterval: 30,
+        nutstoreSyncState: { lastSyncTime: 1, syncing: false, lastSyncError: null },
+        nutstoreSkipBackupFile: false,
+        nutstoreMaxBackups: 5
+      },
+      _persist: { version: 227, rehydrated: false }
+    })
+
+    it('carries the old Markdown directory over into the shared export directory', async () => {
+      const migrated: any = await migrate(makeState() as any, 228)
+
+      expect(migrated.settings.exportPath).toBe('/tmp/export')
+      for (const key of retiredExportKeys) {
+        expect(migrated.settings[key], key).toBeUndefined()
+      }
+      // The per-format menu toggles are gone together with their container: the
+      // export menu is always available, so no flag may gate it anymore.
+      expect(migrated.settings.exportMenuOptions).toBeUndefined()
+    })
+
+    it('writes exportIncludeThinking false explicitly, including when the field never existed', async () => {
+      const migrated: any = await migrate(makeState() as any, 228)
+      expect(migrated.settings.exportIncludeThinking).toBe(false)
+
+      // A persisted slice is replaced wholesale on rehydrate, so a state without
+      // the key must still receive the explicit default.
+      const withoutKey = { settings: { thoughtAutoCollapse: false }, _persist: { version: 227 } }
+      const migratedWithoutKey: any = await migrate(withoutKey as any, 228)
+      expect(migratedWithoutKey.settings.exportIncludeThinking).toBe(false)
+    })
+
+    it('keeps an already-present export directory and tolerates missing/empty values', async () => {
+      const already = {
+        settings: { exportPath: '/already/set', markdownExportPath: '/tmp/export' },
+        _persist: { version: 227 }
+      }
+      const migrated: any = await migrate(already as any, 228)
+      expect(migrated.settings.exportPath).toBe('/already/set')
+
+      for (const markdownExportPath of [undefined, '', null]) {
+        const state = { settings: { markdownExportPath }, _persist: { version: 227 } }
+        const result: any = await migrate(state as any, 228)
+        expect(result.settings.exportPath).toBeNull()
+      }
+    })
+
+    it('deletes only the retired settings and keeps everything else', async () => {
+      const migrated: any = await migrate(makeState() as any, 228)
+
+      for (const key of removedSettingsKeys) {
+        expect(migrated.settings[key], key).toBeUndefined()
+      }
+      // Retained unrelated settings, defaults, and unknown keys pass through.
+      expect(migrated.settings.thoughtAutoCollapse).toBe(false)
+      expect(migrated.settings.excludeCitationsInExport).toBe(true)
+      expect(migrated.settings.standardizeCitationsInExport).toBe(true)
+      expect(migrated.settings.defaultAgent).toBe('assistant-1')
+      expect(migrated.settings.localBackupDir).toBe('/tmp/backup')
+      expect(migrated.settings.s3).toEqual({ endpoint: 'https://s3.example', bucket: 'chat' })
+      expect(migrated.settings.unknownFutureKey).toEqual({ keep: 'me' })
+
+      // Chat-adjacent authority slices are untouched.
+      expect(migrated.llm).toEqual({
+        providers: [{ id: 'openai', apiKey: 'provider-secret' }],
+        settings: { mode: 'custom' }
+      })
+      expect(migrated.assistants).toEqual({
+        assistants: [{ id: 'assistant-1', name: 'A' }],
+        assistantDefaults: { temperature: 0.7 }
+      })
+      expect(migrated.topicBranches).toEqual({ byId: { b1: { id: 'b1', topicId: 't1' } } })
+      // The retired Nutstore slice is dropped wholesale (token included).
+      expect(migrated.nutstore).toBeUndefined()
+    })
+
+    it('is idempotent and creates nothing on a second pass', async () => {
+      const once: any = await migrate(makeState() as any, 228)
+      const twice: any = await migrate(once, 228)
+      expect(twice).toEqual(once)
+      expect(twice.settings.exportMenuOptions).toBeUndefined()
+      expect(twice.settings.exportPath).toBe('/tmp/export')
+    })
+
+    it('tolerates missing, empty, and null settings/options without creating values', async () => {
+      const noSettings: any = await migrate({ llm: { providers: [] }, _persist: { version: 227 } } as any, 228)
+      expect(noSettings.settings).toBeUndefined()
+
+      const emptySettings: any = await migrate({ settings: {}, _persist: { version: 227 } } as any, 228)
+      expect(emptySettings.settings).toEqual({ exportPath: null, exportIncludeThinking: false })
+
+      const nullSettings: any = await migrate({ settings: null, _persist: { version: 227 } } as any, 228)
+      expect(nullSettings.settings).toBeNull()
+
+      const nullOptions: any = await migrate(
+        { settings: { exportMenuOptions: null, siyuanToken: 'secret' }, _persist: { version: 227 } } as any,
+        228
+      )
+      expect(nullOptions.settings.exportMenuOptions).toBeUndefined()
+      expect(nullOptions.settings.siyuanToken).toBeUndefined()
+
+      // createMigrate short-circuits a null/undefined root state; 228 must not throw.
+      const nullState: any = await migrate(null as any, 228)
+      expect(nullState).toBeUndefined()
+    })
+
+    it('replays the historic export-menu default from 93 without sharing one mutable object', async () => {
+      const historicKeys = ['docx', 'image', 'markdown', 'markdown_reason', 'plain_text']
+
+      const at93: any = await migrate({ settings: {}, _persist: { version: 92 } } as any, 93)
+      expect(Object.keys(at93.settings.exportMenuOptions).sort()).toEqual(historicKeys)
+      for (const key of historicKeys) {
+        expect(at93.settings.exportMenuOptions[key], key).toBe(true)
+      }
+
+      // Mutating one run's seeded object must not leak into the next run: the
+      // removed slice no longer owns these literals.
+      at93.settings.exportMenuOptions.image = false
+      delete at93.settings.exportMenuOptions.docx
+
+      const secondRun: any = await migrate({ settings: {}, _persist: { version: 92 } } as any, 93)
+      expect(Object.keys(secondRun.settings.exportMenuOptions).sort()).toEqual(historicKeys)
+      expect(secondRun.settings.exportMenuOptions.image).toBe(true)
+    })
+
+    it('backfills only the missing plain_text flag at 114', async () => {
+      const missing = {
+        settings: { exportMenuOptions: { image: true, markdown: true, markdown_reason: true, docx: true } },
+        _persist: { version: 113 }
+      }
+      const filled: any = await migrate(missing as any, 114)
+      expect(filled.settings.exportMenuOptions.plain_text).toBe(true)
+
+      const explicit = {
+        settings: {
+          exportMenuOptions: { image: true, markdown: true, markdown_reason: true, docx: true, plain_text: false }
+        },
+        _persist: { version: 113 }
+      }
+      const kept: any = await migrate(explicit as any, 114)
+      expect(kept.settings.exportMenuOptions.plain_text).toBe(false)
+    })
+
+    it('92 → 228 runs the whole chain and ends without the retired export surface', async () => {
+      const state = {
+        translate: {},
+        assistants: { assistants: [], assistantDefaults: {} },
+        llm: { providers: [], settings: {} },
+        settings: {},
+        inputTools: { toolOrder: { visible: [], hidden: [] } },
+        _persist: { version: 92, rehydrated: false }
+      }
+      const migrated: any = await migrate(state as any, 228)
+
+      expect(migrated.settings.exportMenuOptions).toBeUndefined()
+      for (const key of retiredExportKeys) {
+        expect(migrated.settings[key], key).toBeUndefined()
+      }
+      for (const key of removedSettingsKeys) {
+        expect(migrated.settings[key], key).toBeUndefined()
+      }
+      expect(migrated.settings.exportIncludeThinking).toBe(false)
+      expect(migrated.settings.exportPath === undefined || migrated.settings.exportPath === null).toBe(true)
+    })
+  })
 })

@@ -318,11 +318,10 @@ describe('init.ts — async-barrier bootstrap failure isolation (behavioral)', (
       })
     } else {
       vi.doMock('./store', () => ({
-        default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) }
+        default: { getState: vi.fn(() => ({ settings: {} })) }
       }))
     }
     vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
 
     const { loggerService } = await import('@logger')
     const warnSpy = vi.fn()
@@ -394,9 +393,8 @@ describe('init.ts — async-barrier bootstrap failure isolation (behavioral)', (
     }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceMock } }))
     vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
+    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {} })) } }))
     vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
     const { loggerService } = await import('@logger')
     const warnSpy = vi.fn()
     const withContextSpy = vi

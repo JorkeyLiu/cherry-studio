@@ -4,7 +4,6 @@ import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import type { DraggableVirtualListRef } from '@renderer/components/DraggableList'
 import { DraggableVirtualList } from '@renderer/components/DraggableList'
 import { DeleteIcon, EditIcon } from '@renderer/components/Icons'
-import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
 import { isMac } from '@renderer/config/constant'
@@ -31,16 +30,8 @@ import { updateTopic as updateTopicAction } from '@renderer/store/assistants'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
-import {
-  exportMarkdownToJoplin,
-  exportMarkdownToSiyuan,
-  exportMarkdownToYuque,
-  exportTopicAsMarkdown,
-  exportTopicToNotes,
-  exportTopicToNotion,
-  topicToMarkdown
-} from '@renderer/utils/export'
+import { classNames } from '@renderer/utils'
+import { exportTopicAsMarkdown, exportTopicToNotes } from '@renderer/utils/export'
 import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { reorderTopicsForPin, sortTopicsPinnedFirst } from '@renderer/utils/sort'
 import type { MenuProps } from 'antd'
@@ -416,8 +407,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     }
   }, [assistant.id, addTopic, setActiveTopic, logger])
 
-  const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
-
   const [_targetTopic, setTargetTopic] = useState<Topic | null>(null)
   const targetTopic = useDeferredValue(_targetTopic)
   const getTopicMenuItems = useMemo(() => {
@@ -574,70 +563,19 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         key: 'export',
         icon: <SquareArrowOutUpLeft size={14} />,
         children: [
-          exportMenuOptions.image && {
+          {
             label: t('chat.topics.export.image'),
             key: 'image',
             onClick: () => EventEmitter.emit(EVENT_NAMES.EXPORT_TOPIC_IMAGE, topic)
           },
-          exportMenuOptions.markdown && {
+          {
             label: t('chat.topics.export.md.label'),
             key: 'markdown',
             onClick: () => exportTopicAsMarkdown(topic)
           },
-          exportMenuOptions.markdown_reason && {
-            label: t('chat.topics.export.md.reason'),
-            key: 'markdown_reason',
-            onClick: () => exportTopicAsMarkdown(topic, true)
-          },
-          exportMenuOptions.docx && {
-            label: t('chat.topics.export.word'),
-            key: 'word',
-            onClick: async () => {
-              const markdown = await topicToMarkdown(topic)
-              void window.api.export.toWord(markdown, removeSpecialCharactersForFileName(topic.name))
-            }
-          },
-          exportMenuOptions.notion && {
-            label: t('chat.topics.export.notion'),
-            key: 'notion',
-            onClick: async () => {
-              void exportTopicToNotion(topic)
-            }
-          },
-          exportMenuOptions.yuque && {
-            label: t('chat.topics.export.yuque'),
-            key: 'yuque',
-            onClick: async () => {
-              const markdown = await topicToMarkdown(topic)
-              void exportMarkdownToYuque(topic.name, markdown)
-            }
-          },
-          exportMenuOptions.obsidian && {
-            label: t('chat.topics.export.obsidian'),
-            key: 'obsidian',
-            onClick: async () => {
-              await ObsidianExportPopup.show({ title: topic.name, topic, processingMethod: '3' })
-            }
-          },
-          exportMenuOptions.joplin && {
-            label: t('chat.topics.export.joplin'),
-            key: 'joplin',
-            onClick: async () => {
-              const { loadWholeTopicSnapshot } = await import('@renderer/utils/topicSnapshot')
-              const snapshot = await loadWholeTopicSnapshot(topic.id)
-              void exportMarkdownToJoplin(topic.name, snapshot.messages, snapshot.blocksById)
-            }
-          },
-          exportMenuOptions.siyuan && {
-            label: t('chat.topics.export.siyuan'),
-            key: 'siyuan',
-            onClick: async () => {
-              const markdown = await topicToMarkdown(topic)
-              void exportMarkdownToSiyuan(topic.name, markdown)
-            }
-          },
           // Standalone topic JSON data (whole logical topic incl. all
-          // branches). Always available — no ExportMenuSettings toggle.
+          // branches). The only JSON export the product offers — the file
+          // format is the existing topic-data payload, unchanged.
           // No icon by request: this item renders as bare text.
           {
             label: t('chat.topics.export.json.label'),
@@ -684,15 +622,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     t,
     logger,
     isRenaming,
-    exportMenuOptions.image,
-    exportMenuOptions.markdown,
-    exportMenuOptions.markdown_reason,
-    exportMenuOptions.docx,
-    exportMenuOptions.notion,
-    exportMenuOptions.yuque,
-    exportMenuOptions.obsidian,
-    exportMenuOptions.joplin,
-    exportMenuOptions.siyuan,
     assistants,
     notesPath,
     assistant,

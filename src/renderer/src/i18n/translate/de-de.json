@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "Als Bild kopieren",
         "md": "Als Markdown kopieren",
-        "plain_text": "Als reinen Text kopieren (Markdown entfernen)",
         "title": "Kopieren"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "Als Bild exportieren",
         "image_saved": "Bild erfolgreich gespeichert",
-        "joplin": "Nach Joplin exportieren",
         "md": {
-          "label": "Als Markdown exportieren",
-          "reason": "Als Markdown exportieren (mit Denken)"
+          "label": "Als Markdown exportieren"
         },
         "notes": "In Notizen exportieren",
-        "notion": "Nach Notion exportieren",
-        "obsidian": "Nach Obsidian exportieren",
-        "obsidian_atributes": "Notizeigenschaften konfigurieren",
-        "obsidian_btn": "OK",
-        "obsidian_created": "Erstellungszeit",
-        "obsidian_created_placeholder": "Bitte Erstellungszeit auswählen",
-        "obsidian_export_failed": "Export nach Obsidian fehlgeschlagen",
-        "obsidian_export_success": "Erfolgreich nach Obsidian exportiert",
-        "obsidian_fetch_error": "Obsidian-Tresor abrufen fehlgeschlagen",
-        "obsidian_fetch_folders_error": "Ordnerstruktur abrufen fehlgeschlagen",
-        "obsidian_loading": "Lädt...",
-        "obsidian_no_vault_selected": "Bitte zuerst einen Tresor auswählen",
-        "obsidian_no_vaults": "Keine Obsidian-Tresore gefunden",
-        "obsidian_operate": "Verarbeitungsmethode",
-        "obsidian_operate_append": "Anhängen",
-        "obsidian_operate_new_or_overwrite": "Neu erstellen (überschreiben, falls vorhanden)",
-        "obsidian_operate_placeholder": "Bitte Verarbeitungsmethode auswählen",
-        "obsidian_operate_prepend": "Voranstellen",
-        "obsidian_path": "Pfad",
-        "obsidian_path_placeholder": "Bitte Pfad auswählen",
-        "obsidian_reasoning": "Gedankenkette exportieren",
-        "obsidian_root_directory": "Stammverzeichnis",
-        "obsidian_select_vault_first": "Bitte zuerst Tresor auswählen",
-        "obsidian_source": "Quelle",
-        "obsidian_source_placeholder": "Bitte Quelle eingeben",
-        "obsidian_tags": "Tags",
-        "obsidian_tags_placeholder": "Bitte Tags eingeben, mehrere Tags durch Komma trennen",
-        "obsidian_title": "Titel",
-        "obsidian_title_placeholder": "Bitte Titel eingeben",
-        "obsidian_title_required": "Titel darf nicht leer sein",
-        "obsidian_vault": "Tresor",
-        "obsidian_vault_placeholder": "Bitte Tresorname auswählen",
-        "siyuan": "Nach SiYuan-Notizen exportieren",
-        "title": "Exportieren",
-        "title_naming_failed": "Titelgenerierung fehlgeschlagen, verwende Standardtitel",
-        "title_naming_success": "Titel erfolgreich generiert",
-        "wait_for_title_naming": "Titel wird generiert...",
-        "word": "Als Word exportieren",
-        "yuque": "Nach Yuque exportieren"
+        "title": "Exportieren"
       },
       "list": "Themenliste",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "Erstellt am",
     "last_updated": "Zuletzt aktualisiert",
     "messages": "Nachrichtenanzahl",
-    "notion": {
-      "reasoning_truncated": "Gedankenkette kann nicht aufgeteilt werden, wurde abgeschnitten"
-    },
     "user": "Benutzer"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "Bitte wählen Sie ein Modell aus"
         },
-        "nutstore": "Ungültige Nutstore-Einstellungen",
-        "nutstore_token": "Ungültiger Nutstore-Token",
         "proxy": {
           "url": "Ungültige Proxy-Adresse"
         },
         "webdav": "Ungültige WebDAV-Einstellungen"
-      },
-      "joplin": {
-        "export": "Export nach Joplin fehlgeschlagen. Bitte stellen Sie sicher, dass Joplin läuft, und überprüfen Sie den Verbindungsstatus oder die Konfiguration",
-        "no_config": "Joplin-Autorisierungstoken oder URL nicht konfiguriert"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "Notizen exportieren fehlgeschlagen"
       },
-      "notion": {
-        "export": "Export nach Notion fehlgeschlagen. Bitte überprüfen Sie den Verbindungsstatus und die Konfiguration gemäß Dokumentation",
-        "no_api_key": "Notion API Key oder Notion Database ID nicht konfiguriert",
-        "no_content": "Kein Inhalt zum Exportieren nach Notion vorhanden"
-      },
-      "siyuan": {
-        "export": "Export nach SiYuan-Notizen fehlgeschlagen. Bitte überprüfen Sie den Verbindungsstatus und die Konfiguration gemäß Dokumentation",
-        "no_config": "SiYuan-Notizen API-Adresse oder Token nicht konfiguriert"
-      },
       "table": {
         "invalid": "Konnte keine gültigen Tabellendaten abrufen"
       },
-      "unknown": "Unbekannter Fehler",
-      "yuque": {
-        "export": "Export nach Yuque fehlgeschlagen. Bitte überprüfen Sie den Verbindungsstatus und die Konfiguration gemäß Dokumentation",
-        "no_config": "Yuque Token oder Wissensdatenbank-URL nicht konfiguriert"
-      }
+      "unknown": "Unbekannter Fehler"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "Online-Modus aktiviert, Wissensdatenbank wird ignoriert"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Wird nach Notion exportiert ...",
-        "preparing": "Export nach Notion wird vorbereitet..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Excel erfolgreich exportiert"
       },
-      "joplin": {
-        "export": "Erfolgreich nach Joplin exportiert"
-      },
       "markdown": {
         "export": {
           "preconf": "Markdown-Datei erfolgreich in vorkonfigurierten Pfad exportiert",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "Erfolgreich in Notizen exportiert"
-      },
-      "notion": {
-        "export": "Erfolgreich nach Notion exportiert"
-      },
-      "siyuan": {
-        "export": "Erfolgreich nach SiYuan-Notizen exportiert"
-      },
-      "yuque": {
-        "export": "Erfolgreich nach Yuque exportiert"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "Grundlegende Dateneinstellungen",
         "cloud_storage": "Cloud-Backup-Einstellungen",
         "export_settings": "Export-Einstellungen",
-        "import_settings": "Importeinstellungen",
-        "third_party": "Drittanbieter-Verbindungen"
+        "import_settings": "Importeinstellungen"
       },
-      "export_menu": {
-        "docx": "Als Word exportieren",
-        "image": "Als Bild exportieren",
-        "joplin": "Nach Joplin exportieren",
-        "markdown": "Als Markdown exportieren",
-        "markdown_reason": "Als Markdown exportieren (mit Denken)",
-        "notes": "In Notizen exportieren",
-        "notion": "Nach Notion exportieren",
-        "obsidian": "Nach Obsidian exportieren",
-        "plain_text": "Als reinen Text kopieren",
-        "siyuan": "Nach SiYuan-Notizen exportieren",
-        "title": "Export-Menü-Einstellungen",
-        "yuque": "Nach Yuque exportieren"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Beim Export nach Markdown Zitate und Referenzen ausschließen, nur Hauptinhalt behalten",
+          "title": "Zitate nicht exportieren"
+        },
+        "help": "Wenn ausgefüllt, wird bei jedem Export automatisch in diesem Pfad gespeichert; sonst erscheint ein Speicherdialog",
+        "include_thinking": {
+          "help": "Denkprozess beim Exportieren von Bildern oder Markdown einbeziehen.",
+          "title": "Denkprozess einschließen"
+        },
+        "path": "Standard-Exportpfad",
+        "path_placeholder": "Exportpfad",
+        "select": "Auswählen",
+        "standardize_citations": {
+          "help": "Nach Aktivierung werden Zitatmarkierungen in standardisierte Markdown-Fußnoten [^1] umgewandelt und das Literaturverzeichnis formatiert",
+          "title": "Zitierformat standardisieren"
+        },
+        "title": "Themen-Exportoptionen"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Aus Cherry Studio ZIP importieren",
         "cherrystudio_button": "ZIP-Sicherung importieren",
         "title": "Importiere Daten von externen Anwendungen"
-      },
-      "joplin": {
-        "check": {
-          "button": "Erkennen",
-          "empty_token": "Bitte Joplin-Autorisierungstoken eingeben",
-          "empty_url": "Bitte Joplin Webclipper-URL eingeben",
-          "fail": "Joplin-Verbindungsprüfung fehlgeschlagen",
-          "success": "Joplin-Verbindung erfolgreich"
-        },
-        "export_reasoning": {
-          "help": "Nach Aktivierung wird beim Export nach Joplin Gedankenkette eingeschlossen.",
-          "title": "Gedankenkette beim Export einschließen"
-        },
-        "help": "Aktivieren Sie im Joplin-Optionsmenü den Webclipper (kein Browser-Plugin nötig), bestätigen Sie den Port und kopieren Sie das Token",
-        "title": "Joplin-Konfiguration",
-        "token": "Joplin-Autorisierungstoken",
-        "token_placeholder": "Bitte Joplin-Autorisierungstoken eingeben",
-        "url": "Joplin Webclipper-URL",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Festplattenspeicher-Warnung",
@@ -4031,122 +3935,8 @@
         "syncStatus": "Backup-Status",
         "title": "Lokales Backup"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Beim Export nach Markdown Zitate und Referenzen ausschließen, nur Hauptinhalt behalten",
-          "title": "Zitate nicht exportieren"
-        },
-        "force_dollar_math": {
-          "help": "Nach Aktivierung wird beim Markdown-Export die Notation $$ für LaTeX-Formeln erzwungen. Hinweis: Gilt auch für alle anderen Exportwege wie Notion, Yuque usw.",
-          "title": "$$-Notation für LaTeX erzwingen"
-        },
-        "help": "Wenn ausgefüllt, wird bei jedem Export automatisch in diesem Pfad gespeichert; sonst erscheint ein Speicherdialog",
-        "path": "Standard-Exportpfad",
-        "path_placeholder": "Exportpfad",
-        "select": "Auswählen",
-        "show_model_name": {
-          "help": "Nach Aktivierung wird beim Markdown-Export der Modellname angezeigt. Hinweis: Gilt auch für alle anderen Exportwege wie Notion, Yuque usw.",
-          "title": "Modellname beim Export verwenden"
-        },
-        "show_model_provider": {
-          "help": "Beim Markdown-Export den Modellanbieter anzeigen, z. B. OpenAI, Gemini usw.",
-          "title": "Modellanbieter anzeigen"
-        },
-        "standardize_citations": {
-          "help": "Nach Aktivierung werden Zitatmarkierungen in standardisierte Markdown-Fußnoten [^1] umgewandelt und das Literaturverzeichnis formatiert",
-          "title": "Zitierformat standardisieren"
-        },
-        "title": "Markdown-Export"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "Nach Aktivierung wird für exportierte Nachrichten ein Titel mit dem Schnellmodell generiert. Gilt auch für alle Markdown-basierten Exportwege",
-          "title": "Schnellmodell für exportierte Nachrichtentitel verwenden"
-        }
-      },
       "minute_interval_one": "{{count}} Minute",
       "minute_interval_other": "{{count}} Minuten",
-      "notion": {
-        "api_key": "Notion API-Schlüssel",
-        "api_key_placeholder": "Bitte Notion API-Schlüssel eingeben",
-        "check": {
-          "button": "Erkennen",
-          "empty_api_key": "API-Schlüssel nicht konfiguriert",
-          "empty_database_id": "Database ID nicht konfiguriert",
-          "error": "Verbindungsfehler, bitte Netzwerk sowie API-Schlüssel und Database ID prüfen",
-          "fail": "Verbindung fehlgeschlagen, bitte API-Schlüssel und Database ID prüfen",
-          "success": "Erfolgreich verbunden"
-        },
-        "database_id": "Notion Database ID",
-        "database_id_placeholder": "Bitte Notion Database ID eingeben",
-        "export_reasoning": {
-          "help": "Nach Aktivierung wird beim Export nach Notion die Gedankenkette eingeschlossen.",
-          "title": "Gedankenkette beim Export einschließen"
-        },
-        "page_name_key": "Seitentitel-Feldname",
-        "page_name_key_placeholder": "Bitte Feldnamen für Seitentitel eingeben, Standard ist Name",
-        "title": "Notion-Einstellungen"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Zu Nutstore sichern",
-          "modal": {
-            "filename": {
-              "placeholder": "Bitte Backup-Dateinamen eingeben"
-            },
-            "title": "Zu Nutstore sichern"
-          }
-        },
-        "checkConnection": {
-          "fail": "Nutstore-Verbindung fehlgeschlagen",
-          "name": "Verbindung prüfen",
-          "success": "Mit Nutstore verbunden"
-        },
-        "isLogin": "Angemeldet",
-        "login": {
-          "button": "Anmelden"
-        },
-        "logout": {
-          "button": "Abmelden",
-          "content": "Nach Abmeldung kein Backup zu/von Nutstore möglich",
-          "title": "Wirklich von Nutstore abmelden?"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Abbrechen",
-            "confirm": "Bestätigen",
-            "label": "Neuer Ordner"
-          }
-        },
-        "notLogin": "Nicht angemeldet",
-        "path": {
-          "label": "Nutstore-Speicherpfad",
-          "placeholder": "Bitte Nutstore-Speicherpfad eingeben"
-        },
-        "pathSelector": {
-          "currentPath": "Aktueller Pfad",
-          "return": "Zurück",
-          "title": "Nutstore-Speicherpfad"
-        },
-        "restore": {
-          "button": "Von Nutstore wiederherstellen",
-          "confirm": {
-            "content": "Wiederherstellung von Nutstore überschreibt aktuelle Daten. Fortfahren?",
-            "title": "Von Nutstore wiederherstellen"
-          }
-        },
-        "title": "Nutstore-Konfiguration",
-        "username": "Nutstore-Benutzername"
-      },
-      "obsidian": {
-        "default_vault": "Standard-Obsidian-Tresor",
-        "default_vault_export_failed": "Export fehlgeschlagen",
-        "default_vault_fetch_error": "Obsidian-Tresor abrufen fehlgeschlagen",
-        "default_vault_loading": "Obsidian-Tresor wird abgerufen...",
-        "default_vault_no_vaults": "Kein Obsidian-Tresor gefunden",
-        "default_vault_placeholder": "Bitte Standard-Obsidian-Tresor auswählen",
-        "title": "Obsidian-Konfiguration"
-      },
       "s3": {
         "accessKeyId": {
           "label": "Access Key ID",
@@ -4271,27 +4061,6 @@
           "label": "S3-kompatibler Speicher"
         }
       },
-      "siyuan": {
-        "api_url": "API-Adresse",
-        "api_url_placeholder": "z. B.: http://127.0.0.1:6806",
-        "box_id": "Notizbuch-ID",
-        "box_id_placeholder": "Bitte Notizbuch-ID eingeben",
-        "check": {
-          "button": "Erkennen",
-          "empty_config": "Bitte API-Adresse und Token eingeben",
-          "error": "Verbindungsfehler, bitte Netzwerk prüfen",
-          "fail": "Verbindung fehlgeschlagen, bitte API-Adresse und Token prüfen",
-          "success": "Erfolgreich verbunden",
-          "title": "Verbindungsprüfung"
-        },
-        "root_path": "Dokumentenwurzelverzeichnis",
-        "root_path_placeholder": "z. B.: /CherryStudio",
-        "title": "SiYuan-Notizen-Konfiguration",
-        "token": {
-          "label": "API-Token"
-        },
-        "token_placeholder": "Bitte SiYuan-Token eingeben"
-      },
       "title": "Dateneinstellungen",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "Backup-Status",
         "title": "WebDAV",
         "user": "WebDAV-Benutzername"
-      },
-      "yuque": {
-        "check": {
-          "button": "Erkennen",
-          "empty_repo_url": "Bitte Wissensdatenbank-URL eingeben",
-          "empty_token": "Bitte Yuque-Token eingeben",
-          "fail": "Yuque-Verbindungsprüfung fehlgeschlagen",
-          "success": "Yuque-Verbindung erfolgreich verifiziert"
-        },
-        "help": "Yuque-Token abrufen",
-        "repo_url": "Wissensdatenbank-URL",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Yuque-Konfiguration",
-        "token": "Yuque Token",
-        "token_placeholder": "Bitte Yuque-Token eingeben"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "Datensynchronisierung",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

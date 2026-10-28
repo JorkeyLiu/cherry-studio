@@ -43,7 +43,6 @@ function initKeyv() {
 function initAutoSync(store: { getState(): RootState }) {
   setTimeout(() => {
     const { webdavAutoSync, localBackupAutoSync, s3 } = store.getState().settings
-    const { nutstoreAutoSync } = store.getState().nutstore
     const autoSyncLogger = loggerService.withContext('AutoSync')
     if (webdavAutoSync || (s3 && s3.autoSync) || localBackupAutoSync) {
       void import('./services/BackupService')
@@ -56,13 +55,6 @@ function initAutoSync(store: { getState(): RootState }) {
         })
         .catch((e) => {
           autoSyncLogger.warn('[AutoSync] backup auto-sync startup failed', e as Error)
-        })
-    }
-    if (nutstoreAutoSync) {
-      void import('./services/NutstoreService')
-        .then(({ startNutstoreAutoSync }) => startNutstoreAutoSync())
-        .catch((e) => {
-          autoSyncLogger.warn('[AutoSync] nutstore auto-sync startup failed', e as Error)
         })
     }
   }, 8000)

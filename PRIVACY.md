@@ -64,8 +64,7 @@ As this Software uses API Keys for third-party model services that you apply for
 
 To facilitate your management and processing of data, in the **Settings > Data Settings** section of this Software, we support certain third-party service functions that you can choose to configure and use by entering API addresses, usernames, passwords, and other credentials:
 
-- Cloud Backup Settings: WebDAV, S3-compatible storage, Nutstore.
-- Third-Party Connections: Notion, Yuque, Joplin, Obsidian, SiYuan Note.
+- Cloud Backup Settings: WebDAV, S3-compatible storage.
 
 When you use the above third-party services through this Software:
 

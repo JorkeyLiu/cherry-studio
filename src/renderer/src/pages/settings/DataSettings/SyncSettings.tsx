@@ -433,7 +433,7 @@ const SyncSettings: React.FC = () => {
 
   return (
     <SettingGroup theme={theme}>
-      <SettingTitle>{t('settings.sync.title', 'Synchronization')}</SettingTitle>
+      <SettingTitle>{t('settings.sync.title', 'Data Sync')}</SettingTitle>
       <SettingHelpText>
         {t(
           'settings.sync.help',

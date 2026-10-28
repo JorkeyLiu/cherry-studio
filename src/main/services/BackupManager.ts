@@ -1585,7 +1585,7 @@ class BackupManager {
 
         // LOCK-6009: Metadata-less archives are rejected.
         // Legacy data.json/Dexie logical restore is no longer reachable
-        // from any L3 restore path (local/WebDAV/S3/Nutstore/file picker).
+        // from any L3 restore path (local/WebDAV/S3/file picker).
         throw new Error(
           '[restore] Archive does not contain metadata.json. ' +
             'This is not a supported L3 backup format. Legacy logical restore is not supported.'

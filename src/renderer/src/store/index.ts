@@ -49,7 +49,6 @@ import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
-import nutstore from './nutstore'
 import preprocess from './preprocess'
 import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
@@ -72,7 +71,6 @@ const logger = loggerService.withContext('Store')
 const appReducer = combineReducers({
   assistants,
   backup,
-  nutstore,
   llm,
   settings,
   runtime,
@@ -482,7 +480,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 227,
+    version: 228,
     transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',

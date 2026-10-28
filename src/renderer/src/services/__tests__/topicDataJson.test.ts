@@ -126,3 +126,75 @@ describe('exportTopicDataToFile history snapshot explanation', () => {
     expect(toastWarning).not.toHaveBeenCalled()
   })
 })
+
+const { exportPathState } = vi.hoisted(() => ({
+  exportPathState: { path: null as string | null, includeThinking: false }
+}))
+
+vi.mock('@renderer/store', () => ({
+  default: {
+    getState: () => ({
+      settings: {
+        exportPath: exportPathState.path,
+        exportIncludeThinking: exportPathState.includeThinking
+      }
+    })
+  }
+}))
+
+describe('exportTopicDataToFile uses the shared export directory', () => {
+  const payload = () => ({
+    ...ORDINARY_PAYLOAD,
+    blocks: [{ id: 'b1', type: 'THINKING', content: 'reasoning' }],
+    messages: [{ id: 'm1', role: 'assistant' }]
+  })
+  const fileWrite = vi.fn()
+
+  beforeEach(() => {
+    exportPathState.path = null
+    exportPathState.includeThinking = false
+    fileWrite.mockResolvedValue(undefined)
+    window.api = { file: { save: fileSave, write: fileWrite } } as never
+    mocks.exportTopicData.mockResolvedValue(payload())
+  })
+
+  it('writes the unchanged payload into the configured directory (no dialog)', async () => {
+    exportPathState.path = '/tmp/exports'
+    const { exportTopicDataToFile } = await import('../topicDataJson')
+
+    const ok = await exportTopicDataToFile({ id: 't1', name: 'Topic' })
+
+    expect(ok).toBe(true)
+    expect(fileSave).not.toHaveBeenCalled()
+    expect(fileWrite).toHaveBeenCalledTimes(1)
+    const [target, written] = fileWrite.mock.calls[0] as [string, string]
+    expect(target).toBe('/tmp/exports/Topic.json')
+    // Only `exportedAt` is nondeterministic; everything else is the payload verbatim.
+    const parsed = JSON.parse(written)
+    delete parsed.exportedAt
+    const expected: any = payload()
+    delete expected.exportedAt
+    expect(parsed).toEqual(expected)
+  })
+
+  it('keeps the payload identical when the Markdown reasoning default is toggled', async () => {
+    exportPathState.path = '/tmp/exports'
+    const { exportTopicDataToFile } = await import('../topicDataJson')
+
+    exportPathState.includeThinking = false
+    await exportTopicDataToFile({ id: 't1', name: 'Topic' })
+    const withoutThinking = JSON.parse(fileWrite.mock.calls[0][1] as string)
+    delete withoutThinking.exportedAt
+
+    fileWrite.mockClear()
+    exportPathState.includeThinking = true
+    await exportTopicDataToFile({ id: 't1', name: 'Topic' })
+    const withThinking = JSON.parse(fileWrite.mock.calls[0][1] as string)
+    delete withThinking.exportedAt
+
+    expect(withThinking).toEqual(withoutThinking)
+    // The reasoning block survives in both cases: the setting is document-level
+    // for Markdown exports and never filters the JSON payload.
+    expect(withThinking.blocks).toEqual([{ id: 'b1', type: 'THINKING', content: 'reasoning' }])
+  })
+})

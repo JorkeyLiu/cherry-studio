@@ -1276,7 +1276,6 @@
       "copy": {
         "image": "Copiază ca imagine",
         "md": "Copiază ca markdown",
-        "plain_text": "Copiază ca text simplu (elimină Markdown)",
         "title": "Copiază"
       },
       "delete": {
@@ -1290,51 +1289,11 @@
       "export": {
         "image": "Exportă ca imagine",
         "image_saved": "Imagine salvată cu succes",
-        "joplin": "Exportă în Joplin",
         "md": {
-          "label": "Exportă ca markdown",
-          "reason": "Exportă ca Markdown (cu raționament)"
+          "label": "Exportă ca markdown"
         },
         "notes": "Exportă în Note",
-        "notion": "Exportă în Notion",
-        "obsidian": "Exportă în Obsidian",
-        "obsidian_atributes": "Configurează atributele notiței",
-        "obsidian_btn": "Confirmă",
-        "obsidian_created": "Ora creării",
-        "obsidian_created_placeholder": "Te rugăm să selectezi ora creării",
-        "obsidian_export_failed": "Exportul a eșuat",
-        "obsidian_export_success": "Export reușit",
-        "obsidian_fetch_error": "Nu s-au putut prelua seifurile Obsidian",
-        "obsidian_fetch_folders_error": "Nu s-a putut prelua structura folderelor",
-        "obsidian_loading": "Se încarcă...",
-        "obsidian_no_vault_selected": "Te rugăm să selectezi mai întâi un seif",
-        "obsidian_no_vaults": "Nu s-au găsit seifuri Obsidian",
-        "obsidian_operate": "Metodă de operare",
-        "obsidian_operate_append": "Adaugă la sfârșit",
-        "obsidian_operate_new_or_overwrite": "Creează nou (Suprascrie dacă există)",
-        "obsidian_operate_placeholder": "Te rugăm să selectezi metoda de operare",
-        "obsidian_operate_prepend": "Adaugă la început",
-        "obsidian_path": "Cale",
-        "obsidian_path_placeholder": "Te rugăm să selectezi calea",
-        "obsidian_reasoning": "Include lanțul de raționament",
-        "obsidian_root_directory": "Director rădăcină",
-        "obsidian_select_vault_first": "Te rugăm să selectezi mai întâi un seif",
-        "obsidian_source": "Sursă",
-        "obsidian_source_placeholder": "Te rugăm să introduci sursa",
-        "obsidian_tags": "Etichete",
-        "obsidian_tags_placeholder": "Te rugăm să introduci etichete, separă etichetele multiple prin virgule",
-        "obsidian_title": "Titlu",
-        "obsidian_title_placeholder": "Te rugăm să introduci titlul",
-        "obsidian_title_required": "Titlul nu poate fi gol",
-        "obsidian_vault": "Seif",
-        "obsidian_vault_placeholder": "Te rugăm să selectezi numele seifului",
-        "siyuan": "Exportă în Siyuan Note",
-        "title": "Exportă",
-        "title_naming_failed": "Nu s-a putut genera titlul, se folosește titlul implicit",
-        "title_naming_success": "Titlu generat cu succes",
-        "wait_for_title_naming": "Se generează titlul...",
-        "word": "Exportă ca Word",
-        "yuque": "Exportă în Yuque"
+        "title": "Exportă"
       },
       "list": "Listă subiecte",
       "manage": {
@@ -1752,9 +1711,6 @@
     "created": "Creat",
     "last_updated": "Ultima actualizare",
     "messages": "Mesaje",
-    "notion": {
-      "reasoning_truncated": "Lanțul de gândire nu poate fi fragmentat și a fost trunchiat."
-    },
     "user": "Utilizator"
   },
   "files": {
@@ -2192,16 +2148,10 @@
         "enter": {
           "model": "Te rugăm să selectezi un model"
         },
-        "nutstore": "Setări Nutstore invalide",
-        "nutstore_token": "Token Nutstore invalid",
         "proxy": {
           "url": "URL proxy invalid"
         },
         "webdav": "Setări WebDAV invalide"
-      },
-      "joplin": {
-        "export": "Nu s-a putut exporta în Joplin. Te rugăm să menții Joplin rulând și să verifici starea conexiunii sau configurarea",
-        "no_config": "Tokenul de autorizare Joplin sau URL-ul nu sunt configurate"
       },
       "markdown": {
         "export": {
@@ -2212,23 +2162,10 @@
       "notes": {
         "export": "Nu s-au putut exporta notele"
       },
-      "notion": {
-        "export": "Nu s-a putut exporta în Notion. Te rugăm să verifici starea conexiunii și configurarea conform documentației",
-        "no_api_key": "ApiKey-ul Notion sau DatabaseID-ul Notion nu sunt configurate",
-        "no_content": "Nu există nimic de exportat în Notion."
-      },
-      "siyuan": {
-        "export": "Nu s-a putut exporta în Siyuan Note, te rugăm să verifici starea conexiunii și configurarea conform documentației",
-        "no_config": "Adresa API Siyuan Note sau tokenul nu sunt configurate"
-      },
       "table": {
         "invalid": "Imposibil de recuperat date valide din tabel"
       },
-      "unknown": "Eroare necunoscută",
-      "yuque": {
-        "export": "Nu s-a putut exporta în Yuque. Te rugăm să verifici starea conexiunii și configurarea conform documentației",
-        "no_config": "Tokenul Yuque sau Url-ul Yuque nu sunt configurate"
-      }
+      "unknown": "Eroare necunoscută"
     },
     "group": {
       "delete": {
@@ -2240,12 +2177,6 @@
     "ignore": {
       "knowledge": {
         "base": "Modul căutare web este activat, se ignoră baza de cunoștințe"
-      }
-    },
-    "loading": {
-      "notion": {
-        "exporting_progress": "Se exportă în Notion...",
-        "preparing": "Se pregătește exportul în Notion..."
       }
     },
     "mention": {
@@ -2309,9 +2240,6 @@
       "excel": {
         "export": "Excel exportat cu succes"
       },
-      "joplin": {
-        "export": "Exportat cu succes în Joplin"
-      },
       "markdown": {
         "export": {
           "preconf": "Fișierul Markdown a fost exportat cu succes în calea preconfigurată",
@@ -2320,15 +2248,6 @@
       },
       "notes": {
         "export": "Exportat cu succes în note"
-      },
-      "notion": {
-        "export": "Exportat cu succes în Notion"
-      },
-      "siyuan": {
-        "export": "Exportat cu succes în Siyuan Note"
-      },
-      "yuque": {
-        "export": "Exportat cu succes în Yuque"
       }
     },
     "switch": {
@@ -3833,22 +3752,26 @@
         "basic": "Setări date de bază",
         "cloud_storage": "Setări backup în cloud",
         "export_settings": "Setări export",
-        "import_settings": "Setări import",
-        "third_party": "Conexiuni terțe"
+        "import_settings": "Setări import"
       },
-      "export_menu": {
-        "docx": "Exportă ca Word",
-        "image": "Exportă ca imagine",
-        "joplin": "Exportă în Joplin",
-        "markdown": "Exportă ca Markdown",
-        "markdown_reason": "Exportă ca Markdown (cu raționament)",
-        "notes": "Exportă în Notițe",
-        "notion": "Exportă în Notion",
-        "obsidian": "Exportă în Obsidian",
-        "plain_text": "Copiază ca text simplu",
-        "siyuan": "Exportă în SiYuan Note",
-        "title": "Setări meniu export",
-        "yuque": "Exportă în Yuque"
+      "export_options": {
+        "exclude_citations": {
+          "help": "Exclude citările și referințele la exportul în Markdown, păstrând doar conținutul principal",
+          "title": "Exclude citările"
+        },
+        "help": "Dacă este furnizată, exporturile vor fi salvate automat în această cale; în caz contrar, va apărea un dialog de salvare.",
+        "include_thinking": {
+          "help": "Include conținutul de gândire la exportarea imaginilor sau Markdown.",
+          "title": "Include conținutul de gândire"
+        },
+        "path": "Cale export implicită",
+        "path_placeholder": "Cale export",
+        "select": "Selectează",
+        "standardize_citations": {
+          "help": "Când este activat, marcatorii de citare vor fi convertiți în format standard de notă de subsol Markdown [^1], iar listele de citare vor fi formatate.",
+          "title": "Standardizează formatul citării"
+        },
+        "title": "Opțiuni de export pentru subiecte"
       },
       "export_to_phone": {
         "confirm": {
@@ -3927,25 +3850,6 @@
         "cherrystudio": "Import din ZIP Cherry Studio",
         "cherrystudio_button": "Import backup ZIP",
         "title": "Importă date din aplicație externă"
-      },
-      "joplin": {
-        "check": {
-          "button": "Verifică",
-          "empty_token": "Te rugăm să introduci tokenul de autorizare Joplin",
-          "empty_url": "Te rugăm să introduci URL-ul serviciului Joplin Clipper",
-          "fail": "Verificarea conexiunii Joplin a eșuat",
-          "success": "Verificarea conexiunii Joplin a reușit"
-        },
-        "export_reasoning": {
-          "help": "Când este activat, conținutul exportat va include lanțul de raționament (procesul de gândire).",
-          "title": "Include lanțul de raționament în export"
-        },
-        "help": "În opțiunile Joplin, activează web clipper-ul (nu este necesară extensia de browser), confirmă portul și copiază tokenul de autentificare aici.",
-        "title": "Configurare Joplin",
-        "token": "Token de autorizare Joplin",
-        "token_placeholder": "Token de autorizare Joplin",
-        "url": "URL serviciu Joplin Web Clipper",
-        "url_placeholder": "http://127.0.0.1:41184/"
       },
       "limit": {
         "appDataDiskQuota": "Avertisment spațiu pe disc",
@@ -4031,122 +3935,8 @@
         "syncStatus": "Stare backup",
         "title": "Backup local"
       },
-      "markdown_export": {
-        "exclude_citations": {
-          "help": "Exclude citările și referințele la exportul în Markdown, păstrând doar conținutul principal",
-          "title": "Exclude citările"
-        },
-        "force_dollar_math": {
-          "help": "Când este activat, $$ va fi folosit forțat pentru a marca formulele LaTeX la exportul în Markdown. Notă: Această opțiune afectează și toate metodele de export prin Markdown, cum ar fi Notion, Yuque etc.",
-          "title": "Forțează $$ pentru formulele LaTeX"
-        },
-        "help": "Dacă este furnizată, exporturile vor fi salvate automat în această cale; în caz contrar, va apărea un dialog de salvare.",
-        "path": "Cale export implicită",
-        "path_placeholder": "Cale export",
-        "select": "Selectează",
-        "show_model_name": {
-          "help": "Când este activat, numele modelului va fi afișat la exportul în Markdown. Notă: Această opțiune afectează și toate metodele de export prin Markdown, cum ar fi Notion, Yuque etc.",
-          "title": "Folosește numele modelului la export"
-        },
-        "show_model_provider": {
-          "help": "Afișează furnizorul modelului (de ex., OpenAI, Gemini) la exportul în Markdown",
-          "title": "Afișează furnizorul modelului"
-        },
-        "standardize_citations": {
-          "help": "Când este activat, marcatorii de citare vor fi convertiți în format standard de notă de subsol Markdown [^1], iar listele de citare vor fi formatate.",
-          "title": "Standardizează formatul citării"
-        },
-        "title": "Export Markdown"
-      },
-      "message_title": {
-        "use_topic_naming": {
-          "help": "Când este activat, folosește modelul rapid pentru a numi titlul mesajelor exportate. Această setare afectează și toate metodele de export prin Markdown.",
-          "title": "Folosește modelul rapid pentru a numi titlul mesajului exportat"
-        }
-      },
       "minute_interval_one": "{{count}} minut",
       "minute_interval_other": "{{count}} minute",
-      "notion": {
-        "api_key": "Cheie API Notion",
-        "api_key_placeholder": "Introdu cheia API Notion",
-        "check": {
-          "button": "Verifică",
-          "empty_api_key": "Cheia API nu este configurată",
-          "empty_database_id": "ID-ul bazei de date nu este configurat",
-          "error": "Eroare de conexiune, te rugăm să verifici configurația rețelei și cheia API și ID-ul bazei de date",
-          "fail": "Conexiune eșuată, te rugăm să verifici rețeaua și cheia API și ID-ul bazei de date",
-          "success": "Conexiune reușită"
-        },
-        "database_id": "ID bază de date Notion",
-        "database_id_placeholder": "Introdu ID-ul bazei de date Notion",
-        "export_reasoning": {
-          "help": "Când este activat, conținutul exportat va include lanțul de raționament (procesul de gândire).",
-          "title": "Include lanțul de raționament în export"
-        },
-        "page_name_key": "Nume câmp titlu pagină",
-        "page_name_key_placeholder": "Introdu numele câmpului pentru titlul paginii, implicit este Name",
-        "title": "Setări Notion"
-      },
-      "nutstore": {
-        "backup": {
-          "button": "Backup în Nutstore",
-          "modal": {
-            "filename": {
-              "placeholder": "Introdu numele fișierului de backup"
-            },
-            "title": "Backup în Nutstore"
-          }
-        },
-        "checkConnection": {
-          "fail": "Conexiunea Nutstore a eșuat",
-          "name": "Verifică conexiunea",
-          "success": "Conectat la Nutstore"
-        },
-        "isLogin": "Conectat",
-        "login": {
-          "button": "Conectare"
-        },
-        "logout": {
-          "button": "Deconectare",
-          "content": "După deconectare, nu vei mai putea face backup în Nutstore sau restaura din Nutstore.",
-          "title": "Ești sigur că vrei să te deconectezi de la Nutstore?"
-        },
-        "new_folder": {
-          "button": {
-            "cancel": "Anulează",
-            "confirm": "Confirmă",
-            "label": "Dosar nou"
-          }
-        },
-        "notLogin": "Neconectat",
-        "path": {
-          "label": "Cale stocare Nutstore",
-          "placeholder": "Introdu calea de stocare Nutstore"
-        },
-        "pathSelector": {
-          "currentPath": "Cale curentă",
-          "return": "Înapoi",
-          "title": "Cale stocare Nutstore"
-        },
-        "restore": {
-          "button": "Restaurează din Nutstore",
-          "confirm": {
-            "content": "Restaurarea din Nutstore va suprascrie datele curente. Vrei să continui?",
-            "title": "Restaurează din Nutstore"
-          }
-        },
-        "title": "Configurare Nutstore",
-        "username": "Nume utilizator Nutstore"
-      },
-      "obsidian": {
-        "default_vault": "Seif Obsidian implicit",
-        "default_vault_export_failed": "Export eșuat",
-        "default_vault_fetch_error": "Nu s-a putut prelua seiful Obsidian",
-        "default_vault_loading": "Se încarcă seiful Obsidian...",
-        "default_vault_no_vaults": "Nu s-au găsit seifuri Obsidian",
-        "default_vault_placeholder": "Te rugăm să selectezi seiful Obsidian implicit",
-        "title": "Configurare Obsidian"
-      },
       "s3": {
         "accessKeyId": {
           "label": "ID cheie de acces",
@@ -4271,27 +4061,6 @@
           "label": "Stocare compatibilă S3"
         }
       },
-      "siyuan": {
-        "api_url": "URL API SiYuan Note",
-        "api_url_placeholder": "de ex.: http://127.0.0.1:6806",
-        "box_id": "ID Box SiYuan Note",
-        "box_id_placeholder": "Te rugăm să introduci ID-ul Box SiYuan Note",
-        "check": {
-          "button": "Verifică",
-          "empty_config": "Te rugăm să completezi adresa API și tokenul",
-          "error": "Eroare de conexiune, te rugăm să verifici conexiunea la rețea",
-          "fail": "Conexiune eșuată, te rugăm să verifici adresa API și tokenul",
-          "success": "Conexiune reușită",
-          "title": "Verificare conexiune"
-        },
-        "root_path": "Cale rădăcină SiYuan Note",
-        "root_path_placeholder": "de ex.: /CherryStudio",
-        "title": "Configurare SiYuan Note",
-        "token": {
-          "label": "Token SiYuan Note"
-        },
-        "token_placeholder": "Te rugăm să introduci tokenul SiYuan Note"
-      },
       "title": "Setări date",
       "webdav": {
         "autoSync": {
@@ -4377,21 +4146,6 @@
         "syncStatus": "Stare backup",
         "title": "WebDAV",
         "user": "Utilizator WebDAV"
-      },
-      "yuque": {
-        "check": {
-          "button": "Verifică",
-          "empty_repo_url": "Te rugăm să introduci mai întâi URL-ul bazei de cunoștințe",
-          "empty_token": "Te rugăm să introduci mai întâi tokenul Yuque",
-          "fail": "Verificarea conexiunii Yuque a eșuat",
-          "success": "Conexiunea Yuque a fost verificată cu succes"
-        },
-        "help": "Obține token Yuque",
-        "repo_url": "URL Yuque",
-        "repo_url_placeholder": "https://www.yuque.com/username/xxx",
-        "title": "Configurare Yuque",
-        "token": "Token Yuque",
-        "token_placeholder": "Te rugăm să introduci tokenul Yuque"
       }
     },
     "developer": {
@@ -5134,7 +4888,7 @@
       "sync_success": "[to be translated]:Sync completed",
       "syncing": "[to be translated]:Syncing...",
       "target_code_placeholder": "[to be translated]:Other device code",
-      "title": "[to be translated]:Synchronization",
+      "title": "Sincronizare date",
       "token": "[to be translated]:Access Token",
       "token_help": "[to be translated]:Token is never included in sync payload or logs.",
       "token_placeholder": "[to be translated]:Optional bearer token",

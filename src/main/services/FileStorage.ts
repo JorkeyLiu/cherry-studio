@@ -1664,7 +1664,41 @@ class FileStorage {
     }
   }
 
-  public saveImage = async (_: Electron.IpcMainInvokeEvent, name: string, data: string): Promise<boolean> => {
+  /**
+   * Save a captured image as PNG.
+   *
+   * Without `defaultDirectory` the native save dialog decides the destination
+   * (unchanged legacy behavior, including the `.png` extension and the dialog
+   * cancellation semantics).
+   *
+   * With a non-empty `defaultDirectory` the PNG is written straight into that
+   * directory without a dialog — the same direct-write experience the Markdown
+   * export already offers for its configured directory. An invalid directory or
+   * a failed write rejects explicitly; there is no silent fallback to the cwd.
+   */
+  public saveImage = async (
+    _: Electron.IpcMainInvokeEvent,
+    name: string,
+    data: string,
+    defaultDirectory?: string
+  ): Promise<boolean> => {
+    const targetDirectory = defaultDirectory?.trim()
+    if (targetDirectory) {
+      const filePath = path.join(targetDirectory, `${checkName(name)}.png`)
+      try {
+        const stats = await fs.promises.stat(targetDirectory)
+        if (!stats.isDirectory()) {
+          throw new Error(`Invalid image export directory: ${targetDirectory}`)
+        }
+        const parseResult = parseDataUrl(data)
+        await fs.promises.writeFile(filePath, parseResult?.data ?? data, 'base64')
+        return true
+      } catch (error) {
+        logger.error('[IPC - Error] An error occurred saving the image to the export directory:', error as Error)
+        throw error
+      }
+    }
+
     try {
       const filePath = dialog.showSaveDialogSync({
         defaultPath: `${name}.png`,

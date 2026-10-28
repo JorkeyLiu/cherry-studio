@@ -119,6 +119,7 @@ import type { EditSelectionBoundaryDirection } from '@renderer/types/editMode'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
 import { captureScrollableAsBlob, removeSpecialCharactersForFileName } from '@renderer/utils'
+import { saveExportImage } from '@renderer/utils/exportFile'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
@@ -3334,11 +3335,10 @@ const Messages = ({
             window.toast.warning(t('message.warn.export.exporting'))
             return
           case 'captured': {
-            const success = await window.api.file.saveImage(
-              removeSpecialCharactersForFileName(exportTopic.name),
-              outcome.dataUrl
-            )
-            if (success) window.toast.success(t('chat.topics.export.image_saved'))
+            // Saving (and the export target directory) is owned by the shared
+            // export helper; the capture only produces the PNG data URL.
+            const saved = await saveExportImage(removeSpecialCharactersForFileName(exportTopic.name), outcome.dataUrl)
+            if (saved) window.toast.success(t('chat.topics.export.image_saved'))
             return
           }
           case 'empty':

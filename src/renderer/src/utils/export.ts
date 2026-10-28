@@ -1,5 +1,4 @@
 import { loggerService } from '@logger'
-import { Client } from '@notionhq/client'
 import i18n from '@renderer/i18n'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { addNote } from '@renderer/services/NotesService'
@@ -7,9 +6,10 @@ import store from '@renderer/store'
 import { setExportState } from '@renderer/store/runtime'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import { saveExportFile, saveExportImage } from '@renderer/utils/exportFile'
 import { removeSpecialCharactersForFileName } from '@renderer/utils/file'
 import { captureScrollableAsBlob, captureScrollableAsDataURL } from '@renderer/utils/image'
-import { convertMathFormula, markdownToPlainText } from '@renderer/utils/markdown'
+import { markdownToPlainText } from '@renderer/utils/markdown'
 import { getCitationContent, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
 import {
   getCitationSnapshotContent,
@@ -18,11 +18,8 @@ import {
   type SnapshotBlockMap
 } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
-import { appIdentity } from '@shared/config/identity'
-import { markdownToBlocks } from '@tryfabric/martian'
 import dayjs from 'dayjs'
 import DOMPurify from 'dompurify'
-import { appendBlocks } from 'notion-helper'
 
 const logger = loggerService.withContext('Utils:export')
 
@@ -179,38 +176,14 @@ export function getTitleFromString(str: string, length: number = 80): string {
   return title
 }
 
-const getRoleText = (role: string, modelName?: string, providerId?: string): string => {
-  const { showModelNameInMarkdown, showModelProviderInMarkdown } = store.getState().settings
-
-  // Custom-connection display: resolve the stored connection name, fall back
-  // to the provider id. Built-in brand labels are never used in exports.
-  const resolveProviderDisplayName = (id: string): string => {
-    const provider = store.getState().llm.providers.find((p) => p.id === id)
-    const name = provider?.name?.trim()
-    return name && provider ? provider.name : id
-  }
-
+const getRoleText = (role: string): string => {
   if (role === 'user') {
     return '🧑‍💻 User'
-  } else if (role === 'system') {
-    return '🤖 System'
-  } else {
-    let assistantText = '🤖 '
-    if (showModelNameInMarkdown && modelName) {
-      assistantText += `${modelName}`
-      if (showModelProviderInMarkdown && providerId) {
-        const providerDisplayName = resolveProviderDisplayName(providerId)
-        assistantText += ` | ${providerDisplayName}`
-        return assistantText
-      }
-      return assistantText
-    } else if (showModelProviderInMarkdown && providerId) {
-      const providerDisplayName = resolveProviderDisplayName(providerId)
-      assistantText += `Assistant | ${providerDisplayName}`
-      return assistantText
-    }
-    return assistantText + 'Assistant'
   }
+  if (role === 'system') {
+    return '🤖 System'
+  }
+  return '🤖 Assistant'
 }
 
 /**
@@ -298,8 +271,7 @@ const createBaseMarkdown = (
   normalizeCitations: boolean = true,
   blocksById?: SnapshotBlockMap
 ): { titleSection: string; reasoningSection: string; contentSection: string; citation: string } => {
-  const { forceDollarMathInMarkdown } = store.getState().settings
-  const roleText = getRoleText(message.role, message.model?.name, message.model?.provider)
+  const roleText = getRoleText(message.role)
   const titleSection = `## ${roleText}`
   let reasoningSection = ''
 
@@ -313,9 +285,6 @@ const createBaseMarkdown = (
       }
       // 使用 DOMPurify 安全地处理思维链内容
       reasoningContent = sanitizeReasoningContent(reasoningContent)
-      if (forceDollarMathInMarkdown) {
-        reasoningContent = convertMathFormula(reasoningContent)
-      }
       reasoningSection = `<div style="border: 2px solid #dddddd; border-radius: 10px;">
   <details style="padding: 5px;">
     <summary>${i18n.t('common.reasoning_content')}</summary>
@@ -329,7 +298,7 @@ const createBaseMarkdown = (
   const content = resolveMainTextContent(message, blocksById)
   let citation = excludeCitations ? '' : resolveCitationContent(message, blocksById)
 
-  let processedContent = forceDollarMathInMarkdown ? convertMathFormula(content) : content
+  let processedContent = content
 
   // 处理引用标记
   if (excludeCitations) {
@@ -447,36 +416,37 @@ export const exportTopicAsMarkdown = async (
     return
   }
 
-  setExportingState(true)
+  // Document-level default for topic Markdown exports; an explicit caller
+  // argument still wins (topic Markdown copy never goes through this path).
+  const { exportPath, exportIncludeThinking } = store.getState().settings
+  const withReasoning = exportReasoning ?? exportIncludeThinking
 
-  const { markdownExportPath } = store.getState().settings
-  if (!markdownExportPath) {
-    try {
-      const fileName = removeSpecialCharactersForFileName(topic.name) + '.md'
-      const markdown = await topicToMarkdown(topic, exportReasoning, excludeCitations)
-      const result = await window.api.file.save(fileName, markdown)
-      if (result) {
-        window.toast.success(i18n.t('message.success.markdown.export.specified'))
-      }
-    } catch (error: any) {
-      window.toast.error(i18n.t('message.error.markdown.export.specified'))
-      logger.error('Failed to export topic as markdown:', error)
-    } finally {
-      setExportingState(false)
+  setExportingState(true)
+  try {
+    // Direct writes into the configured directory keep the timestamp suffix so
+    // repeated exports never overwrite each other.
+    const stamp = exportPath ? ` ${dayjs().format('YYYY-MM-DD-HH-mm-ss')}` : ''
+    const fileName = removeSpecialCharactersForFileName(topic.name) + stamp + '.md'
+    const markdown = await topicToMarkdown(topic, withReasoning, excludeCitations)
+    const saved = await saveExportFile(fileName, markdown)
+    if (saved) {
+      window.toast.success(
+        i18n.t(
+          exportPath
+            ? i18n.t('message.success.markdown.export.preconf')
+            : i18n.t('message.success.markdown.export.specified')
+        )
+      )
     }
-  } else {
-    try {
-      const timestamp = dayjs().format('YYYY-MM-DD-HH-mm-ss')
-      const fileName = removeSpecialCharactersForFileName(topic.name) + ` ${timestamp}.md`
-      const markdown = await topicToMarkdown(topic, exportReasoning, excludeCitations)
-      await window.api.file.write(markdownExportPath + '/' + fileName, markdown)
-      window.toast.success(i18n.t('message.success.markdown.export.preconf'))
-    } catch (error: any) {
-      window.toast.error(i18n.t('message.error.markdown.export.preconf'))
-      logger.error('Failed to export topic as markdown:', error)
-    } finally {
-      setExportingState(false)
-    }
+  } catch (error: any) {
+    window.toast.error(
+      i18n.t(
+        exportPath ? i18n.t('message.error.markdown.export.preconf') : i18n.t('message.error.markdown.export.specified')
+      )
+    )
+    logger.error('Failed to export topic as markdown:', error)
+  } finally {
+    setExportingState(false)
   }
 }
 
@@ -490,608 +460,41 @@ export const exportMessageAsMarkdown = async (
     return
   }
 
-  setExportingState(true)
-
-  const { markdownExportPath } = store.getState().settings
-  if (!markdownExportPath) {
-    try {
-      const title = await getMessageTitle(message)
-      const fileName = removeSpecialCharactersForFileName(title) + '.md'
-      const markdown = exportReasoning
-        ? messageToMarkdownWithReasoning(message, excludeCitations)
-        : messageToMarkdown(message, excludeCitations)
-      const result = await window.api.file.save(fileName, markdown)
-      if (result) {
-        window.toast.success(i18n.t('message.success.markdown.export.specified'))
-      }
-    } catch (error: any) {
-      window.toast.error(i18n.t('message.error.markdown.export.specified'))
-      logger.error('Failed to export message as markdown:', error)
-    } finally {
-      setExportingState(false)
-    }
-  } else {
-    try {
-      const timestamp = dayjs().format('YYYY-MM-DD-HH-mm-ss')
-      const title = await getMessageTitle(message)
-      const fileName = removeSpecialCharactersForFileName(title) + ` ${timestamp}.md`
-      const markdown = exportReasoning
-        ? messageToMarkdownWithReasoning(message, excludeCitations)
-        : messageToMarkdown(message, excludeCitations)
-      await window.api.file.write(markdownExportPath + '/' + fileName, markdown)
-      window.toast.success(i18n.t('message.success.markdown.export.preconf'))
-    } catch (error: any) {
-      window.toast.error(i18n.t('message.error.markdown.export.preconf'))
-      logger.error('Failed to export message as markdown:', error)
-    } finally {
-      setExportingState(false)
-    }
-  }
-}
-
-const convertMarkdownToNotionBlocks = async (markdown: string): Promise<any[]> => {
-  return markdownToBlocks(markdown)
-}
-
-const convertThinkingToNotionBlocks = async (thinkingContent: string): Promise<any[]> => {
-  if (!thinkingContent.trim()) {
-    return []
-  }
-
-  try {
-    // 预处理思维链内容：将HTML的<br>标签转换为真正的换行符
-    const processedContent = thinkingContent.replace(/<br\s*\/?>/g, '\n')
-
-    // 使用 markdownToBlocks 处理思维链内容
-    const childrenBlocks = markdownToBlocks(processedContent)
-
-    return [
-      {
-        object: 'block',
-        type: 'toggle',
-        toggle: {
-          rich_text: [
-            {
-              type: 'text',
-              text: {
-                content: '🤔 ' + i18n.t('common.reasoning_content')
-              },
-              annotations: {
-                bold: true
-              }
-            }
-          ],
-          children: childrenBlocks
-        }
-      }
-    ]
-  } catch (error) {
-    logger.error('failed to process reasoning content:', error as Error)
-    // 发生错误时，回退到简单的段落处理
-    return [
-      {
-        object: 'block',
-        type: 'toggle',
-        toggle: {
-          rich_text: [
-            {
-              type: 'text',
-              text: {
-                content: '🤔 ' + i18n.t('common.reasoning_content')
-              },
-              annotations: {
-                bold: true
-              }
-            }
-          ],
-          children: [
-            {
-              object: 'block',
-              type: 'paragraph',
-              paragraph: {
-                rich_text: [
-                  {
-                    type: 'text',
-                    text: {
-                      content:
-                        thinkingContent.length > 1800
-                          ? thinkingContent.substring(0, 1800) + '...\n' + i18n.t('export.notion.reasoning_truncated')
-                          : thinkingContent
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        }
-      }
-    ]
-  }
-}
-
-const executeNotionExport = async (title: string, allBlocks: any[]): Promise<boolean> => {
-  if (getExportState()) {
-    window.toast.warning(i18n.t('message.warn.export.exporting'))
-    return false
-  }
-
-  const { notionDatabaseID, notionApiKey } = store.getState().settings
-  if (!notionApiKey || !notionDatabaseID) {
-    window.toast.error(i18n.t('message.error.notion.no_api_key'))
-    return false
-  }
-
-  if (allBlocks.length === 0) {
-    window.toast.error(i18n.t('message.error.notion.export'))
-    return false
-  }
+  // Document-level default for message Markdown exports; an explicit caller
+  // argument still wins (plain message copy never goes through this path).
+  const { exportPath, exportIncludeThinking } = store.getState().settings
+  const withReasoning = exportReasoning ?? exportIncludeThinking
 
   setExportingState(true)
-
-  // 限制标题长度
-  if (title.length > 32) {
-    title = title.slice(0, 29) + '...'
-  }
-
   try {
-    const notion = new Client({ auth: notionApiKey })
-
-    const responsePromise = notion.pages.create({
-      parent: { database_id: notionDatabaseID },
-      properties: {
-        [store.getState().settings.notionPageNameKey || 'Name']: {
-          title: [{ text: { content: title } }]
-        }
-      }
-    })
-    window.toast.loading({ title: i18n.t('message.loading.notion.preparing'), promise: responsePromise })
-    const response = await responsePromise
-
-    const exportPromise = appendBlocks({
-      block_id: response.id,
-      children: allBlocks,
-      client: notion
-    })
-    window.toast.loading({ title: i18n.t('message.loading.notion.exporting_progress'), promise: exportPromise })
-
-    window.toast.success(i18n.t('message.success.notion.export'))
-    return true
+    const title = await getMessageTitle(message)
+    // Direct writes into the configured directory keep the timestamp suffix so
+    // repeated exports never overwrite each other.
+    const stamp = exportPath ? ` ${dayjs().format('YYYY-MM-DD-HH-mm-ss')}` : ''
+    const fileName = removeSpecialCharactersForFileName(title) + stamp + '.md'
+    const markdown = withReasoning
+      ? messageToMarkdownWithReasoning(message, excludeCitations)
+      : messageToMarkdown(message, excludeCitations)
+    const saved = await saveExportFile(fileName, markdown)
+    if (saved) {
+      window.toast.success(
+        i18n.t(
+          exportPath
+            ? i18n.t('message.success.markdown.export.preconf')
+            : i18n.t('message.success.markdown.export.specified')
+        )
+      )
+    }
   } catch (error: any) {
-    // 清理可能存在的loading消息
-
-    logger.error('Notion export failed:', error)
-    window.toast.error(i18n.t('message.error.notion.export'))
-    return false
+    window.toast.error(
+      i18n.t(
+        exportPath ? i18n.t('message.error.markdown.export.preconf') : i18n.t('message.error.markdown.export.specified')
+      )
+    )
+    logger.error('Failed to export message as markdown:', error)
   } finally {
     setExportingState(false)
   }
-}
-
-export const exportMessageToNotion = async (
-  title: string,
-  content: string,
-  message?: Message,
-  blocksById?: SnapshotBlockMap
-): Promise<boolean> => {
-  const { notionExportReasoning } = store.getState().settings
-
-  const notionBlocks = await convertMarkdownToNotionBlocks(content)
-
-  if (notionExportReasoning && message) {
-    const thinkingContent = resolveThinkingContent(message, blocksById)
-    if (thinkingContent) {
-      const thinkingBlocks = await convertThinkingToNotionBlocks(thinkingContent)
-      if (notionBlocks.length > 0) {
-        notionBlocks.splice(1, 0, ...thinkingBlocks)
-      } else {
-        notionBlocks.push(...thinkingBlocks)
-      }
-    }
-  }
-
-  return executeNotionExport(title, notionBlocks)
-}
-
-export const exportTopicToNotion = async (topic: Topic): Promise<boolean> => {
-  const { notionExportReasoning, excludeCitationsInExport } = store.getState().settings
-
-  const snapshot = await loadTopicSnapshotForExport(topic.id)
-  const topicMessages = snapshot.messages
-
-  // 创建话题标题块
-  const titleBlocks = await convertMarkdownToNotionBlocks(`# ${topic.name}`)
-
-  // 为每个消息创建blocks
-  const allBlocks: any[] = [...titleBlocks]
-
-  for (const message of topicMessages) {
-    // 将单个消息转换为markdown
-    const messageMarkdown = messageToMarkdown(message, excludeCitationsInExport, snapshot.blocksById)
-    const messageBlocks = await convertMarkdownToNotionBlocks(messageMarkdown)
-
-    if (notionExportReasoning) {
-      const thinkingContent = resolveThinkingContent(message, snapshot.blocksById)
-      if (thinkingContent) {
-        const thinkingBlocks = await convertThinkingToNotionBlocks(thinkingContent)
-        if (messageBlocks.length > 0) {
-          messageBlocks.splice(1, 0, ...thinkingBlocks)
-        } else {
-          messageBlocks.push(...thinkingBlocks)
-        }
-      }
-    }
-
-    allBlocks.push(...messageBlocks)
-  }
-
-  return executeNotionExport(topic.name, allBlocks)
-}
-
-export const exportMarkdownToYuque = async (title: string, content: string): Promise<any | null> => {
-  const { yuqueToken, yuqueRepoId } = store.getState().settings
-
-  if (getExportState()) {
-    window.toast.warning(i18n.t('message.warn.export.exporting'))
-    return
-  }
-
-  if (!yuqueToken || !yuqueRepoId) {
-    window.toast.error(i18n.t('message.error.yuque.no_config'))
-    return
-  }
-
-  setExportingState(true)
-
-  try {
-    const response = await fetch(`https://www.yuque.com/api/v2/repos/${yuqueRepoId}/docs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Auth-Token': yuqueToken,
-        'User-Agent': appIdentity.userAgentProduct
-      },
-      body: JSON.stringify({
-        title: title,
-        slug: Date.now().toString(), // 使用时间戳作为唯一slug
-        format: 'markdown',
-        body: content
-      })
-    })
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const doc_id = data.data.id
-
-    const tocResponse = await fetch(`https://www.yuque.com/api/v2/repos/${yuqueRepoId}/toc`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Auth-Token': yuqueToken,
-        'User-Agent': appIdentity.userAgentProduct
-      },
-      body: JSON.stringify({
-        action: 'appendNode',
-        action_mode: 'sibling',
-        doc_ids: [doc_id]
-      })
-    })
-
-    if (!tocResponse.ok) {
-      throw new Error(`HTTP error! status: ${tocResponse.status}`)
-    }
-
-    window.toast.success(i18n.t('message.success.yuque.export'))
-    return data
-  } catch (error: any) {
-    logger.debug(error)
-    window.toast.error(i18n.t('message.error.yuque.export'))
-    return null
-  } finally {
-    setExportingState(false)
-  }
-}
-
-/**
- * 导出Markdown到Obsidian
- * @param attributes 文档属性
- * @param attributes.title 标题
- * @param attributes.created 创建时间
- * @param attributes.source 来源
- * @param attributes.tags 标签
- * @param attributes.processingMethod 处理方式
- * @param attributes.folder 选择的文件夹路径或文件路径
- * @param attributes.vault 选择的Vault名称
- */
-export const exportMarkdownToObsidian = async (attributes: any): Promise<void> => {
-  if (getExportState()) {
-    window.toast.warning(i18n.t('message.warn.export.exporting'))
-    return
-  }
-
-  setExportingState(true)
-
-  try {
-    // 从参数获取Vault名称
-    const obsidianVault = attributes.vault
-    let obsidianFolder = attributes.folder || ''
-    let isMarkdownFile = false
-
-    if (!obsidianVault) {
-      window.toast.error(i18n.t('chat.topics.export.obsidian_no_vault_selected'))
-      return
-    }
-
-    if (!attributes.title) {
-      window.toast.error(i18n.t('chat.topics.export.obsidian_title_required'))
-      return
-    }
-
-    // 检查是否选择了.md文件
-    if (obsidianFolder && obsidianFolder.endsWith('.md')) {
-      isMarkdownFile = true
-    }
-
-    let filePath = ''
-
-    // 如果是.md文件，直接使用该文件路径
-    if (isMarkdownFile) {
-      filePath = obsidianFolder
-    } else {
-      // 否则构建路径
-      //构建保存路径添加以 / 结尾
-      if (obsidianFolder && !obsidianFolder.endsWith('/')) {
-        obsidianFolder = obsidianFolder + '/'
-      }
-
-      //构建文件名
-      const fileName = transformObsidianFileName(attributes.title)
-      filePath = obsidianFolder + fileName + '.md'
-    }
-
-    let obsidianUrl = `obsidian://new?file=${encodeURIComponent(filePath)}&vault=${encodeURIComponent(obsidianVault)}&clipboard`
-
-    if (attributes.processingMethod === '3') {
-      obsidianUrl += '&overwrite=true'
-    } else if (attributes.processingMethod === '2') {
-      obsidianUrl += '&prepend=true'
-    } else if (attributes.processingMethod === '1') {
-      obsidianUrl += '&append=true'
-    }
-
-    window.open(obsidianUrl)
-    window.toast.success(i18n.t('chat.topics.export.obsidian_export_success'))
-  } catch (error) {
-    logger.error('Failed to export to Obsidian:', error as Error)
-    window.toast.error(i18n.t('chat.topics.export.obsidian_export_failed'))
-  } finally {
-    setExportingState(false)
-  }
-}
-
-/**
- * 生成Obsidian文件名,源自 Obsidian  Web Clipper 官方实现,修改了一些细节
- * @param fileName
- * @returns
- */
-function transformObsidianFileName(fileName: string): string {
-  const platform = window.navigator.userAgent
-  const isWin = /win/i.test(platform)
-  const isMac = /mac/i.test(platform)
-
-  // 删除Obsidian 全平台无效字符
-  let sanitized = fileName.replace(/[#|\\^\\[\]]/g, '')
-
-  if (isWin) {
-    // Windows 的清理
-    sanitized = sanitized
-      .replace(/[<>:"\\/\\|?*]/g, '') // 移除无效字符
-      .replace(/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i, '_$1$2') // 避免保留名称
-      .replace(/[\s.]+$/, '') // 移除结尾的空格和句点
-  } else if (isMac) {
-    // Mac 的清理
-    sanitized = sanitized
-      .replace(/[<>:"\\/\\|?*]/g, '') // 移除无效字符
-      .replace(/^\./, '_') // 避免以句点开头
-  } else {
-    // Linux 或其他系统
-    sanitized = sanitized
-      .replace(/[<>:"\\/\\|?*]/g, '') // 移除无效字符
-      .replace(/^\./, '_') // 避免以句点开头
-  }
-
-  // 所有平台的通用操作
-  sanitized = sanitized
-    .replace(/^\.+/, '') // 移除开头的句点
-    .trim() // 移除前后空格
-    .slice(0, 245) // 截断为 245 个字符，留出空间以追加 ' 1.md'
-
-  // 确保文件名不为空
-  if (sanitized.length === 0) {
-    sanitized = 'Untitled'
-  }
-
-  return sanitized
-}
-
-export const exportMarkdownToJoplin = async (
-  title: string,
-  contentOrMessages: string | Message | Message[],
-  blocksById?: SnapshotBlockMap
-): Promise<any | null> => {
-  const { joplinUrl, joplinToken, joplinExportReasoning, excludeCitationsInExport } = store.getState().settings
-
-  if (getExportState()) {
-    window.toast.warning(i18n.t('message.warn.export.exporting'))
-    return
-  }
-
-  if (!joplinUrl || !joplinToken) {
-    window.toast.error(i18n.t('message.error.joplin.no_config'))
-    return
-  }
-
-  setExportingState(true)
-
-  let content: string
-  if (typeof contentOrMessages === 'string') {
-    content = contentOrMessages
-  } else if (Array.isArray(contentOrMessages)) {
-    content = messagesToMarkdown(contentOrMessages, joplinExportReasoning, excludeCitationsInExport, blocksById)
-  } else {
-    // 单条Message — live-store based unless a snapshot block source is passed
-    content = joplinExportReasoning
-      ? messageToMarkdownWithReasoning(contentOrMessages, excludeCitationsInExport, blocksById)
-      : messageToMarkdown(contentOrMessages, excludeCitationsInExport, blocksById)
-  }
-
-  try {
-    const baseUrl = joplinUrl.endsWith('/') ? joplinUrl : `${joplinUrl}/`
-    const response = await fetch(`${baseUrl}notes?token=${joplinToken}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        title: title,
-        body: content,
-        source: 'Cherry Chat'
-      })
-    })
-
-    if (!response.ok) {
-      throw new Error('service not available')
-    }
-
-    const data = await response.json()
-    if (data?.error) {
-      throw new Error('response error')
-    }
-
-    window.toast.success(i18n.t('message.success.joplin.export'))
-    return data
-  } catch (error: any) {
-    logger.error('Failed to export to Joplin:', error)
-    window.toast.error(i18n.t('message.error.joplin.export'))
-    return null
-  } finally {
-    setExportingState(false)
-  }
-}
-
-/**
- * 导出Markdown到思源笔记
- * @param title 笔记标题
- * @param content 笔记内容
- */
-export const exportMarkdownToSiyuan = async (title: string, content: string): Promise<void> => {
-  const { siyuanApiUrl, siyuanToken, siyuanBoxId, siyuanRootPath } = store.getState().settings
-
-  if (getExportState()) {
-    window.toast.warning(i18n.t('message.warn.export.exporting'))
-    return
-  }
-
-  if (!siyuanApiUrl || !siyuanToken || !siyuanBoxId) {
-    window.toast.error(i18n.t('message.error.siyuan.no_config'))
-    return
-  }
-
-  setExportingState(true)
-
-  try {
-    // test connection
-    const testResponse = await fetch(`${siyuanApiUrl}/api/notebook/lsNotebooks`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Token ${siyuanToken}`
-      }
-    })
-
-    if (!testResponse.ok) {
-      throw new Error('API请求失败')
-    }
-
-    const testData = await testResponse.json()
-    if (testData.code !== 0) {
-      throw new Error(`${testData.msg || i18n.t('message.error.unknown')}`)
-    }
-
-    // 确保根路径以/开头
-    const rootPath = siyuanRootPath?.startsWith('/') ? siyuanRootPath : `/${siyuanRootPath || 'CherryStudio'}`
-    const renderedRootPath = await renderSprigTemplate(siyuanApiUrl, siyuanToken, rootPath)
-    // 创建文档
-    const docTitle = `${title.replace(/[#|\\^\\[\]]/g, '')}`
-    const docPath = `${renderedRootPath}/${docTitle}`
-
-    // 创建文档
-    await createSiyuanDoc(siyuanApiUrl, siyuanToken, siyuanBoxId, docPath, content)
-
-    window.toast.success(i18n.t('message.success.siyuan.export'))
-  } catch (error) {
-    logger.error('Failed to export to Siyuan:', error as Error)
-    window.toast.error(i18n.t('message.error.siyuan.export') + (error instanceof Error ? `: ${error.message}` : ''))
-  } finally {
-    setExportingState(false)
-  }
-}
-/**
- * 渲染 思源笔记 Sprig 模板字符串
- * @param apiUrl 思源 API 地址
- * @param token 思源 API Token
- * @param template Sprig 模板
- * @returns 渲染后的字符串
- */
-async function renderSprigTemplate(apiUrl: string, token: string, template: string): Promise<string> {
-  const response = await fetch(`${apiUrl}/api/template/renderSprig`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Token ${token}`
-    },
-    body: JSON.stringify({ template })
-  })
-
-  const data = await response.json()
-  if (data.code !== 0) {
-    throw new Error(`${data.msg || i18n.t('message.error.unknown')}`)
-  }
-
-  return data.data
-}
-
-/**
- * 创建思源笔记文档
- */
-async function createSiyuanDoc(
-  apiUrl: string,
-  token: string,
-  boxId: string,
-  path: string,
-  markdown: string
-): Promise<string> {
-  const response = await fetch(`${apiUrl}/api/filetree/createDocWithMd`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Token ${token}`
-    },
-    body: JSON.stringify({
-      notebook: boxId,
-      path: path,
-      markdown: markdown
-    })
-  })
-
-  const data = await response.json()
-  if (data.code !== 0) {
-    throw new Error(`${data.msg || i18n.t('message.error.unknown')}`)
-  }
-
-  return data.data
 }
 
 /**
@@ -1136,8 +539,8 @@ export const exportTopicToNotes = async (topic: Topic, folderPath: string): Prom
 const exportNoteAsMarkdown = async (noteName: string, content: string): Promise<void> => {
   const markdown = `# ${noteName}\n\n${content}`
   const fileName = removeSpecialCharactersForFileName(noteName) + '.md'
-  const result = await window.api.file.save(fileName, markdown)
-  if (result) {
+  const saved = await saveExportFile(fileName, markdown)
+  if (saved) {
     window.toast.success(i18n.t('message.success.markdown.export.specified'))
   }
 }
@@ -1185,14 +588,13 @@ const exportNoteAsImageFile = async (noteName: string): Promise<void> => {
 
   const dataUrl = await captureScrollableAsDataURL(scrollableRef)
   if (dataUrl) {
-    const fileName = removeSpecialCharactersForFileName(noteName)
-    await window.api.file.saveImage(fileName, dataUrl)
+    await saveExportImage(removeSpecialCharactersForFileName(noteName), dataUrl)
   }
 }
 
 interface NoteExportOptions {
   node: { name: string; externalPath: string }
-  platform: 'markdown' | 'docx' | 'notion' | 'yuque' | 'obsidian' | 'joplin' | 'siyuan' | 'copyImage' | 'exportImage'
+  platform: 'markdown' | 'copyImage' | 'exportImage'
 }
 
 export const exportNote = async ({ node, platform }: NoteExportOptions): Promise<void> => {
@@ -1206,26 +608,6 @@ export const exportNote = async ({ node, platform }: NoteExportOptions): Promise
         return await exportNoteAsImageFile(node.name)
       case 'markdown':
         return await exportNoteAsMarkdown(node.name, content)
-      case 'docx':
-        void window.api.export.toWord(`# ${node.name}\n\n${content}`, removeSpecialCharactersForFileName(node.name))
-        return
-      case 'notion':
-        await exportMessageToNotion(node.name, content)
-        return
-      case 'yuque':
-        await exportMarkdownToYuque(node.name, `# ${node.name}\n\n${content}`)
-        return
-      case 'obsidian': {
-        const { default: ObsidianExportPopup } = await import('@renderer/components/Popups/ObsidianExportPopup')
-        await ObsidianExportPopup.show({ title: node.name, processingMethod: '1', rawContent: content })
-        return
-      }
-      case 'joplin':
-        await exportMarkdownToJoplin(node.name, content)
-        return
-      case 'siyuan':
-        await exportMarkdownToSiyuan(node.name, `# ${node.name}\n\n${content}`)
-        return
     }
   } catch (error) {
     logger.error(`Failed to export note to ${platform}:`, error as Error)

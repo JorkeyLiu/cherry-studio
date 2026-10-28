@@ -1,12 +1,15 @@
 import { loggerService } from '@logger'
 import { readAppliedThemeMode } from '@renderer/context/antdThemeConfig'
-import type { Topic } from '@renderer/types'
+import store from '@renderer/store'
+import type { ThemeMode, Topic } from '@renderer/types'
+import type { Message } from '@renderer/types/newMessage'
 import { captureScrollable } from '@renderer/utils'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
-import TopicExportImageCanvas from './TopicExportImageCanvas'
+import TopicExportImageCanvas, { type ExportImageScope } from './TopicExportImageCanvas'
 
 const logger = loggerService.withContext('TopicExportImage')
 
@@ -22,15 +25,18 @@ const FONT_READY_TIMEOUT_MS = 1500
 const DOM_SETTLE_QUIET_MS = 120
 
 export type TopicExportImageOutcome =
-  /** Complete topic rendered and captured as a PNG data URL. */
+  /** Complete export content rendered and captured as a PNG data URL. */
   | { status: 'captured'; dataUrl: string; width: number; height: number }
-  /** The topic exists but holds no messages, so there is nothing to export. */
+  /** The addressed route exists but holds no messages, so there is nothing to export. */
   | { status: 'empty' }
-  /** Another topic image export is already running. */
+  /** Another image export is already running. */
   | { status: 'busy' }
   /** The capture exceeded the maximum canvas dimension (rejected by the capture helper). */
   | { status: 'too-large' }
   | { status: 'failed'; error: unknown }
+
+/** One addressed message produces the very same outcome shape as a topic route. */
+export type MessageExportImageOutcome = TopicExportImageOutcome
 
 let exportInFlight = false
 
@@ -185,70 +191,83 @@ const teardown = (root: Root | null, host: HTMLElement | null): void => {
 }
 
 /**
- * Captures one complete topic route as a PNG data URL.
- *
- * The content source is Main's one-shot `whole-topic` snapshot for the
- * explicitly addressed route, the rendering is caller-local (a detached
- * offscreen React root), and the live message projection, viewport window,
- * scroll position and pagination are never read for content nor mutated.
- * `branchId` is a caller-supplied value, not a live selector read: the route is
- * frozen when the export starts, so a later route switch cannot change what an
- * in-flight export renders. `null`/`undefined` is the main route.
- *
- * Every transient resource — host node, React root, and any style the capture
- * helper applies — is released in `finally`, on success, on failure and on
- * timeout alike.
+ * Reads the export thinking option exactly once per capture, before the first
+ * await: the value is frozen for this export, so a settings change during the
+ * asynchronous render cannot alter what the image shows.
  */
-export const captureTopicExportImage = async (options: {
+const readExportIncludeThinking = (): boolean => store.getState().settings.exportIncludeThinking === true
+
+const resolveCanvasWidth = (width?: number): number =>
+  Math.max(1, Math.round(width && width > 0 ? width : TOPIC_EXPORT_CANVAS_WIDTH_FALLBACK))
+
+/**
+ * Resolves the topic a message belongs to.
+ *
+ * Topics live under their assistant; the export only needs the topic's identity
+ * (id/assistantId/name) for the message body, and never a live route read.
+ */
+const findTopicById = (topicId: string): Topic | undefined => {
+  const { assistants } = store.getState()
+  for (const assistant of assistants.assistants) {
+    const topic = assistant.topics?.find((candidate) => candidate.id === topicId)
+    if (topic) return topic
+  }
+  return undefined
+}
+
+interface ExportRenderRequest {
   topic: Topic
-  /** Route to export: a branch id, or `null`/`undefined` for the main route. */
-  branchId?: string | null
-  /** Live message column width in CSS pixels, so typography matches the chat. */
-  width?: number
-}): Promise<TopicExportImageOutcome> => {
-  if (exportInFlight) return { status: 'busy' }
-  exportInFlight = true
+  messages: Message[]
+  blocksById: SnapshotBlockMap
+  width: number
+  /** Frozen export thinking expansion (`true` = expanded, `false` = collapsed). */
+  exportIncludeThinking: boolean
+  scope: ExportImageScope
+}
 
-  const { topic } = options
-  const width = Math.max(
-    1,
-    Math.round(options.width && options.width > 0 ? options.width : TOPIC_EXPORT_CANVAS_WIDTH_FALLBACK)
-  )
-
+/**
+ * Renders one export tree into a detached offscreen root and captures it.
+ *
+ * This is the single snapshot render/capture path shared by the topic export and
+ * the single-message export: one waiting strategy (commit, fonts, images, DOM
+ * quiet), one capture call, one teardown in `finally`, and one theme scope.
+ */
+const renderAndCapture = async ({
+  topic,
+  messages,
+  blocksById,
+  width,
+  exportIncludeThinking,
+  scope
+}: ExportRenderRequest): Promise<TopicExportImageOutcome> => {
   // The effective theme the page is rendering, read once at export start. React
   // context does not cross into the detached export root, so the theme has to
   // be carried across explicitly; reading what the live ThemeProvider already
   // applied keeps the export on the same theme without a second resolver.
-  const themeMode = readAppliedThemeMode()
+  const themeMode: ThemeMode = readAppliedThemeMode()
 
   let host: HTMLElement | null = null
   let root: Root | null = null
 
   try {
-    // Caller-local whole-topic read: complete ordered messages + blocks for the
-    // addressed topic route, independent of the loaded Redux projection.
-    // The route is the value captured at export start (`null` = main route).
-    const snapshot = await loadWholeTopicSnapshot(topic.id, options.branchId ?? null)
-    if (snapshot.messages.length === 0) {
-      return { status: 'empty' }
-    }
-
     host = createExportHost(width)
     document.body.appendChild(host)
     root = createRoot(host)
     root.render(
       createElement(TopicExportImageCanvas, {
         topic,
-        messages: snapshot.messages,
-        blocksById: snapshot.blocksById,
+        messages,
+        blocksById,
         width,
-        themeMode
+        themeMode,
+        exportIncludeThinking,
+        scope
       })
     )
 
     const committed = await waitForCommittedChildren(host)
     if (!committed) {
-      return { status: 'failed', error: new Error('Topic export canvas did not render') }
+      return { status: 'failed', error: new Error('Export canvas did not render') }
     }
 
     // Capture the laid-out canvas, never the host: the capture helper rewrites
@@ -256,7 +275,7 @@ export const captureTopicExportImage = async (options: {
     // pull the transient tree back into the document flow and reflow the app.
     const target = host.querySelector<HTMLElement>(EXPORT_CONTENT_SELECTOR)
     if (!target) {
-      return { status: 'failed', error: new Error('Topic export canvas content missing') }
+      return { status: 'failed', error: new Error('Export canvas content missing') }
     }
 
     await withTimeout(
@@ -269,7 +288,7 @@ export const captureTopicExportImage = async (options: {
 
     const canvas = await captureScrollable({ current: target })
     if (!canvas) {
-      return { status: 'failed', error: new Error('Topic export capture produced no canvas') }
+      return { status: 'failed', error: new Error('Export capture produced no canvas') }
     }
 
     return {
@@ -278,14 +297,135 @@ export const captureTopicExportImage = async (options: {
       width: canvas.width,
       height: canvas.height
     }
-  } catch (error) {
-    // The capture helper rejects without a reason for the explicit
-    // maximum-dimension rejection and has already surfaced that to the user.
-    if (error === undefined) return { status: 'too-large' }
-    logger.error('Failed to capture topic export image', error as Error)
-    return { status: 'failed', error }
   } finally {
+    // Every transient resource — host node, React root, and any style the
+    // capture helper applies — is released on success, on failure and on
+    // timeout alike.
     teardown(root, host)
+  }
+}
+
+/**
+ * Maps a thrown capture error onto the export outcome.
+ *
+ * The capture helper rejects without a reason for the explicit maximum-dimension
+ * rejection and has already surfaced that to the user.
+ */
+const failureFor = (error: unknown, message: string): TopicExportImageOutcome => {
+  if (error === undefined) return { status: 'too-large' }
+  logger.error(message, error as Error)
+  return { status: 'failed', error }
+}
+
+/**
+ * Captures one complete topic route as a PNG data URL.
+ *
+ * The content source is Main's one-shot `whole-topic` snapshot for the
+ * explicitly addressed route, the rendering is caller-local (a detached
+ * offscreen React root), and the live message projection, viewport window,
+ * scroll position and pagination are never read for content nor mutated.
+ * `branchId` is a caller-supplied value, not a live selector read: the route is
+ * frozen when the export starts, so a later route switch cannot change what an
+ * in-flight export renders. `null`/`undefined` is the main route.
+ *
+ * The thinking-expansion option is read once at export start and stays frozen
+ * for this capture. Every transient resource is released in `finally`, on
+ * success, on failure and on timeout alike.
+ */
+export const captureTopicExportImage = async (options: {
+  topic: Topic
+  /** Route to export: a branch id, or `null`/`undefined` for the main route. */
+  branchId?: string | null
+  /** Live message column width in CSS pixels, so typography matches the chat. */
+  width?: number
+}): Promise<TopicExportImageOutcome> => {
+  if (exportInFlight) return { status: 'busy' }
+  exportInFlight = true
+
+  const { topic } = options
+
+  try {
+    const exportIncludeThinking = readExportIncludeThinking()
+    const width = resolveCanvasWidth(options.width)
+
+    // Caller-local whole-topic read: complete ordered messages + blocks for the
+    // addressed topic route, independent of the loaded Redux projection.
+    // The route is the value captured at export start (`null` = main route).
+    const snapshot = await loadWholeTopicSnapshot(topic.id, options.branchId ?? null)
+    if (snapshot.messages.length === 0) {
+      return { status: 'empty' }
+    }
+
+    return await renderAndCapture({
+      topic,
+      messages: snapshot.messages,
+      blocksById: snapshot.blocksById,
+      width,
+      exportIncludeThinking,
+      scope: 'route'
+    })
+  } catch (error) {
+    return failureFor(error, 'Failed to capture topic export image')
+  } finally {
+    exportInFlight = false
+  }
+}
+
+/**
+ * Captures one addressed message as a PNG data URL.
+ *
+ * The message is resolved from its own topic route in Main's one-shot
+ * `whole-topic` snapshot — by stable id, so inherited/shared-prefix messages are
+ * found in the route that owns them — and exactly that message is rendered, with
+ * its complete block set taken from the same snapshot. The export never falls
+ * back to the live viewport's loaded rows, never substitutes the currently
+ * opened topic, and fails closed when the message is not part of its route.
+ *
+ * The outcome shape is identical to {@link captureTopicExportImage}, including
+ * the shared in-flight guard and the frozen thinking-expansion option.
+ */
+export const captureMessageExportImage = async (options: {
+  message: Message
+  /** Live message column width in CSS pixels, so typography matches the chat. */
+  width?: number
+}): Promise<MessageExportImageOutcome> => {
+  if (exportInFlight) return { status: 'busy' }
+  exportInFlight = true
+
+  const { message } = options
+
+  try {
+    const exportIncludeThinking = readExportIncludeThinking()
+    const width = resolveCanvasWidth(options.width)
+
+    const topic = findTopicById(message.topicId)
+    if (!topic) {
+      return { status: 'failed', error: new Error(`Topic ${message.topicId} of message ${message.id} is not loaded`) }
+    }
+
+    // The message carries its own owner route (inherited messages keep their
+    // owner's branch id and are immutable through descendant routes), so the
+    // owner route is exactly the route holding this stable message id.
+    const snapshot = await loadWholeTopicSnapshot(message.topicId, message.branchId ?? null)
+    const target = snapshot.messages.find((candidate) => candidate.id === message.id)
+    if (!target) {
+      return {
+        status: 'failed',
+        error: new Error(`Message ${message.id} is not part of topic ${message.topicId}'s route`)
+      }
+    }
+
+    return await renderAndCapture({
+      topic,
+      messages: [target],
+      blocksById: snapshot.blocksById,
+      width,
+      exportIncludeThinking,
+      scope: 'single'
+    })
+  } catch (error) {
+    return failureFor(error, 'Failed to capture message export image')
+  } finally {
     exportInFlight = false
   }
 }

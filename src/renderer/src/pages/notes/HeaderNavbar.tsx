@@ -54,25 +54,6 @@ const HeaderNavbar = ({ notesTree, getCurrentNoteContent, onToggleStar, onExpand
     }
   }, [getCurrentNoteContent])
 
-  const handleExportToWord = useCallback(async () => {
-    try {
-      const content = getCurrentNoteContent?.()
-      if (!content) {
-        window.toast.warning(t('notes.no_content_to_export'))
-        return
-      }
-      if (!activeNode) {
-        window.toast.warning(t('notes.no_note_selected'))
-        return
-      }
-      const fileName = activeNode.name.replace('.md', '')
-      await window.api.export.toWord(content, fileName)
-    } catch (error) {
-      logger.error('Failed to export to Word:', error as Error)
-      window.toast.error(t('notes.export_to_word_failed'))
-    }
-  }, [getCurrentNoteContent, activeNode])
-
   const handleShowSettings = useCallback(() => {
     void GeneralPopup.show({
       title: t('notes.settings.title'),
@@ -162,8 +143,6 @@ const HeaderNavbar = ({ notesTree, getCurrentNoteContent, onToggleStar, onExpand
       onClick: () => {
         if (item.copyAction) {
           void handleCopyContent()
-        } else if (item.exportToWordAction) {
-          void handleExportToWord()
         } else if (item.showSettingsPopup) {
           handleShowSettings()
         } else if (item.action) {
