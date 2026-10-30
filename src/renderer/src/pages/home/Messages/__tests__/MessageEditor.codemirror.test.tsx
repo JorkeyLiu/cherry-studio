@@ -1,12 +1,14 @@
+import { isMac } from '@renderer/config/constant'
 import type * as PasteServiceModule from '@renderer/services/PasteService'
 import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { EditorState, EditorView, type Extension, keymap } from '@uiw/react-codemirror'
 import type { ReactNode } from 'react'
 import React, { useCallback, useEffect, useReducer, useRef } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { toggleBold } from '../messageEditorFormatting'
 import {
@@ -21,7 +23,7 @@ const mocks = vi.hoisted(() => ({
   uploadFile: vi.fn(),
   onSave: vi.fn(),
   onResend: vi.fn(),
-  sendKeyPressed: vi.fn(() => false),
+  sendKeyPressed: vi.fn((_event: KeyboardEvent, _shortcut?: string) => false),
   captureIntent: vi.fn(() => true),
   settings: { renderInputMessageAsMarkdown: true },
   pasteLongTextAsFile: false,
@@ -40,7 +42,8 @@ const mocks = vi.hoisted(() => ({
     getScroll: () => number
   } | null,
   autoHeightCallback: null as null | ((height: number) => void),
-  commandCalls: [] as { cmd: 'undo' | 'redo' }[]
+  commandCalls: [] as { cmd: 'undo' | 'redo' }[],
+  editorExtensions: null as unknown[] | null
 }))
 
 vi.mock('@renderer/services/FileManager', () => ({
@@ -242,7 +245,8 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     onEditorReady,
     onHistoryChange,
     historySnapshot,
-    editable
+    editable,
+    extensions
   }: {
     ref?: React.RefObject<{
       save?: () => void
@@ -259,6 +263,7 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     onHistoryChange?: (depths: { undo: number; redo: number }) => void
     historySnapshot?: { json?: { history?: { done?: string[]; undone?: string[] } } } | null
     editable?: boolean
+    extensions?: unknown[]
   }) {
     // Adaptive-measurement contract: the mock exposes the production
     // onHeightChange subscription so tests drive it explicitly via
@@ -266,6 +271,9 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     // onHeightChange undefined (production never measures there).
     mocks.autoHeightCallback = onHeightChange ?? null
     mocks.onEditorPaste = onEditorPaste ?? null
+    // Editor extensions handed to the engine by the editor (resend shortcut
+    // wiring): captured so tests can drive them through a real engine.
+    mocks.editorExtensions = extensions ?? null
     const initial = value ?? ''
     const docRef = useRef(initial)
     const selRef = useRef({ anchor: initial.length, head: initial.length })
@@ -580,7 +588,7 @@ beforeEach(() => {
   mocks.autoHeightCallback = null
   mocks.pasteLongTextAsFile = false
   mocks.pasteCalls = []
-  mocks.onEditorPaste = null
+  mocks.editorExtensions = null
   mocks.createTempFile.mockReset().mockResolvedValue('/tmp/pasted_text.txt')
   mocks.writeTempFile.mockReset().mockResolvedValue(undefined)
   mocks.getTempFile.mockReset().mockResolvedValue(pastedTextFile)
@@ -1544,5 +1552,202 @@ describe('MessageEditor long-text paste role gate', () => {
     expect(event.defaultPrevented).toBe(false)
     expect(mocks.createTempFile).not.toHaveBeenCalled()
     expect(screen.queryByText('pasted_text.txt')).toBeNull()
+  })
+})
+
+describe('MessageEditor resend shortcut wiring (Cmd+Enter → resend action)', () => {
+  // Real engines: the captured extensions are mounted into a genuine
+  // CodeMirror view so the shortcut is exercised through the same DOM
+  // keydown path the app uses.
+  const mountCapturedExtensions = (doc = 'draft') => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc,
+        extensions: [
+          // Competing default-precedence binding the shortcut must beat.
+          keymap.of([{ key: 'Mod-Enter', run: () => true }]),
+          ...((mocks.editorExtensions ?? []) as Extension[])
+        ]
+      })
+    })
+    return view
+  }
+
+  // Platform mod convention: Cmd on macOS, Ctrl elsewhere — the same predicate
+  // the resend binding uses (messageEditorResendShortcut.ts).
+  const modEnter = () =>
+    new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ...(isMac ? { metaKey: true } : { ctrlKey: true }),
+      bubbles: true,
+      cancelable: true
+    })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('user edit routes platform mod+Enter to the resend action, never to save', async () => {
+    renderEditor('user')
+    // Save (both roles) + resend (user only): one extension per binding.
+    expect(mocks.editorExtensions).toHaveLength(2)
+    const view = mountCapturedExtensions()
+    const event = modEnter()
+    view.contentDOM.dispatchEvent(event)
+    // Consumed synchronously: no line is inserted alongside the submission.
+    expect(event.defaultPrevented).toBe(true)
+    expect(view.state.doc.toString()).toBe('draft')
+    // The existing resend action is async (attachment staging): it reaches the
+    // resend callback once, and never the save callback.
+    await waitFor(() => expect(mocks.onResend).toHaveBeenCalledTimes(1))
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    view.destroy()
+  })
+
+  it('user edit leaves plain Enter to the engine (newline, no submission)', async () => {
+    renderEditor('user')
+    const view = mountCapturedExtensions()
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    view.contentDOM.dispatchEvent(event)
+    expect(mocks.onResend).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    // Untouched: Enter keeps the engine default (a newline), proven against
+    // the real default keymap in messageEditorResendShortcut.test.ts.
+    expect(event.defaultPrevented).toBe(false)
+    view.destroy()
+  })
+
+  it('assistant edit gets no shortcut and keeps save/cancel without a resend action', async () => {
+    renderEditor('assistant')
+    // Save only: the assistant role has no resend binding at all.
+    expect(mocks.editorExtensions).toHaveLength(1)
+    const view = mountCapturedExtensions()
+    view.contentDOM.dispatchEvent(modEnter())
+    expect(mocks.onResend).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'common.save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'common.cancel' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'chat.resend' })).toBeNull()
+    view.destroy()
+  })
+})
+
+describe('MessageEditor save shortcut wiring (Cmd+S / Ctrl+S → save action)', () => {
+  // Same real-engine approach as the resend wiring suite: the captured
+  // extensions are mounted into a genuine CodeMirror view.
+  const mountCapturedExtensions = (withCompetingBinding = true) => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: 'draft',
+        extensions: [
+          // Competing default-precedence binding the shortcut must beat: if it
+          // ran, it would handle the key AND mutate the document. The engine
+          // keymap is omitted only where the composition path is observed in
+          // isolation (the app's engine has no Mod-s binding either).
+          ...(withCompetingBinding
+            ? [
+                keymap.of([
+                  {
+                    key: 'Mod-s',
+                    run: (target) => {
+                      target.dispatch({ changes: { from: 0, insert: 'X' } })
+                      return true
+                    }
+                  }
+                ])
+              ]
+            : []),
+          ...((mocks.editorExtensions ?? []) as Extension[])
+        ]
+      })
+    })
+    return view
+  }
+
+  // Platform mod convention: Cmd on macOS, Ctrl elsewhere. This is the same
+  // predicate the binding uses, so each test dispatches the real key here.
+  const modS = () =>
+    new KeyboardEvent('keydown', {
+      key: 's',
+      ...(isMac ? { metaKey: true } : { ctrlKey: true }),
+      bubbles: true,
+      cancelable: true
+    })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('user edit routes platform mod+S to the save action only, once', async () => {
+    renderEditor('user')
+    const view = mountCapturedExtensions()
+    const event = modS()
+    view.contentDOM.dispatchEvent(event)
+    // Consumed before the engine keymap: no character is inserted alongside.
+    expect(event.defaultPrevented).toBe(true)
+    expect(view.state.doc.toString()).toBe('draft')
+    await waitFor(() => expect(mocks.onSave).toHaveBeenCalledTimes(1))
+    // Save only: the user resend action is never invoked by this shortcut.
+    expect(mocks.onResend).not.toHaveBeenCalled()
+    view.destroy()
+  })
+
+  it('assistant edit routes platform mod+S to the save action only, once', async () => {
+    renderEditor('assistant')
+    const view = mountCapturedExtensions()
+    const event = modS()
+    view.contentDOM.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+    expect(view.state.doc.toString()).toBe('draft')
+    await waitFor(() => expect(mocks.onSave).toHaveBeenCalledTimes(1))
+    // The assistant role has no resend action at all.
+    expect(mocks.onResend).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'chat.resend' })).toBeNull()
+    view.destroy()
+  })
+
+  it('an in-flight save disables the button and the shortcut acts once', async () => {
+    renderEditor('user')
+    const view = mountCapturedExtensions()
+    view.contentDOM.dispatchEvent(modS())
+    await waitFor(() => expect(mocks.onSave).toHaveBeenCalledTimes(1))
+    // The existing disabled state (processing) reaches the save button...
+    await waitFor(() => expect(screen.getByRole('button', { name: 'common.save' })).toBeDisabled())
+    // ...and the shortcut: a second press is consumed without a second save.
+    const second = modS()
+    view.contentDOM.dispatchEvent(second)
+    expect(second.defaultPrevented).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mocks.onSave).toHaveBeenCalledTimes(1)
+    view.destroy()
+  })
+
+  it('never saves during IME composition', async () => {
+    renderEditor('user')
+    const view = mountCapturedExtensions(false)
+    const event = modS()
+    Object.defineProperty(event, 'isComposing', { value: true })
+    view.contentDOM.dispatchEvent(event)
+    // Not consumed and not acted on: the shortcut stands down entirely.
+    expect(event.defaultPrevented).toBe(false)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    expect(mocks.onResend).not.toHaveBeenCalled()
+  })
+
+  it('plain Enter stays a newline and never saves', () => {
+    renderEditor('user')
+    const view = mountCapturedExtensions()
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    view.contentDOM.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    view.destroy()
   })
 })

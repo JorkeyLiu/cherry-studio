@@ -77,6 +77,8 @@ import {
   MESSAGE_EDITOR_MEASURED_CHROME_PX,
   resolveMessageEditorHeight
 } from './messageEditorHeight'
+import { createMessageEditorResendExtensions } from './messageEditorResendShortcut'
+import { createMessageEditorSaveExtensions } from './messageEditorSaveShortcut'
 import {
   captureInteractionIntent,
   INTERACTION_REGION_CONTROLS,
@@ -211,12 +213,18 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   onPasteRef.current = onPaste
   const onResendKeyRef = useRef(onResendKey)
   onResendKeyRef.current = onResendKey
+  const onSaveKeyRef = useRef(onSaveKey)
+  onSaveKeyRef.current = onSaveKey
   const onCancelKeyRef = useRef(onCancelKey)
   onCancelKeyRef.current = onCancelKey
   const sendMessageShortcutRef = useRef(sendMessageShortcut)
   sendMessageShortcutRef.current = sendMessageShortcut
   const isUserRef = useRef(isUser)
   isUserRef.current = isUser
+  // Existing submission guard (save/resend in flight) read lazily by the
+  // save/resend shortcuts, so the key handlers never depend on a stale render.
+  const disabledRef = useRef(disabled)
+  disabledRef.current = disabled
 
   useEffect(() => {
     contentRef.current = block.content
@@ -455,6 +463,39 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     // Preserve the original behavior: never trigger the global Electron menu.
     event.stopPropagation()
   }, [])
+
+  // Cmd+Enter (macOS) / Ctrl+Enter (other platforms) runs the SAME action as
+  // the existing resend button, and only where that action exists (user
+  // messages). Assistant edits keep save/cancel and get no shortcut. Injected
+  // as a high-precedence editor extension because the engine's own keymap owns
+  // Enter/Mod-Enter at default precedence.
+  const resendShortcutExtensions = useMemo(
+    () =>
+      createMessageEditorResendExtensions({
+        role,
+        isDisabled: () => disabledRef.current,
+        onResend: () => onResendKeyRef.current()
+      }),
+    [role]
+  )
+
+  // Cmd+S / Ctrl+S runs the SAME action as the existing save button, for both
+  // roles (both have save). Same mechanism and memoization as the resend
+  // binding: the extension set stays identity-stable across draft keystrokes
+  // (refs carry the latest callbacks), so the engine is never reconfigured
+  // while typing.
+  const saveShortcutExtensions = useMemo(
+    () =>
+      createMessageEditorSaveExtensions({
+        isDisabled: () => disabledRef.current,
+        onSave: () => onSaveKeyRef.current()
+      }),
+    []
+  )
+  const editorShortcutExtensions = useMemo(
+    () => [...saveShortcutExtensions, ...resendShortcutExtensions],
+    [saveShortcutExtensions, resendShortcutExtensions]
+  )
 
   const applyToolbarOp = useCallback(
     (op: (content: string, selection: EditorSelection) => FormatResult) => {
@@ -870,6 +911,11 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         onEditorReady={handleEditorReady}
         historySnapshot={historySnapshot}
         onHistoryChange={handleHistoryChange}
+        // Save shortcut (both roles) and resend shortcut (user messages only):
+        // the same actions as the existing buttons, above the engine keymap so
+        // the mod-key events actually reach them. Both inline and expanded
+        // mounts share this exact extension set.
+        extensions={editorShortcutExtensions}
         expanded={false}
         height="100%"
         minHeight="100%"
