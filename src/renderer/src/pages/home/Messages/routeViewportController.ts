@@ -109,6 +109,36 @@ export interface InteractionFingerprint {
 }
 
 /**
+ * Deletion survivor boundary captured BEFORE the rows are removed: the
+ * adjacent surviving message row whose visual position the same-route hold
+ * must keep, plus which side of the deleted block it sits on.
+ *
+ * The deleted interaction region (a footer inside the row that disappears) is
+ * never a measurable handoff target, so a deletion gesture names this survivor
+ * instead of its own region baseline. `above` applies when the deletion
+ * removes a user row together with its assistant replies (the surviving
+ * message ABOVE the block keeps its visual position and the content below
+ * moves up); `below` applies when the deletion removes an assistant row alone
+ * (the surviving message BELOW keeps its visual position). `offset` is the
+ * survivor row's top minus the container top at capture time — the same
+ * layout-space measurement the keeper uses everywhere else, never a raw
+ * scrollTop number.
+ */
+export interface InteractionSurvivorRow {
+  messageId: string
+  offset: number
+  direction: 'above' | 'below'
+}
+
+/** Structural survivor validity: identity, finite geometry, declared side. */
+const isValidSurvivorRow = (row: InteractionSurvivorRow | undefined): row is InteractionSurvivorRow => {
+  if (!row) return false
+  if (typeof row.messageId !== 'string' || row.messageId.length === 0) return false
+  if (typeof row.offset !== 'number' || !Number.isFinite(row.offset)) return false
+  return row.direction === 'above' || row.direction === 'below'
+}
+
+/**
  * Rendered DOM provenance: which route window the committed DOM actually
  * shows, at which session epoch, under which window identity.
  * - `routeId` mirrors `RouteRef.route` naming for the rendered side.
@@ -383,6 +413,13 @@ export class RouteViewportController {
      * unchanged: the captured region offset, which is why a deferred
      * mutation needs no separate geometry. */
     pendingLayoutMutation?: boolean
+    /** Deletion survivor boundary (see `InteractionSurvivorRow`). Present only
+     * for a delete gesture, whose own region disappears with the removed rows:
+     * the keeper holds THIS row's visual position instead of the region
+     * baseline, and hands off to it once the removed rows are gone and the
+     * layout is quiet. Absent for every other interaction, which keeps the
+     * captured region baseline unchanged. */
+    survivorRow?: InteractionSurvivorRow
   } | null = null
   private interactionGestureSeq = 0
   /**
@@ -508,12 +545,17 @@ export class RouteViewportController {
     fingerprint?: InteractionFingerprint
     capturedAt: number
     pendingLayoutMutation?: boolean
+    survivorRow?: InteractionSurvivorRow
   } | null {
     const it = this.interactionIntent
     if (!it) return null
     if (it.epoch !== this.epoch) return null
     if (it.topicId !== this.displayed.topicId || it.route !== this.displayed.route) return null
-    return { ...it, ...(it.fingerprint ? { fingerprint: { ...it.fingerprint } } : {}) }
+    return {
+      ...it,
+      ...(it.fingerprint ? { fingerprint: { ...it.fingerprint } } : {}),
+      ...(it.survivorRow ? { survivorRow: { ...it.survivorRow } } : {})
+    }
   }
 
   /**
@@ -529,19 +571,27 @@ export class RouteViewportController {
    * Never opens ownership, never touches anchor/cache/phase/epoch. A newer
    * capture overwrites the pending gesture (new gestureId); stale
    * completions must guard by that identity and never clear the newer one.
+   *
+   * `survivorRow` names the adjacent surviving row for a deletion gesture
+   * (see `InteractionSurvivorRow`): the hold then targets that row instead of
+   * the region baseline, because the clicked region is removed with the rows.
+   * It is structurally validated (identity + finite offset + declared side)
+   * and refused when invalid — a deletion with no survivor on the required
+   * side keeps the bounded pre-existing behavior instead of guessing one.
    */
   beginInteractionIntent(
     target: RouteRef,
     scope: InteractionScope,
     region: string,
     offset: number,
-    opts?: { expectedEpoch?: number; fingerprint?: InteractionFingerprint }
+    opts?: { expectedEpoch?: number; fingerprint?: InteractionFingerprint; survivorRow?: InteractionSurvivorRow }
   ): boolean {
     if (typeof opts?.expectedEpoch === 'number' && opts.expectedEpoch !== this.epoch) return false
     if (!scope || (scope.kind !== 'message' && scope.kind !== 'group')) return false
     if (typeof scope.id !== 'string' || scope.id.length === 0) return false
     if (typeof region !== 'string' || region.length === 0) return false
     if (!Number.isFinite(offset)) return false
+    if (opts?.survivorRow !== undefined && !isValidSurvivorRow(opts.survivorRow)) return false
     if (this.ownershipHeld) return false
     if (!this.isDomProvenanceClean) return false
     if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) return false
@@ -567,6 +617,7 @@ export class RouteViewportController {
         return false
       }
     }
+    const survivorRow = opts?.survivorRow
     let capturedAt = 0
     try {
       capturedAt = Date.now()
@@ -584,6 +635,7 @@ export class RouteViewportController {
       offset,
       gestureId: this.interactionGestureSeq,
       ...(fingerprint ? { fingerprint: { ...fingerprint } } : {}),
+      ...(survivorRow ? { survivorRow: { ...survivorRow } } : {}),
       capturedAt
     }
     return true

@@ -76,8 +76,10 @@ import styled from 'styled-components'
 import { emitNewBranch, emitReferenceTopic, emitTrueBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
 import {
+  captureDeletionSurvivorIntent,
   INTERACTION_REGION_CONTROLS,
   markInteractionLayoutDeferred,
+  type RouteViewportCommands,
   settleInteractionLayoutDeferred,
   useOptionalRouteViewportCommands
 } from './routeViewportContext'
@@ -188,6 +190,10 @@ type MessageMenubarButtonContext = {
   softHoverBg: boolean
   t: TFunction
   translateLanguages: TranslateLanguage[]
+  // Shared route viewport owner (absent outside the provider). The delete action
+  // uses it to capture the role-aware surviving-row hold before the rows are
+  // removed; it never scrolls on its own.
+  viewportCommands: RouteViewportCommands | null
 }
 
 type MessageMenubarButtonRenderer = (ctx: MessageMenubarButtonContext) => ReactNode | null
@@ -850,7 +856,8 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     showDeleteTooltip,
     softHoverBg,
     t,
-    translateLanguages
+    translateLanguages,
+    viewportCommands
   }
 
   return (
@@ -1329,7 +1336,8 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     setShowDeleteTooltip,
     showDeleteTooltip,
     softHoverBg,
-    t
+    t,
+    viewportCommands
   }) => {
     // Inherited shared rows are immutable locally (Main rejects).
     if (isInherited) {
@@ -1347,7 +1355,31 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     const handleDeleteMessage = async () => {
       abortTranslation(message.id)
-      await deleteMessageWithUndo(message)
+      // Same-route delete geometry: capture the role-aware adjacent survivor
+      // BEFORE the rows are removed (the clicked footer disappears with its own
+      // row, so it can never be the handoff baseline). A user message is deleted
+      // together with its replies, so the surviving message ABOVE keeps its
+      // visual position and the content below moves up; an assistant message is
+      // deleted alone, so the surviving message BELOW keeps its visual position.
+      // Both go through the shared viewport keeper — no per-button scrolling.
+      captureDeletionSurvivorIntent(viewportCommands?.controller, message)
+      // The rows land only after the authority round-trip, so the gesture's
+      // layout effect is declared deferred on the same shared owner (an
+      // unchanged DOM mid-flight is not a no-effect click).
+      const deferred = markInteractionLayoutDeferred(
+        viewportCommands?.controller,
+        { kind: 'message', id: message.id },
+        INTERACTION_REGION_CONTROLS
+      )
+      let applied = false
+      try {
+        await deleteMessageWithUndo(message)
+        applied = true
+      } finally {
+        // `failed` drops the gesture fail-closed (no adopt, no snapshot); a
+        // stale token never touches a newer gesture.
+        settleInteractionLayoutDeferred(viewportCommands?.controller, deferred, applied ? 'applied' : 'failed')
+      }
     }
 
     if (confirmDeleteMessage) {

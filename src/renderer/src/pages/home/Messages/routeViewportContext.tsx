@@ -1190,6 +1190,109 @@ export const resolveBelowVisibleRow = (
 }
 
 /**
+ * Role-aware deletion survivor boundary: the adjacent SURVIVING message row
+ * whose visual position a deletion keeps.
+ *
+ * A deletion is the one in-place interaction whose clicked region (a footer
+ * inside the removed row) is destroyed by its own effect, so its baseline can
+ * only be an adjacent row that outlives it. Which side is the baseline is
+ * decided by what the deletion removes, never by the control that started it:
+ * a user row is removed together with its assistant replies, so the surviving
+ * message ABOVE the block keeps its visual position and the content below
+ * moves up; an assistant row is removed alone, so the surviving message BELOW
+ * keeps its visual position (the side that row already occupies). That is the
+ * same role-aware adjacency rule the chat viewport position contract states,
+ * not a per-button special case.
+ *
+ * `removedIds` must name every row that will disappear, resolved BEFORE the
+ * DOM mutation: a row that disappears with the deletion can never be a
+ * baseline. Rows are matched structurally (real content boxes, never fold
+ * wrappers or tab strips), and a hidden row is never a measurable baseline.
+ * Null (fail-closed) when the removed block has no measurable geometry or when
+ * no surviving row exists on the required side — the caller then keeps the
+ * pre-existing bounded behavior instead of inventing a baseline.
+ */
+export const resolveDeletionSurvivorRow = (
+  container: HTMLElement,
+  removedIds: Iterable<string>,
+  direction: 'above' | 'below'
+): { id: string; offset: number } | null => {
+  try {
+    if (!container || (direction !== 'above' && direction !== 'below')) return null
+    const containerTop = container.getBoundingClientRect().top
+    if (!Number.isFinite(containerTop)) return null
+    const removed = new Set<string>()
+    for (const rid of removedIds) {
+      if (typeof rid === 'string' && rid.length > 0) removed.add(rid)
+    }
+    if (removed.size === 0) return null
+    let rows: NodeListOf<Element> | null = null
+    try {
+      rows = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+    } catch {
+      return null
+    }
+    if (!rows) return null
+    let blockTop = Infinity
+    let blockBottom = -Infinity
+    const survivors: { id: string; top: number; bottom: number }[] = []
+    for (const cand of rows) {
+      if (!(cand instanceof HTMLElement)) continue
+      let id: string | null = null
+      try {
+        id =
+          cand.getAttribute('data-message-id') ??
+          (typeof cand.id === 'string' && cand.id.startsWith('message-') ? cand.id.replace(/^message-/, '') : null)
+      } catch {
+        id = null
+      }
+      if (typeof id !== 'string' || id.length === 0) continue
+      const real = resolveRealMessageBox(container, id)
+      if (!real) continue
+      let rect: DOMRect | null = null
+      try {
+        rect = real.getBoundingClientRect()
+      } catch {
+        rect = null
+      }
+      if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) continue
+      if (removed.has(id)) {
+        // The whole removed block, not just the clicked row: a user delete also
+        // removes its assistant replies, so the block edge must cover them.
+        if (rect.top < blockTop) blockTop = rect.top
+        if (rect.bottom > blockBottom) blockBottom = rect.bottom
+        continue
+      }
+      try {
+        if (isKeeperAnchorRowHidden(real, container)) continue
+      } catch {
+        continue
+      }
+      survivors.push({ id, top: rect.top, bottom: rect.bottom })
+    }
+    if (!Number.isFinite(blockTop) || !Number.isFinite(blockBottom)) return null
+    // Strict separation from the removed block (1px tolerance for subpixel
+    // seams): the baseline must lie wholly on the requested side, and the
+    // NEAREST such survivor wins — a farther row would leave the removed
+    // block's own height between them and let continued motion drift.
+    let best: { id: string; offset: number; edge: number } | null = null
+    for (const cand of survivors) {
+      if (direction === 'above') {
+        if (!(cand.bottom <= blockTop + 1)) continue
+        if (!best || cand.bottom > best.edge) best = { id: cand.id, offset: cand.top, edge: cand.bottom }
+      } else {
+        if (!(cand.top >= blockBottom - 1)) continue
+        if (!best || cand.top < best.edge) best = { id: cand.id, offset: cand.top, edge: cand.top }
+      }
+    }
+    if (!best) return null
+    return { id: best.id, offset: best.offset - containerTop }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Resolve the handoff representative for a settled interaction: the visible
  * message row whose identity + offset the stable snapshot adopts. Tabs hand
  * off to their target answer's real box (hidden pre-commit = mutation still
@@ -1427,6 +1530,114 @@ export const captureInteractionFromEvent = (
 }
 
 /**
+ * Rows a single-message deletion removes, resolved from the committed DOM
+ * BEFORE the mutation: the clicked row plus every row that answers it
+ * (`data-ask-id` = the clicked user message), which is exactly the semantic
+ * deletion authority rule (a user row goes with its assistant replies; a
+ * non-user row goes alone). Structural identity only — never message content,
+ * never a guess about which rows will survive.
+ */
+export const collectDeletedMessageRowIds = (container: HTMLElement, messageId: string): string[] => {
+  const ids: string[] = []
+  try {
+    if (!container || typeof messageId !== 'string' || messageId.length === 0) return ids
+    const seen = new Set<string>()
+    seen.add(messageId)
+    ids.push(messageId)
+    let replyRows: NodeListOf<Element> | null = null
+    try {
+      replyRows = container.querySelectorAll('[data-ask-id]')
+    } catch {
+      replyRows = null
+    }
+    if (replyRows) {
+      for (const row of replyRows) {
+        if (!(row instanceof HTMLElement)) continue
+        let askId: string | null = null
+        try {
+          askId = row.getAttribute('data-ask-id')
+        } catch {
+          askId = null
+        }
+        if (typeof askId !== 'string' || askId !== messageId) continue
+        const rowId = keeperMessageIdFromRow(row)
+        if (rowId && !seen.has(rowId)) {
+          seen.add(rowId)
+          ids.push(rowId)
+        }
+      }
+    }
+  } catch {}
+  return ids
+}
+
+/**
+ * Capture the role-aware deletion hold BEFORE the rows are removed.
+ *
+ * The deletion gesture replaces the plain region intent armed by the click
+ * boundary (same structural scope + `message-controls` region, new gesture)
+ * with one that names the adjacent surviving row as its baseline: the clicked
+ * footer disappears with its own row, so it can never be the handoff
+ * geometry. Direction comes from the message role — a user delete removes a
+ * user row together with its replies and keeps the surviving row ABOVE, an
+ * assistant delete keeps the surviving row BELOW. Fail-closed (false) when the
+ * container/scope is missing, the removed block has no measurable geometry,
+ * no survivor exists on the required side, or the controller refuses
+ * (owned/dirty/user-live/bottom): the caller then keeps the pre-existing
+ * bounded behavior. Never opens ownership, never writes a snapshot.
+ */
+export const captureDeletionSurvivorIntent = (
+  controller:
+    | {
+        beginInteractionIntent: (
+          t: RouteRef,
+          scope: { kind: 'message' | 'group'; id: string },
+          region: string,
+          off: number,
+          opts?: {
+            fingerprint?: { scopeH: number; scopeW: number }
+            survivorRow?: { messageId: string; offset: number; direction: 'above' | 'below' }
+          }
+        ) => boolean
+        displayedRoute: RouteRef
+      }
+    | null
+    | undefined,
+  message: { id: string; role?: string },
+  container?: HTMLElement | null
+): boolean => {
+  try {
+    if (!controller || !message || typeof message.id !== 'string' || message.id.length === 0) return false
+    const liveContainer = container ?? document.getElementById('messages')
+    if (!liveContainer || !liveContainer.isConnected) return false
+    const scope: { kind: 'message'; id: string } = { kind: 'message', id: message.id }
+    const direction: 'above' | 'below' = message.role === 'user' ? 'above' : 'below'
+    const survivor = resolveDeletionSurvivorRow(
+      liveContainer,
+      collectDeletedMessageRowIds(liveContainer, message.id),
+      direction
+    )
+    if (!survivor) return false
+    let offset = NaN
+    try {
+      const regionEl = resolveInteractionRegionElement(liveContainer, scope, INTERACTION_REGION_CONTROLS)
+      if (regionEl) offset = measureViewportRegionOffset(regionEl, liveContainer)
+    } catch {
+      offset = NaN
+    }
+    if (!Number.isFinite(offset)) offset = survivor.offset
+    const target: RouteRef = { ...controller.displayedRoute }
+    const fingerprint = captureLayoutFingerprint(liveContainer, scope)
+    return controller.beginInteractionIntent(target, scope, INTERACTION_REGION_CONTROLS, offset, {
+      ...(fingerprint ? { fingerprint } : {}),
+      survivorRow: { messageId: survivor.id, offset: survivor.offset, direction }
+    })
+  } catch {
+    return false
+  }
+}
+
+/**
  * Capture a bounded route-local tab-switch intent BEFORE selection/layout
  * change. Compatibility entry over the shared interaction intent
  * (`answer-tab` region in the target answer's message scope, fingerprint of
@@ -1552,7 +1763,11 @@ export const settleInteractionLayoutDeferred = (
 export const resolveRetainedViewportMessageId = (
   controller:
     | {
-        activeInteractionIntent: { scopeKind: 'message' | 'group'; scopeId: string } | null
+        activeInteractionIntent: {
+          scopeKind: 'message' | 'group'
+          scopeId: string
+          survivorRow?: { messageId: string }
+        } | null
         getAnchorFor: (target: RouteRef) => { kind: string; messageId?: string } | null
         displayedRoute: RouteRef
       }
@@ -1562,6 +1777,11 @@ export const resolveRetainedViewportMessageId = (
   try {
     if (!controller) return null
     const intent = controller.activeInteractionIntent
+    // A deletion hold keeps the SURVIVOR resident: its own scope row is the row
+    // being removed, so retaining that id would ask a window reconcile to keep
+    // a row that authority already dropped.
+    const survivorId = intent?.survivorRow?.messageId
+    if (typeof survivorId === 'string' && survivorId.length > 0) return survivorId
     if (intent && intent.scopeKind === 'message' && typeof intent.scopeId === 'string' && intent.scopeId.length > 0) {
       return intent.scopeId
     }
@@ -2010,6 +2230,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           fingerprint?: { scopeH: number; scopeW: number }
           capturedAt: number
           pendingLayoutMutation?: boolean
+          survivorRow?: { messageId: string; offset: number; direction: 'above' | 'below' }
         } | null
         if (!intent) return
         const clearGuarded = (): void => {
@@ -2043,15 +2264,27 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           return
         }
         const scope = { kind: intent.scopeKind, id: intent.scopeId }
-        const scopeEl = resolveInteractionScopeElement(liveContainer, scope)
+        // A deletion gesture removes its OWN scope row and region as its
+        // effect, so the measurable subject is the adjacent surviving row
+        // captured before the mutation (see `resolveDeletionSurvivorRow`);
+        // the scope element then only answers "has the removal landed yet".
+        // Every other interaction keeps measuring its own region baseline.
+        const survivorRow = intent.survivorRow
+        const scopeEl = survivorRow
+          ? resolveRealMessageBox(liveContainer, survivorRow.messageId)
+          : resolveInteractionScopeElement(liveContainer, scope)
         if (!scopeEl) {
-          // Scope gone with no valid correspondence: fail closed.
+          // Scope (or the named survivor) gone with no valid correspondence:
+          // fail closed, never a sibling transfer.
           clearGuarded()
           return
         }
         let regionEl: HTMLElement | null = null
         try {
-          regionEl = resolveInteractionRegionElement(liveContainer, scope, intent.region)
+          // The survivor row carries no baseline-edge declaration, so the shared
+          // measurement below resolves its TOP — the visual position the
+          // deletion must keep.
+          regionEl = survivorRow ? scopeEl : resolveInteractionRegionElement(liveContainer, scope, intent.region)
         } catch {
           regionEl = null
         }
@@ -2154,6 +2387,13 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         let quiet = 0
         let effect = false
         let replaced = false
+        // A deletion gesture measures the adjacent SURVIVING row (its own region
+        // baseline is removed with the removed rows) and is effective by
+        // definition: the removal is an authority result, not a DOM-side guess,
+        // and the unlanded case is handled below instead of by the no-effect
+        // drop. Its quiet agreement still gates the handoff.
+        const holdBaseline = survivorRow ? survivorRow.offset : intent.offset
+        if (survivorRow) effect = true
         try {
           const tracked = interactionQuietRef.current
           const same = tracked && tracked.gestureId === intent.gestureId ? tracked : null
@@ -2177,7 +2417,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           }
           quiet = agrees && same !== null ? same.quiet + 1 : 0
           try {
-            if (Math.abs(current - intent.offset) > 1) effect = true
+            if (Math.abs(current - holdBaseline) > 1) effect = true
           } catch {
             // keep prior evidence on measure errors
           }
@@ -2258,14 +2498,43 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         // compensates so churn during the gap never moves the region, but
         // nothing completes until the target resolves.
         let rep: { id: string; offset: number } | null = null
-        try {
-          const avoidScopeRow =
-            intent.region === INTERACTION_REGION_CONTROLS && intent.scopeKind === 'message' && heightChanged === true
-          rep = resolveInteractionRepresentative(liveContainer, scope, intent.region, { avoidScopeRow })
-        } catch {
-          rep = null
+        if (survivorRow) {
+          // Deletion: the survivor IS the handoff target, and only once the
+          // removed rows are actually gone. A still-rendered scope row means the
+          // authority round-trip has not landed — stay armed through the bounded
+          // pending path (a declared deferred command) and drop without adopting
+          // once an undeclared gesture goes provably still.
+          let landed = false
+          try {
+            landed = resolveInteractionScopeElement(liveContainer, scope) === null
+          } catch {
+            landed = false
+          }
+          if (!landed) {
+            if (intent.pendingLayoutMutation === true) {
+              rearmPending()
+              return
+            }
+            if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+              clearGuarded()
+              return
+            }
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
+          rep = { id: survivorRow.messageId, offset: current }
+        } else {
+          try {
+            const avoidScopeRow =
+              intent.region === INTERACTION_REGION_CONTROLS && intent.scopeKind === 'message' && heightChanged === true
+            rep = resolveInteractionRepresentative(liveContainer, scope, intent.region, { avoidScopeRow })
+          } catch {
+            rep = null
+          }
         }
-        const drift = current - intent.offset
+        const drift = current - holdBaseline
         // Cross-row rebase guard: when the handoff representative names a
         // different reading row than the live pause/reading anchor, passive
         // displacement alone (static scope dims, same region node, e.g. stream
@@ -2273,14 +2542,17 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         // Same-row holds keep the displacement-inclusive `proven` (F1
         // same-size reflow still hands off to its own row); cross-row rebases
         // require structural proof (scope dims or replaced node) or legacy
-        // fingerprint-less assume-effect.
+        // fingerprint-less assume-effect. A deletion gesture is proven instead
+        // by its LANDED removal plus quiet agreement (the rows it named are
+        // gone); the unlanded case never reaches here, so no cross-row rebase
+        // rule can strand it.
         const crossRow =
           rep !== null && liveAnchorId !== null && rep.id !== liveAnchorId
             ? true
             : rep !== null && liveAnchorId === null
               ? true
               : false
-        const provenForHandoff = crossRow ? structuralProven : proven
+        const provenForHandoff = survivorRow === undefined ? (crossRow ? structuralProven : proven) : true
         if (Math.abs(drift) > 1) {
           // Honest boundary clamp: at the true scroll limit the region
           // cannot be held further. Early-fit short viewports sit at this
@@ -2553,6 +2825,8 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           region: string
           offset: number
           gestureId: number
+          pendingLayoutMutation?: boolean
+          survivorRow?: { messageId: string; offset: number; direction: 'above' | 'below' }
         } | null
         if (pending) {
           const clearHoldGuarded = (): void => {
@@ -2567,6 +2841,47 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
             vp.controller.currentEpoch !== pending.epoch
           ) {
             clearHoldGuarded()
+          } else if (pending.survivorRow) {
+            // Deletion hold: the clicked region is removed WITH its own row, so
+            // the captured baseline is the adjacent SURVIVING row's visual
+            // position (the side is chosen by what the deletion removes — see
+            // `resolveDeletionSurvivorRow`). Same single arbiter, same signed
+            // delta, no second writer: measure that row, compensate, and let
+            // the quiet validation hand off to it. The survivor disappearing is
+            // fail-closed (no sibling transfer, no invented baseline).
+            const survivor = pending.survivorRow
+            const survivorEl = resolveRealMessageBox(container, survivor.messageId)
+            if (!survivorEl || isKeeperAnchorRowHidden(survivorEl, container)) {
+              clearHoldGuarded()
+            } else {
+              let survivorCurrent = NaN
+              try {
+                survivorCurrent = survivorEl.getBoundingClientRect().top - container.getBoundingClientRect().top
+              } catch {
+                survivorCurrent = NaN
+              }
+              if (!Number.isFinite(survivorCurrent)) {
+                clearHoldGuarded()
+              } else {
+                const survivorDelta = survivorCurrent - survivor.offset
+                if (Math.abs(survivorDelta) > 1) {
+                  try {
+                    container.scrollTop += survivorDelta
+                    compensatingRef.current = { expected: container.scrollTop }
+                  } catch {}
+                }
+                try {
+                  scheduleTabValidation()
+                } catch {}
+                // The deletion hold owns this frame's geometry: every competing
+                // baseline measured before this compensation is dropped with it
+                // (same reason as the region hold below).
+                layoutHoldRef.current = null
+                publishedSampleRef.current = null
+                droppedLayoutHoldRef.current = null
+                return
+              }
+            }
           } else {
             const regionEl = resolveInteractionRegionElement(
               container,

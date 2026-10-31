@@ -1530,3 +1530,283 @@ describe('deferred (asynchronous) layout mutation: mid-list insertion', () => {
     document.body.innerHTML = ''
   })
 })
+
+/**
+ * Deletion survivor geometry (role-aware adjacency).
+ *
+ * A delete is the one same-route interaction whose own clicked region is
+ * destroyed by its effect, so its baseline can only be an adjacent SURVIVING
+ * row: the message above the block when a user row is deleted together with its
+ * replies (that row keeps its visual position and the content below moves up),
+ * or the message below when an assistant row is deleted alone (that row keeps
+ * its visual position). Both directions run through the one shared keeper; the
+ * removed rows never become a baseline, a missing adjacency keeps the
+ * pre-existing bounded behavior, and user intent still wins.
+ */
+describe('deletion survivor boundary: role-aware adjacent row keeps its visual position', () => {
+  interface DeleteRowSpec {
+    id: string
+    top: number
+    height: number
+    askId?: string
+  }
+
+  const buildDeleteRows = (
+    spec: DeleteRowSpec[]
+  ): { container: HTMLDivElement; rows: Map<string, HTMLDivElement>; ref: { current: HTMLDivElement | null } } => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: -400, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 9000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const rows = new Map<string, HTMLDivElement>()
+    for (const s of spec) {
+      const row = document.createElement('div')
+      row.id = `message-${s.id}`
+      row.setAttribute('data-message-id', s.id)
+      if (s.askId) row.setAttribute('data-ask-id', s.askId)
+      mockRect(row, `row-${s.id}`)
+      rects.set(`row-${s.id}`, { top: s.top, height: s.height })
+      container.append(row)
+      rows.set(s.id, row)
+    }
+    document.body.append(container)
+    return { container, rows, ref: { current: container } }
+  }
+
+  it('user delete keeps the surviving row ABOVE and lets the content below move up', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', 130)
+    containerRect.top = 0
+    // m1 above, m2 = the user row being deleted, m3 = its assistant reply
+    // (removed with it), m4 below.
+    const { container, rows, ref } = buildDeleteRows([
+      { id: 'm1', top: 100, height: 80 },
+      { id: 'm2', top: 190, height: 60 },
+      { id: 'm3', top: 260, height: 200, askId: 'm2' },
+      { id: 'm4', top: 480, height: 100 }
+    ])
+    // Every row the deletion removes is resolved from the DOM BEFORE the
+    // mutation — the reply disappears with its user row, so neither can be a
+    // baseline.
+    expect(mod.collectDeletedMessageRowIds(container, 'm2')).toEqual(['m2', 'm3'])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'm2', role: 'user' }, container)).toBe(true)
+    expect(controller.activeInteractionIntent?.survivorRow).toEqual({
+      messageId: 'm1',
+      offset: 100,
+      direction: 'above'
+    })
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // Rows land: the removed block (60 + 200) is gone, so with an unchanged
+    // scrollTop every surviving row above it would drop by 260 — m1 would leave
+    // its visual position and the content below would stay put.
+    act(() => {
+      rows.get('m2')?.remove()
+      rows.get('m3')?.remove()
+      rects.set('row-m1', { top: 360, height: 80 })
+      keeper.rerender(1)
+    })
+    // Compensated upward by exactly the removed height: the above row is back at
+    // its captured offset and the below row has moved up.
+    expect(container.scrollTop).toBe(-140)
+    act(() => {
+      rects.set('row-m1', { top: 100, height: 80 })
+      rects.set('row-m4', { top: 220, height: 100 })
+    })
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm1',
+      offset: 100
+    })
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('m1')
+    expect(stored?.intraRowOffset).toBe(100)
+    keeper.unmount()
+  })
+
+  it('assistant delete keeps the surviving row BELOW with no scroll write', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm5', 130)
+    containerRect.top = 0
+    const { container, rows, ref } = buildDeleteRows([
+      { id: 'm4', top: 100, height: 80 },
+      { id: 'm5', top: 190, height: 60, askId: 'u1' },
+      { id: 'm6', top: 260, height: 100 }
+    ])
+    // A non-user row goes alone: only the clicked row is removed.
+    expect(mod.collectDeletedMessageRowIds(container, 'm5')).toEqual(['m5'])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'm5', role: 'assistant' }, container)).toBe(true)
+    expect(controller.activeInteractionIntent?.survivorRow).toEqual({
+      messageId: 'm6',
+      offset: 260,
+      direction: 'below'
+    })
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      rows.get('m5')?.remove()
+      // The above row drops by the removed height; the BELOW row keeps its
+      // visual position, which is the existing, correct assistant-delete
+      // experience that must not regress.
+      rects.set('row-m4', { top: 160, height: 80 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(-400)
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm6',
+      offset: 260
+    })
+    const stored = store.get('scroll:topic-t1::main') as { messageId: string | null } | undefined
+    expect(stored?.messageId).toBe('m6')
+    keeper.unmount()
+  })
+
+  it('missing adjacency keeps the bounded fallback (no invented baseline)', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'u1', 20)
+    containerRect.top = 0
+    // First user row of the topic: nothing survives above it.
+    const first = buildDeleteRows([
+      { id: 'u1', top: 20, height: 60 },
+      { id: 'a1', top: 90, height: 100, askId: 'u1' }
+    ])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'u1', role: 'user' }, first.container)).toBe(false)
+    expect(controller.activeInteractionIntent).toBeNull()
+    document.body.innerHTML = ''
+    // Tail assistant row: nothing survives below it (bottom pin keeps owning
+    // the geometry).
+    const tail = buildDeleteRows([{ id: 'a2', top: 300, height: 120 }])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'a2', role: 'assistant' }, tail.container)).toBe(false)
+    expect(controller.activeInteractionIntent).toBeNull()
+  })
+
+  it('a non-delete control keeps its region baseline (no survivor semantics)', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container } = buildDeleteRows([{ id: 'm1', top: -100, height: 300 }])
+    const footer = document.createElement('div')
+    footer.setAttribute('data-interaction-region', 'message-controls')
+    footer.setAttribute('data-viewport-baseline-edge', 'end')
+    mockRect(footer, 'footer-m1')
+    rects.set('footer-m1', { top: 140, height: 26 })
+    container.firstElementChild?.append(footer)
+    expect(mod.captureInteractionIntent(controller, { kind: 'message', id: 'm1' }, 'message-controls', container)).toBe(
+      true
+    )
+    // Edit / expand / tab gestures carry no deletion survivor and keep the
+    // declared region baseline, and the retained-row derivation still names the
+    // held row rather than a survivor.
+    expect(controller.activeInteractionIntent?.survivorRow).toBeUndefined()
+    expect(controller.activeInteractionIntent?.offset).toBe(166)
+    expect(mod.resolveRetainedViewportMessageId(controller)).toBe('m1')
+  })
+
+  it('a deferred deletion survives the authority gap, then hands off once the rows land', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', 130)
+    containerRect.top = 0
+    const { container, rows, ref } = buildDeleteRows([
+      { id: 'm1', top: 100, height: 80 },
+      { id: 'm2', top: 190, height: 60 },
+      { id: 'm3', top: 260, height: 200, askId: 'm2' }
+    ])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'm2', role: 'user' }, container)).toBe(true)
+    const token = mod.markInteractionLayoutDeferred(controller, { kind: 'message', id: 'm2' }, 'message-controls')
+    expect(token).not.toBeNull()
+    expect(mod.resolveRetainedViewportMessageId(controller)).toBe('m1')
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // Unchanged DOM mid-flight is not a no-effect click: the gesture stays armed
+    // with no adopt and no snapshot.
+    await act(async () => {
+      for (let i = 0; i < 12; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).not.toBeNull()
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    // The command resolves and the rows land: the same gesture now completes.
+    expect(mod.settleInteractionLayoutDeferred(controller, token, 'applied')).toBe(true)
+    act(() => {
+      rows.get('m2')?.remove()
+      rows.get('m3')?.remove()
+      rects.set('row-m1', { top: 360, height: 80 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(-140)
+    act(() => {
+      rects.set('row-m1', { top: 100, height: 80 })
+    })
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    const stored = store.get('scroll:topic-t1::main') as { messageId: string | null } | undefined
+    expect(stored?.messageId).toBe('m1')
+    keeper.unmount()
+  })
+
+  it('explicit user intent during a pending deletion wins: no compensation, no snapshot', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', 130)
+    containerRect.top = 0
+    const { container, ref } = buildDeleteRows([
+      { id: 'm1', top: 100, height: 80 },
+      { id: 'm2', top: 190, height: 60 },
+      { id: 'm3', top: 260, height: 200, askId: 'm2' }
+    ])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'm2', role: 'user' }, container)).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    controller.declareUserIntent()
+    await act(async () => {
+      for (let i = 0; i < 3; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(container.scrollTop).toBe(-400)
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    controller.clearUserIntent()
+    keeper.unmount()
+  })
+
+  it('a disappearing survivor fails closed: no sibling transfer, no snapshot', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', 130)
+    containerRect.top = 0
+    const { container, rows, ref } = buildDeleteRows([
+      { id: 'm1', top: 100, height: 80 },
+      { id: 'm2', top: 190, height: 60 },
+      { id: 'm3', top: 260, height: 200, askId: 'm2' }
+    ])
+    expect(mod.captureDeletionSurvivorIntent(controller, { id: 'm2', role: 'user' }, container)).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      rows.get('m1')?.remove()
+      rows.get('m2')?.remove()
+      rows.get('m3')?.remove()
+      keeper.rerender(1)
+    })
+    await act(async () => {
+      for (let i = 0; i < 4; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    expect(container.scrollTop).toBe(-400)
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    keeper.unmount()
+  })
+})
