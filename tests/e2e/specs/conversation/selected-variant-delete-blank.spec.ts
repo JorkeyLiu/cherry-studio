@@ -18,6 +18,151 @@
 import type { Page } from '@playwright/test'
 import { expect, test } from '../../fixtures/electron.fixture'
 
+/**
+ * Rendered-visibility probe (single source of truth for every visibility read
+ * in this spec).
+ *
+ * The stable row identity (`id="message-<id>"` / `data-message-id`) lives on
+ * the inner message element, while answer-fold hiding is applied by an
+ * ANCESTOR wrapper that is `display: none` unless it is the selected member.
+ * The inner element therefore still computes `display: flex` while the answer
+ * is not rendered at all: inner computed display alone reports "not none" for
+ * an answer the user cannot see, so it cannot decide visibility. Precondition,
+ * per-frame sampler and final-state reads all go through this ancestor-aware
+ * probe so the three reads cannot disagree.
+ */
+type RenderedProbe = {
+  exists: boolean
+  connected: boolean
+  /** Diagnostic only — the element's own computed display, never a visibility verdict. */
+  innerDisplay: string
+  effectiveVisible: boolean
+  /** Which rule decided invisibility (`self:` / `ancestor:`), `null` when visible. */
+  hiddenBy: string | null
+  rectArea: number
+  checkVisibility: boolean | null
+  text: string
+}
+
+type ProbeWindow = { __selDelProbe: (el: Element | null) => RenderedProbe }
+
+async function installRenderedProbe(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const probe = (el: Element | null): RenderedProbe => {
+      if (!el) {
+        return {
+          exists: false,
+          connected: false,
+          innerDisplay: 'missing',
+          effectiveVisible: false,
+          hiddenBy: 'missing',
+          rectArea: 0,
+          checkVisibility: null,
+          text: ''
+        }
+      }
+      const innerDisplay = window.getComputedStyle(el).display
+      let hiddenBy: string | null = null
+      let node: Element | null = el
+      while (node) {
+        const cs = window.getComputedStyle(node)
+        const scope = node === el ? 'self' : 'ancestor'
+        if (cs.display === 'none') {
+          hiddenBy = `${scope}:display:none`
+          break
+        }
+        if (cs.visibility === 'hidden' || cs.visibility === 'collapse') {
+          hiddenBy = `${scope}:visibility:${cs.visibility}`
+          break
+        }
+        if (cs.contentVisibility === 'hidden') {
+          hiddenBy = `${scope}:content-visibility:hidden`
+          break
+        }
+        if (Number(cs.opacity) === 0) {
+          hiddenBy = `${scope}:opacity:0`
+          break
+        }
+        node = node.parentElement
+      }
+      const rect = el.getBoundingClientRect()
+      const rectArea = Math.round(rect.width * rect.height)
+      const checkVisibility = (
+        el as Element & {
+          checkVisibility?: (o?: { checkOpacity?: boolean; checkVisibilityCSS?: boolean }) => boolean
+        }
+      ).checkVisibility
+      // Native cross-check when the engine provides it; never the sole verdict.
+      const nativeCheck =
+        typeof checkVisibility === 'function'
+          ? checkVisibility.call(el, { checkOpacity: true, checkVisibilityCSS: true })
+          : null
+      return {
+        exists: true,
+        connected: el.isConnected,
+        innerDisplay,
+        effectiveVisible: el.isConnected && hiddenBy === null && rectArea > 0 && nativeCheck !== false,
+        hiddenBy,
+        rectArea,
+        checkVisibility: nativeCheck,
+        text: (el.textContent ?? '').trim()
+      }
+    }
+    ;(window as unknown as ProbeWindow).__selDelProbe = probe
+  })
+}
+
+/**
+ * Negative control for the probe, on a temporary DOM pair mounted for one read
+ * and removed again (no product state touched, nothing left behind): an answer
+ * under a `display: none` ancestor must probe as not rendered while its own
+ * display stays non-`none`, and an otherwise identical visible answer must
+ * probe as rendered. Without this, "answer is visible" could be a constant and
+ * the blank-frame assertions vacuous.
+ */
+async function assertProbeDetectsAncestorHiding(page: Page): Promise<void> {
+  const control = await page.evaluate(() => {
+    const probe = (window as unknown as ProbeWindow).__selDelProbe
+    const root = document.createElement('div')
+    root.setAttribute('data-seldel-probe-control', '1')
+    root.style.cssText = 'position:fixed;left:0;top:0;width:200px;height:100px;z-index:-1;pointer-events:none'
+    const hiddenParent = document.createElement('div')
+    hiddenParent.style.display = 'none'
+    const hiddenChild = document.createElement('div')
+    hiddenChild.textContent = 'probe-hidden-answer'
+    hiddenParent.appendChild(hiddenChild)
+    const visibleParent = document.createElement('div')
+    const visibleChild = document.createElement('div')
+    visibleChild.textContent = 'probe-visible-answer'
+    visibleParent.appendChild(visibleChild)
+    root.appendChild(hiddenParent)
+    root.appendChild(visibleParent)
+    document.body.appendChild(root)
+    try {
+      return {
+        hidden: probe(hiddenChild),
+        visible: probe(visibleChild),
+        detached: probe(document.createElement('div'))
+      }
+    } finally {
+      root.remove()
+    }
+  })
+  expect(control.hidden.effectiveVisible, 'answer under a hidden ancestor must not probe as rendered').toBe(false)
+  expect(control.hidden.hiddenBy, 'hidden control must name the rule that hides it').toBe('ancestor:display:none')
+  // The exact failure mode this probe exists for: inner display alone would
+  // have called this answer visible.
+  expect(control.hidden.innerDisplay, 'hidden control keeps its own display — inner display is not a verdict').not.toBe(
+    'none'
+  )
+  expect(control.visible.effectiveVisible, 'visible control must probe as rendered').toBe(true)
+  expect(control.visible.hiddenBy, 'visible control must name no hiding rule').toBeNull()
+  expect(control.visible.rectArea).toBeGreaterThan(0)
+  expect(control.detached.effectiveVisible, 'detached node must not probe as rendered').toBe(false)
+  const controlLeftBehind = await page.evaluate(() => document.querySelector('[data-seldel-probe-control]') !== null)
+  expect(controlLeftBehind, 'probe control must be removed again').toBe(false)
+}
+
 async function prepareLargeWindowAndAssistant(page: Page): Promise<string> {
   await page.evaluate((limit: number) => {
     const store = (window as unknown as { store: { dispatch: (a: unknown) => void } }).store
@@ -75,14 +220,22 @@ async function activateTopicAndWaitForBootstrap(page: Page, topicId: string, atL
 }
 
 type SampleFrame = {
-  t: number
+  /** Absolute `performance.now()` of the sample. */
+  tAbs: number
   reduxHasA1: boolean
   reduxHasA2: boolean
   reduxGroupIds: string[]
   domA1Exists: boolean
   domA2Exists: boolean
-  domA1Display: string
-  domA2Display: string
+  /** Diagnostics — inner computed display only, NOT a visibility verdict (see RenderedProbe). */
+  domA1InnerDisplay: string
+  domA2InnerDisplay: string
+  a1EffectiveVisible: boolean
+  a2EffectiveVisible: boolean
+  a2HiddenBy: string | null
+  a2RectArea: number
+  /** Full rendered text of the survivor element (uncapped, for content assertions). */
+  a2RenderedText: string
   groupVisibleIds: string[]
   groupVisibleText: string[]
 }
@@ -96,7 +249,7 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'SELECTED-DELETE BLANK INTEGRATED: seed user u1 + assistants a1(selected, foldSelected true, short thinking+main) + a2(survivor, foldSelected false, long thinking+main, same askId=u1) + user u2; large window 50; activate; real delete-button click on selected a1 (confirmDeleteMessage=false); continuous rAF sampler correlated with Redux loaded projection — prove no frame where a1 removed but a2 absent/hidden; final DOM/Redux show survivor with thinking→main_text order.'
+        'SELECTED-DELETE BLANK INTEGRATED: seed user u1 + assistants a1(selected, foldSelected true, short thinking+main) + a2(survivor, foldSelected false, long thinking+main, same askId=u1) + user u2; large window 50; activate; real delete-button click on selected a1 (confirmDeleteMessage=false); continuous rAF sampler correlated with Redux loaded projection — every visibility read via one ancestor-aware rendered probe (inner display alone cannot see ancestor fold hiding), probe negative/positive controls asserted; prove no post-delete frame without a rendered answer and that a2 itself renders once a1 leaves the projection; final DOM/Redux show survivor with thinking→main_text order.'
     })
     const page: Page = mainWindow
     const liveAssistantId = await prepareLargeWindowAndAssistant(page)
@@ -271,20 +424,36 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
       store.dispatch({ type: 'settings/setConfirmDeleteMessage', payload: false })
     })
 
+    // Ancestor-aware probe first, then its negative control, so the whole
+    // precondition/sampler/final-state chain runs on a verified probe.
+    await installRenderedProbe(page)
+    await assertProbeDetectsAncestorHiding(page)
+
     const initialVisible = await page.evaluate(
       ({ a1, a2 }: { a1: string; a2: string }) => {
-        const a1El = document.getElementById(`message-${a1}`)
-        const a2El = document.getElementById(`message-${a2}`)
-        const s1 = a1El ? window.getComputedStyle(a1El).display : 'missing'
-        const s2 = a2El ? window.getComputedStyle(a2El).display : 'missing'
-        return { a1Display: s1, a2Display: s2, a1Exists: !!a1El, a2Exists: !!a2El }
+        const probe = (window as unknown as ProbeWindow).__selDelProbe
+        return {
+          a1: probe(document.getElementById(`message-${a1}`)),
+          a2: probe(document.getElementById(`message-${a2}`))
+        }
       },
       { a1, a2 }
     )
-    expect(initialVisible.a1Exists).toBe(true)
-    expect(initialVisible.a2Exists).toBe(true)
-    expect(initialVisible.a1Display).not.toBe('none')
-    expect(initialVisible.a2Display).toBe('none')
+    expect(initialVisible.a1.exists, 'selected variant element must exist before delete').toBe(true)
+    expect(initialVisible.a2.exists, 'survivor element must exist before delete').toBe(true)
+    expect(
+      initialVisible.a1.effectiveVisible,
+      `selected variant must be rendered before delete (hiddenBy=${String(initialVisible.a1.hiddenBy)})`
+    ).toBe(true)
+    // The survivor is DOM-present but not rendered: the fold wrapper ancestor
+    // hides it. This is the real-DOM negative control of the probe.
+    expect(
+      initialVisible.a2.effectiveVisible,
+      `hidden survivor must not count as rendered (inner display=${initialVisible.a2.innerDisplay}, hiddenBy=${String(
+        initialVisible.a2.hiddenBy
+      )})`
+    ).toBe(false)
+    expect(initialVisible.a2.hiddenBy, 'survivor invisibility must be explained by a resolved rule').toBeTruthy()
 
     // Install continuous rAF sampler BEFORE click and await readiness
     await page.evaluate(
@@ -294,10 +463,11 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
           __selDelSampling: boolean
           __selDelSamplerReady: boolean
         }
+        // Ancestor-aware probe installed above — never inner display alone.
+        const probe = (window as unknown as ProbeWindow).__selDelProbe
         w.__selDelFrames = []
         w.__selDelSampling = true
         w.__selDelSamplerReady = false
-        const start = performance.now()
         const sample = () => {
           if (!w.__selDelSampling) return
           const store = (
@@ -326,40 +496,36 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
           const groupIds = Object.values(state.messages.entities)
             .filter((m): m is { id: string; askId?: string } => !!m && (m as { askId?: string }).askId === u1)
             .map((m) => m.id)
-          const a1El = document.getElementById(`message-${a1}`) as HTMLElement | null
-          const a2El = document.getElementById(`message-${a2}`) as HTMLElement | null
-          const domA1Exists = !!a1El
-          const domA2Exists = !!a2El
-          const domA1Display = a1El ? window.getComputedStyle(a1El).display : 'missing'
-          const domA2Display = a2El ? window.getComputedStyle(a2El).display : 'missing'
+          const a1Probe = probe(document.getElementById(`message-${a1}`))
+          const a2Probe = probe(document.getElementById(`message-${a2}`))
           const groupVisibleIds: string[] = []
           const groupVisibleText: string[] = []
           for (const gid of groupIds) {
-            const el = document.getElementById(`message-${gid}`) as HTMLElement | null
-            if (!el) continue
-            const disp = window.getComputedStyle(el).display
-            if (disp !== 'none' && el.isConnected) {
+            const p = probe(document.getElementById(`message-${gid}`))
+            if (p.effectiveVisible) {
               groupVisibleIds.push(gid)
-              const txt = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 80)
-              groupVisibleText.push(txt)
+              groupVisibleText.push(p.text.replace(/\s+/g, ' '))
             }
           }
-          // Fallback when groupIds empty due to timing: use known a1/a2
-          if (groupIds.length === 0) {
-            if (a2El && window.getComputedStyle(a2El).display !== 'none' && a2El.isConnected) {
-              groupVisibleIds.push(a2)
-              groupVisibleText.push((a2El.textContent ?? '').slice(0, 80))
-            }
+          // Fallback when groupIds empty due to timing: use the known survivor
+          if (groupIds.length === 0 && a2Probe.effectiveVisible) {
+            groupVisibleIds.push(a2)
+            groupVisibleText.push(a2Probe.text.replace(/\s+/g, ' '))
           }
           w.__selDelFrames.push({
-            t: performance.now() - start,
+            tAbs: performance.now(),
             reduxHasA1,
             reduxHasA2,
             reduxGroupIds: [...groupIds],
-            domA1Exists,
-            domA2Exists,
-            domA1Display,
-            domA2Display,
+            domA1Exists: a1Probe.exists,
+            domA2Exists: a2Probe.exists,
+            domA1InnerDisplay: a1Probe.innerDisplay,
+            domA2InnerDisplay: a2Probe.innerDisplay,
+            a1EffectiveVisible: a1Probe.effectiveVisible,
+            a2EffectiveVisible: a2Probe.effectiveVisible,
+            a2HiddenBy: a2Probe.hiddenBy,
+            a2RectArea: a2Probe.rectArea,
+            a2RenderedText: a2Probe.text,
             groupVisibleIds: [...groupVisibleIds],
             groupVisibleText: [...groupVisibleText]
           })
@@ -392,6 +558,9 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
     } catch {}
     const deleteBtn = container.locator('[data-testid="message-delete-button"]')
     await expect(deleteBtn, 'delete button must be attached').toBeAttached({ timeout: 10000 })
+    // Absolute page timestamp of the delete gesture: frames before it are the
+    // intact selected-answer state, frames after it must never be answerless.
+    const clickAt = await page.evaluate(() => performance.now())
     await deleteBtn.click({ timeout: 10000 })
 
     // State-driven stop: wait until Redux no longer contains a1 and several subsequent frames observed
@@ -426,36 +595,67 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
     const firstDeletedIdx = frames.findIndex((f) => !f.reduxHasA1)
     expect(firstDeletedIdx, 'must observe delete commit (reduxHasA1 false) in sampled frames').toBeGreaterThanOrEqual(0)
 
-    // Correlated check: from first frame where a1 is gone from Redux, survivor a2 must be visible in that same frame
+    // Sampler-level controls on the REAL product DOM. Without both, "no blank
+    // frame" could pass without the probe ever discriminating (a vacuous
+    // check): the survivor's element existed while it was not rendered, and
+    // the selected variant really was rendered before the delete.
+    expect(
+      frames.some((f) => f.reduxHasA1 && f.domA2Exists && !f.a2EffectiveVisible),
+      'sampler must observe the survivor DOM-present but NOT rendered before delete (negative control)'
+    ).toBe(true)
+    expect(
+      frames.some((f) => f.reduxHasA1 && f.a1EffectiveVisible),
+      'sampler must observe the selected variant actually rendered before delete (positive control)'
+    ).toBe(true)
+
+    // Correlated check: from first frame where a1 is gone from Redux, survivor
+    // a2 must be truly rendered in that same frame
     const firstDeletedFrame = frames[firstDeletedIdx]
     expect(firstDeletedFrame.reduxHasA2, 'survivor must still be in Redux at delete commit').toBe(true)
     expect(firstDeletedFrame.domA2Exists, 'survivor DOM must exist at first deleted frame').toBe(true)
-    expect(firstDeletedFrame.domA2Display, 'survivor must be visible at first deleted frame').not.toBe('none')
+    expect(
+      firstDeletedFrame.a2EffectiveVisible,
+      `survivor must be truly rendered at first deleted frame (inner display=${
+        firstDeletedFrame.domA2InnerDisplay
+      }, hiddenBy=${String(firstDeletedFrame.a2HiddenBy)}, rectArea=${firstDeletedFrame.a2RectArea})`
+    ).toBe(true)
     expect(
       firstDeletedFrame.groupVisibleIds,
-      'semantic group must have visible answer at first deleted frame'
+      'semantic group must have a rendered answer at first deleted frame'
     ).toContain(a2)
     expect(firstDeletedFrame.groupVisibleIds.length, 'group must not be empty at first deleted frame').toBeGreaterThan(
       0
     )
-    // The visible answer must have non-empty content (not blank)
+    // ...and it must be the survivor's own seeded answer body, not merely any text
     expect(
-      firstDeletedFrame.groupVisibleText.some((t) => t.length > 0),
-      'visible answer must have content at first deleted frame'
-    ).toBe(true)
+      firstDeletedFrame.a2RenderedText,
+      'survivor rendered text must contain its own seeded answer body at first deleted frame'
+    ).toContain('main-long-a2-survivor-continuous')
 
-    // No sample where a1 is removed from Redux while a2 is absent/hidden or group has no visible answer
-    const violating = frames.filter(
-      (f) =>
-        !f.reduxHasA1 &&
-        (!f.domA2Exists ||
-          f.domA2Display === 'none' ||
-          f.groupVisibleIds.length === 0 ||
-          !f.groupVisibleIds.includes(a2))
-    )
+    // After the gesture no sampled frame may paint without a rendered answer,
+    // and once a1 has left the loaded projection the rendered answer must be a2.
+    const seededAnswerBodies = ['main-short-a1', 'main-long-a2-survivor-continuous']
+    const hasRenderedAnswerBody = (f: SampleFrame) =>
+      f.groupVisibleText.some((t) => seededAnswerBodies.some((body) => t.includes(body)))
+    const postClick = frames.filter((f) => f.tAbs >= clickAt)
+    expect(postClick.length, 'sampler must have captured frames after the delete gesture').toBeGreaterThan(5)
+    const violating = postClick.filter((f) => {
+      if (!hasRenderedAnswerBody(f)) return true
+      if (f.groupVisibleIds.length === 0) return true
+      return !f.reduxHasA1 && (!f.a2EffectiveVisible || !f.groupVisibleIds.includes(a2))
+    })
     expect(
       violating,
-      `no frame should have a1 removed while a2 absent/hidden or group empty; violating: ${JSON.stringify(violating.slice(0, 2))}`
+      `no post-delete frame may paint without a rendered answer (a2 once a1 is gone); violating: ${JSON.stringify(
+        violating.slice(0, 2).map((f) => ({
+          t: f.tAbs,
+          reduxHasA1: f.reduxHasA1,
+          a2EffectiveVisible: f.a2EffectiveVisible,
+          a2HiddenBy: f.a2HiddenBy,
+          a2InnerDisplay: f.domA2InnerDisplay,
+          groupVisibleIds: f.groupVisibleIds
+        }))
+      )}`
     ).toEqual([])
 
     // Also ensure no zero-visible-group frame after commit (up to end)
@@ -468,8 +668,9 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
     // Final DOM/Redux: survivor visible, deleted gone, thinking→main_text order
     const finalDom = await page.evaluate(
       ({ a1, a2 }: { a1: string; a2: string }) => {
-        const a1El = document.getElementById(`message-${a1}`)
-        const a2El = document.getElementById(`message-${a2}`)
+        const probe = (window as unknown as ProbeWindow).__selDelProbe
+        const a1Probe = probe(document.getElementById(`message-${a1}`))
+        const a2Probe = probe(document.getElementById(`message-${a2}`))
         const state = (
           window as unknown as {
             store: {
@@ -485,12 +686,13 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
         ).store.getState()
         const bIds: string[] = (state.messages.entities[a2] as { blocks?: string[] } | undefined)?.blocks ?? []
         const types = bIds.map((bid) => state.messageBlocks.entities[bid]?.type ?? 'unknown')
-        const a2Text = a2El ? (a2El.textContent ?? '').trim().slice(0, 120) : ''
         return {
-          a1Exists: !!a1El,
-          a2Exists: !!a2El,
-          a2Display: a2El ? window.getComputedStyle(a2El).display : 'missing',
-          a2Text,
+          a1Exists: a1Probe.exists,
+          a2Exists: a2Probe.exists,
+          a2EffectiveVisible: a2Probe.effectiveVisible,
+          a2InnerDisplay: a2Probe.innerDisplay,
+          a2HiddenBy: a2Probe.hiddenBy,
+          a2Text: a2Probe.text,
           bIds,
           types
         }
@@ -499,8 +701,15 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
     )
     expect(finalDom.a1Exists).toBe(false)
     expect(finalDom.a2Exists).toBe(true)
-    expect(finalDom.a2Display).not.toBe('none')
-    expect(finalDom.a2Text.length, 'survivor must have non-empty rendered content').toBeGreaterThan(0)
+    expect(
+      finalDom.a2EffectiveVisible,
+      `survivor must be truly rendered in the final state (inner display=${finalDom.a2InnerDisplay}, hiddenBy=${String(
+        finalDom.a2HiddenBy
+      )})`
+    ).toBe(true)
+    expect(finalDom.a2Text, 'survivor must render its own seeded answer body').toContain(
+      'main-long-a2-survivor-continuous'
+    )
     expect(finalDom.bIds).toHaveLength(2)
     expect(finalDom.types).toEqual(['thinking', 'main_text'])
 
