@@ -104,7 +104,8 @@ describe('insert-message-groups request validation', () => {
       insertedBlocks: [],
       insertedMessageIds: ['m-1'],
       mutableMessageIds: ['m-1'],
-      groups: [{ insertedMessageIds: ['m-1'], beforeMessageId: null, nextMessageId: null }]
+      groups: [{ insertedMessageIds: ['m-1'], beforeMessageId: null, nextMessageId: null }],
+      boundaryRestores: []
     }
     expect(() => validateChatDbResult(CHANNEL, { ok: true, value: good })).not.toThrow()
     expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { affectedFileIds: [] } })).toThrow(ValidationError)

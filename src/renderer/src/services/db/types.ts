@@ -15,6 +15,7 @@ import type {
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   ImportTopicDataResponse,
+  InheritanceBoundarySnapshot,
   InsertMessageGroup,
   InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
@@ -403,7 +404,13 @@ export interface MessageDataSource {
   insertMessageGroups?(
     topicId: string,
     groups: InsertMessageGroup[],
-    branchId?: BranchRoute
+    branchId?: BranchRoute,
+    /**
+     * Inheritance boundaries to revert inside the same Main insertion
+     * transaction (undo of a delete that moved them). Compare-and-set in Main;
+     * empty/absent keeps an ordinary insertion.
+     */
+    boundaryRestores?: InheritanceBoundarySnapshot[]
   ): Promise<InsertMessageGroupsResponse>
 
   // ============ Batch Operations ============

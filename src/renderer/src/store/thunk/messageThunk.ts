@@ -80,6 +80,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
+  InheritanceBoundarySnapshot,
   JsonObject,
   MoveContextAnchorInheritanceInput,
   SemanticModelSnapshot,
@@ -1375,6 +1376,13 @@ export interface DeleteDependentsUndoParts {
   groupAnchors: GroupAnchor[]
   segmentSnapshots: TopicSegment[]
   fileReferenceDeltas: Array<{ fileId: string; delta: number }>
+  /**
+   * Inheritance boundaries the delete moved (branch anchors + cross-topic
+   * reference endpoints), exactly as Main captured them inside the delete
+   * transaction. Undo passes these back with the restore so Main reverts
+   * messages and boundaries together.
+   */
+  boundarySnapshots: InheritanceBoundarySnapshot[]
 }
 
 export function buildDeleteDependentsUndoParts(
@@ -1426,7 +1434,13 @@ export function buildDeleteDependentsUndoParts(
       }
     }
   }
-  return { groupAnchors, segmentSnapshots, fileReferenceDeltas }
+  // Boundary facts pass through unchanged: Main already decided which
+  // relations this delete moved and what value undo must compare against.
+  // A response without the field (older Main) yields no boundary restores.
+  const boundarySnapshots: InheritanceBoundarySnapshot[] = Array.isArray(response.boundarySnapshots)
+    ? response.boundarySnapshots
+    : []
+  return { groupAnchors, segmentSnapshots, fileReferenceDeltas, boundarySnapshots }
 }
 
 /**
@@ -1501,7 +1515,16 @@ async function executeDeleteCore(
   rootIds: string[],
   addressedRoute: string | null,
   eligibleLoadedIds?: Iterable<string>
-): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> {
+): Promise<{
+  response: DeleteMessagesWithDependentsResponse
+  undoParts: DeleteDependentsUndoParts
+  /**
+   * The route this delete actually addressed (`null` = main route). It travels
+   * with the undo snapshot so undo restores the rows onto their original
+   * route/owner instead of whatever route the UI happens to show later.
+   */
+  addressedRoute: string | null
+}> {
   // Ordinary deletes capture the pre-delete loaded projection BEFORE any
   // persistence. Staged-cut callers pass the cut-time source eligibility
   // explicitly and must never read the (possibly retargeted) live projection
@@ -1544,6 +1567,13 @@ async function executeDeleteCore(
       response.remainingUserMessageIds,
       addressedRoute
     )
+    // A deleted message may be a branch/reference inheritance boundary: Main
+    // moves that boundary to the nearest surviving predecessor inside the same
+    // delete transaction. The branch catalog is a Main projection, so the
+    // renderer copy would keep the removed anchor id — the fork divider then
+    // has no anchor message to attach to and silently disappears. Re-read the
+    // authoritative catalog as part of the same post-commit convergence.
+    await dispatch(fetchTopicBranchesThunk(topicId))
   } catch (convergenceError) {
     throw new DeletePostCommitConvergenceError(
       '[executeDeleteCore] Renderer convergence failed after Main commit; source deletion committed',
@@ -1553,7 +1583,7 @@ async function executeDeleteCore(
     )
   }
 
-  return { response, undoParts }
+  return { response, undoParts, addressedRoute }
 }
 
 export const executeDeleteMessagesWithDependents = async (
@@ -1561,7 +1591,11 @@ export const executeDeleteMessagesWithDependents = async (
   getState: () => RootState,
   topicId: string,
   rootIds: string[]
-): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+): Promise<{
+  response: DeleteMessagesWithDependentsResponse
+  undoParts: DeleteDependentsUndoParts
+  addressedRoute: string | null
+}> => {
   // Renderer precheck against Main-authoritative capability; Main guard stays
   // final. Fail-closed before any Main call so shared/inherited targets never
   // issue a mutation (existing toast path on throw).
@@ -1640,7 +1674,11 @@ export const executeStagedCutSourceDelete = async (
   dispatch: AppDispatch,
   getState: () => RootState,
   authority: StagedCutAuthority
-): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+): Promise<{
+  response: DeleteMessagesWithDependentsResponse
+  undoParts: DeleteDependentsUndoParts
+  addressedRoute: string | null
+}> => {
   const { sourceTopicId, sourceBranchId, rootIds } = authority
   if (typeof sourceBranchId === 'undefined') {
     throw new Error(`[stagedCutDelete] Missing staged source route for topic ${sourceTopicId}`)

@@ -15,6 +15,7 @@ import type {
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   ImportTopicDataResponse,
+  InheritanceBoundarySnapshot,
   InsertMessageGroup,
   MessageBlockEntry,
   MoveContextAnchorInheritanceInput,
@@ -412,9 +413,14 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.insertMessagesAfterAnchor) throw new Error('insertMessagesAfterAnchor unavailable')
     return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries, branchId)
   }
-  insertMessageGroups(topicId: string, groups: InsertMessageGroup[], branchId?: string | null) {
+  insertMessageGroups(
+    topicId: string,
+    groups: InsertMessageGroup[],
+    branchId?: string | null,
+    boundaryRestores?: InheritanceBoundarySnapshot[]
+  ) {
     if (!this.ordinarySource.insertMessageGroups) throw new Error('insertMessageGroups unavailable')
-    return this.ordinarySource.insertMessageGroups(topicId, groups, branchId)
+    return this.ordinarySource.insertMessageGroups(topicId, groups, branchId, boundaryRestores)
   }
 
   resetMessagesForResend(

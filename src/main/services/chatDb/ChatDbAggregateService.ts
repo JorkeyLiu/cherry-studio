@@ -24,6 +24,7 @@ import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
   AppendMessageResponse,
+  BranchInheritedBoundary,
   CreateReferencedTopicResponse,
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
@@ -50,6 +51,8 @@ import type {
   HistoryReferenceMeta,
   ImportTopicDataRequest,
   ImportTopicDataResponse,
+  InheritanceBoundaryRestoreResult,
+  InheritanceBoundarySnapshot,
   InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   JsonObject,
@@ -3025,8 +3028,8 @@ export class ChatDbAggregateService {
    * - Validates topic exists, anchor belongs to the addressed effective route.
    * - Owned anchor: group-tail index inside the owner rows (established behavior).
    * - Inherited (ancestor-reference) anchor on a branch route: allowed ONLY
-   *   when the anchor ID exactly equals the addressed branch's immutable
-   *   anchorMessageId (the fork boundary / parent-reference final answer).
+   *   when the anchor ID exactly equals the addressed branch's current fork
+   *   boundary (anchorMessageId / parent-reference final answer).
    *   That sole exception inserts durably at the START of the branch owned
    *   suffix (index 0), so the effective order is ancestor prefix through
    *   branch anchor, then new rows, then the previous suffix. Any older
@@ -3065,7 +3068,7 @@ export class ChatDbAggregateService {
           // Validate anchor membership inside the addressed effective route.
           // BRANCH-3 bounded insertion: ancestor references are read-only.
           // The sole fork-boundary exception is an inherited anchor whose ID
-          // exactly equals the addressed branch's immutable anchorMessageId;
+          // exactly equals the addressed branch's current fork boundary (anchorMessageId);
           // new rows land at the START of the route owner's suffix (BRANCH-11
           // effective order: prefix through branch anchor, then owned
           // suffix). Ordered authority for owner sequencing is the route
@@ -3517,7 +3520,8 @@ export class ChatDbAggregateService {
   insertMessageGroups(
     topicId: string,
     groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>,
-    branchId?: string | null
+    branchId?: string | null,
+    boundaryRestores?: InheritanceBoundarySnapshot[]
   ): ChatDbResult<InsertMessageGroupsResponse> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(branchId)
@@ -3930,6 +3934,21 @@ export class ChatDbAggregateService {
               nextMessageId: lastIdx + 1 < effective.length ? effective[lastIdx + 1].id : null
             }
           })
+          // Boundary restoration lives in the SAME transaction as the
+          // re-inserted messages: a delete that moved a branch anchor or a
+          // cross-topic reference endpoint can be undone atomically. Applied
+          // only onto relations this delete moved and only while their
+          // recorded post-delete value still holds (compare-and-set helper).
+          const restoredBoundaries =
+            boundaryRestores && boundaryRestores.length > 0
+              ? this.restoreInheritanceBoundariesInTx(
+                  repos,
+                  topicId,
+                  boundaryRestores,
+                  new Set(insertedIds),
+                  this.normalizeBranchId(route)
+                )
+              : []
           return {
             ...cleanup,
             topicId,
@@ -3938,7 +3957,8 @@ export class ChatDbAggregateService {
             insertedBlocks: blocksToWire(durableBlocks),
             insertedMessageIds: insertedIds,
             mutableMessageIds: [...insertedIds],
-            groups: groupRuns
+            groups: groupRuns,
+            boundaryRestores: restoredBoundaries
           }
         })
       } catch (e) {
@@ -4127,9 +4147,11 @@ export class ChatDbAggregateService {
             repos.topics.ensure(topicId)
             // Natural creation authority guard: the addressed route must be
             // resolvable in the SAME root transaction before any message/block
-            // write. Branch appends fail closed on trashed topics,
-            // unknown/cross-topic branches via requireBranchInTx, and missing
-            // anchors via route resolution (BRANCH-5). Main-route appends
+            // write. Branch appends fail closed on trashed topics and
+            // unknown/cross-topic branches via requireBranchInTx; a branch
+            // whose fork boundary is missing still resolves (shortened or
+            // empty inherited history) so its owned suffix stays writable.
+            // Main-route appends
             // preserve existing success semantics on soft-deleted topics
             // (frame maintenance covered by syncParentOrderFrame).
             {
@@ -5393,6 +5415,9 @@ export class ChatDbAggregateService {
           const existing = repos.messages.getInTopic(messageId, topicId)
           if (!existing.found) return null // no-op for missing/foreign IDs
           const known = ctx ? syncService.isKnownEntityInTx(stx, 'message', messageId) : false
+          // Branch/reference boundaries move off the deleted row before it is
+          // gone (pre-delete ordering supplies the predecessor).
+          this.advanceInheritanceBoundariesInTx(repos, topicId, [messageId])
           repos.messages.delete(messageId)
           // Resend intent (SYNC-DATA-055): a deleted message carries no
           // unfinished attempt — clear in the same transaction.
@@ -5454,6 +5479,9 @@ export class ChatDbAggregateService {
           }
           const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
           if (ownedIds.length > 0) {
+            // Same boundary maintenance as the single-message path (the whole
+            // batch leaves together, so predecessors skip every deleted id).
+            this.advanceInheritanceBoundariesInTx(repos, topicId, ownedIds)
             repos.messages.deleteMany(ownedIds)
             // Resend intent (SYNC-DATA-055): deleted messages carry no
             // unfinished attempt — clear in the same transaction.
@@ -7391,8 +7419,9 @@ export class ChatDbAggregateService {
   // every message has exactly one permanent owner (branch_id, null = main);
   // the current route mutates only rows it owns (owner equality); ancestor
   // rows are read-only references through the effective route (no
-  // copy-on-write). Owner edits/deletes/reorders are never blocked by live
-  // descendants (butterfly effect); a missing anchor fails closed.
+  // descendants (butterfly effect); a missing anchor does not block branch
+  // access — a resolvable inheritance boundary applies, otherwise inheritance
+  // is empty.
   // =========================================================================
 
   /**
@@ -7404,16 +7433,56 @@ export class ChatDbAggregateService {
   }
 
   /** Domain branch node → wire (exact TopicBranchWire keys, null-preserving). */
-  private branchToWire(branch: TopicBranchData): TopicBranchWire {
+  private branchToWire(branch: TopicBranchData, inheritedBoundary: BranchInheritedBoundary): TopicBranchWire {
     return {
       id: branch.id,
       topicId: branch.topicId,
       parentBranchId: branch.parentBranchId,
       anchorMessageId: branch.anchorMessageId,
+      inheritedBoundary,
       name: branch.name,
       createdAt: branch.createdAt,
       updatedAt: branch.updatedAt
     }
+  }
+
+  /**
+   * Read-only placement fact for one branch's fork divider, derived from the
+   * SAME route composition the message reads use: the parent route composes
+   * `messageId` as the last inherited message (the fork anchor while it still
+   * composes that route, otherwise the nearest surviving message before it),
+   * or the branch inherits nothing at all and its boundary is the parent
+   * route's history head. A head boundary carries no message id — nothing is
+   * invented for a position no row occupies, so a renderer can place the
+   * divider without turning it into a scroll/navigation target.
+   */
+  private resolveBranchInheritedBoundaryInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    parentBranchId: string | null,
+    anchorMessageId: string,
+    routeCache?: Map<string | null, MessageData[] | null>
+  ): BranchInheritedBoundary {
+    const key = this.normalizeBranchId(parentBranchId)
+    let route = routeCache?.get(key)
+    if (route === undefined) {
+      try {
+        route = this.resolveRouteMessagesGuardedInTx(repos, topicId, key, new Set<string>(), 0)
+      } catch (e) {
+        // Broken ancestry stays readable with an empty inherited history; the
+        // boundary is that empty history's head, never a guessed message.
+        if (!(e instanceof ChatDbNotFoundError)) throw e
+        route = null
+      }
+      routeCache?.set(key, route)
+    }
+    if (route === null) return { kind: 'head', messageId: null }
+    if (route.some((m) => m.id === anchorMessageId)) {
+      return { kind: 'message', messageId: anchorMessageId }
+    }
+    const boundaryIdx = this.deriveInheritanceBoundaryInTx(repos, route, anchorMessageId)
+    if (boundaryIdx === null) return { kind: 'head', messageId: null }
+    return { kind: 'message', messageId: route[boundaryIdx].id }
   }
 
   /**
@@ -7682,10 +7751,12 @@ export class ChatDbAggregateService {
    * cycle/depth-guarded). Returns:
    * - status 'none' when the topic is not a reference target;
    * - status 'missing' when the source topic is gone/trashed, the source
-   *   route cannot resolve, the anchor endpoint is absent, or a cycle/depth
-   *   limit is hit — `messages` is then empty (prefix omitted);
-   * - status 'available' with the source-route prefix through the anchor
-   *   inclusive (canonical source rows; stable IDs; no copy).
+   *   route cannot resolve, no boundary survives for the endpoint, or a
+   *   cycle/depth limit is hit — `messages` is then empty (prefix omitted);
+   * - status 'available' with the source-route prefix through the boundary
+   *   inclusive (canonical source rows; stable IDs; no copy). The boundary is
+   *   the captured endpoint while it composes the source route, otherwise the
+   *   nearest surviving message before it (same rule as branch inheritance).
    *
    * `chainMissing` (optional) is provenance-only: when supplied it is flagged
    * at EVERY missing reference segment in the resolved source chain, so a
@@ -7743,12 +7814,18 @@ export class ChatDbAggregateService {
         }
         throw e
       }
+      // The captured endpoint shares the branch inheritance boundary rule:
+      // while the endpoint row survives, a route that no longer composes it
+      // still inherits up to the nearest surviving message before it; once the
+      // row is gone nothing is guessed and the prefix is simply absent.
       const anchorIdx = sourceRoute.findIndex((m) => m.id === ref.anchorMessageId)
-      if (anchorIdx === -1) {
+      const boundaryIdx =
+        anchorIdx === -1 ? this.deriveInheritanceBoundaryInTx(repos, sourceRoute, ref.anchorMessageId) : anchorIdx
+      if (boundaryIdx === null) {
         if (chainMissing) chainMissing.missing = true
         return { messages: [], reference: ref, status: 'missing' }
       }
-      return { messages: sourceRoute.slice(0, anchorIdx + 1), reference: ref, status: 'available' }
+      return { messages: sourceRoute.slice(0, boundaryIdx + 1), reference: ref, status: 'available' }
     } finally {
       visited.delete(topicId)
     }
@@ -7759,9 +7836,10 @@ export class ChatDbAggregateService {
    * reference recursion. The base of any topic is its foreign reference
    * prefix (when it is a reference target) followed by its own main rows;
    * intra-topic branches then compose atop that base through the same
-   * anchor-slice algorithm. Missing anchors still fail closed (NOT_FOUND);
-   * missing/gone reference sources omit the prefix (status is surfaced by
-   * the caller-facing metadata).
+   * anchor-slice algorithm, each through its inheritance boundary. A missing
+   * reference source omits the prefix (status is surfaced by the caller-facing
+   * metadata) and a branch/reference boundary with no surviving predecessor
+   * inherits nothing.
    *
    * `chainMissing` (optional) is threaded into the reference base so a nested
    * missing segment in the source chain is reported to provenance callers.
@@ -7792,15 +7870,331 @@ export class ChatDbAggregateService {
     }
     let effective: MessageData[] = [...base, ...repos.messages.listByTopic(topicId, null)]
     for (const node of path) {
+      // Inheritance boundary: the original fork point while it still composes
+      // the parent route, otherwise the nearest surviving message before it
+      // (empty inherited history when no such predecessor is derivable). The
+      // branch and its own rows stay reachable either way, and history after
+      // the original fork point never enters the child route.
       const anchorIdx = effective.findIndex((m) => m.id === node.anchorMessageId)
-      if (anchorIdx === -1) {
-        throw new ChatDbNotFoundError(
-          `Anchor message ${node.anchorMessageId} is not in the parent route of branch ${node.id}`
-        )
-      }
-      effective = [...effective.slice(0, anchorIdx + 1), ...repos.messages.listByTopic(topicId, node.id)]
+      const boundaryIdx =
+        anchorIdx === -1 ? this.deriveInheritanceBoundaryInTx(repos, effective, node.anchorMessageId) : anchorIdx
+      const inherited = boundaryIdx === null ? [] : effective.slice(0, boundaryIdx + 1)
+      effective = [...inherited, ...repos.messages.listByTopic(topicId, node.id)]
     }
     return effective
+  }
+
+  /**
+   * Inheritance boundary index for an anchor that no longer composes the
+   * parent effective route, or null when the inherited history is empty.
+   *
+   * The original fork point stays authoritative: only messages composed
+   * before it may be inherited, so nothing after it can leak into the child
+   * route. While the anchor row itself survives its owner segment still
+   * carries the ordering information, so the boundary resolves to the nearest
+   * surviving message before the anchor inside that segment — or, when the
+   * anchor was the segment's first row, to the message immediately before the
+   * segment (the segment's own inherited tail). Once the anchor row is gone no
+   * ordering information is left: no predecessor is guessed, and the child
+   * route inherits nothing while keeping its own suffix.
+   */
+  private deriveInheritanceBoundaryInTx(
+    repos: ChatDbRepositories,
+    effective: MessageData[],
+    anchorMessageId: string
+  ): number | null {
+    const anchorRow = repos.messages.getById(anchorMessageId)
+    if (!anchorRow.found) return null
+    const anchor = anchorRow.data
+    const anchorOwner = anchor.branchId ?? null
+    let segmentStart = -1
+    let predecessor: number | null = null
+    for (let i = 0; i < effective.length; i++) {
+      const row = effective[i]
+      if (row.topicId !== anchor.topicId || (row.branchId ?? null) !== anchorOwner) continue
+      if (segmentStart === -1) segmentStart = i
+      const orderedBefore =
+        row.sortOrder < anchor.sortOrder || (row.sortOrder === anchor.sortOrder && row.id < anchor.id)
+      // Every segment composes in (sort_order, id) order, so nothing later in
+      // this segment can precede the anchor.
+      if (!orderedBefore) break
+      predecessor = i
+    }
+    if (segmentStart === -1) return null
+    if (predecessor !== null) return predecessor
+    return segmentStart === 0 ? null : segmentStart - 1
+  }
+
+  /**
+   * Advance fork/reference boundaries off messages that are about to be
+   * deleted — always inside the caller's transaction and BEFORE the rows are
+   * gone, so the pre-delete route composition supplies the ordering.
+   *
+   * Every branch anchored at a deleted message moves its boundary to the
+   * nearest surviving message before that anchor on its parent route, which is
+   * exactly the history the child inherited through the fork point; a
+   * reference endpoint on a deleted message advances the same way on its
+   * captured source route. When no survivor precedes the anchor the boundary
+   * keeps its anchor id: resolution then has no ordering information and
+   * inherits nothing, while the branch/reference and the owned suffix stay
+   * accessible and writable. Branch and reference rows are never deleted here
+   * and no cascade is introduced. Tolerates pre-016/pre-018 databases.
+   */
+  private advanceInheritanceBoundariesInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    deletedMessageIds: string[],
+    boundarySnapshots?: InheritanceBoundarySnapshot[]
+  ): void {
+    if (deletedMessageIds.length === 0) return
+    const deleted = new Set(deletedMessageIds)
+    // Boundary BEFORE the anchor, skipping every id leaving in this write.
+    const predecessorOf = (route: MessageData[], anchorMessageId: string): string | null => {
+      const anchorIdx = route.findIndex((m) => m.id === anchorMessageId)
+      const boundaryIdx =
+        anchorIdx === -1 ? this.deriveInheritanceBoundaryInTx(repos, route, anchorMessageId) : anchorIdx
+      if (boundaryIdx === null) return null
+      for (let i = boundaryIdx - 1; i >= 0; i--) {
+        if (!deleted.has(route[i].id)) return route[i].id
+      }
+      return null
+    }
+    // Routes are resolved BEFORE any boundary moves, so the rewrite order can
+    // never change another branch's parent composition.
+    const pending: Array<{
+      kind: 'branch' | 'reference'
+      id: string
+      anchorMessageId: string
+      previousAnchorMessageId: string
+    }> = []
+    for (const branch of this.listBranchesTolerantInTx(repos, topicId)) {
+      if (!deleted.has(branch.anchorMessageId)) continue
+      let parentRoute: MessageData[]
+      try {
+        parentRoute = this.resolveRouteMessagesGuardedInTx(repos, topicId, branch.parentBranchId, new Set<string>(), 0)
+      } catch (e) {
+        // Broken ancestry stays readable (it resolves with an empty inherited
+        // history) and must never block the owner's delete.
+        if (e instanceof ChatDbNotFoundError) continue
+        throw e
+      }
+      const next = predecessorOf(parentRoute, branch.anchorMessageId)
+      if (next !== null) {
+        pending.push({
+          kind: 'branch',
+          id: branch.id,
+          anchorMessageId: next,
+          previousAnchorMessageId: branch.anchorMessageId
+        })
+      }
+    }
+    for (const reference of this.listReferencesByAnchorTolerantInTx(repos, deletedMessageIds)) {
+      if (!deleted.has(reference.anchorMessageId)) continue
+      let sourceRoute: MessageData[]
+      try {
+        sourceRoute = this.resolveRouteMessagesGuardedInTx(
+          repos,
+          reference.sourceTopicId,
+          this.normalizeBranchId(reference.sourceBranchId),
+          new Set<string>(),
+          0
+        )
+      } catch (e) {
+        if (e instanceof ChatDbNotFoundError) continue
+        throw e
+      }
+      const next = predecessorOf(sourceRoute, reference.anchorMessageId)
+      if (next !== null) {
+        pending.push({
+          kind: 'reference',
+          id: reference.targetTopicId,
+          anchorMessageId: next,
+          previousAnchorMessageId: reference.anchorMessageId
+        })
+      }
+    }
+    for (const item of pending) {
+      if (item.kind === 'branch') repos.branches.advanceAnchor(item.id, item.anchorMessageId)
+      else repos.topicReferences.advanceAnchor(item.id, item.anchorMessageId)
+      // The undo restore pair (pre-delete boundary + the value just written).
+      // Reported only for boundaries this write actually moved, in rewrite
+      // order, so undo never has to guess which relation changed.
+      boundarySnapshots?.push({
+        kind: item.kind,
+        id: item.id,
+        anchorMessageId: item.previousAnchorMessageId,
+        expectedAnchorMessageId: item.anchorMessageId
+      })
+    }
+  }
+
+  /**
+   * Restore inheritance boundaries a delete moved, inside the caller's
+   * transaction.
+   *
+   * Compare-and-set only, using facts the caller cannot invent: the relation
+   * must still exist, its current anchor must still equal the value that
+   * delete wrote, and the restore target must be a message this same command
+   * actually re-inserted. A relation the user has since deleted is never
+   * recreated, and a boundary another operation has since moved keeps the
+   * newer value.
+   *
+   * Route sovereignty is decided by real composition, not by topic equality:
+   * the route this command restores onto must be part of the route the
+   * relation hangs off — the branch's parent route, or the reference's own
+   * source route — through structural composition (parent-branch chain and
+   * cross-topic reference source). A nested chain (A owns the row, B references
+   * A, C references B through that inherited row) therefore restores the B and
+   * C endpoints from A's own undo, while an unrelated topic's undo can never
+   * address either relation. Composition is structural only (never boundary
+   * anchor values), so the restore order inside this transaction cannot change
+   * the answer. No unrelated relation is addressable — there is no generic
+   * branch/reference write capability here.
+   */
+  private restoreInheritanceBoundariesInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    restores: InheritanceBoundarySnapshot[],
+    insertedIds: Set<string>,
+    insertBranchId: string | null
+  ): InheritanceBoundaryRestoreResult[] {
+    const results: InheritanceBoundaryRestoreResult[] = []
+    const insertRoute = { topicId, branchId: insertBranchId }
+    for (const item of restores) {
+      if (item.kind !== 'branch' && item.kind !== 'reference') {
+        throw new ChatDbValidationError(`Unsupported inheritance boundary kind: ${String(item.kind)}`)
+      }
+      const skipped = (skipReason: 'missing' | 'changed'): void => {
+        results.push({
+          kind: item.kind,
+          id: item.id,
+          anchorMessageId: item.anchorMessageId,
+          restored: false,
+          skipReason
+        })
+      }
+      if (item.kind === 'branch') {
+        const current = repos.branches.getById(item.id)
+        if (!current.found) {
+          skipped('missing')
+          continue
+        }
+        if (current.data.topicId !== topicId) {
+          throw new ChatDbValidationError(`Branch ${item.id} does not belong to topic ${topicId}`)
+        }
+        if (current.data.anchorMessageId !== item.expectedAnchorMessageId || !insertedIds.has(item.anchorMessageId)) {
+          skipped('changed')
+          continue
+        }
+        // The branch inherits through its PARENT route: the restored anchor is
+        // only a legitimate boundary while this command put it back onto a
+        // route that parent route composes.
+        if (
+          !this.routeComposesRouteInTx(repos, topicId, this.normalizeBranchId(current.data.parentBranchId), insertRoute)
+        ) {
+          skipped('changed')
+          continue
+        }
+        repos.branches.advanceAnchor(item.id, item.anchorMessageId)
+      } else {
+        const current = repos.topicReferences.getByTarget(item.id)
+        if (!current.found) {
+          skipped('missing')
+          continue
+        }
+        if (current.data.anchorMessageId !== item.expectedAnchorMessageId || !insertedIds.has(item.anchorMessageId)) {
+          skipped('changed')
+          continue
+        }
+        // The endpoint hangs off the reference's SOURCE route, which may be an
+        // ancestor of the topic this command writes to (nested references).
+        if (
+          !this.routeComposesRouteInTx(
+            repos,
+            current.data.sourceTopicId,
+            this.normalizeBranchId(current.data.sourceBranchId),
+            insertRoute
+          )
+        ) {
+          skipped('changed')
+          continue
+        }
+        repos.topicReferences.advanceAnchor(item.id, item.anchorMessageId)
+      }
+      results.push({ kind: item.kind, id: item.id, anchorMessageId: item.anchorMessageId, restored: true })
+    }
+    return results
+  }
+
+  /**
+   * Structural route composition: does the effective route of
+   * (`topicId`, `branchId`) compose the given route?
+   *
+   * Composition is followed through structure only — a branch route composes
+   * its parent-branch chain, and a topic route composes its cross-topic
+   * reference source route. Boundary anchors are deliberately never read: they
+   * are exactly what an inheritance restore rewrites, so a membership test
+   * that consulted them would make the outcome depend on restore order.
+   * Cycle-safe; a missing branch/reference row simply ends that path.
+   */
+  private routeComposesRouteInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null,
+    target: { topicId: string; branchId: string | null },
+    visited: Set<string> = new Set<string>()
+  ): boolean {
+    const key = `${topicId}\u0000${branchId ?? ''}`
+    if (visited.has(key)) return false
+    visited.add(key)
+    if (topicId === target.topicId && branchId === target.branchId) return true
+    if (branchId !== null) {
+      const branch = repos.branches.getById(branchId)
+      if (branch.found && branch.data.topicId === topicId) {
+        if (
+          this.routeComposesRouteInTx(
+            repos,
+            topicId,
+            this.normalizeBranchId(branch.data.parentBranchId),
+            target,
+            visited
+          )
+        ) {
+          return true
+        }
+      }
+    }
+    const reference = repos.topicReferences.getByTarget(topicId)
+    if (reference.found) {
+      return this.routeComposesRouteInTx(
+        repos,
+        reference.data.sourceTopicId,
+        this.normalizeBranchId(reference.data.sourceBranchId),
+        target,
+        visited
+      )
+    }
+    return false
+  }
+
+  /** Branch rows of one topic; empty on pre-016 databases (no table). */
+  private listBranchesTolerantInTx(repos: ChatDbRepositories, topicId: string): TopicBranchData[] {
+    try {
+      return repos.branches.listByTopic(topicId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return []
+      throw e
+    }
+  }
+
+  /** Reference relations captured on one of `messageIds`; empty on pre-018 databases. */
+  private listReferencesByAnchorTolerantInTx(repos: ChatDbRepositories, messageIds: string[]): TopicReferenceData[] {
+    try {
+      return repos.topicReferences.listByAnchorMessages(messageIds)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return []
+      throw e
+    }
   }
 
   /**
@@ -7814,10 +8208,13 @@ export class ChatDbAggregateService {
    * source route through the reference anchor (canonical source IDs/topicId).
    * The target's own main rows and any intra-topic branches compose atop it.
    *
-   * `branchId = null` is the main route (base + owned rows). A missing anchor
-   * in any parent route fails closed (NOT_FOUND) — the route is broken and
-   * must not silently truncate, clamp, copy, or repair (BRANCH-5). A missing
-   * reference source omits the prefix (status surfaced by metadata).
+   * `branchId = null` is the main route (base + owned rows). Every branch
+   * composes through its inheritance boundary: the original fork point while
+   * it still composes the parent route, otherwise the nearest surviving
+   * message before it, otherwise no inherited history at all — the branch and
+   * its own rows stay readable and writable in every case, and nothing after
+   * the original fork point is ever inherited. A missing/gone reference source
+   * omits the prefix (status surfaced by metadata).
    */
   private resolveRouteMessagesInTx(
     repos: ChatDbRepositories,
@@ -8288,7 +8685,10 @@ export class ChatDbAggregateService {
           const wireMessages = messagesToWire(resolved)
           const wireBlocks = blocksToWire(allBlocks)
           return {
-            branch: this.branchToWire(created),
+            branch: this.branchToWire(
+              created,
+              this.resolveBranchInheritedBoundaryInTx(repos, topicId, created.parentBranchId, created.anchorMessageId)
+            ),
             messages: reconstructMessageBlockRelations(wireMessages, wireBlocks),
             blocks: wireBlocks
           }
@@ -8451,7 +8851,16 @@ export class ChatDbAggregateService {
         if (e instanceof Error && /no such table/i.test(e.message)) rows = []
         else throw e
       }
-      return { topicId, branches: rows.map((b) => this.branchToWire(b)) }
+      const routeCache = new Map<string | null, MessageData[] | null>()
+      return {
+        topicId,
+        branches: rows.map((b) =>
+          this.branchToWire(
+            b,
+            this.resolveBranchInheritedBoundaryInTx(repos, topicId, b.parentBranchId, b.anchorMessageId, routeCache)
+          )
+        )
+      }
     }, `listBranches(${topicId})`)
   }
 
@@ -8478,7 +8887,17 @@ export class ChatDbAggregateService {
         if (!updated.found) {
           throw new ChatDbNotFoundError(`Branch ${branchId} does not exist in topic ${topicId}`)
         }
-        return { branch: this.branchToWire(updated.data) }
+        return {
+          branch: this.branchToWire(
+            updated.data,
+            this.resolveBranchInheritedBoundaryInTx(
+              repos,
+              topicId,
+              updated.data.parentBranchId,
+              updated.data.anchorMessageId
+            )
+          )
+        }
       })
     }, `renameBranch(${topicId}, ${branchId})`)
   }
@@ -8528,6 +8947,10 @@ export class ChatDbAggregateService {
         // Delete owned messages (FK cascade removes blocks → file refs;
         // per-owner order normalization keeps surviving owners dense).
         if (ownedMessageIds.length > 0) {
+          // Subtree rows leave together: boundaries of any branch/reference
+          // anchored here advance to the nearest surviving predecessor before
+          // the rows disappear (subtree cascades are unchanged).
+          this.advanceInheritanceBoundariesInTx(repos, topicId, ownedMessageIds)
           repos.messages.deleteMany(ownedMessageIds)
         }
         // Delete the branch rows subtree-root first (self-CASCADE backstop;
@@ -8913,7 +9336,10 @@ export class ChatDbAggregateService {
             }
           }
           return {
-            branch: this.branchToWire(created),
+            branch: this.branchToWire(
+              created,
+              this.resolveBranchInheritedBoundaryInTx(repos, topicId, created.parentBranchId, created.anchorMessageId)
+            ),
             movedMessageIds: [...movedIds],
             anchorMessageId: anchorId,
             parentMessages: reconstructMessageBlockRelations(parentWireMessages, parentWireBlocks),
@@ -9963,7 +10389,8 @@ export class ChatDbAggregateService {
     ctx: { deviceId: string; ts: number } | null,
     topicId: string,
     ownedIds: string[],
-    notify: { value: boolean }
+    notify: { value: boolean },
+    boundarySnapshots?: InheritanceBoundarySnapshot[]
   ): string[] {
     const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
     const refs = repos.fileRefs.listByMessages(ownedIds)
@@ -9976,6 +10403,9 @@ export class ChatDbAggregateService {
       }
     }
     if (ownedIds.length > 0) {
+      // Boundary maintenance runs before the rows leave: the branch/reference
+      // composition is still the pre-delete one, so the predecessor is exact.
+      this.advanceInheritanceBoundariesInTx(repos, topicId, ownedIds, boundarySnapshots)
       repos.messages.deleteMany(ownedIds)
       clearResendAttemptsInTx(stx, ownedIds)
     }
@@ -10226,7 +10656,19 @@ export class ChatDbAggregateService {
           }
 
           const notifyRef = { value: false }
-          const affectedFileIds = this.deleteOwnedMessagesCoreInTx(tx, repos, stx, ctx, topicId, ownedIds, notifyRef)
+          // Boundary snapshots stay empty unless this delete actually moves a
+          // branch anchor or a cross-topic reference endpoint.
+          const boundarySnapshots: InheritanceBoundarySnapshot[] = []
+          const affectedFileIds = this.deleteOwnedMessagesCoreInTx(
+            tx,
+            repos,
+            stx,
+            ctx,
+            topicId,
+            ownedIds,
+            notifyRef,
+            boundarySnapshots
+          )
           notify = notifyRef.value
           const remainingOrdered = repos.messages.listByTopic(topicId)
           const remainingUserMessageIds = remainingOrdered.filter((m) => m.role === 'user').map((m) => m.id)
@@ -10242,7 +10684,8 @@ export class ChatDbAggregateService {
             remainingUserMessageIds,
             segments,
             restoreGroups,
-            segmentSnapshots
+            segmentSnapshots,
+            boundarySnapshots
           }
         })
       } catch (e) {

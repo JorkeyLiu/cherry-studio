@@ -27,13 +27,14 @@ import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMe
 import { render } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { buildDividerKey, dividerRowTestId, findAnchorsWithChildren } from '../BranchDividers'
+import { buildDividerKey, dividerRowTestId } from '../BranchDividers'
 import { deriveTurnAskId, renderEditFlowNodes } from '../messageEditSelectionLayout'
 import {
   buildMessageFlowNodes,
   type MessageFlowBodyArgs,
   type MessageFlowForkArgs,
-  resolveContextDividerGroupKey
+  resolveContextDividerGroupKey,
+  resolveForkDividers
 } from '../messageFlowNodes'
 import { buildRenderLayers, buildRenderSegments, deriveStableGroupId } from '../messageRenderLayers'
 import { projectMessageViewportGroups } from '../messageViewportProjection'
@@ -108,12 +109,15 @@ function buildFlow(selectedGroupIds: string[], isEditMode = true) {
   const segments = buildRenderSegments(grouped, isEditMode, selectedGroupIds)
   const layers = buildRenderLayers(segments)
   const contextKey = resolveContextDividerGroupKey(grouped, 'u-anchor')
-  const forkAnchorIds = findAnchorsWithChildren(win.displayMessages, CHILDREN_BY_ANCHOR)
+  const forkDividers = resolveForkDividers({
+    displayMessageIds: new Set(win.displayMessages.map((m) => m.id)),
+    childrenByAnchor: CHILDREN_BY_ANCHOR,
+    activeBranchId: null
+  })
   const nodes = buildMessageFlowNodes({
     layerRuns: layers,
     contextDividerGroupKey: contextKey,
-    forkAnchorIds,
-    childrenByAnchor: CHILDREN_BY_ANCHOR,
+    forkDividers,
     branchPath: [],
     branches: [],
     topicDisplayName: 'Test Topic',
@@ -124,7 +128,7 @@ function buildFlow(selectedGroupIds: string[], isEditMode = true) {
     renderForkBoundary: renderForkProbe,
     renderContextBoundary: renderContextProbe
   })
-  return { win, grouped, segments, layers, contextKey, forkAnchorIds, nodes }
+  return { win, grouped, segments, layers, contextKey, forkDividers, nodes }
 }
 
 function domTestIds(container: HTMLElement): (string | null)[] {
@@ -135,14 +139,14 @@ const FORK_TESTID = dividerRowTestId('u-anchor', null)
 
 describe('messageFlowNodes production wiring', () => {
   it('maps groups, fork divider, and context divider into the exact newest→oldest flow', () => {
-    const { grouped, layers, contextKey, forkAnchorIds, nodes } = buildFlow([])
+    const { grouped, layers, contextKey, forkDividers, nodes } = buildFlow([])
 
     // All six groups projected newest-first; anchor group found by real key.
     expect(grouped.length).toBe(6)
     const anchorEntry = grouped.find(([, msgs]) => msgs.some((m) => m.id === 'u-anchor'))
     expect(anchorEntry).toBeDefined()
     expect(contextKey).toBe(anchorEntry![0])
-    expect(forkAnchorIds).toEqual(['u-anchor'])
+    expect(forkDividers.map((d) => d.anchorMessageId)).toEqual(['u-anchor'])
 
     // Exact node sequence: fork DOM-before the anchor body, context DOM-after.
     expect(nodes.map((n) => n.kind)).toEqual(['turn', 'turn', 'turn', 'boundary', 'turn', 'boundary', 'turn', 'turn'])

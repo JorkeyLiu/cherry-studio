@@ -50,6 +50,94 @@ export function groupForkChildrenByParent(children: readonly TopicBranchWire[]):
   return out
 }
 
+/** One fork divider resolved against the current display window. */
+export interface ForkDividerPlacement {
+  /** Stable relation identity (the branch anchor), never a message target. */
+  anchorMessageId: string
+  /** Parent route of the fork's children (null = main route). */
+  parentBranchId: string | null
+  /** Direct child branches of this fork (flat peer set, deterministic order). */
+  children: TopicBranchWire[]
+  /**
+   * `'message'`: the divider renders under `boundaryMessageId`, the last
+   * inherited message Main reports. `'head'`: the fork inherits nothing, so it
+   * renders at the history head of `parentBranchId`.
+   */
+  placement: 'message' | 'head'
+  /** Resident message the divider renders under (null for a head boundary). */
+  boundaryMessageId: string | null
+}
+
+/**
+ * Resolve the fork dividers of one display window from the Main-authoritative
+ * inheritance boundary of each branch.
+ *
+ * A branch and its fork divider are an inheritance relation, so the divider is
+ * NOT conditioned on prefix rows existing:
+ * - `'message'` boundary → place only while that message is resident. An older
+ *   page that is not loaded yet keeps the divider offscreen; pagination never
+ *   promotes it to the head.
+ * - `'head'` boundary → the branch inherits nothing, so its fork sits at the
+ *   absolute history head of its own parent route. The head is a relation
+ *   position, not a row: it renders at the visual beginning of the flow, which
+ *   is authoritative only while the window provably reaches the true history
+ *   head (`historyHeadLoaded`, from the window's authoritative
+ *   `hasMoreBefore === false`). While an older page is unloaded the head is
+ *   offscreen and NO head divider is emitted — the first loaded row is never
+ *   used to guess it.
+ * - The head fork belongs to every route the relation actually addresses: the
+ *   parent route itself (`activeBranchId === parentBranchId`) and any route
+ *   descending through one of the fork's direct children (`activeRoutePath`),
+ *   so selecting such a child keeps the head control reachable to switch back.
+ *   An unrelated route (a fork elsewhere in the tree) never shows it.
+ * - Unknown boundary (a wire captured before the fact existed) → fall back to
+ *   the anchor row being resident, exactly the pre-existing placement. Never
+ *   the head: absence of the fact is not evidence of an empty prefix.
+ */
+export function resolveForkDividers(input: {
+  displayMessageIds: ReadonlySet<string>
+  childrenByAnchor: ReadonlyMap<string, readonly TopicBranchWire[]>
+  activeBranchId: string | null
+  /** Root-first active route chain (branch ids). Absent = `activeBranchId` only. */
+  activeRoutePath?: readonly string[]
+  /**
+   * The displayed window provably contains the true history head (Main
+   * reported no older page for this route). Absent/false = unknown → no head.
+   */
+  historyHeadLoaded?: boolean
+}): ForkDividerPlacement[] {
+  const out: ForkDividerPlacement[] = []
+  // Branch ids of the viewed route: the active branch plus its ancestors.
+  const routeBranchIds = new Set<string>(input.activeRoutePath ?? [])
+  if (input.activeBranchId !== null) routeBranchIds.add(input.activeBranchId)
+  for (const [anchorMessageId, children] of input.childrenByAnchor) {
+    for (const group of groupForkChildrenByParent(children)) {
+      const boundary = group.children[0]?.inheritedBoundary
+      const base = { anchorMessageId, parentBranchId: group.parentBranchId, children: group.children }
+      if (boundary?.kind === 'head') {
+        // Two independent facts must both hold: the fork relation addresses
+        // the viewed route, and the viewed window reaches the true head.
+        const relationOnRoute =
+          group.parentBranchId === input.activeBranchId || group.children.some((c) => routeBranchIds.has(c.id))
+        if (relationOnRoute && input.historyHeadLoaded === true) {
+          out.push({ ...base, placement: 'head', boundaryMessageId: null })
+        }
+        continue
+      }
+      const boundaryMessageId = boundary?.kind === 'message' ? boundary.messageId : anchorMessageId
+      if (boundaryMessageId !== null && input.displayMessageIds.has(boundaryMessageId)) {
+        out.push({ ...base, placement: 'message', boundaryMessageId })
+      }
+    }
+  }
+  return out.sort(
+    (a, b) =>
+      (a.children[0]?.createdAt ?? '').localeCompare(b.children[0]?.createdAt ?? '') ||
+      a.anchorMessageId.localeCompare(b.anchorMessageId) ||
+      (a.parentBranchId ?? '').localeCompare(b.parentBranchId ?? '')
+  )
+}
+
 /**
  * Context window boundary: find the legacy projected group key where the
  * boundary message renders. The legacy key is retained for context-divider
@@ -179,13 +267,15 @@ export interface MessageFlowForkArgs {
   parentBranchId: string | null
   parentLabel: string
   boundaryKey: string
+  /** `'head'` for a fork whose branch inherits nothing (no message anchor). */
+  placement: 'message' | 'head'
 }
 
 export interface BuildMessageFlowNodesInput {
   layerRuns: readonly RenderLayer[]
   contextDividerGroupKey: string | null
-  forkAnchorIds: readonly string[]
-  childrenByAnchor: ReadonlyMap<string, readonly TopicBranchWire[]>
+  /** Fork dividers resolved for this display window (see resolveForkDividers). */
+  forkDividers: readonly ForkDividerPlacement[]
   branchPath: readonly TopicBranchWire[]
   branches: readonly { id: string; name?: string | null }[]
   topicDisplayName: string
@@ -212,8 +302,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     layerRuns,
     contextDividerGroupKey,
     referenceBoundary,
-    forkAnchorIds,
-    childrenByAnchor,
+    forkDividers,
     branchPath,
     branches,
     topicDisplayName,
@@ -226,6 +315,10 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     renderReferenceBoundary
   } = input
   const nodes: FlowNode[] = []
+  const forkParentLabel = (parentBranchId: string | null): string =>
+    parentBranchId === null ? topicDisplayName : (branches.find((b) => b.id === parentBranchId)?.name ?? parentBranchId)
+  const forkBoundaryKey = (anchorMessageId: string, parentBranchId: string | null): string =>
+    `branch-fork-${anchorMessageId}-${parentBranchId ?? 'main'}`
 
   // LOCK-S3.3-FIX-003: no outer React key whose identity changes with layer
   // membership/composition. Groups/selection blocks are stable entity-derived
@@ -248,38 +341,31 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         // (anchor, parent-route) fork: taken forks (the viewed route
         // passes through a child here) render the selected branch name
         // as the switcher; untaken forks render the branch-count form
-        // whose menu includes the current route plus children.
+        // whose menu includes the current route plus children. Placement is
+        // the resolved inheritance boundary, so a divider sits where the
+        // inheritance actually ends rather than on a fixed anchor row.
         const groupIdSet = new Set(groupMessages.map((m) => (m as Message).id))
-        const forkAnchorHere = forkAnchorIds.find((id) => groupIdSet.has(id))
-        const forkGroupsHere =
-          forkAnchorHere !== undefined ? groupForkChildrenByParent(childrenByAnchor.get(forkAnchorHere) ?? []) : []
-        const dividerNodes = forkGroupsHere.map((group) => {
-          const takenHere = takenChildAtAnchor(branchPath, forkAnchorHere as string, group.children)
-          const parentLabel =
-            group.parentBranchId === null
-              ? topicDisplayName
-              : (branches.find((b) => b.id === group.parentBranchId)?.name ?? group.parentBranchId)
-          const boundaryKey = `branch-fork-${forkAnchorHere}-${group.parentBranchId ?? 'main'}`
-          return { group, takenHere, parentLabel, boundaryKey }
-        })
+        const dividersHere = forkDividers.filter(
+          (d) => d.placement === 'message' && d.boundaryMessageId !== null && groupIdSet.has(d.boundaryMessageId)
+        )
         // Fork boundaries are independent siblings placed DOM-before the
         // anchor body (visually directly below the anchor under
         // column-reverse). They carry no turn click/hover behavior.
-        for (const divider of dividerNodes) {
-          const anchorMessageId = forkAnchorHere as string
-          const boundaryKey = divider.boundaryKey
+        for (const divider of dividersHere) {
+          const boundaryKey = forkBoundaryKey(divider.anchorMessageId, divider.parentBranchId)
           nodes.push({
             kind: 'boundary',
             entry: {
               boundaryKey,
               boundaryKind: 'fork',
               node: renderForkBoundary({
-                anchorMessageId,
-                taken: divider.takenHere,
-                children: divider.group.children,
-                parentBranchId: divider.group.parentBranchId,
-                parentLabel: divider.parentLabel,
-                boundaryKey
+                anchorMessageId: divider.anchorMessageId,
+                taken: takenChildAtAnchor(branchPath, divider.anchorMessageId, divider.children),
+                children: divider.children,
+                parentBranchId: divider.parentBranchId,
+                parentLabel: forkParentLabel(divider.parentBranchId),
+                boundaryKey,
+                placement: 'message'
               })
             }
           })
@@ -339,6 +425,32 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         }
       }
     }
+  }
+
+  // Head fork boundaries: a fork whose branch inherits nothing sits at the
+  // history head of its parent route — the relation exists independently of
+  // any prefix row, so the divider is shown even when no message carries it.
+  // Appended in newest→oldest DOM order so it renders at the visual beginning,
+  // below the reference divider when both mark that same head.
+  for (const divider of forkDividers) {
+    if (divider.placement !== 'head') continue
+    const boundaryKey = forkBoundaryKey(divider.anchorMessageId, divider.parentBranchId)
+    nodes.push({
+      kind: 'boundary',
+      entry: {
+        boundaryKey,
+        boundaryKind: 'fork',
+        node: renderForkBoundary({
+          anchorMessageId: divider.anchorMessageId,
+          taken: takenChildAtAnchor(branchPath, divider.anchorMessageId, divider.children),
+          children: divider.children,
+          parentBranchId: divider.parentBranchId,
+          parentLabel: forkParentLabel(divider.parentBranchId),
+          boundaryKey,
+          placement: 'head'
+        })
+      }
+    })
   }
 
   // Missing reference (or a loaded window with no foreign prefix): the divider

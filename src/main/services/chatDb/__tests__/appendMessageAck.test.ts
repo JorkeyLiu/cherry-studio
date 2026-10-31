@@ -318,13 +318,15 @@ describe('appendMessage creation acknowledgment', () => {
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
   })
 
-  it('rejects a branch append with a missing anchor with zero writes', () => {
+  it('acknowledges a branch append when the anchor is gone (empty inherited history, own suffix writable)', () => {
     expect(agg.ensureTopic('t1', 'assistant-1', 'topic-t1').ok).toBe(true)
     expect(agg.appendMessage('t1', msgJson('m0', 't1') as never, []).ok).toBe(true)
     const created = agg.createBranch('t1', null, 'm0', 'B1')
     expectSuccess(created)
     if (!isSuccess(created)) throw new Error('expected branch')
     const b1 = (created.value.branch as { id: string }).id
+    // The only main row was the fork anchor, so the boundary has no surviving
+    // predecessor: the branch inherits nothing and stays writable.
     expect(agg.deleteMessage('t1', 'm0').ok).toBe(true)
     const res = agg.appendMessage(
       't1',
@@ -334,11 +336,15 @@ describe('appendMessage creation acknowledgment', () => {
       undefined,
       { branchId: b1 }
     )
-    expectFailure(res)
-    if (!isFailure(res)) throw new Error('expected failure')
-    expect(branchOf(sqlite, 'c0')).toBeUndefined()
-    expect(sqlite.prepare('SELECT COUNT(*) AS c FROM message_blocks WHERE id=?').get('b-c0') as { c: number }).toEqual({
-      c: 0
-    })
+    expectSuccess(res)
+    if (!isSuccess(res)) throw new Error('expected success')
+    expect(res.value.branchId).toBe(b1)
+    expect(res.value.createdMessageIds).toEqual(['c0'])
+    expect(branchOf(sqlite, 'c0')).toBe(b1)
+    expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
+    const route = agg.fetchMessages('t1', b1)
+    expectSuccess(route)
+    if (!isSuccess(route)) throw new Error('expected route')
+    expect((route.value.messages as Array<{ id: string }>).map((m) => m.id)).toEqual(['c0'])
   })
 })

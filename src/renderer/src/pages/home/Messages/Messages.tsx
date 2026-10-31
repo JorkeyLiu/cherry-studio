@@ -147,7 +147,6 @@ import {
   captureDividerOffset,
   dividerRowTestId,
   type DividerSwitchInfo,
-  findAnchorsWithChildren,
   ForkDivider
 } from './BranchDividers'
 import { decideDividerRestoreSearchStep, type DividerSearchTerminalReason } from './dividerRestoreSearch'
@@ -165,7 +164,12 @@ import {
  */
 import MessageContextMenu from './MessageContextMenu'
 import { renderEditFlowNodes } from './messageEditSelectionLayout'
-import { buildMessageFlowNodes, resolveContextDividerGroupKey, resolveReferenceBoundary } from './messageFlowNodes'
+import {
+  buildMessageFlowNodes,
+  resolveContextDividerGroupKey,
+  resolveForkDividers,
+  resolveReferenceBoundary
+} from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
@@ -553,6 +557,15 @@ interface MessagesContentProps {
    * historical window parked at scrollTop 0 with newer beyond stays visible.
    */
   hasMoreNewer?: boolean
+  /**
+   * The current display window provably reaches the true history head: Main
+   * reported no older page for this route (`window.authoritativeHasMoreBefore
+   * === false`). A head fork divider is authoritative only under this fact; when
+   * an older page is unloaded (or the fact is unknown) the head is offscreen and
+   * no head divider is emitted. Passed as a bare boolean so no new persistence
+   * or authority state is introduced.
+   */
+  historyHeadLoaded?: boolean
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -573,7 +586,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   onStabilizerKeyDown,
   viewportPhase,
   onScrollToBottom,
-  hasMoreNewer
+  hasMoreNewer,
+  historyHeadLoaded
 }) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
@@ -626,9 +640,20 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // grouped by anchor. Sidebar stays flat logical topics.
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
   const branchTree = useBranchTree(topic.id, activeBranchId)
-  const forkAnchorIds = useMemo(
-    () => findAnchorsWithChildren(displayMessages, branchTree.childrenByAnchor),
-    [displayMessages, branchTree.childrenByAnchor]
+  // Fork dividers of the active route, placed on the Main-authoritative
+  // inheritance boundary (a resident message, or the history head of the
+  // route whose fork inherits nothing). Pagination never promotes a divider
+  // to the head: a boundary that is not loaded stays offscreen.
+  const forkDividers = useMemo(
+    () =>
+      resolveForkDividers({
+        displayMessageIds: new Set(displayMessages.map((m) => m.id)),
+        childrenByAnchor: branchTree.childrenByAnchor,
+        activeBranchId,
+        activeRoutePath: branchTree.path.map((b) => b.id),
+        historyHeadLoaded
+      }),
+    [displayMessages, branchTree.childrenByAnchor, branchTree.path, activeBranchId, historyHeadLoaded]
   )
   const topicDisplayName = topic.name && topic.name.length > 0 ? topic.name : topic.id
 
@@ -713,15 +738,14 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       layerRuns,
       contextDividerGroupKey,
       referenceBoundary,
-      forkAnchorIds,
-      childrenByAnchor: branchTree.childrenByAnchor,
+      forkDividers,
       branchPath: branchTree.path,
       branches: branchTree.branches,
       topicDisplayName,
       isMessageInSegment,
       isMessageFirstInSegment,
       isMessageLastInSegment,
-      renderForkBoundary: ({ anchorMessageId, taken, children, parentBranchId, parentLabel }) => (
+      renderForkBoundary: ({ anchorMessageId, taken, children, parentBranchId, parentLabel, placement }) => (
         <ForkDivider
           topicId={topic.id}
           anchorMessageId={anchorMessageId}
@@ -730,6 +754,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           parentBranchId={parentBranchId}
           parentLabel={parentLabel}
           activeBranchId={activeBranchId}
+          placement={placement}
           countLabel={t('chat.topics.branch.children_here', { count: children.length })}
           onSelectRoute={onSelectRoute}
         />
@@ -998,6 +1023,10 @@ const Messages = ({
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
   const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
+  // History-edge fact for head fork dividers: the displayed window provably
+  // contains the true history head only when Main reported no older page.
+  // Unknown (fact absent) counts as unknown, never as a head.
+  const historyHeadLoaded = viewportState.window?.authoritativeHasMoreBefore === false
   const isLoadingMore = viewportState.loading.older
   const isLoadingNewer = viewportState.loading.newer
 
@@ -6332,6 +6361,9 @@ const Messages = ({
       const containerRect = container?.getBoundingClientRect() ?? null
       const parentOfDivider = dividerInfo?.parentBranchId ?? prevRoute
       const dividerKey = dividerInfo?.dividerKey ?? buildDividerKey(anchorMessageId, parentOfDivider)
+      // A head fork boundary has no message: its anchor id is relation identity
+      // only, never a real message to read around or scroll to.
+      const messageAnchorId = dividerInfo?.placement === 'head' ? null : anchorMessageId
       let dividerVisualAnchorOffset: number | null = dividerInfo?.dividerOffset ?? null
       if (dividerVisualAnchorOffset === null && container && containerRect) {
         try {
@@ -6388,26 +6420,7 @@ const Messages = ({
       let deferredReference: HistoryReferenceMeta | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
-        const aroundOpts = {
-          kind: 'around' as const,
-          anchorMessageId,
-          before: NAVIGATION_VISUALLY_OLDER_GROUPS,
-          after: NAVIGATION_VISUALLY_NEWER_GROUPS,
-          deferPublish: true
-        }
-        let aroundRes: FetchMessagesWindowResponse | void = undefined
-        try {
-          aroundRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
-            loadRouteMessagesThunk(topicId, branchId, aroundOpts)
-          )) as FetchMessagesWindowResponse | void
-          // Thunk returns response directly (not via unwrap); handle both.
-          if (aroundRes && (aroundRes as unknown as { window?: unknown }).window) {
-            routeWindow = aroundRes
-          } else {
-            throw new Error('around route read discarded as stale')
-          }
-        } catch (aroundError) {
-          if (!isStillTarget()) throw aroundError
+        const loadLatestWindow = async (): Promise<FetchMessagesWindowResponse> => {
           const latestRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
             loadRouteMessagesThunk(topicId, branchId, { kind: 'latest', deferPublish: true } as unknown as Parameters<
               typeof loadRouteMessagesThunk
@@ -6416,7 +6429,33 @@ const Messages = ({
           if (!latestRes || !(latestRes as unknown as { window?: unknown }).window) {
             throw new Error('latest route fallback discarded as stale')
           }
-          routeWindow = latestRes
+          return latestRes
+        }
+        if (messageAnchorId === null) {
+          // Head boundary: no message exists at the fork, so the target window
+          // is read from the route itself instead of an anchor query.
+          routeWindow = await loadLatestWindow()
+        } else {
+          const aroundOpts = {
+            kind: 'around' as const,
+            anchorMessageId: messageAnchorId,
+            before: NAVIGATION_VISUALLY_OLDER_GROUPS,
+            after: NAVIGATION_VISUALLY_NEWER_GROUPS,
+            deferPublish: true
+          }
+          try {
+            const aroundRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
+              loadRouteMessagesThunk(topicId, branchId, aroundOpts)
+            )) as FetchMessagesWindowResponse | void
+            // Thunk returns response directly (not via unwrap); handle both.
+            if (!aroundRes || !(aroundRes as unknown as { window?: unknown }).window) {
+              throw new Error('around route read discarded as stale')
+            }
+            routeWindow = aroundRes
+          } catch (aroundError) {
+            if (!isStillTarget()) throw aroundError
+            routeWindow = await loadLatestWindow()
+          }
         }
         deferredBlocks = (routeWindow.blocks as unknown as MessageBlock[]) ?? []
         deferredMessages = (routeWindow.messages as unknown as Message[]) ?? []
@@ -6477,7 +6516,7 @@ const Messages = ({
           : undefined
         const { window: targetWindow } = buildRouteViewport(
           loaded,
-          [anchorMessageId, sharedVisualMessageId],
+          [messageAnchorId, sharedVisualMessageId],
           authoritative,
           NAVIGATION_VISUALLY_OLDER_GROUPS,
           NAVIGATION_VISUALLY_NEWER_GROUPS
@@ -6597,7 +6636,7 @@ const Messages = ({
           // auto-pages under the divider anchor during the transition).
           // Never the outgoing route's raw scrollTop.
           const firstPlan: ViewportFirstPositionPlan =
-            dividerVisualAnchorOffset !== null
+            messageAnchorId !== null && dividerVisualAnchorOffset !== null
               ? {
                   kind: 'divider',
                   dividerKey,
@@ -6649,7 +6688,7 @@ const Messages = ({
           // Only when a restore identity exists (divider offset or shared
           // fallback); identity-less restores take the deterministic default
           // single-pass path in the coordinator below.
-          if (dividerVisualAnchorOffset !== null || fallbackTop !== null) {
+          if (messageAnchorId !== null && (dividerVisualAnchorOffset !== null || fallbackTop !== null)) {
             dividerProgressRef.current = {
               ownerEpoch: restoreEpoch,
               topicId: topicIdAtStart,
@@ -8279,6 +8318,7 @@ const Messages = ({
           viewportPhase={viewportPhaseAttr}
           onScrollToBottom={scrollToBottom}
           hasMoreNewer={hasMoreNewer}
+          historyHeadLoaded={historyHeadLoaded}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

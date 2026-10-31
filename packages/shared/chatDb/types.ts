@@ -1431,6 +1431,26 @@ export interface BranchMessagesToTopicResponse {
 // This creation path is the ONLY true-branch creation method; the legacy
 // clone-prefix `branchMessagesToTopic` (Copy Topic) is unchanged.
 
+/**
+ * Read-only Main-derived inheritance boundary of one branch route: the fact
+ * that decides where the fork boundary actually sits, expressed exactly as
+ * route composition applies it.
+ *
+ * - `kind: 'message'` — the parent route composes `messageId` as the last
+ *   inherited message (the original fork anchor while it still composes the
+ *   parent route, otherwise the nearest surviving message before it).
+ * - `kind: 'head'` — the branch inherits nothing, so its fork boundary is the
+ *   history head of the parent route. `messageId` is null; no message id is
+ *   ever invented for that position.
+ *
+ * The relation identity stays `TopicBranchWire.anchorMessageId`; this fact is
+ * placement-only and is never a navigation or scroll message target.
+ */
+export interface BranchInheritedBoundary {
+  kind: 'message' | 'head'
+  messageId: string | null
+}
+
 /** Wire shape of one topic-internal branch node. */
 export interface TopicBranchWire {
   id: string
@@ -1438,6 +1458,12 @@ export interface TopicBranchWire {
   /** Null for level-1 branches (parent route = main route). */
   parentBranchId: string | null
   anchorMessageId: string
+  /**
+   * Placement fact for the fork divider. Absent means unknown (e.g. a wire
+   * captured before this fact existed): renderers then place a divider only
+   * at a resident anchor message and never at the route head.
+   */
+  inheritedBoundary?: BranchInheritedBoundary
   name: string | null
   createdAt: string | null
   updatedAt: string | null
@@ -1969,7 +1995,50 @@ export interface DeleteMessagesWithDependentsRestoreGroup {
   positionIndex: number
   anchorMessageId: string | null
 }
+/**
+ * Authority relation that owns one inheritance boundary.
+ *
+ * - `branch`: a topic-internal branch node; `id` is the branch ID and its
+ *   boundary is `anchorMessageId` on the parent route.
+ * - `reference`: a cross-topic history reference; `id` is the target topic ID
+ *   and its boundary is `anchorMessageId` on the captured source route.
+ */
+export type InheritanceBoundaryKind = 'branch' | 'reference'
 
+/**
+ * One inheritance boundary that a delete actually moved.
+ *
+ * Main captures these inside the same delete transaction, so the pair is the
+ * pre-delete boundary (`anchorMessageId`, the undo restore target) and the
+ * post-delete boundary the delete moved it to (`expectedAnchorMessageId`, the
+ * compare-and-set expectation). A boundary the delete left untouched (no
+ * surviving predecessor) produces no entry — nothing to restore.
+ */
+export interface InheritanceBoundarySnapshot {
+  kind: InheritanceBoundaryKind
+  /** Branch ID (`branch`) or reference target topic ID (`reference`). */
+  id: string
+  /** Boundary anchor before the delete (restore target for undo). */
+  anchorMessageId: string
+  /** Boundary anchor after the delete (undo applies only while it still holds). */
+  expectedAnchorMessageId: string
+}
+
+/**
+ * Outcome of one requested boundary restore, reported by Main.
+ *
+ * `restored: false` is never an error and never a silent success: the relation
+ * row is gone (`missing`) or its anchor no longer equals the recorded
+ * post-delete value (`changed`), so the newer state wins and nothing is
+ * recreated or overwritten.
+ */
+export interface InheritanceBoundaryRestoreResult {
+  kind: InheritanceBoundaryKind
+  id: string
+  anchorMessageId: string
+  restored: boolean
+  skipReason?: 'missing' | 'changed'
+}
 /**
  * @see IpcChannel.ChatDb_DeleteMessagesWithDependents
  *
@@ -1995,6 +2064,12 @@ export interface DeleteMessagesWithDependentsResponse extends FileCleanupResult 
   restoreGroups: DeleteMessagesWithDependentsRestoreGroup[]
   /** Pre-delete full snapshots of segments intersecting the deleted set. */
   segmentSnapshots: SegmentWire[]
+  /**
+   * Inheritance boundaries this delete actually moved (branch anchors and
+   * cross-topic reference endpoints), captured pre/post inside the same
+   * transaction. Empty when no boundary was affected.
+   */
+  boundarySnapshots: InheritanceBoundarySnapshot[]
 }
 
 /** @see IpcChannel.ChatDb_PasteMessagesToTopic */
@@ -2048,6 +2123,17 @@ export interface InsertMessageGroupsRequest {
   branchId?: BranchRouteId
   /** Ordered groups to insert atomically in array order. */
   groups: InsertMessageGroup[]
+  /**
+   * Inheritance boundaries to restore inside the SAME insertion transaction
+   * (undo of a delete that moved them). Newest authority state wins: an item
+   * applies only while its relation still exists, its current anchor equals
+   * `expectedAnchorMessageId`, and `anchorMessageId` is one of the messages
+   * this command actually inserts. Anything else is skipped — a boundary is
+   * never recreated and never overwritten.
+   *
+   * Absent/empty = ordinary insertion with no boundary effect.
+   */
+  boundaryRestores?: InheritanceBoundarySnapshot[]
 }
 
 /**
@@ -2104,6 +2190,12 @@ export interface InsertMessageGroupsResponse extends FileCleanupResult {
   mutableMessageIds: string[]
   /** Per-group committed runs in request order with stable placement. */
   groups: InsertMessageGroupsGroupResult[]
+  /**
+   * One outcome per requested boundary restore, in request order (empty when
+   * the request carried none). Restores are applied inside the same insertion
+   * transaction; a skipped item reports why and changed nothing.
+   */
+  boundaryRestores: InheritanceBoundaryRestoreResult[]
 }
 
 // ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
-import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
+import type { InheritanceBoundarySnapshot, InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 import { t } from 'i18next'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -437,6 +437,9 @@ export async function pasteMessages(
   // by numeric position.
   let sourceGroupAnchors: GroupAnchor[] = []
   let sourceSegmentSnapshots: SegmentSnapshot[] = []
+  // Inheritance boundaries the source delete moved (branch anchors of the
+  // source topic, reference endpoints whose source route is the source topic).
+  let sourceBoundarySnapshots: InheritanceBoundarySnapshot[] = []
 
   // ID mapping: original message ID → new message ID
   const idMapping = new Map<string, string>()
@@ -663,6 +666,7 @@ export async function pasteMessages(
         })
         sourceGroupAnchors = result.undoParts.groupAnchors
         sourceSegmentSnapshots = result.undoParts.segmentSnapshots
+        sourceBoundarySnapshots = result.undoParts.boundarySnapshots
         sourceRootIds = [...stableRoots]
       } catch (error) {
         if (isDeletePostCommitConvergenceError(error)) {
@@ -670,6 +674,7 @@ export async function pasteMessages(
           // surviving pasted copies and never claim a fake cut failure.
           sourceGroupAnchors = error.undoParts.groupAnchors
           sourceSegmentSnapshots = error.undoParts.segmentSnapshots
+          sourceBoundarySnapshots = error.undoParts.boundarySnapshots
           sourceRootIds = [...stableRoots]
           pendingPostCommitError = error
           logger.error(
@@ -757,6 +762,7 @@ export async function pasteMessages(
       sourceProjection: stagedSourceProjection as StagedCutSourceProjection,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
+      sourceBoundarySnapshots,
       targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
@@ -862,12 +868,14 @@ export async function deleteSelectedMessages(
     timestamp: Date.now(),
     targetTopicId: topicId,
     rootMessageIds: rootIds,
+    deletedBranchId: result.addressedRoute,
     insertedMessageIds: result.response.deletedMessageIds,
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
     fileReferenceDeltas: result.undoParts.fileReferenceDeltas,
     groupAnchors: result.undoParts.groupAnchors,
-    segmentSnapshots: result.undoParts.segmentSnapshots
+    segmentSnapshots: result.undoParts.segmentSnapshots,
+    boundarySnapshots: result.undoParts.boundarySnapshots
   }
 
   dispatch(pushUndoAction(undoAction))
@@ -923,12 +931,14 @@ export async function deleteSingleMessage(
     timestamp: Date.now(),
     targetTopicId: topicId,
     rootMessageIds: [message.id],
+    deletedBranchId: result.addressedRoute,
     insertedMessageIds: result.response.deletedMessageIds,
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
     fileReferenceDeltas: result.undoParts.fileReferenceDeltas,
     groupAnchors: result.undoParts.groupAnchors,
-    segmentSnapshots: result.undoParts.segmentSnapshots
+    segmentSnapshots: result.undoParts.segmentSnapshots,
+    boundarySnapshots: result.undoParts.boundarySnapshots
   }
 
   dispatch(pushUndoAction(undoAction))

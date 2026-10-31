@@ -190,6 +190,28 @@ export class BranchesRepository {
   }
 
   /**
+   * Advance the fork boundary of one branch to `anchorMessageId`.
+   *
+   * Purpose-specific Main-authoritative maintenance: the anchor is otherwise
+   * immutable (identity class), but when the anchored message is deleted the
+   * boundary moves to the nearest surviving predecessor on the parent route so
+   * the child keeps the history it inherited up to the original fork point.
+   * Ancestry and `name` stay untouched; unknown ids are a no-op.
+   */
+  advanceAnchor(id: string, anchorMessageId: string): AffectedCount {
+    const current = this.db.select().from(topicBranches).where(eq(topicBranches.id, id)).get()
+    if (!current) return { affected: 0 }
+    const rowPatch = topicBranchToRowPatch({ anchorMessageId, updatedAt: new Date().toISOString() })
+    const values = toUpdateValues((current as any).extra ?? null, rowPatch, COLUMN_MAP)
+    this.db
+      .update(topicBranches)
+      .set(values as any)
+      .where(eq(topicBranches.id, id))
+      .run()
+    return { affected: 1 }
+  }
+
+  /**
    * Delete branch rows for a subtree (root + descendants). Owned messages
    * follow via messages.branch_id CASCADE; callers delete owned rows first
    * when file cleanup or sync suppression must observe them.

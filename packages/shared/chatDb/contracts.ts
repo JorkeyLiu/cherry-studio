@@ -1853,13 +1853,16 @@ const createReferencedTopicContract: ChatDbContract = {
  *
  * A branch wire is a plain object with exactly the TopicBranchWire keys:
  * id/topicId/parentBranchId(null allowed)/anchorMessageId/name(null
- * allowed)/createdAt(null allowed)/updatedAt(null allowed).
+ * allowed)/createdAt(null allowed)/updatedAt(null allowed), plus the optional
+ * Main-derived `inheritedBoundary` placement fact ({kind, messageId}, where
+ * `head` carries a null messageId).
  */
 const TOPIC_BRANCH_WIRE_KEYS = new Set([
   'id',
   'topicId',
   'parentBranchId',
   'anchorMessageId',
+  'inheritedBoundary',
   'name',
   'createdAt',
   'updatedAt'
@@ -1879,6 +1882,34 @@ function validateTopicBranchWire(value: unknown, path: string, channel: string):
     validateNonEmptyString(v.parentBranchId, `${path}.parentBranchId`)
   }
   validateNonEmptyString(v.anchorMessageId, `${path}.anchorMessageId`)
+  if (v.inheritedBoundary !== undefined) {
+    const boundary = v.inheritedBoundary
+    validateJsonObject(boundary, `${path}.inheritedBoundary`)
+    const b = boundary as Record<string, unknown>
+    for (const key of Object.keys(b)) {
+      if (key !== 'kind' && key !== 'messageId') {
+        throw new ValidationError(
+          `${path}.inheritedBoundary.${key}`,
+          `[${channel}] Unknown key in inherited boundary: "${key}"`
+        )
+      }
+    }
+    if (b.kind === 'head') {
+      if (b.messageId !== null) {
+        throw new ValidationError(
+          `${path}.inheritedBoundary.messageId`,
+          `[${channel}] Head inheritance boundary must carry a null messageId`
+        )
+      }
+    } else if (b.kind === 'message') {
+      validateNonEmptyString(b.messageId, `${path}.inheritedBoundary.messageId`)
+    } else {
+      throw new ValidationError(
+        `${path}.inheritedBoundary.kind`,
+        `[${channel}] Inheritance boundary kind must be "message" or "head"`
+      )
+    }
+  }
   if (v.name !== null) {
     validateNonEmptyString(v.name, `${path}.name`)
   }
@@ -2558,7 +2589,8 @@ const DELETE_WITH_DEPENDENTS_VALUE_KEYS = new Set([
   'remainingUserMessageIds',
   'segments',
   'restoreGroups',
-  'segmentSnapshots'
+  'segmentSnapshots',
+  'boundarySnapshots'
 ])
 const DELETE_WITH_DEPENDENTS_SEGMENT_KEYS = new Set([
   'id',
@@ -2586,6 +2618,55 @@ const DELETE_WITH_DEPENDENTS_CHANNEL = 'chatdb:delete-messages-with-dependents'
  */
 function validateDependentsSegmentWire(seg: unknown, path: string): string {
   return validateSegmentWireBody(seg, path, DELETE_WITH_DEPENDENTS_CHANNEL, DELETE_WITH_DEPENDENTS_SEGMENT_KEYS)
+}
+
+/** Strict keys of one inheritance-boundary snapshot (delete response + undo request). */
+const INHERITANCE_BOUNDARY_SNAPSHOT_KEYS = new Set(['kind', 'id', 'anchorMessageId', 'expectedAnchorMessageId'])
+
+/**
+ * Validate one ordered inheritance-boundary snapshot array shared by the
+ * delete response and the undo restore request: same shape on both sides, same
+ * unknown-key fail-closed, no duplicate (kind, id) pair.
+ */
+function validateInheritanceBoundarySnapshots(value: unknown, path: string, channel: string): void {
+  if (!Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected boundary snapshots array`)
+  }
+  const seen = new Set<string>()
+  for (let i = 0; i < value.length; i++) {
+    const itemPath = `${path}[${i}]`
+    const item = value[i]
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new ValidationError(itemPath, `[${channel}] Expected boundary snapshot object`)
+    }
+    const rec = item as Record<string, unknown>
+    for (const key of Object.keys(rec)) {
+      if (!INHERITANCE_BOUNDARY_SNAPSHOT_KEYS.has(key)) {
+        throw new ValidationError(`${itemPath}.${key}`, `[${channel}] Unknown key in boundary snapshot: "${key}"`)
+      }
+    }
+    const kind = rec.kind
+    if (kind !== 'branch' && kind !== 'reference') {
+      throw new ValidationError(`${itemPath}.kind`, `[${channel}] Expected kind "branch" or "reference"`)
+    }
+    if (typeof rec.id !== 'string' || rec.id.length === 0) {
+      throw new ValidationError(`${itemPath}.id`, `[${channel}] Expected a non-empty boundary relation id`)
+    }
+    if (typeof rec.anchorMessageId !== 'string' || rec.anchorMessageId.length === 0) {
+      throw new ValidationError(`${itemPath}.anchorMessageId`, `[${channel}] Expected a non-empty anchor message id`)
+    }
+    if (typeof rec.expectedAnchorMessageId !== 'string' || rec.expectedAnchorMessageId.length === 0) {
+      throw new ValidationError(
+        `${itemPath}.expectedAnchorMessageId`,
+        `[${channel}] Expected a non-empty expected anchor message id`
+      )
+    }
+    const key = `${kind}:${rec.id}`
+    if (seen.has(key)) {
+      throw new ValidationError(`${itemPath}.id`, `[${channel}] Duplicate boundary snapshot for "${key}"`)
+    }
+    seen.add(key)
+  }
 }
 
 const deleteMessagesWithDependentsContract: ChatDbContract = {
@@ -2862,6 +2943,11 @@ const deleteMessagesWithDependentsContract: ChatDbContract = {
             '[chatdb:delete-messages-with-dependents] Restore groups must cover exactly the deletedMessageIds set'
           )
         }
+        validateInheritanceBoundarySnapshots(
+          v.boundarySnapshots,
+          'result.value.boundarySnapshots',
+          'chatdb:delete-messages-with-dependents'
+        )
       }
     }
   }
@@ -4715,7 +4801,7 @@ function validateInsertMessageGroupIntent(value: unknown, path: string): void {
 }
 
 const insertMessageGroupsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'branchId', 'groups'),
+  allowedKeys: keySet('topicId', 'branchId', 'groups', 'boundaryRestores'),
   validate(value: unknown): void {
     validateRequest(value, insertMessageGroupsContract.allowedKeys)
     const req = value as InsertMessageGroupsRequest
@@ -4768,6 +4854,13 @@ const insertMessageGroupsContract: ChatDbContract = {
         seenMessageIds.add(mid)
       }
     }
+    if (req.boundaryRestores !== undefined) {
+      validateInheritanceBoundarySnapshots(
+        req.boundaryRestores,
+        'request.boundaryRestores',
+        INSERT_MESSAGE_GROUPS_CHANNEL
+      )
+    }
   },
   validateResult: validateInsertMessageGroupsResult
 }
@@ -4781,8 +4874,12 @@ const INSERT_MESSAGE_GROUPS_VALUE_KEYS = new Set([
   'insertedBlocks',
   'insertedMessageIds',
   'mutableMessageIds',
-  'groups'
+  'groups',
+  'boundaryRestores'
 ])
+
+/** Closed keys of one boundary-restore outcome. */
+const INSERT_MESSAGE_GROUPS_BOUNDARY_RESULT_KEYS = new Set(['kind', 'id', 'anchorMessageId', 'restored', 'skipReason'])
 
 const INSERT_MESSAGE_GROUPS_GROUP_KEYS = new Set(['insertedMessageIds', 'beforeMessageId', 'nextMessageId'])
 
@@ -4900,6 +4997,55 @@ function validateInsertMessageGroupsResult(result: unknown): void {
         'result.value.groups',
         `[${channel}] groups insertedMessageIds concatenated must equal flat insertedMessageIds in order`
       )
+    }
+    // Boundary restores: one closed outcome per requested item, never an
+    // invented success. A non-restored entry must say why it was skipped.
+    if (!Array.isArray(v.boundaryRestores)) {
+      throw new ValidationError('result.value.boundaryRestores', `[${channel}] Expected boundaryRestores array`)
+    }
+    const boundaryResults = v.boundaryRestores as unknown[]
+    const seenBoundaries = new Set<string>()
+    for (let bi = 0; bi < boundaryResults.length; bi++) {
+      const bpath = `result.value.boundaryRestores[${bi}]`
+      const item = boundaryResults[bi]
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+        throw new ValidationError(bpath, `[${channel}] Expected boundary restore result object`)
+      }
+      const rec = item as Record<string, unknown>
+      for (const key of Object.keys(rec)) {
+        if (!INSERT_MESSAGE_GROUPS_BOUNDARY_RESULT_KEYS.has(key)) {
+          throw new ValidationError(`${bpath}.${key}`, `[${channel}] Unknown key in boundary restore result: "${key}"`)
+        }
+      }
+      if (rec.kind !== 'branch' && rec.kind !== 'reference') {
+        throw new ValidationError(`${bpath}.kind`, `[${channel}] Expected kind "branch" or "reference"`)
+      }
+      validateNonEmptyString(rec.id, `${bpath}.id`)
+      validateNonEmptyString(rec.anchorMessageId, `${bpath}.anchorMessageId`)
+      if (typeof rec.restored !== 'boolean') {
+        throw new ValidationError(`${bpath}.restored`, `[${channel}] restored must be a boolean`)
+      }
+      if (rec.restored === true) {
+        if ('skipReason' in rec) {
+          throw new ValidationError(`${bpath}.skipReason`, `[${channel}] restored entry must not carry skipReason`)
+        }
+        if (!inserted.includes(rec.anchorMessageId as string)) {
+          throw new ValidationError(
+            `${bpath}.anchorMessageId`,
+            `[${channel}] restored boundary anchor must be an inserted message id`
+          )
+        }
+      } else if (rec.skipReason !== 'missing' && rec.skipReason !== 'changed') {
+        throw new ValidationError(
+          `${bpath}.skipReason`,
+          `[${channel}] skipped boundary must report "missing" or "changed"`
+        )
+      }
+      const key = `${rec.kind}:${rec.id}`
+      if (seenBoundaries.has(key)) {
+        throw new ValidationError(`${bpath}.id`, `[${channel}] Duplicate boundary restore result for "${key}"`)
+      }
+      seenBoundaries.add(key)
     }
   }
 }

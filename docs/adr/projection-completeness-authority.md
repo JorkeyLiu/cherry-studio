@@ -67,7 +67,7 @@
 | **PROJ-11** | **暂定已加载候选仅允许三用途**：瞬时展示、请求可用性、用量估算回退。它们**不能**移动持久化锚点、决定权威组/变更作用域、替代新鲜闭包、改变最终持久化 | **Locked** |
 | **PROJ-12** | **未来变更禁令**：禁止在已加载投影之上提供外观完整的含糊 API（读起来像整体、实际只是投影的接口）；禁止以数字序号（loaded-index）向 Main 发起权威变更。新增读取必须声明 §5 的完备性能力；新增变更必须使用稳定 ID 意图 | **Locked** |
 
-> 分支路由的变更权限（PROJ-13…PROJ-16 旧编号）已整体迁出至 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）：实体唯一、永久所属、引用只读、owner 完整控制、蝴蝶效应与缺 anchor fail-closed、删除 subtree、anchor 与创建规则、上下文关系、Main 权威与 capability 定义、local-only、递归算法、复合原子性。本文档不再使用 PROJ-13…PROJ-16 编号，不保留其旧语义。
+> 分支路由的变更权限（PROJ-13…PROJ-16 旧编号）已整体迁出至 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）：实体唯一、永久所属、引用只读、owner 完整控制、蝴蝶效应与继承边界前移（锚点删除时前移、无前驱则空继承）、删除 subtree、anchor 与创建规则、上下文关系、Main 权威与 capability 定义、local-only、递归算法、复合原子性。本文档不再使用 PROJ-13…PROJ-16 编号，不保留其旧语义。
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：PROJ-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
 
@@ -116,6 +116,7 @@
 - **I-6**：暂定候选不改变持久化、不决定权威、不替代新鲜闭包（PROJ-11）。
 - **I-7**：权威变更请求携带稳定 ID 意图；数字序号只表达本地投影位置，永不作为权威变更坐标（PROJ-12）。
 - **I-8**：`mutableMessageIds` 仅与发布它的窗口同代有效；路由切换原子替换（永不复用旧路由集合）、缺失即清除 fail-closed；Renderer 预检永不替代 Main 守卫。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/9）唯一治理，本文档不定义分支权限。
+- **I-9**：删除的 Undo 必须在**同一 Main 事务**内同时恢复消息与该删除实际前移的继承边界（分支锚点、引用端点）；Renderer 只运输 Main 采集的边界事实，永不自行推导或构造。该恢复后分支目录必须重新读取 Main 投影；重新读取失败仅属投影层问题，不得把已提交的权威恢复变成失败的 Undo。
 
 ---
 

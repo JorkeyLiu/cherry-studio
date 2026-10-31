@@ -640,7 +640,7 @@ describe('window mutation capability', () => {
   })
 })
 
-describe('true-branch butterfly effect and missing anchor (BRANCH-5)', () => {
+describe('true-branch butterfly effect and inheritance boundary', () => {
   let sqlite: Database.Database
   let db: BetterSQLite3Database<typeof schema>
   let agg: ChatDbAggregateService
@@ -688,24 +688,41 @@ describe('true-branch butterfly effect and missing anchor (BRANCH-5)', () => {
     expect(afterReorder.map((m) => m.id)).toEqual(['m2', 'm1', 'c0'])
   })
 
-  it('deleting a branch anchor fail-closes dependent routes but keeps branch metadata (BRANCH-5)', () => {
+  it('deleting a branch anchor moves the inheritance boundary to the nearest survivor and keeps routes usable', () => {
     seedMain(agg, 't1', ['m0', 'm1', 'm2'])
     const b1 = (okValue(agg.createBranch('t1', null, 'm1', 'B1')).branch as { id: string }).id
     seedSuffix(agg, 't1', b1, ['b1-0'])
     const b2 = (okValue(agg.createBranch('t1', b1, 'b1-0', 'B2')).branch as { id: string }).id
     // Owner deletes the child anchor b1-0 through its owner route.
     expect(agg.deleteMessage('t1', 'b1-0', b1).ok).toBe(true)
-    // Dependent grandchild route now resolves fail-closed (missing anchor).
-    expect(agg.fetchMessages('t1', b2).ok).toBe(false)
-    expect(agg.fetchMessagesWindow({ kind: 'latest', topicId: 't1', branchId: b2, limit: 10 }).ok).toBe(false)
-    // Branch metadata is retained (no silent cascade delete).
+    // The grandchild inherits up to the nearest surviving predecessor (m1) and
+    // reads normally; branch metadata is retained (no cascade delete).
+    expect((okValue(agg.fetchMessages('t1', b2)).messages as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      'm0',
+      'm1'
+    ])
+    const grandchildWindow = okValue(
+      agg.fetchMessagesWindow({ kind: 'latest', topicId: 't1', branchId: b2, limit: 10 })
+    )
+    expect(grandchildWindow.window.returnedCount).toBe(2)
     const listed = okValue(agg.listBranches('t1')).branches as Array<{ id: string }>
-    expect(listed.map((b) => b.id)).toContain(b2)
-    // Deleting the owner anchor m1 fail-closes the child route the same way.
+    expect(listed.map((b) => b.id)).toEqual(expect.arrayContaining([b1, b2]))
+    // The grandchild's own suffix stays writable after its boundary moved.
+    seedSuffix(agg, 't1', b2, ['b2-0'])
+    expect((okValue(agg.fetchMessages('t1', b2)).messages as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      'm0',
+      'm1',
+      'b2-0'
+    ])
+    // Deleting the owner anchor m1 shortens the child route the same way.
     expect(agg.deleteMessage('t1', 'm1', null).ok).toBe(true)
-    expect(agg.fetchMessages('t1', b1).ok).toBe(false)
+    expect((okValue(agg.fetchMessages('t1', b1)).messages as Array<{ id: string }>).map((m) => m.id)).toEqual(['m0'])
+    expect((okValue(agg.fetchMessages('t1', b2)).messages as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      'm0',
+      'b2-0'
+    ])
     const listed2 = okValue(agg.listBranches('t1')).branches as Array<{ id: string }>
-    expect(listed2.map((b) => b.id)).toContain(b1)
+    expect(listed2.map((b) => b.id)).toEqual(expect.arrayContaining([b1, b2]))
   })
 
   it('branch-owned suffix referenced by a nested descendant stays mutable through its owner only', () => {

@@ -1801,7 +1801,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
               anchorMessageId: 'u2'
             }
           ],
-          segmentSnapshots: []
+          segmentSnapshots: [],
+          boundarySnapshots: []
         }
       })
     ).not.toThrow()
@@ -1844,7 +1845,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
               lastMessageId: 'u2',
               messageCount: 2
             }
-          ]
+          ],
+          boundarySnapshots: [{ kind: 'branch', id: 'branch-1', anchorMessageId: 'u1', expectedAnchorMessageId: 'u2' }]
         }
       })
     ).not.toThrow()
@@ -1863,7 +1865,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
           remainingUserMessageIds: [],
           segments: [],
           restoreGroups: [],
-          segmentSnapshots: []
+          segmentSnapshots: [],
+          boundarySnapshots: []
         }
       })
     ).toThrow(ValidationError)
@@ -1884,7 +1887,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
           restoreGroups: [
             { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }
           ],
-          segmentSnapshots: []
+          segmentSnapshots: [],
+          boundarySnapshots: []
         }
       })
     ).toThrow(ValidationError)
@@ -1921,7 +1925,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
       previousUserMessageIds: ['m1'],
       remainingUserMessageIds: [],
       segments: [],
-      segmentSnapshots: []
+      segmentSnapshots: [],
+      boundarySnapshots: []
     }
     expect(() =>
       validateChatDbResult('chatdb:delete-messages-with-dependents', {
@@ -1960,7 +1965,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
       previousUserMessageIds: ['m1'],
       remainingUserMessageIds: [],
       segments: [],
-      segmentSnapshots: []
+      segmentSnapshots: [],
+      boundarySnapshots: []
     }
     // Missing m2 coverage.
     expect(() =>
@@ -2039,7 +2045,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
           restoreGroups: [
             { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }
           ],
-          segmentSnapshots: []
+          segmentSnapshots: [],
+          boundarySnapshots: []
         }
       })
     ).toThrow(ValidationError)

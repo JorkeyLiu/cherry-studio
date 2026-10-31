@@ -446,7 +446,7 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
     expect(payload.messages.map((m) => m.content)).toEqual(Array.from({ length: 35 }, (_, i) => `m-${i}`))
   })
 
-  it('preserves a dangling branch anchor without repair', () => {
+  it('preserves a dangling branch anchor without repair and keeps the branch readable', () => {
     const seed = seedRichTopicFull()
     const payload = exportPayload(seed.topicId)
     // Drop one main message to orphan the L1/S1 anchors (valid missing-anchor state).
@@ -468,10 +468,11 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
     const l1 = repos.branches.listByTopic(imported.topic.id).find((b) => b.name === 'L1')!
     // The missing anchor id is preserved verbatim (never repaired or dropped).
     expect(l1.anchorMessageId).toBe(dropped)
-    // Resolution of the orphaned route fails closed; metadata survives.
-    const resolved = agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id, branchId: l1.id })
-    expect(resolved.ok).toBe(false)
-    expect(failCode(resolved)).toBe('NOT_FOUND')
+    // Resolution stays available: the fork point is gone and no predecessor is
+    // invented, so the branch inherits nothing while its own suffix survives
+    // and the metadata is untouched.
+    const resolved = okValue(agg.fetchWholeTopicSnapshot({ topicId: imported.topic.id, branchId: l1.id }))
+    expect(resolved.messages.map((m: any) => m.content)).toEqual(['u3', 'a3'])
     expect(repos.branches.listByTopic(imported.topic.id)).toHaveLength(3)
   })
 

@@ -126,6 +126,11 @@ export interface DividerSwitchInfo {
   anchorMessageId: string
   parentBranchId: string | null
   dividerKey: string
+  /**
+   * Placement of the clicked divider: `'head'` means the fork inherits
+   * nothing, so there is no message at the boundary to align to.
+   */
+  placement: 'message' | 'head'
   /** Row top - container top at click time; null when unmeasurable. */
   dividerOffset: number | null
 }
@@ -143,18 +148,23 @@ export const captureDividerOffset = (dividerEl: HTMLElement | null, container: H
 /**
  * Divider restore decision (pure): which anchor to align after the target
  * route commits. Priority: same logical divider row → shared message visual
- * anchor → fork message. Never bottom.
+ * anchor → fork message. A head fork boundary has no message, so it never
+ * becomes a message target. Never bottom.
  */
 export const decideDividerRestoreTarget = (input: {
   dividerKeyPresentInTarget: boolean
   sharedVisualMessageId: string | null
-  forkAnchorMessageId: string
+  /** Fork anchor message; null for a head boundary (no message exists there). */
+  forkAnchorMessageId: string | null
 }): { kind: 'divider-row' | 'shared-message' | 'fork-message'; targetId: string | null; dividerKey: string | null } => {
   if (input.dividerKeyPresentInTarget) {
     return { kind: 'divider-row', targetId: null, dividerKey: '__divider__' }
   }
   if (input.sharedVisualMessageId) {
     return { kind: 'shared-message', targetId: input.sharedVisualMessageId, dividerKey: null }
+  }
+  if (input.forkAnchorMessageId === null) {
+    return { kind: 'divider-row', targetId: null, dividerKey: null }
   }
   return { kind: 'fork-message', targetId: input.forkAnchorMessageId, dividerKey: null }
 }
@@ -172,6 +182,8 @@ interface ForkDividerProps {
   parentLabel: string
   /** Current active route (for delete-fallback convergence). */
   activeBranchId: string | null
+  /** Placement resolved against the route's inheritance boundary (default: message). */
+  placement?: 'message' | 'head'
   /** Label for the count form (e.g. localized "此处有 x 条分支"). Rendered by the caller via i18n. */
   countLabel: string
   onSelectRoute: (branchId: string | null, anchorMessageId: string, info?: DividerSwitchInfo) => void
@@ -194,6 +206,7 @@ export const ForkDivider = ({
   parentBranchId,
   parentLabel,
   activeBranchId,
+  placement = 'message',
   countLabel,
   onSelectRoute
 }: ForkDividerProps) => {
@@ -317,6 +330,7 @@ export const ForkDivider = ({
                 anchorMessageId,
                 parentBranchId,
                 dividerKey: buildDividerKey(anchorMessageId, parentBranchId),
+                placement,
                 dividerOffset
               })
             }}
@@ -350,7 +364,8 @@ export const ForkDivider = ({
       data-testid={rowTestId}
       data-divider-key={dividerKey}
       data-divider-anchor={anchorMessageId}
-      data-divider-parent={parentBranchId ?? 'main'}>
+      data-divider-parent={parentBranchId ?? 'main'}
+      data-divider-placement={placement}>
       {/* Legacy anchor-only id retained as an alias for existing queries. */}
       <span data-testid={`branch-fork-divider-${anchorMessageId}`} style={{ display: 'none' }} aria-hidden />
       <ForkDividerLine />

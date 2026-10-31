@@ -79,6 +79,7 @@ import type {
   HistoryReferenceMeta,
   ImportTopicDataRequest,
   ImportTopicDataResponse,
+  InheritanceBoundarySnapshot,
   InsertMessageGroup,
   InsertMessageGroupsRequest,
   InsertMessageGroupsResponse,
@@ -1144,12 +1145,20 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async insertMessageGroups(
     topicId: string,
     groups: InsertMessageGroup[],
-    branchId?: string | null
+    branchId?: string | null,
+    boundaryRestores?: InheritanceBoundarySnapshot[]
   ): Promise<InsertMessageGroupsResponse> {
     if (!this.api.insertMessageGroups) {
       throw new Error('ChatDb API unavailable: insertMessageGroups not exposed')
     }
-    const request: InsertMessageGroupsRequest = cloneForWire({ topicId, branchId: branchId ?? null, groups })
+    // Boundary restores travel with the insertion so Main applies messages and
+    // the inherited-boundary revert in ONE transaction. Absent/empty keeps the
+    // ordinary insertion wire byte-identical.
+    const request: InsertMessageGroupsRequest = cloneForWire(
+      boundaryRestores && boundaryRestores.length > 0
+        ? { topicId, branchId: branchId ?? null, groups, boundaryRestores }
+        : { topicId, branchId: branchId ?? null, groups }
+    )
     const result = unwrap(await this.api.insertMessageGroups(request))
     dispatchTopicUpdatedAt(topicId)
     return result

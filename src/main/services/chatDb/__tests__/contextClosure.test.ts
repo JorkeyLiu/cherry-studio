@@ -536,7 +536,7 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     if (!afterForkOnBranch.ok) expect(afterForkOnBranch.error.code).toBe(ERR_NOT_FOUND)
   })
 
-  it('effective route fail-closed: invalid/deleted branch and missing fork anchor are NOT_FOUND', () => {
+  it('invalid/deleted branch stays NOT_FOUND while a deleted fork anchor inherits up to the nearest survivor', () => {
     const topicId = `t-${uid()}`
     for (const n of ['u1', 'u2', 'u3']) {
       const u = makeMsg(topicId, n, 'user')
@@ -562,10 +562,16 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const mainStill = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
     expect(mainStill.closure.totalTurnCount).toBe(3)
 
-    // Missing fork anchor fails closed: owner deletes the branch anchor on main
+    // Deleted fork anchor: the boundary moves to the nearest surviving
+    // predecessor (u2), so the branch resolves with the shortened history it
+    // inherited through the original fork point.
     expect(agg.deleteMessage(topicId, 'a2').ok).toBe(true)
     const missingAnchor = agg.fetchContextClosure({ topicId, branchId: bMissing, anchorGroupKey: 'u1' })
-    expect(missingAnchor.ok).toBe(false)
-    if (!missingAnchor.ok) expect(missingAnchor.error.code).toBe(ERR_NOT_FOUND)
+    expect(missingAnchor.ok).toBe(true)
+    expect((okValue(agg.fetchMessages(topicId, bMissing)).messages as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      'u1',
+      'a1',
+      'u2'
+    ])
   })
 })

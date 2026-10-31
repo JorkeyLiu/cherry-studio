@@ -1,4 +1,4 @@
-import type { InsertMessageGroupIntent } from '@shared/chatDb'
+import type { InheritanceBoundarySnapshot, InsertMessageGroupIntent } from '@shared/chatDb'
 
 import type { Message, MessageBlock } from './newMessage'
 import type { TopicSegment } from './topicSegment'
@@ -154,6 +154,21 @@ export interface DeleteUndoAction extends BaseUndoAction {
   groupAnchors: GroupAnchor[]
   /** Snapshots of affected segments before deletion (for undo segment restoration) */
   segmentSnapshots: SegmentSnapshot[]
+  /**
+   * The route this delete actually addressed (`null` = main route), recorded
+   * from the authority execution. Undo restores the deleted rows onto it, so a
+   * branch switch between delete and undo can never retarget the restore to
+   * another owner. Absent = legacy in-memory action without the fact; those
+   * retain the previous live-route behavior only.
+   */
+  deletedBranchId?: string | null
+  /**
+   * Inheritance boundaries (branch anchors, cross-topic reference endpoints)
+   * that this delete moved in Main. Undo reverts exactly these, in the same
+   * Main transaction as the message restore; absent = legacy action with no
+   * recorded boundary facts.
+   */
+  boundarySnapshots?: InheritanceBoundarySnapshot[]
 }
 
 export interface PasteUndoAction extends BaseUndoAction {
@@ -205,6 +220,13 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   sourceGroupAnchors: GroupAnchor[]
   /** Snapshots of affected source segments before deletion (for undo source segment restoration) */
   sourceSegmentSnapshots: SegmentSnapshot[]
+  /**
+   * Inheritance boundaries the staged source delete moved in Main (branch
+   * anchors, cross-topic reference endpoints of the source topic). Undo
+   * reverts exactly these in the same Main transaction as the source restore;
+   * absent = legacy action with no recorded boundary facts.
+   */
+  sourceBoundarySnapshots?: InheritanceBoundarySnapshot[]
   /** Snapshots of segments created in target topic (for undo delete / redo restore) */
   targetSegmentSnapshots: TopicSegment[]
 }

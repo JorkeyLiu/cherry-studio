@@ -13,7 +13,7 @@
  *   the relation degrades to status 'missing' at resolve time.
  */
 
-import { asc, eq } from 'drizzle-orm'
+import { asc, eq, inArray } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import type { TopicReferenceData } from '../domain/types'
@@ -83,6 +83,42 @@ export class TopicReferencesRepository {
   /** Delete the relation owned by a target topic (target-owned cleanup). */
   deleteByTarget(targetTopicId: string): AffectedCount {
     const result = this.db.delete(topicReferences).where(eq(topicReferences.targetTopicId, targetTopicId)).run()
+    return { affected: result.changes }
+  }
+
+  /**
+   * Reference relations captured on one of `messageIds`, across every source
+   * topic: a nested reference base can inherit the endpoint row from its own
+   * source, so the endpoint is not necessarily a row of `sourceTopicId`.
+   * Chunked to stay well below SQLite's bound-variable limit.
+   */
+  listByAnchorMessages(messageIds: string[]): TopicReferenceData[] {
+    const out: TopicReferenceData[] = []
+    for (let offset = 0; offset < messageIds.length; offset += 500) {
+      const chunk = messageIds.slice(offset, offset + 500)
+      const rows = this.db.select().from(topicReferences).where(inArray(topicReferences.anchorMessageId, chunk)).all()
+      for (const row of rows) {
+        out.push(fromDrizzleResult<TopicReferenceData>(row, 'topic_references', (row as any).targetTopicId))
+      }
+    }
+    return out
+  }
+
+  /**
+   * Advance the captured endpoint to `anchorMessageId`.
+   *
+   * Purpose-specific Main-authoritative maintenance: the endpoint is otherwise
+   * immutable, but when the endpoint message is deleted the boundary moves to
+   * the nearest surviving predecessor on the captured source route, so the
+   * target keeps the shorter live prefix instead of losing it. The source
+   * relation and every other column stay untouched.
+   */
+  advanceAnchor(targetTopicId: string, anchorMessageId: string): AffectedCount {
+    const result = this.db
+      .update(topicReferences)
+      .set({ anchorMessageId, updatedAt: new Date().toISOString() })
+      .where(eq(topicReferences.targetTopicId, targetTopicId))
+      .run()
     return { affected: result.changes }
   }
 

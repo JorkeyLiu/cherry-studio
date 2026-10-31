@@ -11,6 +11,7 @@ import {
   deleteMessagesFromDB,
   executeDeleteMessagesWithDependents,
   executeStagedCutSourceDelete,
+  fetchTopicBranchesThunk,
   publishDeleteAuthorityCatalog
 } from '@renderer/store/thunk/messageThunk'
 import {
@@ -30,7 +31,12 @@ import type {
 } from '@renderer/types/editMode'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { isSegmentCatalogConvergenceError } from '@renderer/utils/topicSegmentCatalog'
-import type { InsertMessageGroup, InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
+import type {
+  InheritanceBoundarySnapshot,
+  InsertMessageGroup,
+  InsertMessageGroupIntent,
+  MessageBlockEntry
+} from '@shared/chatDb'
 
 const logger = loggerService.withContext('UndoService')
 
@@ -104,6 +110,26 @@ async function updateFileReferenceCounts(
 }
 
 /**
+ * Re-read the Main branch catalog after an undo/redo authority command that
+ * can move an inheritance boundary or drop the fork rows of `topicId`.
+ *
+ * The catalog is a projection of a Main write that already committed, so a
+ * failed re-read is projection-only: it must never turn a committed undo/redo
+ * into a failed one. Only the topic the command actually addressed is re-read.
+ */
+async function refreshBranchCatalogAfterAuthorityWrite(
+  dispatch: AppDispatch,
+  topicId: string,
+  reason: string
+): Promise<void> {
+  try {
+    await dispatch(fetchTopicBranchesThunk(topicId))
+  } catch (error) {
+    logger.warn(`[${reason}] Authority committed but branch catalog refresh failed`, error as Error)
+  }
+}
+
+/**
  * Restore groups with one atomic stable command.
  * Sends all Main-produced full restore groups in request order with
  * before-message/topic-tail intents (no numeric index). Main success
@@ -119,7 +145,8 @@ async function restoreGroupsByStableAnchors(
   getState: () => RootState,
   topicId: string,
   groupAnchors: GroupAnchor[],
-  addressedRoute?: string | null
+  addressedRoute?: string | null,
+  boundaryRestores?: InheritanceBoundarySnapshot[]
 ): Promise<void> {
   if (groupAnchors.length === 0) return
   const groups = buildRestoreGroups(groupAnchors)
@@ -127,10 +154,17 @@ async function restoreGroupsByStableAnchors(
 
   // DB-first: one atomic multi-group restore with FULL entries. Missing/
   // cross-topic anchors fail the whole transaction with no partial writes and
-  // no Redux changes. Main publishes canonical wires+capability on success.
+  // no Redux changes. Main publishes canonical wires+capability on success,
+  // and reverts the recorded inheritance boundaries in that same transaction
+  // (compare-and-set; a relation removed or moved since keeps its newer state).
   let ack: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
   try {
-    ack = await dbService.insertMessageGroups(topicId, groups, route)
+    // Boundary restores ride only when this delete actually moved one, so an
+    // ordinary restore keeps its exact three-argument Main command.
+    ack =
+      boundaryRestores && boundaryRestores.length > 0
+        ? await dbService.insertMessageGroups(topicId, groups, route, boundaryRestores)
+        : await dbService.insertMessageGroups(topicId, groups, route)
   } catch (error) {
     logger.error('[restoreGroupsByStableAnchors] Failed to restore groups to DB', error as Error)
     throw error
@@ -257,7 +291,13 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
  * Undo delete = re-insert deleted messages and blocks
  */
 async function undoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
-  const { targetTopicId, groupAnchors, fileReferenceDeltas = [], segmentSnapshots = [] } = action
+  const {
+    targetTopicId,
+    groupAnchors,
+    fileReferenceDeltas = [],
+    segmentSnapshots = [],
+    boundarySnapshots = []
+  } = action
 
   if (groupAnchors.length === 0) {
     logger.warn('[undoDelete] No group anchors to restore')
@@ -269,11 +309,33 @@ async function undoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  // Restore groups with one atomic stable command (no numeric index)
-  await restoreGroupsByStableAnchors(dispatch, getState, targetTopicId, groupAnchors)
+  // Restore groups with one atomic stable command (no numeric index). The
+  // recorded boundary snapshots travel with it: messages and the branch
+  // anchors / reference endpoints this delete moved are reverted in ONE Main
+  // transaction, never by a separate renderer write. The route the delete
+  // actually addressed is recorded on the action and drives the restore, so a
+  // branch switch between delete and undo can never retarget the rows to
+  // another owner; legacy actions without the fact fall back to the live route.
+  await restoreGroupsByStableAnchors(
+    dispatch,
+    getState,
+    targetTopicId,
+    groupAnchors,
+    action.deletedBranchId,
+    boundarySnapshots
+  )
 
   // Restore segment membership
   await restoreSegmentsAfterUndo(dispatch, getState, segmentSnapshots)
+
+  // The restore replaced the authoritative messages in Main, and the branch
+  // catalog is a projection of Main state (both the fork rows and the
+  // inherited boundary Main re-derives from effective routes). Re-read the
+  // addressed topic so the projection converges even when the delete recorded
+  // no moved boundary: a missing former predecessor keeps the boundary id
+  // without publishing a snapshot, yet Main still re-derives the head from the
+  // restored message. Refresh is projection-only and never a second write.
+  await refreshBranchCatalogAfterAuthorityWrite(dispatch, targetTopicId, 'undoDelete')
 
   const totalMessages = groupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoDelete] Restored ${totalMessages} messages from ${groupAnchors.length} groups`)
@@ -329,6 +391,13 @@ async function undoPaste(
   if (blockIdsToRemove.length > 0) {
     dispatch(withClosureTopics(removeManyBlocks(blockIdsToRemove), targetTopicId))
   }
+
+  // Removing the copies was a Main delete in this topic, and a Main delete
+  // maintains inheritance boundaries / reference endpoints inside its own
+  // transaction (this command reports none of them back). The branch catalog
+  // is a Main projection, so re-read THIS topic instead of keeping pre-delete
+  // anchors — the same post-commit convergence an ordinary delete performs.
+  await refreshBranchCatalogAfterAuthorityWrite(dispatch, targetTopicId, 'undoPaste')
 
   // Delete target segments that were created during paste BEFORE syncing,
   // so syncSegmentsAfterMessageDeletion won't find (and double-delete) them.
@@ -419,7 +488,7 @@ async function undoCutPaste(
   getState: () => RootState,
   action: CutPasteUndoAction
 ): Promise<void> {
-  const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [] } = action
+  const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [], sourceBoundarySnapshots = [] } = action
   // Staged-addressed provenance (new actions only). Legacy actions without
   // recorded routes retain the previous live-route behavior below.
   // The explicitly staged routes address the Main restores/deletes
@@ -465,7 +534,24 @@ async function undoCutPaste(
   // Stable restore: one atomic command with before-message/topic-tail intents
   // (no numeric index). Throws on missing/cross-topic anchors with no partial
   // writes and no Redux changes — the copies below are then never touched.
-  await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, stagedSourceRoute)
+  // The recorded source boundary snapshots ride the same transaction, so the
+  // source topic's moved branch anchors / reference endpoints come back with
+  // the source messages.
+  await restoreGroupsByStableAnchors(
+    dispatch,
+    getState,
+    sourceTopicId,
+    sourceGroupAnchors,
+    stagedSourceRoute,
+    sourceBoundarySnapshots
+  )
+
+  // The source messages were restored in Main, so the source topic's catalog
+  // is stale regardless of whether this cut recorded a moved boundary: Main
+  // re-derives the inherited head from the restored message even when no
+  // surviving predecessor lets it publish a boundary snapshot. Re-read the
+  // source catalog (projection-only, never a second write).
+  await refreshBranchCatalogAfterAuthorityWrite(dispatch, sourceTopicId, 'undoCutPaste')
 
   // Restore source segment membership before removing the copies.
   // Staged cut_paste undo addresses the source route explicitly so the Main
@@ -532,10 +618,19 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   }
 
   // BRANCH-12: redo re-deletes existing messages — fail closed with zero
-  // IPC calls when any root is already non-owned through the active route.
+  // IPC calls when any root is already non-owned through the ACTIVE route.
   // The Main guard stays final for expanded dependents; undo (restore)
   // paths create new owned rows and stay Main-decided.
-  {
+  //
+  // Recorded-route redo: a delete that recorded the route it addressed
+  // re-deletes through that same route, so undo→redo→undo round-trips after a
+  // branch switch instead of hitting the live-route owner guard. The live
+  // precheck stays for the equal-route case and for legacy actions (no
+  // recorded fact), which keep the previous live-route behavior exactly.
+  const liveRoute = selectActiveBranchId(getState(), targetTopicId)
+  const recordedRoute = typeof action.deletedBranchId === 'undefined' ? undefined : action.deletedBranchId
+  const redoRoute = typeof recordedRoute === 'undefined' ? liveRoute : recordedRoute
+  if (typeof recordedRoute === 'undefined' || recordedRoute === liveRoute) {
     const preState = getState()
     for (const rootId of roots) requireMutableForActiveRoute(preState, targetTopicId, rootId)
   }
@@ -543,11 +638,7 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   // DB-first via the unified semantic command (LOCK-001)
   let response: Awaited<ReturnType<typeof dbService.deleteMessagesWithDependents>>
   try {
-    response = await dbService.deleteMessagesWithDependents(
-      targetTopicId,
-      roots,
-      selectActiveBranchId(getState(), targetTopicId)
-    )
+    response = await dbService.deleteMessagesWithDependents(targetTopicId, roots, redoRoute)
   } catch (error) {
     logger.error('[redoDelete] Failed to delete from DB', error as Error)
     throw error
@@ -560,6 +651,14 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   // complete catalog (no extra list): preserves the valid loaded projection
   // like the unified delete path instead of a bare replace that blanks.
   publishDeleteAuthorityCatalog(dispatch, targetTopicId, response as any)
+
+  // Main maintained the inheritance boundaries / reference endpoints inside
+  // that delete transaction (the unified delete command reports no boundary
+  // payload), and the branch catalog is a Main projection: re-read the topic
+  // this redo deleted from, exactly like the ordinary delete path, instead of
+  // keeping anchors that point at the removed messages. A failed re-read is
+  // projection-only and never turns a committed re-delete into a failure.
+  await refreshBranchCatalogAfterAuthorityWrite(dispatch, targetTopicId, 'redoDelete')
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup

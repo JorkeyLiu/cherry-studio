@@ -372,7 +372,7 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
       branchId
     })
     // Sole fork-boundary exception: the inherited anchor is exactly the
-    // addressed branch's immutable anchorMessageId (BRANCH-3).
+    // addressed branch's current fork boundary (BRANCH-3).
     const n1 = `n1-${uid()}`
     const n2 = `n2-${uid()}`
     const res = agg.insertMessagesAfterAnchor(

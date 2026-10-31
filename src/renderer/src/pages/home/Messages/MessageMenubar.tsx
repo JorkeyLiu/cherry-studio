@@ -161,7 +161,7 @@ type MessageMenubarButtonContext = {
   // rejects.
   isInherited: boolean
   // True only when this message ID exactly equals the active branch's
-  // immutable anchorMessageId (fork boundary). The sole inherited-insert
+  // fork-boundary anchorMessageId. The sole inherited-insert
   // exception (BRANCH-3): insert stays available at the fork anchor.
   isForkAnchor: boolean
   // True when a non-main active route has no matching branch node in the
@@ -797,7 +797,7 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
   )
   const isInherited = !isMutableForMenu
   // Bounded fork-boundary metadata (BRANCH-3/7): the active branch node
-  // carries the immutable anchorMessageId. Unknown/stale/missing catalog
+  // carries the fork-boundary anchorMessageId. Unknown/stale/missing catalog
   // for a non-main route fails closed (both creation actions hide).
   const activeBranchNodeForMenu = useSelector((state: RootState) =>
     selectBranchNode(state, topic.id, activeBranchIdForMenu)

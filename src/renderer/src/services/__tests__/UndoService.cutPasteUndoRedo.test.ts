@@ -25,6 +25,7 @@ const { mocks } = vi.hoisted(() => ({
     executeStagedCutSourceDelete: vi.fn(),
     deleteMessagesWithDependents: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
+    fetchTopicBranchesThunk: vi.fn(),
     updateFileCount: vi.fn(),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p })),
@@ -66,7 +67,8 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
   executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
-  executeStagedCutSourceDelete: mocks.executeStagedCutSourceDelete
+  executeStagedCutSourceDelete: mocks.executeStagedCutSourceDelete,
+  fetchTopicBranchesThunk: mocks.fetchTopicBranchesThunk
 }))
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
@@ -811,5 +813,53 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     expect(mocks.restoreSegmentsAfterUndo).toHaveBeenCalledTimes(1)
     // Omitted (undefined) preserves the legacy live-route path in the helper.
     expect(mocks.restoreSegmentsAfterUndo.mock.calls[0][3]).toBe(undefined)
+  })
+
+  it('cut_paste undo re-reads every topic catalog its own commands changed', async () => {
+    const srcU = makeMessage('src-u')
+    const copy1 = makeMessage('copy-1')
+    const action = {
+      id: 'undo-catalog-topics',
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: 'topic-tgt',
+      insertedMessageIds: ['copy-1'],
+      pastedMessagesSnapshot: [copy1],
+      pastedBlocksSnapshot: [],
+      fileReferenceDeltas: [],
+      sourceTopicId: 'topic-src',
+      sourceBranchId: null,
+      targetBranchId: null,
+      sourceRootIds: ['src-u'],
+      sourceProjection: { sourceTopicId: 'topic-src', sourceBranchId: null, loadedMessageIds: ['src-u'] },
+      sourceGroupAnchors: [
+        { messages: [srcU], blocks: [], positionIndex: 0, anchorMessageId: null, loadedMessageIds: ['src-u'] }
+      ],
+      sourceSegmentSnapshots: [],
+      targetSegmentSnapshots: [],
+      // The source delete moved a boundary, so the restore reverts it and the
+      // source catalog is re-read in the same undo.
+      sourceBoundarySnapshots: [
+        { kind: 'branch', id: 'branch-src', anchorMessageId: 'src-u', expectedAnchorMessageId: null }
+      ],
+      targetAnchorMessageId: null,
+      targetInsertPositionIndex: 0
+    } as unknown as CutPasteUndoAction
+    storeState.undoStack = { undoStack: [action], redoStack: [] }
+
+    const readTopics: string[] = []
+    mocks.fetchTopicBranchesThunk.mockImplementation((topicId: string) => {
+      readTopics.push(topicId)
+      return { type: 'topicBranch/fetch' }
+    })
+
+    const { executeUndo } = await import('../UndoService')
+    const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
+
+    expect(result).not.toBeNull()
+    // Source restore (boundary reverted) then target copy removal (a Main
+    // delete that maintains its own boundaries without reporting them): both
+    // directly affected topics are re-read, and no other topic is touched.
+    expect(readTopics).toEqual(['topic-src', 'topic-tgt'])
   })
 })

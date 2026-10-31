@@ -780,7 +780,7 @@ export function registerChatDbIpc(): () => void {
 
   // 32c. insert-message-groups: stable intents, atomic multi-group insert
   handleCommand(IpcChannel.ChatDb_InsertMessageGroups, (agg, req: InsertMessageGroupsRequest) => {
-    return agg.insertMessageGroups(req.topicId, req.groups as any, req.branchId)
+    return agg.insertMessageGroups(req.topicId, req.groups as any, req.branchId, req.boundaryRestores)
   })
 
   // 33. search-messages (Phase 5.1B-2)

@@ -181,15 +181,29 @@ describe('cross-topic history references', () => {
     expect(win.reference?.status).toBe('missing')
     expect(win.window.returnedCount).toBe(1)
 
-    // Missing endpoint (delete the anchor from the source main route).
+    // Deleted endpoint: the captured boundary advances to the nearest
+    // surviving prefix message, so the reference keeps the shorter live prefix
+    // and the target's own suffix is untouched.
     const source2 = `t-src2-${uid()}`
     const target2 = `t-ref2-${uid()}`
     const ids2 = seedTopic(source2, 3)
     okValue(agg.createReferencedTopic(source2, null, target2, ids2[2]))
+    const own2 = { id: `m-ref-own-${uid()}`, content: 'suffix' }
+    okValue(agg.appendMessage(target2, makeMessageJson(target2, own2) as any, []))
     okValue(agg.deleteMessage(source2, ids2[2]))
-    const win2 = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: target2, limit: 50 }))
+    let win2 = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: target2, limit: 50 }))
+    expect(win2.reference?.status).toBe('available')
+    expect(win2.reference?.boundaryMessageId).toBe(ids2[1])
+    expect((win2.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([ids2[0], ids2[1], own2.id])
+
+    // Deleting every prefix message leaves no boundary to advance to: the
+    // prefix is absent while the target topic and its own suffix survive (the
+    // relation is never deleted by a source mutation).
+    okValue(agg.deleteMessages(source2, [ids2[0], ids2[1]]))
+    win2 = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: target2, limit: 50 }))
     expect(win2.reference?.status).toBe('missing')
-    expect(win2.window.returnedCount).toBe(0)
+    expect(win2.window.returnedCount).toBe(1)
+    expect((win2.messages as Array<{ id: string }>)[0].id).toBe(own2.id)
   })
 
   it('exposes the live authoritative source name (never a copied display name)', () => {
