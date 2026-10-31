@@ -1,4 +1,5 @@
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
+import ModelNameWithId from '@renderer/components/ModelNameWithId'
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { Model, Provider } from '@renderer/types'
 import { matchKeywordsInString } from '@renderer/utils'
@@ -38,7 +39,8 @@ interface ModelSelectorProps extends SelectProps {
  * 模型选择器，封装了 antd Select
  * - 通过传入模型服务商列表和模型 predicate 来构造选项
  * - 支持按服务商分组
- * - 可以控制 avatar 和 suffix 显示与否
+ * - 可以控制 avatar 和 suffix 显示与否（分组模式下 suffix 省略，因为分组标题已经表明服务商）
+ * - 选项与已选字段统一展示 model name + 弱化的 model ID
  * @param providers 服务商列表
  * @param predicate 模型过滤条件
  * @param grouped 是否按服务商分组
@@ -56,32 +58,47 @@ const ModelSelector = ({
 }: ModelSelectorProps & { ref?: React.Ref<BaseSelectRef> | null }) => {
   const { t } = useTranslation()
 
-  // 单个 provider 的模型选项 — name-only rendering (no inline ID, no tooltip ID).
+  // Provider suffix is only meaningful when options are not already grouped by
+  // provider: in grouped mode the group heading carries the provider, so the
+  // per-option suffix would be redundant. Ungrouped callers keep it.
+  const showProviderSuffix = showSuffix && !grouped
+
+  // 单个 provider 的模型选项 — display name + muted monospace ID via the shared
+  // ModelNameWithId primitive (the ID is omitted when it equals the name, same
+  // house rule as the provider model settings list).
   // Search is decoupled via explicit keywords containing display name + exact id + provider name/id.
   const getModelOptions = useCallback(
     (p: Provider, fancyName: string) => {
-      const suffix = showSuffix ? <span style={{ opacity: 0.45 }}>{` | ${fancyName}`}</span> : null
+      const suffix = showProviderSuffix ? <span style={{ opacity: 0.45 }}>{` | ${fancyName}`}</span> : null
       return sortBy(p.models, 'name')
         .filter((model) => predicate?.(model) ?? true)
         .map((m) => {
           const keywords = `${m.name} ${m.id} ${p.name} ${p.id} ${fancyName}`
           return {
             label: (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                 {showAvatar && <ModelAvatar model={m} size={18} />}
-                <span style={{ display: 'inline-flex', alignItems: 'center', minWidth: 0 }}>
-                  <span className="min-w-0 truncate">{m.name}</span>
+                {/* The name+ID group takes all the width the avatar leaves; inside it the
+                    name keeps its intrinsic width and the ID absorbs what remains, so an ID
+                    that fits is never shortened (full ID stays available as its tooltip). */}
+                <span style={{ display: 'flex', flex: '1 1 auto', minWidth: 0, alignItems: 'center' }}>
+                  <ModelNameWithId
+                    model={m}
+                    className="flex min-w-0 flex-1 items-center gap-1.5"
+                    nameClassName="min-w-0 max-w-full shrink-0 truncate"
+                    idClassName="min-w-0 shrink truncate font-mono text-[12px] leading-[1.2] text-[var(--color-text-3)]"
+                  />
                   {suffix}
                 </span>
               </div>
             ),
-            title: showSuffix ? `${m.name} | ${fancyName}` : m.name,
+            title: showProviderSuffix ? `${m.name} | ${fancyName}` : m.name,
             value: getModelUniqId(m),
             keywords
           }
         })
     },
-    [predicate, showAvatar, showSuffix]
+    [predicate, showAvatar, showProviderSuffix]
   )
 
   // 所有 provider 的模型选项

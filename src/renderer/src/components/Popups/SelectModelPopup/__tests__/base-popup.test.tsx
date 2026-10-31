@@ -18,7 +18,11 @@ const mocks = vi.hoisted(() => {
   const t = vi.fn((key: string) => key)
   const getProviderById = vi.fn()
   const navigate = vi.fn()
-  const getModelUniqId = vi.fn((m?: { id?: string }) => m?.id ?? '')
+  // Full selection identity: the same model id served by two providers must stay
+  // two distinct selectable entries.
+  const getModelUniqId = vi.fn((m?: { id?: string; provider?: string }) =>
+    m?.provider ? `${m.provider}::${m.id}` : (m?.id ?? '')
+  )
   return { t, getProviderById, navigate, getModelUniqId }
 })
 
@@ -294,8 +298,8 @@ describe('SelectModelPopupView "Add Model" action', () => {
     })
   })
 
-  describe('name-only rendering (no ID) with ID-aware search', () => {
-    it('renders name only, no serving ID title, even when same display name different id', () => {
+  describe('name + muted inline ID rendering with ID-aware search', () => {
+    it('renders the muted monospace model ID next to the name (same name, different ids stay distinct)', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' } as any,
@@ -303,20 +307,69 @@ describe('SelectModelPopupView "Add Model" action', () => {
         ])
       ]
       renderPopup(providers)
-      // names visible twice, no ID titles
+
+      // both same-name rows stay present, each carrying its own ID
       expect(screen.getAllByText('GPT-4o').length).toBe(2)
-      expect(screen.queryByTitle('gpt-4o-2024-08-06')).toBeNull()
-      expect(screen.queryByTitle('gpt-4o-2024-11-20')).toBeNull()
+      const inlineId = document.querySelectorAll('[data-testid="model-name-with-id"]')
+      expect(inlineId).toHaveLength(2)
+      expect(Array.from(inlineId).map((el) => el.querySelector('[title]')?.getAttribute('title'))).toEqual([
+        'gpt-4o-2024-08-06',
+        'gpt-4o-2024-11-20'
+      ])
     })
 
-    it('does not show duplicate ID when trimmed id == trimmed name (name-only always)', () => {
+    it('presents the ID as muted monospace truncated text with the full ID as tooltip', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [
+          { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' } as any
+        ])
+      ]
+      renderPopup(providers)
+
+      const idEl = screen.getByTitle('gpt-4o-2024-08-06')
+      expect(idEl.textContent).toBe('gpt-4o-2024-08-06')
+      expect(idEl.className).toContain('font-mono')
+      expect(idEl.className).toContain('text-[12px]')
+      expect(idEl.className).toContain('text-[var(--color-text-3)]')
+      expect(idEl.className).toContain('truncate')
+    })
+
+    it('gives the name+ID group the row width the avatar and tags leave over (no arbitrary ID cap)', () => {
+      const providers = [
+        provider('antigravity', 'Antigravity', [
+          {
+            id: 'antigravity/gemini-3.8-flash',
+            name: 'Gemini 3.8 Flash',
+            provider: 'antigravity',
+            group: 'default'
+          } as any
+        ])
+      ]
+      renderPopup(providers)
+
+      const group = document.querySelector('[data-testid="model-name-with-id"]') as HTMLElement
+      const nameLine = group.firstElementChild as HTMLElement
+      const idEl = screen.getByTitle('antigravity/gemini-3.8-flash')
+
+      // the composite claims the remaining row width instead of hugging its own content
+      expect(group.className).toContain('flex-1')
+      expect(group.className).toContain('min-w-0')
+      // the name never surrenders width while the ID still has room to shrink
+      expect(nameLine.className).toContain('shrink-0')
+      // and the ID is not capped at a percentage of the row, so a fitting ID renders in full
+      expect(idEl.className).not.toContain('max-w-')
+      expect(idEl.className).toContain('min-w-0')
+      expect(idEl.className).toContain('truncate')
+    })
+
+    it('does not repeat the ID when trimmed id == trimmed name (shared house rule)', () => {
       const providers = [provider('openai', 'OpenAI', [model('gpt-4o', 'gpt-4o')])]
       renderPopup(providers)
       expect(screen.queryByTitle('gpt-4o')).toBeNull()
-      expect(screen.getByText('gpt-4o')).toBeInTheDocument()
+      expect(screen.getAllByText('gpt-4o')).toHaveLength(1)
     })
 
-    it('whitespace-trimmed remains name-only (no ID row)', () => {
+    it('hides the ID for whitespace-trimmed equality', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai', group: 'default' } as any
@@ -327,27 +380,27 @@ describe('SelectModelPopupView "Add Model" action', () => {
       expect(screen.getByText('gpt-4o')).toBeInTheDocument()
     })
 
-    it('case differs still name-only', () => {
+    it('shows the ID when only the case differs', () => {
       const providers = [
         provider('openai', 'OpenAI', [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' } as any])
       ]
       renderPopup(providers)
       expect(screen.getByText('GPT-4o')).toBeInTheDocument()
-      expect(screen.queryByTitle('gpt-4o')).toBeNull()
+      expect(screen.getByTitle('gpt-4o')).toBeInTheDocument()
     })
 
-    it('whitespace-trimmed differs still name-only', () => {
+    it('shows the raw ID when the trimmed values differ', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai', group: 'default' } as any
         ])
       ]
       renderPopup(providers)
-      expect(document.querySelector('[title=" gpt-4o-1 "]')).toBeNull()
+      expect(document.querySelector('[title=" gpt-4o-1 "]')).not.toBeNull()
       expect(screen.getByText('GPT-4o')).toBeInTheDocument()
     })
 
-    it('near-identical names different ids still name-only', () => {
+    it('keeps near-identical names distinguishable by their IDs', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: 'gpt-4o-mini', name: 'GPT-4o mini', provider: 'openai', group: 'default' } as any,
@@ -356,18 +409,35 @@ describe('SelectModelPopupView "Add Model" action', () => {
       ]
       renderPopup(providers)
       expect(screen.getAllByText('GPT-4o mini').length).toBe(2)
-      expect(screen.queryByTitle('gpt-4o-mini')).toBeNull()
-      expect(screen.queryByTitle('gpt-4o-mini-2024')).toBeNull()
+      expect(screen.getByTitle('gpt-4o-mini')).toBeInTheDocument()
+      expect(screen.getByTitle('gpt-4o-mini-2024')).toBeInTheDocument()
     })
 
-    it('filterModelsByKeywords still ID-aware (rendered name-only but search matches ID)', async () => {
+    it('resolves the clicked row by the full {id, provider} identity, not by the model id alone', () => {
+      const providers = [
+        provider('provider-a', 'Provider A', [
+          { id: 'gpt-4o', name: 'GPT-4o', provider: 'provider-a', group: 'default' } as any
+        ]),
+        provider('provider-b', 'Provider B', [
+          { id: 'gpt-4o', name: 'GPT-4o', provider: 'provider-b', group: 'default' } as any
+        ])
+      ]
+      const { resolve } = renderPopup(providers)
+
+      const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="chat-model-option-gpt-4o"]'))
+      expect(rows).toHaveLength(2)
+
+      fireEvent.click(rows[1])
+      expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'gpt-4o', provider: 'provider-b' }))
+    })
+
+    it('filterModelsByKeywords still ID-aware (search matches IDs beyond the rendered name)', async () => {
       // Real filter function is ID-aware; mocked version passes through, so test direct utility
       const { filterModelsByKeywords } = await import('@renderer/utils/match')
       // Use real implementation via dynamic import would still be mocked; test via direct call of matchKeywordsInModel
       const { matchKeywordsInModel } = await import('@renderer/utils/match')
       const m = { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai' } as any
       const p = { id: 'openai', name: 'OpenAI' } as any
-      // Even though UI is name-only, search by ID/provider still matches
       expect(matchKeywordsInModel('gpt-4o-2024-08-06', m)).toBe(true)
       expect(matchKeywordsInModel('openai', m, p)).toBe(true)
       void filterModelsByKeywords

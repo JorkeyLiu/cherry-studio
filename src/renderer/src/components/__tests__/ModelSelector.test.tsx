@@ -12,6 +12,7 @@ vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
 }))
 
 vi.mock('@renderer/services/ModelService', () => ({
+  // Full selection identity: same id served by different providers stays distinct.
   getModelUniqId: (model: any) => `${model.provider}-${model.id}`
 }))
 
@@ -27,6 +28,11 @@ vi.mock('@renderer/utils/naming', () => ({
 import type { Provider } from '@renderer/types'
 
 import ModelSelector, { modelSelectFilter } from '../ModelSelector'
+
+const optionOf = (el: Element | null) => el?.closest('.ant-select-item-option') as HTMLElement | null
+
+const inlineIdOf = (container: Element | null) =>
+  container?.querySelector('[data-testid="model-name-with-id"] [title]') as HTMLElement | null
 
 describe('ModelSelector', () => {
   const mockProviders: Provider[] = [
@@ -82,33 +88,37 @@ describe('ModelSelector', () => {
       const cohere = screen.getByText('embed-english-v3.0')
       expect(ada).toBeInTheDocument()
       expect(cohere).toBeInTheDocument()
-      // Check suffix is present by default (name-only, suffix remains)
-      expect(ada.closest('.ant-select-item-option')?.textContent).toContain(' | OpenAI')
-      expect(cohere.closest('.ant-select-item-option')?.textContent).toContain(' | Cohere')
-      // name-only: no inline ID
-      expect(screen.queryByText('gpt-4.1')).not.toBeInTheDocument()
-      // no primitive
-      expect(document.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
+
+      // Grouped mode carries the provider in the group heading, so the redundant
+      // per-option " | provider" suffix is gone.
+      expect(optionOf(ada)?.textContent).not.toContain(' | OpenAI')
+      expect(optionOf(cohere)?.textContent).not.toContain(' | Cohere')
+      expect(optionOf(ada)?.getAttribute('title')).toBe('text-embedding-ada-002')
+
+      // name == id: the ID is not repeated (shared house rule)
+      expect(inlineIdOf(optionOf(ada))).toBeNull()
 
       // Check that filtered models are not present
       expect(screen.queryByText('GPT-4.1')).not.toBeInTheDocument()
       expect(screen.queryByText('rerank-english-v2.0')).not.toBeInTheDocument()
     })
 
-    it('should hide suffix when showSuffix is false', () => {
-      render(
-        <ModelSelector
-          providers={mockProviders}
-          predicate={(model) => model.group === 'embedding'}
-          showSuffix={false}
-          open
-        />
-      )
+    it('renders the muted monospace model ID inline when it differs from the name', () => {
+      render(<ModelSelector providers={mockProviders} predicate={(model) => model.group === 'chat'} open />)
 
-      const ada = screen.getByText('text-embedding-ada-002')
-      expect(ada.closest('.ant-select-item-option')?.textContent).toContain('text-embedding-ada-002')
-      expect(ada.closest('.ant-select-item-option')?.textContent).not.toContain(' | OpenAI')
-      expect(document.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
+      const option = optionOf(screen.getByText('GPT-4.1'))
+      const inlineId = inlineIdOf(option)
+
+      expect(inlineId).not.toBeNull()
+      expect(inlineId?.textContent).toBe('gpt-4.1')
+      expect(inlineId?.getAttribute('title')).toBe('gpt-4.1')
+      expect(inlineId?.className).toContain('font-mono')
+      expect(inlineId?.className).toContain('text-[12px]')
+      expect(inlineId?.className).toContain('text-[var(--color-text-3)]')
+      expect(inlineId?.className).toContain('truncate')
+      // title stays name-only (no provider suffix, no ID)
+      expect(option?.getAttribute('title')).toBe('GPT-4.1')
+      expect(option?.textContent).not.toContain(' | OpenAI')
     })
 
     it('should hide avatar when showAvatar is false', () => {
@@ -142,25 +152,118 @@ describe('ModelSelector', () => {
       const cohere = screen.getByText('embed-english-v3.0')
       expect(ada).toBeInTheDocument()
       expect(cohere).toBeInTheDocument()
-      // Check suffix is present by default
-      expect(ada.closest('.ant-select-item-option')?.textContent).toContain(' | OpenAI')
-      expect(cohere.closest('.ant-select-item-option')?.textContent).toContain(' | Cohere')
+      // Ungrouped consumers keep the provider suffix for differentiation
+      expect(optionOf(ada)?.textContent).toContain(' | OpenAI')
+      expect(optionOf(cohere)?.textContent).toContain(' | Cohere')
+      expect(optionOf(ada)?.getAttribute('title')).toBe('text-embedding-ada-002 | OpenAI')
 
       // Check that filtered models are not present
       expect(screen.queryByText('GPT-4.1')).not.toBeInTheDocument()
       expect(screen.queryByText('rerank-english-v2.0')).not.toBeInTheDocument()
     })
 
-    it('should hide suffix when showSuffix is false', () => {
+    it('should hide suffix when showSuffix is false but keep the inline ID', () => {
       render(<ModelSelector providers={mockProviders} grouped={false} showSuffix={false} open />)
 
-      const gpt4 = screen.getByText('GPT-4.1')
-      const container = gpt4.closest('.ant-select-item-option')
-      // name-only: no inline ID even when suffix hidden
-      expect(container?.textContent).toContain('GPT-4.1')
-      expect(container?.textContent).not.toContain('gpt-4.1')
-      expect(container?.textContent).not.toContain(' | OpenAI')
-      expect(container?.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
+      const option = optionOf(screen.getByText('GPT-4.1'))
+      expect(option?.textContent).toContain('GPT-4.1')
+      expect(option?.textContent).not.toContain(' | OpenAI')
+      expect(inlineIdOf(option)?.textContent).toBe('gpt-4.1')
+      expect(option?.getAttribute('title')).toBe('GPT-4.1')
+    })
+
+    it('keeps same-name different-id models as separate, distinguishable rows', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [
+            { id: 'gpt-4o-a', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any,
+            { id: 'gpt-4o-b', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any
+          ]
+        }
+      ]
+      render(<ModelSelector providers={providers} grouped={false} open />)
+
+      expect(screen.getAllByText('GPT-4o')).toHaveLength(2)
+      const options = Array.from(document.querySelectorAll('.ant-select-item-option'))
+      expect(options).toHaveLength(2)
+      expect(options.map((el) => inlineIdOf(el)?.textContent)).toEqual(['gpt-4o-a', 'gpt-4o-b'])
+      // neither row is distinguishable by name alone; the ID is the differentiator
+      expect(options.every((el) => el.textContent?.includes('GPT-4o'))).toBe(true)
+    })
+  })
+
+  describe('selection identity', () => {
+    it('selects by the full {id, provider} value, not by the display name', async () => {
+      const user = userEvent.setup()
+      const onChange = vi.fn()
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [
+            { id: 'gpt-4o-a', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any,
+            { id: 'gpt-4o-b', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any
+          ]
+        }
+      ]
+
+      render(<ModelSelector providers={providers} grouped={false} open onChange={onChange} />)
+
+      await user.click(screen.getByText('gpt-4o-b'))
+
+      expect(onChange).toHaveBeenCalledWith('openai-gpt-4o-b', expect.anything())
+    })
+  })
+
+  describe('inline ID width budget', () => {
+    it('keeps the inline ID shrinkable but never caps it at an arbitrary share of the row', () => {
+      const longId = 'a-very-long-model-identifier-that-should-never-push-the-select-out-of-bounds'
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: longId, name: 'Long Model', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+
+      render(<ModelSelector providers={providers} open />)
+
+      const option = optionOf(screen.getByText('Long Model'))
+      const inlineId = inlineIdOf(option)
+
+      // the full ID always stays reachable
+      expect(inlineId?.getAttribute('title')).toBe(longId)
+      // shrink/ellipsis is available for genuinely long IDs...
+      expect(inlineId?.className).toContain('truncate')
+      expect(inlineId?.className).toContain('min-w-0')
+      // ...but nothing caps it at a share of the row independent of the actual space
+      expect(inlineId?.className).not.toContain('max-w-')
+      expect(inlineId?.className).not.toContain('w-[50%]')
+    })
+
+    it('lets the name+ID group fill the option row instead of sizing to its own content', () => {
+      render(<ModelSelector providers={mockProviders} predicate={(model) => model.group === 'chat'} open />)
+
+      const option = optionOf(screen.getByText('GPT-4.1'))
+      const group = option?.querySelector('[data-testid="model-name-with-id"]') as HTMLElement | null
+      const nameLine = group?.firstElementChild as HTMLElement | null
+
+      // the composite grows into the row...
+      expect(group?.className).toContain('flex-1')
+      expect(group?.className).toContain('min-w-0')
+      // ...and the name never surrenders width while the ID has room to shrink
+      expect(nameLine?.className).toContain('shrink-0')
     })
   })
 
@@ -173,6 +276,40 @@ describe('ModelSelector', () => {
     it('should handle undefined providers', () => {
       render(<ModelSelector providers={undefined} open />)
       expect(document.querySelector('.ant-select-item-option')).toBeNull()
+    })
+
+    it('does not repeat the ID when trimmed id == trimmed name', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: 'gpt-4o', name: 'gpt-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+
+      const option = optionOf(screen.getByText('gpt-4o'))
+      expect(inlineIdOf(option)).toBeNull()
+      expect(option?.textContent?.match(/gpt-4o/g)).toHaveLength(1)
+    })
+
+    it('shows the ID when only the case differs (case-sensitive)', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+
+      expect(inlineIdOf(optionOf(screen.getByText('GPT-4o')))?.textContent).toBe('gpt-4o')
     })
   })
 
@@ -207,6 +344,16 @@ describe('ModelSelector', () => {
       }
       expect(modelSelectFilter('nonexistent', mockOption)).toBe(false)
     })
+
+    it('matches the exact model id via keywords even though the title is name-only', () => {
+      const mockOption = {
+        title: 'GPT-4o | OpenAI',
+        keywords: 'GPT-4o gpt-4o-2024-08-06 OpenAI openai OpenAI',
+        value: 'openai-gpt-4o-2024-08-06'
+      }
+      expect(modelSelectFilter('gpt-4o-2024-08-06', mockOption)).toBe(true)
+      expect(modelSelectFilter('openai', mockOption)).toBe(true)
+    })
   })
 
   describe('integration', () => {
@@ -230,147 +377,17 @@ describe('ModelSelector', () => {
       expect(screen.getByText('OpenAI')).toBeInTheDocument()
       expect(screen.getByText('Cohere')).toBeInTheDocument()
     })
-  })
 
-  describe('name-only rendering with ID-aware search (trim-based title decoupled)', () => {
-    it('renders name-only inline and title without ID, but keywords contain ID for search', () => {
-      const providers: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [{ id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any]
-        }
-      ]
-      render(<ModelSelector providers={providers} open />)
-      // name visible, ID not inline
-      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
-      expect(screen.queryByText('gpt-4o-2024-08-06')).toBeNull()
-      // title is name-only (with suffix, without ID)
-      const option = document.querySelector('.ant-select-item-option')
-      expect(option?.getAttribute('title')).toBe('GPT-4o | OpenAI')
-      expect(option?.getAttribute('title')).not.toContain('gpt-4o-2024-08-06')
-      // but filter via keywords still finds by ID
-      const mockOption = {
-        title: 'GPT-4o | OpenAI',
-        keywords: 'GPT-4o gpt-4o-2024-08-06 OpenAI openai OpenAI',
-        value: 'openai-gpt-4o-2024-08-06'
-      }
-      expect(modelSelectFilter('gpt-4o-2024-08-06', mockOption)).toBe(true)
-      expect(modelSelectFilter('openai', mockOption)).toBe(true)
-    })
+    it('filters by exact model ID through the explicit keywords', async () => {
+      const user = userEvent.setup()
+      render(<ModelSelector providers={mockProviders} open />)
 
-    it('name-only distinguishes same name different id via provider suffix only (no ID inline)', () => {
-      const providers: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [
-            { id: 'gpt-4o-a', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any,
-            { id: 'gpt-4o-b', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any
-          ]
-        }
-      ]
-      render(<ModelSelector providers={providers} open />)
-      const els = screen.getAllByText('GPT-4o')
-      expect(els.length).toBe(2)
-      // no inline IDs
-      expect(screen.queryByText('gpt-4o-a')).toBeNull()
-      expect(screen.queryByText('gpt-4o-b')).toBeNull()
-      // but search still finds via keywords
-      expect(
-        modelSelectFilter('gpt-4o-a', { keywords: 'GPT-4o gpt-4o-a OpenAI openai', title: 'GPT-4o | OpenAI' })
-      ).toBe(true)
-    })
+      const searchInput = screen.getByRole('combobox')
+      await user.type(searchInput, 'gpt-4.1')
 
-    it('does not show duplicate id when trimmed id == trimmed name (name-only always)', () => {
-      const providers: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [{ id: 'gpt-4o', name: 'gpt-4o', provider: 'openai', group: 'chat' } as any]
-        }
-      ]
-      render(<ModelSelector providers={providers} open />)
-      const el = screen.getByText('gpt-4o')
-      const containerText = el.closest('.ant-select-item-option')?.textContent ?? ''
-      expect(containerText).toContain('gpt-4o | OpenAI')
-      expect((containerText.match(/gpt-4o/g) || []).length).toBe(1)
-      const opt = document.querySelector('.ant-select-item-option')
-      expect(opt?.getAttribute('title')).toBe('gpt-4o | OpenAI')
-    })
-
-    it('name-only: whitespace trimmed title remains name-only', () => {
-      const providersTrimSame: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [{ id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai', group: 'chat' } as any]
-        }
-      ]
-      const { unmount } = render(<ModelSelector providers={providersTrimSame} open />)
-      expect(screen.queryByText('  gpt-4o  ')).toBeNull()
-      const opt = document.querySelector('.ant-select-item-option')
-      expect(opt?.getAttribute('title')).toBe('gpt-4o | OpenAI')
-      unmount()
-
-      const providersDiff: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [{ id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai', group: 'chat' } as any]
-        }
-      ]
-      render(<ModelSelector providers={providersDiff} open />)
-      const el2 = document.querySelector('.ant-select-item-option')
-      // title is name with spaces preserved? but should be name-only
-      expect(el2?.getAttribute('title')).toBe(' GPT-4o  | OpenAI')
-      expect(el2?.getAttribute('title')).not.toContain('gpt-4o-1')
-    })
-
-    it('case difference still name-only (case-sensitive)', () => {
-      const providers: Provider[] = [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          type: 'openai',
-          apiKey: '123',
-          apiHost: 'https://api.openai.com',
-          models: [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any]
-        }
-      ]
-      render(<ModelSelector providers={providers} open />)
-      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
-      expect(screen.queryByText('gpt-4o')).toBeNull()
-    })
-
-    it('keywords enable provider id/name search even when title name-only', () => {
-      expect(
-        modelSelectFilter('cohere', {
-          title: 'embed-english-v3.0 | Cohere',
-          keywords: 'embed-english-v3.0 embed-english-v3.0 Cohere cohere Cohere'
-        })
-      ).toBe(true)
-      expect(
-        modelSelectFilter('cohere', {
-          title: 'embed-english-v3.0 | Cohere',
-          keywords: 'embed-english-v3.0 embed-english-v3.0 Cohere cohere Cohere'
-        })
-      ).toBe(true)
+      expect(screen.getByText('GPT-4.1')).toBeInTheDocument()
+      expect(screen.queryByText('text-embedding-ada-002')).not.toBeInTheDocument()
+      expect(screen.queryByText('embed-english-v3.0')).not.toBeInTheDocument()
     })
   })
 })

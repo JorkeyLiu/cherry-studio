@@ -1,5 +1,6 @@
 import { PushpinOutlined } from '@ant-design/icons'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
+import ModelNameWithId from '@renderer/components/ModelNameWithId'
 import ModelTagsWithLabel from '@renderer/components/ModelTagsWithLabel'
 import { TopView } from '@renderer/components/TopView'
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
@@ -121,7 +122,7 @@ const SelectModelPopupView: React.FC<Props> = ({
     [searchText]
   )
 
-  // 创建模型列表项 — name-only rendering; ID-aware search preserved via filterModelsByKeywords.
+  // 创建模型列表项 — inline name + muted model ID; ID-aware search preserved via filterModelsByKeywords.
   const createModelItem = useCallback(
     (model: Model, provider: Provider, isPinned: boolean): FlatListModel => {
       const modelId = getModelUniqId(model)
@@ -130,11 +131,25 @@ const SelectModelPopupView: React.FC<Props> = ({
       return {
         key: isPinned ? `${modelId}_pinned` : modelId,
         type: 'model',
+        // Inline presentation: display name first, then the muted monospace
+        // model ID when it differs from the name (house rule shared with the
+        // provider model settings list via ModelNameWithId). The pinned row
+        // keeps its provider hint.
+        // Width budget: the name+ID group grows into all the width the avatar and
+        // the right-aligned capability tags leave over, so an ID that fits is
+        // never shortened. Inside the group the name keeps its intrinsic width and
+        // the ID absorbs the remaining space, ellipsizing only when the row
+        // genuinely runs out (full ID stays available as its tooltip).
         name: (
           <ModelName>
             <div className="flex min-w-0 flex-1 items-center gap-1.5">
-              <span className="min-w-0 truncate">{model.name}</span>
-              {isPinned && <span className="whitespace-nowrap text-[var(--color-text-3)]">| {groupName}</span>}
+              <ModelNameWithId
+                model={model}
+                className="flex min-w-0 flex-1 items-center gap-1.5"
+                nameClassName="min-w-0 max-w-full shrink-0 truncate"
+                idClassName="min-w-0 shrink truncate font-mono text-[12px] leading-[1.2] text-[var(--color-text-3)]"
+              />
+              {isPinned && <span className="shrink-0 whitespace-nowrap text-[var(--color-text-3)]">| {groupName}</span>}
             </div>
           </ModelName>
         ),
