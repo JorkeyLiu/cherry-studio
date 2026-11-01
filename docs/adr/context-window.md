@@ -1,8 +1,8 @@
 # 上下文窗口治理（Context Window Governance）— 稳定锚点规范
 
 > **文档状态**：Authoritative（权威规范，实现阶段的目标契约）。本文档是上下文窗口（context window）语义的**唯一权威规范**：定义默认上下文数量（`contextCount`）、稳定 topic 锚点（`contextWindowAnchor`）、上下文窗口、允许的锚点迁移、持久化归属、兼容性修复与测试边界，防止既有语义漂移再次发生。
-> **决策锁**：CW-1 … CW-8（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-10-11
+> **决策锁**：CW-1 … CW-9（§3 决策表，durable decision IDs）。
+> **最后更新**：2026-11-01
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
@@ -17,7 +17,7 @@
 - **现状实现仍使用 `contextStartOverride` + 动态推导回退**：持久化的只有 per-topic 用户起点 override；无 override 时，有效窗口起点由 `contextCount` 与当前消息**动态推导**（`computeContextInfo` 每次调用重新计算），推导出的锚点是投影、不持久化。这使「锚点是否稳定」「重锚定是否产生无锚点状态」「改变 `contextCount` 是否移动既有窗口」等语义随实现者理解而漂移。
 - **重复漂移症状**：出现过 fixed/sliding 双模式的反复讨论与复活尝试；出现过把「点击已锚定消息」实现为取消锚定、使非空已初始化 topic 变成无锚点；出现过把 `contextCount` 变更理解为对既有 topic 生效。
 
-本文档以 CW-1…CW-8 锁定一个模型：**稳定锚点到末尾（stable anchor-to-end）**。锚点是持久化的 topic 上下文起点；非空已初始化 topic 恒有且仅有一个锚点；窗口 = 锚点 turn 至 topic 末尾；仅 CW-4 列举的显式情形移动锚点。实现阶段以本文档为契约目标，现状的 override + 动态回退由「兼容性修复」（§10）与「持久化与迁移边界」（§11）一次性收敛。
+本文档以 CW-1…CW-9 锁定一个模型：**稳定锚点到末尾（stable anchor-to-end）**。锚点是持久化的 topic 上下文起点；非空已初始化 topic 恒有且仅有一个锚点；窗口 = 锚点 turn 至 topic 末尾；仅 CW-4 列举的显式情形移动锚点；锚点之上触发的一次请求是临时的、无锚点的（CW-9）。实现阶段以本文档为契约目标，现状的 override + 动态回退由「兼容性修复」（§10）与「持久化与迁移边界」（§11）一次性收敛。
 
 ---
 
@@ -36,6 +36,7 @@
 | 默认窗口位置 | default window position | 由 `contextCount` 唯一确定的窗口起点位置（有限 N → 至多含 N 个 turn 的 turn；`null` → topic 首 turn），见 §6 |
 | 兼容性修复 | compatibility repair | 对缺少锚点的遗留非空 topic 恰好一次初始化锚点（CW-5） |
 | 现状标识符映射 | legacy mapping | 现状 `contextStartOverride[topicId]`（`{ kind: 'active'; groupKey }`）即旧版锚点表达；其 `active.groupKey` 语义等价于本规范的锚点值，由 §10/§11 字段演进为 `contextWindowAnchor` |
+| 锚点之上请求 | above-anchor request | 一次性的临时请求：触发用户先于该 route 的持久化锚点（锚点之上插入后发送、同一路径上的历史重发/编辑重发）。它携带有效路由触发点以上的完整历史 + 触发用户，不含触发点之后的对话与该触发的已有回复；不读取、不移动、不重算、不持久化锚点（CW-9） |
 
 ---
 
@@ -51,6 +52,7 @@
 | **CW-6** | **UI 高亮、TokenCount、边界分隔线、模型请求必须从同一持久化锚点与上下文窗口解析** | **Locked** |
 | **CW-7** | **持久化是普通 renderer assistant-settings 持久化**。迁移测试覆盖字段演进；**不需要**锚点专用重启 E2E | **Locked** |
 | **CW-8** | **不恢复 fixed/sliding 双模式**。只有一种模型：稳定锚点到末尾（stable anchor-to-end） | **Locked** |
+| **CW-9** | **锚点之上触发的一次请求是临时的、无锚点的**：在锚点之前发送（锚点之上插入后发送、以及同一路径上的历史重发/编辑重发）时，该次请求携带**当前有效路由上触发用户之前的完整历史 + 触发用户本身**，不含触发点之后的对话，也不含该触发消息已有回复；该前缀**不被当前 `contextCount` 截断**（系统提示与模型容量等既有非锚点规则保持不变）。它**不读取、不拓宽、不重算、不持久化**锚点，持久化锚点、边界分隔线与后续常规请求起点均不变；窗口内普通发送/重发的语义不变 | **Locked** |
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：CW-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
 
@@ -96,6 +98,7 @@
 | 分支创建 | 确定性继承父 topic 锚点（分支继承）：范围内按索引映射，不重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 同位），空分支无锚点 | 是（CW-4 · 分支继承） |
 | 兼容性修复（遗留非空 topic 缺锚点） | 恰好一次在默认窗口位置初始化锚点；永不重算有效锚点 | 是（CW-4/CW-5 · 兼容性修复） |
 | topic 清空为空 | 锚点移除（空 topic 无锚点，I-1） | 否（不变量推论） |
+| 在锚点之上发送（插入后发送 / 历史重发 / 编辑重发） | 锚点原样保留；该一次请求临时携带触发用户以上的完整有效路由历史 + 触发用户，前缀不被 `contextCount` 截断 | 否（CW-9） |
 
 ---
 
@@ -173,6 +176,7 @@
 
 - 单一解析器（现状 `computeContextInfo` 的演进形态）从**同一持久化锚点 + topic turns** 计算全部消费方：锚点高亮（anchor group key）、TokenCount（current/max）、边界分隔线（`boundaryMessageId`）、模型请求消息列表（CW-6）。
 - 任何组件不得自行推导窗口；运行时不存在「动态推导」语义（§6）。锚点缺失只出现在空 topic 或未修复的遗留 topic，由 §6/§10 处理，而非每次调用时重新推导。
+- **锚点之上请求（CW-9）**：触发用户先于该 route 持久化锚点时，该一次请求的历史前缀取自**当前有效路由的调用者本地完整读取**（`fetchWholeTopicSnapshot`，`whole-topic` 完备性；非视口、非共享投影、不做投影水合），并以稳定 ID 裁剪至触发用户（含）——不含触发之后的对话与该触发的已有回复，也不按 `contextCount` 截断。该请求不读取、不推导、不拓宽、不重算、不持久化锚点，因此不进入本节的锚点解析链：锚点高亮、TokenCount、边界分隔线仍由同一持久化锚点解析，分界线与后续常规请求起点不变。触发目标缺失或不在所寻址的有效路由上、以及真实权威读取失败，一律 fail-closed 并经既有请求错误通道报错。
 
 ---
 
@@ -182,6 +186,7 @@
 - **组件测试**：TokenCount 点击重锚定、消息锚点控件点击（含「点击已锚定 turn → 返回默认窗口位置」）。删除转移采用双层证据：转移语义（§9 确定性契约）由**纯函数单元测试**确立；删除后的锚点高亮/边界分隔线等 UI 表现由**共享的已解析锚点组件测试**确立——不要求专用的删除转移组件测试。
 - **证据层级**：按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`。**不要求**锚点专用重启 E2E（CW-7）。
 
+- **锚点之上请求（CW-9）**：请求组装层单元测试确立「完整有效路由前缀 + 触发用户、排除触发之后与触发已有回复、不被 `contextCount` 截断、不完整视口不参与、读取不改写持久化锚点、触发目标缺失/不在该路由时 fail-closed」。窗口内普通发送/重发沿用既有闭包证据，不需要重复资产。
 ---
 
 ## 14. 非目标（Non-goals）
@@ -196,7 +201,7 @@
 
 ## 15. 验收标准（Acceptance Criteria）
 
-- **AC-1**：本文档完整覆盖 CW-1…CW-8 决策表、状态与不变量（§4）、领域迁移表（§5）及全部六个领域章节（§6–§11）、一致性（§12）、测试契约（§13）、非目标（§14）。
+- **AC-1**：本文档完整覆盖 CW-1…CW-9 决策表、状态与不变量（§4）、领域迁移表（§5）及全部六个领域章节（§6–§11）、一致性（§12）、测试契约（§13）、非目标（§14）。
 - **AC-2**：全文内部一致——目标模型只用 stable anchor-to-end；「动态推导」仅出现于遗留现状与兼容性修复语境（§1/§6/§10/§14），不存在矛盾或滑窗（sliding）语言。
 - **AC-3**：`docs/architecture/architecture.md` 治理段落与 Redux `assistants` 行链接本文档，且不复制决策表。
 - **AC-4**：`AGENTS.md` Detailed References 含单条链接；既有 MUST/NEVER/gate/security 规则零改动；`CLAUDE.md` 仍为 `AGENTS.md` 的符号链接。

@@ -13,7 +13,6 @@ import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { buildBlockOverlay, mergeBlockOverlays } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import { filterEmptyMessages } from '@renderer/utils/messageUtils/filters'
 import { createNoModelError } from '@renderer/utils/noModelError'
 import type { ModelMessage } from 'ai'
 import { findLast, isEmpty } from 'lodash'
@@ -194,21 +193,25 @@ export class ConversationService {
     // queued users and assistant stubs after the trigger are excluded.
     const triggerIndex = closureMessages.findIndex((m) => m?.id === triggerId)
     let requestMessages: Message[]
-    let preAnchorAvailability = false
+    let requestOverlay = overlay
     if (triggerIndex === -1) {
-      if (authorityUser && authorityUser.message.id === triggerId) {
-        // Retry/regenerate target precedes the current anchor: preserve the
-        // explicitly designed lastUser-availability semantic (at least the
-        // triggering user is sent) without widening the anchor or deriving a
-        // silent default. The anchor window (future relative to the target)
-        // is not included.
-        requestMessages = [authorityUser.message]
-        preAnchorAvailability = true
-      } else {
-        throw new Error(
-          `[ConversationService] triggering user ${triggerId} not in authority closure for route ${anchorKey}; refusing partial viewport request`
-        )
-      }
+      // Trigger before this route's persisted anchor (insert above the
+      // boundary, and a historical resend/edit-resend on the same path). The
+      // anchored closure cannot carry it: it starts AT the anchor. This one
+      // request is temporary and anchor-free — it carries the authoritative
+      // effective-route history above the trigger plus the trigger itself,
+      // read at full-route scope and clipped at the trigger. The persisted
+      // anchor, the boundary divider and the origin of later regular requests
+      // are not read, widened, re-derived, or written here.
+      const preAnchorHistory = await ConversationService.readPreAnchorHistory(
+        topicId,
+        pinnedRoute,
+        triggerId,
+        anchorKey,
+        authorityUser
+      )
+      requestMessages = preAnchorHistory.messages
+      requestOverlay = mergeBlockOverlays(buildBlockOverlay(preAnchorHistory.blocks), authorityUser?.blocks)
     } else if (authorityUser && authorityUser.message.id === triggerId) {
       // Fresh triggering object (edited resend) at the same stable position.
       requestMessages = [...closureMessages.slice(0, triggerIndex), authorityUser.message]
@@ -216,29 +219,24 @@ export class ConversationService {
       requestMessages = closureMessages.slice(0, triggerIndex + 1)
     }
 
-    // Message conversion boundary: the validated closure is already the
-    // authoritative anchor-to-end slice, and the trigger clip above already
+    // Message conversion boundary: the validated closure (or, above the
+    // anchor, the caller-local complete route read clipped at the trigger) is
+    // already the authoritative slice, and the trigger clip above already
     // bounded it. Only the shared message-level filter pipeline runs here — no
     // turn regrouping, no anchor re-resolution, no window re-derivation from
     // this bounded slice, and no token-estimation list (never consumed on the
     // request path).
-    let uiMessages: Message[]
-    if (preAnchorAvailability) {
-      const nonEmpty = filterEmptyMessages(requestMessages, overlay)
-      uiMessages = nonEmpty.length > 0 ? nonEmpty : requestMessages
-    } else {
-      // Turn participation: context turns are built from user/assistant/system
-      // rows, so a row with a nullable/unknown role is in authority order but in
-      // no turn and is never part of the request window.
-      const contextTurnMessages = requestMessages.filter(
-        (m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system'
-      )
-      uiMessages = filterContextUiMessages(contextTurnMessages, overlay)
-      if (uiMessages.length === 0) {
-        const triggerMessage = requestMessages.find((m) => m?.id === triggerId)
-        if (triggerMessage) {
-          uiMessages = [triggerMessage]
-        }
+    // Turn participation: context turns are built from user/assistant/system
+    // rows, so a row with a nullable/unknown role is in authority order but in
+    // no turn and is never part of the request window.
+    const contextTurnMessages = requestMessages.filter(
+      (m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system'
+    )
+    let uiMessages = filterContextUiMessages(contextTurnMessages, requestOverlay)
+    if (uiMessages.length === 0) {
+      const triggerMessage = requestMessages.find((m) => m?.id === triggerId)
+      if (triggerMessage) {
+        uiMessages = [triggerMessage]
       }
     }
 
@@ -255,17 +253,66 @@ export class ConversationService {
     // path): imported/degraded attachments whose payload is missing are excluded
     // from this request only, with a single trigger-scoped notice. Genuine
     // failures of present attachments keep aborting in the converter.
-    const attachmentView = await ConversationService.applyAttachmentAvailability(uiMessages, overlay, triggerId)
+    const attachmentView = await ConversationService.applyAttachmentAvailability(uiMessages, requestOverlay, triggerId)
     uiMessages = attachmentView.uiMessages
     if (attachmentView.nothingSendable) {
       return { modelMessages: [], uiMessages, nothingSendable: true }
     }
 
     return {
-      modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay, attachmentView.attachmentFilter),
+      modelMessages: await convertMessagesToSdkMessages(
+        uiMessages,
+        model,
+        requestOverlay,
+        attachmentView.attachmentFilter
+      ),
       uiMessages,
       attachmentFilter: attachmentView.attachmentFilter
     }
+  }
+  /**
+   * Authoritative history above this route's persisted anchor.
+   *
+   * The anchored closure starts AT the anchor, so a trigger that precedes the
+   * anchor (insert above the boundary, historical resend/edit-resend on the
+   * same path) is not in it by construction. Its history therefore comes from
+   * the same authority at full-route scope: one caller-local complete
+   * effective-route read (never the loaded viewport, never a shared projection
+   * hydration, never a `contextCount` window), clipped at the triggering user
+   * inclusive. Nothing after the trigger — including the trigger's existing
+   * replies — belongs to this request. No anchor is read, derived, widened, or
+   * persisted here: the route's persisted anchor, boundary divider, and the
+   * origin of later regular requests are untouched.
+   *
+   * Missing/invalid route history and a trigger that is not on the addressed
+   * route both fail closed; the loaded projection is never a substitute.
+   */
+  private static async readPreAnchorHistory(
+    topicId: string,
+    pinnedRoute: string | null,
+    triggerId: string,
+    anchorKey: string,
+    authorityUser?: AuthorityUserSnapshot
+  ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
+    const snapshot = await dbService.fetchWholeTopicSnapshot(topicId, pinnedRoute)
+    if (snapshot?.snapshot?.completeness !== 'whole-topic' || snapshot.snapshot.topicId !== topicId) {
+      throw new Error(
+        `[ConversationService] invalid route history for route ${anchorKey}; refusing partial viewport request`
+      )
+    }
+    const routeMessages = snapshot.messages as unknown as Message[]
+    const triggerIndex = routeMessages.findIndex((m) => m?.id === triggerId)
+    if (triggerIndex === -1) {
+      throw new Error(
+        `[ConversationService] triggering user ${triggerId} not in authority route ${anchorKey}; refusing partial viewport request`
+      )
+    }
+    const messages = routeMessages.slice(0, triggerIndex + 1)
+    if (authorityUser && authorityUser.message.id === triggerId) {
+      // Fresh triggering object (edited resend) at the same stable position.
+      messages[messages.length - 1] = authorityUser.message
+    }
+    return { messages, blocks: snapshot.blocks as unknown as MessageBlock[] }
   }
 
   /**
