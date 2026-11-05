@@ -9195,13 +9195,7 @@ export class ChatDbAggregateService {
           // inside that route, which restores the §5.1 invariant and preserves the
           // child's effective route verbatim.
           const movedSet = new Set(movedIds)
-          let branchRows: TopicBranchData[] = []
-          try {
-            branchRows = repos.branches.listByTopic(topicId)
-          } catch (e) {
-            if (e instanceof Error && /no such table/i.test(e.message)) branchRows = []
-            else throw e
-          }
+          const branchRows = this.listBranchesTolerantInTx(repos, topicId)
           const reparentTargets = branchRows.filter((b) => movedSet.has(b.anchorMessageId))
           if (reparentTargets.length > 0) {
             // Cycle guard: a re-parented branch becomes a child of the new branch,
