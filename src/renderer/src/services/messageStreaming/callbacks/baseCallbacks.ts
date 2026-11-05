@@ -8,7 +8,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
-import { updateOneBlock } from '@renderer/store/messageBlock'
+import { removeManyBlocks, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
@@ -26,6 +26,7 @@ import { uuid } from '@renderer/utils'
 import { isAbortError, isTimeoutError, serializeError } from '@renderer/utils/error'
 import { createBaseMessageBlock, createErrorBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, getMainTextContent } from '@renderer/utils/messageUtils/find'
+import { coalesceAdjacentMainTextBlocks } from '@renderer/utils/messageUtils/mainTextCoalesce'
 import { isFocused, isOnHomePage } from '@renderer/utils/window'
 import type { AISDKError } from 'ai'
 import { NoOutputGeneratedError } from 'ai'
@@ -34,6 +35,78 @@ import type { BlockManager } from '../BlockManager'
 import type { AssistantExecutionState } from '../executionState'
 
 const logger = loggerService.withContext('BaseCallbacks')
+
+interface FinalMainTextFold {
+  /** Committed block roster, in message order, with adjacent text runs folded. */
+  blocks: MessageBlock[]
+  /** Ids of the folded-away blocks; they must be deleted with the roster write. */
+  removedBlockIds: string[]
+  /**
+   * Survivors whose payload the fold rewrote (joined content, merged citations,
+   * derived status). The live projection still holds their pre-fold entity, so
+   * convergence has to write these back for the UI to match what was committed.
+   */
+  rewrittenBlocks: MessageBlock[]
+}
+
+/**
+ * Folds adjacent main-text runs in the final block set, once per message.
+ *
+ * A text run boundary is a streaming artifact (the adapter emits
+ * TEXT_START/TEXT_COMPLETE per run and the text callbacks open a new block at
+ * every start), so a message whose text arrived in two runs is persisted as
+ * two adjacent `main_text` blocks even though the body is continuous. Finalize
+ * is the single seam where that can be normalized: the whole final set is
+ * known, nothing streams afterwards, and one atomic write can carry both the
+ * roster rewrite and the deletion of the absorbed rows.
+ *
+ * Fail-loud, never silent: if the rewrite would describe a roster the caller
+ * cannot prove (a survivor outside the roster or unresolved, a lost or
+ * duplicated block), the original set is kept and the inconsistency is logged
+ * with context. Nothing is deleted in that case.
+ */
+const foldFinalMainTextBlocks = (
+  finalBlocks: MessageBlock[],
+  rosterIds: readonly string[],
+  resolveBlock: (blockId: string) => MessageBlock | undefined
+): FinalMainTextFold => {
+  const coalesced = coalesceAdjacentMainTextBlocks(finalBlocks, { preserveRunMetadata: true })
+  // No adjacent run: the committed payload stays byte-identical to today's.
+  if (coalesced.length === finalBlocks.length) {
+    return { blocks: finalBlocks, removedBlockIds: [], rewrittenBlocks: [] }
+  }
+  // The fold only creates a new object for a run it actually merged; blocks it
+  // passed through keep their original reference.
+  const originalById = new Map(finalBlocks.map((block) => [block.id, block]))
+  const rewrittenBlocks = coalesced.filter((block) => originalById.get(block.id) !== block)
+
+  const roster = new Set(rosterIds)
+  const survivorIds = new Set(coalesced.map((block) => block.id))
+  const removedBlockIds = finalBlocks.filter((block) => !survivorIds.has(block.id)).map((block) => block.id)
+  const inconsistent =
+    coalesced.length === 0 ||
+    survivorIds.size !== coalesced.length ||
+    coalesced.some((block) => !roster.has(block.id) || !resolveBlock(block.id)) ||
+    coalesced.length + removedBlockIds.length !== finalBlocks.length ||
+    new Set(removedBlockIds).size !== removedBlockIds.length ||
+    removedBlockIds.some((blockId) => survivorIds.has(blockId) || !roster.has(blockId))
+
+  if (inconsistent) {
+    logger.error(
+      `[onComplete] Adjacent main-text fold produced an inconsistent roster; keeping the original block set. survivors=[${[
+        ...survivorIds
+      ].join(',')}] removed=[${removedBlockIds.join(',')}] roster=[${rosterIds.join(',')}]`,
+      new Error('inconsistent-main-text-fold')
+    )
+    return { blocks: finalBlocks, removedBlockIds: [], rewrittenBlocks: [] }
+  }
+
+  logger.debug(
+    `[onComplete] Folded ${removedBlockIds.length} adjacent main-text block(s) into their run survivor(s) before the final atomic write: removed=[${removedBlockIds.join(',')}]`
+  )
+  return { blocks: coalesced, removedBlockIds, rewrittenBlocks }
+}
+
 interface BaseCallbacksDependencies {
   blockManager: BlockManager
   dispatch: any
@@ -53,12 +126,16 @@ interface BaseCallbacksDependencies {
    * Single-transaction final checkpoint for onComplete (Fix B). Fail-loud:
    * rejects on DB failure so the success-final Redux commit below never runs
    * forked from DB. Execution-attempt binding lives in the closure.
+   * `blockIdsToDelete` carries the ids folded away by the final adjacent
+   * main-text coalescing, so the roster rewrite and the row deletion commit in
+   * the same transaction (an omitted list keeps every row).
    */
   saveFinalUpdatesAtomically: (
     messageId: string,
     topicId: string,
     messageUpdates: any,
-    blocksToUpdate: MessageBlock[]
+    blocksToUpdate: MessageBlock[],
+    blockIdsToDelete?: readonly string[]
   ) => Promise<unknown>
   assistant: Assistant
   getCurrentThinkingInfo?: () => { blockId: string | null; millsec: number }
@@ -529,18 +606,30 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           }
           return block
         })
+        // One continuous body, one persisted block: fold adjacent main-text
+        // runs now that the whole final set is known and before the single
+        // atomic write, so the committed roster never contains the streaming
+        // artifact. Non-text blocks (thinking/tool/file/error) between two text
+        // runs break adjacency and are never folded.
+        const finalMainTextFold = foldFinalMainTextBlocks(finalBlocks, referencedIds, resolveFinalBlock)
+        const committedBlocks = finalMainTextFold.blocks
+        const foldedAwayBlockIds = finalMainTextFold.removedBlockIds
+        const foldedSurvivorBlocks = finalMainTextFold.rewrittenBlocks
         const finalMessageUpdates = {
           status,
           metrics: response?.metrics,
           usage: response?.usage,
-          blocks: referencedIds
+          blocks: committedBlocks.map((block) => block.id)
         }
         executionState.applyMessagePatch(finalMessageUpdates as Partial<Message>)
         // possibleBlockId already patched inside finalBlocks if it was a
-        // streaming thinking block; otherwise ensure it converges.
+        // streaming thinking block; otherwise ensure it converges. A terminal
+        // target absorbed by the fold needs no patch: the survivor already
+        // carries the run's terminal status and the absorbed row is deleted.
         const possibleBlockForPatch = resolveFinalBlock(possibleBlockId)
         if (
           possibleBlockForPatch &&
+          !foldedAwayBlockIds.includes(possibleBlockId) &&
           !(
             possibleBlockForPatch.type === MessageBlockType.THINKING &&
             possibleBlockForPatch.status === MessageBlockStatus.STREAMING
@@ -549,17 +638,39 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           executionState.applyBlockPatch(possibleBlockId, { status: MessageBlockStatus.SUCCESS })
         }
         try {
-          await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
+          // Roster rewrite and folded-away deletion commit together: the
+          // delete list is what makes the persisted block set match the
+          // committed roster instead of orphaning the absorbed rows.
+          await saveFinalUpdatesAtomically(
+            assistantMsgId,
+            topicId,
+            finalMessageUpdates,
+            committedBlocks,
+            foldedAwayBlockIds
+          )
         } catch (error) {
           logger.error(`[onComplete] Final atomic persist failed for message ${assistantMsgId}:`, error as Error)
           throw error
         }
         // Redux AFTER the successful commit (DB-first), only when still
-        // loaded: converged thinking blocks + terminal block, then message.
-        // Detached executions never inject. Avoid double dispatch for the
-        // terminal block when it was already a converged thinking block.
+        // loaded: folded-away rows dropped, converged thinking blocks +
+        // terminal block, then message. Detached executions never inject.
+        // Avoid double dispatch for the terminal block when it was already a
+        // converged thinking block.
         if (isLoaded()) {
-          const convergedThinkingIds = finalBlocks
+          // Drop the folded-away rows from the projection first: the roster
+          // below no longer references them, so leaving the entities behind
+          // would show the projection a block set the DB no longer holds.
+          if (foldedAwayBlockIds.length > 0) {
+            dispatch(withClosureTopics(removeManyBlocks(foldedAwayBlockIds), topicId))
+          }
+          // Write the merged survivors back: the projection still holds their
+          // pre-fold payload, and the committed one is the joined text with the
+          // absorbed citations. Without this the UI would keep showing one run.
+          if (foldedSurvivorBlocks.length > 0) {
+            dispatch(withClosureTopics(upsertManyBlocks(foldedSurvivorBlocks), topicId))
+          }
+          const convergedThinkingIds = committedBlocks
             .filter(
               (b) =>
                 b.type === MessageBlockType.THINKING &&
@@ -569,14 +680,16 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
             )
             .map((b) => b.id)
           for (const tid of convergedThinkingIds) {
-            const committed = finalBlocks.find((b) => b.id === tid) as ThinkingMessageBlock
+            const committed = committedBlocks.find((b) => b.id === tid) as ThinkingMessageBlock
             const changes: Partial<ThinkingMessageBlock> = { status: MessageBlockStatus.SUCCESS }
             if (committed.thinking_millsec != null) {
               changes.thinking_millsec = committed.thinking_millsec
             }
             dispatch(withClosureTopics(updateOneBlock({ id: tid, changes }), topicId))
           }
-          if (!convergedThinkingIds.includes(possibleBlockId)) {
+          // A terminal target absorbed by the fold has already been dropped
+          // above; the survivor carries the run's terminal status instead.
+          if (!convergedThinkingIds.includes(possibleBlockId) && !foldedAwayBlockIds.includes(possibleBlockId)) {
             dispatch(
               withClosureTopics(
                 updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),

@@ -14,6 +14,8 @@ import type {
 } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockType } from '@renderer/types/newMessage'
 
+import { joinMainTextContents } from './mainTextCoalesce'
+
 export const findAllBlocks = (message: Message): MessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
     return []
@@ -109,17 +111,10 @@ export const findFileBlocks = (message: Message): FileMessageBlock[] => {
   return fileBlocks
 }
 
-/**
- * Joins main-text block contents with the canonical block separator.
- *
- * One logically-continuous message body may be stored as several `main_text`
- * blocks (streaming opens a new block at every text-start/text-end boundary).
- * This is the single join rule for such a body: every consumer — model input,
- * copy/export, token estimation, and the edit surface — must see the same text.
- * @param contents - Main-text block contents in message order.
- * @returns The joined content string (`''` when there is nothing to join).
- */
-export const joinMainTextContents = (contents: string[]): string => contents.join('\n\n')
+// Re-exported so this store-backed lookup module keeps exposing the canonical
+// join next to the readers that use it. The single implementation lives in the
+// store-free coalesce module, shared with the streaming finalize path.
+export { joinMainTextContents }
 
 /**
  * Gets the concatenated content string from all MainTextMessageBlocks of a message, in order.

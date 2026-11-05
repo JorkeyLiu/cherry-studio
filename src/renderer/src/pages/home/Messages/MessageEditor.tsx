@@ -21,6 +21,7 @@ import { determineCitationSource, withCitationTags } from '@renderer/utils/citat
 import { getFilesFromDropEvent, isSendMessageKeyPressed } from '@renderer/utils/input'
 import { createMainTextBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
+import { coalesceAdjacentMainTextBlocks } from '@renderer/utils/messageUtils/mainTextCoalesce'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { InputRef } from 'antd'
 import { Input, Modal, Tooltip } from 'antd'
@@ -78,7 +79,6 @@ import {
   MESSAGE_EDITOR_MEASURED_CHROME_PX,
   resolveMessageEditorHeight
 } from './messageEditorHeight'
-import { coalesceAdjacentMainTextBlocks } from './messageEditorMainText'
 import { createMessageEditorResendExtensions } from './messageEditorResendShortcut'
 import { createMessageEditorSaveExtensions } from './messageEditorSaveShortcut'
 import {

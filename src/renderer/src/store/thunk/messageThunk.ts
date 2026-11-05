@@ -427,7 +427,13 @@ export const saveFinalMessageAndBlocksAtomically = async (
   messageUpdates: Partial<Message>,
   blocksToUpdate: MessageBlock[],
   resendAttemptId?: string,
-  branchId?: string | null
+  branchId?: string | null,
+  /**
+   * Rows the caller has already removed from `messageUpdates.blocks` (the
+   * finalize fold of adjacent main-text runs). Deleted inside the same
+   * transaction as the roster rewrite, so no absorbed row is orphaned.
+   */
+  blockIdsToDelete: readonly string[] = []
 ): Promise<FileCleanupResult> => {
   try {
     // An explicitly pinned null addresses the main route and is never
@@ -437,7 +443,7 @@ export const saveFinalMessageAndBlocksAtomically = async (
       topicId,
       { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
       blocksToUpdate,
-      [],
+      [...blockIdsToDelete],
       resendAttemptId,
       route
     )
@@ -859,7 +865,8 @@ const fetchAndProcessAssistantResponseImpl = async (
     messageId: string,
     execTopicId: string,
     messageUpdates: Partial<Message>,
-    blocksToUpdate: MessageBlock[]
+    blocksToUpdate: MessageBlock[],
+    blockIdsToDelete?: readonly string[]
   ): Promise<FileCleanupResult> =>
     saveFinalMessageAndBlocksAtomically(
       execTopicId,
@@ -867,7 +874,8 @@ const fetchAndProcessAssistantResponseImpl = async (
       messageUpdates,
       blocksToUpdate,
       resendAttemptId,
-      execRoute
+      execRoute,
+      blockIdsToDelete
     )
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
@@ -4491,9 +4499,18 @@ export const setupChannelStream = (
       messageId: string,
       channelTopicId: string,
       messageUpdates: Partial<Message>,
-      blocksToUpdate: MessageBlock[]
+      blocksToUpdate: MessageBlock[],
+      blockIdsToDelete?: readonly string[]
     ): Promise<FileCleanupResult> =>
-      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate, undefined, null),
+      saveFinalMessageAndBlocksAtomically(
+        channelTopicId,
+        messageId,
+        messageUpdates,
+        blocksToUpdate,
+        undefined,
+        null,
+        blockIdsToDelete
+      ),
     assistant
   })
 

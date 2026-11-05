@@ -35,7 +35,8 @@ interface CallbacksDependencies {
     messageId: string,
     topicId: string,
     messageUpdates: any,
-    blocksToUpdate: any[]
+    blocksToUpdate: any[],
+    blockIdsToDelete?: readonly string[]
   ) => Promise<unknown>
   assistant: Assistant
 }

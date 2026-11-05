@@ -9,6 +9,7 @@ import type { Assistant, ExternalToolResult, MCPTool, Model } from '@renderer/ty
 import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import type { Chunk } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
+import type { MainTextMessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import type * as errorUtils from '@renderer/utils/error'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -34,7 +35,20 @@ const createMockCallbacks = (
   mockTopicId: string,
   mockAssistant: Assistant,
   dispatch: AppDispatch,
-  getState: () => ReturnType<typeof reducer> & RootState
+  getState: () => ReturnType<typeof reducer> & RootState,
+  /**
+   * Records the final atomic persist (committed roster + delete list) for
+   * callers that assert the persisted block set. Defaults to a resolve-only
+   * stub so every other test keeps asserting pure Redux end-state without
+   * touching the DB.
+   */
+  saveFinal: (
+    messageId: string,
+    topicId: string,
+    messageUpdates: any,
+    blocksToUpdate: any[],
+    blockIdsToDelete?: readonly string[]
+  ) => Promise<unknown> = vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
 ) =>
   createCallbacks({
     blockManager: new BlockManager({
@@ -54,7 +68,7 @@ const createMockCallbacks = (
     saveUpdatesToDB: vi.fn(),
     // Fix B single-transaction final checkpoint: resolve without touching the
     // DB so these integration tests keep asserting pure Redux end-state.
-    saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} }),
+    saveFinalUpdatesAtomically: saveFinal,
     assistant: mockAssistant
   })
 
@@ -848,5 +862,170 @@ describe('streamCallback Integration Tests', () => {
 
     // 验证blocks包含正确的内容
     expect(blocks.length).toBeGreaterThan(0)
+  })
+
+  // A text run boundary is a streaming artifact: the adapter reports
+  // TEXT_START/TEXT_COMPLETE per run, so two runs with nothing in between
+  // produce two adjacent main-text blocks for one continuous body. Finalize is
+  // the single seam that normalizes it.
+  describe('adjacent main-text run normalization at finalize', () => {
+    const finalPersistCalls = (saveFinal: ReturnType<typeof vi.fn>) =>
+      saveFinal.mock.calls as unknown as [
+        string,
+        string,
+        { blocks?: string[] },
+        Array<{ id: string; type: string; content: string }>,
+        string[]
+      ][]
+
+    const streamText = (text: string): Chunk[] => [
+      { type: ChunkType.TEXT_START },
+      { type: ChunkType.TEXT_DELTA, text },
+      { type: ChunkType.TEXT_COMPLETE, text }
+    ]
+
+    const completionChunks: Chunk[] = [
+      {
+        type: ChunkType.LLM_RESPONSE_COMPLETE,
+        response: {
+          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+          metrics: { completion_tokens: 50, time_completion_millsec: 1000 }
+        }
+      },
+      {
+        type: ChunkType.BLOCK_COMPLETE,
+        response: {
+          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+          metrics: { completion_tokens: 50, time_completion_millsec: 1000 }
+        }
+      }
+    ]
+
+    it('persists ONE joined main-text block for two runs with nothing between them', async () => {
+      const saveFinal = vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+      const callbacks = createMockCallbacks(
+        mockAssistantMsgId,
+        mockTopicId,
+        mockAssistant,
+        dispatch,
+        getState,
+        saveFinal
+      )
+
+      await processChunks(
+        [
+          { type: ChunkType.LLM_RESPONSE_CREATED },
+          ...streamText('First run.'),
+          ...streamText('Second run.'),
+          ...completionChunks
+        ],
+        callbacks
+      )
+
+      await vi.waitFor(() => {
+        expect(getState().messages.entities[mockAssistantMsgId]?.status).toBe(AssistantMessageStatus.SUCCESS)
+      })
+
+      expect(saveFinal).toHaveBeenCalledTimes(1)
+      const [, persistedTopicId, messageUpdates, blocksToUpdate, blockIdsToDelete] = finalPersistCalls(saveFinal)[0]
+      expect(persistedTopicId).toBe(mockTopicId)
+
+      const mainTextBlocks = blocksToUpdate.filter((block) => block.type === MessageBlockType.MAIN_TEXT)
+      expect(mainTextBlocks).toHaveLength(1)
+      expect(mainTextBlocks[0].content).toBe('First run.\n\nSecond run.')
+      // The roster no longer references the absorbed row, and that row is
+      // handed to persistence for deletion in the same transaction.
+      expect(messageUpdates.blocks).toEqual([mainTextBlocks[0].id])
+      expect(blockIdsToDelete).toHaveLength(1)
+      expect(messageUpdates.blocks).not.toContain(blockIdsToDelete[0])
+
+      // The projection matches what was persisted: one text block, plain
+      // content, and the absorbed entity is gone.
+      const state = getState()
+      const persistedMessage = state.messages.entities[mockAssistantMsgId]
+      expect(persistedMessage?.blocks).toEqual([mainTextBlocks[0].id])
+      const remainingMainText = Object.values(state.messageBlocks.entities).filter(
+        (block) => block?.type === MessageBlockType.MAIN_TEXT
+      )
+      expect(remainingMainText).toHaveLength(1)
+      expect(remainingMainText[0]?.content).toBe('First run.\n\nSecond run.')
+      expect(state.messageBlocks.entities[blockIdsToDelete[0]]).toBeUndefined()
+    })
+
+    it('keeps BOTH main-text blocks when reasoning separates the two runs', async () => {
+      const saveFinal = vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+      const callbacks = createMockCallbacks(
+        mockAssistantMsgId,
+        mockTopicId,
+        mockAssistant,
+        dispatch,
+        getState,
+        saveFinal
+      )
+
+      await processChunks(
+        [
+          { type: ChunkType.LLM_RESPONSE_CREATED },
+          ...streamText('Before reasoning.'),
+          { type: ChunkType.THINKING_START },
+          { type: ChunkType.THINKING_DELTA, text: 'Let me think...', thinking_millsec: 500 },
+          { type: ChunkType.THINKING_COMPLETE, text: 'Let me think...' },
+          ...streamText('After reasoning.'),
+          ...completionChunks
+        ],
+        callbacks
+      )
+
+      await vi.waitFor(() => {
+        expect(getState().messages.entities[mockAssistantMsgId]?.status).toBe(AssistantMessageStatus.SUCCESS)
+      })
+
+      expect(saveFinal).toHaveBeenCalledTimes(1)
+      const [, , messageUpdates, blocksToUpdate, blockIdsToDelete] = finalPersistCalls(saveFinal)[0]
+      const mainTextBlocks = blocksToUpdate.filter((block) => block.type === MessageBlockType.MAIN_TEXT)
+      expect(mainTextBlocks).toHaveLength(2)
+      expect(mainTextBlocks.map((block) => block.content)).toEqual(['Before reasoning.', 'After reasoning.'])
+      expect(messageUpdates.blocks).toHaveLength(3)
+      expect(blockIdsToDelete).toEqual([])
+      expect(getState().messages.entities[mockAssistantMsgId]?.blocks).toHaveLength(3)
+    })
+
+    it('leaves a single-run stream byte-identical to the un-normalized payload', async () => {
+      const saveFinal = vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+      const callbacks = createMockCallbacks(
+        mockAssistantMsgId,
+        mockTopicId,
+        mockAssistant,
+        dispatch,
+        getState,
+        saveFinal
+      )
+
+      await processChunks(
+        [{ type: ChunkType.LLM_RESPONSE_CREATED }, ...streamText('Hello world!'), ...completionChunks],
+        callbacks
+      )
+
+      await vi.waitFor(() => {
+        expect(getState().messages.entities[mockAssistantMsgId]?.status).toBe(AssistantMessageStatus.SUCCESS)
+      })
+
+      const [, , messageUpdates, blocksToUpdate, blockIdsToDelete] = finalPersistCalls(saveFinal)[0]
+      // One run: nothing to fold, so nothing is deleted and the roster is the
+      // referenced list itself.
+      expect(blockIdsToDelete).toEqual([])
+      expect(blocksToUpdate).toHaveLength(1)
+      expect(blocksToUpdate[0]).toMatchObject({
+        type: MessageBlockType.MAIN_TEXT,
+        content: 'Hello world!',
+        status: MessageBlockStatus.SUCCESS
+      })
+      expect(messageUpdates.blocks).toEqual([blocksToUpdate[0].id])
+      expect(getState().messageBlocks.entities[blocksToUpdate[0].id] as MainTextMessageBlock | undefined).toMatchObject(
+        {
+          content: 'Hello world!'
+        }
+      )
+    })
   })
 })
