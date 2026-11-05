@@ -1337,11 +1337,11 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     void openSamples
   })
 
-  test('assistant editor Escape while focused causes no viewport move', async ({ mainWindow }) => {
+  test('assistant editor Escape cancels the edit and returns to the pre-edit viewport', async ({ mainWindow }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'ASSISTANT-EDIT REGION ESCAPE (KEYBOARD): from the verified non-bottom reading viewport, open the assistant editor with a real click, confirm real editor focus (.cm-content preventScroll path), then press the physical Escape key. Geometry (first/every frame) is primary: the structural action-bar region must not move unexpectedly. Assistant Escape is currently a documented no-op (MessageEditor handleKeyDown guards role!==user); the test proves no-move in that state and records cancel as uncovered, or — if a future build closes on Escape — proves the exact pre-edit return.'
+        'ASSISTANT-EDIT REGION ESCAPE (KEYBOARD): from the verified non-bottom reading viewport, open the assistant editor with a real click, confirm real editor focus (.cm-content preventScroll path), then press the physical Escape key. Geometry (first/every frame) is primary: the structural action-bar region must not move unexpectedly. Escape cancels the edit for assistant messages too — MessageEditor runs the very cancel handler the Cancel button uses, for both roles. The expanded (maximized) view is an ownership exception only: there Escape belongs to the antd/rc-dialog wrapper, which closes the expansion and keeps the draft instead of reaching the surface handler. This test stays inline, where the engine-level handler owns Escape once focus is inside .cm-content (the surface handler stands down there): with a non-empty selection CodeMirror consumes the first Escape (deselect), so a second press is the one that cancels. The executed branch is therefore the cancel-then-return path, proving the exact pre-edit return; the retained else-branch still covers a press consumed before the cancel ladder ran.'
     })
     const page: Page = mainWindow
     const { targetAssistantId } = await test.step('seed mid-topic assistant topic and cold-activate', async () =>
@@ -1427,8 +1427,8 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       description: `focusBefore=${focusBefore} focusAfter=${focusAfter} afterActive=${afterActive} editorGone=${editorGone} stillOpen=${editorStillOpen} escWorst=${Number.isFinite(escWorst) ? escWorst.toFixed(1) : 'NaN'} regionWorst=${Number.isFinite(escRegionWorst) ? escRegionWorst.toFixed(1) : 'NaN'} scrollWorst=${Number.isFinite(escScrollWorst) ? escScrollWorst.toFixed(1) : 'NaN'} preScroll=${Math.round(preReading.scrollTop)} editScroll=${Math.round(editScroll.scrollTop)} afterScroll=${Math.round(afterScroll.scrollTop)} preRegion=${pre.regionOffset !== null ? Math.round(pre.regionOffset) : 'null'} editRegion=${editRegionBeforeEsc !== null ? Math.round(editRegionBeforeEsc) : 'null'} spy=${JSON.stringify(spy).slice(0, 900)}`
     })
     if (editorGone) {
-      // Future close-on-Escape build: exact pre-edit return, never inherited
-      // centering. Hover to reveal the footer box for post geometry.
+      // Escape cancel: exact pre-edit return, never inherited centering. Hover
+      // to reveal the footer box for post geometry.
       await page
         .locator(`#message-${escId(targetAssistantId)}[data-message-id="${escId(targetAssistantId)}"]`)
         .first()
@@ -1445,21 +1445,29 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
         'Escape-cancel close: must remain non-bottom (no bottom jump)'
       ).toBeGreaterThan(BOTTOM_TOL)
     } else {
-      // Documented current assistant behavior: Escape is a no-op (role guard)
-      // — the regression contract is strictly no unexpected move.
-      expect(editorStillOpen, 'assistant Escape leaves the editor open (documented role-guard no-op)').toBe(true)
-      expect(escRegionWorst, 'Escape no-op: painted action-bar region frames never jump').toBeLessThanOrEqual(
-        TRANSITION_TOL
+      // The press never reached the cancel ladder: with a non-empty selection
+      // CodeMirror consumes the first Escape (deselect), so the edit rightly
+      // stays open and a second press would cancel. The regression contract
+      // for that state stays strictly no unexpected move.
+      expect(
+        editorStillOpen,
+        'assistant Escape consumed by the selection: the editor stays open until a second press reaches cancel'
+      ).toBe(true)
+      expect(
+        escRegionWorst,
+        'Escape never reached cancel: painted action-bar region frames never jump'
+      ).toBeLessThanOrEqual(TRANSITION_TOL)
+      expect(escScrollWorst, 'Escape never reached cancel: scroll never moves unexpectedly').toBeLessThanOrEqual(
+        OFFSET_TOL
       )
-      expect(escScrollWorst, 'Escape no-op: scroll never moves unexpectedly').toBeLessThanOrEqual(OFFSET_TOL)
       expect(
         Math.abs(afterScroll.scrollTop - editScroll.scrollTop),
-        'Escape no-op: final scroll equals the editing viewport'
+        'Escape never reached cancel: final scroll equals the editing viewport'
       ).toBeLessThanOrEqual(OFFSET_TOL)
       test.info().annotations.push({
         type: 'aer-escape-uncovered',
         description:
-          'UNCOVERED: assistant Escape-cancel close path (MessageEditor handleKeyDown early-returns for role!==user, so Escape cannot cancel an assistant edit; keyboard-cancel return geometry for assistant is unproven by construction).'
+          'SECONDARY BRANCH: the press never reached the cancel ladder (with a non-empty selection CodeMirror consumes the first Escape, so the edit stays open until a second press). The assistant Escape-cancel close path itself is covered by the primary branch above; this branch adds the strict no-unexpected-move contract for a consumed press.'
       })
     }
     void escWorst
