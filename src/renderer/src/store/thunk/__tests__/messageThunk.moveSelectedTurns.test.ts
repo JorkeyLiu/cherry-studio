@@ -2,8 +2,13 @@
  * moveSelectedTurnsToNewBranchThunk — bounded gating.
  *
  * - Route mismatch / unknown source / unresolved / non-owned / noncontiguous /
- *   no preceding / preceding non-owned / branch anchor / unknown catalog /
- *   segment cut make zero IPC calls and return null.
+ *   no preceding / preceding non-owned / segment cut make zero IPC calls and
+ *   return null.
+ * - A selection that contains an existing branch anchor is no longer rejected:
+ *   the same owned continuous selection proceeds to exactly one IPC and Main
+ *   re-parents the branch instead.
+ * - A missing branch catalog no longer gates the move (the renderer menu keeps
+ *   its own known-catalog condition; Main revalidates in the transaction).
  * - Owned continuous selection with preceding anchor succeeds.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -200,7 +205,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
     expect(mocks.moveSelectedTurnsToNewBranch).not.toHaveBeenCalled()
   })
 
-  it('selection holding a branch anchor makes zero IPC', async () => {
+  it('selection holding a branch anchor is not rejected: exactly one IPC', async () => {
     const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
     const state = moveState({
       active: null,
@@ -215,11 +220,11 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       ['uB', 'uC'],
       'Moved'
     )(mocks.dispatch as any, (() => state) as any)
-    expect(res).toBeNull()
-    expect(mocks.moveSelectedTurnsToNewBranch).not.toHaveBeenCalled()
+    expect(res).not.toBeNull()
+    expect(mocks.moveSelectedTurnsToNewBranch).toHaveBeenCalledOnce()
   })
 
-  it('unknown catalog makes zero IPC', async () => {
+  it('unknown catalog no longer gates the move: exactly one IPC', async () => {
     const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
     const state = moveState({ active: null, loaded: LOADED, mutable: LOADED, selected: ['uB', 'uC'] })
     delete (state.topicBranch.branchesByTopic as Record<string, unknown>)['t-1']
@@ -229,8 +234,8 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       ['uB', 'uC'],
       'Moved'
     )(mocks.dispatch as any, (() => state) as any)
-    expect(res).toBeNull()
-    expect(mocks.moveSelectedTurnsToNewBranch).not.toHaveBeenCalled()
+    expect(res).not.toBeNull()
+    expect(mocks.moveSelectedTurnsToNewBranch).toHaveBeenCalledOnce()
   })
 
   it('segment cutting the selection makes zero IPC', async () => {

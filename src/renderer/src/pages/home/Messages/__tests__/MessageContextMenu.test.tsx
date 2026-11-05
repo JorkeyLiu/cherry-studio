@@ -320,7 +320,7 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       expect(byKey('moveToNewBranch').disabled).toBe(true)
     })
 
-    it('moveToNewBranch stays visible but disabled when the selection holds a branch anchor', () => {
+    it('moveToNewBranch stays enabled when the selection holds a branch anchor', () => {
       mocks.editMode.isEnabled = true
       mocks.editMode.selectedGroupIds = ['uB']
       mocks.editMode.groups = [
@@ -338,7 +338,7 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       const items = mocks.dropdownProps.current.menu.items
       const byKey = (key: string) => items.find((item) => item.key === key)!
       expect(byKey('moveToNewBranch')).toBeTruthy()
-      expect(byKey('moveToNewBranch').disabled).toBe(true)
+      expect(byKey('moveToNewBranch').disabled).toBe(false)
     })
 
     it('moveToNewBranch enables for an owned continuous selection with a preceding anchor', () => {

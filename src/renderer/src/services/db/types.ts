@@ -366,8 +366,10 @@ export interface MessageDataSource {
    * Move selected whole turns to a newly created child branch (purpose-specific
    * ownership move). The selection is addressed by stable group IDs and the
    * source route; Main expands authoritatively and validates contiguity,
-   * ownership, preceding anchor, branch-anchor protection, segments, and the
-   * mandatory exact expected-message-ID/order match (no unseen rows).
+   * ownership, preceding anchor, segments, and the mandatory exact
+   * expected-message-ID/order match (no unseen rows). Existing branch anchors
+   * inside the moved range are re-parented onto the new branch (their anchor and
+   * effective route unchanged), never rejected.
    */
   moveSelectedTurnsToNewBranch?(
     topicId: string,

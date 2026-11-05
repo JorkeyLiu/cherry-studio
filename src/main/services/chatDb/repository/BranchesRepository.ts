@@ -210,6 +210,30 @@ export class BranchesRepository {
       .run()
     return { affected: 1 }
   }
+  /**
+   * Re-point the ancestry parent of one branch.
+   *
+   * Purpose-specific Main-authoritative maintenance: `parentBranchId` is an
+   * identity-class column and is never writable through the generic patch path.
+   * When an explicit move migrates the ownership of a branch anchor to a new
+   * branch, the anchored child must follow the anchor to its new owner —
+   * otherwise it would resolve through the missing-anchor degradation and
+   * silently lose the history it inherited. Ancestry is re-pointed only;
+   * `anchorMessageId` and `name` stay untouched. Callers own the cycle and depth
+   * guards; unknown ids are a no-op.
+   */
+  setParent(id: string, parentBranchId: string): AffectedCount {
+    const current = this.db.select().from(topicBranches).where(eq(topicBranches.id, id)).get()
+    if (!current) return { affected: 0 }
+    const rowPatch = topicBranchToRowPatch({ parentBranchId, updatedAt: new Date().toISOString() })
+    const values = toUpdateValues((current as any).extra ?? null, rowPatch, COLUMN_MAP)
+    this.db
+      .update(topicBranches)
+      .set(values as any)
+      .where(eq(topicBranches.id, id))
+      .run()
+    return { affected: 1 }
+  }
 
   /**
    * Delete branch rows for a subtree (root + descendants). Owned messages

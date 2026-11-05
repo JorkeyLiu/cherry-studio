@@ -2905,14 +2905,15 @@ function persistRouteContextAnchors(
  * child branch with stable IDs. Renderer prechecks fail closed with zero IPC
  * on parent/active mismatch, unknown parent metadata, unresolved selection,
  * non-owned members, orphan/incomplete groups, noncontiguous loaded groups,
- * missing/non-owned preceding anchor, or a loaded-known branch anchor inside
- * the selection. The renderer-resolved display-order message IDs ride as the
- * mandatory `expectedSelectedMessageIds` exact-match guard; Main expands the
- * groups over the COMPLETE source route and requires exact ID/order equality
- * inside the same synchronous root transaction (cropped/orphan/incomplete or
- * changed contents fail closed with zero writes, never silently moving unseen
- * rows). Main revalidates atomically (contiguity, ownership, preceding
- * anchor, branch-anchor protection, segments) in the same root transaction.
+ * and a missing/non-owned preceding anchor. The renderer-resolved display-order
+ * message IDs ride as the mandatory `expectedSelectedMessageIds` exact-match
+ * guard; Main expands the groups over the COMPLETE source route and requires
+ * exact ID/order equality inside the same synchronous root transaction
+ * (cropped/orphan/incomplete or changed contents fail closed with zero writes,
+ * never silently moving unseen rows). Main revalidates atomically (contiguity,
+ * ownership, preceding anchor, segments) in the same root transaction and
+ * re-parents any existing branch whose anchor falls inside the moved range onto
+ * the new branch, leaving that branch's effective route verbatim.
  *
  * Route currency: prechecks run on fresh state immediately before IPC and the
  * route/generation is rechecked before IPC (zero IPC on change) and before
@@ -3044,21 +3045,6 @@ export const moveSelectedTurnsToNewBranchThunk =
       if (!isMutableForActiveRoute(state, topicId, precedingId)) {
         logger.error(`[moveSelectedTurnsToNewBranchThunk] Preceding anchor not owned; failing closed.`)
         return null
-      }
-      const catalog = (state as unknown as { topicBranch?: { branchesByTopic?: Record<string, unknown> } }).topicBranch
-        ?.branchesByTopic?.[topicId]
-      if (!Array.isArray(catalog)) {
-        logger.error(`[moveSelectedTurnsToNewBranchThunk] Unknown branch catalog; failing closed.`)
-        return null
-      }
-      const anchorSet = new Set(
-        (catalog as { anchorMessageId: string }[]).map((b) => b.anchorMessageId).filter(Boolean)
-      )
-      for (const id of expectedDisplayOrdered) {
-        if (anchorSet.has(id)) {
-          logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection holds a branch anchor; failing closed.`)
-          return null
-        }
       }
       try {
         const segState = (

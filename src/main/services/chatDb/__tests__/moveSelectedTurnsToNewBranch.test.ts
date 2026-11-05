@@ -2,8 +2,11 @@
  * moveSelectedTurnsToNewBranch — purpose-specific ownership move.
  *
  * A-B-C-D (turns) with B,C selected -> parent A-D, child A-B-C referencing A,
- * same stable IDs, blocks/attachments intact. Rejects: noncontiguous, missing,
- * first-selection, branch-anchor, non-owned, segment-cut. Zero partial writes.
+ * same stable IDs, blocks/attachments intact. A branch whose anchor message is
+ * part of the selection follows the anchor: its ancestry is re-pointed to the
+ * new branch with the anchor unchanged, so its effective route stays verbatim.
+ * Rejects: noncontiguous, missing, first-selection, non-owned, segment-cut,
+ * re-parent depth overflow. Zero partial writes.
  */
 import * as realFs from 'node:fs'
 import * as realOs from 'node:os'
@@ -33,6 +36,7 @@ import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 
 import { ChatDbAggregateService } from '../ChatDbAggregateService'
 import { runMigrations } from '../migration'
+import { MAX_BRANCH_DEPTH } from '../repository'
 import * as schema from '../schema'
 
 function makeTempDir(): string {
@@ -222,7 +226,7 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(branchOf(sqlite, 'uF')).toBe(b2)
   })
 
-  it('rejects noncontiguous, missing, first-selection, and branch-anchor selections with zero writes', () => {
+  it('rejects noncontiguous, missing, and first-selection selections with zero writes', () => {
     seedABCD(agg, 't1')
     const branchesBefore = okValue(agg.listBranches('t1')).branches.length
     const countBefore = (sqlite.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n
@@ -234,11 +238,7 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(agg.moveSelectedTurnsToNewBranch('t1', null, ['uA'], 'Bad', ['uA', 'aA']).ok).toBe(false)
     // Empty selection.
     expect(agg.moveSelectedTurnsToNewBranch('t1', null, [], 'Bad', []).ok).toBe(false)
-    // Selection containing an existing branch anchor rejects.
-    const anchorBranch = (okValue(agg.createBranch('t1', null, 'aB', 'Anchor')).branch as { id: string }).id
-    void anchorBranch
-    expect(agg.moveSelectedTurnsToNewBranch('t1', null, ['uB', 'uC'], 'Bad', ['uB', 'aB', 'uC', 'aC']).ok).toBe(false)
-    expect(okValue(agg.listBranches('t1')).branches.length).toBe(branchesBefore + 1)
+    expect(okValue(agg.listBranches('t1')).branches.length).toBe(branchesBefore)
     expect((sqlite.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n).toBe(countBefore)
     expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD'])
   })
@@ -279,22 +279,41 @@ describe('moveSelectedTurnsToNewBranch', () => {
     }
   })
 
-  function snapshotDbState(): {
+  function snapshotDbState(topicId: string = 't1'): {
     branchCount: number
+    branchRows: { id: string; parentBranchId: string | null; anchorMessageId: string }[]
     owners: Record<string, string | null>
+    allOwners: Record<string, string | null>
     mainOrders: number[]
     blockCount: number
     fileRefCount: number
   } {
-    const branchCount = okValue(agg.listBranches('t1')).branches.length
+    const branchCount = okValue(agg.listBranches(topicId)).branches.length
+    const branchRows = (
+      sqlite
+        .prepare('SELECT id, parent_branch_id AS p, anchor_message_id AS a FROM topic_branches ORDER BY id ASC')
+        .all() as { id: string; p: string | null; a: string }[]
+    ).map((r) => ({ id: r.id, parentBranchId: r.p, anchorMessageId: r.a }))
+    // `allOwners` below is the complete per-topic owner map; this fixed slice is
+    // kept for the t1 fixtures and skips ids the topic does not contain.
     const owners: Record<string, string | null> = {}
     for (const id of ['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD']) {
-      owners[id] = branchOf(sqlite, id)
+      const row = sqlite.prepare('SELECT branch_id AS b FROM messages WHERE id=?').get(id) as
+        | { b: string | null }
+        | undefined
+      if (row) owners[id] = row.b ?? null
+    }
+    const allOwners: Record<string, string | null> = {}
+    const ownerRows = sqlite
+      .prepare('SELECT id, branch_id AS b FROM messages WHERE topic_id=? ORDER BY id ASC')
+      .all(topicId) as { id: string; b: string | null }[]
+    for (const row of ownerRows) {
+      allOwners[row.id] = row.b ?? null
     }
     const mainOrders = (
       sqlite
         .prepare('SELECT sort_order AS o FROM messages WHERE topic_id=? AND branch_id IS NULL ORDER BY sort_order ASC')
-        .all('t1') as { o: number }[]
+        .all(topicId) as { o: number }[]
     ).map((r) => r.o)
     const blockCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM message_blocks').get() as { n: number }).n
     let fileRefCount = 0
@@ -303,7 +322,7 @@ describe('moveSelectedTurnsToNewBranch', () => {
     } catch {
       fileRefCount = 0
     }
-    return { branchCount, owners, mainOrders, blockCount, fileRefCount }
+    return { branchCount, branchRows, owners, allOwners, mainOrders, blockCount, fileRefCount }
   }
 
   it('rolls back branch INSERT plus owner/order writes when projection construction faults (zero partial writes)', async () => {
@@ -343,11 +362,10 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(effIds(agg, 't1', null)).toEqual(['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD'])
   })
 
-  it('HARD rejects any selection holding an existing branch anchor (sibling + nested) with zero writes', () => {
+  it('re-parents any branch anchored inside the selection and preserves its effective route verbatim (sibling + nested)', () => {
     seedABCD(agg, 't1')
     // Sibling anchor: L1 fork at aB on main.
     const b1 = (okValue(agg.createBranch('t1', null, 'aB', 'Sibling')).branch as { id: string }).id
-    void b1
     // Nested anchor: child of B1 anchored at its owned suffix message.
     // Seed one B1-owned suffix turn so the nested anchor is B1-owned.
     expect(
@@ -366,26 +384,192 @@ describe('moveSelectedTurnsToNewBranch', () => {
       ).ok
     ).toBe(true)
     const b2 = (okValue(agg.createBranch('t1', b1, 'aE', 'Nested')).branch as { id: string }).id
-    void b2
-    // ANY catalog anchor inside the selection rejects, independent of UI:
-    // aB is the sibling anchor, aE is the nested anchor.
-    const beforeSibling = snapshotDbState()
-    const siblingRes = agg.moveSelectedTurnsToNewBranch('t1', null, ['uB', 'uC'], 'Bad', ['uB', 'aB', 'uC', 'aC'])
-    expect(siblingRes.ok).toBe(false)
-    if (siblingRes.ok === false) {
-      expect(siblingRes.error.code).toBe('VALIDATION_ERROR')
+    // Route-preservation proof. Before: E(main) = [uA,aA,uB,aB,uC,aC,uD,aD] and
+    // b1: parent=main, anchor=aB → E(b1) = [uA,aA,uB,aB] + own(b1).
+    // After: E(main) = [uA,aA,uD,aD]; N: parent=main, anchor=aA →
+    // E(N) = [uA,aA,uB,aB,uC,aC]; b1: parent=N, anchor=aB → identical E(b1).
+    const routeB1Before = effIds(agg, 't1', b1)
+    const routeB2Before = effIds(agg, 't1', b2)
+    expect(routeB1Before).toEqual(['uA', 'aA', 'uB', 'aB', 'uE', 'aE'])
+    expect(routeB2Before).toEqual(['uA', 'aA', 'uB', 'aB', 'uE', 'aE'])
+    const branchesBefore = okValue(agg.listBranches('t1')).branches.length
+    const branchRowsBefore = (sqlite.prepare('SELECT COUNT(*) AS n FROM topic_branches').get() as { n: number }).n
+    // aB is the sibling anchor and sits inside the moved selection.
+    const res = agg.moveSelectedTurnsToNewBranch('t1', null, ['uB', 'uC'], 'Moved', ['uB', 'aB', 'uC', 'aC'])
+    expect(res.ok).toBe(true)
+    const newBranchId = (okValue(res).branch as { id: string }).id
+    // The moved anchor is now owned by the new branch.
+    expect(branchOf(sqlite, 'aB')).toBe(newBranchId)
+    // b1 follows its anchor: parent re-pointed, anchor untouched.
+    const b1Row = sqlite
+      .prepare('SELECT parent_branch_id AS p, anchor_message_id AS a FROM topic_branches WHERE id=?')
+      .get(b1) as { p: string | null; a: string }
+    expect(b1Row.p).toBe(newBranchId)
+    expect(b1Row.a).toBe('aB')
+    // b2 is untouched: still child of b1 and follows by route composition.
+    const b2Row = sqlite
+      .prepare('SELECT parent_branch_id AS p, anchor_message_id AS a FROM topic_branches WHERE id=?')
+      .get(b2) as { p: string | null; a: string }
+    expect(b2Row.p).toBe(b1)
+    expect(b2Row.a).toBe('aE')
+    // Verbatim effective routes: only the intermediate ownership changed.
+    expect(effIds(agg, 't1', b1)).toEqual(routeB1Before)
+    expect(effIds(agg, 't1', b2)).toEqual(routeB2Before)
+    // Only the new branch row was added; nothing deleted.
+    expect(okValue(agg.listBranches('t1')).branches.length).toBe(branchesBefore + 1)
+    expect((sqlite.prepare('SELECT COUNT(*) AS n FROM topic_branches').get() as { n: number }).n).toBe(
+      branchRowsBefore + 1
+    )
+  })
+
+  it('re-parents a nested child branch whose anchor sits inside a moved branch suffix', () => {
+    seedABCD(agg, 'tn')
+    const b1 = (okValue(agg.createBranch('tn', null, 'aA', 'B1')).branch as { id: string }).id
+    const appendOwned = (branchId: string, uid: string, aid: string): void => {
+      expect(
+        agg.appendMessage(
+          'tn',
+          msgJson(uid, 'tn') as never,
+          [blockJson(`b-${uid}`, uid) as never],
+          undefined,
+          undefined,
+          {
+            branchId
+          }
+        ).ok
+      ).toBe(true)
+      expect(
+        agg.appendMessage(
+          'tn',
+          msgJson(aid, 'tn', { role: 'assistant', askId: uid }) as never,
+          [blockJson(`b-${aid}`, aid) as never],
+          undefined,
+          undefined,
+          { branchId }
+        ).ok
+      ).toBe(true)
     }
-    expect(snapshotDbState()).toEqual(beforeSibling)
-    // Nested-anchor selection through the B1 route (uE turn holds anchor aE).
-    const beforeNested = snapshotDbState()
-    const nestedRes = agg.moveSelectedTurnsToNewBranch('t1', b1, ['uE'], 'Bad', ['uE', 'aE'])
-    expect(nestedRes.ok).toBe(false)
-    if (nestedRes.ok === false) {
-      expect(nestedRes.error.code).toBe('VALIDATION_ERROR')
+    appendOwned(b1, 'uE', 'aE')
+    appendOwned(b1, 'uF', 'aF')
+    // Child anchored at a b1-owned suffix message: E(child) = E(b1) through aF.
+    const child = (okValue(agg.createBranch('tn', b1, 'aF', 'Child')).branch as { id: string }).id
+    const routeChildBefore = effIds(agg, 'tn', child)
+    expect(routeChildBefore).toEqual(['uA', 'aA', 'uE', 'aE', 'uF', 'aF'])
+    // The move's preceding anchor (aE) is b1-owned and the anchor of `child`
+    // (aF) is inside the moved selection.
+    const res = agg.moveSelectedTurnsToNewBranch('tn', b1, ['uF'], 'Nested', ['uF', 'aF'])
+    expect(res.ok).toBe(true)
+    const newBranchId = (okValue(res).branch as { id: string }).id
+    const childRow = sqlite
+      .prepare('SELECT parent_branch_id AS p, anchor_message_id AS a FROM topic_branches WHERE id=?')
+      .get(child) as { p: string | null; a: string }
+    expect(childRow.p).toBe(newBranchId)
+    expect(childRow.a).toBe('aF')
+    expect(branchOf(sqlite, 'aF')).toBe(newBranchId)
+    // E(child) is unchanged: E(b1) = [uA,aA,uE,aE]; E(new) = that + [uF,aF].
+    expect(effIds(agg, 'tn', b1)).toEqual(['uA', 'aA', 'uE', 'aE'])
+    expect(effIds(agg, 'tn', newBranchId)).toEqual(['uA', 'aA', 'uE', 'aE', 'uF', 'aF'])
+    expect(effIds(agg, 'tn', child)).toEqual(routeChildBefore)
+  })
+
+  // =========================================================================
+  // Re-parent depth boundary
+  //
+  // The repository resolves at most MAX_BRANCH_DEPTH - 1 ancestors: the
+  // `ancestorsOf` loop runs `depth < MAX_BRANCH_DEPTH` times and never pushes
+  // the branch itself, so a node with MAX_BRANCH_DEPTH ancestors is silently
+  // truncated at its root-most one. The guard must therefore sit on
+  // MAX_BRANCH_DEPTH - 1, and these fixtures pin both sides of that boundary.
+  // =========================================================================
+
+  /**
+   * Linear branch chain L1..L(deepest) under `topicId`, forked from main at
+   * `aroot`: L1 owns the move's preceding turn (up/ap) and the target turn
+   * (u1/a1); L2 forks from L1 at a1; every L(k+1) forks from Lk at its own
+   * assistant row. L(k) has k-1 ancestors, so L(deepest) has `deepest - 1`
+   * before a re-parent of L2 and `deepest` after one.
+   */
+  function buildBranchChain(topicId: string, deepest: number): string[] {
+    expect(agg.ensureTopic(topicId, 'assistant-1', `topic-${topicId}`).ok).toBe(true)
+    seedTurn(agg, topicId, 'uroot', ['aroot'])
+    const appendOwned = (branchId: string, uid: string, aid: string): void => {
+      expect(
+        agg.appendMessage(
+          topicId,
+          msgJson(uid, topicId) as never,
+          [blockJson(`b-${uid}`, uid) as never],
+          undefined,
+          undefined,
+          {
+            branchId
+          }
+        ).ok
+      ).toBe(true)
+      expect(
+        agg.appendMessage(
+          topicId,
+          msgJson(aid, topicId, { role: 'assistant', askId: uid }) as never,
+          [blockJson(`b-${aid}`, aid) as never],
+          undefined,
+          undefined,
+          { branchId }
+        ).ok
+      ).toBe(true)
     }
-    expect(snapshotDbState()).toEqual(beforeNested)
-    expect(branchOf(sqlite, 'uB')).toBeNull()
-    expect(branchOf(sqlite, 'uE')).toBe(b1)
+    const chain: string[] = []
+    const l1 = (okValue(agg.createBranch(topicId, null, 'aroot', 'L1')).branch as { id: string }).id
+    chain.push(l1)
+    appendOwned(l1, 'up', 'ap')
+    appendOwned(l1, 'u1', 'a1')
+    let current = (okValue(agg.createBranch(topicId, l1, 'a1', 'L2')).branch as { id: string }).id
+    chain.push(current)
+    for (let level = 2; level < deepest; level++) {
+      appendOwned(current, `u${level}`, `a${level}`)
+      current = (okValue(agg.createBranch(topicId, current, `a${level}`, `L${level + 1}`)).branch as { id: string }).id
+      chain.push(current)
+    }
+    return chain
+  }
+
+  it('accepts a re-parent landing exactly at the resolvable depth limit', () => {
+    // L(MAX_BRANCH_DEPTH-1) ends with MAX_BRANCH_DEPTH-1 ancestors after the
+    // re-parent: exactly what `ancestorsOf` can still return.
+    const deepest = MAX_BRANCH_DEPTH - 1
+    const chain = buildBranchChain('td', deepest)
+    const rootRoute = chain[0]
+    const target = chain[1]
+    const deepestBranch = chain[deepest - 1]
+    // Fully resolvable before the move (deepest - 1 = MAX_BRANCH_DEPTH - 2).
+    const routeBefore = effIds(agg, 'td', deepestBranch)
+    expect(routeBefore[0]).toBe('uroot')
+    const res = agg.moveSelectedTurnsToNewBranch('td', rootRoute, ['u1'], 'Moved', ['u1', 'a1'])
+    expect(res.ok).toBe(true)
+    const newBranchId = (okValue(res).branch as { id: string }).id
+    const targetRow = sqlite
+      .prepare('SELECT parent_branch_id AS p, anchor_message_id AS a FROM topic_branches WHERE id=?')
+      .get(target) as { p: string | null; a: string }
+    expect(targetRow.p).toBe(newBranchId)
+    expect(targetRow.a).toBe('a1')
+    // Still fully resolvable after the move: the composition reaches the main
+    // route and the deepest route is verbatim (nothing truncated root-most).
+    const routeAfter = effIds(agg, 'td', deepestBranch)
+    expect(routeAfter[0]).toBe('uroot')
+    expect(routeAfter).toEqual(routeBefore)
+  })
+
+  it('rejects with zero writes when re-parenting would exceed the resolvable depth limit', () => {
+    // One ancestor over: L(MAX_BRANCH_DEPTH) would end with MAX_BRANCH_DEPTH
+    // ancestors, which `ancestorsOf` cannot resolve.
+    const chain = buildBranchChain('td', MAX_BRANCH_DEPTH)
+    const rootRoute = chain[0]
+    const before = snapshotDbState('td')
+    const res = agg.moveSelectedTurnsToNewBranch('td', rootRoute, ['u1'], 'Bad', ['u1', 'a1'])
+    expect(res.ok).toBe(false)
+    if (res.ok === false) {
+      expect(res.error.code).toBe('VALIDATION_ERROR')
+      expect(res.error.message).toContain(`maximum resolvable branch depth (${MAX_BRANCH_DEPTH - 1}`)
+    }
+    expect(snapshotDbState('td')).toEqual(before)
   })
 
   it('HARD rejects expected-selection mismatch (cropped subset, wrong order, unseen rows) with zero writes', () => {

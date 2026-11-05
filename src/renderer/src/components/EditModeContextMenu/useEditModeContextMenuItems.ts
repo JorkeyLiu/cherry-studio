@@ -45,11 +45,6 @@ export function useEditModeContextMenuItems(topicId: string) {
   const catalogKnown = useAppSelector((state) =>
     Object.prototype.hasOwnProperty.call(state.topicBranch?.branchesByTopic ?? {}, topicId)
   )
-  const branchAnchors = useAppSelector((state) => {
-    const list = state.topicBranch?.branchesByTopic?.[topicId]
-    if (!Array.isArray(list)) return [] as string[]
-    return list.map((b) => b.anchorMessageId).filter((id): id is string => typeof id === 'string')
-  })
 
   const getSelectedMessageIds = useCallback((): string[] => {
     if (selectedGroupIds.length === 0) return []
@@ -261,10 +256,6 @@ export function useEditModeContextMenuItems(topicId: string) {
     if (firstIdx <= 0) return false
     const precedingId = allMessageIds[firstIdx - 1]
     if (!mutableSet.has(precedingId)) return false
-    const anchorSet = new Set(branchAnchors)
-    for (const id of msgIds) {
-      if (anchorSet.has(id)) return false
-    }
     const segments = getSegmentsForTopic(topicId)
     const movedSet = new Set(msgIds)
     for (const seg of segments) {
@@ -286,7 +277,6 @@ export function useEditModeContextMenuItems(topicId: string) {
     getSelectedMessageIds,
     checkMessagesContinuous,
     allMessageIds,
-    branchAnchors,
     getSegmentsForTopic,
     topicId
   ])

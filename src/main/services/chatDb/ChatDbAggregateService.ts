@@ -107,6 +107,7 @@ import type {
   TopicReferenceData
 } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
+import { MAX_BRANCH_DEPTH } from './repository'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import { createImportWriter } from './repository/ImportWriter'
@@ -9010,7 +9011,18 @@ export class ChatDbAggregateService {
    * from the source route to a newly created child branch. Stable IDs,
    * topic, blocks, file references, askId relations and contents are
    * preserved. The new branch anchors at the immutable preceding message.
-   * Ordinary identity patch stays forbidden; no general reparent API.
+   * The generic identity-patch path and any general reparent API stay
+   * forbidden; the sole purpose-specific exception is this command's
+   * anchor-following re-parent, which writes through
+   * `BranchesRepository.setParent`.
+   *
+   * Anchor-following re-parent: a branch whose anchor message is part of the
+   * move loses that anchor's ownership to the new branch, so its ancestry is
+   * re-pointed to the new branch with the anchor unchanged. That restores the
+   * invariant "anchor is on the parent route and owned by it" and leaves the
+   * child's effective route verbatim (only the intermediate ownership moves).
+   * Descendants keep their own parent and follow by route composition. Cycle
+   * and depth guards run before any write, so a rejected move writes nothing.
    *
    * Atomic in one root transaction: branch row + message owners + per-owner
    * dense orders. Any validation failure rejects with zero writes.
@@ -9175,6 +9187,14 @@ export class ChatDbAggregateService {
               `Preceding anchor ${anchorId} is not owned by the source route and cannot fork a child branch`
             )
           }
+          // Anchor-following re-parent (ADR §5.3). A branch whose anchor is part of
+          // this move loses that anchor to the new branch. Leaving its parent alone
+          // would drop it into the missing-anchor degradation (§4.3) and silently
+          // truncate the history it inherited, so re-point it to the new branch with
+          // an unchanged anchor: the anchor is then owned by the new branch and still
+          // inside that route, which restores the §5.1 invariant and preserves the
+          // child's effective route verbatim.
+          const movedSet = new Set(movedIds)
           let branchRows: TopicBranchData[] = []
           try {
             branchRows = repos.branches.listByTopic(topicId)
@@ -9182,15 +9202,58 @@ export class ChatDbAggregateService {
             if (e instanceof Error && /no such table/i.test(e.message)) branchRows = []
             else throw e
           }
-          const existingAnchors = new Set(branchRows.map((b) => b.anchorMessageId))
-          for (const id of movedIds) {
-            if (existingAnchors.has(id)) {
-              throw new ChatDbValidationError(
-                `Message ${id} is an existing branch anchor and cannot move to a new branch`
-              )
+          const reparentTargets = branchRows.filter((b) => movedSet.has(b.anchorMessageId))
+          if (reparentTargets.length > 0) {
+            // Cycle guard: a re-parented branch becomes a child of the new branch,
+            // whose own parent is the source route, so it must not sit on that
+            // route's ancestry. Moved rows are all source-owned, so this is defensive.
+            const forbidden = new Set<string>(
+              sourceRoute === null ? [] : [sourceRoute, ...repos.branches.ancestorsOf(sourceRoute).map((b) => b.id)]
+            )
+            for (const target of reparentTargets) {
+              if (forbidden.has(target.id)) {
+                throw new ChatDbValidationError(
+                  `Branch ${target.id} owns the source route ancestry and cannot be re-parented`
+                )
+              }
+            }
+            // Depth guard: re-parenting deepens every node of the target subtree by
+            // one ancestor. The real capacity is MAX_BRANCH_DEPTH - 1, not
+            // MAX_BRANCH_DEPTH: `ancestorsOf` iterates at most MAX_BRANCH_DEPTH times
+            // (`depth < MAX_BRANCH_DEPTH`) and its first iteration visits the branch
+            // itself without pushing, so at most MAX_BRANCH_DEPTH - 1 ancestors can
+            // ever be returned. A node with MAX_BRANCH_DEPTH ancestors is therefore
+            // unresolvable — route composition would silently truncate its root-most
+            // ancestor — so the guard sits on MAX_BRANCH_DEPTH - 1. Measured exactly
+            // rather than with `ancestorsOf`, which saturates at the very limit it is
+            // checked against: the target's own count is exact (it is a direct child
+            // of the source route) and the subtree depth comes from a bounded
+            // breadth-first descent.
+            const maxResolvableAncestors = MAX_BRANCH_DEPTH - 1
+            for (const target of reparentTargets) {
+              const targetAncestors = repos.branches.ancestorsOf(target.id).length
+              let subtreeDepth = 0
+              let frontier: string[] = [target.id]
+              const visited = new Set<string>([target.id])
+              for (let level = 1; level <= MAX_BRANCH_DEPTH + 1 && frontier.length > 0; level++) {
+                const next: string[] = []
+                for (const id of frontier) {
+                  for (const child of repos.branches.listChildrenOf(id)) {
+                    if (visited.has(child.id)) continue
+                    visited.add(child.id)
+                    next.push(child.id)
+                  }
+                }
+                if (next.length > 0) subtreeDepth = level
+                frontier = next
+              }
+              if (targetAncestors + 1 + subtreeDepth > maxResolvableAncestors) {
+                throw new ChatDbValidationError(
+                  `Re-parenting branch ${target.id} would exceed the maximum resolvable branch depth (${maxResolvableAncestors} ancestors)`
+                )
+              }
             }
           }
-          const movedSet = new Set(movedIds)
           const segments = repos.segments.listByTopic(topicId)
           for (const seg of segments) {
             const memberIds = repos.segments.getMessageIds(seg.id)
@@ -9230,6 +9293,11 @@ export class ChatDbAggregateService {
               // deno-lint-ignore no-explicit-any
               .where(eq(schema.messages.id, movedIds[i]) as any)
               .run()
+          }
+          // Applied in the same root transaction so the branch tree and the message
+          // owners can never be observed apart.
+          for (const target of reparentTargets) {
+            repos.branches.setParent(target.id, newBranchId)
           }
           const remainingSourceIds = effective
             .filter((m) => !movedSet.has(m.id) && (m.branchId ?? null) === sourceRoute)

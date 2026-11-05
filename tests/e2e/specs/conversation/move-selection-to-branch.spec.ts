@@ -5,8 +5,8 @@
  * actual right-click context menu (`Move to New Branch` / `移至新建分支`),
  * actual new branch route with stable IDs, parent/new route sequences, and
  * same-profile relaunch persistence. Negative cases assert the menu item
- * stays visible but disabled (no preceding anchor; selection holds a branch
- * anchor).
+ * stays visible but disabled when the selection has no owned preceding
+ * anchor; a selection holding a branch anchor now migrates and re-parents it.
  *
  * Uses the standard shared fixture, a unique disposable profile, and mocked
  * external providers. Not run by the implementation lane; executed by
@@ -615,9 +615,7 @@ test.describe('Move selected turns to new branch (focused)', () => {
     expect(fs.existsSync(dbPath!)).toBe(true)
   })
 
-  test('menu stays visible but disabled with no preceding anchor or a branch anchor in the selection', async ({
-    mainWindow
-  }) => {
+  test('menu stays visible but disabled when the selection has no owned preceding anchor', async ({ mainWindow }) => {
     const page = mainWindow
     await waitForAppReady(page)
     const assistantId = await prepareAssistant(page, 20)
@@ -642,7 +640,9 @@ test.describe('Move selected turns to new branch (focused)', () => {
     await expect(firstItem).toBeDisabled({ timeout: 15000 })
     await page.keyboard.press('Escape')
 
-    // Selection holding an existing branch anchor -> disabled.
+    // Selecting from the first turn has no owned preceding anchor -> still
+    // disabled. A held branch anchor is no longer a disabling reason (such a
+    // selection migrates and re-parents that branch).
     const created = (await page.evaluate(
       async ({ tid, anchor }: { tid: string; anchor: string }) => {
         const win = window as unknown as {
