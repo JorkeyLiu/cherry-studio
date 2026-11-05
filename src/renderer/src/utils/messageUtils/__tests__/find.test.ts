@@ -11,7 +11,7 @@ import {
   createMessage,
   createThinkingBlock
 } from '../create'
-import { isAssistantInterruptedThinkingOnlyMessage } from '../find'
+import { getMainTextContent, isAssistantInterruptedThinkingOnlyMessage, joinMainTextContents } from '../find'
 
 const reducer = combineReducers({
   messageBlocks: messageBlocksSlice.reducer
@@ -133,6 +133,36 @@ describe('Message Find Utils', () => {
       mockStore.dispatch(messageBlocksSlice.actions.upsertManyBlocks([thinkingBlock, toolBlock, errorBlock]))
 
       expect(isAssistantInterruptedThinkingOnlyMessage(message)).toBe(false)
+    })
+  })
+
+  describe('joinMainTextContents', () => {
+    it('returns an empty string when there is nothing to join', () => {
+      expect(joinMainTextContents([])).toBe('')
+    })
+
+    it('returns a single content unchanged', () => {
+      expect(joinMainTextContents(['only part'])).toBe('only part')
+    })
+
+    it('joins several contents with the canonical blank-line separator', () => {
+      expect(joinMainTextContents(['first part', 'second part', 'third part'])).toBe(
+        'first part\n\nsecond part\n\nthird part'
+      )
+    })
+
+    it('is the separator getMainTextContent applies to stored blocks', () => {
+      const messageId = 'assistant-two-texts'
+      const first = createMainTextBlock(messageId, 'first part', { status: MessageBlockStatus.SUCCESS })
+      const second = createMainTextBlock(messageId, 'second part', { status: MessageBlockStatus.SUCCESS })
+      const message = createMessage('assistant', 'topic-1', 'assistant-1', {
+        id: messageId,
+        blocks: [first.id, second.id]
+      })
+
+      mockStore.dispatch(messageBlocksSlice.actions.upsertManyBlocks([first, second]))
+
+      expect(getMainTextContent(message)).toBe('first part\n\nsecond part')
     })
   })
 })

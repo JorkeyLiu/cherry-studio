@@ -22,6 +22,7 @@ import { getFilesFromDropEvent, isSendMessageKeyPressed } from '@renderer/utils/
 import { createMainTextBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
+import type { InputRef } from 'antd'
 import { Input, Modal, Tooltip } from 'antd'
 import {
   Bold,
@@ -77,6 +78,7 @@ import {
   MESSAGE_EDITOR_MEASURED_CHROME_PX,
   resolveMessageEditorHeight
 } from './messageEditorHeight'
+import { coalesceAdjacentMainTextBlocks } from './messageEditorMainText'
 import { createMessageEditorResendExtensions } from './messageEditorResendShortcut'
 import { createMessageEditorSaveExtensions } from './messageEditorSaveShortcut'
 import {
@@ -111,23 +113,29 @@ interface PersistenceOperation {
 
 const logger = loggerService.withContext('MessageBlockEditor')
 
-const getInitialEditableBlocks = (message: Message) => {
+/**
+ * Seeds the editable draft from the persisted message blocks.
+ *
+ * Adjacent main-text blocks are folded into one editor surface (see
+ * `coalesceAdjacentMainTextBlocks`), so a body stored as several blocks during
+ * streaming opens as the one continuous text the read view shows.
+ */
+const getInitialEditableBlocks = (message: Message): MessageBlock[] => {
   const allBlocks = findAllBlocks(message)
 
-  if (
+  const draftBlocks =
     !allBlocks.some((block) => block.type === MessageBlockType.MAIN_TEXT) &&
     isAssistantInterruptedThinkingOnlyMessage(message)
-  ) {
-    return [
-      ...allBlocks,
-      createMainTextBlock(message.id, '', {
-        model: message.model,
-        status: MessageBlockStatus.SUCCESS
-      })
-    ]
-  }
+      ? [
+          ...allBlocks,
+          createMainTextBlock(message.id, '', {
+            model: message.model,
+            status: MessageBlockStatus.SUCCESS
+          })
+        ]
+      : allBlocks
 
-  return allBlocks
+  return coalesceAdjacentMainTextBlocks(draftBlocks)
 }
 
 type MainTextViewMode = 'source' | 'preview'
@@ -225,6 +233,14 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   // save/resend shortcuts, so the key handlers never depend on a stale render.
   const disabledRef = useRef(disabled)
   disabledRef.current = disabled
+  // Find/replace Tab hop. Two copies of the find bar can be mounted at once
+  // (the inline footprint hold plus the expanded modal), so each copy owns
+  // its own input refs: one shared pair would let the inline find field focus
+  // the modal's replace field.
+  const inlineFindInputRef = useRef<InputRef>(null)
+  const inlineReplaceInputRef = useRef<InputRef>(null)
+  const expandedFindInputRef = useRef<InputRef>(null)
+  const expandedReplaceInputRef = useRef<InputRef>(null)
 
   useEffect(() => {
     contentRef.current = block.content
@@ -246,6 +262,44 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
       editorRef.current?.focus?.({ preventScroll: true })
     } catch {}
   }, [])
+
+  /**
+   * Inline surface-level Escape: puts the caret back into the engine from
+   * anywhere else in the inline edit surface (find/replace fields, toolbar
+   * buttons, resize handle). It never saves, never cancels and never closes the
+   * find bar — those belong to the engine-level ladder in
+   * `handleEditorKeyDown`, which keeps owning Escape once focus is back inside
+   * the content.
+   *
+   * The inline mount only. The expanded mount is a modal portal whose real
+   * antd/rc-dialog wrapper owns Escape (it closes the expansion on any bubbling
+   * Esc without consulting `defaultPrevented`), so this handler is deliberately
+   * not attached there: refocusing an engine that is about to unmount would
+   * only fight the dialog. The inline group also has no shared wrapper — its
+   * toolbar, find bar and body are siblings — so each of those parts carries
+   * the handler itself.
+   */
+  const handleSurfaceKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== 'Escape') return
+      // Same IME guard as the save/resend shortcuts: the composition window
+      // owns the key, so focus must never move out from under a pending text.
+      // React's synthetic keyboard event does not forward `isComposing`, so it
+      // is read from the native event (same pattern as the Inputbar handlers).
+      if (event.nativeEvent.isComposing || event.keyCode === 229) return
+      // Escape inside the engine content is already handled by CodeMirror's
+      // `domEventHandlers` keydown, so stand down whenever the press originates
+      // inside that content node: one press is never handled twice, and the
+      // engine ladder keeps precedence. This is a containment check against the
+      // CodeMirror content node itself, not an assumption about which of the
+      // wired parts the press came from.
+      const origin = event.target
+      if (origin instanceof Element && origin.closest('.cm-content')) return
+      event.preventDefault()
+      focusQuietly()
+    },
+    [focusQuietly]
+  )
 
   const readLiveSelection = useCallback((): EditorSelection | null => {
     try {
@@ -417,24 +471,30 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   collapseExpandedRef.current = collapseExpanded
 
   const handleEditorKeyDown = useCallback((event: KeyboardEvent) => {
-    // Expanded-modal Escape closes the expansion first and retains the
-    // draft — for both roles. Everything below keeps the original inline
-    // keyboard policy (assistant Escape is a no-op).
+    // Escape belongs to the IME while a composition is active: the candidate
+    // window consumes it, so neither the expansion nor the edit may change
+    // underneath the in-progress text (same guard as the Enter shortcut).
+    if (event.key === 'Escape' && event.isComposing) {
+      return false
+    }
+    // Expanded-modal Escape closes the expansion first and retains the draft —
+    // for both roles. A later Escape (inline) cancels.
     if (event.key === 'Escape' && expandedRef.current) {
       event.preventDefault()
       collapseExpandedRef.current()
       return true
     }
-    if (!isUserRef.current) {
-      return false
-    }
+    // Inline Escape cancels the edit for both roles through the very handler
+    // the cancel buttons use, so its guards (processing/removing), attachment
+    // release and viewport hold apply identically.
     if (event.key === 'Escape') {
       event.preventDefault()
       onCancelKeyRef.current()
       return true
     }
-    // keep the same enter behavior as inputbar, never during IME composition
-    if (event.key === 'Enter' && !event.isComposing) {
+    // keep the same enter behavior as inputbar, never during IME composition —
+    // the resend shortcut stays user-only.
+    if (isUserRef.current && event.key === 'Enter' && !event.isComposing) {
       if (
         isSendMessageKeyPressed(
           event as unknown as React.KeyboardEvent<HTMLTextAreaElement>,
@@ -932,7 +992,9 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     // history (undo/redo left alongside search), and the end group owns ONLY
     // the expand/collapse control far-right. Narrow windows scroll the tools
     // group internally; the end group never shrinks away.
-    <EditorToolbar>
+    // The expanded copy already sits inside the single ExpandedRoot attachment
+    // below; only the inline mount needs the handler here.
+    <EditorToolbar onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
       <ToolbarGroup>
         <Tooltip title={isPreview ? t('message.edit.show_source') : t('message.edit.show_preview')} mouseLeaveDelay={0}>
           <ActionIconButton
@@ -1052,67 +1114,93 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     </EditorToolbar>
   )
 
-  const renderFindBar = () => (
-    <FindBar>
-      <Input
-        size="small"
-        value={findText}
-        onChange={(e) => {
-          setFindText(e.target.value)
-          setFindIndex(0)
-        }}
-        onPressEnter={() => goToMatch(activeMatchIndex + 1)}
-        placeholder={t('message.edit.find_placeholder')}
-        aria-label={t('message.edit.find_placeholder')}
-        style={{ width: 150 }}
-      />
-      <FindCount>
-        {matches.length === 0
-          ? t('message.edit.no_results')
-          : t('message.edit.find_count', { current: activeMatchIndex + 1, total: matches.length })}
-      </FindCount>
-      <Tooltip title={t('message.edit.find_previous')} mouseLeaveDelay={0}>
-        <ActionIconButton
-          disabled={matches.length === 0}
-          onClick={() => goToMatch(activeMatchIndex - 1)}
-          aria-label={t('message.edit.find_previous')}>
-          <ChevronUp size={15} />
-        </ActionIconButton>
-      </Tooltip>
-      <Tooltip title={t('message.edit.find_next')} mouseLeaveDelay={0}>
-        <ActionIconButton
-          disabled={matches.length === 0}
-          onClick={() => goToMatch(activeMatchIndex + 1)}
-          aria-label={t('message.edit.find_next')}>
-          <ChevronDown size={15} />
-        </ActionIconButton>
-      </Tooltip>
-      <Input
-        size="small"
-        value={replaceText}
-        onChange={(e) => setReplaceText(e.target.value)}
-        placeholder={t('message.edit.replace_placeholder')}
-        aria-label={t('message.edit.replace_placeholder')}
-        style={{ width: 150 }}
-      />
-      <Tooltip title={t('message.edit.replace')} mouseLeaveDelay={0}>
-        <ActionIconButton
-          disabled={formatDisabled || matches.length === 0}
-          onClick={handleReplaceCurrent}
-          aria-label={t('message.edit.replace')}>
-          <Replace size={15} />
-        </ActionIconButton>
-      </Tooltip>
-      <Tooltip title={t('message.edit.replace_all')} mouseLeaveDelay={0}>
-        <ActionIconButton
-          disabled={formatDisabled || matches.length === 0}
-          onClick={handleReplaceAll}
-          aria-label={t('message.edit.replace_all')}>
-          <ReplaceAll size={15} />
-        </ActionIconButton>
-      </Tooltip>
-    </FindBar>
-  )
+  const renderFindBar = (inExpanded: boolean) => {
+    const findInputRef = inExpanded ? expandedFindInputRef : inlineFindInputRef
+    const replaceInputRef = inExpanded ? expandedReplaceInputRef : inlineReplaceInputRef
+    // Tab hops straight from the find field to the replace field: the two match
+    // arrows sit between them in DOM order, so a native Tab would land on a
+    // button with no visible focus ring instead of the replace field. Only
+    // these two presses are claimed — Shift+Tab in find, Tab in replace and
+    // every other key keep native behavior, so the bar stays in the ordinary
+    // tab order and never becomes a focus trap.
+    const handleFindInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== 'Tab' || event.shiftKey) return
+      event.preventDefault()
+      replaceInputRef.current?.focus()
+    }
+    const handleReplaceInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== 'Tab' || !event.shiftKey) return
+      event.preventDefault()
+      findInputRef.current?.focus()
+    }
+    return (
+      // Expanded copy: covered by the single ExpandedRoot attachment; inline
+      // copy carries its own so Escape works from the find/replace fields.
+      <FindBar onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
+        <Input
+          ref={findInputRef}
+          onKeyDown={handleFindInputKeyDown}
+          size="small"
+          value={findText}
+          onChange={(e) => {
+            setFindText(e.target.value)
+            setFindIndex(0)
+          }}
+          onPressEnter={() => goToMatch(activeMatchIndex + 1)}
+          placeholder={t('message.edit.find_placeholder')}
+          aria-label={t('message.edit.find_placeholder')}
+          style={{ width: 150 }}
+        />
+        <FindCount>
+          {matches.length === 0
+            ? t('message.edit.no_results')
+            : t('message.edit.find_count', { current: activeMatchIndex + 1, total: matches.length })}
+        </FindCount>
+        <Tooltip title={t('message.edit.find_previous')} mouseLeaveDelay={0}>
+          <ActionIconButton
+            disabled={matches.length === 0}
+            onClick={() => goToMatch(activeMatchIndex - 1)}
+            aria-label={t('message.edit.find_previous')}>
+            <ChevronUp size={15} />
+          </ActionIconButton>
+        </Tooltip>
+        <Tooltip title={t('message.edit.find_next')} mouseLeaveDelay={0}>
+          <ActionIconButton
+            disabled={matches.length === 0}
+            onClick={() => goToMatch(activeMatchIndex + 1)}
+            aria-label={t('message.edit.find_next')}>
+            <ChevronDown size={15} />
+          </ActionIconButton>
+        </Tooltip>
+        <Input
+          ref={replaceInputRef}
+          onKeyDown={handleReplaceInputKeyDown}
+          size="small"
+          value={replaceText}
+          onChange={(e) => setReplaceText(e.target.value)}
+          placeholder={t('message.edit.replace_placeholder')}
+          aria-label={t('message.edit.replace_placeholder')}
+          style={{ width: 150 }}
+        />
+        <Tooltip title={t('message.edit.replace')} mouseLeaveDelay={0}>
+          <ActionIconButton
+            disabled={formatDisabled || matches.length === 0}
+            onClick={handleReplaceCurrent}
+            aria-label={t('message.edit.replace')}>
+            <Replace size={15} />
+          </ActionIconButton>
+        </Tooltip>
+        <Tooltip title={t('message.edit.replace_all')} mouseLeaveDelay={0}>
+          <ActionIconButton
+            disabled={formatDisabled || matches.length === 0}
+            onClick={handleReplaceAll}
+            aria-label={t('message.edit.replace_all')}>
+            <ReplaceAll size={15} />
+          </ActionIconButton>
+        </Tooltip>
+      </FindBar>
+    )
+  }
 
   const renderPreview = () => {
     // Same display semantics as the saved message view: user drafts honor the
@@ -1163,7 +1251,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
           outer layout does not reflow when the engine ports to the modal.
           The modal duplicates these controls; the engine itself mounts once
           (inline placeholder replaces only the body at the current height). */}
-      {findOpen && renderFindBar()}
+      {findOpen && renderFindBar(false)}
       {expanded ? (
         <ExpandedPlaceholder
           data-testid="message-editor-expanded-placeholder"
@@ -1171,7 +1259,9 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
           {t('message.edit.expanded_hint')}
         </ExpandedPlaceholder>
       ) : (
-        <InlineResizeContainer>
+        // Inline body: covers the resize handle and the engine itself (the
+        // containment guard keeps Escape inside the content with CodeMirror).
+        <InlineResizeContainer onKeyDown={handleSurfaceKeyDown}>
           {renderResizeHandle()}
           <ResizeSurface data-testid="message-editor-resize-surface" style={{ height: inlineHeight }}>
             {isPreview ? renderPreview() : renderSourceEditor(true)}
@@ -1201,6 +1291,12 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
             body: { padding: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }
           }}
           onCancel={collapseExpanded}>
+          {/* Expanded mount: NOT wired to the surface Escape handler. The real
+              antd/rc-dialog wrapper owns Escape here and closes the expansion on
+              any Esc that bubbles to it (it does not consult defaultPrevented),
+              so focusing this mount's engine would only land the caret on a node
+              about to unmount. Escape leaving the maximized view is the intended
+              behavior; the inline mount is the one that must not be closed. */}
           <ExpandedRoot data-testid="message-editor-expanded">
             <ExpandedHeader>
               <ExpandedTitle>{t('message.edit.expanded_title')}</ExpandedTitle>
@@ -1211,7 +1307,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
               </Tooltip>
             </ExpandedHeader>
             {renderToolbar(true)}
-            {findOpen && renderFindBar()}
+            {findOpen && renderFindBar(true)}
             <ExpandedBody>{isPreview ? renderPreview() : renderSourceEditor(false)}</ExpandedBody>
             <ExpandedFooter>
               <Tooltip title={t('common.cancel')}>

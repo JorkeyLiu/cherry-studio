@@ -3,6 +3,7 @@ import type * as PasteServiceModule from '@renderer/services/PasteService'
 import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
+import type * as FindModule from '@renderer/utils/messageUtils/find'
 import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EditorState, EditorView, type Extension, keymap } from '@uiw/react-codemirror'
@@ -105,10 +106,14 @@ vi.mock('@renderer/services/PasteService', async () => {
   }
 })
 
-vi.mock('@renderer/utils/messageUtils/find', () => ({
-  findAllBlocks: (message: Message) => (message as Message & { initialBlocks?: MessageBlock[] }).initialBlocks ?? [],
-  isAssistantInterruptedThinkingOnlyMessage: () => false
-}))
+vi.mock('@renderer/utils/messageUtils/find', async (importOriginal) => {
+  const actual = await importOriginal<typeof FindModule>()
+  return {
+    ...actual,
+    findAllBlocks: (message: Message) => (message as Message & { initialBlocks?: MessageBlock[] }).initialBlocks ?? [],
+    isAssistantInterruptedThinkingOnlyMessage: () => false
+  }
+})
 
 vi.mock('@renderer/utils/messageUtils/create', () => ({
   createMainTextBlock: (messageId: string, content: string, overrides: Partial<MessageBlock> = {}) => ({
@@ -178,8 +183,15 @@ vi.mock('antd', () => ({
         {children}
       </div>
     ) : null,
-  Input: ({ onPressEnter, ...props }: { onPressEnter?: (e: unknown) => void } & Record<string, unknown>) => (
-    <input {...props} />
+  // `ref` is forwarded so the find/replace tab hop is exercised against real
+  // input elements: the production code focuses the sibling input through the
+  // antd input handle, and the mock's `.focus()` is the DOM element's own.
+  Input: ({
+    onPressEnter,
+    ref,
+    ...props
+  }: { onPressEnter?: (e: unknown) => void; ref?: React.Ref<HTMLInputElement> } & Record<string, unknown>) => (
+    <input ref={ref} {...props} />
   )
 }))
 
@@ -280,6 +292,9 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     const scrollRef = useRef(0)
     const doneRef = useRef<string[]>([])
     const undoneRef = useRef<string[]>([])
+    // The rendered engine content node: production focuses `view.contentDOM`,
+    // so the mock's `focus()` handle targets this element.
+    const contentDomRef = useRef<HTMLDivElement>(null)
     const [, force] = useReducer((count: number) => count + 1, 0)
 
     // Session restore on (re)mount: seed the mock stacks from the snapshot
@@ -410,7 +425,10 @@ vi.mock('@renderer/components/CodeEditor', () => ({
         ref.current = {
           save: () => {},
           getContent: () => (mocks.liveViewEnabled ? docRef.current : (value ?? '')),
-          focus: () => {},
+          // Mirrors production `view.contentDOM.focus({preventScroll})`: the
+          // engine content node is where the caret lands, so focus-return
+          // contracts are asserted against real DOM focus.
+          focus: () => contentDomRef.current?.focus(),
           getView: getFakeView
         }
       }
@@ -444,21 +462,26 @@ vi.mock('@renderer/components/CodeEditor', () => ({
 
     return (
       <div>
+        {/* One engine content node, exactly like production: the textarea that
+            carries the source-value contract lives INSIDE it, so a keydown from
+            either one counts as "inside the engine content" for the surface
+            containment guard. */}
         <div
+          ref={contentDomRef}
           className="cm-content"
           contentEditable={true}
-          onPaste={(e) => onEditorPaste?.(e.nativeEvent as unknown as ClipboardEvent)}
-        />
-        {mocks.liveViewEnabled && <div data-testid="mock-cm-doc">{docRef.current}</div>}
-        <textarea
-          aria-label="message-editor-source"
-          value={value ?? ''}
-          disabled={editable === false}
-          onChange={(e) => onChange?.(e.target.value)}
-          onKeyDown={(e) => {
-            if (onEditorKeyDown?.(e.nativeEvent as unknown as KeyboardEvent)) e.preventDefault()
-          }}
-        />
+          onPaste={(e) => onEditorPaste?.(e.nativeEvent as unknown as ClipboardEvent)}>
+          {mocks.liveViewEnabled && <div data-testid="mock-cm-doc">{docRef.current}</div>}
+          <textarea
+            aria-label="message-editor-source"
+            value={value ?? ''}
+            disabled={editable === false}
+            onChange={(e) => onChange?.(e.target.value)}
+            onKeyDown={(e) => {
+              if (onEditorKeyDown?.(e.nativeEvent as unknown as KeyboardEvent)) e.preventDefault()
+            }}
+          />
+        </div>
       </div>
     )
   }
@@ -562,6 +585,18 @@ const renderEditorWithContent = (content: string, role: 'user' | 'assistant' = '
     />
   )
 }
+
+/** Render the editor for an explicit stored block list (order = message order). */
+const renderEditorWithBlocks = (blocks: MessageBlock[], role: 'user' | 'assistant' = 'assistant') =>
+  render(
+    <MessageEditor
+      message={makeMessage(role, blocks)}
+      topicId="topic-1"
+      onSave={mocks.onSave}
+      onResend={mocks.onResend}
+      onCancel={vi.fn()}
+    />
+  )
 
 /** Drive the production adaptive-measurement subscription like the live engine would. */
 const fireAutoHeight = (height: number) => {
@@ -732,17 +767,80 @@ describe('MessageEditor CodeMirror upgrade', () => {
     expect(blocks.find((b) => b.type === MessageBlockType.MAIN_TEXT)?.content).toBe(RAW_MARKDOWN)
   })
 
-  it('user Escape cancels while assistant Escape is a no-op', async () => {
+  it('Escape cancels the edit for both roles with the cancel button semantics', async () => {
     const onCancel = vi.fn()
     const userView = renderEditor('user', onCancel)
     fireEvent.keyDown(screen.getByLabelText('message-editor-source'), { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    // Not the bare onCancel callback: the shared cancel path arms the viewport
+    // hold first, exactly like the cancel button.
+    expect(mocks.captureIntent).toHaveBeenCalledTimes(1)
     userView.unmount()
 
+    // Assistant messages cancel through the same handler as the cancel
+    // button: the draft is discarded, never written.
     const assistantCancel = vi.fn()
     renderEditor('assistant', assistantCancel)
+    fireEvent.change(screen.getByLabelText('message-editor-source'), { target: { value: 'staged probe' } })
     fireEvent.keyDown(screen.getByLabelText('message-editor-source'), { key: 'Escape' })
-    expect(assistantCancel).not.toHaveBeenCalled()
+    expect(assistantCancel).toHaveBeenCalledTimes(1)
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    expect(mocks.captureIntent).toHaveBeenCalledTimes(2)
+  })
+
+  it('assistant Escape collapses the expanded modal first and cancels on the next press', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+
+    fireEvent.keyDown(screen.getByLabelText('message-editor-source'), { key: 'Escape' })
+    expect(screen.queryByTestId('message-editor-expanded')).toBeNull()
+    expect(onCancel).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(screen.getByLabelText('message-editor-source'), { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(mocks.onSave).not.toHaveBeenCalled()
+  })
+
+  it('Escape never cancels while a save is in flight', async () => {
+    const onCancel = vi.fn()
+    let releaseSave!: () => void
+    mocks.onSave.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSave = resolve
+        })
+    )
+    // User role: cancel is otherwise allowed here, so only the cancel
+    // handler's own processing guard can keep the editor open.
+    renderEditor('user', onCancel)
+
+    await userEvent.click(screen.getByRole('button', { name: 'common.save' }))
+    await waitFor(() => expect(mocks.onSave).toHaveBeenCalledTimes(1))
+
+    // The cancel handler owns the processing guard, so Escape inherits it.
+    fireEvent.keyDown(screen.getByLabelText('message-editor-source'), { key: 'Escape' })
+    expect(onCancel).not.toHaveBeenCalled()
+
+    await act(async () => releaseSave())
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
+  it('Escape during IME composition never cancels the edit', () => {
+    const onCancel = vi.fn()
+    // User role: cancel is otherwise allowed here, so only the composition
+    // guard can keep the editor open.
+    renderEditor('user', onCancel)
+    const source = screen.getByLabelText('message-editor-source')
+
+    const composing = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    Object.defineProperty(composing, 'isComposing', { value: true })
+    source.dispatchEvent(composing)
+
+    expect(onCancel).not.toHaveBeenCalled()
+    // Not consumed either: the IME keeps ownership of the key.
+    expect(composing.defaultPrevented).toBe(false)
     expect(screen.getByLabelText('message-editor-source')).toBeInTheDocument()
   })
 
@@ -1749,5 +1847,314 @@ describe('MessageEditor save shortcut wiring (Cmd+S / Ctrl+S → save action)', 
     expect(event.defaultPrevented).toBe(false)
     expect(mocks.onSave).not.toHaveBeenCalled()
     view.destroy()
+  })
+})
+
+describe('MessageEditor main-text block runs (one surface per continuous text)', () => {
+  // A body stored as two adjacent main-text blocks during streaming: one
+  // logically continuous text, split by a block boundary the reader never sees.
+  const adjacentTextBlocks = (): MessageBlock[] => [
+    { ...mainTextBlock, id: 'main-text-1', content: 'first stored part' },
+    { ...mainTextBlock, id: 'main-text-2', content: 'second stored part' }
+  ]
+
+  it('renders one editor and one toolbar for adjacent main-text blocks and shows the joined text', () => {
+    renderEditorWithBlocks(adjacentTextBlocks())
+
+    expect(screen.getAllByLabelText('message-editor-source')).toHaveLength(1)
+    expect(screen.getAllByTestId('message-editor-mode-btn')).toHaveLength(1)
+    expect(screen.getAllByTestId('message-editor-tools-scroll')).toHaveLength(1)
+    expect(screen.getByLabelText('message-editor-source')).toHaveValue('first stored part\n\nsecond stored part')
+  })
+
+  it('saves an edited adjacent run as exactly one main-text block', async () => {
+    renderEditorWithBlocks(adjacentTextBlocks())
+
+    fireEvent.change(screen.getByLabelText('message-editor-source'), {
+      target: { value: 'first stored part\n\nsecond stored part, edited' }
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'common.save' }))
+    await waitFor(() => expect(mocks.onSave).toHaveBeenCalledTimes(1))
+
+    const blocks = mocks.onSave.mock.calls[0][0] as MessageBlock[]
+    const mainTextBlocks = blocks.filter((block) => block.type === MessageBlockType.MAIN_TEXT)
+    expect(mainTextBlocks).toHaveLength(1)
+    expect(mainTextBlocks[0].id).toBe('main-text-1')
+    expect(mainTextBlocks[0].content).toBe('first stored part\n\nsecond stored part, edited')
+    // The folded-away block is gone from the saved draft, so editSave's
+    // original-minus-edited diff lists it for deletion.
+    expect(blocks.map((block) => block.id)).toEqual(['main-text-1'])
+  })
+
+  it('keeps two editors when a thinking block separates the main-text blocks', () => {
+    const thinkingBlock: MessageBlock = {
+      id: 'thinking-1',
+      messageId: 'message-1',
+      type: MessageBlockType.THINKING,
+      content: 'reasoning between the two parts',
+      thinking_millsec: 0,
+      createdAt: '2026-07-30T00:00:00.000Z',
+      status: MessageBlockStatus.SUCCESS
+    }
+
+    renderEditorWithBlocks([
+      { ...mainTextBlock, id: 'main-text-1', content: 'before reasoning' },
+      thinkingBlock,
+      { ...mainTextBlock, id: 'main-text-2', content: 'after reasoning' }
+    ])
+
+    expect(screen.getAllByLabelText('message-editor-source')).toHaveLength(2)
+    expect(screen.getAllByTestId('message-editor-mode-btn')).toHaveLength(2)
+  })
+
+  it('leaves a single main-text block as one editor', () => {
+    renderEditor()
+
+    expect(screen.getAllByLabelText('message-editor-source')).toHaveLength(1)
+    expect(screen.getAllByTestId('message-editor-mode-btn')).toHaveLength(1)
+  })
+})
+
+describe('MessageEditor find/replace tab order', () => {
+  // 'raft' matches the stored draft, so the match arrows are enabled and
+  // tabbable — the state that reproduced the report (a Tab that looked ignored
+  // because it landed on an arrow whose focus ring is invisible).
+  const openFindBar = async ({ withMatches = true } = {}) => {
+    await userEvent.click(screen.getByTestId('message-editor-find-btn'))
+    if (withMatches) fireEvent.change(findFields()[0], { target: { value: 'raft' } })
+  }
+  const findFields = () => screen.getAllByLabelText('message.edit.find_placeholder')
+  const replaceFields = () => screen.getAllByLabelText('message.edit.replace_placeholder')
+
+  it('Tab in the find field moves focus to the replace field', async () => {
+    renderEditor()
+    await openFindBar()
+    const find = findFields()[0]
+    const replace = replaceFields()[0]
+    expect(screen.getAllByRole('button', { name: 'message.edit.find_next' })[0]).toBeEnabled()
+
+    find.focus()
+    expect(find).toHaveFocus()
+    await userEvent.tab()
+
+    expect(replace).toHaveFocus()
+  })
+
+  it('claims the find-field Tab with no matches instead of relying on native order', async () => {
+    renderEditor()
+    await openFindBar({ withMatches: false })
+    const find = findFields()[0]
+
+    find.focus()
+    const nativeTab = createEvent.keyDown(find, { key: 'Tab' })
+    fireEvent(find, nativeTab)
+
+    expect(nativeTab.defaultPrevented).toBe(true)
+    expect(replaceFields()[0]).toHaveFocus()
+  })
+
+  it('Shift+Tab in the replace field moves focus back to the find field', async () => {
+    renderEditor()
+    await openFindBar()
+    const find = findFields()[0]
+    const replace = replaceFields()[0]
+
+    replace.focus()
+    expect(replace).toHaveFocus()
+    await userEvent.tab({ shift: true })
+
+    expect(find).toHaveFocus()
+  })
+
+  it('Tab in the replace field stays native and never traps focus in the bar', async () => {
+    renderEditor()
+    await openFindBar()
+    const replace = replaceFields()[0]
+
+    replace.focus()
+    // The bar claims only the two hops above; this press is untouched.
+    const nativeTab = createEvent.keyDown(replace, { key: 'Tab' })
+    fireEvent(replace, nativeTab)
+    expect(nativeTab.defaultPrevented).toBe(false)
+    expect(replace).toHaveFocus()
+
+    // Native tab order then walks out of the replace field.
+    await userEvent.tab()
+    expect(replace).not.toHaveFocus()
+  })
+
+  it('leaves Shift+Tab in the find field native', async () => {
+    renderEditor()
+    await openFindBar()
+    const find = findFields()[0]
+
+    find.focus()
+    const nativeTab = createEvent.keyDown(find, { key: 'Tab', shiftKey: true })
+    fireEvent(find, nativeTab)
+
+    expect(nativeTab.defaultPrevented).toBe(false)
+    expect(replaceFields()[0]).not.toHaveFocus()
+  })
+
+  it('each mounted bar hops its own inputs, never the other copy', async () => {
+    renderEditor()
+    await openFindBar()
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    // Both copies are mounted: inline footprint hold first, modal copy second.
+    expect(findFields()).toHaveLength(2)
+    const [inlineFind, modalFind] = findFields()
+    const [inlineReplace, modalReplace] = replaceFields()
+
+    // The modal copy hops within itself.
+    modalFind.focus()
+    await userEvent.tab()
+    expect(modalReplace).toHaveFocus()
+    expect(inlineReplace).not.toHaveFocus()
+
+    // The still-mounted inline copy hops within itself too: one shared ref pair
+    // would send this press into the modal's replace field.
+    inlineFind.focus()
+    await userEvent.tab()
+    expect(inlineReplace).toHaveFocus()
+    expect(modalReplace).not.toHaveFocus()
+
+    await userEvent.tab({ shift: true })
+    expect(inlineFind).toHaveFocus()
+  })
+})
+
+describe('MessageEditor surface Escape (focus returns to the engine)', () => {
+  // The rendered engine content node: production focuses `view.contentDOM`, so
+  // these are real focus checks, not handle spies.
+  const engineContent = () => document.querySelector('.cm-content') as HTMLElement
+  const findField = () => screen.getAllByLabelText('message.edit.find_placeholder')[0]
+  const replaceField = () => screen.getAllByLabelText('message.edit.replace_placeholder')[0]
+  const openFindBar = async (query: string) => {
+    await userEvent.click(screen.getByTestId('message-editor-find-btn'))
+    fireEvent.change(findField(), { target: { value: query } })
+  }
+
+  it('Escape in the find field returns focus to the editor, keeping the query', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    await openFindBar('raft')
+    findField().focus()
+    expect(findField()).toHaveFocus()
+
+    fireEvent.keyDown(findField(), { key: 'Escape' })
+
+    expect(engineContent()).toHaveFocus()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    // The bar stays open and the query survives: Escape only moved the caret.
+    expect(findField()).toBeInTheDocument()
+    expect(findField()).toHaveValue('raft')
+    expect(screen.getByLabelText('message-editor-source')).toBeInTheDocument()
+  })
+
+  it('Escape in the replace field returns focus to the editor, keeping the query', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    await openFindBar('raft')
+    fireEvent.change(replaceField(), { target: { value: 'draft' } })
+    replaceField().focus()
+    expect(replaceField()).toHaveFocus()
+
+    fireEvent.keyDown(replaceField(), { key: 'Escape' })
+
+    expect(engineContent()).toHaveFocus()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    expect(replaceField()).toBeInTheDocument()
+    expect(replaceField()).toHaveValue('draft')
+  })
+
+  it('Escape on a toolbar button returns focus to the editor without cancelling', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    const bold = screen.getByTestId('message-editor-bold-btn')
+    bold.focus()
+    expect(bold).toHaveFocus()
+
+    fireEvent.keyDown(bold, { key: 'Escape' })
+
+    expect(engineContent()).toHaveFocus()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+  })
+
+  it('Escape on the resize handle returns focus to the editor without cancelling', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    const handle = screen.getByTestId('message-editor-resize-handle')
+    handle.focus()
+
+    fireEvent.keyDown(handle, { key: 'Escape' })
+
+    expect(engineContent()).toHaveFocus()
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
+  it('Escape inside the editor content still cancels exactly once and the surface handler stands down', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    const source = screen.getByLabelText('message-editor-source')
+    source.focus()
+    expect(source).toHaveFocus()
+
+    fireEvent.keyDown(source, { key: 'Escape' })
+
+    // Engine ladder owns it: one cancel, never a save.
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    // Containment guard: the surface handler never ran, so focus is untouched
+    // (a second handling would have re-focused the engine content node).
+    expect(source).toHaveFocus()
+    expect(engineContent()).not.toHaveFocus()
+  })
+
+  it('Escape during IME composition never moves focus or cancels', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    await openFindBar('raft')
+    const find = findField()
+    find.focus()
+
+    const composing = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    Object.defineProperty(composing, 'isComposing', { value: true })
+    find.dispatchEvent(composing)
+
+    expect(find).toHaveFocus()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(composing.defaultPrevented).toBe(false)
+  })
+
+  it('expanded: the surface Escape handler is not wired there (the dialog owns Escape)', async () => {
+    const onCancel = vi.fn()
+    renderEditor('assistant', onCancel)
+    await openFindBar('raft')
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    // Both bars are mounted; the second copy belongs to the modal.
+    const modalFind = screen.getAllByLabelText('message.edit.find_placeholder')[1]
+    modalFind.focus()
+    expect(modalFind).toHaveFocus()
+
+    fireEvent.keyDown(modalFind, { key: 'Escape' })
+
+    // The expanded mount is deliberately outside the inline surface handler: in
+    // the real app the antd/rc-dialog wrapper owns Escape there and closes the
+    // expansion on any bubbling Esc (it never consults `defaultPrevented`), so
+    // refocusing this mount's engine would only fight the dialog. What is pinned
+    // here is that OUR handler does nothing on that press — focus stays put in
+    // the find field and the expanded surface is still mounted, with no cancel
+    // and no save side effect. (The actual close is the dialog's job and cannot
+    // be observed here: this spec mocks antd's Modal as a plain div with no
+    // rc-dialog wrapper.)
+    expect(modalFind).toHaveFocus()
+    expect(engineContent()).not.toHaveFocus()
+    expect(screen.getByTestId('message-editor-expanded')).toBeInTheDocument()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(mocks.onSave).not.toHaveBeenCalled()
+    expect(modalFind).toHaveValue('raft')
   })
 })

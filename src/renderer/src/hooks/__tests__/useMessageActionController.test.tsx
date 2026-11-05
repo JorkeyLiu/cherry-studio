@@ -185,6 +185,42 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     expect(mocks.dispatch).toHaveBeenCalled()
   })
 
+  it('editSave deletes every original block id missing from the edited draft', async () => {
+    // The editor folds adjacent main-text blocks into one draft block: the
+    // folded-away id is absent from the edited draft, so the original-vs-edited
+    // diff must hand it to persistence for deletion (never leave it orphaned).
+    const msg = { id: 'm1', topicId: 't1', assistantId: 'a1', blocks: ['b1', 'b2'], role: 'assistant' } as any
+    mocks.resolveEditTarget.mockReturnValue(msg)
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { m1: msg }, messageIdsByTopic: { t1: ['m1'] } },
+      assistants: { assistants: [] },
+      messageBlocks: {
+        entities: {
+          b1: { id: 'b1', type: 'main_text', content: 'first stored part' } as any,
+          b2: { id: 'b2', type: 'main_text', content: 'second stored part' } as any
+        }
+      }
+    })
+    mocks.dispatch.mockResolvedValueOnce({ affectedFileIds: [] })
+    const { result } = renderHook(() => useMessageActionController())
+    await act(async () => {
+      await result.current.editSave({ topicId: 't1', messageId: 'm1' }, [
+        { id: 'b1', type: 'main_text', content: 'first stored part\n\nsecond stored part, edited' } as any
+      ])
+    })
+
+    const action = mocks.dispatch.mock.calls[0][0] as { args: unknown[] }
+    const [, messageUpdates, blocksToPersist, blockIdsToDelete] = action.args as [
+      string,
+      { blocks: string[] },
+      { id: string }[],
+      string[]
+    ]
+    expect(messageUpdates.blocks).toEqual(['b1'])
+    expect(blocksToPersist.map((block) => block.id)).toEqual(['b1'])
+    expect(blockIdsToDelete).toEqual(['b2'])
+  })
+
   it('successful editSave with no persist needed still returns true', async () => {
     const msg = { id: 'm1', topicId: 't1', assistantId: 'a1', blocks: [], role: 'user' } as any
     mocks.resolveEditTarget.mockReturnValue(msg)

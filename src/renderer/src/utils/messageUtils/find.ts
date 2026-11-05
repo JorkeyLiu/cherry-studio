@@ -110,13 +110,25 @@ export const findFileBlocks = (message: Message): FileMessageBlock[] => {
 }
 
 /**
+ * Joins main-text block contents with the canonical block separator.
+ *
+ * One logically-continuous message body may be stored as several `main_text`
+ * blocks (streaming opens a new block at every text-start/text-end boundary).
+ * This is the single join rule for such a body: every consumer — model input,
+ * copy/export, token estimation, and the edit surface — must see the same text.
+ * @param contents - Main-text block contents in message order.
+ * @returns The joined content string (`''` when there is nothing to join).
+ */
+export const joinMainTextContents = (contents: string[]): string => contents.join('\n\n')
+
+/**
  * Gets the concatenated content string from all MainTextMessageBlocks of a message, in order.
  * @param message - The message object.
  * @returns The concatenated content string or an empty string if no text blocks are found.
  */
 export const getMainTextContent = (message: Message): string => {
   const textBlocks = findMainTextBlocks(message)
-  return textBlocks.map((block) => block.content).join('\n\n')
+  return joinMainTextContents(textBlocks.map((block) => block.content))
 }
 
 export const isAssistantInterruptedThinkingOnlyMessage = (message: Message): boolean => {
