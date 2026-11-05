@@ -28,6 +28,8 @@ Please make sure you have read the [Code of Conduct](CODE_OF_CONDUCT.md) and the
 
 Please refer to [`AGENTS.md`](AGENTS.md) for the always-on repository contract, toolchain, and available commands. For the detailed architecture reference, see [`docs/architecture/architecture.md`](docs/architecture/architecture.md) and the documentation index at [`docs/README.md`](docs/README.md).
 
+Git hooks for this repository are tracked in [`.githooks/`](.githooks) and selected with `core.hooksPath`, which `pnpm install` configures automatically, so the `pre-commit`, `post-checkout`, and `post-merge` hooks come from the checked-out revision rather than from machine-specific files under `.git/hooks/`.
+
 ## Getting Started
 
 To help you get familiar with the codebase, we recommend tackling issues tagged with one or more of the following labels: [good-first-issue](https://github.com/CherryHQ/cherry-studio/labels/good%20first%20issue), [help-wanted](https://github.com/CherryHQ/cherry-studio/labels/help%20wanted), or [kind/bug](https://github.com/CherryHQ/cherry-studio/labels/kind%2Fbug). Any help is welcome.

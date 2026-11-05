@@ -1,0 +1,40 @@
+#!/bin/sh
+# Tracked Git hook trampoline (post-merge).
+#
+# Git runs this file through core.hooksPath=.githooks, which `pnpm install`
+# configures from the package.json "prepare" script. Nothing here is
+# machine-specific: the repository root is derived from this script's own
+# location, so the hook behaves identically from any checkout or worktree
+# instead of embedding the absolute path of the checkout that ran `pnpm install`.
+#
+# It pins the repository Node/pnpm toolchain, then delegates to the repo's own
+# prek shim (node_modules/.bin/prek), which replays the hooks declared for this
+# stage in .pre-commit-config.yaml (the conditional dependency install).
+set -u
+
+_hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || exit 127
+_root=$(CDPATH= cd -- "$_hook_dir/.." 2>/dev/null && pwd) || exit 127
+
+# Toolchain pin. scripts/hooks/ensure-toolchain.sh resolves the repository root
+# from its own $0, so it must be sourced with $0 naming its real path; PATH is
+# captured back because a sourced bootstrap can only extend the child's PATH.
+_hook_path=$(
+  sh -c '. "$0" || exit $?; hook_ensure_toolchain || exit $?; printf "%s" "$PATH"' \
+    "$_root/scripts/hooks/ensure-toolchain.sh"
+) || exit $?
+PATH=$_hook_path
+export PATH
+
+# Only a missing prek shim blocks the hook: an absent or broken
+# .pre-commit-config.yaml is prek's own diagnostic, not ours.
+_prek="$_root/node_modules/.bin/prek"
+if [ ! -x "$_prek" ]; then
+  printf '%s\n' "post-merge: $_prek is missing; run 'pnpm install' in $_root" >&2
+  exit 1
+fi
+
+# --script-version must equal the hook script version of the installed prek
+# (prek 0.3.4 expects 4; a `prek install`-generated hook shows the same value).
+# Any other value - including omitting the flag, which defaults to 1 - makes
+# prek warn on every run that the installed hook script is outdated.
+exec "$_prek" hook-impl --hook-dir "$_hook_dir" --script-version 4 --hook-type=post-merge -- "$@"
