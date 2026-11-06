@@ -10,7 +10,7 @@ import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { Button, Popover } from 'antd'
 import { ChevronDown, ChevronRight, GitFork } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import SelectModelButton from '../../SelectModelButton'
@@ -23,6 +23,12 @@ type TopicContentProps = {
 }
 
 const logger = loggerService.withContext('TopicContent')
+
+// Grace window before a shorter hover chain takes effect: the pointer crossing
+// between adjacent columns passes over the shorter chain, so collapsing at once
+// would tear the column away under the cursor. Expansion stays instant so the
+// next column is already there on arrival.
+const HOVER_COLLAPSE_GRACE_MS = 150
 
 const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   return (
@@ -259,23 +265,74 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
     })
   }
 
+  // Pending hover collapse. Cleared on a newer hover, on close, and on unmount
+  // so a delayed collapse can never setState into a closed/unmounted popover.
+  const hoverCollapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearHoverCollapse = useCallback((): void => {
+    if (hoverCollapseTimerRef.current !== null) {
+      clearTimeout(hoverCollapseTimerRef.current)
+      hoverCollapseTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => {
+    return clearHoverCollapse
+  }, [clearHoverCollapse])
+
   // Hovering/focusing an option in column C continues the chain that
   // produced column C (walkIds[0..C)) through that option, revealing the
   // next column; leaves truncate the chain. Arbitrary depth.
-  const hoverThrough = (colIdx: number, opt: CascaderOption): void => {
-    const prefix = walkIds.slice(0, colIdx).filter((id): id is string => id !== null)
-    if (opt.hasChildren && opt.branchId !== null) {
-      setHoverPath([...prefix, opt.branchId])
-    } else {
-      setHoverPath(prefix)
-    }
-  }
+  // Intent asymmetry: expanding or equal-length follows the pointer at once,
+  // shrinking waits out HOVER_COLLAPSE_GRACE_MS so crossing a column boundary
+  // does not drop the column the pointer is heading into. Stable reference:
+  // every option row receives it as `onHover`.
+  const hoverThrough = useCallback(
+    (colIdx: number, opt: CascaderOption): void => {
+      const prefix = walkIds.slice(0, colIdx).filter((id): id is string => id !== null)
+      const next = opt.hasChildren && opt.branchId !== null ? [...prefix, opt.branchId] : prefix
+      // Any newer hover supersedes a pending collapse.
+      clearHoverCollapse()
+      if (next.length >= walkIds.length) {
+        setHoverPath(next)
+        return
+      }
+      hoverCollapseTimerRef.current = setTimeout(() => {
+        hoverCollapseTimerRef.current = null
+        setHoverPath(next)
+      }, HOVER_COLLAPSE_GRACE_MS)
+    },
+    [clearHoverCollapse, walkIds]
+  )
+
+  // Horizontal position on open: the columns wrapper itself is
+  // overflow-visible, its real horizontal scroller is antd's popover body, so
+  // positioning is driven by the `open` transition (the content remounts on
+  // every open) and never by hover, which would fight the user's own scrolling.
+  const columnsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    // One frame: the popover content has no width before layout has run.
+    const frame = requestAnimationFrame(() => {
+      // `closest` rather than `parentElement`: the antd class name is the
+      // popover body this layout depends on, and matching by class keeps
+      // working if antd inserts wrapper elements in between.
+      const scroller = columnsRef.current?.closest('.ant-popover-inner-content')
+      if (!scroller) return
+      if (scroller.scrollWidth <= scroller.clientWidth) return
+      // Hover chain is reset on open, so the last column is the current
+      // branch's column; scrolling to the end brings it into view.
+      scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [open])
 
   if (branches.length === 0) {
     return null
   }
 
   const switchRoute = (branchId: string | null): void => {
+    // Closing here drops the popover without an onOpenChange call, so a
+    // pending collapse must be cancelled here too.
+    clearHoverCollapse()
     if (branchId === activeBranchId) {
       setOpen(false)
       return
@@ -336,7 +393,7 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
   }
 
   const content = (
-    <div data-testid="branch-selector-popover" style={{ display: 'flex', maxWidth: 560 }}>
+    <div ref={columnsRef} data-testid="branch-selector-popover" style={{ display: 'flex', maxWidth: 560 }}>
       {columns.map((col, colIdx) => (
         <div
           key={colIdx}
@@ -395,6 +452,9 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
           setOpen(v)
           // Every open and every close resets to the default expansion so
           // repeat close/open preserves the same no-over-expansion behavior.
+          // Clearing the pending collapse keeps it from landing after the
+          // reset (and after the popover content is gone).
+          clearHoverCollapse()
           setHoverPath(null)
           if (!v) {
             setRenamingId(null)

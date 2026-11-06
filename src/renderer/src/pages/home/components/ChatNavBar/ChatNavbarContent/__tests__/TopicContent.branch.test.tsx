@@ -1,5 +1,5 @@
 import type { TopicBranchWire } from '@renderer/services/db/types'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const wire = (id: string, anchorMessageId: string, parentBranchId: string | null, name: string): TopicBranchWire =>
@@ -194,6 +194,7 @@ describe('TopicContent unified branch selector', () => {
   })
 
   it('current L1 with children opens col-0 only (no child over-expansion) until hover/focus on L1', () => {
+    vi.useFakeTimers()
     setTree([b1(), b2(), b3()], [b1()], 'b-1')
     const setActiveTopic = vi.fn()
     renderTopicContent(setActiveTopic)
@@ -205,12 +206,19 @@ describe('TopicContent unified branch selector', () => {
     // Hovering/focusing the current L1 reveals its children (keyboard path too).
     fireEvent.mouseEnter(screen.getByTestId('branch-cascader-row-b-1'))
     expect(screen.getByTestId('branch-cascader-item-b-3')).toHaveTextContent('B1-Child')
-    // Hovering the sibling collapses back to its (empty) level.
+    // Hovering the sibling collapses back to its (empty) level, but only after
+    // the grace window that keeps a column from vanishing under the pointer
+    // while it crosses a column boundary.
     fireEvent.mouseEnter(screen.getByTestId('branch-cascader-row-b-2'))
+    expect(screen.getByTestId('branch-cascader-item-b-3')).toBeInTheDocument()
+    act(() => {
+      vi.advanceTimersByTime(150)
+    })
     expect(screen.queryByTestId('branch-cascader-item-b-3')).not.toBeInTheDocument()
     // Focusing the parent re-opens the child column (keyboard path).
     fireEvent.focus(screen.getByTestId('branch-cascader-row-b-1'))
     expect(screen.getByTestId('branch-cascader-item-b-3')).toBeInTheDocument()
+    vi.useRealTimers()
   })
 
   it('current L2 opens through the L2-containing column but not L2 children', () => {
