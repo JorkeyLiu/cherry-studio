@@ -7,9 +7,12 @@ import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import { Button, Popover } from 'antd'
+import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
+
+import { forkMarkerLabel } from './forkPlacement'
 
 const logger = loggerService.withContext('BranchDividers')
 
@@ -24,12 +27,14 @@ const logger = loggerService.withContext('BranchDividers')
  *
  * Two forms per the UI contract:
  * - Untaken fork (main route, or a fork in the viewed route no child was
- *   taken at): `── 此处有 x 条分支 ▾ ──`. The popup includes the current
- *   route plus the direct child branches at the anchor.
+ * - Untaken fork (main route, or a fork in the viewed route no child was
+ *   taken at): `── 此处有 x 条分支 ──` followed by the chevron icon that
+ *   marks the row as expandable. The popup includes the current route plus
+ *   the direct child branches at the anchor.
  * - Taken fork (the viewed route passes through `taken` at the anchor):
- *   `── <taken branch name> ▾ ──`. The popup switches among the
- *   original/parent route at that fork and the sibling branches, with the
- *   current one selected.
+ *   `── <taken branch name> ──` followed by the same chevron icon. The popup
+ *   switches among the original/parent route at that fork and the sibling
+ *   branches, with the current one selected.
  *
  * Popup binding: reuse ONLY the top selector's visual primitives and popover
  * interaction (overlay container, option row styling/highlight, rename/delete
@@ -68,18 +73,11 @@ export function findAnchorsWithChildren(
 }
 
 /**
- * The child branch taken by the viewed route at an anchor, if any: the
- * branch on the root-first `path` whose anchor is `anchorMessageId`.
- * Siblings considered are exactly the direct children at the anchor.
+ * `takenChildAtAnchor` moved to `forkPlacement` so the outline's fork markers
+ * and this divider resolve the same child from the same function. Re-exported
+ * here to keep this module's existing surface intact.
  */
-export function takenChildAtAnchor(
-  path: readonly TopicBranchWire[],
-  anchorMessageId: string,
-  childrenAtAnchor: readonly TopicBranchWire[]
-): TopicBranchWire | undefined {
-  const childIds = new Set(childrenAtAnchor.map((c) => c.id))
-  return path.find((b) => b.anchorMessageId === anchorMessageId && childIds.has(b.id))
-}
+export { takenChildAtAnchor } from './forkPlacement'
 
 /**
  * Menu options for a fork: the parent/original route first, then the direct
@@ -184,8 +182,6 @@ interface ForkDividerProps {
   activeBranchId: string | null
   /** Placement resolved against the route's inheritance boundary (default: message). */
   placement?: 'message' | 'head'
-  /** Label for the count form (e.g. localized "此处有 x 条分支"). Rendered by the caller via i18n. */
-  countLabel: string
   onSelectRoute: (branchId: string | null, anchorMessageId: string, info?: DividerSwitchInfo) => void
 }
 
@@ -207,7 +203,6 @@ export const ForkDivider = ({
   parentLabel,
   activeBranchId,
   placement = 'message',
-  countLabel,
   onSelectRoute
 }: ForkDividerProps) => {
   const { t } = useTranslation()
@@ -216,7 +211,9 @@ export const ForkDivider = ({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
-  const takenName = taken && taken.name && taken.name.length > 0 ? taken.name : (taken?.id ?? '')
+  // One shared two-state decision (branch name vs. children-here count) with
+  // the outline's fork marker, so both surfaces name the same thing.
+  const dividerLabel = forkMarkerLabel(taken, children, t)
   const ordered = [...children].sort(
     (a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id)
   )
@@ -386,7 +383,8 @@ export const ForkDivider = ({
           autoInsertSpace={false}
           aria-expanded={open}
           aria-label={t(open ? 'chat.topics.branch.collapse' : 'chat.topics.branch.expand')}>
-          {taken ? takenName : countLabel} ▾
+          {dividerLabel}
+          <ChevronDown size={14} aria-hidden />
         </ForkDividerNameButton>
       </Popover>
       <ForkDividerLine />
@@ -412,6 +410,9 @@ const ForkDividerLine = styled.div`
 const ForkDividerNameButton = styled(Button)`
   font-size: 12px;
   color: var(--color-text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
   height: auto;
   padding: 0 8px;

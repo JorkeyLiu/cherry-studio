@@ -1,6 +1,6 @@
 import Scrollbar from '@renderer/components/Scrollbar'
 import type { FC, KeyboardEvent } from 'react'
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import styled from 'styled-components'
 
 export interface MessageOutlineEntry {
@@ -12,6 +12,17 @@ interface MessageOutlineProps {
   entries: MessageOutlineEntry[]
   onNavigate: (id: string) => void
   activeId?: string | null
+  /**
+   * Rows that are followed by a fork marker: `forkAfter.has(id)` draws one
+   * non-interactive fork row directly after that message row, and the value is
+   * the TEXT that marker shows while the outline is expanded — either the branch
+   * the viewed route travels at that fork or, when the route took no branch
+   * there, the fork's children-here count. Both forms come from the same label
+   * rule the message stream's divider renders (`forkMarkerLabel`), so the marker
+   * never invents or drops the text on its own.
+   * Keys are message ids that exist in `entries` (the caller owns that filter).
+   */
+  forkAfter?: ReadonlyMap<string, string>
 }
 
 /** Idle window before follow resumes after a manual wheel/pointer/key interaction. */
@@ -19,11 +30,18 @@ const FOLLOW_RESUME_IDLE_MS = 800
 
 /**
  * Expand/collapse transition: collapsed rows are 12px high with a 2px gap;
- * hover expands rows to 24px with a 4px gap over 180ms ease-out. The
- * ResizeObserver follow below re-measures at the final actual size, so no
- * hover timer is needed.
+ * expansion grows rows to 24px with a 4px gap over 180ms ease-out. The
+ * ResizeObserver follow below re-measures at the final actual size, so
+ * expansion needs no timer of its own; only leaving needs the grace below.
  */
 const EXPAND_TRANSITION_MS = 180
+
+/**
+ * Collapse grace margin: expansion is immediate, but the collapsed rail is
+ * only ~24px wide, so shrinking the moment the pointer left made it trivial
+ * to drop the panel while travelling. Leaving waits this margin first.
+ */
+const COLLAPSE_GRACE_MS = 160
 
 /**
  * Follow safe-zone band: the active row moves the outline only when its
@@ -48,11 +66,29 @@ const FOLLOW_SAFE_MIN_MARGIN_ROWS = 1.5
  * never by a per-count estimated top offset, JS measurement, or transform
  * (a ResizeObserver only re-runs the anchor follow so edge-band geometry
  * is measured at the post-transition actual size).
- * Collapsed rows are 12px high with a 2px body gap; hover expands (180ms
- * ease-out) to the original 24px row / 4px gap / dot-text 8px geometry, DOM,
- * positioning, single-line ellipsis, trigger area and navigation behavior.
+ * Collapsed rows are 12px high with a 2px body gap; entering the body
+ * expands (180ms ease-out) to the original 24px row / 4px gap / dot-text 8px
+ * geometry and leaving restores the collapsed rail after a short grace, with
+ * DOM, positioning, single-line ellipsis, trigger area and navigation
+ * behavior unchanged.
  * $level props stay because dot size/padding still use them.
  * prefers-reduced-motion disables all transitions.
+ * A fork marker (`forkAfter`) is a separate NON-interactive row inserted
+ * directly after the marked message row: it is never a navigation target (no
+ * role, stable id, tab stop, handler or active highlight), so the marked
+ * message row keeps its own hitbox and stays reachable. Its row height matches
+ * the message rows exactly (12px collapsed / 24px expanded, same body gap), so
+ * collapsed and expanded rows line up 1:1.
+ * Collapsed it is two 6px dashes with a 2px gap — 14px total, exactly the dot
+ * band it sits in — and carries no text at all. Expanded it becomes
+ * `── <text> ──` in the message flow's divider form: two 1px `flex:1` rules, an
+ * 8px gap and the fork's label in the middle, left-aligned with the dot column.
+ * The text is the message flow's own two states (`forkMarkerLabel`): the branch
+ * this route travels at the fork, or the fork's `此处有 {{count}} 条分支` count
+ * when the route took none — a fork is never drawn as a bare line. No caret:
+ * the flow's `▾` belongs to a clickable popover trigger, and this row is not
+ * interactive. The text is rendered only while expanded, so the collapsed
+ * marker carries no text in the DOM rather than merely hiding it.
  *
  * Active highlight (`activeId`) is theme-colored with `aria-current` and the
  * outline container follows it edge-early: when the active row's center
@@ -63,11 +99,15 @@ const FOLLOW_SAFE_MIN_MARGIN_ROWS = 1.5
  * Manual wheel/pointer/key interaction pauses follow until a short idle
  * window passes; drag releases on document `pointerup`.
  */
-const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId }) => {
+const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId, forkAfter }) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const followPausedRef = useRef(false)
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rafRef = useRef<number | null>(null)
+  // Expansion is a JS state machine (not CSS :hover) so leaving can wait for
+  // COLLAPSE_GRACE_MS while entering stays immediate.
+  const [expanded, setExpanded] = useState(false)
+  const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const scheduleResume = useCallback(() => {
     if (resumeTimerRef.current) {
@@ -105,6 +145,10 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
       if (rafRef.current != null) {
         cancelAnimationFrame(rafRef.current)
         rafRef.current = null
+      }
+      if (collapseTimerRef.current) {
+        clearTimeout(collapseTimerRef.current)
+        collapseTimerRef.current = null
       }
     }
   }, [scheduleResume])
@@ -195,33 +239,80 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     }
   }
 
+  // Entering expands at once, replacing the CSS :hover it used to rely on.
+  const handleBodyMouseEnter = () => {
+    if (collapseTimerRef.current) {
+      clearTimeout(collapseTimerRef.current)
+      collapseTimerRef.current = null
+    }
+    setExpanded(true)
+  }
+
+  // Leaving only starts the collapse; the grace margin above is the travel
+  // slack for a pointer that crosses the thin collapsed rail.
+  const handleBodyMouseLeave = () => {
+    if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current)
+    collapseTimerRef.current = setTimeout(() => {
+      collapseTimerRef.current = null
+      setExpanded(false)
+    }, COLLAPSE_GRACE_MS)
+  }
+
   return (
     <MessageOutlineContainer data-testid="conversation-navigation">
       <MessageOutlineBody
         ref={containerRef}
+        $expanded={expanded}
+        onMouseEnter={handleBodyMouseEnter}
+        onMouseLeave={handleBodyMouseLeave}
         onWheel={pauseFollow}
         onPointerDown={pauseFollow}
         onKeyDownCapture={pauseFollow}>
         {entries.map((entry) => {
           const isActive = activeId != null && entry.id === activeId
+          const hasFork = forkAfter?.has(entry.id) ?? false
+          const forkText = forkAfter?.get(entry.id) ?? ''
           return (
-            <MessageOutlineItem
-              key={entry.id}
-              $active={isActive}
-              onClick={() => onNavigate(entry.id)}
-              onKeyDown={(event) => handleKeyDown(event, entry.id)}
-              tabIndex={0}
-              role="button"
-              aria-label={entry.text}
-              aria-current={isActive ? true : undefined}
-              data-testid={`conversation-nav-item-${entry.id}`}
-              data-message-id={entry.id}
-              title={entry.text}>
-              <MessageOutlineItemDot $level={1} />
-              <MessageOutlineItemText $level={1} $miniLevel={1}>
-                {entry.text}
-              </MessageOutlineItemText>
-            </MessageOutlineItem>
+            <Fragment key={entry.id}>
+              <MessageOutlineItem
+                $active={isActive}
+                onClick={() => onNavigate(entry.id)}
+                onKeyDown={(event) => handleKeyDown(event, entry.id)}
+                tabIndex={0}
+                role="button"
+                aria-label={entry.text}
+                aria-current={isActive ? true : undefined}
+                data-testid={`conversation-nav-item-${entry.id}`}
+                data-message-id={entry.id}
+                title={entry.text}>
+                <MessageOutlineItemDot $level={1} />
+                <MessageOutlineItemText $level={1} $miniLevel={1}>
+                  {entry.text}
+                </MessageOutlineItemText>
+              </MessageOutlineItem>
+              {/*
+                Fork marker: a separate row directly AFTER the marked message
+                row, never a message row itself — no stable id, role, tab stop
+                or handler, so it can never be a navigation target, a highlight
+                winner or a follow target. Decorative only (`aria-hidden`): the
+                message row next to it is the navigation entry.
+
+                Expanded it reads `── <text> ──`, the message flow's divider
+                text without its `▾` (that caret belongs to the flow's clickable
+                popover trigger, and this row is not interactive). The text is
+                rendered ONLY while expanded, so the collapsed marker is exactly
+                two dashes with no text in the DOM — and it is always present,
+                because the caller supplies the flow's untaken-fork count form
+                when the route took no branch here.
+              */}
+              {hasFork ? (
+                <MessageOutlineForkRow aria-hidden="true" data-testid="conversation-nav-fork" key={`fork-${entry.id}`}>
+                  <MessageOutlineForkSegment />
+                  {expanded ? <MessageOutlineForkName>{forkText}</MessageOutlineForkName> : null}
+                  <MessageOutlineForkSegment />
+                </MessageOutlineForkRow>
+              ) : null}
+            </Fragment>
           )
         })}
       </MessageOutlineBody>
@@ -307,7 +398,66 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
     }
   `}
 `
-const MessageOutlineBody = styled(Scrollbar)`
+
+/**
+ * Fork marker row: the same height as a message row in both states (12px
+ * collapsed / 24px expanded) and the body owns the shared row gap, so the
+ * collapsed and expanded lists line up row for row.
+ *
+ * Collapsed it occupies exactly the dot band — 6px + 2px gap + 6px = 14px,
+ * the dot's own width — so the dashes read as one short interruption of the
+ * rail instead of two separated strokes. Expanded it stretches across the
+ * content width and hosts the fork's label (branch name or count form) between
+ * its two rules.
+ * Not interactive: no cursor, no hover state.
+ */
+const MessageOutlineForkRow = styled.div`
+  height: 12px;
+  width: 14px;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  pointer-events: none;
+  transition:
+    height ${EXPAND_TRANSITION_MS}ms ease-out,
+    gap ${EXPAND_TRANSITION_MS}ms ease-out;
+`
+/**
+ * One dash. Collapsed it is a 6px stroke with the dot's 2px radius; expanded it
+ * drops its fixed width and takes an equal share of the row, so the two
+ * surviving rules read as the dividers around the name — the same 1px
+ * `var(--color-border)` line the message-flow fork divider draws.
+ */
+const MessageOutlineForkSegment = styled.div`
+  width: 6px;
+  height: 1px;
+  background: var(--color-border);
+  border-radius: 2px;
+  flex: 0 0 auto;
+  transition: width ${EXPAND_TRANSITION_MS}ms ease-out;
+`
+/**
+ * The fork's label between the two rules: the message-flow divider's text form
+ * (11.5px, secondary text color) at the flow's 8px gap. It never wraps or
+ * shrinks, so the rules absorb every width change around it.
+ */
+const MessageOutlineForkName = styled.div`
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--color-text-2);
+  white-space: nowrap;
+`
+/**
+ * `$expanded` is a transient prop (styled-components never forwards it to the
+ * DOM); it is projected onto `data-expanded` so the expanded geometry stays a
+ * static CSS rule instead of a per-render dynamic interpolation.
+ */
+const MessageOutlineBody = styled(Scrollbar).attrs<{
+  $expanded: boolean
+  'data-expanded'?: 'true' | 'false'
+}>((props) => ({ 'data-expanded': props.$expanded ? 'true' : 'false' }))`
    max-width: min(320px, calc(100% - 24px));
    max-height: min(100%, 45vh, 420px);
    align-self: center;
@@ -323,7 +473,7 @@ const MessageOutlineBody = styled(Scrollbar)`
    transition:
      gap ${EXPAND_TRANSITION_MS}ms ease-out,
      padding ${EXPAND_TRANSITION_MS}ms ease-out;
-   &:hover {
+  &[data-expanded='true'] {
      padding: 10px 10px 10px 10px;
      gap: 4px;
      overflow-y: auto;
@@ -336,6 +486,20 @@ const MessageOutlineBody = styled(Scrollbar)`
        opacity: 1;
        display: block;
      }
+    // Fork marker row: the message-row height, the full content width, and the
+    // message-flow divider form — the two rules flank the fork's text at the
+    // flow's 8px gap instead of abutting, so the marker always reads as the
+    // same divider the message stream draws.
+    ${MessageOutlineForkRow} {
+      height: 24px;
+      width: auto;
+      align-self: stretch;
+      gap: 8px;
+    }
+    ${MessageOutlineForkSegment} {
+      width: auto;
+      flex: 1 1 0;
+    }
    }
    @media (prefers-reduced-motion: reduce) {
      transition: none;
@@ -348,6 +512,12 @@ const MessageOutlineBody = styled(Scrollbar)`
      ${MessageOutlineItemDot} {
        transition: none;
      }
+    ${MessageOutlineForkRow} {
+      transition: none;
+    }
+    ${MessageOutlineForkSegment} {
+      transition: none;
+    }
    }
  `
 

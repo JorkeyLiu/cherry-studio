@@ -9,8 +9,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 
+import { forkMarkerLabel, groupForkChildrenByParent, resolveForkPlacement, takenChildAtAnchor } from './forkPlacement'
 import MessageOutline from './MessageOutline'
 import type { ReadingAnchorReport } from './Messages'
+import { useBranchTree } from './useBranchTree'
 import {
   type AttachmentLabelFormatters,
   buildAttachmentLabel,
@@ -83,6 +85,22 @@ export const buildConversationNavItems = (
   }
   return items
 }
+/**
+ * Resolve a message id to the outline row it belongs under. A user message is
+ * its own row; any other message belongs under its nearest preceding user
+ * message in route order (`precedingUserByMessageId`). Unresolved — the id is
+ * not in this snapshot, or nothing user precedes it — has no row.
+ *
+ * This is the single mapping the reading-anchor highlight and the fork markers
+ * share; keeping one implementation is what makes "which row does this message
+ * belong under" a single fact instead of two agreeing guesses.
+ */
+const resolveOutlineRowId = (
+  messageId: string,
+  itemIds: ReadonlySet<string>,
+  precedingUserByMessageId: ReadonlyMap<string, string>
+): string | undefined => (itemIds.has(messageId) ? messageId : precedingUserByMessageId.get(messageId))
+
 const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, readingAnchor, onNavigate }) => {
   const { t } = useTranslation()
   const fallback = t('chat.navigation.user_message_fallback')
@@ -106,6 +124,12 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   const activeBranchId = useSelector((state: RootState) =>
     topicId ? (state.topicBranch?.activeBranchIdByTopic?.[topicId] ?? null) : null
   )
+  // Branch catalog for the viewed route: the outline mirrors the message
+  // stream's fork dividers, so it needs the same relation source (children of
+  // the active level plus every ancestor level of this route, by anchor) and
+  // the root-first `path` of the route itself, which is what tells a fork's
+  // siblings apart — only the one this route travels names the marker.
+  const { childrenByAnchor, path: branchPath } = useBranchTree(topicId, activeBranchId)
   // Loaded-route provenance: the active route key (`topic::branch`) is derived
   // synchronously every render; the loaded snapshot carries the key it was
   // fetched for. While a new route's snapshot is pending, the keys mismatch
@@ -254,10 +278,13 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     [isSnapshotCurrent, messages, blocksById, fallback, attachmentFormatters, linkLabel]
   )
 
-  // Caller-local chronological map: each message id resolves to the nearest
-  // preceding user message id in the current whole-topic snapshot (route
-  // order). Non-user anchor reports highlight their user turn instead.
-  const memoMap = useMemo(() => {
+  // Caller-local chronological map: each non-user message id resolves to the
+  // nearest preceding user message id in the current whole-topic snapshot
+  // (route order). This is the ONE "nearest preceding user row" mapping in
+  // this module: the reading-anchor highlight and the fork markers both
+  // consume it, so the two surfaces can never disagree about which outline
+  // row a message belongs under.
+  const precedingUserByMessageId = useMemo(() => {
     const map = new Map<string, string>()
     let lastUserId: string | null = null
     if (isSnapshotCurrent) {
@@ -270,19 +297,65 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     return map
   }, [isSnapshotCurrent, messages])
 
+  const itemIds = useMemo(() => new Set(items.map((item) => item.id)), [items])
+
+  // Fork markers handed to the outline: `map.has(messageId)` means "draw one
+  // marker line directly after that row", and the value is the text the marker
+  // shows — the branch this route travels at that fork, or the fork's
+  // children-here count when it took none. That text is produced by
+  // `forkMarkerLabel`, the SAME two-state decision the message flow's divider
+  // renders, so the two surfaces can never name one thing and show another. The
+  // shared placement resolution decides the boundary id (never a second
+  // ternary), so a marker cannot sit under a row whose divider the flow draws
+  // somewhere else.
+  // The outline is a directory of USER turns, so a boundary message is mapped
+  // to the row it belongs under by `resolveOutlineRowId`: a user boundary marks
+  // its own row, while an assistant boundary marks the nearest preceding user
+  // row. Assistant boundaries are the normal case — the split action lives only
+  // on assistant turns, and Main reports the anchor itself as the boundary
+  // while it is still on its own parent route — and the preceding user row is
+  // exactly the user-facing meaning of that fork: "you asked this, the
+  // assistant answered, the split happened here".
+  //
+  // Two silent drops remain, both structural:
+  // - `'head'` placements have no inherited message at all, so there is no row
+  //   to sit under (the head position is a relation position, not a target).
+  // - an unresolvable boundary (message absent from this route's snapshot, or
+  //   no user row before it) has no row either.
+  // Several forks may resolve to the same user row. The FIRST one in this
+  // iteration order keeps the row (one marker per row, and a stable winner
+  // because `childrenByAnchor` and the group order are both deterministic), so
+  // a rebuild can never flip which branch the marker names.
+  const forkAfter = useMemo<ReadonlyMap<string, string>>(() => {
+    const marked = new Map<string, string>()
+    if (!isSnapshotCurrent) return marked
+    for (const [anchorMessageId, children] of childrenByAnchor) {
+      for (const group of groupForkChildrenByParent(children)) {
+        const { placement, boundaryMessageId } = resolveForkPlacement(group.children, anchorMessageId)
+        if (placement !== 'message' || boundaryMessageId === null) continue
+        const rowId = resolveOutlineRowId(boundaryMessageId, itemIds, precedingUserByMessageId)
+        if (rowId === undefined) continue
+        if (marked.has(rowId)) continue
+        const taken = takenChildAtAnchor(branchPath, anchorMessageId, group.children)
+        marked.set(rowId, forkMarkerLabel(taken, group.children, t))
+      }
+    }
+    return marked
+  }, [isSnapshotCurrent, itemIds, precedingUserByMessageId, childrenByAnchor, branchPath, t])
+
   // Active highlight: only when the report matches the current topic, the
   // current branch route and the loaded snapshot key. navigationTargetId
-  // wins over messageId; a resolved non-user id maps to its preceding user
-  // id; an unresolvable id never steals the highlight.
+  // wins over messageId; the resolved row is the same row the fork markers use
+  // (a user id is its own row, any other id maps to its preceding user id); an
+  // unresolvable id never steals the highlight.
   const activeId = useMemo(() => {
     if (!readingAnchor || !isSnapshotCurrent) return undefined
     if (readingAnchor.topicId !== topicId) return undefined
     if ((readingAnchor.route ?? 'main') !== (activeBranchId ?? 'main')) return undefined
     const target = readingAnchor.navigationTargetId ?? readingAnchor.messageId
     if (!target) return undefined
-    if (items.some((item) => item.id === target)) return target
-    return memoMap.get(target)
-  }, [readingAnchor, isSnapshotCurrent, topicId, activeBranchId, items, memoMap])
+    return resolveOutlineRowId(target, itemIds, precedingUserByMessageId)
+  }, [readingAnchor, isSnapshotCurrent, topicId, activeBranchId, itemIds, precedingUserByMessageId])
 
   // Stable-ID clicks are honored only within the matching route. A click
   // landing after a route switch (stale closure or queued event) is dropped
@@ -301,7 +374,7 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // Presentation is the restored original MessageOutline (verbatim styles);
   // this module stays a caller-local data controller only.
   const entries = items.map((item) => ({ id: item.id, text: item.preview }))
-  return <MessageOutline entries={entries} onNavigate={handleNavigate} activeId={activeId} />
+  return <MessageOutline entries={entries} onNavigate={handleNavigate} activeId={activeId} forkAfter={forkAfter} />
 }
 
 export default ConversationNavigation

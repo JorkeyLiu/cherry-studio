@@ -90,7 +90,6 @@ describe('ForkDivider main button two-char Chinese name (real Antd Button)', () 
         parentBranchId={null}
         parentLabel="主题"
         activeBranchId="b1"
-        countLabel="此处有 1 条分支"
         onSelectRoute={() => {}}
       />
     )

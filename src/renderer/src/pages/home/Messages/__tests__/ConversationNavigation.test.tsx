@@ -1,3 +1,4 @@
+import type { TopicBranchWire } from '@renderer/services/db/types'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -80,6 +81,8 @@ vi.mock('react-i18next', () => ({
           return 'Code'
         case 'chat.navigation.user_message_link':
           return 'Link'
+        case 'chat.topics.branch.children_here':
+          return `${count} branches here`
         default:
           return key
       }
@@ -89,6 +92,44 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('@renderer/utils/topicSnapshot', () => ({
   loadWholeTopicSnapshot: (...args: unknown[]) => mocks.loadWholeTopicSnapshot(...args)
+}))
+
+// Branch catalog stub: the outline reads the same relation source the message
+// flow uses. The real hook reaches the app store, so the harness supplies the
+// exact projection (`childrenByAnchor`) the component consumes.
+const branchTree = vi.hoisted(() => {
+  let childrenByAnchor: Map<string, unknown[]> = new Map()
+  let path: unknown[] = []
+  return {
+    get: () => childrenByAnchor,
+    set: (value: Map<string, unknown[]>) => {
+      childrenByAnchor = value
+    },
+    // Root-first branch chain of the viewed route: what tells the fork's taken
+    // child apart from its siblings.
+    getPath: () => path,
+    setPath: (value: unknown[]) => {
+      path = value
+    },
+    reset: () => {
+      childrenByAnchor = new Map()
+      path = []
+    }
+  }
+})
+
+vi.mock('../useBranchTree', () => ({
+  useBranchTree: () => ({
+    branches: [],
+    activeNode: undefined,
+    path: branchTree.getPath(),
+    children: [],
+    childrenByAnchor: branchTree.get(),
+    ownAnchorMessageId: null,
+    routeGeneration: 0,
+    hasBranches: branchTree.get().size > 0
+  }),
+  requestTopicBranches: vi.fn()
 }))
 
 import ConversationNavigation from '../ConversationNavigation'
@@ -835,5 +876,304 @@ describe('ConversationNavigation reading-anchor highlight', () => {
     expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', 'b1')
     expect(await screen.findByTestId('conversation-nav-item-u2')).toBeTruthy()
     expect(activeRowId()).toBe('u2')
+  })
+})
+
+describe('ConversationNavigation fork markers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.setActiveBranchId(null)
+    mocks.setUpdatedAt('t0')
+    branchTree.reset()
+  })
+
+  /** u1 / a1 / u2 / a2 — the outline lists the two user rows only. */
+  const seedForkThread = () => {
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        userMsg('u2', ['b2']),
+        assistantMsg('a2', ['ba2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+  }
+
+  /** u1 / a1 / a1b / u2 / a2 — assistant turns can arrive in runs. */
+  const seedAssistantChainThread = () => {
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('ba1x', 'a1b', 'First assistant answer, regenerated'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        assistantMsg('a1b', ['ba1x']),
+        userMsg('u2', ['b2']),
+        assistantMsg('a2', ['ba2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+  }
+
+  /** a0 / u1 / a1 / u2 — an assistant turn BEFORE the first user question. */
+  const seedLeadingAssistantThread = () => {
+    const blocks = [
+      textBlock('ba0', 'a0', 'Greeting before any question'),
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('b2', 'u2', 'Second question about mountains')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        assistantMsg('a0', ['ba0']),
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        userMsg('u2', ['b2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+  }
+
+  const wire = (
+    anchorMessageId: string,
+    inheritedBoundary?: TopicBranchWire['inheritedBoundary'],
+    overrides?: { id?: string; name?: string | null }
+  ): TopicBranchWire => ({
+    id: overrides?.id ?? `br-${anchorMessageId}`,
+    topicId: 'topic-1',
+    parentBranchId: null,
+    anchorMessageId,
+    ...(inheritedBoundary === undefined ? {} : { inheritedBoundary }),
+    name: overrides?.name ?? null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: null
+  })
+
+  const forkRows = () => screen.queryAllByTestId('conversation-nav-fork')
+
+  it('marks the row of the resolved inheritance boundary, never the raw anchor', async () => {
+    seedForkThread()
+    // The branch is anchored on the ASSISTANT turn a2, but its inherited
+    // history ends at the user turn u2 — exactly where the message stream
+    // draws the divider. Reading the raw anchor would mark nothing here.
+    branchTree.set(new Map([['a2', [wire('a2', { kind: 'message', messageId: 'u2' })]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    expect(forkRows()).toHaveLength(1)
+    const fork = forkRows()[0]
+    // Directly AFTER the u2 row, inside the same body.
+    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    expect(Array.from(body.children).indexOf(fork)).toBe(Array.from(body.children).indexOf(row) + 1)
+    expect(fork.previousElementSibling).toBe(row)
+    // u1 is untouched.
+    expect(screen.getByTestId('conversation-nav-item-u1').nextElementSibling).toBe(row)
+  })
+
+  it('maps an assistant placement message onto its nearest preceding user row', async () => {
+    seedForkThread()
+    // Placement resolves to an assistant turn — the normal case, because the
+    // split action lives on assistant turns and Main reports the anchor itself
+    // as the boundary while it stays on its parent route. The outline lists
+    // user rows only, so the marker lands under the user turn that assistant
+    // answered (u1) — where the reader experienced the fork.
+    branchTree.set(new Map([['a1', [wire('a1', { kind: 'message', messageId: 'a1' })]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u1')
+    const laterRow = await screen.findByTestId('conversation-nav-item-u2')
+
+    expect(forkRows()).toHaveLength(1)
+    const fork = forkRows()[0]
+    // Directly AFTER the u1 row, inside the same body.
+    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    expect(Array.from(body.children).indexOf(fork)).toBe(Array.from(body.children).indexOf(row) + 1)
+    expect(fork.previousElementSibling).toBe(row)
+    // Exactly one marker: the later user row is untouched.
+    expect(laterRow.previousElementSibling).toBe(fork)
+  })
+
+  it('resolves through a run of assistant turns to the user row that opened it', async () => {
+    seedAssistantChainThread()
+    // u1 / a1 / a1b / u2: the boundary is the second consecutive assistant
+    // turn; its nearest preceding user row is still u1, not u2.
+    branchTree.set(new Map([['a1b', [wire('a1b', { kind: 'message', messageId: 'a1b' })]]]) as Map<string, unknown[]>)
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u1')
+    const laterRow = await screen.findByTestId('conversation-nav-item-u2')
+
+    expect(forkRows()).toHaveLength(1)
+    expect(forkRows()[0].previousElementSibling).toBe(row)
+    expect(laterRow.previousElementSibling).toBe(forkRows()[0])
+  })
+
+  it('emits no marker when no user row precedes the boundary message', async () => {
+    seedLeadingAssistantThread()
+    // a0 / u1 / a1 / u2: the leading assistant turn has no preceding user row
+    // to belong under, so there is nothing to mark.
+    branchTree.set(new Map([['a0', [wire('a0', { kind: 'message', messageId: 'a0' })]]]) as Map<string, unknown[]>)
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(forkRows()).toHaveLength(0)
+  })
+
+  it('keeps a user placement message on its own row without shifting it backwards', async () => {
+    seedForkThread()
+    // Regression guard for the direct case: a user boundary is its own row.
+    branchTree.set(new Map([['a1', [wire('a1', { kind: 'message', messageId: 'u1' })]]]) as Map<string, unknown[]>)
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u1')
+    const laterRow = await screen.findByTestId('conversation-nav-item-u2')
+
+    expect(forkRows()).toHaveLength(1)
+    expect(forkRows()[0].previousElementSibling).toBe(row)
+    expect(laterRow.previousElementSibling).toBe(forkRows()[0])
+  })
+
+  it('keeps one marker when two distinct forks resolve to the same user row', async () => {
+    seedAssistantChainThread()
+    // Two assistant anchors (a1 and the regenerated a1b) both inherit up to u1,
+    // so both boundaries resolve to the same user row: one marker, not two.
+    branchTree.set(
+      new Map([
+        ['a1', [wire('a1', { kind: 'message', messageId: 'a1' })]],
+        ['a1b', [wire('a1b', { kind: 'message', messageId: 'a1b' })]]
+      ]) as Map<string, unknown[]>
+    )
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u1')
+    await screen.findByTestId('conversation-nav-item-u2')
+
+    expect(forkRows()).toHaveLength(1)
+    expect(forkRows()[0].previousElementSibling).toBe(row)
+  })
+
+  it('emits no marker for a head fork and none for an off-list boundary', async () => {
+    seedForkThread()
+    branchTree.set(
+      new Map([
+        // Head boundary: nothing is inherited, so there is no row to sit under.
+        ['u1', [wire('u1', { kind: 'head', messageId: null })]],
+        // Boundary message outside the current route's user rows.
+        ['u2', [wire('u2', { kind: 'message', messageId: 'ghost' })]]
+      ]) as Map<string, unknown[]>
+    )
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(forkRows()).toHaveLength(0)
+  })
+
+  it('falls back to the anchor row when the wire carries no boundary fact', async () => {
+    seedForkThread()
+    // Same fallback the message stream uses: absence of the fact is not
+    // evidence of an empty prefix, so the anchor row places the marker.
+    branchTree.set(new Map([['u1', [wire('u1')]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u1')
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(forkRows()).toHaveLength(1)
+    expect(forkRows()[0].previousElementSibling).toBe(row)
+    expect(container.querySelectorAll('[data-message-id]')).toHaveLength(2)
+  })
+
+  /**
+   * The text the outline marker must carry while expanded: the branch the
+   * viewed route actually travels at the fork (the child on the root-first
+   * `path`), or — when the route took no child there — the message flow's
+   * children-here count form. Both come from the shared `forkMarkerLabel`
+   * rule, so this helper asserts the geometry and returns the text.
+   */
+  const revealedForkText = (container: HTMLElement): string => {
+    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    // Collapsed the marker carries no text at all.
+    expect(forkRows()[0].textContent).toBe('')
+    fireEvent.mouseEnter(body)
+    const expanded = forkRows()[0]
+    // line + text + line: the text is the middle element, the two rules flank it.
+    expect(expanded.children).toHaveLength(3)
+    const [, name] = Array.from(expanded.children)
+    expect(name.textContent).toBe(expanded.textContent)
+    return expanded.textContent ?? ''
+  }
+
+  it('names the marker with the child branch the current route travels through', async () => {
+    seedForkThread()
+    const taken = wire('a2', { kind: 'message', messageId: 'u2' }, { id: 'br-taken', name: 'Rivers branch' })
+    // The viewed route is main → br-taken, so that is the branch at this fork.
+    branchTree.setPath([taken])
+    branchTree.set(new Map([['a2', [taken]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    expect(forkRows()).toHaveLength(1)
+    expect(revealedForkText(container)).toBe('Rivers branch')
+    // The marker is still a separate row after the message row, not that row.
+    expect(forkRows()[0].previousElementSibling).toBe(row)
+  })
+
+  it('names the sibling the current route travels, never another branch of the same fork', async () => {
+    seedForkThread()
+    // Two siblings at the same fork (same anchor, same parent route): the first
+    // in the deterministic child order is NOT the one this route took.
+    const siblingAlpha = wire('a2', { kind: 'message', messageId: 'u2' }, { id: 'br-a', name: 'Alpha branch' })
+    const siblingBeta = wire('a2', { kind: 'message', messageId: 'u2' }, { id: 'br-b', name: 'Beta branch' })
+    mocks.setActiveBranchId('br-b')
+    branchTree.setPath([siblingBeta])
+    branchTree.set(new Map([['a2', [siblingAlpha, siblingBeta]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', 'br-b')
+    expect(forkRows()).toHaveLength(1)
+    const text = revealedForkText(container)
+    expect(text).toBe('Beta branch')
+    expect(text).not.toBe('Alpha branch')
+  })
+
+  it('falls back to the flow children-here count when the route took no child at the fork', async () => {
+    seedForkThread()
+    // The fork's children all sit on OTHER routes (the viewed route stayed on
+    // its parent route here), so there is no branch name to show. The marker
+    // must then carry the message flow's untaken-fork text — never a bare line.
+    const elsewhere = wire('a2', { kind: 'message', messageId: 'u2' }, { id: 'br-other', name: 'Other branch' })
+    branchTree.setPath([])
+    branchTree.set(new Map([['a2', [elsewhere]]]) as Map<string, unknown[]>)
+
+    const { container } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    const row = await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    expect(forkRows()).toHaveLength(1)
+    // The shared label rule, resolved through i18n: one child at this fork.
+    expect(revealedForkText(container)).toBe('1 branches here')
+    expect(forkRows()[0].previousElementSibling).toBe(row)
   })
 })

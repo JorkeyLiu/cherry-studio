@@ -8,6 +8,9 @@ import { BranchRouteOptionRow } from '../branchRouteOption'
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, opts?: { count?: number }) => {
+      // Base locale mirror: interpolation and plural selection are the
+      // production i18n config's job, so the mock only needs the same shape.
+      if (key === 'chat.topics.branch.children_here') return `此处有 ${opts?.count ?? 0} 条分支`
       const map: Record<string, string> = {
         'chat.topics.branch.rename': 'Rename Branch',
         'chat.topics.branch.delete': 'Delete Branch',
@@ -112,8 +115,7 @@ describe('ForkDivider', () => {
     topicId: 't-1',
     activeBranchId: null as string | null,
     parentBranchId: null as string | null,
-    parentLabel: 'Topic',
-    countLabel: '此处有 2 条分支'
+    parentLabel: 'Topic'
   }
 
   it('untaken fork renders the count form; popup includes the parent/original route plus children', async () => {
@@ -336,7 +338,6 @@ describe('ForkDivider', () => {
           parentLabel="Topic"
           topicId="t-1"
           activeBranchId={null}
-          countLabel="此处有 1 条分支"
           onSelectRoute={onSelectRoute}
         />
         <ForkDivider
@@ -347,7 +348,6 @@ describe('ForkDivider', () => {
           parentLabel="Topic"
           topicId="t-1"
           activeBranchId={null}
-          countLabel="此处有 2 条分支"
           onSelectRoute={onSelectRoute}
         />
       </div>

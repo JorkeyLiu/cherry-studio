@@ -755,7 +755,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           parentLabel={parentLabel}
           activeBranchId={activeBranchId}
           placement={placement}
-          countLabel={t('chat.topics.branch.children_here', { count: children.length })}
           onSelectRoute={onSelectRoute}
         />
       ),

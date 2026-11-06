@@ -4,6 +4,7 @@ import type { TopicSegment } from '@renderer/types/topicSegment'
 import type { ReactNode } from 'react'
 
 import { takenChildAtAnchor } from './BranchDividers'
+import { groupForkChildrenByParent, resolveForkPlacement } from './forkPlacement'
 import { deriveTurnAskId, type FlowNode } from './messageEditSelectionLayout'
 import { deriveStableGroupId, type RenderLayer } from './messageRenderLayers'
 import type { MessageViewportProjectedGroup } from './messageViewportProjection'
@@ -22,33 +23,6 @@ import type { MessageViewportProjectedGroup } from './messageViewportProjection'
  * attributes, so executing this builder (not a re-implementation) plus
  * `renderEditFlowNodes` proves the real production flow wiring.
  */
-
-/** Group one anchor's direct children by their parent route (null = main route). */
-export function groupForkChildrenByParent(children: readonly TopicBranchWire[]): {
-  parentBranchId: string | null
-  children: TopicBranchWire[]
-}[] {
-  const byParent = new Map<string | null, TopicBranchWire[]>()
-  for (const c of children) {
-    const key = c.parentBranchId ?? null
-    const list = byParent.get(key) ?? []
-    list.push(c)
-    byParent.set(key, list)
-  }
-  const out: { parentBranchId: string | null; children: TopicBranchWire[] }[] = []
-  for (const [parentBranchId, list] of byParent) {
-    list.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id))
-    out.push({ parentBranchId, children: list })
-  }
-  // Deterministic group order: main-route forks first, then by first child.
-  out.sort((a, b) => {
-    if ((a.parentBranchId === null) !== (b.parentBranchId === null)) return a.parentBranchId === null ? -1 : 1
-    const aid = a.children[0]?.id ?? ''
-    const bid = b.children[0]?.id ?? ''
-    return aid.localeCompare(bid)
-  })
-  return out
-}
 
 /** One fork divider resolved against the current display window. */
 export interface ForkDividerPlacement {
@@ -112,9 +86,9 @@ export function resolveForkDividers(input: {
   if (input.activeBranchId !== null) routeBranchIds.add(input.activeBranchId)
   for (const [anchorMessageId, children] of input.childrenByAnchor) {
     for (const group of groupForkChildrenByParent(children)) {
-      const boundary = group.children[0]?.inheritedBoundary
+      const { placement, boundaryMessageId } = resolveForkPlacement(group.children, anchorMessageId)
       const base = { anchorMessageId, parentBranchId: group.parentBranchId, children: group.children }
-      if (boundary?.kind === 'head') {
+      if (placement === 'head') {
         // Two independent facts must both hold: the fork relation addresses
         // the viewed route, and the viewed window reaches the true head.
         const relationOnRoute =
@@ -124,7 +98,6 @@ export function resolveForkDividers(input: {
         }
         continue
       }
-      const boundaryMessageId = boundary?.kind === 'message' ? boundary.messageId : anchorMessageId
       if (boundaryMessageId !== null && input.displayMessageIds.has(boundaryMessageId)) {
         out.push({ ...base, placement: 'message', boundaryMessageId })
       }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@renderer/components/Scrollbar', () => ({
@@ -354,5 +354,261 @@ describe('MessageOutline reading-anchor follow', () => {
     unmount()
     expect(vi.getTimerCount()).toBe(0)
     flushRaf()
+  })
+})
+
+describe('MessageOutline expand/collapse grace margin', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' }
+  ]
+
+  // `nav.firstElementChild` is the body: the single element that carries the
+  // expanded/collapsed presentation (`data-expanded`) and the pointer handlers.
+  const renderOutline = () => {
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
+    const body = utils.container.querySelector('[data-testid="conversation-navigation"]')!
+      .firstElementChild as HTMLElement
+    return { ...utils, body }
+  }
+
+  // Fake timers stay scoped to this suite: the reading-anchor follow suite owns
+  // its own timer setup, so real timers are restored after every case here.
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('expands immediately on body entry, before any expand timer runs', () => {
+    const { body } = renderOutline()
+    expect(body.getAttribute('data-expanded')).toBe('false')
+
+    fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+  })
+
+  it('collapses on leave only after the 160ms grace margin expires', () => {
+    const { body } = renderOutline()
+    fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+
+    fireEvent.mouseLeave(body)
+    // 150ms of travel slack: the panel is still expanded.
+    act(() => {
+      vi.advanceTimersByTime(150)
+    })
+    expect(body.getAttribute('data-expanded')).toBe('true')
+
+    // Past the margin the pending collapse lands.
+    act(() => {
+      vi.advanceTimersByTime(50)
+    })
+    expect(body.getAttribute('data-expanded')).toBe('false')
+  })
+
+  it('cancels the pending collapse when the pointer re-enters inside the grace margin', () => {
+    const { body } = renderOutline()
+    fireEvent.mouseEnter(body)
+    fireEvent.mouseLeave(body)
+
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+    fireEvent.mouseEnter(body)
+
+    // Well past the margin: the canceled timer must never fire late.
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(body.getAttribute('data-expanded')).toBe('true')
+  })
+})
+
+describe('MessageOutline fork markers', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+
+  const bodyOf = (container: HTMLElement) =>
+    container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+
+  const childTestIds = (body: HTMLElement) => Array.from(body.children).map((el) => el.getAttribute('data-testid'))
+
+  // styled-components injects component CSS into <style>; normalize whitespace
+  // so serialization variants cannot false-fail, then read the geometry.
+  const normalizedCss = () =>
+    Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+
+  it('inserts the fork row directly AFTER the marked message row, and only there', () => {
+    const { container } = render(
+      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+    )
+    const body = bodyOf(container)
+    // Sibling order in DOM: the marked row keeps its own row, the fork row
+    // follows it, the next message row is unchanged.
+    expect(childTestIds(body)).toEqual([
+      'conversation-nav-item-u1',
+      'conversation-nav-item-u2',
+      'conversation-nav-fork',
+      'conversation-nav-item-u3'
+    ])
+    const fork = screen.getByTestId('conversation-nav-fork')
+    expect(fork.previousElementSibling?.getAttribute('data-message-id')).toBe('u2')
+    expect(fork.nextElementSibling?.getAttribute('data-message-id')).toBe('u3')
+    // The anchor row itself stays a normal, clickable navigation row: the
+    // marker owns its own row, so the message never loses its jump target.
+    const marked = screen.getByTestId('conversation-nav-item-u2')
+    expect(marked.getAttribute('role')).toBe('button')
+    expect(marked.getAttribute('tabindex')).toBe('0')
+    // Only the marked row produces a marker.
+    expect(screen.getAllByTestId('conversation-nav-fork')).toHaveLength(1)
+  })
+
+  it('keeps the fork row out of navigation: no role, ID, tab stop, handler or text', () => {
+    const onNavigate = vi.fn()
+    render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={onNavigate}
+        activeId="u2"
+        forkAfter={new Map([['u2', 'Research branch']])}
+      />
+    )
+    const fork = screen.getByTestId('conversation-nav-fork')
+    expect(fork.getAttribute('role')).toBeNull()
+    expect(fork.getAttribute('data-message-id')).toBeNull()
+    expect(fork.getAttribute('tabindex')).toBeNull()
+    // Never a highlight winner, and never announced.
+    expect(fork.getAttribute('aria-current')).toBeNull()
+    expect(fork.getAttribute('aria-hidden')).toBe('true')
+    // Collapsed the marker is two dashes only: the name exists for this fork,
+    // so an empty textContent proves the collapsed state renders no text at
+    // all — not a hidden-but-present label.
+    expect(fork.children).toHaveLength(2)
+    expect(fork.textContent).toBe('')
+
+    fireEvent.click(fork)
+    fireEvent.keyDown(fork, { key: 'Enter' })
+    fireEvent.keyDown(fork, { key: ' ' })
+    expect(onNavigate).not.toHaveBeenCalled()
+    // The active row next to the marker is still the message row.
+    expect(screen.getByTestId('conversation-nav-item-u2').getAttribute('aria-current')).toBe('true')
+  })
+
+  it('renders byte-identical DOM when nothing is marked (empty map or absent prop)', () => {
+    const withEmptyMap = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map()} />)
+    expect(childTestIds(bodyOf(withEmptyMap.container))).toEqual([
+      'conversation-nav-item-u1',
+      'conversation-nav-item-u2',
+      'conversation-nav-item-u3'
+    ])
+    expect(screen.queryAllByTestId('conversation-nav-fork')).toHaveLength(0)
+    const htmlWithEmptyMap = withEmptyMap.container.innerHTML
+    withEmptyMap.unmount()
+
+    const withoutProp = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
+    expect(withoutProp.container.innerHTML).toBe(htmlWithEmptyMap)
+    expect(screen.queryAllByTestId('conversation-nav-fork')).toHaveLength(0)
+  })
+
+  it('sits on the dot band collapsed: 6px + 2px gap + 6px = the 14px dot width', () => {
+    render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />)
+    const norm = normalizedCss()
+
+    const dot = /width:(\d+)px;height:4px;background:var\(--color-border\);border-radius:2px/.exec(norm)
+    const row = /height:12px;width:(\d+)px;align-self:flex-start;display:flex;align-items:center;gap:(\d+)px/.exec(norm)
+    const segment = /width:(\d+)px;height:1px;background:var\(--color-border\);border-radius:2px/.exec(norm)
+    expect(dot).not.toBeNull()
+    expect(row).not.toBeNull()
+    expect(segment).not.toBeNull()
+
+    const dotWidth = Number(dot![1])
+    const markerWidth = Number(row![1])
+    const gap = Number(row![2])
+    const dashWidth = Number(segment![1])
+    expect(dashWidth).toBe(6)
+    expect(gap).toBe(2)
+    // Two 6px dashes with the 2px gap add up to exactly the row width.
+    expect(dashWidth * 2 + gap).toBe(14)
+    expect(markerWidth).toBe(14)
+    // ... and the row is exactly as wide as the dot it replaces in the band.
+    expect(markerWidth).toBe(dotWidth)
+    // The dash keeps the dot's own radius so it reads as part of the same rail.
+    expect(norm).toContain('border-radius:2px')
+  })
+
+  it('expands into the message flow form: line + name + line at the 24px row height', () => {
+    const { container } = render(
+      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+    )
+    // Expanded, because the name element (and therefore its rule) exists only
+    // while the taken branch name is actually rendered.
+    fireEvent.mouseEnter(bodyOf(container))
+    const norm = normalizedCss()
+
+    // The message-row height, the full content width, and the flow's 8px gap
+    // around the name.
+    expect(norm).toContain('height:24px;width:auto;align-self:stretch;gap:8px')
+    // Two equal rules: `flex: 1 1 0` on both dashes.
+    expect(norm).toContain('flex:110')
+    // Name typography matches the flow's selected-fork label.
+    expect(norm).toContain('font-size:11.5px;color:var(--color-text-2);white-space:nowrap')
+  })
+
+  it('reveals the taken branch name only while expanded, between the two rules', () => {
+    const { container } = render(
+      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+    )
+    const body = bodyOf(container)
+    const collapsed = screen.getByTestId('conversation-nav-fork')
+    expect(collapsed.children).toHaveLength(2)
+    expect(collapsed.textContent).toBe('')
+
+    fireEvent.mouseEnter(body)
+
+    const expanded = screen.getByTestId('conversation-nav-fork')
+    expect(expanded.children).toHaveLength(3)
+    const [leadingRule, name, trailingRule] = Array.from(expanded.children)
+    expect(leadingRule.textContent).toBe('')
+    expect(name.textContent).toBe('Research branch')
+    expect(trailingRule.textContent).toBe('')
+    expect(expanded.textContent).toBe('Research branch')
+    // Expanded it is still decorative, never a navigation target.
+    expect(expanded.getAttribute('aria-hidden')).toBe('true')
+    expect(expanded.getAttribute('role')).toBeNull()
+    expect(expanded.getAttribute('data-message-id')).toBeNull()
+    expect(expanded.getAttribute('tabindex')).toBeNull()
+    // The message row stays the navigation entry right above the marker.
+    expect(expanded.previousElementSibling).toBe(screen.getByTestId('conversation-nav-item-u2'))
+  })
+
+  it('renders the caller-supplied fork text, including the untaken-fork count form', () => {
+    const { container } = render(
+      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', '此处有 2 条分支']])} />
+    )
+    const body = bodyOf(container)
+    expect(screen.getByTestId('conversation-nav-fork').children).toHaveLength(2)
+
+    fireEvent.mouseEnter(body)
+
+    // The marker owns no text decision of its own: whatever label the caller
+    // resolved (branch name or the flow's children-here form) is what renders
+    // between the two rules, so a fork the route did not take is never a bare
+    // line.
+    const expanded = screen.getByTestId('conversation-nav-fork')
+    expect(expanded.children).toHaveLength(3)
+    const [, label] = Array.from(expanded.children)
+    expect(label.textContent).toBe('此处有 2 条分支')
+    expect(expanded.textContent).toBe('此处有 2 条分支')
+    // No caret: the flow's `▾` belongs to its clickable popover trigger.
+    expect(expanded.textContent).not.toContain('▾')
   })
 })
