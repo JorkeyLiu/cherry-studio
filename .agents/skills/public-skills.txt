@@ -1,6 +1,5 @@
 # Public skills tracked by skills:sync and skills:check.
 # One skill name per line.
-github-workflow
 prepare-release
 create-skill
 gh-create-issue

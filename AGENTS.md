@@ -42,9 +42,10 @@ This is the canonical, always-on repository contract for AI coding assistants wo
 Load the matching skill before starting the task. If a referenced skill is missing, read its `SKILL.md` under `.agents/skills/<name>/` and follow it manually.
 
 - **Root AGENTS.md authoring** — use the `agents-md-authoring` skill when creating, restructuring, reviewing, or maintaining this repository-root AGENTS.md (or a CLAUDE.md compatibility entry for it). It governs only the root AGENTS.md; nested/subdirectory AGENTS.md files are out of scope and remain locally scoped overlays.
-- **GitHub PR workflow and code review** — route through the `github-workflow` skill (PR creation/update with template compliance, review, CI check/log inspection). If that skill is missing, read the current PR-related skill under `.agents/skills/` and follow it. PR review must not run `pnpm lint`/`pnpm test`/`pnpm format` locally — check CI status with `gh pr checks`, `gh pr view`, and `gh run view <RUN_ID> --log-failed` instead, investigating failures from logs only.
+- **GitHub PR creation and update** — read `.github/pull_request_template.md` and fill the whole template: keep every section and its structure, and write `N/A`/`None` for missing data instead of removing sections.
+- **PR review** — never run `pnpm lint`/`pnpm test`/`pnpm format` locally; inspect CI with `gh pr checks`, `gh pr view`, and `gh run view <RUN_ID> --log-failed` instead, and investigate failures from logs only.
 - **Issue creation** — use the `gh-create-issue` skill.
-- **Implementation-time UI verification** — use the `ui-verify-change` skill when a task involves user-visible behavior: verify a UI change, confirm a fix, test changed UI, or decide UI regression coverage. No PR is required; this is the PR-focused `github-workflow` companion for implementation-time evidence.
+- **Implementation-time UI verification** — use the `ui-verify-change` skill when a task involves user-visible behavior: verify a UI change, confirm a fix, test changed UI, or decide UI regression coverage. No PR is required; this covers implementation-time evidence, complementing the PR creation and review rules above.
 - **Creating a new skill** — use the `create-skill` skill.
 - **Release preparation** — use the `prepare-release` skill.
 - **Delivery validation** — use the `delivery-validation` skill when running completion gates, pre-commit checks, full tests, E2E/build/packaging, or other long-running validation commands.

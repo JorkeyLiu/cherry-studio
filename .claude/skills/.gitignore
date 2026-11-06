@@ -8,7 +8,6 @@
 !create-skill
 !delivery-validation
 !gh-create-issue
-!github-workflow
 !prepare-release
 !ui-verify-change
 !vercel-react-best-practices

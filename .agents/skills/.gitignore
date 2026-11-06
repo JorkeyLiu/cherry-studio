@@ -14,8 +14,6 @@
 !delivery-validation/**
 !gh-create-issue/
 !gh-create-issue/**
-!github-workflow/
-!github-workflow/**
 !prepare-release/
 !prepare-release/**
 !ui-verify-change/
