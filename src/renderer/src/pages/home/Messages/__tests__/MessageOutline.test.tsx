@@ -211,11 +211,11 @@ describe('MessageOutline reading-anchor follow', () => {
     expect(norm).toContain('color:var(--color-text-1)')
   })
 
-  it('leaves the outline scroll alone when the active row rests in the safe zone', () => {
+  it('leaves the outline scroll alone when the active row is fully visible', () => {
     const { body, rowOf } = renderOutline('u2')
     stubRect(body, 0, 100)
-    // Row center 42 sits inside the safe band (36..64: the 1.5-row floor
-    // dominates 20% on a 100px box): no motion.
+    // 30..54 sits inside the box edge to edge: the reader can already read the
+    // row, so follow keeps the position it has instead of centering it.
     stubRect(rowOf('u2'), 30, 54)
     flushRaf()
     expect(body.scrollTop).toBe(0)
@@ -250,31 +250,39 @@ describe('MessageOutline reading-anchor follow', () => {
     expect(body.scrollTop).toBe(-68)
   })
 
-  it('follows early when a still-visible row nears the edge band', () => {
+  it('keeps a visible row exactly where it is, at an edge as well as in the middle', () => {
     const { body, rowOf, rerender } = renderOutline('u1')
     stubRect(body, 0, 100)
-    // Visible (60..84) but center 72 sits outside the 20..80 safe zone:
-    // deviate +22 from container center 50.
-    stubRect(rowOf('u1'), 60, 84)
+    // Fully visible at 76..100, the bottom edge of the box: no motion.
+    stubRect(rowOf('u1'), 76, 100)
     flushRaf()
-    expect(body.scrollTop).toBe(22)
+    expect(body.scrollTop).toBe(0)
 
-    // Symmetric top band: center 12 deviates -38 from container center 50.
+    // Symmetric top edge: 0..24 fully visible, still no motion.
     rerender(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId="u3" />)
     body.scrollTop = 0
     stubRect(rowOf('u3'), 0, 24)
     flushRaf()
-    expect(body.scrollTop).toBe(-38)
+    expect(body.scrollTop).toBe(0)
   })
 
-  it('holds still when the active row crosses the middle without touching the bands', () => {
+  it('reveals a row the box edge cuts, where it is not readable yet', () => {
+    const { body, rowOf } = renderOutline('u1')
+    stubRect(body, 0, 100)
+    // 88..112 crosses the bottom edge: row center 100 vs container center 50.
+    stubRect(rowOf('u1'), 88, 112)
+    flushRaf()
+    expect(body.scrollTop).toBe(50)
+  })
+
+  it('holds still when the active row changes inside the visible box', () => {
     const { body, rowOf, rerender } = renderOutline('u1')
     stubRect(body, 0, 100)
     stubRect(rowOf('u1'), 30, 54)
     flushRaf()
     expect(body.scrollTop).toBe(0)
 
-    // Re-anchor inside the safe zone: no recenter per turn change.
+    // Re-anchor inside the visible box: no recenter per turn change.
     rerender(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId="u2" />)
     stubRect(rowOf('u2'), 40, 64)
     flushRaf()
@@ -290,15 +298,19 @@ describe('MessageOutline reading-anchor follow', () => {
     expect(body.scrollTop).toBe(0)
   })
 
-  it('keeps a 1.5-row edge band even when 20% of the container is smaller', () => {
-    // 120px container: 20% = 24 < 1.5-row floor 36, so the safe band is
-    // 36..84 and a row centered at 30 follows early.
-    const { body, rowOf } = renderOutline('u1')
+  it('keeps a short box exact too: a visible row stays put and a cut one is revealed', () => {
+    // 120px box: 18..42 is fully visible, so nothing moves there either.
+    const { body, rowOf, rerender } = renderOutline('u1')
     stubRect(body, 0, 120)
     stubRect(rowOf('u1'), 18, 42)
     flushRaf()
-    // Center 30 vs container center 60: deviate -30.
-    expect(body.scrollTop).toBe(-30)
+    expect(body.scrollTop).toBe(0)
+
+    // 110..134 crosses the 120px edge: center 122 vs container center 60.
+    rerender(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId="u2" />)
+    stubRect(rowOf('u2'), 110, 134)
+    flushRaf()
+    expect(body.scrollTop).toBe(62)
   })
 
   it('pauses follow on wheel input and resumes after the idle window', () => {
@@ -555,10 +567,22 @@ describe('MessageOutline fork markers', () => {
     const norm = normalizedCss()
 
     // The message-row height, the full content width, and the flow's 8px gap
-    // around the name.
+    // around the name. The rules grow, so they need no space-between: they own
+    // the row's two ends once the rail is wider than the label.
     expect(norm).toContain('height:24px;width:auto;align-self:stretch;gap:8px')
-    // Two equal rules: `flex: 1 1 0` on both dashes.
-    expect(norm).toContain('flex:110')
+    // Both rules reserve a definite base size, then grow into whatever width
+    // the row has left, with an 8px floor. The base keeps them part of the
+    // row's intrinsic width (a zero-basis rule contributes nothing, so a rail
+    // whose widest content was the label sized itself to the label plus the two
+    // gaps and left the rules at 0px — the divider lost its lines on short
+    // messages); the growth is what still draws long dividers around the name
+    // on a wide message rather than two short dashes beside a wide gap; the
+    // floor keeps a visible line when a capped panel has to shrink the row.
+    // (Declared geometry only: jsdom performs no flex layout, so the resulting
+    // pixel widths are proven by the runtime observation run, not here.)
+    expect(norm).toContain('flex:118px;min-width:8px')
+    expect(norm).not.toContain('flex:018px')
+    expect(norm).not.toContain('flex:110;')
     // Name typography matches the flow's selected-fork label.
     expect(norm).toContain('font-size:11.5px;color:var(--color-text-2);white-space:nowrap')
   })
@@ -610,5 +634,517 @@ describe('MessageOutline fork markers', () => {
     expect(expanded.textContent).toBe('此处有 2 条分支')
     // No caret: the flow's `▾` belongs to its clickable popover trigger.
     expect(expanded.textContent).not.toContain('▾')
+  })
+})
+
+describe('MessageOutline follow across the expand/collapse geometry switch', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+
+  // The two delays the component owns: the collapse grace margin and the
+  // geometry window the compensation holds a row's on-screen position for.
+  const COLLAPSE_GRACE_MS = 160
+  const EXPAND_TRANSITION_MS = 180
+  // Idle window after the last manual wheel/pointer/key interaction.
+  const FOLLOW_RESUME_IDLE_MS = 800
+
+  let rafQueue: FrameRequestCallback[]
+  let resizeCallbacks: ResizeObserverCallback[]
+
+  const flushRaf = () => {
+    const pending = [...rafQueue]
+    rafQueue.length = 0
+    for (const cb of pending) cb(0)
+  }
+
+  const rect = (top: number, bottom: number) =>
+    ({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+      toJSON: () => ({})
+    }) as DOMRect
+
+  const stubRect = (el: Element, top: number, bottom: number) => {
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(rect(top, bottom))
+  }
+
+  const stubScrollable = (el: HTMLElement, scrollHeight: number, clientHeight: number) => {
+    Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
+  }
+
+  /**
+   * Layout model for one row: what it draws is its content-space top minus the
+   * body's current scrollTop, the very relationship the compensation cancels.
+   * jsdom lays nothing out, so without the model a scroll write would not move
+   * anything and the drift a real transition produces could not be imitated.
+   * The returned handle is mutated to imitate rows growing or shrinking.
+   */
+  const modelRow = (body: HTMLElement, row: HTMLElement, contentTop: number, height: number) => {
+    const layout = { contentTop, height }
+    vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => {
+      const top = layout.contentTop - body.scrollTop
+      return rect(top, top + layout.height)
+    })
+    return layout
+  }
+
+  const ROWS_CONTENT_TOP = 400
+
+  /**
+   * Coherent three-row layout: the rows share one height and the 4px expanded
+   * gap, so a row-height change of d moves the content end by 3d while the top
+   * row moves by nothing. That surplus is exactly what a row anchor cannot
+   * absorb at the end of the list, and why the end itself is the reference
+   * there. Returns the content height the rows add up to, so a test can address
+   * the scroll end without repeating the arithmetic, plus the top row's handle.
+   */
+  const modelEnd = (body: HTMLElement, rowOf: (id: string) => HTMLElement, height: number) => {
+    const pitch = height + 4
+    const topRow = modelRow(body, rowOf('u1'), ROWS_CONTENT_TOP, height)
+    modelRow(body, rowOf('u2'), ROWS_CONTENT_TOP + pitch, height)
+    modelRow(body, rowOf('u3'), ROWS_CONTENT_TOP + pitch * 2, height)
+    const scrollHeight = ROWS_CONTENT_TOP + pitch * 2 + height
+    stubScrollable(body, scrollHeight, 100)
+    return { scrollHeight, topRow }
+  }
+
+  const renderOutline = (activeId?: string) => {
+    const onNavigate = vi.fn()
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} activeId={activeId} />)
+    const body = utils.container.querySelector('[data-testid="conversation-navigation"]')!
+      .firstElementChild as HTMLElement
+    // A long route: the body keeps its capped height in both states, so the
+    // box a ResizeObserver watches never changes size across the switch.
+    stubScrollable(body, 5000, 100)
+    stubRect(body, 0, 100)
+    const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    const advance = (ms: number) => {
+      act(() => {
+        vi.advanceTimersByTime(ms)
+      })
+    }
+    return { ...utils, body, rowOf, advance, onNavigate }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rafQueue = []
+    resizeCallbacks = []
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((cb: FrameRequestCallback): number => {
+        rafQueue.push(cb)
+        return rafQueue.length
+      })
+    )
+    vi.stubGlobal(
+      'cancelAnimationFrame',
+      vi.fn(() => {
+        rafQueue.length = 0
+      })
+    )
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: ResizeObserverCallback) {
+          resizeCallbacks.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('holds the on-screen row where it is drawn while the rows grow', () => {
+    const { body, rowOf, advance } = renderOutline('u2')
+    body.scrollTop = 400
+    // Drawn 70px below the box top, fully visible: follow leaves it alone.
+    const layout = modelRow(body, rowOf('u2'), 470, 12)
+    flushRaf()
+    expect(body.scrollTop).toBe(400)
+    expect(rowOf('u2').getBoundingClientRect().top).toBe(70)
+
+    fireEvent.mouseEnter(body)
+    // Every row grows over the transition: the rows above the anchor push its
+    // content-space top down by up to 116px and its own height doubles. Each
+    // frame corrects the scroll offset, so the row keeps its 70px position and
+    // never drifts out of the box.
+    for (const step of [
+      { contentTop: 499, height: 13.79 },
+      { contentTop: 528, height: 15.43 },
+      { contentTop: 557, height: 19.72 },
+      { contentTop: 586, height: 24 }
+    ]) {
+      layout.contentTop = step.contentTop
+      layout.height = step.height
+      flushRaf()
+      expect(Math.abs(rowOf('u2').getBoundingClientRect().top - 70)).toBeLessThan(0.51)
+    }
+
+    // The window closes on the settled geometry: still 70, not the 38px offset
+    // a recenter would pick for a 24px row.
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(586 - 70)
+    expect(rowOf('u2').getBoundingClientRect().top).toBe(70)
+  })
+
+  it('holds the on-screen row through a collapse instead of snapping it back', () => {
+    const { body, rowOf, advance } = renderOutline('u2')
+    body.scrollTop = 400
+    const layout = modelRow(body, rowOf('u2'), 460, 24)
+    flushRaf()
+    expect(body.scrollTop).toBe(400)
+
+    fireEvent.mouseEnter(body)
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(400)
+
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // Rows shrink back: the rows above the anchor pull its content-space top up
+    // by up to 116px. The anchor keeps its 60px position throughout.
+    for (const step of [
+      { contentTop: 431, height: 22.21 },
+      { contentTop: 402, height: 19.72 },
+      { contentTop: 373, height: 15.43 },
+      { contentTop: 344, height: 12 }
+    ]) {
+      layout.contentTop = step.contentTop
+      layout.height = step.height
+      flushRaf()
+      expect(Math.abs(rowOf('u2').getBoundingClientRect().top - 60)).toBeLessThan(0.51)
+    }
+
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(344 - 60)
+    expect(rowOf('u2').getBoundingClientRect().top).toBe(60)
+  })
+
+  it('keeps a single writer when a ResizeObserver callback lands mid-switch', () => {
+    const { body, rowOf } = renderOutline('u2')
+    body.scrollTop = 400
+    const layout = modelRow(body, rowOf('u2'), 470, 12)
+    flushRaf()
+
+    fireEvent.mouseEnter(body)
+    layout.contentTop = 528
+    layout.height = 15
+    flushRaf()
+    expect(body.scrollTop).toBe(458)
+    expect(rowOf('u2').getBoundingClientRect().top).toBe(70)
+
+    // The body's content width changes across the switch, so the observer fires
+    // once mid-transition. Its follow must not split the transition: an
+    // edge-band rule would have re-centered this visible row (center 77.5).
+    for (const cb of resizeCallbacks) cb([], {} as ResizeObserver)
+    flushRaf()
+    expect(body.scrollTop).toBe(458)
+  })
+
+  it('re-anchors a rapid reverse on the row that is on screen then', () => {
+    const { body, rowOf, advance } = renderOutline('u2')
+    body.scrollTop = 400
+    const layout = modelRow(body, rowOf('u2'), 470, 12)
+    flushRaf()
+
+    fireEvent.mouseEnter(body)
+    layout.contentTop = 500
+    layout.height = 16
+    flushRaf()
+    expect(body.scrollTop).toBe(430)
+
+    // Leave and come back inside the collapse transition: each switch takes a
+    // fresh measurement of the row that is on screen at that moment.
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    layout.contentTop = 440
+    layout.height = 12
+    flushRaf()
+    expect(body.scrollTop).toBe(370)
+
+    fireEvent.mouseEnter(body)
+    layout.contentTop = 480
+    layout.height = 18
+    flushRaf()
+    expect(body.scrollTop).toBe(410)
+
+    // The reverse settles on the same row: the compensation ends with the
+    // expanded geometry and keeps holding the position it had.
+    layout.contentTop = 490
+    layout.height = 24
+    flushRaf()
+    expect(body.scrollTop).toBe(420)
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(420)
+    expect(rowOf('u2').getBoundingClientRect().top).toBe(70)
+  })
+
+  it('yields the scroll to a gesture and leaves no handle behind on unmount', () => {
+    const { body, rowOf, unmount } = renderOutline('u2')
+    body.scrollTop = 400
+    const layout = modelRow(body, rowOf('u2'), 470, 12)
+    flushRaf()
+
+    fireEvent.mouseEnter(body)
+    layout.contentTop = 500
+    flushRaf()
+    expect(body.scrollTop).toBe(430)
+
+    // Wheel input takes over: the compensation is dropped, so no later frame
+    // writes over the reader's own scroll.
+    fireEvent.wheel(body)
+    const browsed = body.scrollTop
+    layout.contentTop = 560
+    flushRaf()
+    expect(body.scrollTop).toBe(browsed)
+
+    // A switch interrupted by unmount leaves no timer or frame behind.
+    fireEvent.mouseEnter(body)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    layout.contentTop = 640
+    flushRaf()
+    expect(body.scrollTop).toBe(browsed)
+  })
+
+  it('holds the row in view, never the hidden active row, while the reader browses', () => {
+    const { body, rowOf, advance } = renderOutline('u3')
+    body.scrollTop = 400
+    const browseRow = modelRow(body, rowOf('u1'), 420, 12)
+    const activeRow = modelRow(body, rowOf('u3'), 432, 12)
+    flushRaf()
+    expect(body.scrollTop).toBe(400)
+
+    // The reader wheels away and the reading anchor moves far down the list:
+    // while the pause holds, the outline keeps the browse position.
+    fireEvent.wheel(body)
+    activeRow.contentTop = 1200
+    fireEvent.mouseEnter(body)
+    browseRow.contentTop = 478
+    browseRow.height = 24
+    flushRaf()
+    expect(body.scrollTop).toBe(458)
+    expect(rowOf('u1').getBoundingClientRect().top).toBe(20)
+
+    // The switch does not drag the hidden anchor into view either, and the
+    // compensation ends on the settled row height.
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(458)
+
+    // The deferred reveal lands only once the idle window closes.
+    advance(FOLLOW_RESUME_IDLE_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(1156)
+    expect(rowOf('u3').getBoundingClientRect().top).toBe(1200 - 1156)
+  })
+
+  it('reveals the clicked row after a quick leave, and only when the paused follow resumes', () => {
+    const { body, rowOf, advance, rerender, onNavigate } = renderOutline('u1')
+    stubRect(rowOf('u1'), 30, 54)
+    flushRaf()
+    fireEvent.mouseEnter(body)
+    advance(EXPAND_TRANSITION_MS)
+    stubRect(rowOf('u1'), 30, 54)
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+
+    // Far upward browse inside the expanded list: wheel pauses follow.
+    fireEvent.wheel(body)
+    // Click a far row: the pointer interaction re-arms the idle window, the
+    // caller reports the new reading anchor, and follow is paused throughout.
+    fireEvent.pointerDown(rowOf('u3'))
+    fireEvent.click(rowOf('u3'))
+    expect(onNavigate).toHaveBeenCalledWith('u3')
+    rerender(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} activeId="u3" />)
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+
+    // Quick leave: the collapse lands 160ms later while the pause is still
+    // active, so the collapse's own reveal is held back, not dropped.
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // Settled compact geometry: the collapse's own reveal is only deferred.
+    stubRect(rowOf('u1'), 30, 42)
+    flushRaf()
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+
+    // Still inside the idle window: the browse position is intact.
+    advance(FOLLOW_RESUME_IDLE_MS - COLLAPSE_GRACE_MS - EXPAND_TRANSITION_MS - 100)
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+
+    // The compact rail puts the clicked row out of view; the idle window then
+    // closes with no rerender, no new anchor and no further interaction.
+    stubRect(rowOf('u3'), 120, 144)
+    advance(100)
+    flushRaf()
+    expect(body.scrollTop).toBe(82)
+  })
+
+  it('lands a late anchor update received while paused, not the one held at collapse time', () => {
+    const { body, rowOf, advance, rerender, onNavigate } = renderOutline('u1')
+    stubRect(rowOf('u1'), 30, 54)
+    flushRaf()
+    fireEvent.mouseEnter(body)
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+
+    fireEvent.wheel(body)
+    fireEvent.pointerDown(rowOf('u1'))
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS + EXPAND_TRANSITION_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // The compact rows are the settled geometry of the collapse: its reveal is
+    // deferred by the pause, not performed now.
+    stubRect(rowOf('u1'), 30, 42)
+    flushRaf()
+
+    // The anchor report arrives after the collapse, while follow is paused.
+    // The old anchor stays visible, so a reveal of it would not move anything.
+    stubRect(rowOf('u1'), 30, 54)
+    stubRect(rowOf('u2'), 120, 144)
+    rerender(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} activeId="u2" />)
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+
+    // Resuming follows the anchor that is current now, not the captured one.
+    advance(FOLLOW_RESUME_IDLE_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(82)
+  })
+
+  it('keeps a paused browse position when only the row list changes', () => {
+    const { body, rowOf, advance, rerender, onNavigate } = renderOutline('u2')
+    stubRect(rowOf('u2'), 30, 54)
+    flushRaf()
+    fireEvent.mouseEnter(body)
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+
+    fireEvent.wheel(body)
+    // Callers hand down a fresh entries array on every render (streaming
+    // tokens included): a row-list change must not arm a reveal while the user
+    // is browsing the outline.
+    rerender(<MessageOutline entries={ENTRIES.map((entry) => ({ ...entry }))} onNavigate={onNavigate} activeId="u2" />)
+    stubRect(rowOf('u2'), 120, 144)
+    advance(FOLLOW_RESUME_IDLE_MS * 2)
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+  })
+
+  it('holds the end of the list through an expansion, so the last row stays whole and the grown range is reached', () => {
+    const { body, rowOf } = renderOutline('u2')
+    // The compact end: the last row sits exactly on the body's bottom edge.
+    const compact = modelEnd(body, rowOf, 12)
+    body.scrollTop = compact.scrollHeight - 100
+    flushRaf()
+    expect(body.scrollTop).toBe(compact.scrollHeight - 100)
+    expect(rowOf('u3').getBoundingClientRect().bottom).toBeCloseTo(100, 5)
+
+    fireEvent.mouseEnter(body)
+    // Every row grows, so the content end moves three times as far as any one
+    // row top: holding the end lets the scroll range grow to where the rows
+    // actually end, instead of stopping a row short with the last row sliced by
+    // the box edge.
+    for (const height of [13.79, 19.43, 24]) {
+      const frame = modelEnd(body, rowOf, height)
+      flushRaf()
+      expect(body.scrollTop).toBeCloseTo(frame.scrollHeight - 100, 5)
+      expect(rowOf('u3').getBoundingClientRect().bottom).toBeCloseTo(100, 5)
+    }
+
+    // Settled: the grown range is reached and the row the reader was looking at
+    // is still whole, so the reveal the switch hands back leaves it alone.
+    expect(body.scrollTop).toBeCloseTo(480 - 100, 5)
+    expect(rowOf('u2').getBoundingClientRect().top).toBeCloseTo(48, 5)
+    expect(rowOf('u2').getBoundingClientRect().bottom).toBeCloseTo(72, 5)
+  })
+
+  it('holds the end through the collapse and lands back on the compact scroll end', () => {
+    const { body, rowOf, advance } = renderOutline('u2')
+    // Expanded and at the end: the growth is over and the last row is whole.
+    const expanded = modelEnd(body, rowOf, 24)
+    body.scrollTop = expanded.scrollHeight - 100
+    fireEvent.mouseEnter(body)
+    flushRaf()
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(body.scrollTop).toBeCloseTo(expanded.scrollHeight - 100, 5)
+
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // Rows shrink, so the content end rises frame by frame: the end distance
+    // stays held and the last row keeps its bottom on the box edge.
+    for (const height of [19.43, 13.79, 12]) {
+      const frame = modelEnd(body, rowOf, height)
+      flushRaf()
+      expect(body.scrollTop).toBeCloseTo(frame.scrollHeight - 100, 5)
+      expect(rowOf('u3').getBoundingClientRect().bottom).toBeCloseTo(100, 5)
+    }
+
+    // The compact rail lands exactly on its own scroll end, with the row the
+    // reader was looking at still whole and not re-centered.
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBeCloseTo(444 - 100, 5)
+    expect(rowOf('u3').getBoundingClientRect().bottom).toBeCloseTo(100, 5)
+    expect(rowOf('u2').getBoundingClientRect().top).toBeCloseTo(72, 5)
+  })
+
+  it('keeps a near-end browse position on its row anchor, where the reader is not at the end', () => {
+    const { body, rowOf, advance } = renderOutline('u1')
+    // A row and a half short of the end: a browse position inside the last page,
+    // not the end of the list. The top row is above the growth, so the row
+    // anchor holds it by leaving the scroll offset alone.
+    const compact = modelEnd(body, rowOf, 12)
+    body.scrollTop = compact.scrollHeight - 118
+    flushRaf()
+    expect(body.scrollTop).toBe(compact.scrollHeight - 118)
+    const anchoredTop = rowOf('u1').getBoundingClientRect().top
+    expect(anchoredTop).toBeCloseTo(74, 5)
+
+    fireEvent.mouseEnter(body)
+    for (const height of [13.79, 19.43, 24]) {
+      const frame = modelEnd(body, rowOf, height)
+      flushRaf()
+      // The scroll never goes to the end: the end is the reference only for a
+      // reader who is actually there.
+      expect(body.scrollTop).toBe(compact.scrollHeight - 118)
+      expect(body.scrollTop).not.toBeCloseTo(frame.scrollHeight - 100, 5)
+      expect(rowOf('u1').getBoundingClientRect().top).toBeCloseTo(anchoredTop, 5)
+    }
+
+    // Settled: the row grew into the space its held top leaves free, still
+    // whole, and the browse position is untouched.
+    advance(EXPAND_TRANSITION_MS)
+    flushRaf()
+    expect(body.scrollTop).toBe(compact.scrollHeight - 118)
+    expect(rowOf('u1').getBoundingClientRect().bottom).toBeCloseTo(anchoredTop + 24, 5)
   })
 })

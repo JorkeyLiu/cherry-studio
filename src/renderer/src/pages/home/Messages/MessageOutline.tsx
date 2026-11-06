@@ -30,11 +30,28 @@ const FOLLOW_RESUME_IDLE_MS = 800
 
 /**
  * Expand/collapse transition: collapsed rows are 12px high with a 2px gap;
- * expansion grows rows to 24px with a 4px gap over 180ms ease-out. The
- * ResizeObserver follow below re-measures at the final actual size, so
- * expansion needs no timer of its own; only leaving needs the grace below.
+ * expansion grows rows to 24px with a 4px gap over 180ms ease-out. A long list
+ * keeps its capped body height across the switch, so the body box a
+ * ResizeObserver watches never changes size; the compensation below holds one
+ * row's on-screen position while every row changes height.
  */
 const EXPAND_TRANSITION_MS = 180
+/**
+ * The anchored row's own height is the switch's progress signal: it reaches
+ * these sizes only when every row has finished growing/shrinking, so the
+ * compensation ends on the settled geometry instead of on a fixed wait. A wait
+ * measured from the pointer event cannot work — the render, the style change
+ * and the animation all start later than the event that triggered them.
+ */
+const ROW_HEIGHT_COLLAPSED_PX = 12
+const ROW_HEIGHT_EXPANDED_PX = 24
+/** Row-height match that counts as "the switch has settled". */
+const ROW_HEIGHT_SETTLE_TOLERANCE_PX = 0.05
+/**
+ * Safety net for a switch whose row height never reaches the target (a themed
+ * or restyled rail): the compensation and its reveal still end here.
+ */
+const GEOMETRY_SETTLE_FALLBACK_MS = EXPAND_TRANSITION_MS + 500
 
 /**
  * Collapse grace margin: expansion is immediate, but the collapsed rail is
@@ -44,17 +61,131 @@ const EXPAND_TRANSITION_MS = 180
 const COLLAPSE_GRACE_MS = 160
 
 /**
- * Follow safe-zone band: the active row moves the outline only when its
- * center leaves this middle fraction of the container height.
+ * Sub-pixel tolerance for "this row is where it was": layout reports fractional
+ * geometry, and chasing that would write the scroll offset every frame for
+ * nothing.
  */
-const FOLLOW_SAFE_ZONE_TOP_RATIO = 0.2
-const FOLLOW_SAFE_ZONE_BOTTOM_RATIO = 0.8
+const POSITION_TOLERANCE_PX = 0.5
+
 /**
- * Edge-band floor in row heights: the 20% inset never shrinks below ~1.5
- * rows, so small containers keep an early-follow band instead of riding the
- * edge. Short lists without overflow never scroll (guarded in the effect).
+ * "The reader is at the end of the list": the scroll offset is within this
+ * distance of the content end. Fractional layout means an end reached by a drag
+ * or a reveal reports a fraction of a pixel short, while anything further in —
+ * the shortest row is 12px, so a whole row or more — is a browse position
+ * inside the last page, not the end of it.
  */
-const FOLLOW_SAFE_MIN_MARGIN_ROWS = 1.5
+const BOTTOM_DISTANCE_TOLERANCE_PX = 1
+
+interface GeometryAnchor {
+  /**
+   * `row` holds one row's top at `offset` below the body's top; `end` holds the
+   * list end's distance to the body's bottom at `offset`, for a reader standing
+   * at the end whose visible rows all grow toward that edge.
+   */
+  mode: 'row' | 'end'
+  /**
+   * Row whose on-screen position is held (`row`), or whose height is the
+   * switch's settle signal (`end`).
+   */
+  row: HTMLElement
+  /** Row top, or distance to the content end, in px, when the switch began. */
+  offset: number
+}
+
+/** The single transient geometry compensation in flight, if any. */
+interface GeometryCompensation {
+  raf: number
+  anchor: GeometryAnchor
+}
+
+/** Stable-ID row lookup: IDs never pass through the selector parser. */
+const findRow = (container: HTMLElement, id: string) =>
+  Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]')).find((el) => el.dataset.messageId === id) ??
+  null
+
+/**
+ * A row counts as visible when the body shows all of it. A row cut by the
+ * body's edge is only half readable, so follow still repairs that one.
+ */
+const isFullyVisible = (row: HTMLElement, containerRect: DOMRect) => {
+  const rowRect = row.getBoundingClientRect()
+  return (
+    rowRect.height > 0 &&
+    rowRect.top >= containerRect.top - POSITION_TOLERANCE_PX &&
+    rowRect.bottom <= containerRect.bottom + POSITION_TOLERANCE_PX
+  )
+}
+
+/**
+ * The reference a geometry switch holds still. At the end of the list that is
+ * the list end itself: the reader's view is the last row and the gap under it,
+ * every row they can see grows toward that edge, and no single row top can
+ * represent the growth below it. Elsewhere the active row is the one the reader
+ * is looking at, so it wins whenever it is on screen. A hidden active row is
+ * not dragged anywhere by a geometry change while the reader is browsing — the
+ * row already on screen wins then, so the browse position survives the switch.
+ * A hidden active row with follow unpaused is follow's own intent: it is
+ * centered first, and that centered position is what the switch holds.
+ */
+const resolveGeometryAnchor = (
+  container: HTMLElement,
+  activeId: string | null | undefined,
+  paused: boolean
+): GeometryAnchor | null => {
+  const containerRect = container.getBoundingClientRect()
+  const containerHeight = containerRect.height || containerRect.bottom - containerRect.top
+  if (containerHeight <= 0) return null
+  const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
+  // Genuinely at the end of the list: hold that end instead of a row top, so
+  // the rows grow into the space the body already reserved and the last row
+  // stays whole rather than the switch chasing a row the growth pushes past the
+  // edge. The end row is only the settle signal here.
+  const bottomDistance = container.scrollHeight - container.clientHeight - container.scrollTop
+  const endRow = rows[rows.length - 1]
+  if (endRow && bottomDistance <= BOTTOM_DISTANCE_TOLERANCE_PX) {
+    return { mode: 'end', row: endRow, offset: Math.max(bottomDistance, 0) }
+  }
+  const activeRow = activeId ? findRow(container, activeId) : null
+  if (activeRow && !paused && !isFullyVisible(activeRow, containerRect)) {
+    const activeRect = activeRow.getBoundingClientRect()
+    const rowHeight = activeRect.height || activeRect.bottom - activeRect.top
+    return { mode: 'row', row: activeRow, offset: Math.max((containerHeight - rowHeight) / 2, 0) }
+  }
+  if (activeRow && isFullyVisible(activeRow, containerRect)) {
+    return { mode: 'row', row: activeRow, offset: activeRow.getBoundingClientRect().top - containerRect.top }
+  }
+  // Browsing, or an anchor that is not in the list: hold the row in view.
+  const visibleRow =
+    rows.find((row) => {
+      const rowRect = row.getBoundingClientRect()
+      return rowRect.height > 0 && rowRect.bottom > containerRect.top && rowRect.top < containerRect.bottom
+    }) ?? null
+  if (!visibleRow) return null
+  return { mode: 'row', row: visibleRow, offset: visibleRow.getBoundingClientRect().top - containerRect.top }
+}
+
+/**
+ * One correction: put the reference back where it was. Only the body's
+ * scrollTop moves, so this neither resizes content nor re-triggers the
+ * ResizeObserver, and the browser clamps at the content ends — a row near the
+ * start or the end of the list rides that edge instead of an arbitrary offset.
+ * A row reference holds that row's top; an end reference holds the distance
+ * between the content end and the body's bottom, the only reference that
+ * survives the rows below the reader growing toward that edge.
+ */
+const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => {
+  // A row that left the list has no geometry to hold. An end reference measures
+  // the content end instead, so it also survives a replaced row list.
+  if (anchor.mode === 'row' && !anchor.row.isConnected) return
+  // A body without overflow has nothing to scroll.
+  if (container.scrollHeight <= container.clientHeight + 1) return
+  const drift =
+    anchor.mode === 'end'
+      ? container.scrollHeight - container.clientHeight - anchor.offset - container.scrollTop
+      : anchor.row.getBoundingClientRect().top - (container.getBoundingClientRect().top + anchor.offset)
+  if (Math.abs(drift) < POSITION_TOLERANCE_PX) return
+  container.scrollTop += drift
+}
 
 /**
  * MessageOutline presentation restored from f2b83d806c with an approved
@@ -81,8 +212,13 @@ const FOLLOW_SAFE_MIN_MARGIN_ROWS = 1.5
  * collapsed and expanded rows line up 1:1.
  * Collapsed it is two 6px dashes with a 2px gap — 14px total, exactly the dot
  * band it sits in — and carries no text at all. Expanded it becomes
- * `── <text> ──` in the message flow's divider form: two 1px `flex:1` rules, an
- * 8px gap and the fork's label in the middle, left-aligned with the dot column.
+ * `── <text> ──` in the message flow's divider form: two 1px rules sharing the
+ * space above an 8px basis, an 8px gap and the fork's label in the middle,
+ * left-aligned with the dot column. That basis is what makes the rules part of
+ * the row's intrinsic width, so the rail always grows enough to show both of
+ * them next to the label — even when every message preview is shorter than the
+ * label (short messages) — and a wider rail still splits its surplus between
+ * them.
  * The text is the message flow's own two states (`forkMarkerLabel`): the branch
  * this route travels at the fork, or the fork's `此处有 {{count}} 条分支` count
  * when the route took none — a fork is never drawn as a bare line. No caret:
@@ -91,23 +227,120 @@ const FOLLOW_SAFE_MIN_MARGIN_ROWS = 1.5
  * marker carries no text in the DOM rather than merely hiding it.
  *
  * Active highlight (`activeId`) is theme-colored with `aria-current` and the
- * outline container follows it edge-early: when the active row's center
- * leaves the middle safe-zone band (20%-80% of the container height, at
- * least ~1.5 rows inset) or is out of view, only the outline container's
- * own scrollTop moves so the row recenters — never `scrollIntoView`, which
- * would move the chat.
- * Manual wheel/pointer/key interaction pauses follow until a short idle
- * window passes; drag releases on document `pointerup`.
+ * outline container follows it only when the row is NOT fully visible inside
+ * the body: a row the reader can already see keeps the position it has, so only
+ * the outline container's own scrollTop ever moves, and only for a row past the
+ * box edge or cut by it — never `scrollIntoView`, which would move the chat.
+ * An expand/collapse switch changes every row's height at once while a long list
+ * keeps the body at its capped height, so both directions hold one row's
+ * on-screen position frame by frame for the length of the transition (which row
+ * wins, and why it need not be the active one, is decided in
+ * `resolveGeometryAnchor`): the row never leaves the box, so there is no drift
+ * and nothing to snap back.
+ * At the end of the list the window holds the list end's distance to the box
+ * bottom instead of a row top: there the rows the reader sees are the ones
+ * growing toward that edge, so the last row stays whole and the grown scroll
+ * range is reached instead of left short.
+ * Manual wheel/pointer/key interaction pauses follow until a short idle window
+ * passes; drag releases on document `pointerup`. A paused interaction defers
+ * the follow instead of dropping it, and an interrupted geometry switch hands
+ * its reveal to that same deferred path.
  */
 const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId, forkAfter }) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const followPausedRef = useRef(false)
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rafRef = useRef<number | null>(null)
+  // Follow intent that arrived while the user was in control of the outline.
+  // The interaction pause below suppresses the motion, never the intent: when
+  // its idle window closes, follow lands on the anchor that is current then.
+  const pendingFollowRef = useRef(false)
   // Expansion is a JS state machine (not CSS :hover) so leaving can wait for
   // COLLAPSE_GRACE_MS while entering stays immediate.
   const [expanded, setExpanded] = useState(false)
   const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const geometryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The single transient compensation in flight (see
+  // `startGeometryCompensation`): while it is set, it — not the follow — owns
+  // the body's scrollTop.
+  const geometryCompensationRef = useRef<GeometryCompensation | null>(null)
+  // Anchor read by the deferred paths (geometry settle, pause expiry). Both run
+  // after the render that armed them, where the prop closure would still hold
+  // the previous anchor — a late anchor change must win.
+  const latestActiveIdRef = useRef<string | null | undefined>(activeId)
+  latestActiveIdRef.current = activeId
+
+  // Container-local follow: the outline's own scrollTop moves only for an
+  // active row that is not fully visible inside the body. A row the reader can
+  // already see keeps the exact position it has, so reading the rail never
+  // re-centers a visible highlight — and a geometry switch has nothing to snap
+  // back afterwards. The browser clamps scrollTop at the content ends, so
+  // first/last rows rest at the boundary instead of centering.
+  // The target is always the reading anchor — never the hovered row — so
+  // expansion can never scroll to a wrong item.
+  const revealActiveRow = useCallback((targetId: string) => {
+    if (followPausedRef.current) return
+    // A geometry switch owns the scroll for its own duration: a mid-transition
+    // follow would measure half-grown rows and fight the compensation.
+    if (geometryCompensationRef.current) return
+    const container = containerRef.current
+    if (!container) return
+    const row = findRow(container, targetId)
+    if (!row) return
+    const containerRect = container.getBoundingClientRect()
+    const containerHeight = containerRect.height || containerRect.bottom - containerRect.top
+    if (containerHeight <= 0) return
+    // No scrollable overflow (short list): centering is meaningless.
+    if (container.scrollHeight <= container.clientHeight + 1) return
+    if (isFullyVisible(row, containerRect)) return
+    const rowRect = row.getBoundingClientRect()
+    const rowCenter = (rowRect.top + rowRect.bottom) / 2
+    const containerCenter = (containerRect.top + containerRect.bottom) / 2
+    container.scrollTop += rowCenter - containerCenter
+  }, [])
+
+  /** Run the follow on the next frame, replacing any still-scheduled frame. */
+  const scheduleFollow = useCallback(
+    (targetId: string) => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        revealActiveRow(targetId)
+      })
+    },
+    [revealActiveRow]
+  )
+
+  /**
+   * Follow intent. While the user is browsing the outline the motion is held,
+   * not dropped: the idle window below resumes onto whatever anchor is current
+   * at that moment, so a reveal never waits for an unrelated rerender.
+   */
+  const requestFollow = useCallback(
+    (targetId: string | null | undefined) => {
+      const id = targetId ?? latestActiveIdRef.current
+      if (!id) return
+      if (followPausedRef.current) {
+        pendingFollowRef.current = true
+        return
+      }
+      pendingFollowRef.current = false
+      scheduleFollow(id)
+    },
+    [scheduleFollow]
+  )
+
+  /** Idle window closed: resume follow, landing any intent it was holding. */
+  const resumeFollow = useCallback(() => {
+    followPausedRef.current = false
+    if (!pendingFollowRef.current) return
+    pendingFollowRef.current = false
+    const targetId = latestActiveIdRef.current
+    if (targetId) scheduleFollow(targetId)
+  }, [scheduleFollow])
 
   const scheduleResume = useCallback(() => {
     if (resumeTimerRef.current) {
@@ -116,21 +349,123 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     }
     resumeTimerRef.current = setTimeout(() => {
       resumeTimerRef.current = null
-      followPausedRef.current = false
+      resumeFollow()
     }, FOLLOW_RESUME_IDLE_MS)
+  }, [resumeFollow])
+
+  /**
+   * Drop the transient compensation. A switch that was interrupted still owes
+   * the reader a reveal, so that intent is handed to the deferred follow path
+   * (`pendingFollowRef`) instead of being dropped, exactly like a follow that
+   * arrives while the reader is in control of the outline.
+   */
+  const stopGeometryCompensation = useCallback((deferFollow: boolean) => {
+    const current = geometryCompensationRef.current
+    if (current) {
+      geometryCompensationRef.current = null
+      if (current.raf) cancelAnimationFrame(current.raf)
+      if (deferFollow) pendingFollowRef.current = true
+    }
+    if (geometryTimerRef.current) {
+      clearTimeout(geometryTimerRef.current)
+      geometryTimerRef.current = null
+    }
   }, [])
 
   const pauseFollow = useCallback(() => {
     followPausedRef.current = true
+    stopGeometryCompensation(true)
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
     }
     scheduleResume()
-  }, [scheduleResume])
+  }, [scheduleResume, stopGeometryCompensation])
 
-  // Drag release anywhere releases the pause via the idle window; RAF and
-  // timers are cleaned up on unmount.
+  /**
+   * Hold one row's on-screen position across an expand/collapse height switch.
+   *
+   * The switch re-lays out every row at once (12px + 2px gap <-> 24px + 4px
+   * gap) while a long list keeps the body at its capped height, so a retained
+   * scrollTop carries the row the reader is looking at out of the box, and the
+   * follow could only snap it back after the transition. Instead, take that
+   * row's position now — before the new geometry lands — and re-apply it on
+   * every frame of the transition: the row stays where it is drawn and the
+   * scroll offset absorbs the layout change. Geometry is read inside each frame
+   * callback, which measures the geometry that frame is about to paint, so the
+   * correction lands before the paint and no frame shows the drift.
+   *
+   * A reader who is at the end of the list has no row top to hold: the rows
+   * above the end are the ones growing, so this window holds the end's own
+   * distance to the box bottom instead (`resolveGeometryAnchor` picks that
+   * reference), and the anchored row's height still carries it to the settled
+   * geometry.
+   *
+   * It ends on the settled geometry — the anchored row reaches its expanded or
+   * collapsed height — not after a fixed wait: the render and the animation
+   * start after the event that caused them, so a wait measured from the event
+   * would stop the compensation while rows are still growing. The last frame
+   * corrects once more and hands the scroll back to the ordinary follow: for a
+   * row the compensation kept visible that follow writes nothing, and for one
+   * it could not hold (a list edge, a replaced row list) it reveals the row as
+   * usual. A paused browse still defers its reveal; a gesture or an unmount
+   * drops the compensation.
+   */
+  const startGeometryCompensation = useCallback(
+    (expandedTarget: boolean) => {
+      stopGeometryCompensation(false)
+      const container = containerRef.current
+      const anchor = container
+        ? resolveGeometryAnchor(container, latestActiveIdRef.current, followPausedRef.current)
+        : null
+      const targetHeight = expandedTarget ? ROW_HEIGHT_EXPANDED_PX : ROW_HEIGHT_COLLAPSED_PX
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        if (geometryTimerRef.current) {
+          clearTimeout(geometryTimerRef.current)
+          geometryTimerRef.current = null
+        }
+        const current = geometryCompensationRef.current
+        const liveContainer = containerRef.current
+        if (current) {
+          geometryCompensationRef.current = null
+          if (current.raf) cancelAnimationFrame(current.raf)
+          // Settled geometry: the last correction of the switch.
+          if (liveContainer) applyGeometryAnchor(liveContainer, current.anchor)
+        }
+        requestFollow(latestActiveIdRef.current)
+      }
+      // Safety net only: a restyled rail may never reach the target row height.
+      geometryTimerRef.current = setTimeout(() => {
+        geometryTimerRef.current = null
+        finish()
+      }, GEOMETRY_SETTLE_FALLBACK_MS)
+      // No body, or no scroll range (short list): there is nothing to compensate.
+      if (!anchor || !container) return
+      if (container.scrollHeight <= container.clientHeight + 1) return
+      const state: GeometryCompensation = { raf: 0, anchor }
+      geometryCompensationRef.current = state
+      const tick = () => {
+        if (geometryCompensationRef.current !== state) return
+        const liveContainer = containerRef.current
+        if (!liveContainer) return
+        applyGeometryAnchor(liveContainer, state.anchor)
+        const rowHeight = state.anchor.row.isConnected ? state.anchor.row.getBoundingClientRect().height : targetHeight
+        if (Math.abs(rowHeight - targetHeight) <= ROW_HEIGHT_SETTLE_TOLERANCE_PX) {
+          finish()
+          return
+        }
+        state.raf = requestAnimationFrame(tick)
+      }
+      state.raf = requestAnimationFrame(tick)
+    },
+    [requestFollow, stopGeometryCompensation]
+  )
+
+  // Drag release anywhere releases the pause via the idle window; RAF, timers
+  // and any compensation still in flight are cleaned up on unmount.
   useEffect(() => {
     const handlePointerUp = () => {
       if (followPausedRef.current) scheduleResume()
@@ -138,6 +473,8 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     document.addEventListener('pointerup', handlePointerUp)
     return () => {
       document.removeEventListener('pointerup', handlePointerUp)
+      pendingFollowRef.current = false
+      stopGeometryCompensation(false)
       if (resumeTimerRef.current) {
         clearTimeout(resumeTimerRef.current)
         resumeTimerRef.current = null
@@ -151,69 +488,28 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
         collapseTimerRef.current = null
       }
     }
-  }, [scheduleResume])
+  }, [scheduleResume, stopGeometryCompensation])
 
-  // Container-local edge-early follow: when the active row's center is out
-  // of view or inside an edge band (outside the middle 20%-80% safe zone,
-  // at least ~1.5 rows inset), move only the outline container's own
-  // scrollTop so the row centers. The browser clamps scrollTop at the
-  // content ends, so first/last rows rest at the boundary instead of
-  // centering. Rows resting in the safe zone never move the outline.
-  // The target is always the reading anchor — never the hovered row — so
-  // expansion can never scroll to a wrong item.
-  const recenterToActiveRow = useCallback((targetId: string) => {
-    if (followPausedRef.current) return
-    const container = containerRef.current
-    if (!container) return
-    // Attribute-value match instead of a selector query: stable IDs never
-    // pass through the selector parser (no CSS.escape dependency).
-    const row = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]')).find(
-      (el) => el.dataset.messageId === targetId
-    )
-    if (!row) return
-    const containerRect = container.getBoundingClientRect()
-    const rowRect = row.getBoundingClientRect()
-    const containerHeight = containerRect.height || containerRect.bottom - containerRect.top
-    if (containerHeight <= 0) return
-    const rowHeight = rowRect.height || rowRect.bottom - rowRect.top
-    const rowFloor = FOLLOW_SAFE_MIN_MARGIN_ROWS * Math.max(rowHeight, 0)
-    const topMargin = Math.max(containerHeight * FOLLOW_SAFE_ZONE_TOP_RATIO, rowFloor)
-    const bottomMargin = Math.max(containerHeight * (1 - FOLLOW_SAFE_ZONE_BOTTOM_RATIO), rowFloor)
-    const safeTop = containerRect.top + topMargin
-    const safeBottom = containerRect.bottom - bottomMargin
-    const rowCenter = (rowRect.top + rowRect.bottom) / 2
-    const outOfView = rowRect.bottom <= containerRect.top || rowRect.top >= containerRect.bottom
-    // No scrollable overflow (short list): centering is meaningless.
-    if (container.scrollHeight <= container.clientHeight + 1) return
-    if (outOfView || rowCenter < safeTop || rowCenter > safeBottom) {
-      const containerCenter = (containerRect.top + containerRect.bottom) / 2
-      container.scrollTop += rowCenter - containerCenter
-    }
-  }, [])
-
+  // Reading-anchor follow: a changed anchor is always a follow intent (held
+  // while the user browses, landed on resume). A row-list change is only
+  // followed while the user is not browsing — `entries` gets a new identity on
+  // every caller render, and streaming must never take over a paused outline.
+  const previousActiveIdRef = useRef<string | null | undefined>(activeId)
   useEffect(() => {
-    if (!activeId || followPausedRef.current) return
-    if (rafRef.current != null) {
-      cancelAnimationFrame(rafRef.current)
-      rafRef.current = null
-    }
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null
-      recenterToActiveRow(activeId)
-    })
-    return () => {
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current)
-        rafRef.current = null
-      }
-    }
-  }, [activeId, entries, recenterToActiveRow])
+    const anchorChanged = previousActiveIdRef.current !== activeId
+    previousActiveIdRef.current = activeId
+    if (!activeId) return
+    if (!anchorChanged && followPausedRef.current) return
+    requestFollow(activeId)
+  }, [activeId, entries, requestFollow])
 
-  // Keep the active row visible across the expand/collapse height change: a
-  // ResizeObserver re-runs the same RAF follow schedule, so the edge-band
-  // geometry is always measured at the final actual size (transition
-  // intermediates converge there). Scrolling never resizes content, so this
-  // cannot self-trigger.
+  // A body-box change (a short list: the box itself grows or shrinks) still
+  // re-runs the follow, so the active row is measured at the size the box ends
+  // at. An expand/collapse switch also fires this observer — the body's content
+  // width changes even while its height stays capped — but the geometry
+  // compensation owns the scroll for that window, so the follow stays out of
+  // its way instead of splitting the transition across two writers.
+  // Scrolling never resizes content, so this cannot self-trigger.
   useEffect(() => {
     const container = containerRef.current
     if (!container || !activeId) return
@@ -221,14 +517,14 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     let raf = 0
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(() => recenterToActiveRow(activeId))
+      raf = requestAnimationFrame(() => revealActiveRow(activeId))
     })
     observer.observe(container)
     return () => {
       observer.disconnect()
       cancelAnimationFrame(raf)
     }
-  }, [activeId, recenterToActiveRow])
+  }, [activeId, revealActiveRow])
 
   if (!entries.length) return null
 
@@ -239,22 +535,29 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     }
   }
 
-  // Entering expands at once, replacing the CSS :hover it used to rely on.
+  // Entering expands at once, replacing the CSS :hover it used to rely on. The
+  // switch holds the row on screen still for its length instead of letting the
+  // taller rows drift it out of the box.
   const handleBodyMouseEnter = () => {
     if (collapseTimerRef.current) {
       clearTimeout(collapseTimerRef.current)
       collapseTimerRef.current = null
     }
     setExpanded(true)
+    startGeometryCompensation(true)
   }
 
   // Leaving only starts the collapse; the grace margin above is the travel
-  // slack for a pointer that crosses the thin collapsed rail.
+  // slack for a pointer that crosses the thin collapsed rail. The collapse
+  // holds the same on-screen row instead of keeping a scroll offset that only
+  // made sense at the expanded row heights, so the compact rail ends up showing
+  // the row the reader was looking at rather than snapping it back afterwards.
   const handleBodyMouseLeave = () => {
     if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current)
     collapseTimerRef.current = setTimeout(() => {
       collapseTimerRef.current = null
       setExpanded(false)
+      startGeometryCompensation(false)
     }, COLLAPSE_GRACE_MS)
   }
 
@@ -408,7 +711,8 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
  * the dot's own width — so the dashes read as one short interruption of the
  * rail instead of two separated strokes. Expanded it stretches across the
  * content width and hosts the fork's label (branch name or count form) between
- * its two rules.
+ * its two rules; the rules' 8px basis is part of that row's intrinsic width, so
+ * the row never resolves to "label only".
  * Not interactive: no cursor, no hover state.
  */
 const MessageOutlineForkRow = styled.div`
@@ -425,10 +729,21 @@ const MessageOutlineForkRow = styled.div`
     gap ${EXPAND_TRANSITION_MS}ms ease-out;
 `
 /**
- * One dash. Collapsed it is a 6px stroke with the dot's 2px radius; expanded it
- * drops its fixed width and takes an equal share of the row, so the two
- * surviving rules read as the dividers around the name — the same 1px
+ * One dash. Collapsed it is a 6px stroke with the dot's 2px radius. Expanded it
+ * keeps an 8px base size and then grows into whatever width the row has left,
+ * so the two rules read as the dividers around the name — the same 1px
  * `var(--color-border)` line the message-flow fork divider draws.
+ *
+ * The base size is not zero on purpose. The body is an inline-flex column sized
+ * by its widest child, and a zero-base rule contributes nothing to that
+ * intrinsic width: when the fork's label was the widest thing in the rail
+ * (short messages like "hi"), the row spent its whole width on the label and
+ * both rules measured zero — the divider lost its lines. A real base makes the
+ * two rules part of the row's intrinsic width, so the rail grows just enough to
+ * show `line — label — line`. Growth then hands any surplus to the rules, so a
+ * wide rail still draws the dividers out to its two ends instead of leaving two
+ * short dashes beside a wide gap, and the 8px floor keeps a visible line even
+ * when a capped panel has to shrink the row.
  */
 const MessageOutlineForkSegment = styled.div`
   width: 6px;
@@ -486,20 +801,22 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
        opacity: 1;
        display: block;
      }
-    // Fork marker row: the message-row height, the full content width, and the
-    // message-flow divider form — the two rules flank the fork's text at the
-    // flow's 8px gap instead of abutting, so the marker always reads as the
-    // same divider the message stream draws.
-    ${MessageOutlineForkRow} {
-      height: 24px;
-      width: auto;
-      align-self: stretch;
-      gap: 8px;
-    }
-    ${MessageOutlineForkSegment} {
-      width: auto;
-      flex: 1 1 0;
-    }
+   // Fork marker row: the message-row height, the full content width, and the
+   // message-flow divider form — the two rules flank the fork's text at the
+   // flow's 8px gap instead of abutting. The rules grow, so they own the
+   // distribution: they reach the row's two ends on a wide rail and keep their
+   // base size when the row is only as wide as the label needs.
+   ${MessageOutlineForkRow} {
+     height: 24px;
+     width: auto;
+     align-self: stretch;
+     gap: 8px;
+   }
+   ${MessageOutlineForkSegment} {
+     width: auto;
+     flex: 1 1 8px;
+     min-width: 8px;
+   }
    }
    @media (prefers-reduced-motion: reduce) {
      transition: none;
