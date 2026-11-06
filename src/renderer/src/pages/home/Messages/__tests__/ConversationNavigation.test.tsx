@@ -683,14 +683,16 @@ describe('ConversationNavigation whole-route user list', () => {
 
     await screen.findByTestId('conversation-nav-item-u3')
     // One compact hitbox per row in the restored original outline DOM
-    // (Container > Body > Item divs): every item owns exactly one stable-ID
-    // row, so no neighbor row can intercept another row's click point.
+    // (Container > Body > measured content > Item divs): every item owns exactly
+    // one stable-ID row, so no neighbor row can intercept another row's click
+    // point. The extra boxes are the clip and the animated width; they never
+    // become rows.
     const nav = container.querySelector('[data-testid="conversation-navigation"]')
     expect(nav).not.toBeNull()
     expect(nav?.tagName).toBe('DIV')
     const body = nav!.firstElementChild as HTMLElement | null
     expect(body).not.toBeNull()
-    const rows = Array.from(body!.querySelectorAll(':scope > div[data-message-id]'))
+    const rows = Array.from(body!.querySelectorAll('div[data-message-id]'))
     expect(rows.length).toBe(3)
     for (const row of rows) {
       // Original hierarchy per row: indicator dot div + ellipsis text div.
@@ -966,6 +968,12 @@ describe('ConversationNavigation fork markers', () => {
 
   const forkRows = () => screen.queryAllByTestId('conversation-nav-fork')
 
+  // The outline's rows live inside its measured content box
+  // (nav > body > panel > content), where the fork marker is a sibling of the
+  // message rows.
+  const rowListOf = (nav: HTMLElement) =>
+    nav.querySelector('[data-testid="conversation-nav-panel"]')!.firstElementChild as HTMLElement
+
   it('marks the row of the resolved inheritance boundary, never the raw anchor', async () => {
     seedForkThread()
     // The branch is anchored on the ASSISTANT turn a2, but its inherited
@@ -979,9 +987,11 @@ describe('ConversationNavigation fork markers', () => {
 
     expect(forkRows()).toHaveLength(1)
     const fork = forkRows()[0]
-    // Directly AFTER the u2 row, inside the same body.
+    // Directly AFTER the u2 row, inside the same row list.
     const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
-    expect(Array.from(body.children).indexOf(fork)).toBe(Array.from(body.children).indexOf(row) + 1)
+    expect(Array.from(rowListOf(body).children).indexOf(fork)).toBe(
+      Array.from(rowListOf(body).children).indexOf(row) + 1
+    )
     expect(fork.previousElementSibling).toBe(row)
     // u1 is untouched.
     expect(screen.getByTestId('conversation-nav-item-u1').nextElementSibling).toBe(row)
@@ -1002,9 +1012,11 @@ describe('ConversationNavigation fork markers', () => {
 
     expect(forkRows()).toHaveLength(1)
     const fork = forkRows()[0]
-    // Directly AFTER the u1 row, inside the same body.
+    // Directly AFTER the u1 row, inside the same row list.
     const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
-    expect(Array.from(body.children).indexOf(fork)).toBe(Array.from(body.children).indexOf(row) + 1)
+    expect(Array.from(rowListOf(body).children).indexOf(fork)).toBe(
+      Array.from(rowListOf(body).children).indexOf(row) + 1
+    )
     expect(fork.previousElementSibling).toBe(row)
     // Exactly one marker: the later user row is untouched.
     expect(laterRow.previousElementSibling).toBe(fork)
@@ -1109,8 +1121,12 @@ describe('ConversationNavigation fork markers', () => {
    */
   const revealedForkText = (container: HTMLElement): string => {
     const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
-    // Collapsed the marker carries no text at all.
-    expect(forkRows()[0].textContent).toBe('')
+    // The marker's label is mounted in both states (its compact clip and opacity
+    // are the switch, never a mount), so the same text is there collapsed and
+    // expanded; what this helper proves is that it is the label the flow
+    // resolved, flanked by the two rules.
+    const collapsed = forkRows()[0]
+    expect(collapsed.children).toHaveLength(3)
     fireEvent.mouseEnter(body)
     const expanded = forkRows()[0]
     // line + text + line: the text is the middle element, the two rules flank it.

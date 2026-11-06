@@ -1,6 +1,6 @@
 import Scrollbar from '@renderer/components/Scrollbar'
 import type { FC, KeyboardEvent } from 'react'
-import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import React, { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import styled from 'styled-components'
 
 export interface MessageOutlineEntry {
@@ -29,11 +29,14 @@ interface MessageOutlineProps {
 const FOLLOW_RESUME_IDLE_MS = 800
 
 /**
- * Expand/collapse transition: collapsed rows are 12px high with a 2px gap;
- * expansion grows rows to 24px with a 4px gap over 180ms ease-out. A long list
- * keeps its capped body height across the switch, so the body box a
- * ResizeObserver watches never changes size; the compensation below holds one
- * row's on-screen position while every row changes height.
+ * Expand/collapse transition: compact rows are 12px high with a 2px gap;
+ * expansion grows rows to 24px with a 4px gap, and carries the panel's measured
+ * width, the text and fork-label fades and the body's padding/background/shadow
+ * over the same 180ms ease-out — one timeline for the whole switch, so an
+ * interrupted switch reverses every one of them from where they are. A long list
+ * keeps its capped body height, so only the rows move vertically; the
+ * compensation below holds one row's on-screen position while they change
+ * height.
  */
 const EXPAND_TRANSITION_MS = 180
 /**
@@ -61,6 +64,47 @@ const GEOMETRY_SETTLE_FALLBACK_MS = EXPAND_TRANSITION_MS + 500
 const COLLAPSE_GRACE_MS = 160
 
 /**
+ * The body's scrollbar is withheld for the length of a width transition and
+ * revealed once the switch has settled. The bar is painted on the body's right
+ * edge, and that edge is exactly what the switch animates: left painted, it is
+ * carried across the opening panel (~151px over ~165ms on a 320px column)
+ * instead of appearing where it belongs. The window is the switch's own
+ * timeline plus one frame of slack — the timer is armed in the commit that
+ * changes the width target, and the browser may start interpolating on the
+ * following frame — so the two cannot drift apart. Only the paint is withheld:
+ * the body keeps `overflow-y: auto` and its reserved gutter, so measurement,
+ * scroll range and `scrollTop` are untouched by it.
+ */
+const SCROLLBAR_REVEAL_SETTLE_SLACK_MS = 16
+const SCROLLBAR_REVEAL_DELAY_MS = EXPAND_TRANSITION_MS + SCROLLBAR_REVEAL_SETTLE_SLACK_MS
+
+/**
+ * Compact rail width, as a content width: the collapsed panel is exactly the
+ * dot column the collapsed rows sit in — the 14px level-1 dot plus its 4px
+ * right margin. The body's own 10px left padding and the reserved scrollbar
+ * gutter sit around it, so the rail keeps the 34px strip its trigger area has
+ * always been. Content, because that is the one box the width below animates
+ * without measuring the body's padding or the platform's gutter.
+ */
+const RAIL_CONTENT_WIDTH_PX = 18
+/**
+ * Expanded panel cap: the reading column minus the inset the body has always
+ * reserved, and never more than this. It is a cap on the *column*, not a width
+ * for every screen — the expanded panel itself is measured from its content.
+ */
+const OUTLINE_MAX_WIDTH_PX = 320
+const OUTLINE_MAX_WIDTH_INSET_PX = 24
+/**
+ * Expanded fork row: two rules that reserve this basis each, either side of the
+ * label at this gap. The pair is what makes the rules part of the row's
+ * intrinsic width (see `MessageOutlineForkSegment`), so the measured panel
+ * width includes them; `measurePanelWidth` reads the same two constants the CSS
+ * uses instead of a second copy of the arithmetic.
+ */
+const FORK_SEGMENT_BASIS_PX = 8
+const FORK_ROW_GAP_PX = 8
+
+/**
  * Sub-pixel tolerance for "this row is where it was": layout reports fractional
  * geometry, and chasing that would write the scroll offset every frame for
  * nothing.
@@ -75,6 +119,26 @@ const POSITION_TOLERANCE_PX = 0.5
  * inside the last page, not the end of it.
  */
 const BOTTOM_DISTANCE_TOLERANCE_PX = 1
+
+/**
+ * `prefers-reduced-motion`: every transition of the switch is disabled, so the
+ * switch is settled by the very next layout. The compensation below uses this
+ * to correct once and go straight back to the follow instead of holding the
+ * scroll for a transition that will never run.
+ */
+const prefersReducedMotion = () =>
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    : false
+
+/**
+ * The body's own horizontal padding (each side, while expanded). The panel's cap
+ * has to leave room for it plus the reserved scrollbar gutter, because the
+ * body's `max-width` clamps its *border* box: a panel sized to the whole cap
+ * would push its own right edge past the clamp and be clipped there instead of
+ * ellipsizing.
+ */
+const BODY_INLINE_PADDING_PX = 10
 
 interface GeometryAnchor {
   /**
@@ -197,34 +261,56 @@ const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => 
  * never by a per-count estimated top offset, JS measurement, or transform
  * (a ResizeObserver only re-runs the anchor follow so edge-band geometry
  * is measured at the post-transition actual size).
- * Collapsed rows are 12px high with a 2px body gap; entering the body
- * expands (180ms ease-out) to the original 24px row / 4px gap / dot-text 8px
- * geometry and leaving restores the collapsed rail after a short grace, with
- * DOM, positioning, single-line ellipsis, trigger area and navigation
- * behavior unchanged.
+ * Compact rows are 12px high with a 2px gap; entering the body expands
+ * (180ms ease-out) to the original 24px row / 4px gap / dot-text 8px geometry
+ * and leaving restores the compact rail after a short grace, with DOM,
+ * positioning, single-line ellipsis, trigger area and navigation behavior
+ * unchanged.
+ *
+ * The switch is ONE reversible transition, not a state swap with animations
+ * bolted on. Entering is immediate and leaving waits COLLAPSE_GRACE_MS, but past
+ * that point both directions interpolate the same properties from whatever the
+ * screen currently shows: the panel's width (measured, see `measurePanelWidth`),
+ * the rows' heights and the content's gap, the text's and the fork label's
+ * opacity and clip, and the body's padding, background and shadow. Nothing is
+ * held back for later, so a pointer that leaves and returns mid-collapse turns
+ * the running transition around in place, and no state, width, text or chrome
+ * ever lands in a single frame. The content beside the panel keeps its own
+ * intrinsic width in both states, so the panel's animation moves a clip and
+ * never reflows the rows; the row-height switch is what the geometry
+ * compensation below follows.
  * $level props stay because dot size/padding still use them.
- * prefers-reduced-motion disables all transitions.
+ * prefers-reduced-motion disables every transition, so the same switch settles in
+ * the frame it is applied instead of waiting out a timeline.
+ * The body's own scrollbar is the one thing the switch does not interpolate:
+ * it is painted on the very edge the width animates, so it is withheld for the
+ * transition's window and revealed once the panel has settled at its final
+ * width (see `SCROLLBAR_REVEAL_DELAY_MS`).
  * A fork marker (`forkAfter`) is a separate NON-interactive row inserted
  * directly after the marked message row: it is never a navigation target (no
  * role, stable id, tab stop, handler or active highlight), so the marked
  * message row keeps its own hitbox and stays reachable. Its row height matches
- * the message rows exactly (12px collapsed / 24px expanded, same body gap), so
- * collapsed and expanded rows line up 1:1.
- * Collapsed it is two 6px dashes with a 2px gap — 14px total, exactly the dot
- * band it sits in — and carries no text at all. Expanded it becomes
- * `── <text> ──` in the message flow's divider form: two 1px rules sharing the
- * space above an 8px basis, an 8px gap and the fork's label in the middle,
- * left-aligned with the dot column. That basis is what makes the rules part of
- * the row's intrinsic width, so the rail always grows enough to show both of
- * them next to the label — even when every message preview is shorter than the
- * label (short messages) — and a wider rail still splits its surplus between
- * them.
+ * the message rows exactly (12px compact / 24px expanded, same row gap), so
+ * compact and expanded rows line up 1:1.
+ * Compact it is two 6px dashes with a 2px gap — 14px total, exactly the dot
+ * band it sits in — with its label clipped to zero width and transparent.
+ * Expanded it becomes `── <text> ──` in the message flow's divider form: two 1px
+ * rules sharing the space above an 8px basis, an 8px gap and the fork's label in
+ * the middle, left-aligned with the dot column. That basis is what makes the
+ * rules part of the row's intrinsic width, so the rail always grows enough to
+ * show both of them next to the label — even when every message preview is
+ * shorter than the label (short messages) — and a wider rail still splits its
+ * surplus between them. The row also keeps its stretched width in both states
+ * and only its gap, its rules' flex basis and the label's clip switch, so the
+ * marker spreads and fades instead of re-placing itself inside a still-open
+ * panel.
  * The text is the message flow's own two states (`forkMarkerLabel`): the branch
  * this route travels at the fork, or the fork's `此处有 {{count}} 条分支` count
  * when the route took none — a fork is never drawn as a bare line. No caret:
  * the flow's `▾` belongs to a clickable popover trigger, and this row is not
- * interactive. The text is rendered only while expanded, so the collapsed
- * marker carries no text in the DOM rather than merely hiding it.
+ * interactive. The label stays in the DOM in both states (decorative,
+ * `aria-hidden`, non-interactive) because mounting it on expansion would replace
+ * the fade with a pop and take its width away from the measurement.
  *
  * Active highlight (`activeId`) is theme-colored with `aria-current` and the
  * outline container follows it only when the row is NOT fully visible inside
@@ -269,6 +355,119 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   // the previous anchor — a late anchor change must win.
   const latestActiveIdRef = useRef<string | null | undefined>(activeId)
   latestActiveIdRef.current = activeId
+
+  // Measured presentation widths (see `measurePanelWidth`): the expanded
+  // panel's own width and the column cap it may not exceed. Both are read from
+  // layout, never modelled per screen.
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  const [panelWidthPx, setPanelWidthPx] = useState(RAIL_CONTENT_WIDTH_PX)
+  const [panelCapPx, setPanelCapPx] = useState<number | null>(null)
+  // Read by the resize observer, which runs outside the render that set it.
+  const latestExpandedRef = useRef(expanded)
+  latestExpandedRef.current = expanded
+  // Whether the body's scrollbar may be painted (see
+  // `SCROLLBAR_REVEAL_DELAY_MS`). It is derived from `expanded` in the same
+  // render that starts the width transition, so both directions withhold the
+  // bar on their first frame: opening paints nothing at the compact edge, and
+  // closing drops it before the panel narrows. Only the reveal is deferred, so
+  // only the reveal needs a timer.
+  const [scrollbarSettled, setScrollbarSettled] = useState(false)
+  const scrollbarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /**
+   * The width the expanded panel needs, measured instead of decided.
+   *
+   * The panel cannot be `max-content`: a keyword cannot be interpolated with the
+   * compact rail, so one frame would carry the whole 141px step — the switch
+   * would not be a transition at all. It cannot be a fixed number either. So it
+   * is read back from layout: the content box is laid out at its own intrinsic
+   * width in *both* states (the panel clips it while compact, and never reflows
+   * it for the animation), which is exactly the width the expanded panel ends
+   * at, and it follows short, long and streaming-updated text with no model of
+   * its own.
+   *
+   * Two inputs are added from their own geometry rather than the content box:
+   * a fork row's label only owns layout width while expanded, so its row is the
+   * label's measured text width plus the two rule bases and gaps the CSS
+   * reserves (read from the same constants the CSS uses); and the cap is the
+   * body's own — the reading column's cap minus the padding and the stable
+   * scrollbar gutter the body reserves around the panel, so the panel never
+   * pushes past the body's `max-width` clamp (which would clip it instead of
+   * ellipsizing the row at that edge).
+   */
+  const measurePanelWidth = useCallback((expandedTarget: boolean) => {
+    const container = containerRef.current
+    const content = contentRef.current
+    const host = container?.parentElement
+    if (!container || !content || !host) return
+    const hostWidth = host.getBoundingClientRect().width
+    if (hostWidth <= 0) return
+    const bodyCap = Math.min(OUTLINE_MAX_WIDTH_PX, hostWidth - OUTLINE_MAX_WIDTH_INSET_PX)
+    const bodyChrome = 2 * BODY_INLINE_PADDING_PX + Math.max(container.offsetWidth - container.clientWidth, 0)
+    const cap = Math.max(RAIL_CONTENT_WIDTH_PX, bodyCap - bodyChrome)
+    setPanelCapPx((previous) => (previous === cap ? previous : cap))
+    if (!expandedTarget) return
+    let needed = content.getBoundingClientRect().width
+    for (const label of container.querySelectorAll<HTMLElement>('[data-outline-fork-label]')) {
+      const labelWidth = label.scrollWidth
+      if (labelWidth > 0) needed = Math.max(needed, labelWidth + 2 * (FORK_SEGMENT_BASIS_PX + FORK_ROW_GAP_PX))
+    }
+    if (needed <= 0) return
+    const width = Math.min(needed, cap)
+    setPanelWidthPx((previous) => (Math.abs(previous - width) < 0.5 ? previous : width))
+  }, [])
+
+  // Before paint: the first frame of the switch already animates towards the
+  // width this state really needs, so entering never opens towards a stale one.
+  useLayoutEffect(() => {
+    measurePanelWidth(expanded)
+  }, [expanded, measurePanelWidth])
+
+  // The scrollbar's paint window. Any change of the width target — opening,
+  // closing, and a re-measure while open — hides the bar and re-arms the reveal,
+  // so a reversal can never reveal a bar on an edge that is still moving and a
+  // rapid re-entry restarts the settlement instead of inheriting the first
+  // window's. Running before paint keeps the withhold in the same frame as the
+  // transition, and clearing at the head of every run (plus on unmount) keeps at
+  // most one reveal timer alive.
+  useLayoutEffect(() => {
+    if (scrollbarTimerRef.current) {
+      clearTimeout(scrollbarTimerRef.current)
+      scrollbarTimerRef.current = null
+    }
+    if (!expanded) {
+      // Compact paints no scrollbar anyway (`overflow-y: hidden`), so there is
+      // nothing to wait for: a pending reveal is dropped, not rescheduled.
+      setScrollbarSettled(false)
+      return
+    }
+    if (prefersReducedMotion()) {
+      // No timeline runs, so the final edge is already on screen: settle now
+      // rather than arm a timer nothing will turn back off.
+      setScrollbarSettled(true)
+      return
+    }
+    setScrollbarSettled(false)
+    scrollbarTimerRef.current = setTimeout(() => {
+      scrollbarTimerRef.current = null
+      setScrollbarSettled(true)
+    }, SCROLLBAR_REVEAL_DELAY_MS)
+  }, [expanded, panelWidthPx])
+
+  // The content's box changes when its text does, and the column when the
+  // window or the layout column does: both are measurement inputs. Neither is
+  // driven by the panel's animated width — the content is intrinsically sized
+  // and the panel clips it — so observing them cannot feed back into the
+  // transition.
+  useEffect(() => {
+    const content = contentRef.current
+    const host = containerRef.current?.parentElement
+    if (!content || !host || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => measurePanelWidth(latestExpandedRef.current))
+    observer.observe(content)
+    observer.observe(host)
+    return () => observer.disconnect()
+  }, [measurePanelWidth])
 
   // Container-local follow: the outline's own scrollTop moves only for an
   // active row that is not fully visible inside the body. A row the reader can
@@ -437,6 +636,17 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
         }
         requestFollow(latestActiveIdRef.current)
       }
+      // Reduced motion: the switch is settled the moment it is applied, so there
+      // is no window to hold and nothing to wait out. Correct once and hand the
+      // scroll straight back to the follow — no frame loop, no settle timer.
+      if (prefersReducedMotion()) {
+        const liveContainer = containerRef.current
+        if (anchor && liveContainer && liveContainer.scrollHeight > liveContainer.clientHeight + 1) {
+          applyGeometryAnchor(liveContainer, anchor)
+        }
+        requestFollow(latestActiveIdRef.current)
+        return
+      }
       // Safety net only: a restyled rail may never reach the target row height.
       geometryTimerRef.current = setTimeout(() => {
         geometryTimerRef.current = null
@@ -486,6 +696,10 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
       if (collapseTimerRef.current) {
         clearTimeout(collapseTimerRef.current)
         collapseTimerRef.current = null
+      }
+      if (scrollbarTimerRef.current) {
+        clearTimeout(scrollbarTimerRef.current)
+        scrollbarTimerRef.current = null
       }
     }
   }, [scheduleResume, stopGeometryCompensation])
@@ -566,58 +780,77 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
       <MessageOutlineBody
         ref={containerRef}
         $expanded={expanded}
+        // Painted only where the switch has finished: compact never paints one,
+        // and an open panel only once its final width is on screen.
+        $scrollbarVisible={expanded && scrollbarSettled}
         onMouseEnter={handleBodyMouseEnter}
         onMouseLeave={handleBodyMouseLeave}
         onWheel={pauseFollow}
         onPointerDown={pauseFollow}
         onKeyDownCapture={pauseFollow}>
-        {entries.map((entry) => {
-          const isActive = activeId != null && entry.id === activeId
-          const hasFork = forkAfter?.has(entry.id) ?? false
-          const forkText = forkAfter?.get(entry.id) ?? ''
-          return (
-            <Fragment key={entry.id}>
-              <MessageOutlineItem
-                $active={isActive}
-                onClick={() => onNavigate(entry.id)}
-                onKeyDown={(event) => handleKeyDown(event, entry.id)}
-                tabIndex={0}
-                role="button"
-                aria-label={entry.text}
-                aria-current={isActive ? true : undefined}
-                data-testid={`conversation-nav-item-${entry.id}`}
-                data-message-id={entry.id}
-                title={entry.text}>
-                <MessageOutlineItemDot $level={1} />
-                <MessageOutlineItemText $level={1} $miniLevel={1}>
-                  {entry.text}
-                </MessageOutlineItemText>
-              </MessageOutlineItem>
-              {/*
-                Fork marker: a separate row directly AFTER the marked message
-                row, never a message row itself — no stable id, role, tab stop
-                or handler, so it can never be a navigation target, a highlight
-                winner or a follow target. Decorative only (`aria-hidden`): the
-                message row next to it is the navigation entry.
+        {/*
+          One measured width, one animated box. The panel is the only thing the
+          switch interpolates horizontally; the content beside it keeps its own
+          intrinsic width in both states, so the panel clips a stable layout
+          instead of reflowing every row on every frame of the transition.
+        */}
+        <MessageOutlinePanel
+          data-testid="conversation-nav-panel"
+          style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
+          <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
+            {entries.map((entry) => {
+              const isActive = activeId != null && entry.id === activeId
+              const hasFork = forkAfter?.has(entry.id) ?? false
+              const forkText = forkAfter?.get(entry.id) ?? ''
+              return (
+                <Fragment key={entry.id}>
+                  <MessageOutlineItem
+                    $active={isActive}
+                    onClick={() => onNavigate(entry.id)}
+                    onKeyDown={(event) => handleKeyDown(event, entry.id)}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={entry.text}
+                    aria-current={isActive ? true : undefined}
+                    data-testid={`conversation-nav-item-${entry.id}`}
+                    data-message-id={entry.id}
+                    title={entry.text}>
+                    <MessageOutlineItemDot $level={1} />
+                    <MessageOutlineItemText $level={1} $miniLevel={1}>
+                      {entry.text}
+                    </MessageOutlineItemText>
+                  </MessageOutlineItem>
+                  {/*
+                    Fork marker: a separate row directly AFTER the marked message
+                    row, never a message row itself — no stable id, role, tab stop
+                    or handler, so it can never be a navigation target, a highlight
+                    winner or a follow target. Decorative only (`aria-hidden`): the
+                    message row next to it is the navigation entry.
 
-                Expanded it reads `── <text> ──`, the message flow's divider
-                text without its `▾` (that caret belongs to the flow's clickable
-                popover trigger, and this row is not interactive). The text is
-                rendered ONLY while expanded, so the collapsed marker is exactly
-                two dashes with no text in the DOM — and it is always present,
-                because the caller supplies the flow's untaken-fork count form
-                when the route took no branch here.
-              */}
-              {hasFork ? (
-                <MessageOutlineForkRow aria-hidden="true" data-testid="conversation-nav-fork" key={`fork-${entry.id}`}>
-                  <MessageOutlineForkSegment />
-                  {expanded ? <MessageOutlineForkName>{forkText}</MessageOutlineForkName> : null}
-                  <MessageOutlineForkSegment />
-                </MessageOutlineForkRow>
-              ) : null}
-            </Fragment>
-          )
-        })}
+                    Expanded it reads `── <text> ──`, the message flow's divider
+                    text without its `▾` (that caret belongs to the flow's clickable
+                    popover trigger, and this row is not interactive). The label is
+                    mounted in BOTH states and only its own clip and opacity switch:
+                    mounting it on expansion would replace the fade with a pop, and
+                    the row would lose the label's width while measuring it. It is
+                    always present, because the caller supplies the flow's
+                    untaken-fork count form when the route took no branch here.
+                  */}
+                  {hasFork ? (
+                    <MessageOutlineForkRow
+                      aria-hidden="true"
+                      data-testid="conversation-nav-fork"
+                      key={`fork-${entry.id}`}>
+                      <MessageOutlineForkSegment />
+                      <MessageOutlineForkName data-outline-fork-label>{forkText}</MessageOutlineForkName>
+                      <MessageOutlineForkSegment />
+                    </MessageOutlineForkRow>
+                  ) : null}
+                </Fragment>
+              )
+            })}
+          </MessageOutlineContent>
+        </MessageOutlinePanel>
       </MessageOutlineBody>
     </MessageOutlineContainer>
   )
@@ -656,12 +889,18 @@ const MessageOutlineItemDot = styled.div<{ $level: number }>`
   transition: background 0.2s ease;
 `
 
+/**
+ * Expanded text. It is mounted in both states and only its opacity switches:
+ * `display` cannot animate, so a `display: none` collapse would replace the fade
+ * with a pop, and the row would lose the text's width while the panel measures
+ * itself. Compact it is fully transparent, and the panel's own clip keeps it out
+ * of the 34px rail, so nothing about it is visible before its fade starts.
+ */
 const MessageOutlineItemText = styled.div<{ $level: number; $miniLevel: number }>`
   overflow: hidden;
   color: var(--color-text-3);
   opacity: 0;
-  display: none;
-  transition: opacity 0.2s ease;
+  transition: opacity ${EXPAND_TRANSITION_MS}ms ease-out;
   padding: 2px 8px;
   padding-left: ${({ $level, $miniLevel }) => ($level - $miniLevel) * 8}px;
   font-size: 13px;
@@ -703,25 +942,61 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
 `
 
 /**
+ * The panel: the one width the switch animates, and the box the compact rail
+ * clips. It is not `max-content` (a keyword cannot be interpolated with the
+ * compact width, so the whole step would land in one frame) and not a fixed size
+ * either — the component measures the width it needs and writes it here, so the
+ * browser can interpolate it, and an interrupted switch turns around from
+ * whatever width is on screen at that moment.
+ *
+ * `overflow: visible` matters: the content beside it keeps its own intrinsic
+ * width in both states, so the animation moves a clip instead of reflowing every
+ * row, and that width stays measurable while the panel is narrow.
+ */
+const MessageOutlinePanel = styled.div`
+  flex: 0 0 auto;
+  overflow: visible;
+  transition: width ${EXPAND_TRANSITION_MS}ms ease-out;
+`
+
+/**
+ * The measured content: as wide as its own rows at all times — short and long
+ * previews, fork labels, streaming text, a resized column (the `max-width` the
+ * component measures is the reading column's cap, so a row ellipsizes exactly
+ * where the fully expanded panel ends). Its gap is the body's former row gap.
+ */
+const MessageOutlineContent = styled.div`
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  gap: 2px;
+  transition: gap ${EXPAND_TRANSITION_MS}ms ease-out;
+`
+
+/**
  * Fork marker row: the same height as a message row in both states (12px
- * collapsed / 24px expanded) and the body owns the shared row gap, so the
+ * collapsed / 24px expanded), and the content owns the shared row gap, so the
  * collapsed and expanded lists line up row for row.
  *
- * Collapsed it occupies exactly the dot band — 6px + 2px gap + 6px = 14px,
- * the dot's own width — so the dashes read as one short interruption of the
- * rail instead of two separated strokes. Expanded it stretches across the
- * content width and hosts the fork's label (branch name or count form) between
- * its two rules; the rules' 8px basis is part of that row's intrinsic width, so
+ * Collapsed it occupies exactly the dot band — 6px + 1px gap + a zero-wide label
+ * + 1px gap + 6px = the 14px dot width — so the dashes read as one short
+ * interruption of the rail instead of two separated strokes. Expanded it hosts
+ * the fork's label (branch name or count form) between its two rules at the
+ * flow's 8px gap; the rules' 8px basis is part of that row's intrinsic width, so
  * the row never resolves to "label only".
+ *
+ * The row keeps its stretched width in both states on purpose: shrinking it to
+ * the 14px band at the switch would re-place the label and both rules inside a
+ * still-open panel — the very pop the width transition exists to remove. Only
+ * heights, the gap and the label's own clip switch, and they all interpolate.
  * Not interactive: no cursor, no hover state.
  */
 const MessageOutlineForkRow = styled.div`
   height: 12px;
-  width: 14px;
-  align-self: flex-start;
+  align-self: stretch;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   flex-shrink: 0;
   pointer-events: none;
   transition:
@@ -734,46 +1009,74 @@ const MessageOutlineForkRow = styled.div`
  * so the two rules read as the dividers around the name — the same 1px
  * `var(--color-border)` line the message-flow fork divider draws.
  *
- * The base size is not zero on purpose. The body is an inline-flex column sized
- * by its widest child, and a zero-base rule contributes nothing to that
- * intrinsic width: when the fork's label was the widest thing in the rail
- * (short messages like "hi"), the row spent its whole width on the label and
- * both rules measured zero — the divider lost its lines. A real base makes the
- * two rules part of the row's intrinsic width, so the rail grows just enough to
- * show `line — label — line`. Growth then hands any surplus to the rules, so a
- * wide rail still draws the dividers out to its two ends instead of leaving two
- * short dashes beside a wide gap, and the 8px floor keeps a visible line even
- * when a capped panel has to shrink the row.
+ * The base size is not zero on purpose. The content is sized by its widest row,
+ * and a zero-base rule contributes nothing to that intrinsic width: when the
+ * fork's label was the widest thing in the rail (short messages like "hi"), the
+ * row spent its whole width on the label and both rules measured zero — the
+ * divider lost its lines. A real base makes the two rules part of the row's
+ * intrinsic width, so the rail grows just enough to show `line — label — line`.
+ * Growth then hands any surplus to the rules, so a wide rail still draws the
+ * dividers out to its two ends instead of leaving two short dashes beside a wide
+ * gap, and the 8px floor keeps a visible line even when a capped panel has to
+ * shrink the row. `flex` is what interpolates here (a `width: auto` target
+ * cannot), so the pair spreads out of the dot band instead of jumping.
  */
 const MessageOutlineForkSegment = styled.div`
   width: 6px;
   height: 1px;
   background: var(--color-border);
   border-radius: 2px;
-  flex: 0 0 auto;
-  transition: width ${EXPAND_TRANSITION_MS}ms ease-out;
+  flex: 0 0 6px;
+  transition:
+    flex ${EXPAND_TRANSITION_MS}ms ease-out,
+    min-width ${EXPAND_TRANSITION_MS}ms ease-out;
 `
 /**
  * The fork's label between the two rules: the message-flow divider's text form
  * (11.5px, secondary text color) at the flow's 8px gap. It never wraps or
  * shrinks, so the rules absorb every width change around it.
+ *
+ * Compact it is clipped to zero width and transparent instead of being unmounted
+ * or hidden with `display`: both of those would make the label appear and
+ * disappear in a single frame. Its clip and its opacity interpolate, and the
+ * fade is what masks the (necessarily faster) width change — the text is already
+ * gone by the time the hint of it would be readable.
  */
 const MessageOutlineForkName = styled.div`
   flex: 0 0 auto;
+  max-width: 0;
+  overflow: hidden;
   font-size: 11.5px;
   color: var(--color-text-2);
   white-space: nowrap;
+  opacity: 0;
+  transition:
+    max-width ${EXPAND_TRANSITION_MS}ms ease-out,
+    opacity ${EXPAND_TRANSITION_MS}ms ease-out;
 `
 /**
- * `$expanded` is a transient prop (styled-components never forwards it to the
- * DOM); it is projected onto `data-expanded` so the expanded geometry stays a
- * static CSS rule instead of a per-render dynamic interpolation.
+ * `$expanded` and `$scrollbarVisible` are transient props (styled-components
+ * never forwards them to the DOM); they are projected onto `data-expanded` and
+ * `data-outline-scrollbar` so the expanded geometry and the scrollbar's paint
+ * window stay static CSS rules instead of per-render dynamic interpolations.
+ *
+ * The body is the clip and the scroll container, not the width owner: it is
+ * intrinsically sized around the panel, so its 34px compact strip and its
+ * expanded width both come from the one width the panel animates, plus this
+ * box's own padding. Its background, shadow and padding are part of the same
+ * transition as the rows, so the chrome eases in with them instead of appearing
+ * in one frame.
  */
 const MessageOutlineBody = styled(Scrollbar).attrs<{
   $expanded: boolean
+  $scrollbarVisible: boolean
   'data-expanded'?: 'true' | 'false'
-}>((props) => ({ 'data-expanded': props.$expanded ? 'true' : 'false' }))`
-   max-width: min(320px, calc(100% - 24px));
+  'data-outline-scrollbar'?: 'visible' | 'hidden'
+}>((props) => ({
+  'data-expanded': props.$expanded ? 'true' : 'false',
+  'data-outline-scrollbar': props.$scrollbarVisible ? 'visible' : 'hidden'
+}))`
+   max-width: min(${OUTLINE_MAX_WIDTH_PX}px, calc(100% - ${OUTLINE_MAX_WIDTH_INSET_PX}px));
    max-height: min(100%, 45vh, 420px);
    align-self: center;
    flex: 0 1 auto;
@@ -781,61 +1084,96 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
    overflow-y: hidden;
    display: inline-flex;
    flex-direction: column;
-   padding: 10px 0 10px 10px;
-   gap: 2px;
+   padding: ${BODY_INLINE_PADDING_PX}px 0 ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px;
    border-radius: 10px;
    pointer-events: auto;
+   background-color: transparent;
+   box-shadow: 0 0 10px 0 rgba(128, 128, 128, 0);
    transition:
-     gap ${EXPAND_TRANSITION_MS}ms ease-out,
-     padding ${EXPAND_TRANSITION_MS}ms ease-out;
+     padding ${EXPAND_TRANSITION_MS}ms ease-out,
+     background-color ${EXPAND_TRANSITION_MS}ms ease-out,
+     box-shadow ${EXPAND_TRANSITION_MS}ms ease-out;
+  /**
+   * Scoped to this body: the app's scrollbars stay classic and untouched, and
+   * only this one element withholds its paint (see the reveal delay constant).
+   * overflow-y is deliberately NOT part of it — the switch is a width
+   * transition of this box, so the bar would be carried across the opening panel
+   * instead of appearing on its final edge. Keeping the scroll container live
+   * (auto) with its gutter reserved means the bar is merely invisible: scroll
+   * range, client height and scrollTop are the same as when it is painted.
+   *
+   * The :hover arm is the specificity that matters: the shared Scrollbar paints
+   * its thumb through the webkit scrollbar thumb pseudo-element and its own
+   * :hover rule, so the withheld state has to out-specify both. transition: none
+   * is the instant half — the shared component fades its thumb over 2s, and a
+   * fade here would keep painting the bar for the whole of it, at whatever x it
+   * had reached, which is the artifact being removed.
+   */
+  &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb,
+  &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb:hover {
+    background: transparent;
+    transition: none;
+  }
   &[data-expanded='true'] {
-     padding: 10px 10px 10px 10px;
-     gap: 4px;
+     padding: ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px;
      overflow-y: auto;
-     background: var(--color-background);
+     background-color: var(--color-background);
      box-shadow: 0 0 10px 0 rgba(128, 128, 128, 0.2);
+     ${MessageOutlineContent} {
+       gap: 4px;
+     }
      ${MessageOutlineItem} {
        height: 24px;
      }
      ${MessageOutlineItemText} {
        opacity: 1;
-       display: block;
      }
-   // Fork marker row: the message-row height, the full content width, and the
-   // message-flow divider form — the two rules flank the fork's text at the
-   // flow's 8px gap instead of abutting. The rules grow, so they own the
-   // distribution: they reach the row's two ends on a wide rail and keep their
-   // base size when the row is only as wide as the label needs.
+  // Fork marker row: the message-row height and the message-flow divider form —
+  // the two rules flank the fork's text at the flow's 8px gap instead of
+  // abutting. The rules grow, so they own the distribution: they reach the row's
+  // two ends on a wide rail and keep their base size when the row is only as wide
+  // as the label needs.
+  ${MessageOutlineForkRow} {
+    height: 24px;
+    gap: ${FORK_ROW_GAP_PX}px;
+  }
+  ${MessageOutlineForkSegment} {
+    width: auto;
+    flex: 1 1 ${FORK_SEGMENT_BASIS_PX}px;
+    min-width: ${FORK_SEGMENT_BASIS_PX}px;
+  }
+  ${MessageOutlineForkName} {
+    max-width: ${OUTLINE_MAX_WIDTH_PX}px;
+    opacity: 1;
+  }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+    ${MessageOutlinePanel} {
+      transition: none;
+    }
+    ${MessageOutlineContent} {
+      transition: none;
+    }
+    ${MessageOutlineItem} {
+      transition: none;
+    }
+    ${MessageOutlineItemText} {
+      transition: none;
+    }
+    ${MessageOutlineItemDot} {
+      transition: none;
+    }
    ${MessageOutlineForkRow} {
-     height: 24px;
-     width: auto;
-     align-self: stretch;
-     gap: 8px;
+     transition: none;
    }
    ${MessageOutlineForkSegment} {
-     width: auto;
-     flex: 1 1 8px;
-     min-width: 8px;
-   }
-   }
-   @media (prefers-reduced-motion: reduce) {
      transition: none;
-     ${MessageOutlineItem} {
-       transition: none;
-     }
-     ${MessageOutlineItemText} {
-       transition: none;
-     }
-     ${MessageOutlineItemDot} {
-       transition: none;
-     }
-    ${MessageOutlineForkRow} {
-      transition: none;
-    }
-    ${MessageOutlineForkSegment} {
-      transition: none;
-    }
    }
- `
+   ${MessageOutlineForkName} {
+     transition: none;
+   }
+  }
+`
 
 export default React.memo(MessageOutline)

@@ -27,7 +27,9 @@ describe('MessageOutline restored original presentation', () => {
     expect(nav?.tagName).toBe('DIV')
     const body = nav!.firstElementChild as HTMLElement | null
     expect(body).not.toBeNull()
-    const rows = Array.from(body!.querySelectorAll(':scope > div[data-message-id]'))
+    // Rows are the content box's children (body > panel > content); the
+    // hierarchy the test checks is the row itself.
+    const rows = Array.from(body!.querySelectorAll('div[data-message-id]'))
     expect(rows.map((row) => row.getAttribute('data-message-id'))).toEqual(['u1', 'u2'])
     for (const row of rows) {
       expect(row.querySelectorAll(':scope > div').length).toBe(2)
@@ -76,7 +78,7 @@ describe('MessageOutline restored original presentation', () => {
 
     // Row geometry + DOM invariants stay unchanged.
     const nav = container.querySelector('[data-testid="conversation-navigation"]')
-    const rows = Array.from(nav!.firstElementChild!.querySelectorAll(':scope > div[data-message-id]'))
+    const rows = Array.from(nav!.querySelectorAll('div[data-message-id]'))
     expect(rows.length).toBe(2)
     for (const row of rows) {
       expect(row.querySelectorAll(':scope > div').length).toBe(2)
@@ -449,7 +451,12 @@ describe('MessageOutline fork markers', () => {
   const bodyOf = (container: HTMLElement) =>
     container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
 
-  const childTestIds = (body: HTMLElement) => Array.from(body.children).map((el) => el.getAttribute('data-testid'))
+  // Rows sit in the measured content box: body (clip/scroll) > panel (animated
+  // width) > content (intrinsic width) > rows.
+  const rowListOf = (body: HTMLElement) => body.firstElementChild!.firstElementChild as HTMLElement
+
+  const childTestIds = (body: HTMLElement) =>
+    Array.from(rowListOf(body).children).map((el) => el.getAttribute('data-testid'))
 
   // styled-components injects component CSS into <style>; normalize whitespace
   // so serialization variants cannot false-fail, then read the geometry.
@@ -484,7 +491,7 @@ describe('MessageOutline fork markers', () => {
     expect(screen.getAllByTestId('conversation-nav-fork')).toHaveLength(1)
   })
 
-  it('keeps the fork row out of navigation: no role, ID, tab stop, handler or text', () => {
+  it('keeps the fork row out of navigation: no role, ID, tab stop, handler or interactive content', () => {
     const onNavigate = vi.fn()
     render(
       <MessageOutline
@@ -501,11 +508,12 @@ describe('MessageOutline fork markers', () => {
     // Never a highlight winner, and never announced.
     expect(fork.getAttribute('aria-current')).toBeNull()
     expect(fork.getAttribute('aria-hidden')).toBe('true')
-    // Collapsed the marker is two dashes only: the name exists for this fork,
-    // so an empty textContent proves the collapsed state renders no text at
-    // all — not a hidden-but-present label.
-    expect(fork.children).toHaveLength(2)
-    expect(fork.textContent).toBe('')
+    // The label is mounted in both states — swapping it on expansion would
+    // replace its fade with a pop — so the compact marker is two dashes around a
+    // clipped, transparent label, never an interactive target.
+    expect(fork.children).toHaveLength(3)
+    expect(fork.textContent).toBe('Research branch')
+    expect(fork.querySelector('[data-outline-fork-label]')).not.toBeNull()
 
     fireEvent.click(fork)
     fireEvent.keyDown(fork, { key: 'Enter' })
@@ -531,27 +539,30 @@ describe('MessageOutline fork markers', () => {
     expect(screen.queryAllByTestId('conversation-nav-fork')).toHaveLength(0)
   })
 
-  it('sits on the dot band collapsed: 6px + 2px gap + 6px = the 14px dot width', () => {
+  it('sits on the dot band collapsed: 6px + a 2px gap + 6px = the 14px dot width', () => {
     render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />)
     const norm = normalizedCss()
 
     const dot = /width:(\d+)px;height:4px;background:var\(--color-border\);border-radius:2px/.exec(norm)
-    const row = /height:12px;width:(\d+)px;align-self:flex-start;display:flex;align-items:center;gap:(\d+)px/.exec(norm)
+    const row = /height:12px;align-self:stretch;display:flex;align-items:center;gap:(\d+)px/.exec(norm)
     const segment = /width:(\d+)px;height:1px;background:var\(--color-border\);border-radius:2px/.exec(norm)
     expect(dot).not.toBeNull()
     expect(row).not.toBeNull()
     expect(segment).not.toBeNull()
 
     const dotWidth = Number(dot![1])
-    const markerWidth = Number(row![1])
-    const gap = Number(row![2])
+    const gap = Number(row![1])
     const dashWidth = Number(segment![1])
     expect(dashWidth).toBe(6)
-    expect(gap).toBe(2)
-    // Two 6px dashes with the 2px gap add up to exactly the row width.
-    expect(dashWidth * 2 + gap).toBe(14)
+    // One gap either side of the clipped label: 6 + 1 + 0 + 1 + 6 = 14.
+    expect(gap).toBe(1)
+    expect(norm).toContain('max-width:0;overflow:hidden')
+    const markerWidth = dashWidth * 2 + gap * 2
+    // Two 6px dashes a 2px visual gap apart add up to exactly the dot width, so
+    // the collapsed marker still reads as part of the same rail. (The row itself
+    // stays as wide as the content in both states, so the marker's own boxes do
+    // not re-place themselves inside a still-open panel.)
     expect(markerWidth).toBe(14)
-    // ... and the row is exactly as wide as the dot it replaces in the band.
     expect(markerWidth).toBe(dotWidth)
     // The dash keeps the dot's own radius so it reads as part of the same rail.
     expect(norm).toContain('border-radius:2px')
@@ -561,15 +572,16 @@ describe('MessageOutline fork markers', () => {
     const { container } = render(
       <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
     )
-    // Expanded, because the name element (and therefore its rule) exists only
-    // while the taken branch name is actually rendered.
+    // Expanded geometry: the label is mounted in both states, so the row's rules
+    // and its height are the switch, not the label's existence.
     fireEvent.mouseEnter(bodyOf(container))
     const norm = normalizedCss()
 
-    // The message-row height, the full content width, and the flow's 8px gap
-    // around the name. The rules grow, so they need no space-between: they own
-    // the row's two ends once the rail is wider than the label.
-    expect(norm).toContain('height:24px;width:auto;align-self:stretch;gap:8px')
+    // The message-row height and the flow's 8px gap around the name, which
+    // interpolates out of the compact 1px band gap. The rules grow, so they need
+    // no space-between: they own the row's two ends once the rail is wider than
+    // the label.
+    expect(norm).toContain('height:24px;gap:8px')
     // Both rules reserve a definite base size, then grow into whatever width
     // the row has left, with an 8px floor. The base keeps them part of the
     // row's intrinsic width (a zero-basis rule contributes nothing, so a rail
@@ -587,14 +599,25 @@ describe('MessageOutline fork markers', () => {
     expect(norm).toContain('font-size:11.5px;color:var(--color-text-2);white-space:nowrap')
   })
 
-  it('reveals the taken branch name only while expanded, between the two rules', () => {
+  it('keeps the taken branch name mounted between the two rules and only switches its clip', () => {
     const { container } = render(
       <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
     )
     const body = bodyOf(container)
     const collapsed = screen.getByTestId('conversation-nav-fork')
-    expect(collapsed.children).toHaveLength(2)
-    expect(collapsed.textContent).toBe('')
+    // Same three children in both states: nothing is mounted or unmounted, so
+    // there is no frame in which the label appears or vanishes.
+    expect(collapsed.children).toHaveLength(3)
+    expect(collapsed.textContent).toBe('Research branch')
+    const collapsedLabel = collapsed.querySelector('[data-outline-fork-label]') as HTMLElement
+    expect(collapsedLabel).not.toBeNull()
+    // Declared geometry of the two states (both rules are always in the sheet):
+    // compact clips the label to nothing and keeps it transparent, expanded
+    // opens the clip and fades it in. The pixel result is the runtime
+    // observation run's to prove.
+    const norm = normalizedCss()
+    expect(norm).toContain('max-width:0;overflow:hidden')
+    expect(norm).toContain('max-width:320px;opacity:1')
 
     fireEvent.mouseEnter(body)
 
@@ -619,7 +642,7 @@ describe('MessageOutline fork markers', () => {
       <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', '此处有 2 条分支']])} />
     )
     const body = bodyOf(container)
-    expect(screen.getByTestId('conversation-nav-fork').children).toHaveLength(2)
+    expect(screen.getByTestId('conversation-nav-fork').children).toHaveLength(3)
 
     fireEvent.mouseEnter(body)
 
@@ -1146,5 +1169,346 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
     flushRaf()
     expect(body.scrollTop).toBe(compact.scrollHeight - 118)
     expect(rowOf('u1').getBoundingClientRect().bottom).toBeCloseTo(anchoredTop + 24, 5)
+  })
+})
+
+describe('MessageOutline single reversible compact/expanded transition', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+  const COLLAPSE_GRACE_MS = 160
+
+  let rafQueue: FrameRequestCallback[]
+  let resizeCallbacks: ResizeObserverCallback[]
+
+  const flushRaf = () => {
+    const pending = [...rafQueue]
+    rafQueue.length = 0
+    for (const cb of pending) cb(0)
+  }
+
+  // jsdom lays nothing out: give one element the box the test needs to see.
+  const stubBox = (el: Element, top: number, bottom: number, width = 0) =>
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: width,
+      width,
+      height: bottom - top,
+      toJSON: () => ({})
+    } as DOMRect)
+
+  // The reserved scrollbar gutter is what the body's offset/client boxes differ
+  // by (it has no border), and jsdom reports both as 0.
+  const stubGutter = (el: HTMLElement, gutter: number) => {
+    Object.defineProperty(el, 'offsetWidth', { value: 34, configurable: true })
+    Object.defineProperty(el, 'clientWidth', { value: 34 - gutter, configurable: true })
+  }
+
+  const renderOutline = (activeId?: string) => {
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId={activeId} />)
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = nav.firstElementChild as HTMLElement
+    const panel = screen.getByTestId('conversation-nav-panel')
+    const content = panel.firstElementChild as HTMLElement
+    const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    const advance = (ms: number) => {
+      act(() => {
+        vi.advanceTimersByTime(ms)
+      })
+    }
+    return { ...utils, nav, body, panel, content, rowOf, advance }
+  }
+
+  const stubScrollable = (el: HTMLElement, scrollHeight: number, clientHeight: number) => {
+    Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rafQueue = []
+    resizeCallbacks = []
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((cb: FrameRequestCallback): number => {
+        rafQueue.push(cb)
+        return rafQueue.length
+      })
+    )
+    vi.stubGlobal(
+      'cancelAnimationFrame',
+      vi.fn(() => {
+        rafQueue.length = 0
+      })
+    )
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: ResizeObserverCallback) {
+          resizeCallbacks.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('opens to the width its own content needs, not a state swap', () => {
+    const { nav, body, panel, content } = renderOutline()
+    // Compact: the panel is exactly the dot column, whatever the text needs.
+    expect(panel.style.width).toBe('18px')
+
+    // A 400px reading column, a 6px reserved scrollbar gutter and the body's own
+    // 10px padding either side: 320 - 20 - 6 is what the panel may use.
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 200)
+    stubGutter(body, 6)
+    fireEvent.mouseEnter(body)
+    // Measured before paint: the first frame already animates to 200px.
+    expect(panel.style.width).toBe('200px')
+    expect(content.style.maxWidth).toBe('294px')
+  })
+
+  it('caps a long preview at the reading column instead of one fixed width', () => {
+    const { nav, body, panel, content } = renderOutline()
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 900)
+    stubGutter(body, 6)
+    fireEvent.mouseEnter(body)
+    expect(panel.style.width).toBe('294px')
+
+    // A narrower reading column lowers the cap the same content is measured
+    // against, and the panel follows it: 300 - 24 - 20 - 6.
+    stubBox(nav, 0, 100, 300)
+    act(() => {
+      for (const cb of resizeCallbacks) cb([], {} as ResizeObserver)
+    })
+    expect(panel.style.width).toBe('250px')
+    expect(content.style.maxWidth).toBe('250px')
+  })
+
+  it('turns a mid-collapse re-entry around at once, on the same single target', () => {
+    const { nav, body, panel, content, advance } = renderOutline()
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 200)
+    fireEvent.mouseEnter(body)
+    expect(panel.style.width).toBe('200px')
+
+    // The grace expires and the collapse lands: the panel's own target is the
+    // compact rail again, and the running width transition heads there.
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    expect(panel.style.width).toBe('18px')
+
+    // Re-enter while the collapse is still on screen: expansion is immediate and
+    // the target is the same single measured width again — the transition turns
+    // around from the width that is drawn right now, because the width it is
+    // heading for is the only state there is.
+    fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(panel.style.width).toBe('200px')
+
+    // Nothing was held back waiting for the collapse to finish.
+    advance(1000)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(panel.style.width).toBe('200px')
+  })
+
+  it('declares one timeline for width, rows, fades and chrome — and none under reduced motion', () => {
+    const { content } = renderOutline()
+    expect(content.style.maxWidth).toBe('')
+    const norm = Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+    // Width, rows, gap, text fade, chrome: the same 180ms ease-out.
+    expect(norm).toContain('transition:width180msease-out')
+    expect(norm).toContain('transition:height180msease-out')
+    expect(norm).toContain('gap180msease-out')
+    expect(norm).toContain('opacity180msease-out')
+    expect(norm).toContain('background-color180msease-out')
+    // Neither the text nor the fork label is display-swapped, so neither can pop.
+    expect(norm).not.toContain('display:none')
+    // Reduced motion drops every one of them, so the switch settles at once.
+    expect(norm).toContain('@media(prefers-reduced-motion:reduce)')
+    expect(norm).toContain('transition:none')
+  })
+
+  it('settles a reduced-motion switch at once, with no settle wait armed', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false
+    }))
+    const { nav, body, content, rowOf } = renderOutline('u2')
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 200)
+    stubBox(body, 0, 100)
+    stubBox(rowOf('u2'), 30, 54)
+    stubScrollable(body, 5000, 100)
+
+    fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    // The switch is settled in the frame it was applied: nothing waits for a
+    // transition that will never run. (The animated path arms its 680ms settle
+    // fallback at this exact point.)
+    expect(vi.getTimerCount()).toBe(0)
+    flushRaf()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('MessageOutline scrollbar paint across the width transition', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+  const COLLAPSE_GRACE_MS = 160
+  const EXPAND_TRANSITION_MS = 180
+  // The reveal waits out the switch's own timeline plus one frame of slack.
+  const REVEAL_MS = EXPAND_TRANSITION_MS + 16
+
+  const renderOutline = () => {
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = nav.firstElementChild as HTMLElement
+    const advance = (ms: number) => {
+      act(() => {
+        vi.advanceTimersByTime(ms)
+      })
+    }
+    const scrollbar = () => body.getAttribute('data-outline-scrollbar')
+    return { ...utils, nav, body, advance, scrollbar }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('withholds the scrollbar for the whole width transition and reveals it on the settled edge', () => {
+    const { body, advance, scrollbar } = renderOutline()
+    // Compact paints no scrollbar at all (the body clips with overflow hidden).
+    expect(scrollbar()).toBe('hidden')
+
+    fireEvent.mouseEnter(body)
+    // Opening starts at the compact rail: a painted bar here would materialize
+    // at the narrow left edge and be carried across the panel.
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(scrollbar()).toBe('hidden')
+
+    // The width is still changing, so the edge the bar sits on is still moving.
+    advance(EXPAND_TRANSITION_MS)
+    expect(scrollbar()).toBe('hidden')
+
+    // Settled at its final width: the bar appears where it belongs.
+    advance(REVEAL_MS - EXPAND_TRANSITION_MS)
+    expect(scrollbar()).toBe('visible')
+  })
+
+  it('drops the scrollbar in the commit that starts a collapse, and never re-reveals it while compact', () => {
+    const { body, advance, scrollbar } = renderOutline()
+    fireEvent.mouseEnter(body)
+    advance(REVEAL_MS)
+    expect(scrollbar()).toBe('visible')
+
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    // The collapse's first frame: the panel starts narrowing with the bar
+    // already gone, so nothing slides left with it.
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    expect(scrollbar()).toBe('hidden')
+
+    // A pending reveal must not survive into the compact rail.
+    advance(1000)
+    expect(scrollbar()).toBe('hidden')
+  })
+
+  it('restarts the window on a reversal, so no stale reveal paints a moving edge', () => {
+    const { body, advance, scrollbar } = renderOutline()
+    fireEvent.mouseEnter(body)
+    advance(20)
+    expect(scrollbar()).toBe('hidden')
+
+    // Leave early: the collapse lands at 180ms, i.e. before the reveal armed by
+    // the opening (196ms) would have fired.
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+
+    // The dropped window must not fire into the collapsed rail.
+    advance(REVEAL_MS - 20 - COLLAPSE_GRACE_MS)
+    expect(scrollbar()).toBe('hidden')
+
+    // Re-entering starts a fresh window instead of inheriting the old one's.
+    fireEvent.mouseEnter(body)
+    expect(scrollbar()).toBe('hidden')
+    advance(REVEAL_MS - 1)
+    expect(scrollbar()).toBe('hidden')
+    advance(1)
+    expect(scrollbar()).toBe('visible')
+  })
+
+  it('reveals a reduced-motion switch in the same commit, with no timer left to fire', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false
+    }))
+    const { body, scrollbar } = renderOutline()
+    fireEvent.mouseEnter(body)
+    // No transition runs, so there is no moving edge to hide the bar from and
+    // nothing to wait out: settled in the frame the switch is applied.
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(scrollbar()).toBe('visible')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('scopes the withheld paint to this body instead of the shared scrollbar', () => {
+    const { body } = renderOutline()
+    const norm = Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+    const withheld = norm.match(/[^{}]*\[data-outline-scrollbar='hidden'\][^{]*\{[^}]*\}/g) ?? []
+    expect(withheld).toHaveLength(1)
+    const rule = withheld[0] ?? ''
+    // Element-scoped: the selector is this body's own class, never a bare
+    // `::-webkit-scrollbar` override that would reach every other scrollbar.
+    expect(Array.from(body.classList).some((name) => rule.includes(`.${name}[data-outline-scrollbar`))).toBe(true)
+    // Both the paint and the shared component's 2s fade are dropped, so the bar
+    // is gone in the frame the switch starts rather than fading across it.
+    expect(rule).toContain('background:transparent')
+    expect(rule).toContain('transition:none')
   })
 })
