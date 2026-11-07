@@ -667,6 +667,43 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
   })
 
+  it('refetches on the first real updatedAt when the topic mounted without one', async () => {
+    const blocks1 = [textBlock('b1', 'u1', 'First question')]
+    const blocks2 = [textBlock('b1', 'u1', 'First question'), textBlock('b2', 'u2', 'Inserted question')]
+    let calls = 0
+    mocks.loadWholeTopicSnapshot.mockImplementation(async () => {
+      calls += 1
+      return (
+        calls === 1
+          ? {
+              messages: [userMsg('u1', ['b1'])],
+              blocks: blocks1,
+              blocksById: new Map(blocks1.map((b) => [(b as { id: string }).id, b]))
+            }
+          : {
+              messages: [userMsg('u1', ['b1']), userMsg('u2', ['b2'])],
+              blocks: blocks2,
+              blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
+            }
+      ) as never
+    })
+
+    // First mount of this route: the persisted topic carries NO updatedAt yet.
+    mocks.setUpdatedAt(undefined)
+    const { rerender } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    // The first REAL timestamp is an authority mutation, not a baseline: the
+    // message inserted now must reach the outline.
+    mocks.setUpdatedAt('t1')
+    rerender(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    expect(await screen.findByTestId('conversation-nav-item-u2', {}, { timeout: 5000 })).toBeTruthy()
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+    // The existing row is still there: the refetch is additive, not a reset.
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+  })
+
   it('keeps one isolated row hitbox per entry inside the original outline body', async () => {
     const blocks = [
       textBlock('b1', 'u1', 'First question about rivers'),

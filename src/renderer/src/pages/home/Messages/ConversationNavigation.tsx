@@ -146,7 +146,12 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   const branchRef = useRef<string | null>(activeBranchId)
   const mountedRef = useRef(true)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // Authority metadata baseline for the loaded route. The baseline's PRESENCE
+  // is tracked apart from its VALUE because a missing `updatedAt` is itself a
+  // legitimate baseline: a topic may mount with no persisted timestamp, and
+  // the first real timestamp that follows is a genuine update, not a baseline.
   const lastUpdatedAtRef = useRef<string | undefined>(undefined)
+  const hasUpdatedAtBaselineRef = useRef(false)
   topicRef.current = topicId
   branchRef.current = activeBranchId
 
@@ -212,6 +217,7 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     const targetRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
     routeRef.current = targetRouteKey
     lastUpdatedAtRef.current = undefined
+    hasUpdatedAtBaselineRef.current = false
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = undefined
@@ -240,7 +246,14 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // updatedAt changes (baseline established on route load above).
   useEffect(() => {
     if (!topicId) return
-    if (lastUpdatedAtRef.current === undefined) {
+    if (!hasUpdatedAtBaselineRef.current) {
+      // First observation of this route's authority metadata after the
+      // immediate load above: whatever it is — including a missing
+      // `updatedAt` — is what the loaded snapshot represents, so it becomes
+      // the baseline without a refetch. The presence of a baseline is tracked
+      // separately from its value; that is what lets a topic that mounts with
+      // NO `updatedAt` still refetch on its first real timestamp.
+      hasUpdatedAtBaselineRef.current = true
       lastUpdatedAtRef.current = topicUpdatedAt
       return
     }
