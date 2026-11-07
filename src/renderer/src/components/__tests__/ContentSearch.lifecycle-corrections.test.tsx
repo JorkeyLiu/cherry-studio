@@ -107,6 +107,8 @@ describe('B-08 lifecycle corrections (final audit)', () => {
     expect(hostTestId.getAttribute('data-dom-generation')).toBe(genBefore)
     // Same-chunk navigation must NOT trigger clear/highlight teardown nor rescan (fallback snapshot excludes host)
     highlightsMock.clear.mockClear()
+    highlightsMock.set.mockClear()
+    highlightsMock.delete.mockClear()
     highlightArgs = []
     ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_LIVE = undefined
     ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_TOTAL = undefined
@@ -119,12 +121,15 @@ describe('B-08 lifecycle corrections (final audit)', () => {
     expect((globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_TOTAL).toBeUndefined()
     expect(hostTestId.getAttribute('data-dom-generation')).toBe(genBefore)
     expect(hostTestId.getAttribute('data-live-ranges')).toBe('3')
-    // locateByIndex always clears once to update current-match; rescan path would clear twice (rescan teardown + locate)
-    expect(highlightsMock.clear.mock.calls.length).toBeLessThanOrEqual(1)
+    // Publishing the located match replaces the two named entries; it must never
+    // clear the registry (a wholesale clear is what blinked the match set out).
+    expect(highlightsMock.clear).not.toHaveBeenCalled()
+    expect(highlightsMock.set).toHaveBeenCalledWith('current-match', expect.anything())
     expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
 
     // Verify meaningful mutation outside host still invalidates (same target)
     highlightsMock.clear.mockClear()
+    highlightsMock.delete.mockClear()
     highlightArgs = []
     const extra = document.createElement('div')
     extra.textContent = 'hello'
@@ -132,12 +137,80 @@ describe('B-08 lifecycle corrections (final audit)', () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0))
     })
-    expect(highlightsMock.clear).toHaveBeenCalled()
+    // Content added outside the host invalidates: this component releases the two
+    // names it owns, without clearing the shared registry.
+    expect(highlightsMock.delete).toHaveBeenCalledWith('search-matches')
+    expect(highlightsMock.delete).toHaveBeenCalledWith('current-match')
+    expect(highlightsMock.clear).not.toHaveBeenCalled()
     await act(async () => {
       ref.current?.searchNext()
     })
     await waitFor(() => expect(bar.textContent).toContain('3/4'))
     expect(hostTestId.getAttribute('data-live-ranges')).toBe('4')
+
+    unmount()
+  })
+
+  it('viewport bookkeeping attribute writes outside the host do not invalidate the live match set', async () => {
+    const filter = makeFilter()
+    const ref = { current: null as any } as React.RefObject<ContentSearchRef>
+    const Wrapper = () => {
+      const outerRef = React.useRef<HTMLDivElement>(null)
+      return (
+        <div ref={outerRef} data-testid="chat-main-shape">
+          <div data-testid="messages" style={{ height: '400px' }}>
+            <div className="message message-assistant">
+              <div className="message-content-container">hello hello</div>
+            </div>
+          </div>
+          <ContentSearch
+            ref={ref}
+            searchTarget={outerRef as React.RefObject<HTMLElement>}
+            filter={filter}
+            onClose={() => {}}
+          />
+        </div>
+      )
+    }
+    const { unmount } = render(<Wrapper />)
+    const host = screen.getByTestId('content-search-host')
+    const bar = screen.getByTestId('content-search')
+    const container = screen.getByTestId('messages')
+    const input = bar.querySelector('input') as HTMLInputElement
+    input.value = 'hello'
+    await act(async () => {
+      ref.current?.search()
+    })
+    await waitFor(() => expect(bar.textContent).toContain('1/2'))
+    const generation = host.getAttribute('data-dom-generation')
+    highlightsMock.clear.mockClear()
+    highlightsMock.delete.mockClear()
+    highlightsMock.set.mockClear()
+
+    // Exactly what a moving chat viewport writes while a hit lands: phase and
+    // container bookkeeping. None of it can change searchable text or filter
+    // eligibility, so the healthy match set must stay registered and clean.
+    await act(async () => {
+      container.setAttribute('data-viewport-phase', 'scrolling')
+      container.setAttribute('style', 'height: 420px')
+      container.setAttribute('aria-hidden', 'false')
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(highlightsMock.delete).not.toHaveBeenCalled()
+    expect(highlightsMock.clear).not.toHaveBeenCalled()
+    expect(host.getAttribute('data-dom-generation')).toBe(generation)
+
+    // A class write is eligibility (the Chat/RichEditor filters read selectors):
+    // the same observer must still invalidate without a wholesale clear.
+    const row = container.querySelector('.message') as HTMLElement
+    expect(row).not.toBeNull()
+    await act(async () => {
+      row.classList.remove('message-assistant')
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(highlightsMock.delete).toHaveBeenCalledWith('search-matches')
+    expect(highlightsMock.delete).toHaveBeenCalledWith('current-match')
+    expect(highlightsMock.clear).not.toHaveBeenCalled()
 
     unmount()
   })

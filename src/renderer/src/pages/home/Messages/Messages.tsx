@@ -42,6 +42,7 @@ import {
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
   type MessageNavigationResult,
+  type MessageNavigationScrollOutcome,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
@@ -172,7 +173,15 @@ import {
 } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
-import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
+import {
+  NAVIGATION_VISUALLY_NEWER_GROUPS,
+  NAVIGATION_VISUALLY_OLDER_GROUPS,
+  planSearchMatchScroll,
+  resolveMessageRowIdForNode,
+  resolveUnobscuredReadingBand,
+  type SearchMatchLanding,
+  type SearchMatchScrollPlan
+} from './messageNavigation'
 import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
 import { useCrossMessageSelectionGuard } from './messageSelectionGuard'
 import {
@@ -268,9 +277,138 @@ export interface MessagesHandle {
   scrollToContextBoundary: () => void
   previousUserMessage: (currentMessageId: string) => void
   nextUserMessage: (currentMessageId: string) => void
+  /**
+   * Positions the viewport on a chat search match and adopts the resulting
+   * viewport as this route's stable reading position — the same explicit
+   * navigation transaction (settle, fold reveal, window, snapshot, keeper
+   * adoption) every other navigation uses, with the matched text as the landing
+   * geometry and its row as the adopted anchor.
+   *
+   * A long movement is animated and the transaction stays open until it settles,
+   * so the adopted snapshot is the settled position rather than a
+   * pre-animation frame. Returns `false` when the match has no owning row in the
+   * live container, so the caller keeps its own fallback.
+   */
+  scrollToSearchMatch: (match: SearchMatchLanding) => boolean
 }
 
 const logger = loggerService.withContext('Messages')
+
+// ---------------------------------------------------------------------------
+// Search match landing geometry (Cmd/Ctrl+F)
+// ---------------------------------------------------------------------------
+
+/**
+ * Landing movement timing. The journey is driven frame by frame inside the
+ * navigation transaction (native smooth scrolling does not animate this
+ * column-reverse scroller), so the duration is explicit: a short hop and a long
+ * jump both feel deliberate, and the whole movement is bounded (~420ms max).
+ */
+const SEARCH_MATCH_MOTION_MIN_DURATION_MS = 140
+const SEARCH_MATCH_MOTION_MAX_DURATION_MS = 420
+const SEARCH_MATCH_MOTION_MS_PER_PX = 0.05
+
+/**
+ * Fallback geometry height for a hit whose exact range can no longer be measured
+ * (a re-render replaced the text node): the owning element is a whole paragraph,
+ * so centring it would land on the paragraph rather than the hit. One text line
+ * is the honest approximation.
+ */
+const SEARCH_MATCH_FALLBACK_LINE_HEIGHT_PX = 24
+
+const prefersReducedMotion = (): boolean => {
+  try {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches === true
+  } catch {
+    return false
+  }
+}
+
+interface MeasuredRect {
+  top: number
+  bottom: number
+  height: number
+}
+
+/** Measured rectangle of a live element, or `null` when it cannot be measured. */
+const measureRect = (element: Element | null | undefined): MeasuredRect | null => {
+  if (!element || !element.isConnected) return null
+  try {
+    const rect = element.getBoundingClientRect()
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) || !Number.isFinite(rect.height)) return null
+    return { top: rect.top, bottom: rect.bottom, height: rect.height }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Measures one search hit and plans its landing.
+ *
+ * Every bound comes from real rectangles measured at write time — the scroll
+ * container, the panel painted over it, and the hit itself — never from a
+ * hard-coded header height, so the landed text follows the actual layout. The
+ * exact matched RANGE is the primary geometry: several hits inside one paragraph
+ * share an element, so only the range distinguishes them; the owning element and
+ * then the row are fallbacks for a range that no longer measures.
+ *
+ * Returns `null` when nothing is measurable (caller reports not-found); a
+ * `'visible'` plan means the hit is already clearly readable and must not be
+ * moved.
+ */
+const planSearchMatchLanding = (args: {
+  container: HTMLElement
+  target: Element | null
+  match: SearchMatchLanding
+}): SearchMatchScrollPlan => {
+  const { container, target, match } = args
+  const containerRect = measureRect(container)
+  if (!containerRect || container.clientHeight <= 0) return null
+
+  const overlayRect = measureRect(match.overlay)
+  const band = resolveUnobscuredReadingBand({
+    containerTop: containerRect.top,
+    containerHeight: container.clientHeight,
+    obscurer: overlayRect ? { top: overlayRect.top, bottom: overlayRect.bottom } : null
+  }) ?? { top: 0, height: container.clientHeight }
+
+  let matchTopOffset: number | null = null
+  let matchHeight: number | null = null
+  const range = match.range
+  if (range && range.startContainer.isConnected) {
+    try {
+      const rects = range.getClientRects()
+      const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect()
+      if (rect && (rect.height > 0 || rect.width > 0)) {
+        matchTopOffset = rect.top - containerRect.top
+        matchHeight = rect.height > 0 ? rect.height : SEARCH_MATCH_FALLBACK_LINE_HEIGHT_PX
+      }
+    } catch {
+      matchTopOffset = null
+      matchHeight = null
+    }
+  }
+  if (matchTopOffset === null || matchHeight === null) {
+    const fallback = measureRect(match.element) ?? measureRect(target)
+    if (!fallback) return null
+    matchTopOffset = fallback.top - containerRect.top
+    matchHeight = Math.min(
+      fallback.height > 0 ? fallback.height : SEARCH_MATCH_FALLBACK_LINE_HEIGHT_PX,
+      SEARCH_MATCH_FALLBACK_LINE_HEIGHT_PX
+    )
+  }
+
+  return planSearchMatchScroll({
+    matchTopOffset,
+    matchHeight,
+    containerClientHeight: container.clientHeight,
+    currentScrollTop: container.scrollTop,
+    minScrollTop: -(container.scrollHeight - container.clientHeight),
+    band,
+    reducedMotion: prefersReducedMotion()
+  })
+}
 
 /**
  * SEND_MESSAGE topic guard (pure, focused-test entry): only the matching
@@ -2640,6 +2778,116 @@ const Messages = ({
   }, [cancelActiveLoads, clearTimeoutTimer])
 
   /**
+   * Controlled progression for the search landing (Cmd/Ctrl+F).
+   *
+   * The viewport is a `column-reverse` scroller whose valid `scrollTop` range is
+   * NEGATIVE (`0` is the newest bottom). Native smooth scrolling
+   * (`scrollTo({ behavior: 'smooth' })`) accepts such a write but never animates
+   * it in this scroller — measured: one write, zero movement, no cancelling
+   * writer — so the movement is produced here instead: one positional write per
+   * frame along an ease-out curve, on the SAME scroll owner, inside the SAME
+   * navigation transaction. No global `scroll-behavior`, no second scroll owner,
+   * no suppression window.
+   *
+   * The returned promise IS the transaction's completion signal: it must not
+   * finish — nor hand the viewport to the keeper/snapshot — while the viewport is
+   * still travelling, otherwise it would record pre-animation geometry and
+   * release ownership mid-flight.
+   *
+   * - `'completed'`: the final position was written (exactly `top`).
+   * - `'interrupted'`: the user took the viewport over (wheel / touch / key on the
+   *   container) or a newer navigation superseded this one. The step loop stops
+   *   immediately and writes nothing more, so the user's own movement is never
+   *   rewound and a superseded animation never continues toward the older hit.
+   */
+  const animateSearchMatchScroll = useCallback(
+    (
+      container: HTMLElement,
+      top: number,
+      token: MessageViewportNavigationToken
+    ): Promise<'completed' | 'interrupted'> =>
+      new Promise((resolve) => {
+        const from = container.scrollTop
+        if (!Number.isFinite(top) || !Number.isFinite(from)) {
+          resolve('interrupted')
+          return
+        }
+        const distance = Math.abs(top - from)
+        const duration = Math.min(
+          SEARCH_MATCH_MOTION_MAX_DURATION_MS,
+          SEARCH_MATCH_MOTION_MIN_DURATION_MS + distance * SEARCH_MATCH_MOTION_MS_PER_PX
+        )
+        let settled = false
+        let rafId = 0
+        /**
+         * Clock origin is the FIRST painted frame, not the call: the main thread
+         * can be busy with the window/settle/commit work that preceded the write,
+         * and a wall-clock origin would then find the whole duration already
+         * elapsed and degrade the journey to a teleport.
+         */
+        let animationStart: number | null = null
+
+        const cleanup = () => {
+          if (rafId) cancelAnimationFrame(rafId)
+          rafId = 0
+          container.removeEventListener('wheel', onUserTakeover, true)
+          container.removeEventListener('touchstart', onUserTakeover, true)
+          container.removeEventListener('keydown', onUserTakeover, true)
+        }
+
+        const finish = (outcome: 'completed' | 'interrupted') => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve(outcome)
+        }
+
+        const onUserTakeover = () => finish('interrupted')
+
+        const step = () => {
+          rafId = 0
+          if (settled) return
+          // Detached container or a newer navigation owns the viewport now:
+          // stop where the movement currently is and never continue.
+          if (!container.isConnected || !isCurrentNavigation(token)) {
+            finish('interrupted')
+            return
+          }
+          if (animationStart === null) animationStart = performance.now()
+          const elapsed = performance.now() - animationStart
+          if (elapsed >= duration) {
+            try {
+              container.scrollTop = top
+            } catch {
+              finish('interrupted')
+              return
+            }
+            finish('completed')
+            return
+          }
+          // Ease-out cubic: immediate departure, settling arrival. Monotonic, so
+          // no frame ever passes the target and comes back.
+          const progress = elapsed / duration
+          const eased = 1 - (1 - progress) ** 3
+          const nextTop = from + (top - from) * eased
+          try {
+            container.scrollTop = nextTop
+          } catch {
+            finish('interrupted')
+            return
+          }
+          rafId = requestAnimationFrame(step)
+        }
+
+        container.addEventListener('wheel', onUserTakeover, true)
+        container.addEventListener('touchstart', onUserTakeover, true)
+        container.addEventListener('keydown', onUserTakeover, true)
+        rafId = requestAnimationFrame(step)
+      }),
+    [isCurrentNavigation]
+  )
+
+  /**
    * Edit-selection follow eligibility: the resolved physical row of a `group`
    * intent is already resident AND visible in the displayed window, and the
    * controller would accept an interaction adoption right now (unowned, clean
@@ -2681,7 +2929,20 @@ const Messages = ({
      * or a settle is gated out by `canFollowResidentSelectionEndpoint` and keeps
      * the unchanged asynchronous path.
      */
-    (intent: MessageNavigationIntent, options?: { residentFollow?: boolean }) => {
+    (
+      intent: MessageNavigationIntent,
+      options?: {
+        residentFollow?: boolean
+        /**
+         * Positioning-only landing element (search matches): the matched text
+         * inside the target row. Resolved at write time and validated against
+         * the live container; when it is unusable the transaction falls back
+         * to the row. It never changes the adopted anchor identity — that
+         * stays the target row, so the route keeps a stable reading position.
+         */
+        landing?: () => SearchMatchLanding | null
+      }
+    ) => {
       const residentFollow = options?.residentFollow === true
       // Route/epoch currency bound at call time: the actual DOM scroll below
       // rechecks topic/route/controller-epoch/unmounted plus a new genuine
@@ -2741,45 +3002,209 @@ const Messages = ({
           viewportDispatch({ type: 'navigation/phase', token, phase: 'scrolling' })
           return beginScroll('programmatic', {})
         },
-        scroll: (resolved) => {
+        scroll: (resolved, token) => {
           // Currency gate immediately before the DOM mutation: superseded
           // (topic/route/epoch/unmounted), detached container, or a new
           // genuine interaction since entry all skip the programmatic write
           // so the user's actual geometry wins and no stale scrollTo lands
           // on the new container. Skips return truthful outcomes so the
           // transaction cancels without finish/savePosition (no false success).
-          try {
-            if (unmountedRef.current) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
+          // The same gate is re-evaluated after a moving (animated) write, so a
+          // change DURING the movement cancels before the anchor/snapshot
+          // handoff instead of adopting another route's geometry.
+          const stillCurrent = (): boolean => {
+            try {
+              if (unmountedRef.current) return false
+            } catch {
+              return false
+            }
+            try {
+              if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return false
+            } catch {
+              return false
+            }
+            try {
+              if (controller.currentEpoch !== ctrlEpochAtStart) return false
+            } catch {
+              return false
+            }
+            try {
+              const cur = controller.activeInteractionToken?.interactionId ?? null
+              if (cur !== interactionAtStart) return false
+            } catch {
+              return false
+            }
+            try {
+              const curGen = controller.activeInteractionDeclareGeneration ?? null
+              if (curGen !== interactionGenAtStart) return false
+            } catch {
+              return false
+            }
+            try {
+              const container = scrollContainerRef.current
+              if (!container || !container.isConnected) return false
+            } catch {
+              return false
+            }
+            return true
           }
-          try {
-            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
-          }
-          try {
-            if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
-          }
-          try {
-            const cur = controller.activeInteractionToken?.interactionId ?? null
-            if (cur !== interactionAtStart) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
-          }
-          try {
-            const curGen = controller.activeInteractionDeclareGeneration ?? null
-            if (curGen !== interactionGenAtStart) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
-          }
+          if (!stillCurrent()) return 'cancelled' as const
           const live = scrollContainerRef.current
-          try {
-            if (!live || !live.isConnected) return 'cancelled' as const
-          } catch {
-            return 'cancelled' as const
+          if (!live) return 'cancelled' as const
+          // Same-route message navigation live-anchor handoff (single
+          // implementation, used by every message path): the scroll above moves
+          // the viewport but never installs the post-scroll row anchor, so the
+          // keeper would keep holding the old live anchor (bottom null or a
+          // stale row) and pull back on the next Resize/Mutation. Install the
+          // actual navigated row synchronously — before any keeper observer can
+          // repin — through the existing gesture-free row keeper
+          // (`adoptInteractionViewport`, which keeps the row even in bottom
+          // vicinity, unlike the send/bottom programmatic path). Navigation
+          // to a user ID is a reading row, never an auto-resume follow.
+          // Fail-closed: currency skips above already returned without touching
+          // the DOM, so reaching here proves entry currency; a
+          // missing/unmeasurable physical target or a controller refusal
+          // (owned/dirty/route/epoch/phase) adopts nothing and commits
+          // nothing — never a false success. No new scroll
+          // owner/controller/lifecycle/state.
+          const adoptRowAnchor = (targetId: string): MessageNavigationScrollOutcome => {
+            try {
+              const targetEl = document.getElementById(`message-${targetId}`)
+              if (!targetEl || !(targetEl instanceof HTMLElement)) return 'not-found' as const
+              if (!targetEl.isConnected) return 'not-found' as const
+              try {
+                if (!live.contains(targetEl)) return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              try {
+                if (window.getComputedStyle(targetEl).display === 'none') return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              let containerTop = NaN
+              let targetTop = NaN
+              try {
+                containerTop = live.getBoundingClientRect().top
+                targetTop = targetEl.getBoundingClientRect().top
+              } catch {
+                return 'not-found' as const
+              }
+              if (!Number.isFinite(containerTop) || !Number.isFinite(targetTop)) return 'not-found' as const
+              const intraRowOffset = targetTop - containerTop
+              if (!Number.isFinite(intraRowOffset)) return 'not-found' as const
+              const postScrollTop = live.scrollTop
+              if (typeof postScrollTop !== 'number' || !Number.isFinite(postScrollTop)) return 'not-found' as const
+              let atBottom = false
+              try {
+                atBottom = isColumnReverseAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+              } catch {
+                atBottom = false
+              }
+              try {
+                if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              try {
+                const curId = controller.activeInteractionToken?.interactionId ?? null
+                if (curId !== interactionAtStart) return 'cancelled' as const
+                const curGen = controller.activeInteractionDeclareGeneration ?? null
+                if (curGen !== interactionGenAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              const out = controller.adoptInteractionViewport(
+                { topicId: topicAtStart, route: routeAtStart },
+                {
+                  messageId: targetId,
+                  intraRowOffset,
+                  scrollTop: postScrollTop,
+                  isAtBottom: atBottom
+                },
+                { expectedEpoch: ctrlEpochAtStart }
+              )
+              if (!out || (out as { taken?: unknown }).taken !== true) return 'cancelled' as const
+              const taken = out as {
+                taken: true
+                routeKey: string
+                snapshot: {
+                  scrollTop: number
+                  messageId: string | null
+                  intraRowOffset: number | null
+                  isAtBottom: boolean
+                }
+              }
+              try {
+                commitSnapshotForRoute(taken.routeKey, {
+                  scrollTop: taken.snapshot.scrollTop,
+                  anchorId: taken.snapshot.messageId,
+                  messageId: taken.snapshot.messageId,
+                  intraRowOffset: taken.snapshot.intraRowOffset,
+                  rawScrollTop: taken.snapshot.scrollTop,
+                  isAtBottom: taken.snapshot.isAtBottom
+                })
+              } catch {
+                // fail-closed: controller state already advanced above
+              }
+              try {
+                notifyViewport()
+              } catch {
+                // fail-closed: keeper reads the live anchor on its next trigger
+              }
+              // Actually positioned + row adopted (clamped already-visible still
+              // counts — no arbitrary delta required).
+              return 'success' as const
+            } catch {
+              return 'cancelled' as const
+            }
+          }
+          // Search match landing (Cmd/Ctrl+F): the hit owns its own geometry —
+          // exact matched text, centred in the reading band the search panel
+          // leaves visible — so it does NOT go through the row-alignment path
+          // below. A movement worth seeing is driven frame by frame
+          // (`animateSearchMatchScroll`) and this transaction stays open until it
+          // completes, so the anchor/snapshot handoff reads the settled position,
+          // never a frame captured before the movement started.
+          const landing = resolved.kind === 'message' ? (options?.landing?.() ?? null) : null
+          if (landing && resolved.kind === 'message') {
+            const plan = planSearchMatchLanding({
+              container: live,
+              target: document.getElementById(`message-${resolved.targetId}`),
+              match: landing
+            })
+            if (!plan) return 'not-found' as const
+            if (plan.kind === 'scroll') {
+              if (plan.animate) {
+                // Hand the target row to the route keeper BEFORE the movement
+                // starts. Without this the keeper still holds the previous
+                // anchor (bottom), pins it, and reverts every intermediate
+                // position — measured: each frame's write landed and was undone
+                // before the next frame, collapsing the journey into a jump.
+                // With the row adopted, the keeper's hold is layout-only
+                // (displacement 0 for a pure scroll), so the movement survives;
+                // the adoption is repeated on the settled position below.
+                if (adoptRowAnchor(resolved.targetId) !== 'success') return 'cancelled' as const
+                return (async () => {
+                  const motion = await animateSearchMatchScroll(live, plan.top, token)
+                  if (motion !== 'completed') return 'cancelled' as const
+                  // A completion racing the arrival of a newer navigation must
+                  // not adopt from here either: only the current navigation may
+                  // hand the viewport to the keeper.
+                  if (!isCurrentNavigation(token)) return 'cancelled' as const
+                  if (!stillCurrent()) return 'cancelled' as const
+                  return adoptRowAnchor(resolved.targetId)
+                })()
+              }
+              try {
+                live.scrollTo({ top: plan.top })
+              } catch {
+                return 'cancelled' as const
+              }
+            }
+            // Already clearly visible (or a short instant write): adopt the
+            // resulting position without a journey.
+            return adoptRowAnchor(resolved.targetId)
           }
           const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
             // Explicit-container row scroll (column-reverse fundamental):
@@ -2839,115 +3264,10 @@ const Messages = ({
             return 'success' as const
           })
           if (scrollOutcome !== 'success') return scrollOutcome
-          // Same-route message navigation live-anchor handoff (existing
-          // authoritative path only): the transaction scroll above moves the
-          // viewport but never installs the post-scroll row anchor, so the
-          // keeper would keep holding the old live anchor (bottom null or a
-          // stale row) and pull back on the next Resize/Mutation. Install the
-          // actual navigated row synchronously here — before any keeper
-          // observer can repin — through the existing gesture-free row keeper
-          // (`adoptInteractionViewport`, which keeps the row even in bottom
-          // vicinity, unlike the send/bottom programmatic path). Navigation
-          // to a user ID is a reading row, never an auto-resume follow.
-          // Fail-closed: currency skips above already returned without
-          // touching the DOM, so reaching here proves entry currency; a
-          // missing/unmeasurable physical target or a controller refusal
-          // (owned/dirty/route/epoch/phase) adopts nothing and commits
-          // nothing — never a false success. Bottom/top kinds keep their
-          // existing semantics (explicit bottom suspends via beginSendBottom
-          // elsewhere); no new scroll owner/controller/lifecycle/state.
-          if (resolved.kind === 'message') {
-            try {
-              const targetEl = document.getElementById(`message-${resolved.targetId}`)
-              if (!targetEl || !(targetEl instanceof HTMLElement)) return 'not-found' as const
-              if (!targetEl.isConnected) return 'not-found' as const
-              try {
-                if (!live.contains(targetEl)) return 'not-found' as const
-              } catch {
-                return 'not-found' as const
-              }
-              try {
-                if (window.getComputedStyle(targetEl).display === 'none') return 'not-found' as const
-              } catch {
-                return 'not-found' as const
-              }
-              let containerTop = NaN
-              let targetTop = NaN
-              try {
-                containerTop = live.getBoundingClientRect().top
-                targetTop = targetEl.getBoundingClientRect().top
-              } catch {
-                return 'not-found' as const
-              }
-              if (!Number.isFinite(containerTop) || !Number.isFinite(targetTop)) return 'not-found' as const
-              const intraRowOffset = targetTop - containerTop
-              if (!Number.isFinite(intraRowOffset)) return 'not-found' as const
-              const postScrollTop = live.scrollTop
-              if (typeof postScrollTop !== 'number' || !Number.isFinite(postScrollTop)) return 'not-found' as const
-              let atBottom = false
-              try {
-                atBottom = isColumnReverseAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
-              } catch {
-                atBottom = false
-              }
-              try {
-                if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
-              } catch {
-                return 'cancelled' as const
-              }
-              try {
-                const curId = controller.activeInteractionToken?.interactionId ?? null
-                if (curId !== interactionAtStart) return 'cancelled' as const
-                const curGen = controller.activeInteractionDeclareGeneration ?? null
-                if (curGen !== interactionGenAtStart) return 'cancelled' as const
-              } catch {
-                return 'cancelled' as const
-              }
-              const out = controller.adoptInteractionViewport(
-                { topicId: topicAtStart, route: routeAtStart },
-                {
-                  messageId: resolved.targetId,
-                  intraRowOffset,
-                  scrollTop: postScrollTop,
-                  isAtBottom: atBottom
-                },
-                { expectedEpoch: ctrlEpochAtStart }
-              )
-              if (!out || (out as { taken?: unknown }).taken !== true) return 'cancelled' as const
-              const taken = out as {
-                taken: true
-                routeKey: string
-                snapshot: {
-                  scrollTop: number
-                  messageId: string | null
-                  intraRowOffset: number | null
-                  isAtBottom: boolean
-                }
-              }
-              try {
-                commitSnapshotForRoute(taken.routeKey, {
-                  scrollTop: taken.snapshot.scrollTop,
-                  anchorId: taken.snapshot.messageId,
-                  messageId: taken.snapshot.messageId,
-                  intraRowOffset: taken.snapshot.intraRowOffset,
-                  rawScrollTop: taken.snapshot.scrollTop,
-                  isAtBottom: taken.snapshot.isAtBottom
-                })
-              } catch {
-                // fail-closed: controller state already advanced above
-              }
-              try {
-                notifyViewport()
-              } catch {
-                // fail-closed: keeper reads the live anchor on its next trigger
-              }
-              // Actually positioned + row adopted (clamped already-visible still
-              // counts — no arbitrary delta required).
-              return 'success' as const
-            } catch {
-              return 'cancelled' as const
-            }
-          }
+          // Message paths install the navigated row as the reading anchor; the
+          // explicit top/bottom/scrollTop kinds keep their existing semantics
+          // (explicit bottom suspends via beginSendBottom elsewhere).
+          if (resolved.kind === 'message') return adoptRowAnchor(resolved.targetId)
           // Explicit top/bottom/scrollTop canonical: success when written above.
           return 'success' as const
         },
@@ -2959,6 +3279,7 @@ const Messages = ({
       })
     },
     [
+      animateSearchMatchScroll,
       beginScroll,
       cancelNavigationLoadsAndTimers,
       checkElement,
@@ -3014,7 +3335,7 @@ const Messages = ({
    * clears pending. No DB knowledge in the transaction itself.
    */
   const navigate = useCallback(
-    (intent: MessageNavigationIntent) => {
+    (intent: MessageNavigationIntent, landing?: () => SearchMatchLanding | null) => {
       // Explicit navigation invalidates any pending shared interaction hold:
       // the navigation owns viewport geometry from here.
       try {
@@ -3030,12 +3351,13 @@ const Messages = ({
         // `canFollowResidentSelectionEndpoint` and falls back to the unchanged
         // asynchronous navigation below.
         return runTransaction(intent, {
-          residentFollow: canFollowResidentSelectionEndpoint(intent)
+          residentFollow: canFollowResidentSelectionEndpoint(intent),
+          landing
         })
       }
-      if (intent.kind !== 'message') return runTransaction(intent)
+      if (intent.kind !== 'message') return runTransaction(intent, { landing })
       const targetId = intent.targetId
-      if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent)
+      if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent, { landing })
 
       return (async () => {
         const navigateEpochAtStart = ++navigateEpochRef.current
@@ -3086,7 +3408,7 @@ const Messages = ({
         if (ensured.status === 'cancelled') return 'cancelled' as const
         if (ensured.status === 'resident') {
           if (isStale()) return 'cancelled' as const
-          return runTransaction(intent)
+          return runTransaction(intent, { landing })
         }
         if (ensured.status === 'not-found') {
           if (isStale()) return 'cancelled' as const
@@ -3128,7 +3450,7 @@ const Messages = ({
         if (!committed) return 'cancelled' as const
         if (isStale()) return 'cancelled' as const
 
-        return runTransaction(intent)
+        return runTransaction(intent, { landing })
       })()
     },
     [canFollowResidentSelectionEndpoint, controller, dispatch, runTransaction, waitForProjectionCommit]
@@ -3144,7 +3466,7 @@ const Messages = ({
    * must use `navigate` directly without persistence.
    */
   const navigateAndSave = useCallback(
-    (intent: MessageNavigationIntent) => {
+    (intent: MessageNavigationIntent, landing?: () => SearchMatchLanding | null) => {
       // S3.1 Blocker 2 correction: capture the transition epoch at invocation
       // so a topic change during the async navigation suppresses persistence.
       // Without this, savePosition would write to the new topic's scroll key,
@@ -3154,7 +3476,7 @@ const Messages = ({
       readingAnchorPendingTargetRef.current =
         intent.kind === 'message' ? { navigateToken: readingToken, targetId: intent.targetId } : null
       scheduleReadingAnchor()
-      const pending = navigate(intent)
+      const pending = navigate(intent, landing)
       void Promise.resolve(pending).then((result) => {
         if (transitionEpochRef.current !== saveEpoch) return
         // Same-route user navigation: the resulting viewport is stable, so
@@ -3318,13 +3640,58 @@ const Messages = ({
     [navigateAndSave]
   )
 
+  /**
+   * Chat search (Cmd/Ctrl+F) positioning entry point.
+   *
+   * A ContentSearch hit is a text range inside a rendered row, while the scroll
+   * owner here is `#messages` and the reading position belongs to the viewport
+   * navigation authority. A generic element scroll therefore targets the wrong
+   * owner and is reverted by the route keeper (bottom pin / stale row anchor) on
+   * the next layout or mutation pass. Routing the hit through the same explicit
+   * navigation transaction — matched text as landing geometry, its row as the
+   * adopted anchor — positions the exact hit under the search panel (including
+   * several hits inside one long row), animates a long movement, and makes the
+   * settled viewport this route's stable position, so it survives settle, growth,
+   * next/previous hits and search close.
+   *
+   * The hit is handed over as a descriptor, not a resolved element: only the
+   * transaction may measure it, and it must measure at write time.
+   *
+   * Returns `false` when the hit has no owning row in the live container, so the
+   * caller keeps its generic fallback.
+   */
+  const scrollToSearchMatch = useCallback(
+    (match: SearchMatchLanding): boolean => {
+      try {
+        if (!match) return false
+        const container = scrollContainerRef.current
+        if (!container || !container.isConnected) return false
+        // Anchor identity comes from the row that owns the hit text; the range is
+        // preferred because the element may be a whole paragraph shared by
+        // several hits, while both resolve to the same owning row.
+        const range = match.range && match.range.startContainer.isConnected ? match.range : null
+        const anchorNode: Node | null = range ? range.startContainer : match.element
+        if (!anchorNode) return false
+        if (!container.contains(anchorNode)) return false
+        const messageId = resolveMessageRowIdForNode(anchorNode, container)
+        if (!messageId) return false
+        navigateAndSave({ kind: 'message', targetId: messageId, source: 'imperative', alignment: 'start' }, () => match)
+        return true
+      } catch {
+        return false
+      }
+    },
+    [navigateAndSave, scrollContainerRef]
+  )
+
   useImperativeHandle(ref, () => ({
     scrollToMessageById,
     scrollToBottom,
     scrollToTop,
     scrollToContextBoundary,
     previousUserMessage,
-    nextUserMessage
+    nextUserMessage,
+    scrollToSearchMatch
   }))
 
   useEffect(() => {

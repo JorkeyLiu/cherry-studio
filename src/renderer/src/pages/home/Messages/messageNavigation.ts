@@ -112,6 +112,175 @@ export const computeRestoreMessageScrollTop = (args: {
   return Math.max(lower, Math.min(0, desired))
 }
 
+// ---------------------------------------------------------------------------
+// Search match landing (Cmd/Ctrl+F)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum readable margin kept between a search hit and the edges of the
+ * unobscured reading band (px). A hit already inside the band by at least this
+ * margin is "clearly visible" and is not repositioned at all.
+ */
+export const SEARCH_MATCH_VISIBLE_MARGIN_PX = 24
+
+/**
+ * Comfortable gap between a host panel's lower edge and the reading band (px),
+ * so a landed hit never touches the panel border.
+ */
+export const SEARCH_MATCH_READING_PADDING_PX = 16
+
+/**
+ * Shortest viewport movement worth animating (px). A shorter move is written
+ * instantly: the smooth effect is for a real journey, not for a few pixels.
+ */
+export const SEARCH_MATCH_ANIMATION_MIN_DISTANCE_PX = 24
+
+/**
+ * Positioning descriptor for one chat search hit, handed by the search host to
+ * the chat navigation authority.
+ *
+ * The hit is a text range, not an element: two hits inside one paragraph are
+ * the same element but different ranges, so only the range can put the viewport
+ * on the exact text. `element` is fallback geometry for a range that no longer
+ * measures (a re-render replaced the text node), and `overlay` is the host panel
+ * painted over the scroll container (the search bar), whose covered strip is
+ * excluded from the landing band.
+ */
+export interface SearchMatchLanding {
+  range: Range | null
+  element: HTMLElement | null
+  overlay: Element | null
+}
+
+/** Vertical band of a scroll container that no host panel covers. */
+export interface UnobscuredReadingBand {
+  /** Band top edge, as an offset from the container's own top edge. */
+  top: number
+  height: number
+}
+
+/**
+ * Derives the unobscured reading band from the measured rectangles of the
+ * scroll container and of the panel floating over it — never from a hard-coded
+ * header height, so the landing point follows the real layout (panel size,
+ * container insets, window size).
+ *
+ * Only a panel that actually covers the container's top area removes height: a
+ * panel sitting entirely above the container hides nothing and leaves the full
+ * container as the band. `paddingPx` insets both ends for readability.
+ *
+ * Returns `null` when no usable band remains (unmeasurable input or a panel
+ * covering everything), so the caller degrades explicitly instead of landing on
+ * a nonsense coordinate.
+ */
+export const resolveUnobscuredReadingBand = (args: {
+  containerTop: number
+  containerHeight: number
+  obscurer: { top: number; bottom: number } | null
+  paddingPx?: number
+}): UnobscuredReadingBand | null => {
+  const { containerTop, containerHeight, obscurer, paddingPx = SEARCH_MATCH_READING_PADDING_PX } = args
+  if (!Number.isFinite(containerTop) || !Number.isFinite(containerHeight) || containerHeight <= 0) return null
+  const containerBottom = containerTop + containerHeight
+  let coveredBottom = containerTop
+  if (obscurer && Number.isFinite(obscurer.top) && Number.isFinite(obscurer.bottom)) {
+    if (obscurer.bottom > containerTop)
+      coveredBottom = Math.max(coveredBottom, Math.min(obscurer.bottom, containerBottom))
+  }
+  const padding = Number.isFinite(paddingPx) ? Math.max(0, paddingPx) : 0
+  const top = coveredBottom - containerTop + padding
+  const height = containerHeight - (coveredBottom - containerTop) - padding * 2
+  if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return null
+  return { top, height }
+}
+
+/**
+ * Result of planning one search-hit landing.
+ * - `visible`: leave the viewport alone.
+ * - `scroll`: write `top`; `animate` decides smooth vs instant.
+ * - `null` (see {@link planSearchMatchScroll}): unmeasurable, skip the write.
+ */
+export type SearchMatchScrollPlan =
+  | { kind: 'visible' }
+  | { kind: 'scroll'; top: number; distance: number; animate: boolean }
+  | null
+
+/**
+ * Where a search hit should put the viewport, in the same column-reverse
+ * container convention as {@link computeColumnReverseMessageScrollTop}
+ * (`scrollTop` 0 is the newest/bottom edge, older content is negative).
+ *
+ * Three outcomes, never a silent middle ground:
+ * - `visible`: the hit already sits clearly inside the unobscured band, so no
+ *   reposition happens (a repeated locate of an already readable hit must not
+ *   move the viewport).
+ * - `scroll`: the `top` to write, its distance from the current position, and
+ *   whether that distance is worth animating. The hit is centred in the
+ *   unobscured band, never in the raw container, because the covered strip is
+ *   not visible reading area.
+ * - `null`: an input is not measurable, so the caller skips the write.
+ *
+ * `animate` is false for reduced-motion users and for a movement shorter than
+ * `animateMinDistancePx`; the decision is part of the plan so it stays a pure,
+ * checkable rule instead of a call-site improvisation.
+ */
+export const planSearchMatchScroll = (args: {
+  /** Hit top minus container top, in current viewport coordinates. */
+  matchTopOffset: number
+  matchHeight: number
+  containerClientHeight: number
+  currentScrollTop: number
+  minScrollTop: number
+  band: UnobscuredReadingBand
+  reducedMotion?: boolean
+  visibleMarginPx?: number
+  animateMinDistancePx?: number
+}): SearchMatchScrollPlan => {
+  const {
+    matchTopOffset,
+    matchHeight,
+    containerClientHeight,
+    currentScrollTop,
+    minScrollTop,
+    band,
+    reducedMotion = false,
+    visibleMarginPx = SEARCH_MATCH_VISIBLE_MARGIN_PX,
+    animateMinDistancePx = SEARCH_MATCH_ANIMATION_MIN_DISTANCE_PX
+  } = args
+  for (const value of [
+    matchTopOffset,
+    matchHeight,
+    containerClientHeight,
+    currentScrollTop,
+    minScrollTop,
+    band?.top,
+    band?.height
+  ]) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  }
+  if (band.height <= 0 || matchHeight < 0) return null
+
+  // Margins are a readability guard, never an impossibility: a hit taller than
+  // the band keeps zero margin and only the plain containment test applies.
+  const margin = Math.max(0, Math.min(visibleMarginPx, (band.height - matchHeight) / 2))
+  const clearlyVisible =
+    matchTopOffset >= band.top + margin && matchTopOffset + matchHeight <= band.top + band.height - margin
+  if (clearlyVisible) return { kind: 'visible' }
+
+  // Column-reverse keeps the plain content relation `viewportOffset =
+  // contentOffset - scrollTop` (the reverse direction lives in the SIGN of
+  // scrollTop), which is why raising `scrollTop` moves content up. Centring the
+  // hit inside the band therefore is: contentOffset + height/2 - bandCentre.
+  const contentOffset = matchTopOffset + currentScrollTop
+  const bandCentre = band.top + band.height / 2
+  const desired = contentOffset + matchHeight / 2 - bandCentre
+  if (!Number.isFinite(desired)) return null
+  const lower = Math.min(0, minScrollTop)
+  const top = Math.max(lower, Math.min(0, desired))
+  if (!Number.isFinite(top)) return null
+  const distance = Math.abs(top - currentScrollTop)
+  return { kind: 'scroll', top, distance, animate: !reducedMotion && distance >= animateMinDistancePx }
+}
 /**
  * Truthful scroll outcome for the existing transaction `scroll` callback.
  * Reuses the navigation result contract — no new lifecycle or state:
@@ -327,6 +496,49 @@ export const resolveAdjacentUserMessage = (
   return null
 }
 
+/**
+ * Resolves the stable message row id that owns a DOM node inside a chat scroll
+ * container.
+ *
+ * Search matches are text ranges inside a row's content, not the row itself,
+ * and the row is the identity the navigation transaction positions and adopts
+ * as the route's reading anchor. The walk stops at the container and accepts
+ * only a real row: `id="message-<id>"` (group wrappers `message-group-*` and
+ * answer-tab strips are never rows).
+ *
+ * Returns `null` when the node is not inside a navigable row, so the caller
+ * keeps its own fallback instead of guessing a target.
+ */
+export const resolveMessageRowIdForNode = (
+  node: Node | null | undefined,
+  container: Element | null | undefined
+): string | null => {
+  if (!node || !container) return null
+  const start: Element | null = node.nodeType === 1 ? (node as Element) : node.parentElement
+  if (!start) return null
+  // The node must actually live inside the scroll container: a node outside it
+  // is not owned by this container's rows (fail-closed, no guessed target).
+  try {
+    if (!container.contains(start)) return null
+  } catch {
+    return null
+  }
+  let el: Element | null = start
+  while (el && el !== container) {
+    try {
+      const id = el.id ?? ''
+      if (typeof id === 'string' && id.startsWith('message-') && !id.startsWith('message-group-')) {
+        const messageId = id.slice('message-'.length)
+        if (messageId.length > 0) return messageId
+      }
+    } catch {
+      return null
+    }
+    el = el.parentElement
+  }
+  return null
+}
+
 export const resolveMessageNavigation = (
   messages: Message[],
   intent: MessageNavigationIntent
@@ -399,7 +611,23 @@ interface MessageNavigationTransactionDependencies {
   settleDom: () => Promise<void>
   /* Same as `begin`: `true` may be reported synchronously (resident follow). */
   beginProgrammaticScroll: (token: MessageViewportNavigationToken) => boolean | Promise<boolean>
-  scroll: (resolved: ResolvedMessageNavigation) => MessageNavigationScrollOutcome | void
+  /**
+   * Applies the navigation geometry for `resolved`.
+   *
+   * Usually synchronous. A movement that keeps the viewport in motion after the
+   * write (the animated search landing) resolves only when that motion has
+   * completed, been interrupted, or been superseded — the runner awaits it, so
+   * the navigation state stays `scrolling`, the post-scroll currency recheck and
+   * the route anchor/snapshot handoff happen on the settled position, and no
+   * adoption can be taken from a pre-animation frame.
+   *
+   * The `resident` shape writes geometry first and never uses the asynchronous
+   * form (its whole point is that nothing stands between input and write).
+   */
+  scroll: (
+    resolved: ResolvedMessageNavigation,
+    token: MessageViewportNavigationToken
+  ) => MessageNavigationScrollOutcome | void | Promise<MessageNavigationScrollOutcome | void>
   finish: (token: MessageViewportNavigationToken) => void
   cancel: (token: MessageViewportNavigationToken) => void
   /**
@@ -490,6 +718,11 @@ export const handlePendingNavigateEvent = async (
  * in-flight navigation is still superseded. Currency is unchanged: the
  * caller's `scroll` callback owns the topic/route/epoch/interaction gates and
  * the controller adoption, exactly as in the generic path.
+ *
+ * The generic path awaits `scroll`, so a write that keeps moving afterwards (the
+ * animated search landing) also awaits its own completion here: the navigation
+ * stays open through the movement, and finish/supersession are decided on the
+ * settled position — the same single transaction, only completion-aware.
  */
 export const runMessageNavigationTransaction = async (
   intent: MessageNavigationIntent,
@@ -505,7 +738,7 @@ export const runMessageNavigationTransaction = async (
       dependencies.cancel(token)
       return 'not-found'
     }
-    const residentOutcome = dependencies.scroll(residentResolved)
+    const residentOutcome = dependencies.scroll(residentResolved, token)
     const outcome: MessageNavigationScrollOutcome =
       residentOutcome === 'cancelled' || residentOutcome === 'not-found' ? residentOutcome : 'success'
     // State coherence only: the geometry above is already written.
@@ -552,7 +785,10 @@ export const runMessageNavigationTransaction = async (
 
   if (!(await dependencies.beginProgrammaticScroll(token))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'
-  const scrollOutcome = dependencies.scroll(resolved)
+  // Awaited: a moving write (animated search landing) keeps the transaction
+  // open until the viewport has settled, so currency and the finish below apply
+  // to the position the user actually ends on, never to a pre-animation frame.
+  const scrollOutcome = await dependencies.scroll(resolved, token)
   if (scrollOutcome === 'cancelled' || scrollOutcome === 'not-found') {
     dependencies.cancel(token)
     return scrollOutcome

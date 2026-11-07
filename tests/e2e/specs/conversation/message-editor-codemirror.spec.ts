@@ -55,13 +55,21 @@
  *   exactly one content plane (`.cm-scroller` in source, preview scroller
  *   in preview) scrolls under a real wheel — never overflow:hidden-only.
  * - `data-testid` surface otherwise: `message-editor-expand-btn`,
- *   `message-editor-collapse-btn`, `message-editor-find-btn`,
+ *   `message-editor-collapse-btn`, `message-editor-find-btn` plus the find bar
+ *   it opens (`message-editor-find-input`, `message-editor-replace-input`,
+ *   `message-editor-find-next-btn`, `message-editor-find-prev-btn`),
  *   `message-editor-expanded` (modal root),
  *   `message-editor-resize-surface`, plus the native-history toolbar
  *   `message-editor-bold-btn`, `message-editor-undo-btn`,
  *   `message-editor-redo-btn` (ONE native CodeMirror history shared by
  *   keyboard and toolbar; EditorState/history/selection preserved across
  *   preview/source and expand/collapse presentation changes).
+ * - Find navigation is editor-local: the active occurrence is marked
+ *   `.cm-md-find-match-active` and revealing it moves only the editor's own
+ *   `.cm-scroller`, so the outer chat viewport never moves. One long-draft
+ *   workflow test owns that contract (first query, Next/Previous/Enter,
+ *   inline + expanded scroller); match counts and bar behaviour stay
+ *   component-test owned.
  * - Source/preview is toggle-only (split not guaranteed); expanded is ~80vh
  *   with the shared draft and save/cancel available.
  * - Inline assistant Escape stays a no-op; modal Escape closes the expansion
@@ -73,8 +81,7 @@
  * assertions use Redux/SQLite (never `.cm-content` text, which may virtualize).
  * Keyboard selection uses a known short probe for controllability; the main
  * persisted sample stays the long synthetic draft and exact storage is
- * Redux/SQLite after replace (current long save contract). Find/replace match
- * counts stay component-test owned (no new E2E selectors guessed).
+ * Redux/SQLite after replace (current long save contract).
  *
  * Intended invocation (parent coordinates fresh build + focused run):
  *   pnpm build && pnpm test:e2e tests/e2e/specs/conversation/message-editor-codemirror.spec.ts
@@ -4006,6 +4013,152 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         'history survives expand->collapse'
       ).toBeEnabled({ timeout: 10000 })
       expect(hAfter, 'session height owns the collapsed surface').toBeGreaterThanOrEqual(hInline)
+    })
+  })
+
+  test('find navigation reveals offscreen matches inside the editor and keeps the chat viewport', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CODEMIRROR LONG-DRAFT FIND NAVIGATION (INTEGRATED): with a virtualized long draft, a first query must reveal its first match without taking focus out of the find field, Next/Previous/Enter must reveal the selected match (including matches far outside the rendered window), the inline and the expanded scroller must both show the active match, and the outer #messages scroll position must not move.'
+    })
+    const page: Page = mainWindow
+    const tag = `cmefind-${Date.now().toString(36)}`
+    // Three far-apart occurrences inside a document far taller than either the
+    // inline (52vh) or the expanded (72vh) scroller, so the head occurrence is
+    // genuinely outside the rendered window once the editor opens at the tail.
+    const probe = `findprobe-${tag}`
+    const filler = (label: string) =>
+      Array.from(
+        { length: 90 },
+        (_, i) => `${label} filler ${i}: a body paragraph long enough to virtualize the window.`
+      ).join('\n\n')
+    const content = [
+      `# Find navigation ${tag}`,
+      '',
+      `${probe} head occurrence.`,
+      '',
+      filler('head'),
+      '',
+      `${probe} middle occurrence.`,
+      '',
+      filler('middle'),
+      '',
+      `${probe} tail occurrence.`,
+      ''
+    ].join('\n')
+    const seeded = await seedLongAssistantDraft(page, tag, { assistantContent: content })
+    const { editorArea } = await openAssistantEditor(page, seeded.assistantMsgId)
+
+    const findInput = editorArea.locator('[data-testid="message-editor-find-input"]')
+    const nextBtn = editorArea.locator('[data-testid="message-editor-find-next-btn"]')
+    const prevBtn = editorArea.locator('[data-testid="message-editor-find-prev-btn"]')
+    /** The active match is a real rendered mark inside the given scroll plane. */
+    const expectActiveMatchInside = async (scope: Locator, scroller: Locator, label: string) => {
+      const mark = scope.locator('.cm-md-find-match-active')
+      await expect(mark, `${label}: the active match must materialize in the rendered window`).toHaveCount(1, {
+        timeout: 10000
+      })
+      const [markBox, scrollerBox] = await Promise.all([mark.boundingBox(), scroller.boundingBox()])
+      expect(markBox, `${label}: match geometry`).not.toBeNull()
+      expect(scrollerBox, `${label}: scroller geometry`).not.toBeNull()
+      expect(markBox!.y, `${label}: match top inside the scroller`).toBeGreaterThanOrEqual(scrollerBox!.y - 1)
+      expect(markBox!.y + markBox!.height, `${label}: match bottom inside the scroller`).toBeLessThanOrEqual(
+        scrollerBox!.y + scrollerBox!.height + 1
+      )
+    }
+    const outerScrollTop = () =>
+      page
+        .locator('#messages')
+        .first()
+        .evaluate((el) => el.scrollTop)
+
+    const outerBefore = await outerScrollTop()
+
+    await test.step('a first query reveals the offscreen head match and keeps focus in the find field', async () => {
+      await editorArea.locator('[data-testid="message-editor-find-btn"]').click()
+      await expect(findInput, 'find field must render').toBeVisible({ timeout: 10000 })
+      // The editor-local bar replaces the chat-wide search for this surface:
+      // nothing here may mount the chat ContentSearch behind the editor.
+      await expect(page.locator('[data-testid="content-search"]'), 'chat search must stay absent').toHaveCount(0)
+      await expect(
+        page.locator('[data-testid="content-search-host"]'),
+        'chat search host must stay unmounted'
+      ).toHaveCount(0)
+      await findInput.click()
+      await findInput.fill(probe)
+      // Revealing must never steal the caret the user is typing with.
+      await expect(findInput, 'the query field keeps focus while the match is revealed').toBeFocused()
+      // The replace surface is part of the same local widget: Tab hops between
+      // the two fields without leaving the bar.
+      const replaceInput = editorArea.locator('[data-testid="message-editor-replace-input"]')
+      await expect(replaceInput, 'the local replace field is part of the bar').toBeVisible({ timeout: 10000 })
+      await findInput.press('Tab')
+      await expect(replaceInput, 'Tab from the query lands in the replace field').toBeFocused()
+      await replaceInput.press('Shift+Tab')
+      await expect(findInput, 'Shift+Tab returns to the query field').toBeFocused()
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'first query')
+    })
+
+    await test.step('Next, Previous and Enter keep the selected match visible', async () => {
+      const findCount = editorArea.getByText(/^\d+ of 3$/).first()
+      await expect(findCount, 'all three occurrences are still matched').toBeVisible({ timeout: 10000 })
+      await nextBtn.click()
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'next')
+      await nextBtn.click()
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'next to the tail occurrence')
+      await prevBtn.click()
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'previous')
+      // Enter is the keyboard form of Next — and it stays a navigation key: it
+      // never hands the press to the engine, so the revealed match is neither
+      // deleted nor lost and the query keeps the caret.
+      await findInput.click()
+      await findInput.press('Enter')
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'enter')
+      await expect(findInput, 'Enter keeps the caret in the query field').toBeFocused()
+      await expect(findCount, 'Enter advances without touching the draft').toHaveText('3 of 3')
+    })
+
+    await test.step('the expanded scroller reveals the same active match', async () => {
+      await editorArea.locator('[data-testid="message-editor-expand-btn"]').click()
+      const modal = page.locator('[data-testid="message-editor-expanded"]')
+      await expect(modal, 'expanded root must render').toBeVisible({ timeout: 10000 })
+      await expectActiveMatchInside(modal, modal.locator('.cm-scroller').first(), 'expanded')
+      await modal.locator('[data-testid="message-editor-collapse-btn"]').click()
+      await expect(modal, 'collapse closes the expansion').not.toBeVisible({ timeout: 10000 })
+    })
+
+    await test.step('the outer chat viewport never moved', async () => {
+      const outerAfter = await outerScrollTop()
+      test.info().annotations.push({
+        type: 'cme-find-reveal-scroll',
+        description: `outer #messages scrollTop ${Math.round(outerBefore)} -> ${Math.round(outerAfter)} (editor-local reveal only)`
+      })
+      expect(Math.abs(outerAfter - outerBefore), 'find reveal stays inside the editor scroller').toBeLessThanOrEqual(1)
+    })
+
+    await test.step('platform mod+F toggles this bar and keeps its query', async () => {
+      // The editor owns the platform mod+F inside its own surface: it toggles
+      // this bar (the same action as the toolbar button) instead of opening the
+      // chat-wide message search behind it.
+      await editorArea.locator('.cm-content').first().click()
+      await page.keyboard.press('ControlOrMeta+f')
+      await expect(findInput, 'mod+F closes the editor find bar').not.toBeVisible({ timeout: 10000 })
+      await page.keyboard.press('ControlOrMeta+f')
+      await expect(findInput, 'mod+F opens it again').toBeVisible({ timeout: 10000 })
+      await expect(findInput, 'the query survives the toggle').toHaveValue(probe)
+      await expect(findInput, 'reopening lands in the find field').toBeFocused()
+      await expectActiveMatchInside(editorArea, cmScroller(editorArea), 'reopened bar')
+      // The press was consumed by this surface: the chat-wide search never
+      // appeared, and the close left the engine in charge of the caret.
+      await expect(page.locator('[data-testid="content-search"]'), 'mod+F never mounts chat search').toHaveCount(0)
+      await page.keyboard.press('ControlOrMeta+f')
+      await expect(findInput, 'mod+F toggles the bar off again').not.toBeVisible({ timeout: 10000 })
+      await expect(editorArea.locator('.cm-content').first(), 'closing returns the caret to the engine').toBeFocused()
+      await page.keyboard.press('ControlOrMeta+f')
+      await expect(findInput, 'the bar reopens from the engine').toBeVisible({ timeout: 10000 })
     })
   })
 })

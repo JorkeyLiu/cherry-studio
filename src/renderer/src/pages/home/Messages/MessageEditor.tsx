@@ -1,5 +1,4 @@
 import { redo, undo } from '@codemirror/commands'
-import type { EditorView } from '@codemirror/view'
 import { loggerService } from '@logger'
 import { ActionIconButton } from '@renderer/components/Buttons'
 import type { CodeEditorHandles } from '@renderer/components/CodeEditor'
@@ -23,6 +22,14 @@ import { createMainTextBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
 import { coalesceAdjacentMainTextBlocks } from '@renderer/utils/messageUtils/mainTextCoalesce'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  type Extension,
+  StateEffect,
+  StateField
+} from '@uiw/react-codemirror'
 import type { InputRef } from 'antd'
 import { Input, Modal, Tooltip } from 'antd'
 import {
@@ -56,6 +63,7 @@ import { FileNameRender, getFileIcon } from '../Inputbar/AttachmentPreview'
 import AttachmentButton from '../Inputbar/tools/components/AttachmentButton'
 import Markdown from '../Markdown/Markdown'
 import { releaseStagedAttachmentUploads, stageAttachmentUploads } from './MessageEditorAttachmentUpload'
+import { createMessageEditorFindKeyDownHandler } from './messageEditorFindShortcut'
 import {
   buildDocumentChanges,
   type DocumentChange,
@@ -138,6 +146,98 @@ const getInitialEditableBlocks = (message: Message): MessageBlock[] => {
   return coalesceAdjacentMainTextBlocks(draftBlocks)
 }
 
+/**
+ * Find/replace active-match highlight — presentation only.
+ *
+ * Only the ACTIVE occurrence is decorated. Every other occurrence keeps its
+ * stock editor appearance: they are ordinary occurrences of a selected range,
+ * so the engine's own `highlightSelectionMatches` hint draws them, and this
+ * feature adds nothing for them — no decoration and no `.cm-selectionMatch`
+ * style override — so candidates look exactly as they did before find/replace
+ * existed.
+ *
+ * The find bar's query and the active occurrence live in React state, so they
+ * are pushed into editor state as ONE effect and the single mark is recomputed
+ * from the live document on every edit: typing, toolbar formatting and the
+ * Next/Previous navigation always retarget the same presentation. Never a
+ * document change, a selection change or a history entry.
+ */
+const setMessageEditorFindHighlight = StateEffect.define<{ query: string; activeIndex: number }>()
+
+interface MessageEditorFindHighlightState {
+  query: string
+  activeIndex: number
+  mark: DecorationSet
+}
+
+/** One mark on the active occurrence only; every other occurrence stays stock. */
+const buildMessageEditorFindMarks = (doc: string, query: string, activeIndex: number): DecorationSet => {
+  const offsets = findMatches(doc, query)
+  if (offsets.length === 0) return Decoration.none
+  const active = ((activeIndex % offsets.length) + offsets.length) % offsets.length
+  const from = offsets[active]
+  const to = Math.min(from + query.length, doc.length)
+  if (to <= from) return Decoration.none
+  return Decoration.set([Decoration.mark({ class: 'cm-md-find-match-active' }).range(from, to)])
+}
+
+const messageEditorFindHighlightField = StateField.define<MessageEditorFindHighlightState>({
+  create: () => ({ query: '', activeIndex: 0, mark: Decoration.none }),
+  update(value, transaction) {
+    let { query, activeIndex } = value
+    let settled = false
+    for (const effect of transaction.effects) {
+      if (!effect.is(setMessageEditorFindHighlight)) continue
+      query = effect.value.query
+      activeIndex = effect.value.activeIndex
+      settled = true
+    }
+    // Closed/empty find bar: keep an empty decoration set so keystrokes in the
+    // draft cost no highlighting work at all.
+    if (!query) return settled ? { query, activeIndex, mark: Decoration.none } : value
+    if (!settled && !transaction.docChanged) return value
+    return {
+      query,
+      activeIndex,
+      mark: buildMessageEditorFindMarks(transaction.state.doc.toString(), query, activeIndex)
+    }
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.mark)
+})
+
+/**
+ * The active match is washed with the theme's own link blue — a restrained,
+ * selection-like tint that flips between light and dark — instead of the app's
+ * yellow/orange search-highlight pair. Inside prose the current find match is an
+ * editing target, not a search-result warning, so it reads as a slightly
+ * stronger selection rather than an alarm.
+ *
+ * The foreground is inherited, never forced, so each CodeMirror theme keeps its
+ * own text color and the text stays legible on the translucent wash. Candidates
+ * keep their stock appearance: no `.cm-selectionMatch` rule is installed here.
+ */
+const messageEditorFindHighlightTheme = EditorView.theme({
+  '.cm-md-find-match-active': {
+    backgroundColor: 'color-mix(in srgb, var(--color-link) 42%, transparent)',
+    borderRadius: '3px',
+    boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-link) 55%, transparent)'
+  }
+})
+
+const messageEditorFindHighlightExtensions: Extension = [
+  messageEditorFindHighlightField,
+  messageEditorFindHighlightTheme
+]
+
+/**
+ * Vertical breathing room kept between a revealed find match and the editor
+ * scroller's edge. CodeMirror's `'nearest'` strategy moves the minimum amount,
+ * and this margin is what "minimum" means: a match lands just inside the
+ * readable region instead of glued to the edge, while a match that is already
+ * comfortably visible moves nothing at all.
+ */
+const FIND_MATCH_SCROLL_MARGIN = 24
+
 type MainTextViewMode = 'source' | 'preview'
 
 interface MainTextEditorProps {
@@ -194,6 +294,9 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   const [findText, setFindText] = useState('')
   const [replaceText, setReplaceText] = useState('')
   const [findIndex, setFindIndex] = useState(0)
+  // Bumped on every engine mount: the match highlight lives in editor state, so
+  // each newly mounted engine (source⇄preview, expand/collapse) needs it again.
+  const [editorEpoch, setEditorEpoch] = useState(0)
 
   const editorRef = useRef<CodeEditorHandles | null>(null)
   const mountedOnceRef = useRef(false)
@@ -364,18 +467,33 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     [block.id, readLiveView]
   )
 
-  const scrollSelectionIntoEditorView = useCallback((view: EditorView, pos: number) => {
-    // Editor-local scroll only: adjusts the CodeMirror scroller, never the
-    // outer message viewport (no snapshot writes, no outer scrolling).
+  /**
+   * Reveal one find match: selection and scroll in ONE native transaction.
+   *
+   * `EditorView.scrollIntoView` is CodeMirror's viewport-aware scroll request:
+   * it resolves the target from the height map, so a match in a virtualized
+   * region the editor has never materialized is still reachable. The previous
+   * mechanism read `coordsAtPos` first and gave up when it returned null — no
+   * coordinates exist for an unmaterialized line, which is exactly why an
+   * out-of-viewport match never scrolled into view.
+   *
+   * Editor-local only: this moves `view.scrollDOM` (the editor's own scroller)
+   * and never the outer message viewport — no snapshot writes, no chat
+   * scrolling. Focus is the caller's business, so a reveal on a query change
+   * can leave focus exactly where it is.
+   */
+  const revealMatch = useCallback((view: EditorView, from: number, to: number) => {
     try {
-      const coords = view.coordsAtPos(pos)
-      if (!coords) return
-      const scroller = view.scrollDOM
-      const rect = scroller.getBoundingClientRect()
-      if (rect.height <= 0) return
-      const middle = (coords.top + coords.bottom) / 2 - (rect.top + rect.bottom) / 2
-      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-      scroller.scrollTop = Math.max(0, Math.min(maxTop, scroller.scrollTop + middle))
+      const length = view.state.doc.length
+      const anchor = Math.max(0, Math.min(from, length))
+      const head = Math.max(anchor, Math.min(to, length))
+      view.dispatch({
+        selection: { anchor, head },
+        // `'nearest'` keeps the movement minimal (a comfortably visible match
+        // does not move at all) while the margin keeps the revealed line one
+        // readable step inside the scroller edge.
+        effects: EditorView.scrollIntoView(anchor, { y: 'nearest', yMargin: FIND_MATCH_SCROLL_MARGIN })
+      })
     } catch {}
   }, [])
 
@@ -391,6 +509,8 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   )
 
   const handleEditorReady = useCallback(() => {
+    // Each mount is a new engine: re-apply the find highlight to it.
+    setEditorEpoch((n) => n + 1)
     const view = readLiveView()
     if (!mountedOnceRef.current) {
       // Single usable focus with preventScroll: the shared interaction hold
@@ -556,6 +676,13 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     () => [...saveShortcutExtensions, ...resendShortcutExtensions],
     [saveShortcutExtensions, resendShortcutExtensions]
   )
+  // Identity-stable set: the match highlight is appended once, so the engine is
+  // never reconfigured — and never loses the highlight — while find or the draft
+  // changes.
+  const editorExtensions = useMemo(
+    () => [...editorShortcutExtensions, messageEditorFindHighlightExtensions],
+    [editorShortcutExtensions]
+  )
 
   const applyToolbarOp = useCallback(
     (op: (content: string, selection: EditorSelection) => FormatResult) => {
@@ -598,23 +725,77 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
 
   const matches = useMemo(() => findMatches(content, findText), [content, findText])
   const activeMatchIndex = matches.length === 0 ? 0 : findIndex % matches.length
+  // Latest match list and index for the reveal effect: it fires on a query
+  // change and on every freshly mounted engine, and reads these through refs so
+  // it never becomes a dependency on the draft or on the recomputed list.
+  const matchesRef = useRef(matches)
+  matchesRef.current = matches
+  const findIndexRef = useRef(findIndex)
+  findIndexRef.current = findIndex
 
+  /**
+   * Retarget the active occurrence and reveal it inside the engine.
+   *
+   * `keepFocus` is for presses that originate in the find field itself (Enter):
+   * the user is still typing their query there, so the caret must stay put.
+   * Moving focus into the engine during that keydown would hand the press's
+   * default action — a newline — to the engine's current selection, which is
+   * exactly the revealed match: the match would be deleted instead of stepped
+   * over. Toolbar arrows pass no flag and keep the established behavior of
+   * landing the caret in the content they just scrolled.
+   */
   const goToMatch = useCallback(
-    (index: number) => {
+    (index: number, options?: { keepFocus?: boolean }) => {
       if (matches.length === 0 || !findText) return
       const safe = ((index % matches.length) + matches.length) % matches.length
       setFindIndex(safe)
       const view = readLiveView()
       if (!view || isPreview) return
       const at = matches[safe]
-      try {
-        view.dispatch({ selection: { anchor: at, head: at + findText.length } })
-      } catch {}
-      scrollSelectionIntoEditorView(view, at)
-      focusQuietly()
+      revealMatch(view, at, at + findText.length)
+      if (!options?.keepFocus) focusQuietly()
     },
-    [findText, focusQuietly, isPreview, matches, readLiveView, scrollSelectionIntoEditorView]
+    [findText, focusQuietly, isPreview, matches, readLiveView, revealMatch]
   )
+
+  // Find/replace highlight is editor presentation, never draft state: the query
+  // and the active occurrence are pushed into the live engine as one effect, so
+  // typing, formatting and Next/Previous retarget the same marks without a
+  // document change, a selection change or a history entry. The mount epoch
+  // re-applies it to every newly mounted engine.
+  useEffect(() => {
+    const view = readLiveView()
+    if (!view) return
+    try {
+      view.dispatch({
+        effects: setMessageEditorFindHighlight.of({
+          query: findOpen && findText ? findText : '',
+          activeIndex: activeMatchIndex
+        })
+      })
+    } catch {}
+  }, [activeMatchIndex, editorEpoch, findOpen, findText, readLiveView])
+
+  // A non-empty query must reveal its first match, and a freshly mounted engine
+  // (source⇄preview, expand/collapse) must reveal the match that is still
+  // active. Both reveal through the engine only — selection plus the native
+  // scroll request — and move no DOM focus, so the user keeps typing in the
+  // find field.
+  //
+  // Deliberately keyed on the query, the bar and the engine, never on the draft
+  // or on the recomputed match list: editing the draft moves the caret and
+  // shifts match offsets, and that must never pull the selection back to a
+  // match.
+  useEffect(() => {
+    if (!findOpen || isPreview || !findText) return
+    const view = readLiveView()
+    if (!view) return
+    const offsets = matchesRef.current
+    if (offsets.length === 0) return
+    const active = ((findIndexRef.current % offsets.length) + offsets.length) % offsets.length
+    const from = offsets[active]
+    revealMatch(view, from, from + findText.length)
+  }, [editorEpoch, findOpen, findText, isPreview, readLiveView, revealMatch])
 
   const handleReplaceCurrent = useCallback(() => {
     if (disabled || isPreview || matches.length === 0 || !findText) return
@@ -689,6 +870,62 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     setFindOpen((prev) => !prev)
     setFindIndex(0)
   }, [captureControlsIntent])
+
+  // One open/close focus rule for every way into the bar: the surface shortcut
+  // and the toolbar button run the same toggle, so both land the caret in the
+  // same place. Opening puts it in the find field with the query selected
+  // (ready to retype); closing puts it back in the content without scrolling
+  // the message out from under the reader. Runs on the transition only — a
+  // keystroke inside the bar, a match hop or a mount never moves focus.
+  const wasFindOpenRef = useRef(findOpen)
+  useEffect(() => {
+    if (wasFindOpenRef.current === findOpen) return
+    wasFindOpenRef.current = findOpen
+    if (!findOpen) {
+      focusQuietly()
+      return
+    }
+    const findInput = (expandedRef.current ? expandedFindInputRef : inlineFindInputRef).current
+    try {
+      findInput?.focus()
+      findInput?.select()
+    } catch {}
+  }, [findOpen, focusQuietly])
+
+  // Latest toggle behind an identity-stable shortcut, so the surface is never
+  // reconfigured while the draft changes.
+  const toggleFindRef = useRef(toggleFind)
+  toggleFindRef.current = toggleFind
+  const findShortcutHandler = useMemo(
+    () => createMessageEditorFindKeyDownHandler({ onToggle: () => toggleFindRef.current() }),
+    []
+  )
+
+  /**
+   * Platform mod+F belongs to this editor's own find/replace while the press
+   * originates inside its surface (content, toolbar, find/replace fields).
+   *
+   * Capture phase, not bubble: the engine handles keydown on its content node
+   * and the app shortcut layer listens on the document, both on the bubble
+   * path, so a bubble handler here would either lose the press to the engine
+   * or leave the chat-wide message search firing behind the bar. Consuming the
+   * native event in capture stops both, and the synthetic event is consumed as
+   * well so React handlers inside the surface stand down for this press.
+   *
+   * Attached per surface part — the inline toolbar, find bar and body are
+   * siblings with no shared wrapper — plus the single expanded root, so one
+   * rule covers both mounts.
+   */
+  const handleFindShortcutKeyDownCapture = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // React does not forward `isComposing`, so the decision runs on the
+      // native event (same pattern as the save/resend shortcuts).
+      if (!findShortcutHandler(event.nativeEvent)) return
+      event.preventDefault()
+      event.stopPropagation()
+    },
+    [findShortcutHandler]
+  )
 
   const formatDisabled = disabled || isPreview
   // Toolbar history buttons reflect the live native stack: they enable only
@@ -975,7 +1212,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         // the same actions as the existing buttons, above the engine keymap so
         // the mod-key events actually reach them. Both inline and expanded
         // mounts share this exact extension set.
-        extensions={editorShortcutExtensions}
+        extensions={editorExtensions}
         expanded={false}
         height="100%"
         minHeight="100%"
@@ -994,7 +1231,9 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     // group internally; the end group never shrinks away.
     // The expanded copy already sits inside the single ExpandedRoot attachment
     // below; only the inline mount needs the handler here.
-    <EditorToolbar onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
+    <EditorToolbar
+      onKeyDownCapture={inExpanded ? undefined : handleFindShortcutKeyDownCapture}
+      onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
       <ToolbarGroup>
         <Tooltip title={isPreview ? t('message.edit.show_source') : t('message.edit.show_preview')} mouseLeaveDelay={0}>
           <ActionIconButton
@@ -1124,6 +1363,13 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     // every other key keep native behavior, so the bar stays in the ordinary
     // tab order and never becomes a focus trap.
     const handleFindInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+      // Enter is this bar's "next match" (see `onPressEnter`), never a default
+      // action: claimed so no implicit submit/keyboard default can act on the
+      // engine selection the reveal just placed.
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        return
+      }
       if (event.key !== 'Tab' || event.shiftKey) return
       event.preventDefault()
       replaceInputRef.current?.focus()
@@ -1136,9 +1382,12 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     return (
       // Expanded copy: covered by the single ExpandedRoot attachment; inline
       // copy carries its own so Escape works from the find/replace fields.
-      <FindBar onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
+      <FindBar
+        onKeyDownCapture={inExpanded ? undefined : handleFindShortcutKeyDownCapture}
+        onKeyDown={inExpanded ? undefined : handleSurfaceKeyDown}>
         <Input
           ref={findInputRef}
+          data-testid="message-editor-find-input"
           onKeyDown={handleFindInputKeyDown}
           size="small"
           value={findText}
@@ -1146,7 +1395,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
             setFindText(e.target.value)
             setFindIndex(0)
           }}
-          onPressEnter={() => goToMatch(activeMatchIndex + 1)}
+          onPressEnter={() => goToMatch(activeMatchIndex + 1, { keepFocus: true })}
           placeholder={t('message.edit.find_placeholder')}
           aria-label={t('message.edit.find_placeholder')}
           style={{ width: 150 }}
@@ -1158,6 +1407,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         </FindCount>
         <Tooltip title={t('message.edit.find_previous')} mouseLeaveDelay={0}>
           <ActionIconButton
+            data-testid="message-editor-find-prev-btn"
             disabled={matches.length === 0}
             onClick={() => goToMatch(activeMatchIndex - 1)}
             aria-label={t('message.edit.find_previous')}>
@@ -1166,6 +1416,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         </Tooltip>
         <Tooltip title={t('message.edit.find_next')} mouseLeaveDelay={0}>
           <ActionIconButton
+            data-testid="message-editor-find-next-btn"
             disabled={matches.length === 0}
             onClick={() => goToMatch(activeMatchIndex + 1)}
             aria-label={t('message.edit.find_next')}>
@@ -1174,6 +1425,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         </Tooltip>
         <Input
           ref={replaceInputRef}
+          data-testid="message-editor-replace-input"
           onKeyDown={handleReplaceInputKeyDown}
           size="small"
           value={replaceText}
@@ -1261,7 +1513,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
       ) : (
         // Inline body: covers the resize handle and the engine itself (the
         // containment guard keeps Escape inside the content with CodeMirror).
-        <InlineResizeContainer onKeyDown={handleSurfaceKeyDown}>
+        <InlineResizeContainer onKeyDownCapture={handleFindShortcutKeyDownCapture} onKeyDown={handleSurfaceKeyDown}>
           {renderResizeHandle()}
           <ResizeSurface data-testid="message-editor-resize-surface" style={{ height: inlineHeight }}>
             {isPreview ? renderPreview() : renderSourceEditor(true)}
@@ -1297,7 +1549,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
               so focusing this mount's engine would only land the caret on a node
               about to unmount. Escape leaving the maximized view is the intended
               behavior; the inline mount is the one that must not be closed. */}
-          <ExpandedRoot data-testid="message-editor-expanded">
+          <ExpandedRoot data-testid="message-editor-expanded" onKeyDownCapture={handleFindShortcutKeyDownCapture}>
             <ExpandedHeader>
               <ExpandedTitle>{t('message.edit.expanded_title')}</ExpandedTitle>
               <Tooltip title={t('message.edit.collapse')} mouseLeaveDelay={0}>

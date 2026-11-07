@@ -17,6 +17,27 @@ import {
   setContentSearchDomGeneration
 } from './contentSearchDiagnostics'
 
+/**
+ * A located match as handed to a host that positions matches itself: the exact
+ * match range, the element owning its start text node (resolved while the row
+ * is still live), and the search panel itself when that panel is painted over
+ * the host's content instead of taking part in its layout.
+ *
+ * The range — not only the owning element — is what lets a host land on the
+ * matched TEXT: several hits inside one paragraph share the same element, so
+ * the element alone cannot distinguish them.
+ */
+export interface ContentSearchLocatedMatch {
+  range: Range
+  element: HTMLElement | null
+  /**
+   * The floating search bar covering part of the host's content area, or `null`
+   * when the bar takes part in layout and covers nothing. A host that positions
+   * matches itself measures this to keep the landed hit out from under it.
+   */
+  overlay: HTMLElement | null
+}
+
 interface Props {
   children?: React.ReactNode
   searchTarget: React.RefObject<React.ReactNode> | React.RefObject<HTMLElement> | HTMLElement
@@ -46,6 +67,19 @@ interface Props {
    */
   initialText?: string
   onClose?: () => void
+  /**
+   * Host-owned positioning for the currently located match.
+   *
+   * The default path scrolls the search target itself, which is correct only
+   * for a target that owns its own overflow. A host whose scroll owner is a
+   * different element — and whose viewport position is owned by that host's
+   * own navigation authority — would have the default scroll land on the wrong
+   * element and be reverted on the next layout pass. Returning `true` means the
+   * host positioned the match, so the default scroll is skipped; `false`/void
+   * keeps the default scroll (host has no navigable match location, e.g. a
+   * rich-text editor that owns its own container).
+   */
+  onLocateMatch?: (match: ContentSearchLocatedMatch) => boolean
 }
 
 enum SearchCompletedState {
@@ -92,6 +126,40 @@ const safeSetHighlight = (name: string, highlight: any) => {
     ;(globalThis as any).CSS?.highlights?.set?.(name, highlight)
   } catch {}
 }
+
+/**
+ * Releases one highlight this component owns. The registry offers atomic named
+ * replacement, so a live path never needs the wholesale `clear()` — which would
+ * also drop highlights owned by someone else and, between two navigations, leave
+ * a frame painted with no match at all.
+ */
+const safeDeleteHighlight = (name: string) => {
+  try {
+    ;(globalThis as any).CSS?.highlights?.delete?.(name)
+  } catch {}
+}
+
+/**
+ * Attributes a searchable-node decision can be made from.
+ *
+ * Eligibility is decided by the host's `NodeFilter`, and both hosts in this app
+ * select on `class` (Chat: `.message-content-container` inside `.message` +
+ * `.message-assistant`; RichEditor: `.ProseMirror`). No other attribute can move a
+ * text node in or out of the searched set: rendered-DOM search walks text
+ * regardless of paint state, so a visibility change neither adds nor removes a
+ * match and a range over currently-unpainted text stays textually correct. A
+ * `class` write is additionally narrowed to subtrees that still hold searched
+ * text (see `canAffectSearchableContent`) so chrome churn cannot invalidate.
+ *
+ * A host whose filter reads another attribute must add it here, otherwise that
+ * eligibility change will not invalidate the session. One narrow case stays
+ * undetected by design: a `class` write that makes an element's text stop being
+ * searched while none of its matches are live (already outside the current
+ * chunk) is not observed, because after the write its text no longer passes the
+ * filter and it holds no live range; the count then lags until the next content
+ * mutation or explicit search re-scans.
+ */
+const ELIGIBILITY_ATTRIBUTES = new Set(['class'])
 
 const hasHighlightAPI = () =>
   typeof (globalThis as any).Highlight !== 'undefined' && !!(globalThis as any).CSS?.highlights
@@ -191,7 +259,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       showUserToggle = true,
       positionMode = 'fixed',
       initialText,
-      onClose
+      onClose,
+      onLocateMatch
     },
     ref
   ) => {
@@ -203,6 +272,10 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       }
     })()
     const containerRef = React.useRef<HTMLDivElement>(null)
+    // The floating search bar itself (the panel painted over the host's
+    // content): handed to a host that positions matches so it can exclude the
+    // covered strip from the landing point.
+    const searchBarRef = React.useRef<HTMLDivElement>(null)
     const searchInputRef = React.useRef<HTMLInputElement>(null)
     const isParentOwned = Boolean(onClose)
     const [enableContentSearch, setEnableContentSearch] = useState(() => isParentOwned)
@@ -236,6 +309,10 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     const isCaseSensitiveRef = useRef(isCaseSensitive)
     const isWholeWordRef = useRef(isWholeWord)
     const filterRef = useRef(filter)
+    // Host match-positioning hook kept in a ref (same pattern as `filter`):
+    // navigating a match must never re-create `locateByIndex`, which is an
+    // effect dependency that would then re-run the scroll on every render.
+    const locateMatchRef = useRef(onLocateMatch)
     const searchCompletedRef = useRef(searchCompleted)
 
     useEffect(() => {
@@ -259,6 +336,9 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     useEffect(() => {
       searchCompletedRef.current = searchCompleted
     }, [searchCompleted])
+    useEffect(() => {
+      locateMatchRef.current = onLocateMatch
+    }, [onLocateMatch])
 
     // Lightweight DOM snapshot to avoid heavy rescan on every same-chunk navigation when DOM unchanged
     // Fallback dimensions are derived only from searchable target content excluding ContentSearch host subtree
@@ -295,42 +375,79 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       }
     }, [target])
 
+    /**
+     * Whether an attribute write on `element` can change what is searchable.
+     *
+     * Eligibility comes from the host's `NodeFilter` and can only be affected by
+     * the mutated element's own subtree, so a `class` write matters only when
+     * that subtree still holds text the filter searches — or holds a live match
+     * whose eligibility just changed. A `class` write on chrome (a toolbar
+     * button, an input, a diagnostic wrapper) can move no match at all.
+     */
+    const canAffectSearchableContent = useCallback((element: Element | null): boolean => {
+      if (!element) return false
+      const ranges = liveRangesRef.current
+      for (let index = 0; index < ranges.length; index += 1) {
+        const range = ranges[index]
+        if (element.contains(range.startContainer) || element.contains(range.endContainer)) return true
+      }
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, filterRef.current)
+      return walker.nextNode() !== null
+    }, [])
+
     // Synchronously process mutation records using the same invalidation/filtering as the async observer.
     // Returns true when a relevant mutation was found and dirty state was marked.
-    const handleRelevantMutations = useCallback((records: MutationRecord[]) => {
-      const searchText = searchInputRef.current?.value.trim() ?? ''
-      if (!searchText) return false
-      if (searchCompletedRef.current === SearchCompletedState.NotSearched) {
-        return false
-      }
-      const host = containerRef.current
-      let hasRelevant = false
-      for (const record of records) {
-        const t = record.target
-        if (host && (t === host || host.contains(t))) {
-          continue
+    const handleRelevantMutations = useCallback(
+      (records: MutationRecord[]) => {
+        const searchText = searchInputRef.current?.value.trim() ?? ''
+        if (!searchText) return false
+        if (searchCompletedRef.current === SearchCompletedState.NotSearched) {
+          return false
         }
-        if (record.type === 'childList' && host) {
-          const nodes: Node[] = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)]
-          let isHostStructure = false
-          for (const n of nodes) {
-            if (n === host) {
-              isHostStructure = true
-              break
-            }
+        const host = containerRef.current
+        let hasRelevant = false
+        for (const record of records) {
+          const t = record.target
+          if (host && (t === host || host.contains(t))) {
+            continue
           }
-          if (isHostStructure) continue
+          // Attribute writes are the bulk of what a moving viewport produces
+          // (`data-viewport-phase`, container styles, button/input churn). Only a
+          // write the host's filter can decide eligibility from, on a subtree that
+          // still holds searched text, can change the match set; the rest cannot
+          // move a single match, so invalidating on them destroys a healthy match
+          // set on every next/previous hit.
+          if (record.type === 'attributes') {
+            if (!ELIGIBILITY_ATTRIBUTES.has(record.attributeName ?? '')) continue
+            if (!canAffectSearchableContent(t as Element)) continue
+          }
+          if (record.type === 'childList' && host) {
+            const nodes: Node[] = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)]
+            let isHostStructure = false
+            for (const n of nodes) {
+              if (n === host) {
+                isHostStructure = true
+                break
+              }
+            }
+            if (isHostStructure) continue
+          }
+          hasRelevant = true
+          break
         }
-        hasRelevant = true
-        break
-      }
-      if (!hasRelevant) return false
-      domDirtyRef.current = true
-      domGenerationRef.current += 1
-      recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
-      safeClearHighlights()
-      return true
-    }, [])
+        if (!hasRelevant) return false
+        domDirtyRef.current = true
+        domGenerationRef.current += 1
+        recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
+        // Stale text may now sit under these ranges: release only the two names
+        // this component owns so a stale highlight is never painted, without a
+        // wholesale clear of the shared registry.
+        safeDeleteHighlight('search-matches')
+        safeDeleteHighlight('current-match')
+        return true
+      },
+      [canAffectSearchableContent]
+    )
 
     const drainPendingMutations = useCallback(() => {
       const obs = observerRef.current
@@ -399,26 +516,48 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       setSearchCompleted(SearchCompletedState.NotSearched)
     }, [clearLiveChunk])
 
+    /**
+     * Publishes the located match to the registry.
+     *
+     * The two entries this component owns are REPLACED by name, never cleared
+     * first: named replacement is atomic, so the previous match set stays painted
+     * until the new one is registered and a navigation can never paint a frame
+     * with the highlight missing (the blink on every next/previous hit). Entries
+     * that cannot be filled are removed individually, so a stale `current-match`
+     * from an earlier query cannot survive.
+     */
     const locateByIndex = useCallback(
       (shouldScroll = true) => {
-        safeClearHighlights()
+        if (!hasHighlightAPI()) return
         const ranges = liveRangesRef.current
-        if (ranges.length > 0) {
-          if (!hasHighlightAPI()) return
-          const allMatchesHighlight = new (globalThis as any).Highlight(...ranges)
-          safeSetHighlight('search-matches', allMatchesHighlight)
-          if (globalIndex !== -1) {
-            const localIndex = globalIndex - chunkIndex * CONTENT_SEARCH_CHUNK_SIZE
-            const currentMatchRange = ranges[localIndex]
-            if (currentMatchRange) {
-              const currentMatchHighlight = new (globalThis as any).Highlight(currentMatchRange)
-              safeSetHighlight('current-match', currentMatchHighlight)
-              const parentElement = currentMatchRange.startContainer.parentElement
-              if (shouldScroll && parentElement) {
-                scrollElementIntoView(parentElement, target)
-              }
-            }
-          }
+        if (ranges.length === 0) {
+          safeDeleteHighlight('search-matches')
+          safeDeleteHighlight('current-match')
+          return
+        }
+        safeSetHighlight('search-matches', new (globalThis as any).Highlight(...ranges))
+        const localIndex = globalIndex === -1 ? -1 : globalIndex - chunkIndex * CONTENT_SEARCH_CHUNK_SIZE
+        const currentMatchRange = localIndex >= 0 ? ranges[localIndex] : undefined
+        if (!currentMatchRange) {
+          safeDeleteHighlight('current-match')
+          return
+        }
+        safeSetHighlight('current-match', new (globalThis as any).Highlight(currentMatchRange))
+        if (!shouldScroll) return
+        const parentElement = currentMatchRange.startContainer.parentElement
+        if (!parentElement) return
+        // Host-owned positioning first: a host whose scroll owner is not
+        // the search target defers to its own navigation authority and
+        // reports `true`; the default target scroll would land on the
+        // wrong element and be reverted by that authority.
+        const positionedByHost =
+          locateMatchRef.current?.({
+            range: currentMatchRange,
+            element: parentElement,
+            overlay: searchBarRef.current
+          }) === true
+        if (!positionedByHost) {
+          scrollElementIntoView(parentElement, target)
         }
       },
       [chunkIndex, globalIndex, target]
@@ -1022,7 +1161,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         style={isParentOwned ? undefined : enableContentSearch ? {} : { display: 'none' }}
         $overlayPosition={positionMode === 'absolute' ? 'absolute' : 'static'}>
         <div style={{ width: '100%' }}>
-          <SearchBarContainer $position={positionMode} data-testid="content-search">
+          <SearchBarContainer ref={searchBarRef} $position={positionMode} data-testid="content-search">
             <InputWrapper>
               <Input
                 ref={searchInputRef}

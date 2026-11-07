@@ -44,7 +44,14 @@ const mocks = vi.hoisted(() => ({
   } | null,
   autoHeightCallback: null as null | ((height: number) => void),
   commandCalls: [] as { cmd: 'undo' | 'redo' }[],
-  editorExtensions: null as unknown[] | null
+  editorExtensions: null as unknown[] | null,
+  // Every transaction the fake engine received: `selection` plus the state
+  // effects of that one dispatch, so a reveal can be asserted as one native
+  // transaction instead of a sequence of side effects.
+  editorDispatches: [] as { selection: { anchor: number; head: number } | null; effects: unknown[] }[],
+  // Reports the production "no coordinates for this position" outcome. Any
+  // reveal that still needed coordinates silently does nothing here.
+  coordsAtPos: vi.fn((): { top: number; bottom: number } | null => null)
 }))
 
 vi.mock('@renderer/services/FileManager', () => ({
@@ -391,11 +398,27 @@ vi.mock('@renderer/components/CodeEditor', () => ({
           clientHeight: 200,
           getBoundingClientRect: () => ({ top: 0, bottom: 200, height: 200, left: 0, right: 0, width: 0 })
         },
-        coordsAtPos: () => null,
+        // Load-bearing: production find/replace reveal must never need
+        // coordinates. This reports "no coordinates available", the exact
+        // condition that used to swallow an offscreen match, so any reveal that
+        // went back through coordinates would silently do nothing here.
+        coordsAtPos: mocks.coordsAtPos,
         dispatch: (transaction: {
           changes?: { from: number; to: number; insert?: string }[] | { from: number; to: number; insert?: string }
           selection?: { anchor: number; head: number }
+          effects?: unknown
         }) => {
+          // Every transaction is recorded (selection + effects, in one record)
+          // so tests can assert that a reveal request is native, and that the
+          // selection and the scroll request travel together. `effects` accepts
+          // one effect or a list, exactly like a native transaction spec.
+          const effects =
+            transaction.effects === undefined
+              ? []
+              : Array.isArray(transaction.effects)
+                ? transaction.effects
+                : [transaction.effects]
+          mocks.editorDispatches.push({ selection: transaction.selection ?? null, effects })
           if (transaction.changes) {
             const list = Array.isArray(transaction.changes) ? transaction.changes : [transaction.changes]
             const ordered = [...list].sort((a, b) => b.from - a.from)
@@ -627,6 +650,8 @@ beforeEach(() => {
   mocks.createTempFile.mockReset().mockResolvedValue('/tmp/pasted_text.txt')
   mocks.writeTempFile.mockReset().mockResolvedValue(undefined)
   mocks.getTempFile.mockReset().mockResolvedValue(pastedTextFile)
+  mocks.editorDispatches = []
+  mocks.coordsAtPos.mockClear()
   const fileApi = (window as unknown as { api: { file: Record<string, unknown> } }).api.file
   fileApi.createTempFile = mocks.createTempFile
   fileApi.write = mocks.writeTempFile
@@ -1690,8 +1715,9 @@ describe('MessageEditor resend shortcut wiring (Cmd+Enter → resend action)', (
 
   it('user edit routes platform mod+Enter to the resend action, never to save', async () => {
     renderEditor('user')
-    // Save (both roles) + resend (user only): one extension per binding.
-    expect(mocks.editorExtensions).toHaveLength(2)
+    // Save (both roles) + resend (user only) + the find/replace match highlight
+    // group: one extension per binding, plus the presentation-only highlight.
+    expect(mocks.editorExtensions).toHaveLength(3)
     const view = mountCapturedExtensions()
     const event = modEnter()
     view.contentDOM.dispatchEvent(event)
@@ -1720,8 +1746,9 @@ describe('MessageEditor resend shortcut wiring (Cmd+Enter → resend action)', (
 
   it('assistant edit gets no shortcut and keeps save/cancel without a resend action', async () => {
     renderEditor('assistant')
-    // Save only: the assistant role has no resend binding at all.
-    expect(mocks.editorExtensions).toHaveLength(1)
+    // Save only, plus the find/replace highlight group: the assistant role has no
+    // resend binding at all.
+    expect(mocks.editorExtensions).toHaveLength(2)
     const view = mountCapturedExtensions()
     view.contentDOM.dispatchEvent(modEnter())
     expect(mocks.onResend).not.toHaveBeenCalled()
@@ -2023,6 +2050,140 @@ describe('MessageEditor find/replace tab order', () => {
   })
 })
 
+describe('MessageEditor find/replace reveal (native editor scroll)', () => {
+  // Matches separated by more text than any reasonable viewport holds: the
+  // first sits in the opening lines, the second below the fold, the third near
+  // the end. The fake engine reports NO coordinates for any position, which is
+  // exactly the condition that used to swallow an offscreen reveal, so a reveal
+  // that still depended on coordinates would observe nothing here.
+  const longFindDraft = () => {
+    const lines = ['# Draft head', '', 'needle appears in the first lines.', '']
+    for (let i = 0; i < 160; i += 1) lines.push(`filler line ${i}: body text between the matches.`)
+    lines.push('', 'second needle sits below the fold, past every rendered line.', '')
+    for (let i = 0; i < 160; i += 1) lines.push(`trailing filler ${i}: still below the fold.`)
+    lines.push('', 'third needle closes the draft.')
+    return lines.join('\n')
+  }
+  const QUERY = 'needle'
+  /** Same offsets the production literal search produces. */
+  const offsetsFor = (doc: string, query = QUERY) => {
+    const offsets: number[] = []
+    let index = doc.indexOf(query)
+    while (index >= 0) {
+      offsets.push(index)
+      index = doc.indexOf(query, index + query.length)
+    }
+    return offsets
+  }
+  const findField = () => screen.getAllByLabelText('message.edit.find_placeholder')[0]
+  // Module state, not a private detail: the component asks for this exact
+  // CodeMirror effect type, so an identical construction recognizes it.
+  // `StateEffect.type` is not part of CodeMirror's public typings, but the
+  // identity is what matters: the same construction the component performs
+  // yields the same effect type object.
+  const revealEffectType = (EditorView.scrollIntoView(0) as unknown as { type: unknown }).type
+  interface RevealTarget {
+    range: { from: number; to: number }
+    y: string
+    yMargin: number
+  }
+  const isReveal = (effect: unknown) => (effect as { type?: unknown } | null)?.type === revealEffectType
+  const revealTransactions = () => mocks.editorDispatches.filter((record) => record.effects.some(isReveal))
+  const revealTargets = () =>
+    revealTransactions().map((record) => {
+      const effect = record.effects.find(isReveal) as { value: RevealTarget }
+      const { range, y, yMargin } = effect.value
+      return { from: range.from, to: range.to, y, yMargin }
+    })
+  const openFindWithQuery = async (query = QUERY) => {
+    await userEvent.click(screen.getByTestId('message-editor-find-btn'))
+    const field = findField()
+    field.focus()
+    fireEvent.change(field, { target: { value: query } })
+    return field
+  }
+
+  beforeEach(() => {
+    mocks.liveViewEnabled = true
+  })
+
+  it('reveals the first match as soon as the query has one, keeping focus in the find field', async () => {
+    const doc = longFindDraft()
+    renderEditorWithContent(doc)
+    const [first] = offsetsFor(doc)
+
+    const field = await openFindWithQuery()
+
+    // The user is still typing the query: the reveal is an engine transaction,
+    // never a focus move.
+    expect(field).toHaveFocus()
+    expect(mocks.coordsAtPos).not.toHaveBeenCalled()
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+    // The scroll target is the match start; the match range itself rides along
+    // in the same transaction's selection (asserted just below).
+    expect(revealTargets()[0]).toMatchObject({ from: first, y: 'nearest' })
+    // Readable context, not an edge-hugging scroll.
+    expect(revealTargets()[0].yMargin).toBeGreaterThan(0)
+    // Selection and scroll request are one transaction: they can never disagree.
+    expect(revealTransactions()[0].selection).toEqual({ anchor: first, head: first + QUERY.length })
+  })
+
+  it('reveals the match Next and Previous select, in the same transaction as the selection', async () => {
+    const doc = longFindDraft()
+    renderEditorWithContent(doc)
+    const offsets = offsetsFor(doc)
+    expect(offsets, 'the fixture must hold three matches').toHaveLength(3)
+
+    await openFindWithQuery()
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+
+    mocks.editorDispatches = []
+    await userEvent.click(screen.getAllByRole('button', { name: 'message.edit.find_next' })[0])
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+    expect(revealTargets()[0]).toMatchObject({ from: offsets[1] })
+    expect(revealTransactions()[0].selection).toEqual({ anchor: offsets[1], head: offsets[1] + QUERY.length })
+    expect(mocks.coordsAtPos).not.toHaveBeenCalled()
+
+    mocks.editorDispatches = []
+    await userEvent.click(screen.getAllByRole('button', { name: 'message.edit.find_previous' })[0])
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+    expect(revealTargets()[0]).toMatchObject({ from: offsets[0] })
+    expect(revealTransactions()[0].selection).toEqual({ anchor: offsets[0], head: offsets[0] + QUERY.length })
+  })
+
+  it('reveals the active match again in the freshly mounted expansion engine', async () => {
+    const doc = longFindDraft()
+    renderEditorWithContent(doc)
+    const offsets = offsetsFor(doc)
+
+    await openFindWithQuery()
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+
+    mocks.editorDispatches = []
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+
+    await waitFor(() => expect(revealTransactions().length).toBeGreaterThanOrEqual(1))
+    expect(revealTargets()[0]).toMatchObject({ from: offsets[0] })
+    expect(mocks.coordsAtPos).not.toHaveBeenCalled()
+  })
+
+  it('never re-reveals a match while the draft itself changes under an open query', async () => {
+    const doc = longFindDraft()
+    renderEditorWithContent(doc)
+
+    await openFindWithQuery()
+    await waitFor(() => expect(revealTransactions()).toHaveLength(1))
+    mocks.editorDispatches = []
+
+    // Typing in the engine puts the caret wherever the user wants it: a
+    // recomputed match list must never pull the selection back to a match.
+    const typed = `${doc}\n\nneedle typed by the user`
+    fireEvent.change(screen.getByLabelText('message-editor-source'), { target: { value: typed } })
+
+    await waitFor(() => expect(screen.getByLabelText('message-editor-source')).toHaveValue(typed))
+    expect(revealTransactions()).toHaveLength(0)
+  })
+})
 describe('MessageEditor surface Escape (focus returns to the engine)', () => {
   // The rendered engine content node: production focuses `view.contentDOM`, so
   // these are real focus checks, not handle spies.
@@ -2156,5 +2317,158 @@ describe('MessageEditor surface Escape (focus returns to the engine)', () => {
     expect(onCancel).not.toHaveBeenCalled()
     expect(mocks.onSave).not.toHaveBeenCalled()
     expect(modalFind).toHaveValue('raft')
+  })
+})
+
+describe('MessageEditor find shortcut wiring (Cmd+F / Ctrl+F → own find/replace bar)', () => {
+  // The rendered engine content node: production focuses `view.contentDOM`, so
+  // the focus-return contract is asserted against real DOM focus.
+  const engineContent = () => document.querySelector('.cm-content') as HTMLElement
+  const findFields = () => screen.queryAllByLabelText<HTMLInputElement>('message.edit.find_placeholder')
+  const replaceFields = () => screen.queryAllByLabelText<HTMLInputElement>('message.edit.replace_placeholder')
+  // Platform mod convention: Cmd on macOS, Ctrl elsewhere. The same predicate
+  // the binding uses, so each test presses the real key combination.
+  const platformMod = () => (isMac ? { metaKey: true } : { ctrlKey: true })
+  // The press is dispatched inside `act` so the toggle's state update is flushed
+  // before the assertions read the surface.
+  const press = (target: Element, init: KeyboardEventInit & { isComposing?: boolean } = {}) => {
+    const event = new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true, ...init })
+    if (init.isComposing) Object.defineProperty(event, 'isComposing', { value: true })
+    act(() => {
+      target.dispatchEvent(event)
+    })
+    return event
+  }
+
+  it('opens the bar from the editor body, focuses the find field and consumes the press', () => {
+    renderEditor('assistant')
+    // The app shortcut layer listens on the document at bubble time and does
+    // not consult `defaultPrevented`: this press must never reach it, or the
+    // chat-wide message search would open behind the editor's own find bar.
+    const outerListener = vi.fn()
+    document.addEventListener('keydown', outerListener)
+
+    const event = press(engineContent(), platformMod())
+
+    document.removeEventListener('keydown', outerListener)
+    expect(event.defaultPrevented).toBe(true)
+    expect(outerListener).not.toHaveBeenCalled()
+    expect(findFields()).toHaveLength(1)
+    expect(findFields()[0]).toHaveFocus()
+  })
+
+  it('closes with the same press, keeps the query and returns focus to the content', async () => {
+    renderEditor('assistant')
+    await userEvent.click(screen.getByTestId('message-editor-find-btn'))
+    fireEvent.change(findFields()[0], { target: { value: 'raft' } })
+    findFields()[0].focus()
+    expect(findFields()[0]).toHaveFocus()
+
+    const outerListener = vi.fn()
+    document.addEventListener('keydown', outerListener)
+    const closeEvent = press(findFields()[0], platformMod())
+    document.removeEventListener('keydown', outerListener)
+
+    // Consumed for the browser default AND for the app shortcut layer.
+    expect(closeEvent.defaultPrevented).toBe(true)
+    expect(outerListener).not.toHaveBeenCalled()
+    expect(findFields()).toHaveLength(0)
+    expect(engineContent()).toHaveFocus()
+
+    // Reopening restores the same query, selected and ready to retype.
+    press(engineContent(), platformMod())
+    expect(findFields()).toHaveLength(1)
+    expect(findFields()[0]).toHaveValue('raft')
+    expect(findFields()[0]).toHaveFocus()
+    expect(findFields()[0].selectionStart).toBe(0)
+    expect(findFields()[0].selectionEnd).toBe('raft'.length)
+  })
+
+  it('works from the toolbar and from the replace field, not only from the body', async () => {
+    renderEditor('assistant')
+    const bold = screen.getByTestId('message-editor-bold-btn')
+    bold.focus()
+    expect(bold).toHaveFocus()
+
+    press(bold, platformMod())
+
+    expect(findFields()).toHaveLength(1)
+    expect(findFields()[0]).toHaveFocus()
+
+    fireEvent.change(replaceFields()[0], { target: { value: 'draft' } })
+    replaceFields()[0].focus()
+    const closeEvent = press(replaceFields()[0], platformMod())
+
+    expect(closeEvent.defaultPrevented).toBe(true)
+    expect(findFields()).toHaveLength(0)
+    expect(engineContent()).toHaveFocus()
+    // Toggle only: no save ran and no replacement was applied.
+    expect(mocks.onSave).not.toHaveBeenCalled()
+  })
+
+  it('toggles from the expanded mount through the same open state', async () => {
+    renderEditor('assistant')
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    // Both toolbars are mounted: the inline footprint hold plus the modal copy.
+    await userEvent.click(screen.getAllByTestId('message-editor-find-btn')[1])
+    // Both bars are mounted; the second copy belongs to the modal and is where
+    // the shared open/close focus rule lands while expanded.
+    expect(findFields()).toHaveLength(2)
+    expect(findFields()[1]).toHaveFocus()
+
+    const closeEvent = press(findFields()[1], platformMod())
+
+    expect(closeEvent.defaultPrevented).toBe(true)
+    expect(findFields()).toHaveLength(0)
+    expect(screen.getByTestId('message-editor-expanded')).toBeInTheDocument()
+    expect(engineContent()).toHaveFocus()
+  })
+
+  it('ignores composition, Alt/Shift combinations and the other platform modifier', () => {
+    renderEditor('assistant')
+
+    // An IME composition owns the key: nothing toggles and nothing is consumed.
+    const composing = press(engineContent(), { ...platformMod(), isComposing: true })
+    expect(composing.defaultPrevented).toBe(false)
+
+    // Alt/Shift are not this shortcut, and the opposite platform modifier must
+    // not act as a second binding.
+    const alt = press(engineContent(), { ...platformMod(), altKey: true })
+    const shift = press(engineContent(), { ...platformMod(), shiftKey: true })
+    const wrongMod = press(engineContent(), isMac ? { ctrlKey: true } : { metaKey: true })
+
+    expect([alt.defaultPrevented, shift.defaultPrevented, wrongMod.defaultPrevented]).toEqual([false, false, false])
+    expect(findFields()).toHaveLength(0)
+  })
+
+  it('leaves plain typing in the find field native', async () => {
+    renderEditor('assistant')
+    await userEvent.click(screen.getByTestId('message-editor-find-btn'))
+    const find = findFields()[0]
+    find.focus()
+
+    const plain = press(find, { key: 'f' })
+
+    expect(plain.defaultPrevented).toBe(false)
+    expect(find).toHaveFocus()
+    expect(findFields()).toHaveLength(1)
+  })
+
+  it('adds no global listener: a press outside the editor still reaches the app layer', () => {
+    renderEditor('assistant')
+    const outerListener = vi.fn()
+    document.addEventListener('keydown', outerListener)
+    const outside = document.createElement('div')
+    document.body.appendChild(outside)
+
+    const event = press(outside, platformMod())
+
+    document.removeEventListener('keydown', outerListener)
+    outside.remove()
+    // The chat-wide shortcut keeps owning the key everywhere outside the
+    // editor's own surface.
+    expect(event.defaultPrevented).toBe(false)
+    expect(outerListener).toHaveBeenCalledTimes(1)
+    expect(findFields()).toHaveLength(0)
   })
 })

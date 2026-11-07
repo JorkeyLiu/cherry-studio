@@ -10,11 +10,16 @@ import {
   computeColumnReverseMessageScrollTop,
   computeRestoreMessageScrollTop,
   type MessageNavigationIntent,
+  planSearchMatchScroll,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveColumnReverseScrollTarget,
   resolveMessageNavigation,
+  resolveMessageRowIdForNode,
+  resolveUnobscuredReadingBand,
   runMessageNavigationTransaction,
+  SEARCH_MATCH_ANIMATION_MIN_DISTANCE_PX,
+  SEARCH_MATCH_READING_PADDING_PX,
   shouldPersistNavigationResult
 } from '../messageNavigation'
 import { createOldestMessageWindow, createTargetMessageWindow, type MessageWindow } from '../messageWindow'
@@ -1033,5 +1038,270 @@ describe('resident selection follow through the transaction', () => {
       }
     )
     expect(missing).toBe('not-found')
+  })
+})
+
+describe('resolveMessageRowIdForNode (search-match row resolution)', () => {
+  const build = () => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    container.innerHTML =
+      '<div id="message-m1" data-message-id="m1" class="message message-assistant">' +
+      '<div class="message-content-container"><p id="hit-a">first hit</p><p id="hit-b">second hit</p></div>' +
+      '</div>' +
+      '<div id="message-group-g1" class="message-group">' +
+      '<div id="message-m2" data-message-id="m2" class="message message-assistant">' +
+      '<div class="message-content-container"><p id="hit-c">grouped hit</p></div>' +
+      '</div>' +
+      '</div>'
+    document.body.appendChild(container)
+    return container
+  }
+
+  it('resolves the owning row from text and element nodes, per hit inside one row', () => {
+    const container = build()
+    const hitA = container.querySelector('#hit-a')!
+    const hitB = container.querySelector('#hit-b')!
+    expect(resolveMessageRowIdForNode(hitA.firstChild, container)).toBe('m1')
+    expect(resolveMessageRowIdForNode(hitB, container)).toBe('m1')
+    // Two hits in the same row resolve to the same row identity.
+    expect(resolveMessageRowIdForNode(hitA.firstChild, container)).toBe(
+      resolveMessageRowIdForNode(hitB.firstChild, container)
+    )
+    container.remove()
+  })
+
+  it('skips group wrappers and never crosses the container boundary', () => {
+    const container = build()
+    const grouped = container.querySelector('#hit-c')!
+    expect(resolveMessageRowIdForNode(grouped.firstChild, container)).toBe('m2')
+    // The group wrapper itself is not a row.
+    expect(resolveMessageRowIdForNode(container.querySelector('#message-group-g1'), container)).toBeNull()
+    // The container is the boundary: nothing above it is consulted.
+    expect(resolveMessageRowIdForNode(container, container)).toBeNull()
+    // A node outside the container has no row.
+    const outside = document.createElement('div')
+    outside.id = 'message-outside'
+    document.body.appendChild(outside)
+    expect(resolveMessageRowIdForNode(outside, container)).toBeNull()
+    outside.remove()
+    container.remove()
+  })
+
+  it('fails closed for missing inputs', () => {
+    const container = document.createElement('div')
+    expect(resolveMessageRowIdForNode(null, container)).toBeNull()
+    expect(resolveMessageRowIdForNode(document.createTextNode('x'), null)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Search match landing (Cmd/Ctrl+F)
+// ---------------------------------------------------------------------------
+
+const CONTAINER_HEIGHT = 600
+const CONTAINER_SCROLL_HEIGHT = 5000
+const MIN_SCROLL_TOP = -(CONTAINER_SCROLL_HEIGHT - CONTAINER_HEIGHT)
+
+/** Band derived the way production derives it: from real measured rectangles. */
+const bandFor = (overlayBottom: number | null, paddingPx?: number) =>
+  resolveUnobscuredReadingBand({
+    containerTop: 100,
+    containerHeight: CONTAINER_HEIGHT,
+    obscurer: overlayBottom === null ? null : { top: 85, bottom: overlayBottom },
+    paddingPx
+  })
+
+/** Band of a viewport whose search panel covers the first 44px of content. */
+const COVERED_BAND = {
+  top: 44 + SEARCH_MATCH_READING_PADDING_PX,
+  height: CONTAINER_HEIGHT - 44 - SEARCH_MATCH_READING_PADDING_PX * 2
+}
+
+describe('unobscured reading band', () => {
+  it('removes exactly the strip the search panel covers, plus readability padding', () => {
+    expect(bandFor(100 + 44)).toEqual(COVERED_BAND)
+  })
+
+  it('keeps the whole container when no panel covers it', () => {
+    const unpadded = { top: 0, height: CONTAINER_HEIGHT }
+    expect(bandFor(null, 0)).toEqual(unpadded)
+    // A panel floating entirely above the container hides nothing.
+    expect(bandFor(90, 0)).toEqual(unpadded)
+    // Padding insets both ends of whatever band remains.
+    expect(bandFor(null)).toEqual({
+      top: SEARCH_MATCH_READING_PADDING_PX,
+      height: CONTAINER_HEIGHT - SEARCH_MATCH_READING_PADDING_PX * 2
+    })
+  })
+
+  it('fails closed when nothing readable remains or a rect is unmeasurable', () => {
+    expect(bandFor(100 + CONTAINER_HEIGHT)).toBeNull()
+    expect(
+      resolveUnobscuredReadingBand({ containerTop: Number.NaN, containerHeight: CONTAINER_HEIGHT, obscurer: null })
+    ).toBeNull()
+    expect(resolveUnobscuredReadingBand({ containerTop: 100, containerHeight: 0, obscurer: null })).toBeNull()
+  })
+})
+
+describe('search match landing plan', () => {
+  const planAt = (overrides: Partial<Parameters<typeof planSearchMatchScroll>[0]> = {}) =>
+    planSearchMatchScroll({
+      matchTopOffset: 0,
+      matchHeight: 20,
+      containerClientHeight: CONTAINER_HEIGHT,
+      currentScrollTop: -2000,
+      minScrollTop: MIN_SCROLL_TOP,
+      band: COVERED_BAND,
+      ...overrides
+    })
+
+  it('centres the hit inside the unobscured band, not in the whole container', () => {
+    const currentScrollTop = -2000
+    const matchTopOffset = 900 // far below the visible area
+    const plan = planAt({ matchTopOffset, currentScrollTop })
+    expect(plan?.kind).toBe('scroll')
+    const { top } = plan as { kind: 'scroll'; top: number }
+    const onScreenTop = matchTopOffset + currentScrollTop - top
+    // Hit CENTRE lands on the band centre ...
+    expect(onScreenTop + 10).toBeCloseTo(COVERED_BAND.top + COVERED_BAND.height / 2, 6)
+    // ... which is below the covered strip, not merely inside the container.
+    expect(onScreenTop).toBeGreaterThan(COVERED_BAND.top)
+  })
+
+  it('agrees with container centring when nothing is covered', () => {
+    const uncovered = { top: 0, height: CONTAINER_HEIGHT }
+    const centring = computeColumnReverseMessageScrollTop({
+      elementTopWithinContainer: 900 - 2000,
+      containerClientHeight: CONTAINER_HEIGHT,
+      elementHeight: 20,
+      alignment: 'center',
+      minScrollTop: MIN_SCROLL_TOP
+    })
+    const plan = planAt({ matchTopOffset: 900, band: uncovered })
+    expect(plan).toMatchObject({ kind: 'scroll', top: centring })
+  })
+
+  it('leaves a hit that is already clearly readable alone', () => {
+    expect(planAt({ matchTopOffset: 300 })).toEqual({ kind: 'visible' })
+  })
+
+  it('pulls a hit out from under the search panel', () => {
+    const plan = planAt({ matchTopOffset: 20 }) as { kind: string; top: number }
+    expect(plan.kind).toBe('scroll')
+    // Post-write on-screen position of the hit is clear of the covered strip.
+    expect(20 - 2000 - plan.top).toBeGreaterThan(COVERED_BAND.top)
+  })
+
+  it('clamps at the oldest edge and still reports the real distance', () => {
+    const plan = planAt({ matchTopOffset: -3000 }) as { top: number; distance: number; animate: boolean }
+    expect(plan.top).toBe(MIN_SCROLL_TOP)
+    expect(plan.distance).toBeCloseTo(Math.abs(MIN_SCROLL_TOP + 2000), 6)
+    expect(plan.animate).toBe(true)
+  })
+
+  it('does not animate reduced-motion users or a sub-threshold correction', () => {
+    expect(planAt({ matchTopOffset: 900, reducedMotion: true })).toMatchObject({ animate: false })
+    // Parked at the newest edge: the plan clamps to scrollTop 0, a few pixels away.
+    const tiny = planAt({ matchTopOffset: 583, currentScrollTop: -3 })
+    expect(tiny).toMatchObject({ kind: 'scroll', top: 0, animate: false })
+    expect((tiny as { distance: number }).distance).toBeLessThan(SEARCH_MATCH_ANIMATION_MIN_DISTANCE_PX)
+  })
+
+  it('fails closed for unmeasurable input', () => {
+    expect(planAt({ matchTopOffset: Number.NaN })).toBeNull()
+    expect(planAt({ band: { top: 0, height: 0 } })).toBeNull()
+  })
+})
+
+describe('moving scroll completion inside the navigation transaction', () => {
+  const movingScrollTransaction = (
+    intent: MessageNavigationIntent,
+    scroll: unknown,
+    options: { current?: () => boolean } = {}
+  ) => {
+    const finish = vi.fn()
+    const cancel = vi.fn()
+    const beginTokens: unknown[] = []
+    const result = runMessageNavigationTransaction(intent, {
+      begin: vi.fn(async (token) => {
+        beginTokens.push(token)
+        return true
+      }),
+      isCurrent: () => (options.current ? options.current() : true),
+      cancelLoadsAndTimers: vi.fn(),
+      resolve: (requested) => resolveMessageNavigation(messages, requested),
+      prepareWindow: (resolved) => chooseNavigationWindow(messages, null, resolved, 60),
+      applyWindow: vi.fn(async () => true),
+      getTargetStatus: () => 'visible',
+      revealTarget: vi.fn(async () => {}),
+      settleDom: async () => {},
+      beginProgrammaticScroll: async () => true,
+      scroll: scroll as Parameters<typeof runMessageNavigationTransaction>[1]['scroll'],
+      finish,
+      cancel
+    })
+    return { result, finish, cancel, beginTokens }
+  }
+
+  const waitForScrollCall = async (scroll: { mock: { calls: unknown[] } }) => {
+    for (let attempt = 0; attempt < 50 && scroll.mock.calls.length === 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(scroll.mock.calls.length).toBeGreaterThan(0)
+  }
+
+  it('stays open until a moving write reports completion, then finishes once', async () => {
+    let release: (outcome: string) => void = () => {}
+    const scroll = vi.fn(() => new Promise<string>((resolve) => (release = resolve)))
+    const run = movingScrollTransaction({ kind: 'message', targetId: 'm50', source: 'event' }, scroll)
+
+    await waitForScrollCall(scroll)
+    // Still travelling: the transaction must not finish (no anchor/snapshot yet).
+    expect(run.finish).not.toHaveBeenCalled()
+
+    release('success')
+    await expect(run.result).resolves.toBe('success')
+    expect(run.finish).toHaveBeenCalledOnce()
+  })
+
+  it('cancels without finishing when the movement is interrupted', async () => {
+    const scroll = vi.fn(async () => 'cancelled' as const)
+    const run = movingScrollTransaction({ kind: 'message', targetId: 'm50', source: 'event' }, scroll)
+
+    await expect(run.result).resolves.toBe('cancelled')
+    expect(run.finish).not.toHaveBeenCalled()
+    expect(run.cancel).toHaveBeenCalled()
+  })
+
+  it('cancels without finishing when a newer navigation supersedes the movement', async () => {
+    let current = true
+    let release: (outcome: string) => void = () => {}
+    const scroll = vi.fn(() => new Promise<string>((resolve) => (release = resolve)))
+    const run = movingScrollTransaction({ kind: 'message', targetId: 'm50', source: 'event' }, scroll, {
+      current: () => current
+    })
+
+    await waitForScrollCall(scroll)
+    current = false
+    release('success')
+
+    await expect(run.result).resolves.toBe('cancelled')
+    expect(run.finish).not.toHaveBeenCalled()
+  })
+
+  it('hands the navigation token to the write so it can observe supersession', async () => {
+    const seen: unknown[] = []
+    const scroll = vi.fn((_resolved, token) => {
+      seen.push(token)
+      return 'success' as const
+    })
+    const run = movingScrollTransaction({ kind: 'message', targetId: 'm50', source: 'event' }, scroll)
+
+    await expect(run.result).resolves.toBe('success')
+    expect(seen).toHaveLength(1)
+    expect(run.beginTokens).toHaveLength(1)
+    expect(seen[0]).toBe(run.beginTokens[0])
+    expect(run.finish).toHaveBeenCalledOnce()
   })
 })

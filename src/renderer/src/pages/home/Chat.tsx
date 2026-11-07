@@ -1,5 +1,5 @@
 import { loggerService } from '@logger'
-import type { ContentSearchRef } from '@renderer/components/ContentSearch'
+import type { ContentSearchLocatedMatch, ContentSearchRef } from '@renderer/components/ContentSearch'
 import { ContentSearch } from '@renderer/components/ContentSearch'
 import { HStack } from '@renderer/components/Layout'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
@@ -253,23 +253,54 @@ const Chat: FC<Props> = (props) => {
     }
   })
 
-  const contentSearchFilter: NodeFilter = {
-    acceptNode(node) {
-      const container = node.parentElement?.closest('.message-content-container')
-      if (!container) return NodeFilter.FILTER_REJECT
+  /**
+   * Search-scope filter. Memoized on its only dependency: ContentSearch keys
+   * its search routine on this prop, and a per-render object identity would
+   * re-run the committed query on every Chat render (each viewport update),
+   * resetting the located match back to the first hit and re-positioning the
+   * viewport. Stable identity keeps one query = one committed match set.
+   */
+  const contentSearchFilter: NodeFilter = React.useMemo(
+    () => ({
+      acceptNode(node: Node) {
+        const container = node.parentElement?.closest('.message-content-container')
+        if (!container) return NodeFilter.FILTER_REJECT
 
-      const message = container.closest('.message')
-      if (!message) return NodeFilter.FILTER_REJECT
+        const message = container.closest('.message')
+        if (!message) return NodeFilter.FILTER_REJECT
 
-      if (filterIncludeUser) {
-        return NodeFilter.FILTER_ACCEPT
+        if (filterIncludeUser) {
+          return NodeFilter.FILTER_ACCEPT
+        }
+        if (message.classList.contains('message-assistant')) {
+          return NodeFilter.FILTER_ACCEPT
+        }
+        return NodeFilter.FILTER_REJECT
       }
-      if (message.classList.contains('message-assistant')) {
-        return NodeFilter.FILTER_ACCEPT
-      }
-      return NodeFilter.FILTER_REJECT
-    }
-  }
+    }),
+    [filterIncludeUser]
+  )
+
+  /**
+   * Chat-owned match positioning for the Cmd/Ctrl+F search.
+   *
+   * `#chat-main` is the search target but `#messages` is the scroll owner, and
+   * the reading position belongs to the Messages viewport authority — a generic
+   * element scroll lands on the wrong owner and the route keeper reverts it on
+   * the next layout pass. Messages therefore positions the match through its own
+   * explicit navigation transaction, landing on the exact matched text and
+   * adopting its row as the reading anchor.
+   *
+   * The whole located match is forwarded (range, owning element and the search
+   * panel covering the viewport), because only Messages can measure the live
+   * container and exclude the panel. A match with no owning message row (or no
+   * live Messages handle) keeps the generic ContentSearch scroll.
+   */
+  const locateContentSearchMatch = React.useCallback((match: ContentSearchLocatedMatch): boolean => {
+    const messages = messagesRef.current
+    if (!messages) return false
+    return messages.scrollToSearchMatch(match)
+  }, [])
 
   const userOutlinedItemClickHandler = React.useCallback(() => {
     setFilterIncludeUser((prev) => !prev)
@@ -383,6 +414,7 @@ const Chat: FC<Props> = (props) => {
                     includeUser={filterIncludeUser}
                     onIncludeUserChange={userOutlinedItemClickHandler}
                     initialText={pendingSearchText}
+                    onLocateMatch={locateContentSearchMatch}
                     onClose={disableContentSearch}
                   />
                 )}
