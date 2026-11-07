@@ -4498,6 +4498,9 @@ const Messages = ({
               if (decision.kind === 'none') return
               try {
                 live.scrollTop += decision.delta
+                // Owned compensation is app movement too: publish the realized
+                // position so its scroll echo can never page.
+                controller.noteCompensationWrite(live.scrollTop)
               } catch {
                 // fail-closed: the owning session owns the remainder
               }
@@ -5112,6 +5115,24 @@ const Messages = ({
     // is genuine-user-only (live interaction session): programmatic scrolls
     // carry no live token and must keep the target until Promise settle.
     scheduleReadingAnchor()
+    // App compensation echo: the shared keeper (and an in-flight transition's
+    // owned direct delta) records the position its own `scrollTop` write
+    // REALIZED together with the user-declaration generation it happened under,
+    // so the scroll observation the browser fires for it is app movement —
+    // never user navigation. It must not start another page even while a
+    // genuine gesture session is live; the session itself is untouched, so
+    // continued wheel/key/touch input still pages from its own geometry.
+    // One-shot: any other observed position is genuine input (or nothing) and
+    // clears the marker, and a fresh input declaration after the write makes
+    // even the same numeric position genuine (a gesture coalesced with the
+    // compensation is never swallowed).
+    let compensationEcho = false
+    try {
+      const container = scrollContainerRef.current
+      compensationEcho = controller.consumeCompensationEcho(container ? container.scrollTop : NaN)
+    } catch {
+      compensationEcho = false
+    }
     if (!suppressUserWriteRef.current) {
       const liveToken = controller.activeInteractionToken
       if (liveToken !== null) {
@@ -5156,8 +5177,14 @@ const Messages = ({
     // no direction and never page pre-input by design. The active direction is
     // decided against the single column-reverse geometry primitive (bottom/newest
     // is scrollTop ≈ 0, visual top/oldest is the most negative scrollTop).
-    maybePageAtEdge('newer')
-    maybePageAtEdge('older')
+    // Decided against ACTUAL post-scroll geometry in `maybePageAtEdge`: a live
+    // gesture session and the direction's edge. An app compensation echo is
+    // excluded here (see `compensationEcho` above) — its own scroll is app
+    // movement, so it never pages even from the edge it just parked at.
+    if (!compensationEcho) {
+      maybePageAtEdge('newer')
+      maybePageAtEdge('older')
+    }
   }, [
     adoptTakeoverSnapshot,
     cancelReadingAnchorPendingTargetForUser,

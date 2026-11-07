@@ -364,6 +364,30 @@ export class RouteViewportController {
    */
   private paginationHoldGeneration: number | null = null
   /**
+   * Programmatic compensation echo (renderer-local, ephemeral, one-shot).
+   *
+   * The layout owners — the shared keeper's hold writes and the single owned
+   * direct delta of an in-flight transition — record the scroll position their
+   * own `scrollTop` write realized, TOGETHER with the monotonic
+   * user-declaration sequence the write happened under. Such a scroll is APP
+   * movement, not user input: the browse-edge gate consumes the marker so a
+   * compensation echo can never start another ordinary page even while a
+   * genuine gesture session is live.
+   *
+   * The declaration sequence is what keeps a coalesced genuine scroll from
+   * being swallowed: a fresh `declareUserIntent()` after the write (a wheel /
+   * key / touch / scrollbar input arriving before the browser delivers the
+   * coalesced observation) advances the sequence, so an observation at the
+   * marker's own numeric position is no longer provably app-only and is
+   * consumed as genuine user input instead. The sequence never repeats a value,
+   * so no later declaration can restore a stale marker's meaning. The session
+   * itself is never touched, so continued input keeps paging. Cleared by
+   * `request()`, `invalidateAll()`, and by the displayed/rendered invalidations
+   * (`syncDisplayed`/`markRenderedUnknown`): a superseded session's or another
+   * projection's echo never describes the new one.
+   */
+  private compensationEcho: { scrollTop: number; declareSeq: number } | null = null
+  /**
    * Shared route-local interaction intent (same-route in-place geometry hold,
    * not reading-position restoration). One reusable owner arbitrated by the
    * controller + keeper for every ordinary control interaction — message
@@ -794,8 +818,12 @@ export class RouteViewportController {
     if (this.ownershipHeld) return
     this.clearAnswerTabLocked()
     // A topic/displayed change is an invalidation for any armed same-route
-    // pagination hold: the armed generation belongs to the previous DOM.
+    // pagination hold: the armed generation belongs to the previous DOM. A
+    // pending compensation echo belongs to the previous DOM too — the first
+    // scroll observation of the new topic must never be swallowed by a marker
+    // recorded for the old one at the same numeric position.
     this.paginationHoldGeneration = null
+    this.compensationEcho = null
     this.displayed = { ...displayed }
     this.rendered = null
     if (this.phase === 'terminal' || this.phase === 'stable') {
@@ -839,8 +867,11 @@ export class RouteViewportController {
   /** Failure clear (empty viewport): DOM no longer belongs to any route. */
   markRenderedUnknown(): void {
     // Rendered-unknown invalidates any armed pagination hold with it: there
-    // is no committed DOM for the matching layout commit anymore.
+    // is no committed DOM for the matching layout commit anymore. A pending
+    // compensation echo names a scroll of the DOM that just went unknown, so it
+    // is dropped with it.
     this.paginationHoldGeneration = null
+    this.compensationEcho = null
     this.rendered = null
   }
 
@@ -861,6 +892,8 @@ export class RouteViewportController {
     // armed generation belongs to the outgoing DOM, never the incoming
     // session (the generation is not bumped here, so this clear is explicit).
     this.paginationHoldGeneration = null
+    // A pending compensation echo belongs to the outgoing DOM/session.
+    this.compensationEcho = null
     // A fresh guarded transaction consumes a pending detached reactivation:
     // the renewed connected lifetime owns its restore BEFORE any geometry is
     // admitted as stable. Single owner: this request is the activation.
@@ -1237,6 +1270,40 @@ export class RouteViewportController {
     }
     this.paginationHoldGeneration = null
     return true
+  }
+
+  /**
+   * Record the position a programmatic compensation write realized
+   * (`scrollTop` read back after the write) together with the monotonic
+   * user-declaration sequence it happened under. One slot, latest write wins:
+   * only the finally realized position can produce a browser scroll
+   * observation. Never touches the live user session, ownership, or the
+   * projection.
+   */
+  noteCompensationWrite(realizedScrollTop: number): void {
+    this.compensationEcho = Number.isFinite(realizedScrollTop)
+      ? { scrollTop: realizedScrollTop, declareSeq: this.interactionDeclareSeq }
+      : null
+  }
+
+  /**
+   * Consume the compensation echo for ONE scroll observation. True exactly when
+   * the observed position is the position the app's own write realized AND no
+   * genuine input declaration has landed since that write (the app-caused
+   * scroll — it must never page); false otherwise (a fresh user declaration at
+   * any position, no marker, non-finite observation), with the marker cleared
+   * either way so a stale echo can never swallow later input.
+   */
+  consumeCompensationEcho(observedScrollTop: number): boolean {
+    const marker = this.compensationEcho
+    this.compensationEcho = null
+    if (marker === null || !Number.isFinite(observedScrollTop)) return false
+    // A genuine input declaration after the write means this observation can
+    // carry user movement (a gesture coalesced with the compensation): it is
+    // not provably app-owned, so it is never suppressed. The sequence is
+    // monotonic, so no later declaration can ever restore the recorded value.
+    if (marker.declareSeq !== this.interactionDeclareSeq) return false
+    return Math.abs(observedScrollTop - marker.scrollTop) <= 0.5
   }
 
   /**
@@ -2031,6 +2098,7 @@ export class RouteViewportController {
     // armed pagination hold with the session it belonged to. `detach()` runs
     // through here, so the detached lifetime never inherits a stale arm.
     this.paginationHoldGeneration = null
+    this.compensationEcho = null
     this.activationSession = false
     this.continuationEpoch = null
     if (!this.ownershipHeld) {

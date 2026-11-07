@@ -1810,3 +1810,136 @@ describe('deletion survivor boundary: role-aware adjacent row keeps its visual p
     keeper.unmount()
   })
 })
+
+/**
+ * A compensation write is a REQUEST: at a real physical boundary the browser
+ * clamps it. The keeper records what the container ACTUALLY realized, so the
+ * browse-edge gate can tell the app's own scroll from user navigation without
+ * ever disarming a live gesture session.
+ */
+describe('compensation write truth and the app echo marker', () => {
+  const buildClampedContainer = (
+    initial: number,
+    min: number,
+    max: number
+  ): { container: HTMLDivElement; ref: { current: HTMLDivElement | null }; setLayoutTop: (top: number) => void } => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    let value = initial
+    Object.defineProperty(container, 'scrollTop', {
+      configurable: true,
+      get: () => value,
+      set: (next: number) => {
+        value = Math.min(max, Math.max(min, next))
+      }
+    })
+    Object.defineProperty(container, 'scrollHeight', { value: 9000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const row = document.createElement('div')
+    row.id = 'message-m1'
+    row.setAttribute('data-message-id', 'm1')
+    container.append(row)
+    document.body.append(container)
+    // Real coupling of this container: the row's viewport offset is its
+    // content-space position minus the container's scroll, so a scroll write
+    // moves the row (and a clamped write moves it only by what was realized).
+    let layoutTop = -100
+    row.getBoundingClientRect = (() => {
+      const top = layoutTop - container.scrollTop
+      return {
+        top,
+        bottom: top + 300,
+        height: 300,
+        left: 0,
+        right: 300,
+        width: 300,
+        x: 0,
+        y: top,
+        toJSON: () => ({})
+      } as DOMRect
+    }) as () => DOMRect
+    return {
+      container,
+      ref: { current: container },
+      setLayoutTop: (top: number) => {
+        layoutTop = top
+      }
+    }
+  }
+
+  it('records the realized (clamped) position, never the unreachable request', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, setLayoutTop } = buildClampedContainer(-400, -400, 0)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // +500 layout growth asks for scrollTop 100, which the container cannot
+    // reach: it realizes 0 (the real physical boundary).
+    act(() => {
+      setLayoutTop(400)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+    // The echo names the position the app actually produced.
+    expect(controller.consumeCompensationEcho(0)).toBe(true)
+    expect(controller.consumeCompensationEcho(100)).toBe(false)
+    // The realized pair is the next baseline: re-observing the same geometry
+    // invents no movement and writes nothing.
+    act(() => {
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(0)
+    expect(controller.consumeCompensationEcho(0)).toBe(false)
+    keeper.unmount()
+  })
+
+  it('an app compensation scroll during a live session is an echo; a later user scroll is not', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, setLayoutTop } = buildClampedContainer(-400, -4000, 0)
+    // Genuine wheel gesture is live across the commit (the reported case).
+    const token = controller.declareUserIntent()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      setLayoutTop(80)
+      keeper.rerender(1)
+    })
+    // Layout settlement compensated by +180: the app's own scroll.
+    expect(container.scrollTop).toBe(-220)
+    expect(controller.consumeCompensationEcho(-220)).toBe(true)
+    // The gesture session itself is untouched (never disarmed by the echo).
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+    expect(controller.activeInteractionToken?.interactionId).toBe(token.interactionId)
+    // A fresh wheel after settlement refreshes the session and its own scroll is
+    // genuine input, so the gate still pages on it.
+    const refreshed = controller.declareUserIntent()
+    expect(refreshed.interactionId).toBe(token.interactionId)
+    expect(controller.consumeCompensationEcho(-380)).toBe(false)
+    keeper.unmount()
+  })
+
+  it('a genuine wheel coalesced with the keeper write is never swallowed at the same position', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, setLayoutTop } = buildClampedContainer(-400, -4000, 0)
+    const token = controller.declareUserIntent()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      setLayoutTop(80)
+      keeper.rerender(1)
+    })
+    // The keeper's own compensation realized -220 under the live gesture.
+    expect(container.scrollTop).toBe(-220)
+    // A fresh wheel lands before the browser delivers the coalesced scroll
+    // observation: the same numeric position is no longer provably app-only, so
+    // the gate must not suppress it.
+    const refreshed = controller.declareUserIntent()
+    expect(refreshed.interactionId).toBe(token.interactionId)
+    expect(controller.consumeCompensationEcho(-220)).toBe(false)
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+    keeper.unmount()
+  })
+})

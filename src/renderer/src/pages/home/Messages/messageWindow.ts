@@ -28,6 +28,17 @@ export interface MessageWindow {
   range: MessageGroupRange | null
   /** Whether reconciliation follows newly appended groups or retains this range. */
   edge: 'latest' | 'fixed'
+  /**
+   * Set on a window an ordinary pagination published: this range is that
+   * transition's committed browsing target for the loaded projection it was
+   * derived from. Reconciliation RETAINS it instead of rebuilding the
+   * newest-capacity range (see `reconcileMessageWindow`), so a page the user
+   * pulled in is never replaced by a latest-edge reconstruction before the next
+   * traversal. Every other construction (latest/oldest/target/navigation)
+   * leaves it unset, and a pagination that again reaches the latest groups
+   * drops it.
+   */
+  paginationTarget?: true
   /** Messages in newest-to-oldest order, as consumed by the column-reverse view. */
   displayMessages: Message[]
   /** Sliced visual groups in chronological order, pre-computed from the range.
@@ -341,13 +352,13 @@ const retentionLimitGroups = (
 const boundedTrimGroups = (required: number, retentionLimit: number | null): number =>
   retentionLimit === null ? required : Math.min(required, Math.max(0, retentionLimit))
 
-export const expandMessageWindowOlder = (
+const expandOlderWindow = (
   messages: Message[],
   currentWindow: MessageWindow,
   additionalGroupCount: number,
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
   options?: MessageWindowExpansionOptions
-): MessageWindow => {
+): { window: MessageWindow; paged: boolean } => {
   const model = createMessageViewportGroupModel(messages)
   const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
   if (!currentRange) {
@@ -357,7 +368,10 @@ export const expandMessageWindowOlder = (
     }
     const cleanAuth =
       fallbackAuth.hasMoreBefore === undefined && fallbackAuth.hasMoreAfter === undefined ? undefined : fallbackAuth
-    return createLatestMessageWindow(messages, additionalGroupCount, cleanAuth)
+    // The committed rows do not resolve in the loaded projection, so the
+    // requested older page cannot be produced: this is a newest-capacity
+    // rebuild, explicitly NOT a paged range.
+    return { window: createLatestMessageWindow(messages, additionalGroupCount, cleanAuth), paged: false }
   }
 
   const addedCount = Math.max(0, additionalGroupCount)
@@ -393,14 +407,17 @@ export const expandMessageWindowOlder = (
       trimmedEdge: 'newer',
       retentionClamped: trimmedGroups < requiredTrim
     }
-    return createWindowFromRange(
-      model,
-      { oldestGroupIndex: provisionalOldest, newestGroupIndex: boundedNewest },
-      boundedCapacity,
-      currentWindow.edge,
-      cleanAuth,
-      observability
-    )
+    return {
+      window: createWindowFromRange(
+        model,
+        { oldestGroupIndex: provisionalOldest, newestGroupIndex: boundedNewest },
+        boundedCapacity,
+        currentWindow.edge,
+        cleanAuth,
+        observability
+      ),
+      paged: true
+    }
   }
   const boundedCapacity = Math.min(
     currentWindow.groupCapacity + addedCount,
@@ -413,15 +430,38 @@ export const expandMessageWindowOlder = (
     trimmedGroups: 0,
     trimmedEdge: null
   }
-  return createWindowFromRange(
-    model,
-    { ...currentRange, oldestGroupIndex: desiredOldest },
-    boundedCapacity,
-    currentWindow.edge,
-    cleanAuth,
-    observability
-  )
+  return {
+    window: createWindowFromRange(
+      model,
+      { ...currentRange, oldestGroupIndex: desiredOldest },
+      boundedCapacity,
+      currentWindow.edge,
+      cleanAuth,
+      observability
+    ),
+    paged: true
+  }
 }
+
+/**
+ * Older-edge expansion: grow the loaded (visually older) edge by one page,
+ * bounded by the calibration default with the opposite-edge trim never
+ * crossing the retained live row (see `boundedTrimGroups`).
+ *
+ * The result carries the explicit answer to what the expansion actually
+ * produced. `paged: true` means the current window's rows resolved in the
+ * loaded projection and this range IS the requested older page. `paged: false`
+ * means they did not resolve (route/topic reload, stale in-flight merge), so
+ * the fallback rebuilt a newest-capacity range that is NOT the requested page —
+ * callers must not treat it as a committed browsing target.
+ */
+export const expandMessageWindowOlder = (
+  messages: Message[],
+  currentWindow: MessageWindow,
+  additionalGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  options?: MessageWindowExpansionOptions
+): MessageWindow => expandOlderWindow(messages, currentWindow, additionalGroupCount, authoritative, options).window
 
 export const expandMessageWindowNewer = (
   messages: Message[],
@@ -623,24 +663,62 @@ export const derivePaginationWindow = (input: PaginationWindowTransitionInput): 
   if (!guard.allowed) return { status: 'declined', reason: guard.reason }
   const { direction, messages, currentWindow, additionalGroupCount, responseWindow, retainMessageId } = input
   const options: MessageWindowExpansionOptions = { retainMessageId: retainMessageId ?? null }
-  const window =
+  // The older expansion reports explicitly whether it produced the requested
+  // paged range or fell back to a newest-capacity rebuild (its rows no longer
+  // resolved in the loaded projection). Only the former may carry the committed
+  // target marker; a rebuilt latest range is not a browsing target and must keep
+  // following the latest groups.
+  let window: MessageWindow
+  let olderPaged = false
+  if (direction === 'older') {
+    const expansion = expandOlderWindow(
+      messages,
+      currentWindow,
+      additionalGroupCount,
+      { hasMoreBefore: responseWindow.hasMoreBefore, hasMoreAfter: currentWindow.hasMoreNewer },
+      options
+    )
+    window = expansion.window
+    olderPaged = expansion.paged
+  } else {
+    window = expandMessageWindowNewer(
+      messages,
+      currentWindow,
+      additionalGroupCount,
+      { hasMoreBefore: currentWindow.hasMoreOlder, hasMoreAfter: responseWindow.hasMoreAfter },
+      options
+    )
+  }
+  // The committed target marker travels with the window it describes:
+  // - growing the OLDER edge is browsing history, so the published range stops
+  //   following the latest groups and stays the authoritative target for this
+  //   loaded projection (see `reconcileMessageWindow`) — but only when the
+  //   expansion really produced that page (`olderPaged`);
+  // - growing the NEWER edge keeps an existing marker only while the window has
+  //   not reached the latest groups again, so a traversal back to the newest
+  //   edge restores ordinary latest-following reconciliation.
+  const paginationTarget: true | undefined =
     direction === 'older'
-      ? expandMessageWindowOlder(
-          messages,
-          currentWindow,
-          additionalGroupCount,
-          { hasMoreBefore: responseWindow.hasMoreBefore, hasMoreAfter: currentWindow.hasMoreNewer },
-          options
-        )
-      : expandMessageWindowNewer(
-          messages,
-          currentWindow,
-          additionalGroupCount,
-          { hasMoreBefore: currentWindow.hasMoreOlder, hasMoreAfter: responseWindow.hasMoreAfter },
-          options
-        )
-  return { status: 'accepted', window }
+      ? olderPaged
+        ? true
+        : undefined
+      : currentWindow.paginationTarget === true && window.hasMoreNewer !== false
+        ? true
+        : undefined
+  return { status: 'accepted', window: paginationTarget === undefined ? window : { ...window, paginationTarget } }
 }
+
+/**
+ * The range a window published as an ordinary pagination target, resolved in
+ * the CURRENT projection. `null` when the window is not such a target, or when
+ * the projection no longer contains its rows (route/topic reload, deletion):
+ * the caller then falls back to its ordinary derivation.
+ */
+const resolvePaginationTargetRange = (
+  model: MessageViewportGroupModel,
+  currentWindow: MessageWindow
+): MessageGroupRange | null =>
+  currentWindow.paginationTarget === true ? getRangeFromDisplayMessages(model, currentWindow.displayMessages) : null
 
 /**
  * Refreshes a historical range, or follows the latest edge, at the same group
@@ -650,9 +728,15 @@ export const derivePaginationWindow = (input: PaginationWindowTransitionInput): 
  * (active interaction region owner, else the live reading anchor). A latest-edge
  * reconcile that would slide the newest-capacity range past it keeps it — and the
  * older context already on screen — resident inside the same bounded capacity,
- * trimming the newer edge instead. Without that, an insertion inside the resident
  * span unmounts the held region, its hold fails closed, and the arriving rows
  * displace the view.
+ *
+ * A window an ordinary pagination published (`paginationTarget`) is exempt from
+ * the latest-edge rebuild: its committed range is the authoritative target for
+ * the loaded projection it was derived from, so it is retained (bounded on the
+ * newer edge) instead of being replaced before the next traversal. A pagination
+ * that reaches the latest groups again drops the marker and restores ordinary
+ * latest-following.
  */
 export const reconcileMessageWindow = (
   messages: Message[],
@@ -675,6 +759,46 @@ export const reconcileMessageWindow = (
     const model = boundedCapacity === 0 ? null : createMessageViewportGroupModel(messages)
     const retainedIndex = model ? resolveRetainedGroupIndex(model, options) : null
     const latestOldest = model ? Math.max(0, model.groups.length - boundedCapacity) : 0
+    // A published ordinary pagination target stays authoritative for the loaded
+    // projection it was derived from: rebuilding the newest-capacity range here
+    // would slide the window past the page the user just pulled in — dropping
+    // it and re-mounting newer rows far below — so the committed range is
+    // retained instead, bounded by the same capacity on the NEWER edge, never
+    // grown past what it already committed, and never trimmed under the held
+    // row.
+    const committedTarget = model ? resolvePaginationTargetRange(model, currentWindow) : null
+    if (model && committedTarget) {
+      const lastGroupIndex = model.groups.length - 1
+      const oldest = Math.min(committedTarget.oldestGroupIndex, lastGroupIndex)
+      const capacityNewest = oldest + boundedCapacity - 1
+      const newestCeiling = retainedIndex !== null && retainedIndex > capacityNewest ? retainedIndex : capacityNewest
+      const newest = Math.max(oldest, Math.min(lastGroupIndex, committedTarget.newestGroupIndex, newestCeiling))
+      const trimmedGroups = Math.max(0, lastGroupIndex - newest)
+      // The trim is reported honestly (newer edge, exact count), so the newer
+      // rows still resident in the projection read as locally traversable and
+      // the traversal back to the latest edge stays possible.
+      const observability: MessageWindow['boundedViewportObservability'] | undefined =
+        trimmedGroups > 0
+          ? {
+              calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+              boundedCapacity,
+              didTrim: true,
+              trimmedGroups,
+              trimmedEdge: 'newer'
+            }
+          : undefined
+      return {
+        ...createWindowFromRange(
+          model,
+          { oldestGroupIndex: oldest, newestGroupIndex: newest },
+          boundedCapacity,
+          'latest',
+          cleanAuth,
+          observability
+        ),
+        paginationTarget: true
+      }
+    }
     if (!model || retainedIndex === null || retainedIndex >= latestOldest) {
       return createLatestMessageWindow(messages, capacity, cleanAuth)
     }

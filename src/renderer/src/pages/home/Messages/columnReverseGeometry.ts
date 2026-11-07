@@ -133,3 +133,47 @@ export const rebaseLayoutHold = (now: LayoutHoldSample, displacement: number): L
   viewportOffset: now.viewportOffset - displacement,
   scrollTop: now.scrollTop + displacement
 })
+
+/**
+ * Did the container realize a compensation write?
+ *
+ * `scrollTop += displacement` is a REQUEST: a real physical boundary clamps it,
+ * and the container then sits somewhere else than the arithmetic says. Only a
+ * realized write may seed the next baseline analytically.
+ */
+export const didRealizeCompensation = (
+  requestedScrollTop: number,
+  realizedScrollTop: number,
+  tolerancePx = LAYOUT_HOLD_TOLERANCE_PX
+): boolean =>
+  Number.isFinite(requestedScrollTop) &&
+  Number.isFinite(realizedScrollTop) &&
+  Math.abs(realizedScrollTop - requestedScrollTop) <= tolerancePx
+
+/**
+ * Next layout-hold baseline after `scrollTop += displacement`, decided against
+ * what the container ACTUALLY realized.
+ *
+ * - Realized write: the analytic rebase (no second layout read; the next
+ *   trigger measures only what changed after the write).
+ * - Clamped write (real physical boundary): the analytic pair describes a
+ *   position the container never reached, so it must not seed later
+ *   calculations — the caller re-samples the anchor row synchronously and that
+ *   realized pair becomes the baseline.
+ * - `null` when neither pair is provable (no re-sampled geometry for a clamped
+ *   write, or non-finite input): the hold is invalidated and the next
+ *   observation only seeds a fresh baseline.
+ */
+export const rebaseAfterCompensation = (
+  before: LayoutHoldSample,
+  displacement: number,
+  realized: { scrollTop: number; viewportOffset: number | null }
+): LayoutHoldSample | null => {
+  if (!Number.isFinite(realized.scrollTop)) return null
+  if (didRealizeCompensation(before.scrollTop + displacement, realized.scrollTop)) {
+    return rebaseLayoutHold(before, displacement)
+  }
+  const { viewportOffset } = realized
+  if (viewportOffset === null || !Number.isFinite(viewportOffset)) return null
+  return { viewportOffset, scrollTop: realized.scrollTop }
+}

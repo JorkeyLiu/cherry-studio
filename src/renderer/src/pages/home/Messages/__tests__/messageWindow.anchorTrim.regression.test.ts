@@ -734,3 +734,184 @@ describe('latest-edge reconcile retains the held row across insertion (bounded)'
     expect(window.groupCount).toBe(DISPLAY_COUNT)
   })
 })
+
+describe('ordinary pagination target stays authoritative for its loaded projection', () => {
+  /**
+   * The reported failure: at the calibration cap, an accepted ordinary older
+   * page trims the newest edge (120..319 → 100..299 for a 220-group projection),
+   * and the very next reconcile rebuilds the newest-capacity range — dropping
+   * the page the user just pulled in and re-mounting newer rows far below.
+   * The committed target must survive that reconcile.
+   */
+  const accept = (input: Parameters<typeof derivePaginationWindow>[0]): MessageWindow => {
+    const outcome = derivePaginationWindow(input)
+    expect(outcome.status, `transition must be accepted (got ${JSON.stringify(outcome)})`).toBe('accepted')
+    if (outcome.status !== 'accepted') throw new Error('unreachable')
+    return outcome.window
+  }
+
+  /** Latest cap window over `loaded`, then one accepted older page of `page`. */
+  const pagedOlderAtCap = (loaded: Message[]): { committed: MessageWindow; nextMessages: Message[] } => {
+    const capWindow = createLatestMessageWindow(loaded, CAL)
+    // The Main response merged the older page into the projection: 20 older
+    // groups ahead of the currently loaded ones.
+    const olderPrefix = Array.from({ length: 20 }, (_, i) => message(`old${i}`))
+    const nextMessages = [...olderPrefix, ...loaded]
+    const committed = accept({
+      direction: 'older',
+      messages: nextMessages,
+      currentWindow: capWindow,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: true, hasMoreAfter: false }
+    })
+    return { committed, nextMessages }
+  }
+
+  it('marks the accepted older page as the committed pagination target', () => {
+    const loaded = users(200)
+    const { committed } = pagedOlderAtCap(loaded)
+    // 220 groups, capacity 200: grows older by 20 and trims the newest 20.
+    expect(committed.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 199 })
+    expect(committed.paginationTarget).toBe(true)
+    // A latest rebuild would show 20..219 instead.
+    expect(committed.oldestMessageId).toBe('old0')
+  })
+
+  it('reconcile retains the committed page instead of rebuilding the newest range', () => {
+    const loaded = users(200)
+    const { committed, nextMessages } = pagedOlderAtCap(loaded)
+    const committedIds = committed.displayMessages.map((m) => m.id)
+
+    // The committed page spans 0..199 of the 220-group projection; a newest-capacity
+    // rebuild would slide to 20..219 and drop the rows just published.
+    expect(committed.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 199 })
+
+    // The reconcile that runs in the layout phase of the very same commit. All
+    // three retention resolutions must keep the committed target:
+    // - no resolvable held row (the reported condition: nothing pins the range);
+    // - a held row INSIDE the newest-capacity range;
+    // - a held row inside the page that was just published.
+    for (const options of [undefined, { retainMessageId: 'm210' }, { retainMessageId: 'old3' }]) {
+      const reconciled = reconcileMessageWindow(nextMessages, loaded, committed, options)
+      expect(reconciled.range, `options=${JSON.stringify(options)}`).toEqual(committed.range)
+      expect(reconciled.displayMessages.map((m) => m.id)).toEqual(committedIds)
+      expect(reconciled.paginationTarget).toBe(true)
+      // The trimmed newer groups stay locally traversable: the traversal back to
+      // the latest edge (and latest following) remains possible.
+      expect(reconciled.hasMoreNewer).toBe(true)
+      expect(reconciled.hasMoreOlder).toBe(true)
+    }
+
+    // And it is stable: a second reconcile of the same projection changes nothing.
+    const reconciled = reconcileMessageWindow(nextMessages, loaded, committed, { retainMessageId: 'm210' })
+    const again = reconcileMessageWindow(nextMessages, nextMessages, reconciled, { retainMessageId: 'm210' })
+    expect(again.range).toEqual(committed.range)
+    expect(again.displayMessages.map((m) => m.id)).toEqual(committedIds)
+  })
+
+  it('keeps the committed page under an ordinary append at the newest edge', () => {
+    const loaded = users(200)
+    const { committed, nextMessages } = pagedOlderAtCap(loaded)
+    const appended = [...nextMessages, message('m200')]
+    const reconciled = reconcileMessageWindow(appended, nextMessages, committed, { retainMessageId: 'old3' })
+    // The committed page is retained; the appended row stays traversable on the
+    // newer edge instead of the window sliding onto it.
+    expect(reconciled.range).toEqual(committed.range)
+    expect(reconciled.hasMoreNewer).toBe(true)
+  })
+
+  it('a traversal that reaches the latest groups drops the marker and restores latest following', () => {
+    const loaded = users(200)
+    const { committed, nextMessages } = pagedOlderAtCap(loaded)
+    const pagedBack = accept({
+      direction: 'newer',
+      messages: nextMessages,
+      currentWindow: committed,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: true, hasMoreAfter: false }
+    })
+    expect(pagedBack.hasMoreNewer).toBe(false)
+    expect(pagedBack.paginationTarget).toBeUndefined()
+
+    const appended = [...nextMessages, message('m200')]
+    const reconciled = reconcileMessageWindow(appended, nextMessages, pagedBack, { retainMessageId: 'm199' })
+    // Ordinary latest-edge reconciliation again.
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 21, newestGroupIndex: 220 })
+    expect(reconciled.paginationTarget).toBeUndefined()
+  })
+
+  it('a mid-history traversal keeps the marker while the newest groups are still outside', () => {
+    const loaded = users(200)
+    const { committed, nextMessages } = pagedOlderAtCap(loaded)
+    const halfway = accept({
+      direction: 'newer',
+      messages: nextMessages,
+      currentWindow: committed,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: true, hasMoreAfter: true }
+    })
+    expect(halfway.hasMoreNewer).toBe(true)
+    expect(halfway.paginationTarget).toBe(true)
+  })
+
+  it('a latest window (no pagination) still follows appended groups', () => {
+    const loaded = users(200)
+    const latestWindow = createLatestMessageWindow(loaded, CAL)
+    expect(latestWindow.paginationTarget).toBeUndefined()
+    const appended = [...loaded, message('m200')]
+    const reconciled = reconcileMessageWindow(appended, loaded, latestWindow)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 1, newestGroupIndex: 200 })
+    expect(reconciled.paginationTarget).toBeUndefined()
+  })
+
+  it('falls back to the ordinary latest window when the committed rows left the projection', () => {
+    const loaded = users(200)
+    const { committed } = pagedOlderAtCap(loaded)
+    // A rebuild from scratch (route reload): none of the committed rows resolve.
+    const replaced = users(30)
+    const reconciled = reconcileMessageWindow(replaced, loaded, committed)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 29 })
+  })
+
+  /**
+   * The older expansion's own fallback: when the CURRENT window's rows no
+   * longer resolve in the projection being committed (a stale/in-flight merge
+   * whose projection was rebuilt), no requested older page can be produced —
+   * it rebuilds a newest-capacity range. That rebuild is NOT a committed
+   * paging target, so reconciliation must keep ordinary latest following
+   * instead of pinning the rebuilt range.
+   */
+  it('a stale-projection fallback is never marked as a committed pagination target', () => {
+    const loaded = users(200)
+    // The projection the current committed window showed is gone (reload): the
+    // accepted merge carries 20 older groups plus the reloaded ones, and none of
+    // the committed window's rows resolve in it.
+    const staleWindow = createLatestMessageWindow(
+      Array.from({ length: 150 }, (_, i) => message(`gone${i}`)),
+      CAL
+    )
+    const olderPrefix = Array.from({ length: 20 }, (_, i) => message(`old${i}`))
+    const acceptedMessages = [...olderPrefix, ...loaded]
+    const outcome = derivePaginationWindow({
+      direction: 'older',
+      messages: acceptedMessages,
+      currentWindow: staleWindow,
+      additionalGroupCount: 20,
+      responseWindow: { hasMoreBefore: true, hasMoreAfter: false }
+    })
+    expect(outcome.status).toBe('accepted')
+    if (outcome.status !== 'accepted') throw new Error('unreachable')
+    const fallbackWindow = outcome.window
+    // The fallback rebuilds a newest-capacity range over the accepted projection
+    // instead of producing the requested older page…
+    expect(fallbackWindow.range).toEqual({ oldestGroupIndex: 200, newestGroupIndex: 219 })
+    expect(fallbackWindow.paginationTarget).toBeUndefined()
+
+    // …and the next reconcile stays ordinary latest-following: an appended group
+    // slides the window onto the newest edge instead of retaining the rebuild.
+    const appended = [...acceptedMessages, message('m200')]
+    const reconciled = reconcileMessageWindow(appended, acceptedMessages, fallbackWindow)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 201, newestGroupIndex: 220 })
+    expect(reconciled.paginationTarget).toBeUndefined()
+  })
+})

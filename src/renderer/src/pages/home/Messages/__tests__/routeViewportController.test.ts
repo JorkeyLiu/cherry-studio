@@ -948,6 +948,120 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
   })
 })
 
+describe('compensation echo marker (app scroll never pages, input still does)', () => {
+  it('a recorded write is consumed exactly once, at its own realized position', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    expect(c.consumeCompensationEcho(0)).toBe(false)
+    c.noteCompensationWrite(-1842)
+    // The browser reports the position the write realized: app echo.
+    expect(c.consumeCompensationEcho(-1842)).toBe(true)
+    // One-shot: the same observation can never be swallowed twice.
+    expect(c.consumeCompensationEcho(-1842)).toBe(false)
+  })
+
+  it('a genuine user position is never swallowed by a stale marker', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    // The app wrote, but the browser produced no observation for it (a clamped
+    // no-op write emits no scroll). The next, genuine scroll must page.
+    c.noteCompensationWrite(0)
+    expect(c.consumeCompensationEcho(-640)).toBe(false)
+    // …and the marker is gone, so later observations are genuine too.
+    expect(c.consumeCompensationEcho(-640)).toBe(false)
+  })
+
+  it('consuming the echo leaves the live user session intact (continued input pages)', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    const token = c.declareUserIntent()
+    expect(c.hasActiveUserInteraction()).toBe(true)
+    c.noteCompensationWrite(-900)
+    // App compensation scroll during the live gesture: consumed, session kept.
+    expect(c.consumeCompensationEcho(-900)).toBe(true)
+    expect(c.hasActiveUserInteraction()).toBe(true)
+    expect(c.activeInteractionToken?.interactionId).toBe(token.interactionId)
+    // Fresh user wheel after settlement refreshes the session, and its own scroll
+    // is genuine input (never swallowed by a stale echo).
+    const refreshed = c.declareUserIntent()
+    expect(refreshed.interactionId).toBe(token.interactionId)
+    expect(c.consumeCompensationEcho(-1500)).toBe(false)
+    const adopted = c.userTakeover(
+      { messageId: 'mUser', intraRowOffset: -4, scrollTop: -1500, isAtBottom: false },
+      undefined,
+      refreshed
+    )
+    expect(adopted.taken).toBe(true)
+  })
+
+  it('a superseded session never inherits a pending echo', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    c.noteCompensationWrite(-300)
+    c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
+    expect(c.consumeCompensationEcho(-300)).toBe(false)
+    c.noteCompensationWrite(-301)
+    c.invalidateAll()
+    expect(c.consumeCompensationEcho(-301)).toBe(false)
+  })
+
+  it('non-finite positions are never recorded as an echo', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    c.noteCompensationWrite(NaN)
+    expect(c.consumeCompensationEcho(NaN)).toBe(false)
+    c.noteCompensationWrite(-10)
+    expect(c.consumeCompensationEcho(NaN)).toBe(false)
+  })
+
+  it('a genuine declaration coalesced with the compensation is never swallowed at its own position', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    const token = c.declareUserIntent()
+    // The app's compensation write realizes a position under the live gesture.
+    c.noteCompensationWrite(-220)
+    // A fresh wheel (same gesture session, new declaration generation) lands
+    // before the browser delivers the coalesced observation.
+    const refreshed = c.declareUserIntent()
+    expect(refreshed.interactionId).toBe(token.interactionId)
+    // Same numeric position as the app's own write, but a genuine declaration
+    // has landed since: the observation may carry user movement, so it is not
+    // suppressed and the gate may page.
+    expect(c.consumeCompensationEcho(-220)).toBe(false)
+    // The marker was consumed by that decision, so the next observation is
+    // genuine by default as well.
+    expect(c.consumeCompensationEcho(-220)).toBe(false)
+    // The same write without a fresh declaration stays an app echo.
+    c.noteCompensationWrite(-220)
+    expect(c.consumeCompensationEcho(-220)).toBe(true)
+  })
+
+  it('a gesture that starts after the write is genuine at the same numeric position', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    // No session yet: a keeper write for a layout change.
+    c.noteCompensationWrite(-500)
+    // The user starts a brand-new gesture before the echo is delivered.
+    c.declareUserIntent()
+    expect(c.consumeCompensationEcho(-500)).toBe(false)
+    expect(c.hasActiveUserInteraction()).toBe(true)
+    // A gesture that opened AND closed between the write and the observation
+    // also invalidates it: the declaration sequence never repeats a value, so a
+    // stale marker can never be revived.
+    c.noteInteractionScrollEnd()
+    expect(c.hasActiveUserInteraction()).toBe(false)
+    c.noteCompensationWrite(-500)
+    c.declareUserIntent()
+    c.noteInteractionScrollEnd()
+    expect(c.consumeCompensationEcho(-500)).toBe(false)
+  })
+
+  it('displayed/rendered invalidation drops a pending echo (first new-topic observation pages)', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    c.noteCompensationWrite(-500)
+    // The DOM goes unknown: the marker names a scroll of the old DOM.
+    c.markRenderedUnknown()
+    expect(c.consumeCompensationEcho(-500)).toBe(false)
+    // Same through the displayed-route sync (topic switch).
+    c.noteCompensationWrite(-500)
+    c.syncDisplayed(displayed('t2', 'A'))
+    expect(c.consumeCompensationEcho(-500)).toBe(false)
+  })
+})
+
 describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', () => {
   const stableA = (c: RouteViewportController, id = 'a1', offset = -12): void => {
     c.declareUserIntent()

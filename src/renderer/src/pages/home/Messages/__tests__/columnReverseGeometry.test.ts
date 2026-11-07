@@ -7,11 +7,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
+  didRealizeCompensation,
   distanceFromBottom,
   distanceFromOldest,
   isAtBottom,
   isAtOldest,
   layoutDisplacement,
+  rebaseAfterCompensation,
   rebaseLayoutHold,
   resolveLayoutHold
 } from '../columnReverseGeometry'
@@ -100,5 +102,52 @@ describe('layout-space hold metric (the keeper hold coordinate, split from scrol
     expect(
       resolveLayoutHold({ viewportOffset: 0, scrollTop: Infinity }, { viewportOffset: 10, scrollTop: 0 })
     ).toBeNull()
+  })
+})
+
+describe('compensation write truth (realized vs clamped)', () => {
+  it('a realized write keeps the analytic rebase', () => {
+    const sample = { viewportOffset: 120, scrollTop: -40 }
+    const displacement = 180
+    expect(didRealizeCompensation(sample.scrollTop + displacement, 140)).toBe(true)
+    expect(rebaseAfterCompensation(sample, displacement, { scrollTop: 140, viewportOffset: null })).toEqual({
+      viewportOffset: -60,
+      scrollTop: 140
+    })
+  })
+
+  it('a clamped write never seeds the next baseline with an unreachable pair', () => {
+    const sample = { viewportOffset: 120, scrollTop: 0 }
+    const displacement = 7642.95
+    // The browser clamped at the real physical boundary: the container sits at 0.
+    const realizedScrollTop = 0
+    expect(didRealizeCompensation(sample.scrollTop + displacement, realizedScrollTop)).toBe(false)
+    // The re-sampled row geometry becomes the baseline, so the next trigger
+    // measures only what happens AFTER the clamp instead of re-charging the
+    // unreachable distance to layout.
+    const next = rebaseAfterCompensation(sample, displacement, {
+      scrollTop: realizedScrollTop,
+      viewportOffset: 120
+    })
+    const realized = { viewportOffset: 120, scrollTop: 0 }
+    expect(next).toEqual(realized)
+    // The same geometry re-observed after the clamp is a no-op, not a second
+    // charge of the unreachable distance.
+    expect(resolveLayoutHold(realized, realized)).toBeNull()
+    // A later real layout change is still measured from the realized pair.
+    expect(resolveLayoutHold(realized, { viewportOffset: 140, scrollTop: 0 })).toBe(20)
+  })
+
+  it('an unprovable re-sample invalidates the hold instead of inventing a pair', () => {
+    const sample = { viewportOffset: 120, scrollTop: 0 }
+    expect(rebaseAfterCompensation(sample, 500, { scrollTop: 0, viewportOffset: null })).toBeNull()
+    expect(rebaseAfterCompensation(sample, 500, { scrollTop: NaN, viewportOffset: 10 })).toBeNull()
+    expect(rebaseAfterCompensation(sample, 500, { scrollTop: 0, viewportOffset: NaN })).toBeNull()
+    // A negligible clamp (sub-pixel) still counts as a realized write: the
+    // analytic pair stays valid inside the shared tolerance.
+    expect(rebaseAfterCompensation(sample, 500, { scrollTop: 499.6, viewportOffset: null })).toEqual({
+      viewportOffset: 120 - 500,
+      scrollTop: 500
+    })
   })
 })

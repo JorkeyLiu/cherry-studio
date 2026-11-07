@@ -21,10 +21,11 @@
 
 import {
   COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
+  didRealizeCompensation,
   isAtBottom,
   LAYOUT_HOLD_TOLERANCE_PX,
   type LayoutHoldSample,
-  rebaseLayoutHold,
+  rebaseAfterCompensation,
   resolveLayoutHold
 } from '@renderer/pages/home/Messages/columnReverseGeometry'
 import { handleScrollSnapshotRead, handleScrollSnapshotSaved } from '@renderer/services/scrollSnapshotCache'
@@ -1807,6 +1808,28 @@ interface LayoutHoldBaseline {
   scrollTop: number
 }
 
+/**
+ * Programmatic compensation write bookkeeping — the shared contract with the
+ * browse-edge gate (see `noteCompensationWrite`/`consumeCompensationEcho` on the
+ * controller).
+ *
+ * Every app-owned `scrollTop` write records the position the container actually
+ * REALIZED, so the scroll observation the browser fires for it is consumed as an
+ * app echo instead of being mistaken for user navigation. Best-effort: an
+ * unavailable controller or container never blocks the compensation itself.
+ */
+const recordCompensationWrite = (
+  controller: { noteCompensationWrite: (scrollTop: number) => void } | null | undefined,
+  container: HTMLElement
+): void => {
+  try {
+    if (!controller) return
+    controller.noteCompensationWrite(container.scrollTop)
+  } catch {
+    // best-effort bookkeeping only
+  }
+}
+
 export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement | null>): StableVisualAnchorMaintainer {
   const viewport = useOptionalRouteViewport()
   const compensatingRef = useRef<{ expected: number } | null>(null)
@@ -2868,6 +2891,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                   try {
                     container.scrollTop += survivorDelta
                     compensatingRef.current = { expected: container.scrollTop }
+                    recordCompensationWrite(vp.controller, container)
                   } catch {}
                 }
                 try {
@@ -2941,6 +2965,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                   try {
                     container.scrollTop += regionDelta
                     compensatingRef.current = { expected: container.scrollTop }
+                    recordCompensationWrite(vp.controller, container)
                   } catch {}
                 }
                 try {
@@ -2986,6 +3011,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           if (Math.abs(container.scrollTop) > 1) {
             container.scrollTop = 0
             compensatingRef.current = { expected: container.scrollTop }
+            recordCompensationWrite(vp.controller, container)
           }
         } catch {}
         return
@@ -3082,14 +3108,38 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         layoutHoldRef.current = { routeKey, anchorKey, ...sample }
         return
       }
-      try {
-        container.scrollTop += displacement
-        compensatingRef.current = { expected: container.scrollTop }
-      } catch {}
       // Ordinary layout hold converges here: no snapshot write, no pending
       // queue, no anchor/token/phase change. A hidden row above already returned
       // fail-closed; the tab-switch intent above owns switch geometry.
-      layoutHoldRef.current = { routeKey, anchorKey, ...rebaseLayoutHold(sample, displacement) }
+      // The write is a REQUEST: a real physical boundary can clamp it, leaving the
+      // container somewhere other than the arithmetic says. Only a realized write
+      // may seed the next baseline analytically; a clamped write is re-sampled
+      // synchronously on the live row, and an unprovable re-sample invalidates the
+      // hold instead of storing an unreachable pair that would later be charged to
+      // layout.
+      try {
+        const requestedScrollTop = sample.scrollTop + displacement
+        container.scrollTop += displacement
+        const realizedScrollTop = container.scrollTop
+        compensatingRef.current = { expected: realizedScrollTop }
+        recordCompensationWrite(vp.controller, container)
+        let realizedOffset: number | null = null
+        if (!didRealizeCompensation(requestedScrollTop, realizedScrollTop)) {
+          try {
+            realizedOffset = el.getBoundingClientRect().top - container.getBoundingClientRect().top
+          } catch {
+            realizedOffset = null
+          }
+        }
+        const rebased = rebaseAfterCompensation(sample, displacement, {
+          scrollTop: realizedScrollTop,
+          viewportOffset: realizedOffset
+        })
+        layoutHoldRef.current = rebased === null ? null : { routeKey, anchorKey, ...rebased }
+      } catch {
+        // No write landed: the fresh observation is the honest baseline.
+        layoutHoldRef.current = { routeKey, anchorKey, ...sample }
+      }
     }
     holdRef.current = hold
     // Observer creation precedes the first rebind/hold (no TDZ swallow):
