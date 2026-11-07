@@ -1049,4 +1049,465 @@ test.describe('edit-mode scroll host — integrated UI', () => {
     expect(activeAfterExit.second).toBe(false)
     await expect(footer, 'footer visible again after exit').toBeVisible({ timeout: 15000 })
   })
+
+  test('message navigation, single selection, back to bottom, then Shift-click selects the whole range', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'EDIT-MODE RANGE INTEGRATED UI: seed 20 user+answer turns rendered through a bounded window, enter real edit mode, locate a far turn through the real message-navigation rail and single-select it with a click (anchor), return to the newest turns through the real back-to-bottom control so the anchor turn is no longer rendered, then Shift-click the newest turn. Asserts the closed interval anchor..newest is selected in authority order (including turns that are not rendered), the toolbar count covers the whole range, and the anchor/endpoint ids are preserved. Real clicks/navigation only — no selection is ever dispatched directly.'
+    })
+    const page = mainWindow
+    // 20 user+answer turns; the rendered window shows the newest 10 turns only,
+    // so a far anchor can only be reached through message navigation.
+    const GROUPS = 20
+    const GROUP_MESSAGES = 2
+    const TOTAL = GROUPS * GROUP_MESSAGES
+    const WINDOW_DISPLAY = 20
+    const ANCHOR_GROUP_INDEX = 2
+    const EXPECTED_GROUPS = GROUPS - ANCHOR_GROUP_INDEX
+    const EXPECTED_MESSAGES = EXPECTED_GROUPS * GROUP_MESSAGES
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page, WINDOW_DISPLAY)
+    // The message-navigation rail is an opt-in surface; enable the surface (a
+    // setting), never the selection under test.
+    await page.evaluate(() => (window as any).store.dispatch({ type: 'settings/setMessageNavigation', payload: true }))
+
+    const topicId = `edit-range-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const name = `edit-range ${topicId}`
+    const messageIds: string[] = []
+    const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+    const stamp = '2026-01-01T00:00:00.000Z'
+    for (let i = 0; i < TOTAL; i++) {
+      const msgId = `${topicId}-msg-${pad(i, 5)}`
+      const blockId = `${topicId}-block-${pad(i, 5)}`
+      messageIds.push(msgId)
+      const role = i % 2 === 0 ? 'user' : 'assistant'
+      const msg: Record<string, unknown> = {
+        id: msgId,
+        topicId,
+        role,
+        assistantId: liveAssistantId,
+        createdAt: stamp,
+        updatedAt: stamp,
+        status: 'success',
+        blocks: [blockId],
+        sortOrder: i
+      }
+      if (role === 'assistant') {
+        ;(msg as any).model = { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' }
+        ;(msg as any).modelId = 'mock-model'
+        ;(msg as any).askId = messageIds[i - 1]
+      }
+      entries.push({
+        message: msg,
+        blocks: [
+          {
+            id: blockId,
+            messageId: msgId,
+            type: 'main_text',
+            content: `range seed ${pad(i, 5)}`,
+            status: 'success',
+            createdAt: stamp,
+            updatedAt: stamp,
+            sortOrder: 0
+          }
+        ]
+      })
+    }
+    const askIdOfGroup = (groupIndex: number) => messageIds[groupIndex * GROUP_MESSAGES]
+    const anchorAskId = askIdOfGroup(ANCHOR_GROUP_INDEX)
+    // A turn strictly between the far anchor and the rendered bottom window: it
+    // belongs to the selected range but is never rendered during the scenario.
+    const FIRST_RENDERED_GROUP = GROUPS - WINDOW_DISPLAY / GROUP_MESSAGES
+    const middleAskId = askIdOfGroup(Math.floor((ANCHOR_GROUP_INDEX + FIRST_RENDERED_GROUP) / 2))
+    const newestAskId = askIdOfGroup(GROUPS - 1)
+
+    await page.evaluate(
+      ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+        const store = (window as any).store
+        store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: new Date().toISOString()
+            }
+          }
+        })
+      },
+      { topicId, assistantId: liveAssistantId, name }
+    )
+    const persist = await page.evaluate(
+      async ({ topicId, assistantId, name, entries }: any) => {
+        const api = (window as any).api.chatDb as any
+        const ensured = await api.ensureTopic({ topicId, assistantId, name })
+        if (!ensured?.ok) return { ok: false, err: JSON.stringify(ensured) }
+        const pasted = await api.pasteMessagesToTopic({ topicId, entries })
+        if (!pasted?.ok) return { ok: false, err: JSON.stringify(pasted) }
+        return { ok: true }
+      },
+      { topicId, assistantId: liveAssistantId, name, entries }
+    )
+    expect(persist.ok).toBe(true)
+    await activateTopicAndWaitForBootstrap(page, topicId, WINDOW_DISPLAY)
+
+    // Precondition: the far anchor turn is NOT in the rendered window.
+    await page.waitForFunction((id: string) => !document.getElementById(`message-${id}`), anchorAskId, {
+      timeout: 15000
+    })
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, undefined, {
+      timeout: 15000
+    })
+    await page.waitForTimeout(400)
+
+    // 1) Locate the far turn through the real message-navigation rail.
+    const rail = page.locator('[data-testid="conversation-navigation"]').first()
+    await expect(rail, 'message navigation rail must be available').toHaveCount(1, { timeout: 20000 })
+    // The rail container is a pointer-events:none layer; the pointer must enter
+    // the panel body (pointer-events:auto) for the rail to expand its rows.
+    const navPanel = page.locator('[data-testid="conversation-nav-panel"]').first()
+    const panelBox = await navPanel.boundingBox()
+    expect(panelBox, 'message navigation panel must have a box').not.toBeNull()
+    await page.mouse.move(panelBox!.x + Math.min(10, panelBox!.width / 2), panelBox!.y + 10)
+    await page
+      .waitForFunction(
+        () =>
+          document
+            .querySelector('[data-testid="conversation-nav-panel"]')
+            ?.parentElement?.getAttribute('data-expanded') === 'true',
+        undefined,
+        { timeout: 15000 }
+      )
+      .catch(() => {})
+    const navItem = page.locator(`[data-testid="conversation-nav-item-${anchorAskId}"]`).first()
+    await expect(navItem, 'far turn must be listed in the message navigation').toHaveCount(1, { timeout: 20000 })
+    await navItem.click()
+    await page.waitForFunction((id: string) => !!document.getElementById(`message-${id}`), anchorAskId, {
+      timeout: 20000
+    })
+    // Leave the rail: the expanded panel overlays the message column, so the
+    // pointer must move back to the content and the rail must collapse before
+    // the turn can be clicked.
+    const messagesBox = await page.locator('#messages').first().boundingBox()
+    if (messagesBox) {
+      await page.mouse.move(messagesBox.x + messagesBox.width - 24, messagesBox.y + messagesBox.height / 2)
+    }
+    await page
+      .waitForFunction(
+        () =>
+          document
+            .querySelector('[data-testid="conversation-nav-panel"]')
+            ?.parentElement?.getAttribute('data-expanded') === 'false',
+        undefined,
+        { timeout: 15000 }
+      )
+      .catch(() => {})
+
+    // 2) Single-select that far turn with a real click: it becomes the anchor.
+    const anchorTurn = page.locator(`[data-testid="edit-turn"][data-turn-ask="${anchorAskId}"]`).first()
+    await expect(anchorTurn, 'far turn must be rendered after navigating to it').toHaveCount(1, { timeout: 20000 })
+    await anchorTurn.click()
+    await page.waitForFunction(
+      (askId: string) => {
+        const s = (window as any).store.getState().editMode
+        return s?.anchorGroupId === askId && s?.selectedGroupIds?.length === 1 && s.selectedGroupIds[0] === askId
+      },
+      anchorAskId,
+      { timeout: 15000 }
+    )
+
+    // 3) Return to the newest turns through the real back-to-bottom control: the
+    //    anchor turn leaves the rendered window while the selection stays.
+    const bottom = page.locator('[data-testid="conversation-back-to-bottom"]').first()
+    await expect(bottom, 'back-to-bottom control must be available').toBeVisible({ timeout: 20000 })
+    await bottom.click()
+    await page.waitForFunction((id: string) => !document.getElementById(`message-${id}`), anchorAskId, {
+      timeout: 20000
+    })
+    await page.waitForTimeout(300)
+    const selectionBeforeShift = await page.evaluate(() => [
+      ...(window as any).store.getState().editMode.selectedGroupIds
+    ])
+    expect(selectionBeforeShift).toEqual([anchorAskId])
+    const middleRendered = await page.evaluate((id: string) => !!document.getElementById(`message-${id}`), middleAskId)
+    expect(middleRendered, 'middle turn of the range must not be rendered').toBe(false)
+
+    // 4) Shift-click the newest turn: the whole closed interval becomes selected.
+    const newestTurn = page.locator(`[data-testid="edit-turn"][data-turn-ask="${newestAskId}"]`).first()
+    await expect(newestTurn, 'newest turn must be rendered at the bottom').toHaveCount(1, { timeout: 20000 })
+    await newestTurn.click({ modifiers: ['Shift'] })
+
+    const expectedRange = Array.from({ length: EXPECTED_GROUPS }, (_, offset) =>
+      askIdOfGroup(ANCHOR_GROUP_INDEX + offset)
+    )
+    await page.waitForFunction(
+      (expected: string[]) => {
+        const selected = (window as any).store.getState().editMode?.selectedGroupIds ?? []
+        return selected.length === expected.length && expected.every((id, index) => selected[index] === id)
+      },
+      expectedRange,
+      { timeout: 20000 }
+    )
+
+    const rangeState = await page.evaluate(() => {
+      const s = (window as any).store.getState().editMode
+      return { selected: [...s.selectedGroupIds], anchor: s.anchorGroupId }
+    })
+    // Closed interval in authority order, both endpoints included, no gap.
+    expect(rangeState.selected[0]).toBe(anchorAskId)
+    expect(rangeState.selected[rangeState.selected.length - 1]).toBe(newestAskId)
+    expect(rangeState.selected).toContain(middleAskId)
+    expect(rangeState.anchor).toBe(anchorAskId)
+
+    // The toolbar count covers the whole range, not only the rendered window.
+    const toolbarCount = await page.evaluate(() => {
+      const button = document.querySelector('[data-testid="edit-copy-btn"]')
+      const bar = button?.parentElement?.parentElement
+      const match = (bar?.textContent ?? '').match(/\d+/)
+      return match ? Number(match[0]) : null
+    })
+    expect(toolbarCount, 'edit toolbar must report the whole range message count').toBe(EXPECTED_MESSAGES)
+
+    // The rendered turns of the range are visibly outlined.
+    const selectedTurnCount = await page.evaluate(() => document.querySelectorAll('.edit-turn-selected').length)
+    expect(selectedTurnCount).toBeGreaterThan(0)
+
+    // Ordinary click still replaces the whole range (plain selection unaffected).
+    await newestTurn.click()
+    const afterPlainClick = await page.evaluate(() => [...(window as any).store.getState().editMode.selectedGroupIds])
+    expect(afterPlainClick).toEqual([newestAskId])
+
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === false, undefined, {
+      timeout: 15000
+    })
+  })
+
+  test('an older page load keeps the edit selection, its anchor and the toolbar count', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'EDIT-MODE PAGING INTEGRATED UI: seed 30 user+answer turns but render/load only the newest 10 turns, enter real edit mode, click one rendered turn to select it, then page the real history toward older content with genuine wheel input until the production window read merges an older page (asserted by the loaded ID list growing — not by scroll position alone). Asserts the selection ids, the anchor id and the toolbar message count are unchanged by the merge, the selected turn is still rendered with its selected outline, and a following Shift-click on a newly loaded older turn still extends from the original anchor. No selection or window state is injected; only real clicks/scrolling are used.'
+    })
+    const page = mainWindow
+    const GROUPS = 30
+    const GROUP_MESSAGES = 2
+    const TOTAL = GROUPS * GROUP_MESSAGES
+    // Rendered/loaded window: the newest 10 turns only, so older history must be
+    // paged in through the real append target.
+    const INITIAL_DISPLAY = 20
+    const INITIAL_GROUPS = INITIAL_DISPLAY / GROUP_MESSAGES
+    const FIRST_INITIAL_GROUP = GROUPS - INITIAL_GROUPS
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page, INITIAL_DISPLAY)
+
+    const topicId = `edit-paging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const name = `edit-paging ${topicId}`
+    const blank = 'success'
+    const messageIds: string[] = []
+    const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+    const stamp = '2026-01-01T00:00:00.000Z'
+    for (let i = 0; i < TOTAL; i++) {
+      const msgId = `${topicId}-msg-${pad(i, 5)}`
+      const blockId = `${topicId}-block-${pad(i, 5)}`
+      messageIds.push(msgId)
+      const role = i % 2 === 0 ? 'user' : 'assistant'
+      const msg: Record<string, unknown> = {
+        id: msgId,
+        topicId,
+        role,
+        assistantId: liveAssistantId,
+        createdAt: stamp,
+        updatedAt: stamp,
+        status: blank,
+        blocks: [blockId],
+        sortOrder: i
+      }
+      if (role === 'assistant') {
+        ;(msg as any).model = { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' }
+        ;(msg as any).modelId = 'mock-model'
+        ;(msg as any).askId = messageIds[i - 1]
+      }
+      entries.push({
+        message: msg,
+        blocks: [
+          {
+            id: blockId,
+            messageId: msgId,
+            type: 'main_text',
+            content: `paging filler ${pad(i, 5)} ${'scrollable older history row '.repeat(20)}`,
+            status: blank,
+            createdAt: stamp,
+            updatedAt: stamp,
+            sortOrder: 0
+          }
+        ]
+      })
+    }
+    const askIdOfGroup = (groupIndex: number) => messageIds[groupIndex * GROUP_MESSAGES]
+    const anchorGroupIndex = FIRST_INITIAL_GROUP + 6
+    const anchorAskId = askIdOfGroup(anchorGroupIndex)
+    const olderTargetIndex = 4
+    const olderTargetAskId = askIdOfGroup(olderTargetIndex)
+    const EXPECTED_GROUPS = anchorGroupIndex - olderTargetIndex + 1
+    const EXPECTED_MESSAGES = EXPECTED_GROUPS * GROUP_MESSAGES
+
+    await page.evaluate(
+      ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+        const store = (window as any).store
+        store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: new Date().toISOString()
+            }
+          }
+        })
+      },
+      { topicId, assistantId: liveAssistantId, name }
+    )
+    const persist = await page.evaluate(
+      async ({ topicId, assistantId, name, entries }: any) => {
+        const api = (window as any).api.chatDb as any
+        const ensured = await api.ensureTopic({ topicId, assistantId, name })
+        if (!ensured?.ok) return { ok: false, err: JSON.stringify(ensured) }
+        const pasted = await api.pasteMessagesToTopic({ topicId, entries })
+        if (!pasted?.ok) return { ok: false, err: JSON.stringify(pasted) }
+        return { ok: true }
+      },
+      { topicId, assistantId: liveAssistantId, name, entries }
+    )
+    expect(persist.ok).toBe(true)
+    await activateTopicAndWaitForBootstrap(page, topicId, INITIAL_DISPLAY)
+    await ensureOverflow(page, topicId)
+
+    const readLoadedIds = () =>
+      page.evaluate(
+        (tid: string) => [...((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [])],
+        topicId
+      ) as Promise<string[]>
+    const readEditSelection = () =>
+      page.evaluate(() => {
+        const s = (window as any).store.getState().editMode
+        const button = document.querySelector('[data-testid="edit-copy-btn"]')
+        const bar = button?.parentElement?.parentElement
+        const match = (bar?.textContent ?? '').match(/\d+/)
+        return {
+          selected: [...(s?.selectedGroupIds ?? [])],
+          anchor: s?.anchorGroupId ?? null,
+          toolbarCount: match ? Number(match[0]) : null
+        }
+      })
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, undefined, {
+      timeout: 15000
+    })
+    await page.waitForTimeout(400)
+
+    // 1) Single-select a rendered turn with a real click.
+    const anchorTurn = page.locator(`[data-testid="edit-turn"][data-turn-ask="${anchorAskId}"]`).first()
+    await expect(anchorTurn, 'anchor turn must be rendered in the newest window').toHaveCount(1, { timeout: 20000 })
+    await anchorTurn.click()
+    await page.waitForFunction(
+      (askId: string) => {
+        const s = (window as any).store.getState().editMode
+        return s?.anchorGroupId === askId && s?.selectedGroupIds?.length === 1 && s.selectedGroupIds[0] === askId
+      },
+      anchorAskId,
+      { timeout: 15000 }
+    )
+    const beforePaging = await readEditSelection()
+    expect(beforePaging).toEqual({ selected: [anchorAskId], anchor: anchorAskId, toolbarCount: GROUP_MESSAGES })
+    const loadedBefore = await readLoadedIds()
+    expect(loadedBefore.length).toBe(INITIAL_DISPLAY)
+    expect(loadedBefore).not.toContain(olderTargetAskId)
+
+    // 2) Page the real history toward older content with genuine wheel input
+    //    until the production window read merges an older page.
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    let loadedAfter: string[] = loadedBefore
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
+      await page.mouse.wheel(0, -900)
+      await page.waitForTimeout(450)
+      loadedAfter = await readLoadedIds()
+      if (loadedAfter.length > loadedBefore.length) break
+    }
+    // Proof the older page really loaded through the window read — not scroll alone.
+    expect(loadedAfter.length, 'an older page must be merged into the loaded projection').toBeGreaterThan(
+      loadedBefore.length
+    )
+    // The selected turn must already be unaffected by the first merged page;
+    // keep paging until the older target turn itself is loaded.
+    const afterFirstPage = await readEditSelection()
+    expect(afterFirstPage).toEqual(beforePaging)
+    const targetDeadline = Date.now() + 30000
+    while (!loadedAfter.includes(olderTargetAskId) && Date.now() < targetDeadline) {
+      await page.mouse.wheel(0, -900)
+      await page.waitForTimeout(450)
+      loadedAfter = await readLoadedIds()
+    }
+    expect(loadedAfter, 'the older target turn must be loaded through paging').toContain(olderTargetAskId)
+    console.log(
+      '[E2E] edit-paging window growth',
+      JSON.stringify({ loadedBefore: loadedBefore.length, loadedAfter: loadedAfter.length })
+    )
+
+    // 3) The merge is selection-neutral.
+    const afterPaging = await readEditSelection()
+    expect(afterPaging).toEqual(beforePaging)
+
+    // 4) The selected turn is still rendered with its selected outline.
+    await expect(anchorTurn, 'selected turn must stay rendered after the page merge').toHaveCount(1, {
+      timeout: 20000
+    })
+    const anchorSelected = await page.evaluate((ask: string) => {
+      const turn = document.querySelector(`[data-testid="edit-turn"][data-turn-ask="${ask}"]`)
+      return !!turn && turn.classList.contains('edit-turn-selected')
+    }, anchorAskId)
+    expect(anchorSelected, 'selected turn must keep its selected outline').toBe(true)
+    expect(await page.evaluate(() => document.querySelectorAll('.edit-turn-selected').length)).toBeGreaterThan(0)
+
+    // 5) A Shift-click on a newly loaded older turn still extends from the
+    //    original anchor.
+    const olderTarget = page.locator(`[data-testid="edit-turn"][data-turn-ask="${olderTargetAskId}"]`).first()
+    await expect(olderTarget, 'older turn must be rendered after the page merge').toHaveCount(1, { timeout: 20000 })
+    await olderTarget.click({ modifiers: ['Shift'] })
+    const expectedRange = Array.from({ length: EXPECTED_GROUPS }, (_, offset) =>
+      askIdOfGroup(olderTargetIndex + offset)
+    )
+    await page.waitForFunction(
+      (expected: string[]) => {
+        const selected = (window as any).store.getState().editMode?.selectedGroupIds ?? []
+        return selected.length === expected.length && expected.every((id, index) => selected[index] === id)
+      },
+      expectedRange,
+      { timeout: 20000 }
+    )
+    const afterShift = await readEditSelection()
+    expect(afterShift.anchor).toBe(anchorAskId)
+    expect(afterShift.toolbarCount).toBe(EXPECTED_MESSAGES)
+
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === false, undefined, {
+      timeout: 15000
+    })
+  })
 })

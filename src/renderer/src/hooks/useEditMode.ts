@@ -3,7 +3,7 @@ import { copyMessages, cutMessages, deleteSelectedMessages, pasteMessages } from
 import { executeRedo, executeUndo } from '@renderer/services/UndoService'
 
 const logger = loggerService.withContext('useEditMode')
-import store, { useAppDispatch, useAppSelector } from '@renderer/store'
+import store, { useAppDispatch, useAppSelector, useAppStore } from '@renderer/store'
 import {
   clearSelection,
   extendSelectionRange,
@@ -22,10 +22,22 @@ import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { EditSelectionBoundaryPageRequest } from '@renderer/types/editMode'
 import type { Message } from '@renderer/types/newMessage'
+import { loadWholeTopicSnapshot, type WholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import i18n from 'i18next'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { getGroupIndex, useMessageGroups } from './useMessageGroup'
+import { getGroupIndex, getMessageGroups, type MessageGroup, useMessageGroups } from './useMessageGroup'
+
+/** Stable empty overlay map (keeps memo identities while no range view is held). */
+const EMPTY_GROUP_MAP: ReadonlyMap<string, MessageGroup> = new Map()
+
+function sameGroupIds(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
 
 export function useCreateEditMode(
   topicId: string,
@@ -54,21 +66,44 @@ export function useCreateEditMode(
 
   // 消息组
   const allGroups = useMessageGroups(messages)
-  // 使用已渲染的组（分页可见），若未传则使用全部
+  // 使用已渲染的组（分页可见），若未传则使用全部。这个更窄的集合只限定
+  // 点击/键盘导航的落点范围，不代表选择集本身。
   const groups = useMemo(() => {
     if (!visibleGroupIds) return allGroups
     return allGroups.filter((g) => visibleGroupIds.has(g.askId))
   }, [allGroups, visibleGroupIds])
 
+  const appStore = useAppStore()
+  // 当前 route 标识 — 跨窗口范围读取绑定到发起请求时的那一条 route。
+  const routeKey = `${topicId}::${activeBranchId ?? 'main'}`
+  // 跨窗口 Shift 范围的渲染层视图：只为让选区展示/工具栏计数覆盖窗口外
+  // 的组成员，永不写回普通 Redux 消息/块投影（投影完备性不因此改变）。
+  const [rangeOverlay, setRangeOverlay] = useState<{ routeKey: string; byAskId: Map<string, MessageGroup> }>({
+    routeKey: '',
+    byAskId: new Map()
+  })
+  const rangeOverlayByAskId = rangeOverlay.routeKey === routeKey ? rangeOverlay.byAskId : EMPTY_GROUP_MAP
+  // 发起时状态快照 + 单飞令牌：迟到结果只允许落到发起请求时的那一份意图上。
+  const rangeRequestTokenRef = useRef(0)
+  // 选择意图令牌：范围请求之间的先后由 rangeRequestTokenRef 表达，但"范围请求
+  // 之后发生的其它选择交互"无法靠比较状态区分 —— 用户清空后又选回同一 anchor
+  // 时，旧请求的基线快照与新意图的状态恰好相等，迟到的完整快照会把旧范围重新
+  // 盖上去。因此每个会真正改变选区的同步入口都推进本令牌，让在途范围请求失效。
+  const selectionIntentTokenRef = useRef(0)
+  const liveRef = useRef({ topicId, branchId: activeBranchId })
+  liveRef.current = { topicId, branchId: activeBranchId }
+
   // W3: 切换 topic 时清空选择
   useEffect(() => {
     dispatch(clearSelection())
+    setRangeOverlay({ routeKey: '', byAskId: new Map() })
   }, [topicId, dispatch])
 
   // BRANCH-12: route 切换清空选择 — 避免残留计数误导写门禁；
   // 能力 route 不匹配本身也会使写 fail-closed（双保险）。
   useEffect(() => {
     dispatch(clearSelection())
+    setRangeOverlay({ routeKey: '', byAskId: new Map() })
   }, [activeBranchId, dispatch])
 
   // BRANCH-12: 当前选集是否可写 — 每个选中组的全部 loaded 消息都
@@ -76,10 +111,24 @@ export function useCreateEditMode(
   // Copy 保持允许（authority 读取），不经此门禁。
   const isSelectionMutable = useAppSelector((state) => selectIsEditSelectionMutable(state, topicId))
 
-  // 选中的消息组
+  // 选中的消息组 — 从 loaded projection 解析，与写能力（editSelection 的
+  // 解析投影）保持一致。滚动/跳转导航（例如“回到底部”）只会改变渲染窗口，
+  // 不会改变选择本身：若用 visibleGroupIds 过滤，已选组一旦移出渲染窗口就
+  // 会被展示成“0 selected”，而 authority 层的选择仍然存在 —— 选择看起来
+  // 被清除但写操作仍指向它。
+  // 跨窗口 Shift 范围的组不在已加载投影里，若只按 loaded 投影解析，工具栏
+  // 会把它们显示成“未选中”。顺序跟随选择自身（范围本身即权威顺序）；已加载
+  // 组优先，窗口外的组由本次范围读取的渲染层视图补齐。
   const selectedGroups = useMemo(() => {
-    return groups.filter((g) => selectedGroupIds.includes(g.askId))
-  }, [groups, selectedGroupIds])
+    if (selectedGroupIds.length === 0) return []
+    const loadedByAskId = new Map(allGroups.map((group) => [group.askId, group]))
+    const resolved: MessageGroup[] = []
+    for (const askId of selectedGroupIds) {
+      const group = loadedByAskId.get(askId) ?? rangeOverlayByAskId.get(askId)
+      if (group) resolved.push(group)
+    }
+    return resolved
+  }, [allGroups, selectedGroupIds, rangeOverlayByAskId])
 
   // Toggle 编辑模式
   const toggleEditMode = useCallback(
@@ -89,21 +138,112 @@ export function useCreateEditMode(
     [dispatch]
   )
 
+  /**
+   * 标记一次新的选择意图：推进令牌，使在途的跨窗口范围请求在落地时失效。
+   * 只在本 hook 的选择入口调用（点击/清空/键盘选区），不引入跨进程状态。
+   */
+  const noteSelectionIntent = useCallback(() => {
+    selectionIntentTokenRef.current += 1
+  }, [])
+
+  /**
+   * Shift 范围的跨窗口解析。
+   *
+   * 锚点与目标都是稳定组 ID；已渲染窗口只能给它们提供一个不相交的落点视图，
+   * 一旦锚点已被导航移出渲染窗口，同步 slice 就只能看到窗口内的组，中间未
+   * 加载的组会被静默丢掉。这里按需读一次调用者本地完整 route 快照（含当前
+   * route 的完整顺序），用两端稳定 ID 解析真实闭区间，绝不按显示
+   * 索引或 ID 字符串排序猜测范围。
+   *
+   * 快照是短生命周期读取：结果只用于选择组 ID 列表与渲染层计数视图，不写回
+   * 普通 Redux 消息/块投影。迟到结果只允许落到发起请求时的那一份意图上 ——
+   * 退出编辑模式、切换 topic/route、或期间发生任何普通选择/清空，都必须保持
+   * 现状；端点缺失或读取失败则保持旧选择，不发布任何部分范围。
+   */
+  const requestCompleteRange = useCallback(
+    (targetAskId: string, anchorId: string, isCtrl: boolean) => {
+      const token = rangeRequestTokenRef.current + 1
+      rangeRequestTokenRef.current = token
+      const requestedTopicId = liveRef.current.topicId
+      const requestedBranchId = liveRef.current.branchId
+      const requestedRouteKey = `${requestedTopicId}::${requestedBranchId ?? 'main'}`
+      const baselineSelection = [...(appStore.getState().editMode.selectedGroupIds ?? [])]
+      // 发起时的选择意图代际：之后任何选择交互都会推进它，本请求随即作废。
+      const intentToken = selectionIntentTokenRef.current
+
+      void (async () => {
+        let snapshot: WholeTopicSnapshot
+        try {
+          snapshot = await loadWholeTopicSnapshot(requestedTopicId, requestedBranchId)
+        } catch (error) {
+          if (token !== rangeRequestTokenRef.current) return
+          if (intentToken !== selectionIntentTokenRef.current) return
+          logger.warn('[handleGroupClick] Complete route snapshot unavailable; shift range not applied', error as Error)
+          return
+        }
+
+        // Superseded by a newer range request: that one owns the selection.
+        if (token !== rangeRequestTokenRef.current) return
+        // Superseded by a later selection interaction (click / clear / keyboard
+        // selection): the newer intent owns the selection even when its state
+        // happens to equal this request's baseline.
+        if (intentToken !== selectionIntentTokenRef.current) return
+
+        const editState = appStore.getState().editMode
+        if (!editState.enabled) return
+        if (liveRef.current.topicId !== requestedTopicId || liveRef.current.branchId !== requestedBranchId) return
+        if (editState.anchorGroupId !== anchorId) return
+        if (!sameGroupIds(editState.selectedGroupIds ?? [], baselineSelection)) return
+
+        const completeGroups = getMessageGroups(snapshot.messages)
+        const anchorIndex = getGroupIndex(completeGroups, anchorId)
+        const targetIndex = getGroupIndex(completeGroups, targetAskId)
+        if (anchorIndex < 0 || targetIndex < 0) {
+          logger.warn(
+            `[handleGroupClick] Shift range endpoints missing from route ${requestedRouteKey}; selection unchanged`
+          )
+          return
+        }
+
+        const start = Math.min(anchorIndex, targetIndex)
+        const end = Math.max(anchorIndex, targetIndex)
+        const rangeGroups = completeGroups.slice(start, end + 1)
+        const rangeAskIds = rangeGroups.map((group) => group.askId)
+        const nextSelection = isCtrl ? [...new Set([...baselineSelection, ...rangeAskIds])] : rangeAskIds
+
+        setRangeOverlay((previous) => {
+          const byAskId =
+            previous.routeKey === requestedRouteKey ? new Map(previous.byAskId) : new Map<string, MessageGroup>()
+          for (const group of rangeGroups) byAskId.set(group.askId, group)
+          return { routeKey: requestedRouteKey, byAskId }
+        })
+        dispatch(setSelectedGroupIds(nextSelection))
+      })()
+    },
+    [appStore, dispatch]
+  )
+
   // 点击选择消息组
   const handleGroupClick = useCallback(
     (askId: string, isCtrl: boolean, isShift: boolean) => {
       if (!isEnabled) return
+      // Every click is a fresh selection intent: a click invalidates any range
+      // request still in flight, including one whose baseline looks identical.
+      noteSelectionIntent()
 
-      const groupIndex = getGroupIndex(groups, askId)
-      if (groupIndex === -1) return
+      if (isShift) {
+        // Shift 区域选。两端都在渲染窗口内时保持既有同步 slice 语义；任何
+        // 一端在窗口外，就由完整 route 快照解析闭区间（见 requestCompleteRange）。
+        if (!anchorGroupId) return
+        const anchorGroupIndex = getGroupIndex(groups, anchorGroupId)
+        const targetGroupIndex = getGroupIndex(groups, askId)
+        if (anchorGroupIndex < 0 || targetGroupIndex < 0) {
+          requestCompleteRange(askId, anchorGroupId, isCtrl)
+          return
+        }
 
-      const resolvedAnchorIndex = anchorGroupId ? getGroupIndex(groups, anchorGroupId) : -1
-      if (isShift && (!anchorGroupId || resolvedAnchorIndex < 0)) return
-
-      if (isShift && resolvedAnchorIndex !== -1) {
-        // Shift 区域选
-        const start = Math.min(resolvedAnchorIndex, groupIndex)
-        const end = Math.max(resolvedAnchorIndex, groupIndex)
+        const start = Math.min(anchorGroupIndex, targetGroupIndex)
+        const end = Math.max(anchorGroupIndex, targetGroupIndex)
         const rangeAskIds = groups.slice(start, end + 1).map((g) => g.askId)
 
         if (isCtrl) {
@@ -114,7 +254,13 @@ export function useCreateEditMode(
           // Shift only: 替换
           dispatch(setSelectedGroupIds(rangeAskIds))
         }
-      } else if (isCtrl) {
+        return
+      }
+
+      const groupIndex = getGroupIndex(groups, askId)
+      if (groupIndex === -1) return
+
+      if (isCtrl) {
         // Ctrl 点选：切换
         const index = selectedGroupIds.indexOf(askId)
         if (index >= 0) {
@@ -136,14 +282,21 @@ export function useCreateEditMode(
         }
       }
 
-      if (!isShift) {
-        dispatch(setLastSelectedIndex(groupIndex))
-        dispatch(setFocusedIndex(groupIndex))
-        dispatch(setAnchorGroupId(askId))
-        dispatch(setFocusedGroupId(askId))
-      }
+      dispatch(setLastSelectedIndex(groupIndex))
+      dispatch(setFocusedIndex(groupIndex))
+      dispatch(setAnchorGroupId(askId))
+      dispatch(setFocusedGroupId(askId))
     },
-    [dispatch, groups, selectedGroupIds, anchorGroupId, focusedGroupId, isEnabled]
+    [
+      dispatch,
+      groups,
+      selectedGroupIds,
+      anchorGroupId,
+      focusedGroupId,
+      isEnabled,
+      requestCompleteRange,
+      noteSelectionIntent
+    ]
   )
 
   // 复制
@@ -308,11 +461,13 @@ export function useCreateEditMode(
 
       const targetGroup = groups[newIndex]
       if (targetGroup) {
+        // Keyboard single-selection is a selection intent of its own.
+        noteSelectionIntent()
         dispatch(moveFocusSelection({ groupId: targetGroup.askId, index: newIndex }))
         scrollToGroup?.(targetGroup.askId)
       }
     },
-    [dispatch, groups, lastSelectedIndex, focusedIndex, focusedGroupId, scrollToGroup]
+    [dispatch, groups, lastSelectedIndex, focusedIndex, focusedGroupId, scrollToGroup, noteSelectionIntent]
   )
 
   // 扩展选区（Shift+箭头）
@@ -355,6 +510,7 @@ export function useCreateEditMode(
       // One atomic range step: a repeat key must not publish an intermediate
       // selection (old endpoint id with the new range) to context consumers —
       // the arrangement reads only ever observe one consistent step.
+      noteSelectionIntent()
       dispatch(
         extendSelectionRange({
           rangeGroupIds: rangeAskIds,
@@ -379,19 +535,22 @@ export function useCreateEditMode(
       focusedIndex,
       focusedGroupId,
       scrollToGroup,
-      requestBoundaryPage
+      requestBoundaryPage,
+      noteSelectionIntent
     ]
   )
 
   // 清除选区（不退出编辑模式）
   const handleClearSelection = useCallback(() => {
+    noteSelectionIntent()
     dispatch(clearSelection())
-  }, [dispatch])
+  }, [dispatch, noteSelectionIntent])
 
   // stable clearSelection
   const stableClearSelection = useCallback(() => {
+    noteSelectionIntent()
     dispatch(clearSelection())
-  }, [dispatch])
+  }, [dispatch, noteSelectionIntent])
 
   return useMemo(
     () => ({
