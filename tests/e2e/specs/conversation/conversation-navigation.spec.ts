@@ -346,10 +346,29 @@ function outlineBodySelector(): string {
   return '[data-testid="conversation-navigation"] > div'
 }
 
-/** Hover the original collapsed strip via a real row (body is pointer-events auto, container is none). */
+/**
+ * Hover the collapsed outline's own hover surface.
+ *
+ * The surface is the reserved gutter lane, not a row: rows stay transparent to
+ * the pointer until the expand switch has settled, so the lane is the one thing
+ * a pointer can enter while the outline is compact (it spans the container's
+ * inset plus the gutter width, full height, behind the rail). The point offset
+ * stays inside the inset strip the rail never covers, so the move lands on the
+ * lane itself instead of on the body above it.
+ */
 async function hoverOriginalOutline(page: any): Promise<void> {
-  const row = page.locator('[data-testid^="conversation-nav-item-"]').first()
-  await row.hover({ timeout: 10000 })
+  const lane = page.locator('[data-testid="conversation-nav-hitzone"]').first()
+  await lane.hover({ position: { x: 4, y: 24 }, timeout: 10000 })
+  // The rows take the pointer only once the switch has settled: wait for the
+  // gate the way the next real hover would experience it.
+  await page.waitForFunction(
+    () => {
+      const panel = document.querySelector('[data-testid="conversation-nav-panel"]')
+      return panel?.getAttribute('data-outline-interactive') === 'ready'
+    },
+    undefined,
+    { timeout: 10000 }
+  )
   // Hover reveals the single-line text (original CSS: display block + opacity 1 on body:hover).
   await page.waitForFunction(
     () => {

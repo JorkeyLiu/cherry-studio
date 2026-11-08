@@ -57,36 +57,58 @@ const ROW_HEIGHT_SETTLE_TOLERANCE_PX = 0.05
 const GEOMETRY_SETTLE_FALLBACK_MS = EXPAND_TRANSITION_MS + 500
 
 /**
- * Collapse grace margin: expansion is immediate, but the collapsed rail is
- * only ~24px wide, so shrinking the moment the pointer left made it trivial
- * to drop the panel while travelling. Leaving waits this margin first.
+ * Collapse grace margin: expansion is immediate, but the expanded panel hangs
+ * off a thin rail, and a pointer travelling between the panel and the gutter
+ * lane beside it crosses a gap on the way, so shrinking the moment the pointer
+ * left made it trivial to drop the panel mid-travel. Leaving waits this margin
+ * first.
  */
 const COLLAPSE_GRACE_MS = 160
 
 /**
- * The body's scrollbar is withheld for the length of a width transition and
- * revealed once the switch has settled. The bar is painted on the body's right
- * edge, and that edge is exactly what the switch animates: left painted, it is
- * carried across the opening panel (~151px over ~165ms on a 320px column)
- * instead of appearing where it belongs. The window is the switch's own
- * timeline plus one frame of slack — the timer is armed in the commit that
- * changes the width target, and the browser may start interpolating on the
- * following frame — so the two cannot drift apart. Only the paint is withheld:
- * the body keeps `overflow-y: auto` and its reserved gutter, so measurement,
- * scroll range and `scrollTop` are untouched by it.
+ * The switch's settle window: its own timeline plus one frame of slack. The
+ * timer is armed in the commit that changes the width target, and the browser
+ * may start interpolating on the following frame, so the two cannot drift
+ * apart. Two things wait it out, both because they belong to the settled
+ * switch rather than to a frame in the middle of it:
+ *
+ * 1. The body's scrollbar is withheld for its length and revealed after it. The
+ *    bar is painted on the body's right edge, and that edge is exactly what the
+ *    switch animates: left painted, it is carried across the opening panel
+ *    (~151px over ~165ms on a 320px column) instead of appearing where it
+ *    belongs. Only the paint is withheld: the body keeps `overflow-y: auto` and
+ *    its reserved gutter, so measurement, scroll range and `scrollTop` are
+ *    untouched by it.
+ * 2. The rows take the pointer only after it (see `contentInteractive`): while
+ *    the switch is in flight every row is still moving under the pointer, so
+ *    nothing in the panel may hover, show a native tooltip, offer a pointer
+ *    cursor or navigate.
  */
-const SCROLLBAR_REVEAL_SETTLE_SLACK_MS = 16
-const SCROLLBAR_REVEAL_DELAY_MS = EXPAND_TRANSITION_MS + SCROLLBAR_REVEAL_SETTLE_SLACK_MS
+const EXPAND_SETTLE_SLACK_MS = 16
+const EXPAND_SETTLE_DELAY_MS = EXPAND_TRANSITION_MS + EXPAND_SETTLE_SLACK_MS
 
 /**
  * Compact rail width, as a content width: the collapsed panel is exactly the
  * dot column the collapsed rows sit in — the 14px level-1 dot plus its 4px
  * right margin. The body's own 10px left padding and the reserved scrollbar
- * gutter sit around it, so the rail keeps the 34px strip its trigger area has
- * always been. Content, because that is the one box the width below animates
- * without measuring the body's padding or the platform's gutter.
+ * gutter sit around it, so the rail keeps the 34px visual strip it has always
+ * been. Content, because that is the one box the width below animates without
+ * measuring the body's padding or the platform's gutter.
+ *
+ * The visual strip is not the hover target: that is the whole gutter below.
  */
 const RAIL_CONTENT_WIDTH_PX = 18
+/**
+ * The navigation gutter the reading area reserves on its left — the chat column
+ * and its footer are pushed right by exactly `NAV_GUTTER_WIDTH_PX` — and the
+ * container's own inset inside it. The gutter is also the outline's hover
+ * surface, so the hit zone spans this inset plus the reserved width: entering
+ * the gutter anywhere (above, below, left of or beside the rail) expands the
+ * outline, while the reserved strip's right edge is where the chat content
+ * begins, so nothing to its right is covered.
+ */
+const NAV_GUTTER_WIDTH_PX = 46
+const NAV_GUTTER_INSET_PX = 10
 /**
  * Expanded panel cap: the reading column minus the inset the body has always
  * reserved, and never more than this. It is a cap on the *column*, not a width
@@ -285,7 +307,22 @@ const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => 
  * The body's own scrollbar is the one thing the switch does not interpolate:
  * it is painted on the very edge the width animates, so it is withheld for the
  * transition's window and revealed once the panel has settled at its final
- * width (see `SCROLLBAR_REVEAL_DELAY_MS`).
+ * width (see `EXPAND_SETTLE_DELAY_MS`).
+ * The rows take the pointer on that same settlement and not a frame earlier:
+ * until then the content is transparent to hit testing, so a row cannot
+ * highlight, offer a pointer cursor, show its native tooltip or navigate while
+ * the switch is still moving — the hover that started the expansion is only a
+ * hover until the switch is over. Closing shuts the gate in the commit that
+ * starts the collapse. Keyboard navigation is not part of this gate: rows stay
+ * focusable and Enter/Space keep navigating.
+ * The hover surface is the reserved gutter itself, not the drawn rail: an
+ * invisible hit zone spans the container's inset plus the gutter width at the
+ * reading area's full height, painted behind the body inside this layer's own
+ * stacking context. Entering the gutter anywhere opens the outline, staying over
+ * the gutter or the panel keeps it open (they are one surface — the container
+ * owns the enter/leave pair), and the rail's own position and size are
+ * untouched because nothing about it moved. The zone stops at the gutter's right
+ * edge, where the chat column begins, so no chat content is covered.
  * A fork marker (`forkAfter`) is a separate NON-interactive row inserted
  * directly after the marked message row: it is never a navigation target (no
  * role, stable id, tab stop, handler or active highlight), so the marked
@@ -365,14 +402,29 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   // Read by the resize observer, which runs outside the render that set it.
   const latestExpandedRef = useRef(expanded)
   latestExpandedRef.current = expanded
-  // Whether the body's scrollbar may be painted (see
-  // `SCROLLBAR_REVEAL_DELAY_MS`). It is derived from `expanded` in the same
-  // render that starts the width transition, so both directions withhold the
-  // bar on their first frame: opening paints nothing at the compact edge, and
-  // closing drops it before the panel narrows. Only the reveal is deferred, so
-  // only the reveal needs a timer.
+  // Whether the body's scrollbar may be painted, and whether the rows may take
+  // the pointer (see `EXPAND_SETTLE_DELAY_MS`). It is derived from `expanded`
+  // in the same render that starts the width transition, so both directions
+  // clear it on their first frame: opening paints nothing and accepts nothing
+  // at the compact edge, and closing drops both before the panel narrows. Only
+  // the settle is deferred, so only the settle needs a timer.
   const [scrollbarSettled, setScrollbarSettled] = useState(false)
   const scrollbarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /**
+   * The rows' pointer gate: content reacts to the pointer only once the switch
+   * has fully settled, so the one hover that starts an expansion cannot also
+   * highlight, tooltip or activate whatever row happens to be under it while
+   * rows are still moving.
+   *
+   * It is read as the pair the effect above already maintains — `expanded` is
+   * the switch's direction and `scrollbarSettled` is "its final width is on
+   * screen" — rather than as a second timer of its own, so the two cannot
+   * disagree about when the switch ended. The pair also gives both required
+   * edges for free: the commit that starts a collapse clears `expanded`, so the
+   * gate is shut before the panel moves back, and any restarted width target
+   * clears `scrollbarSettled` in that same commit.
+   */
+  const contentInteractive = expanded && scrollbarSettled
 
   /**
    * The width the expanded panel needs, measured instead of decided.
@@ -423,13 +475,14 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     measurePanelWidth(expanded)
   }, [expanded, measurePanelWidth])
 
-  // The scrollbar's paint window. Any change of the width target — opening,
-  // closing, and a re-measure while open — hides the bar and re-arms the reveal,
-  // so a reversal can never reveal a bar on an edge that is still moving and a
-  // rapid re-entry restarts the settlement instead of inheriting the first
-  // window's. Running before paint keeps the withhold in the same frame as the
-  // transition, and clearing at the head of every run (plus on unmount) keeps at
-  // most one reveal timer alive.
+  // The switch's settled signal (see `EXPAND_SETTLE_DELAY_MS`), which drives
+  // both the scrollbar's paint window and the rows' pointer gate. Any change of
+  // the width target — opening, closing, and a re-measure while open — clears it
+  // and re-arms the timer, so a reversal can never settle on an edge that is
+  // still moving and a rapid re-entry restarts the settlement instead of
+  // inheriting the first window's. Running before paint keeps the clear in the
+  // same frame as the transition, and clearing at the head of every run (plus on
+  // unmount) keeps at most one settle timer alive.
   useLayoutEffect(() => {
     if (scrollbarTimerRef.current) {
       clearTimeout(scrollbarTimerRef.current)
@@ -437,7 +490,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     }
     if (!expanded) {
       // Compact paints no scrollbar anyway (`overflow-y: hidden`), so there is
-      // nothing to wait for: a pending reveal is dropped, not rescheduled.
+      // nothing to wait for: a pending settle is dropped, not rescheduled.
       setScrollbarSettled(false)
       return
     }
@@ -451,7 +504,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     scrollbarTimerRef.current = setTimeout(() => {
       scrollbarTimerRef.current = null
       setScrollbarSettled(true)
-    }, SCROLLBAR_REVEAL_DELAY_MS)
+    }, EXPAND_SETTLE_DELAY_MS)
   }, [expanded, panelWidthPx])
 
   // The content's box changes when its text does, and the column when the
@@ -752,7 +805,14 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   // Entering expands at once, replacing the CSS :hover it used to rely on. The
   // switch holds the row on screen still for its length instead of letting the
   // taller rows drift it out of the box.
-  const handleBodyMouseEnter = () => {
+  //
+  // The handler sits on the container, not on the body: the container has no
+  // hit box of its own (`pointer-events: none`) and only its interactive
+  // descendants feed it, so it is the one surface that spans BOTH the rail/panel
+  // and the gutter lane beside it. Moving between those two is therefore a move
+  // inside one surface — no leave, no grace, no collapse — and only leaving both
+  // reaches the leave path below.
+  const handleSurfaceMouseEnter = () => {
     if (collapseTimerRef.current) {
       clearTimeout(collapseTimerRef.current)
       collapseTimerRef.current = null
@@ -762,11 +822,12 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   }
 
   // Leaving only starts the collapse; the grace margin above is the travel
-  // slack for a pointer that crosses the thin collapsed rail. The collapse
-  // holds the same on-screen row instead of keeping a scroll offset that only
-  // made sense at the expanded row heights, so the compact rail ends up showing
-  // the row the reader was looking at rather than snapping it back afterwards.
-  const handleBodyMouseLeave = () => {
+  // slack for a pointer that crosses the gap between the gutter lane and the
+  // panel. The collapse holds the same on-screen row instead of keeping a scroll
+  // offset that only made sense at the expanded row heights, so the compact rail
+  // ends up showing the row the reader was looking at rather than snapping it
+  // back afterwards.
+  const handleSurfaceMouseLeave = () => {
     if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current)
     collapseTimerRef.current = setTimeout(() => {
       collapseTimerRef.current = null
@@ -776,15 +837,16 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   }
 
   return (
-    <MessageOutlineContainer data-testid="conversation-navigation">
+    <MessageOutlineContainer
+      data-testid="conversation-navigation"
+      onMouseEnter={handleSurfaceMouseEnter}
+      onMouseLeave={handleSurfaceMouseLeave}>
       <MessageOutlineBody
         ref={containerRef}
         $expanded={expanded}
         // Painted only where the switch has finished: compact never paints one,
         // and an open panel only once its final width is on screen.
         $scrollbarVisible={expanded && scrollbarSettled}
-        onMouseEnter={handleBodyMouseEnter}
-        onMouseLeave={handleBodyMouseLeave}
         onWheel={pauseFollow}
         onPointerDown={pauseFollow}
         onKeyDownCapture={pauseFollow}>
@@ -796,6 +858,9 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
         */}
         <MessageOutlinePanel
           data-testid="conversation-nav-panel"
+          // Projected for the CSS pointer gate (see `MessageOutlineContent`):
+          // the rows take the pointer only once the switch has settled.
+          data-outline-interactive={contentInteractive ? 'ready' : 'blocked'}
           style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
           <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
             {entries.map((entry) => {
@@ -806,7 +871,17 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
                 <Fragment key={entry.id}>
                   <MessageOutlineItem
                     $active={isActive}
-                    onClick={() => onNavigate(entry.id)}
+                    // Pointer navigation waits for the settled switch. The
+                    // pointer-events gate already keeps a real click off the row
+                    // while it is closed; this guard covers the one window hit
+                    // testing cannot — a press that started on the row before
+                    // the gate shut (a collapse under the held button). Keyboard
+                    // activation is untouched: it is the keydown handler above,
+                    // never a synthesized click.
+                    onClick={() => {
+                      if (!contentInteractive) return
+                      onNavigate(entry.id)
+                    }}
                     onKeyDown={(event) => handleKeyDown(event, entry.id)}
                     tabIndex={0}
                     role="button"
@@ -852,6 +927,20 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
           </MessageOutlineContent>
         </MessageOutlinePanel>
       </MessageOutlineBody>
+      {/*
+        The gutter lane: an invisible hit surface over the whole reserved strip
+        (the container's own inset plus the reserved width), full height of the
+        reading area. It is what makes the trigger area the gutter itself instead
+        of only the collapsed rail's drawn box, and it is the one thing that
+        moved — the rail's own position and size are untouched.
+
+        Last child and out of flow, so the flex layout that centers the body
+        vertically around it is unchanged. `z-index: -1` keeps it behind the
+        body: where the two overlap the body wins, so the lane never covers a
+        row of the open panel, and it is scoped inside the container's own
+        stacking context (z999), so it cannot reach chat content either.
+      */}
+      <MessageOutlineHitZone data-testid="conversation-nav-hitzone" aria-hidden="true" />
     </MessageOutlineContainer>
   )
 }
@@ -860,11 +949,11 @@ const MessageOutlineContainer = styled.div`
   position: absolute;
   // Left-edge inset reserves the segment group-label lane: the label pill
   // (LineContainer left:-12, TabContainer max-width 280, z1000) sits above
-  // the nav layer (z999) and its own contained hit region never enters the
-  // nav body, so label hover cannot expand the nav. The body starts past
-  // the label's left zone; the nav's own collapsed-dot trigger still
-  // expands on direct hover of its uncovered area.
-  inset: 0 0 0 10px;
+  // the nav layer (z999), so hover on the pill itself still never expands the
+  // nav. The hit zone below reaches back over this inset — the whole reserved
+  // gutter is the outline's hover surface — and only the pill's own box, which
+  // is painted above it, is excluded.
+  inset: 0 0 0 ${NAV_GUTTER_INSET_PX}px;
   z-index: 999;
   pointer-events: none;
   user-select: none;
@@ -872,11 +961,33 @@ const MessageOutlineContainer = styled.div`
   align-items: center;
   justify-content: flex-start;
   & ~ .message-content-container {
-    padding-left: 46px !important;
+    padding-left: ${NAV_GUTTER_WIDTH_PX}px !important;
   }
   & ~ .MessageFooter {
-    margin-left: 46px !important;
+    margin-left: ${NAV_GUTTER_WIDTH_PX}px !important;
   }
+`
+
+/**
+ * The gutter's hit surface (see the render site): the container's inset plus the
+ * reserved gutter width, at the reading area's full height.
+ *
+ * pointer-events: auto is the whole point — the container is none, so this is
+ * what gives the reserved strip a hit box — and z-index: -1 orders it behind the
+ * body inside the container's stacking context, so the rail and the open panel
+ * are always the ones answering a pointer over them and this only answers for
+ * the space around them. It carries no cursor of its own: over the lane the
+ * pointer is the reading area's default, and the pointer cursor belongs to the
+ * settled rows alone.
+ */
+const MessageOutlineHitZone = styled.div`
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -${NAV_GUTTER_INSET_PX}px;
+  width: ${NAV_GUTTER_WIDTH_PX}px;
+  pointer-events: auto;
+  z-index: -1;
 `
 
 const MessageOutlineItemDot = styled.div<{ $level: number }>`
@@ -914,16 +1025,27 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
    display: flex;
    align-items: center;
    gap: 8px;
-   cursor: pointer;
    flex-shrink: 0;
    overflow: hidden;
    transition: height ${EXPAND_TRANSITION_MS}ms ease-out;
-  &:hover {
-    ${MessageOutlineItemText} {
-      color: var(--color-text-2);
-    }
-    ${MessageOutlineItemDot} {
-      background: var(--color-text-3);
+  /**
+   * Everything that says "this is a clickable row" belongs to the settled
+   * switch alone: data-outline-interactive is the panel's pointer gate (see
+   * contentInteractive), so compact, expanding and collapsing rows carry no
+   * pointer cursor and no hover recolor — the initial hover that starts an
+   * expansion cannot also light up whatever row it landed on. The attribute is
+   * read as an ancestor selector so the rule needs no forward reference to the
+   * panel, and the gate is the only thing that ever writes it.
+   */
+  [data-outline-interactive='ready'] & {
+    cursor: pointer;
+    &:hover {
+      ${MessageOutlineItemText} {
+        color: var(--color-text-2);
+      }
+      ${MessageOutlineItemDot} {
+        background: var(--color-text-3);
+      }
     }
   }
   ${({ $active }) =>
@@ -964,6 +1086,20 @@ const MessageOutlinePanel = styled.div`
  * previews, fork labels, streaming text, a resized column (the `max-width` the
  * component measures is the reading column's cap, so a row ellipsizes exactly
  * where the fully expanded panel ends). Its gap is the body's former row gap.
+ *
+ * It is also the pointer gate: while the panel reports blocked (see
+ * contentInteractive) the whole content subtree is transparent to hit testing.
+ * That is what "the rows do not react until the switch has settled" means
+ * mechanically, and it covers every affordance at once rather than editing each
+ * of them: no hover arm, no pointer cursor, no native title tooltip and no
+ * click, because the browser never considers a row the element under the
+ * pointer. Flipping back to auto is enough for a pointer that never moved to
+ * pick up the row it is resting on — the browser re-runs hit testing when the
+ * computed style changes — so a settled switch begins the item hover right
+ * where the expansion hover ended.
+ *
+ * Only the content is gated, never the body: the body stays the panel's
+ * surface for wheel scrolling, its scrollbar and the gutter lane.
  */
 const MessageOutlineContent = styled.div`
   display: flex;
@@ -971,6 +1107,9 @@ const MessageOutlineContent = styled.div`
   width: max-content;
   gap: 2px;
   transition: gap ${EXPAND_TRANSITION_MS}ms ease-out;
+  ${MessageOutlinePanel}[data-outline-interactive='blocked'] & {
+    pointer-events: none;
+  }
 `
 
 /**

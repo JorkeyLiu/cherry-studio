@@ -38,15 +38,35 @@ describe('MessageOutline restored original presentation', () => {
   })
 
   it('navigates by stable ID on click and keyboard', () => {
-    const onNavigate = vi.fn()
-    render(<MessageOutline entries={[{ id: 'u9', text: 'Only question' }]} onNavigate={onNavigate} />)
+    vi.useFakeTimers()
+    try {
+      const onNavigate = vi.fn()
+      const { container } = render(
+        <MessageOutline entries={[{ id: 'u9', text: 'Only question' }]} onNavigate={onNavigate} />
+      )
+      const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
 
-    const item = screen.getByTestId('conversation-nav-item-u9')
-    expect(item.getAttribute('title')).toBe('Only question')
-    fireEvent.click(item)
-    expect(onNavigate).toHaveBeenCalledWith('u9')
-    fireEvent.keyDown(item, { key: 'Enter' })
-    expect(onNavigate).toHaveBeenCalledWith('u9')
+      const item = screen.getByTestId('conversation-nav-item-u9')
+      expect(item.getAttribute('title')).toBe('Only question')
+      // Keyboard activation is independent of the pointer gate: it works on the
+      // compact rail, before anything has expanded.
+      fireEvent.keyDown(item, { key: 'Enter' })
+      expect(onNavigate).toHaveBeenCalledWith('u9')
+      fireEvent.keyDown(item, { key: ' ' })
+      expect(onNavigate).toHaveBeenCalledTimes(2)
+
+      // A pointer click belongs to the settled switch: the rows only take the
+      // pointer once the width transition is over.
+      fireEvent.mouseEnter(body)
+      act(() => {
+        vi.advanceTimersByTime(196)
+      })
+      fireEvent.click(item)
+      expect(onNavigate).toHaveBeenCalledTimes(3)
+      expect(onNavigate).toHaveBeenLastCalledWith('u9')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('renders null for empty caller state', () => {
@@ -671,6 +691,9 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
   // geometry window the compensation holds a row's on-screen position for.
   const COLLAPSE_GRACE_MS = 160
   const EXPAND_TRANSITION_MS = 180
+  // The switch's settle window: its timeline plus one frame of slack, after
+  // which the rows take the pointer (and the scrollbar is painted again).
+  const EXPAND_SETTLE_DELAY_MS = EXPAND_TRANSITION_MS + 16
   // Idle window after the last manual wheel/pointer/key interaction.
   const FOLLOW_RESUME_IDLE_MS = 800
 
@@ -990,7 +1013,9 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
     stubRect(rowOf('u1'), 30, 54)
     flushRaf()
     fireEvent.mouseEnter(body)
-    advance(EXPAND_TRANSITION_MS)
+    // The click belongs to the settled switch: the rows take the pointer only
+    // once the width transition is over.
+    advance(EXPAND_SETTLE_DELAY_MS)
     stubRect(rowOf('u1'), 30, 54)
     flushRaf()
     expect(body.scrollTop).toBe(0)
@@ -1510,5 +1535,296 @@ describe('MessageOutline scrollbar paint across the width transition', () => {
     // is gone in the frame the switch starts rather than fading across it.
     expect(rule).toContain('background:transparent')
     expect(rule).toContain('transition:none')
+  })
+})
+
+describe('MessageOutline navigation gutter hover surface', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' }
+  ]
+
+  // styled-components injects component CSS into <style>; normalize whitespace
+  // so serialization variants cannot false-fail, then select whole rules.
+  const normalizedCss = () =>
+    Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+
+  const rulesFor = (element: HTMLElement) => {
+    const rules = normalizedCss().match(/[^{}]+\{[^}]*\}/g) ?? []
+    return rules.filter((rule) => Array.from(element.classList).some((name) => rule.includes(`.${name}`)))
+  }
+
+  const renderOutline = () => {
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = nav.firstElementChild as HTMLElement
+    const zone = screen.getByTestId('conversation-nav-hitzone')
+    return { ...utils, nav, body, zone }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('makes the whole reserved gutter a hit surface, full height, behind the untouched rail', () => {
+    const { nav, body, zone } = renderOutline()
+
+    // The gutter lane spans the container's inset plus the reserved width: it
+    // reaches back over the 10px the container is inset by, and its right edge
+    // is the chat gutter's width, where the chat column begins.
+    const zoneRule = rulesFor(zone).join('\n')
+    expect(zoneRule).not.toBe('')
+    for (const declaration of [
+      'position:absolute',
+      'top:0',
+      'bottom:0',
+      'left:-10px',
+      'width:46px',
+      'pointer-events:auto',
+      'z-index:-1'
+    ]) {
+      expect(zoneRule).toContain(declaration)
+    }
+
+    // Nothing about the rail moved: the lane is out of flow and painted behind
+    // the body, so the body (the rail's own box) is still the container's first
+    // element child and still owns the flex row.
+    expect(nav.firstElementChild).toBe(body)
+    expect(nav.lastElementChild).toBe(zone)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // The chat column and its footer keep the same reserved strip.
+    const norm = normalizedCss()
+    expect(norm).toContain('padding-left:46px!important')
+    expect(norm).toContain('margin-left:46px!important')
+  })
+
+  it('expands from the lane alone and treats the lane and the panel as one surface', () => {
+    const { body, zone } = renderOutline()
+    const expanded = () => body.getAttribute('data-expanded')
+
+    // Entering the lane anywhere expands, exactly as entering the rail does.
+    fireEvent.mouseEnter(zone)
+    expect(expanded()).toBe('true')
+
+    // Moving between the lane and the panel is travel inside one surface: the
+    // pair of events a browser reports for it cannot start a collapse.
+    fireEvent.mouseLeave(zone)
+    fireEvent.mouseEnter(body)
+    expect(expanded()).toBe('true')
+
+    // Leaving the panel arms the grace margin; re-entering the lane cancels it.
+    fireEvent.mouseLeave(body)
+    act(() => {
+      vi.advanceTimersByTime(150)
+    })
+    expect(expanded()).toBe('true')
+    fireEvent.mouseEnter(zone)
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(expanded()).toBe('true')
+
+    // Leaving both keeps the existing 160ms grace: not a frame earlier.
+    fireEvent.mouseLeave(zone)
+    act(() => {
+      vi.advanceTimersByTime(159)
+    })
+    expect(expanded()).toBe('true')
+    act(() => {
+      vi.advanceTimersByTime(1)
+    })
+    expect(expanded()).toBe('false')
+  })
+})
+
+describe('MessageOutline pointer gate across the switch', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+  const EXPAND_TRANSITION_MS = 180
+  // The switch's settle window: its timeline plus one frame of slack.
+  const SETTLE_MS = 16
+  const COLLAPSE_GRACE_MS = 160
+
+  const normalizedCss = () =>
+    Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+
+  const rulesFor = (element: HTMLElement) => {
+    const rules = normalizedCss().match(/[^{}]+\{[^}]*\}/g) ?? []
+    return rules.filter((rule) => Array.from(element.classList).some((name) => rule.includes(`.${name}`)))
+  }
+
+  const renderOutline = () => {
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = nav.firstElementChild as HTMLElement
+    const panel = screen.getByTestId('conversation-nav-panel')
+    const content = panel.firstElementChild as HTMLElement
+    const gate = () => panel.getAttribute('data-outline-interactive')
+    const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    const advance = (ms: number) => {
+      act(() => {
+        vi.advanceTimersByTime(ms)
+      })
+    }
+    return { ...utils, nav, body, panel, content, gate, rowOf, advance }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the rows inert for the whole switch and opens on the settled edge only', () => {
+    const { body, gate, advance } = renderOutline()
+    expect(gate()).toBe('blocked')
+
+    fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    // Expanding: the rows are still moving under the pointer.
+    expect(gate()).toBe('blocked')
+
+    // The transition's own timeline has run out, but the settle frame that
+    // proves the final width is on screen has not landed yet.
+    advance(EXPAND_TRANSITION_MS)
+    expect(gate()).toBe('blocked')
+
+    advance(SETTLE_MS)
+    expect(gate()).toBe('ready')
+  })
+
+  it('shuts the gate in the commit that starts a collapse', () => {
+    const { body, gate, advance } = renderOutline()
+    fireEvent.mouseEnter(body)
+    advance(EXPAND_TRANSITION_MS + SETTLE_MS)
+    expect(gate()).toBe('ready')
+
+    fireEvent.mouseLeave(body)
+    // Still in the grace margin: nothing has changed yet.
+    advance(COLLAPSE_GRACE_MS - 1)
+    expect(gate()).toBe('ready')
+
+    // The collapse's first frame already refuses the pointer, before the panel
+    // has moved back.
+    advance(1)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    expect(gate()).toBe('blocked')
+    // Nothing re-opens it while compact.
+    advance(1000)
+    expect(gate()).toBe('blocked')
+  })
+
+  it('restarts the gate on a reversal instead of inheriting the open state', () => {
+    const { body, gate, advance } = renderOutline()
+    fireEvent.mouseEnter(body)
+    advance(20)
+    expect(gate()).toBe('blocked')
+
+    // Leave early: the collapse lands long before the first window's settle.
+    fireEvent.mouseLeave(body)
+    advance(COLLAPSE_GRACE_MS)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    advance(SETTLE_MS)
+    expect(gate()).toBe('blocked')
+
+    // Re-entering starts a fresh window rather than inheriting the dropped one.
+    fireEvent.mouseEnter(body)
+    expect(gate()).toBe('blocked')
+    advance(EXPAND_TRANSITION_MS)
+    expect(gate()).toBe('blocked')
+    advance(SETTLE_MS)
+    expect(gate()).toBe('ready')
+  })
+
+  it('settles the gate at once under reduced motion', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false
+    }))
+    const { body, gate } = renderOutline()
+    expect(gate()).toBe('blocked')
+    fireEvent.mouseEnter(body)
+    // No transition runs, so the switch is already fully expanded: the rows take
+    // the pointer in the same commit instead of waiting out a timeline.
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    expect(gate()).toBe('ready')
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Closing still shuts it immediately.
+    fireEvent.mouseLeave(body)
+    act(() => {
+      vi.advanceTimersByTime(COLLAPSE_GRACE_MS)
+    })
+    expect(gate()).toBe('blocked')
+  })
+
+  it('gates the content subtree and the row affordances, never the keyboard', () => {
+    const onNavigate = vi.fn()
+    const { container } = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} />)
+    const nav = container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = nav.firstElementChild as HTMLElement
+    const content = screen.getByTestId('conversation-nav-panel').firstElementChild as HTMLElement
+    const row = screen.getByTestId('conversation-nav-item-u1')
+
+    // Hit testing: only the content subtree is transparent, so the body keeps
+    // the wheel, its scrollbar and the gutter lane live.
+    const gateRule = rulesFor(content).find((rule) => rule.includes("[data-outline-interactive='blocked']"))
+    expect(gateRule).toBeDefined()
+    expect(gateRule).toContain('pointer-events:none')
+
+    // The pointer affordances exist only under the settled attribute.
+    const rowRules = rulesFor(row)
+    const pointerRules = rowRules.filter((rule) => rule.includes('cursor:pointer'))
+    expect(pointerRules.length).toBeGreaterThan(0)
+    const hoverRules = rowRules.filter((rule) => rule.includes(':hover'))
+    expect(hoverRules.length).toBeGreaterThan(0)
+    for (const rule of [...pointerRules, ...hoverRules]) {
+      expect(rule).toContain("[data-outline-interactive='ready']")
+    }
+
+    // Pointer navigation is refused while the gate is closed...
+    fireEvent.click(row)
+    expect(onNavigate).not.toHaveBeenCalled()
+
+    // ...and keyboard navigation is not part of the gate: the row keeps its tab
+    // stop and Enter still navigates the compact rail.
+    expect(row.getAttribute('tabindex')).toBe('0')
+    row.focus()
+    expect(document.activeElement).toBe(row)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    expect(onNavigate).toHaveBeenCalledWith('u1')
+    fireEvent.keyDown(row, { key: ' ' })
+    expect(onNavigate).toHaveBeenCalledTimes(2)
+
+    // Once settled the same click navigates.
+    fireEvent.mouseEnter(body)
+    act(() => {
+      vi.advanceTimersByTime(EXPAND_TRANSITION_MS + SETTLE_MS)
+    })
+    fireEvent.click(row)
+    expect(onNavigate).toHaveBeenCalledTimes(3)
   })
 })

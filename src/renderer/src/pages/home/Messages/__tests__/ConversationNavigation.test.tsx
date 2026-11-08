@@ -225,6 +225,21 @@ const assistantMsg = (id: string, blocks: string[]) =>
     blocks
   }) as never
 
+/**
+ * Pointer navigation the way the product now allows it: the rows take the
+ * pointer only once the expand switch has fully settled (MessageOutline's
+ * pointer gate), so a click is preceded by the expansion hover and its settle
+ * window — the same wait Playwright's actionability retries perform against the
+ * real UI, and the reason these cases stay about navigation, not about layout.
+ */
+const clickOutlineRow = async (row: HTMLElement) => {
+  const nav = row.closest('[data-testid="conversation-navigation"]') as HTMLElement
+  const panel = nav.querySelector('[data-testid="conversation-nav-panel"]') as HTMLElement
+  fireEvent.mouseEnter(nav)
+  await waitFor(() => expect(panel.getAttribute('data-outline-interactive')).toBe('ready'))
+  fireEvent.click(row)
+}
+
 describe('ConversationNavigation whole-route user list', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -261,7 +276,7 @@ describe('ConversationNavigation whole-route user list', () => {
     ])
 
     // Stable-ID navigation (not DOM/index scrolling).
-    fireEvent.click(item2)
+    await clickOutlineRow(item2)
     expect(mocks.onNavigate).toHaveBeenCalledWith('u2')
     expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', null)
     // Keyboard activation on the same original row hitbox.
@@ -288,7 +303,7 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(attachItem.textContent).toContain('[Attachment]')
     expect(attachItem.textContent).not.toContain('doc.pdf')
 
-    fireEvent.click(attachItem)
+    await clickOutlineRow(attachItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('ua')
   })
 
@@ -351,7 +366,7 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(longItem.querySelector('div')).not.toBeNull()
     expect(longItem.getAttribute('title')).toBe(longItem.textContent)
 
-    fireEvent.click(multiItem)
+    await clickOutlineRow(multiItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('u1')
   })
 
@@ -387,7 +402,7 @@ describe('ConversationNavigation whole-route user list', () => {
     const linkItem = await screen.findByTestId('conversation-nav-item-ul')
     expect(linkItem.textContent).toBe('[Link]Test')
 
-    fireEvent.click(mixed)
+    await clickOutlineRow(mixed)
     expect(mocks.onNavigate).toHaveBeenCalledWith('um')
   })
 
@@ -405,7 +420,7 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(item.textContent).toContain('[Image][Document]')
     expect(item.textContent).not.toContain('later-report.pdf')
 
-    fireEvent.click(item)
+    await clickOutlineRow(item)
     expect(mocks.onNavigate).toHaveBeenCalledWith('um')
   })
 
@@ -424,7 +439,7 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(pastedItem.textContent).toContain('[Image]')
     expect(pastedItem.textContent).not.toContain('45285c9c')
 
-    fireEvent.click(pastedItem)
+    await clickOutlineRow(pastedItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('up')
   })
 
@@ -566,7 +581,7 @@ describe('ConversationNavigation whole-route user list', () => {
 
     const { rerender } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
     const oldItem = await screen.findByTestId('conversation-nav-item-u1')
-    fireEvent.click(oldItem)
+    await clickOutlineRow(oldItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('u1')
     mocks.onNavigate.mockClear()
 
@@ -584,7 +599,7 @@ describe('ConversationNavigation whole-route user list', () => {
       blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
     } as never)
     expect(await screen.findByTestId('conversation-nav-item-u9')).toBeTruthy()
-    fireEvent.click(screen.getByTestId('conversation-nav-item-u9'))
+    await clickOutlineRow(screen.getByTestId('conversation-nav-item-u9'))
     expect(mocks.onNavigate).toHaveBeenCalledWith('u9')
   })
 
