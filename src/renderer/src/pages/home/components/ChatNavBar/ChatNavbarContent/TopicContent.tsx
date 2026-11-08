@@ -1,17 +1,28 @@
 import { loggerService } from '@logger'
-import { BranchRouteOptionRow } from '@renderer/pages/home/Messages/branchRouteOption'
+import {
+  BranchBreadcrumb,
+  type BranchCrumbSegment
+} from '@renderer/pages/home/Messages/branchSelector/BranchBreadcrumb'
+import {
+  BRANCH_POPOVER_MAX_WIDTH,
+  branchPopoverAlign,
+  type BranchPopoverFit,
+  buildBranchTreeIndex,
+  planBranchPopoverFit
+} from '@renderer/pages/home/Messages/branchSelector/branchTreeModel'
+import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
 import { dbService } from '@renderer/services/db/DbService'
-import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
-import { Button, Popover } from 'antd'
-import { ChevronDown, ChevronRight, GitFork } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Button, type GetRef, Popover, Tooltip } from 'antd'
+import { GitFork } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import styled from 'styled-components'
 
 import SelectModelButton from '../../SelectModelButton'
 import Tools from '../Tools'
@@ -23,504 +34,332 @@ type TopicContentProps = {
 }
 
 const logger = loggerService.withContext('TopicContent')
-
-// Grace window before a shorter hover chain takes effect: the pointer crossing
-// between adjacent columns passes over the shorter chain, so collapsing at once
-// would tear the column away under the cursor. Expansion stays instant so the
-// next column is already there on arrival.
-const HOVER_COLLAPSE_GRACE_MS = 150
-
-const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
-  return (
-    <div className="flex flex-1 items-center gap-2">
-      {/* Model selector (retained) */}
-      <SelectModelButton assistant={assistant} />
-
-      {/* Unified branch selector (retained with its own path display) */}
-      <BranchSelectorEntry activeTopic={activeTopic} />
-      {/* Edit/Settings tools stay pinned at the far right */}
-      <div data-testid="navbar-tools-right" className="ml-auto flex shrink-0 items-center">
-        <Tools />
-      </div>
-    </div>
-  )
-}
-
-interface BranchSelectorEntryProps {
-  activeTopic: Topic
-}
+/**
+ * Fit used before the first open planned one: the anchored left edge and the
+ * full ceiling. Module-level so it stays the same object, i.e. the align config
+ * derived from it does not change identity on every render.
+ */
+const UNMEASURED_POPOVER_FIT: BranchPopoverFit = { leftShift: 0, maxWidth: BRANCH_POPOVER_MAX_WIDTH }
 
 /**
- * Single unified top branch entry, visible in both the main route and
- * branch routes once the topic has branches (initial no-branch state hides
- * it entirely).
+ * The chat navbar's own row: model selector, the branch path of the viewed
+ * route, and the right-hand tool group.
  *
- * - Displays the breadcrumb path: logical topic / level-1 branch / level-2
- *   branch … for the active route (topic name only on the main route).
- * - Cascader-like selector: hovering/focusing a route option reveals its
- *   descendants in the next column, to arbitrary depth. Selecting switches
- *   activeBranchId while the topic stays fixed.
- * - Default expansion shows only the columns needed to place the current
- *   branch in its current column (ancestors excluding the current node):
- *   current L1 with children opens col-0 only (L1 highlighted, no child
- *   column until hover/focus on L1); current L2 opens through the
- *   L2-containing column but not L2's children. Repeat close/open resets to
- *   this default (no collapse to first column, no child over-expansion).
- * - Selection highlight is background-only (no checkmark icons).
- * - Branch management is rename/delete only, for non-null branch nodes.
+ * - The branch entry is one icon button inside that existing tool group, on
+ *   the same 30px/8px-radius shape as edit mode and settings, so it reads as a
+ *   third tool of the same kind. It is the popover's only trigger; nothing else
+ *   opens the tree.
+ * - The breadcrumb is pure navigation: every segment — the current route
+ *   included — switches through the same `requestTopRoute` entry point
+ *   (clicking the current one only closes) and never opens the panel.
+ * - The popover is a vertical branch tree, so several forks stay open at once
+ *   and a route never has to be walked column by column. Opening expands the
+ *   current route's ancestors and puts the current row on screen.
+ * - The panel's width belongs to the open session. The entry sits at the right
+ *   end of the row, so a panel that kept its right edge on the entry could only
+ *   grow leftwards and would drag the whole popover (and the entry's own click
+ *   point) with it. Instead the open reserves the room the panel may grow into
+ *   from the window's right edge, puts the left edge there through the
+ *   popover's align pass, and lets the panel grow rightwards only — up to the
+ *   budget, where names truncate instead. That pass is the placement's own
+ *   input, so its horizontal self-correction is turned off with it: neither a
+ *   wide panel nor a wide row may flip or shift the panel off that edge.
+ * - Row management belongs to the rows themselves: rename edits in place and
+ *   delete confirms through a small popconfirm, both DB-first with the catalog
+ *   refreshed after the write. The selector stays open across them.
+ * - The state lives here because this row is the natural place both the path
+ *   and the tool group are rendered from — no global store is involved.
  */
-interface CascaderOption {
-  key: string
-  branchId: string | null
-  label: string
-  selected: boolean
-  hasChildren: boolean
-}
-
-/**
- * Tail-first breadcrumb overflow at whole-segment granularity: the box holds
- * one wrap span per segment in logical order, each carrying its own leading
- * " / " separator (except the first). While it overflows, leading wraps are
- * hidden front-to-back — the remainder always starts at a segment boundary,
- * never a mid-word cut. If even the lone last segment overflows, its head is
- * trimmed character-wise behind an in-text "…" (whole glyphs only, never a
- * sliced glyph). A static "…" marker shows whenever leading wraps are hidden
- * without a trimmed tail. Direct DOM only (no React state), so scroll/resize
- * sync never re-renders.
- */
-function syncCrumbTail(
-  el: HTMLSpanElement | null,
-  lead: HTMLSpanElement | null,
-  showTail: boolean,
-  fullText: string
-): void {
-  if (!el) return
-  const kids = Array.from(el.children) as HTMLElement[]
-  // Reset: restore wraps and the original tail text.
-  kids.forEach((kid) => {
-    kid.style.display = ''
-    if (kid.dataset.origSeg !== undefined) {
-      const textNode = Array.from(kid.childNodes).find((node) => node.nodeType === 3)
-      if (textNode) textNode.textContent = kid.dataset.origSeg
-      delete kid.dataset.origSeg
-      const sep = kid.firstElementChild as HTMLElement | null
-      if (sep) sep.style.display = ''
-    }
-  })
-  el.style.textOverflow = 'ellipsis'
-  el.scrollLeft = 0
-  el.removeAttribute('aria-label')
-  if (!showTail || el.scrollWidth <= el.clientWidth + 1) {
-    if (lead) lead.style.display = 'none'
-    return
-  }
-  let guard = kids.length + 1
-  while (guard-- > 0) {
-    if (el.scrollWidth <= el.clientWidth + 1) break
-    const visible = (Array.from(el.children) as HTMLElement[]).filter((kid) => kid.style.display !== 'none')
-    // The last segment is never hidden.
-    if (visible.length <= 1) break
-    visible[0].style.display = 'none'
-  }
-  const visible = (Array.from(el.children) as HTMLElement[]).filter((kid) => kid.style.display !== 'none')
-  const hiddenCount = kids.length - visible.length
-  const last = visible[visible.length - 1]
-  let trimmed = false
-  if (last && el.scrollWidth > el.clientWidth + 1) {
-    // Lone overlong tail: trim its head behind an in-text "…", whole glyphs.
-    const textNode = Array.from(last.childNodes).find((node) => node.nodeType === 3)
-    if (textNode && textNode.textContent) {
-      const orig = textNode.textContent
-      last.dataset.origSeg = orig
-      let chars = Array.from(orig)
-      textNode.textContent = `…${chars.join('')}`
-      while (chars.length > 1 && el.scrollWidth > el.clientWidth + 1) {
-        chars = chars.slice(1)
-        textNode.textContent = `…${chars.join('')}`
-      }
-      trimmed = true
-      const sep = last.firstElementChild as HTMLElement | null
-      if (sep) sep.style.display = 'none'
-      el.setAttribute('aria-label', fullText)
-    }
-  }
-  if (!trimmed && el.scrollWidth > el.clientWidth + 1) {
-    // Last-resort residual (should not normally happen): scroll to the end.
-    // Clip while scrolled: Chromium does not paint scrolled ellipsis text.
-    el.style.textOverflow = 'clip'
-    el.scrollLeft = el.scrollWidth
-  }
-  if (lead) lead.style.display = hiddenCount > 0 && !trimmed ? '' : 'none'
-}
-
-const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
+const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const viewport = useRouteViewport()
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, activeTopic.id))
   const branchTree = useBranchTree(activeTopic.id, activeBranchId)
   const [open, setOpen] = useState(false)
-  // Explicit hover chain (null = default expansion: ancestors needed to show
-  // the current node, excluding the current node itself). Hovering an option
-  // in column C sets the chain to the path through that option, revealing
-  // the next column; arbitrary depth.
-  const [hoverPath, setHoverPath] = useState<(string | null)[] | null>(null)
-  const [renamingId, setRenamingId] = useState<string | null>(null)
-  const [draft, setDraft] = useState('')
+  /** Bumped per open so the tree always starts from the current route's ancestors. */
+  const [openCount, setOpenCount] = useState(0)
+  /**
+   * The popover's settled visibility, reported by antd once the panel is
+   * really on screen. The tree only measures from a laid-out panel, so this is
+   * its "you may measure now" signal — never the mere mount of the content.
+   */
+  const [treeVisible, setTreeVisible] = useState(false)
+  /** Row whose subtree delete is in flight, so only that row shows a spinner. */
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  /**
+   * Whether a row's delete confirmation is open. It is a ref, not state: it
+   * guards only the press that dismisses that confirmation and renders
+   * nothing.
+   */
+  const deleteConfirmRef = useRef(false)
+  const handleDeleteConfirmChange = useCallback((isOpen: boolean): void => {
+    deleteConfirmRef.current = isOpen
+  }, [])
+  /**
+   * The one closing path of the popover. The protection a row's delete
+   * confirmation asked for belongs to the open session it was raised in, so
+   * closing the selector retires it: it can never outlive its selector and
+   * swallow a later press.
+   */
+  const closeSelector = useCallback((): void => {
+    deleteConfirmRef.current = false
+    setTreeVisible(false)
+    setOpen(false)
+  }, [])
+  /**
+   * Open-session fit of the panel: where its left edge starts and how far it
+   * may grow. Planned just before the open (so the frame the panel first
+   * appears in already has its final left edge) and re-planned on window
+   * resize, which may re-constrain it; never re-planned by the panel's own
+   * content.
+   */
+  const [popoverFit, setPopoverFit] = useState<BranchPopoverFit | null>(null)
+  const entryRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<GetRef<typeof Popover>>(null)
+
+  const planFit = useCallback((): void => {
+    const rect = entryRef.current?.getBoundingClientRect()
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0
+    setPopoverFit(
+      planBranchPopoverFit({
+        triggerLeft: rect?.left ?? 0,
+        triggerWidth: rect?.width ?? 0,
+        viewportWidth
+      })
+    )
+  }, [])
+
+  // A resize may re-constrain the open session.
+  useLayoutEffect(() => {
+    if (!open) return
+    window.addEventListener('resize', planFit)
+    return () => window.removeEventListener('resize', planFit)
+  }, [open, planFit])
+
+  // The planned left edge is an align input, so it only reaches the popup on
+  // the trigger's own align pass — and the trigger does not ask for one when a
+  // changed align meets one of its built-in placements. After a re-plan the
+  // pass is therefore requested explicitly, so a shrunk window pulls the panel
+  // back inside the margin instead of leaving it at the old offset.
+  useLayoutEffect(() => {
+    if (!open) return
+    popoverRef.current?.forceAlign()
+  }, [open, popoverFit])
+
+  const panelFit: BranchPopoverFit = popoverFit ?? UNMEASURED_POPOVER_FIT
+  const popoverAlign = useMemo(() => branchPopoverAlign(panelFit), [panelFit])
 
   const branches = branchTree.branches
   const path = branchTree.path
-
-  const childrenOf = useMemo(() => {
-    const map = new Map<string | null, TopicBranchWire[]>()
-    for (const b of branches) {
-      const key = b.parentBranchId ?? null
-      const list = map.get(key) ?? []
-      list.push(b)
-      map.set(key, list)
-    }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id))
-    }
-    return map
-  }, [branches])
-
-  const byId = useMemo(() => new Map(branches.map((b) => [b.id, b])), [branches])
+  const index = useMemo(() => buildBranchTreeIndex(branches), [branches])
 
   const topicName = activeTopic.name && activeTopic.name.length > 0 ? activeTopic.name : activeTopic.id
-  const branchNames = path.map((b) => (b.name && b.name.length > 0 ? b.name : b.id))
-  const breadcrumb = path.length === 0 ? topicName : `${topicName} / ${branchNames.join(' / ')}`
-  // Segments mirror the breadcrumb string exactly (separators carry their own
-  // spans), so textContent/order stay identical while overflow can hide whole
-  // leading segments. Rendered via array (no inter-element whitespace) to
-  // keep the " / " separators exact.
-  const breadcrumbSegments = path.length === 0 ? [topicName] : [topicName, ...branchNames]
-
-  // Tail-first overflow: the breadcrumb keeps logical (root-first) order in a
-  // single line; when it overflows, whole leading segments hide front-to-back
-  // and the current branch stays visible. No direction or ordering tricks, so
-  // text order and the popover navigation are untouched. A lone title keeps
-  // the classic head-visible tail ellipsis. A static "…" prefix (sibling of
-  // the scroll box, never overlaid) marks the hidden front.
-  const crumbRef = useRef<HTMLSpanElement>(null)
-  const leadRef = useRef<HTMLSpanElement>(null)
-  const hasBranchPath = path.length > 0
-  useEffect(() => {
-    syncCrumbTail(crumbRef.current, leadRef.current, hasBranchPath, breadcrumb)
-  }, [hasBranchPath, breadcrumb])
-  useEffect(() => {
-    const el = crumbRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const keepTailVisible = (): void => syncCrumbTail(crumbRef.current, leadRef.current, hasBranchPath, breadcrumb)
-    const observer = new ResizeObserver(keepTailVisible)
-    observer.observe(el)
-    el.addEventListener('scroll', keepTailVisible, { passive: true })
-    return () => {
-      observer.disconnect()
-      el.removeEventListener('scroll', keepTailVisible)
-    }
-  }, [hasBranchPath, breadcrumb])
-
-  // Default expansion: ancestors of the current node (excluding the current
-  // node itself) — exactly the columns needed to place the current branch in
-  // its current column, never its children.
-  const defaultWalkIds = useMemo(() => path.slice(0, -1).map((b) => b.id), [path])
-  // Walk the explicit hover chain, or the default expansion when untouched,
-  // to build cascader columns: column 0 = main route + level-1 branches,
-  // each further column = children of the hovered/default option above.
-  const walkIds = hoverPath ?? defaultWalkIds
-  const columns: { parentId: string | null; options: CascaderOption[] }[] = [
-    {
-      parentId: null,
-      options: [
-        { key: '__main', branchId: null, label: topicName, selected: activeBranchId === null, hasChildren: false },
-        ...(childrenOf.get(null) ?? []).map(
-          (b): CascaderOption => ({
-            key: b.id,
-            branchId: b.id,
-            label: b.name && b.name.length > 0 ? b.name : b.id,
-            selected: b.id === activeBranchId,
-            hasChildren: (childrenOf.get(b.id) ?? []).length > 0
-          })
-        )
-      ]
-    }
-  ]
-  for (const id of walkIds) {
-    if (id === null) continue
-    const kids = childrenOf.get(id) ?? []
-    if (kids.length === 0) break
-    columns.push({
-      parentId: id,
-      options: kids.map(
-        (b): CascaderOption => ({
-          key: b.id,
-          branchId: b.id,
-          label: b.name && b.name.length > 0 ? b.name : b.id,
-          selected: b.id === activeBranchId,
-          hasChildren: (childrenOf.get(b.id) ?? []).length > 0
-        })
-      )
-    })
-  }
-
-  // Pending hover collapse. Cleared on a newer hover, on close, and on unmount
-  // so a delayed collapse can never setState into a closed/unmounted popover.
-  const hoverCollapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const clearHoverCollapse = useCallback((): void => {
-    if (hoverCollapseTimerRef.current !== null) {
-      clearTimeout(hoverCollapseTimerRef.current)
-      hoverCollapseTimerRef.current = null
-    }
-  }, [])
-  useEffect(() => {
-    return clearHoverCollapse
-  }, [clearHoverCollapse])
-
-  // Hovering/focusing an option in column C continues the chain that
-  // produced column C (walkIds[0..C)) through that option, revealing the
-  // next column; leaves truncate the chain. Arbitrary depth.
-  // Intent asymmetry: expanding or equal-length follows the pointer at once,
-  // shrinking waits out HOVER_COLLAPSE_GRACE_MS so crossing a column boundary
-  // does not drop the column the pointer is heading into. Stable reference:
-  // every option row receives it as `onHover`.
-  const hoverThrough = useCallback(
-    (colIdx: number, opt: CascaderOption): void => {
-      const prefix = walkIds.slice(0, colIdx).filter((id): id is string => id !== null)
-      const next = opt.hasChildren && opt.branchId !== null ? [...prefix, opt.branchId] : prefix
-      // Any newer hover supersedes a pending collapse.
-      clearHoverCollapse()
-      if (next.length >= walkIds.length) {
-        setHoverPath(next)
-        return
-      }
-      hoverCollapseTimerRef.current = setTimeout(() => {
-        hoverCollapseTimerRef.current = null
-        setHoverPath(next)
-      }, HOVER_COLLAPSE_GRACE_MS)
-    },
-    [clearHoverCollapse, walkIds]
-  )
-
-  // Horizontal position on open: the columns wrapper itself is
-  // overflow-visible, its real horizontal scroller is antd's popover body, so
-  // positioning is driven by the `open` transition (the content remounts on
-  // every open) and never by hover, which would fight the user's own scrolling.
-  const columnsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    // One frame: the popover content has no width before layout has run.
-    const frame = requestAnimationFrame(() => {
-      // `closest` rather than `parentElement`: the antd class name is the
-      // popover body this layout depends on, and matching by class keeps
-      // working if antd inserts wrapper elements in between.
-      const scroller = columnsRef.current?.closest('.ant-popover-inner-content')
-      if (!scroller) return
-      if (scroller.scrollWidth <= scroller.clientWidth) return
-      // Hover chain is reset on open, so the last column is the current
-      // branch's column; scrolling to the end brings it into view.
-      scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [open])
-
-  if (branches.length === 0) {
-    return null
-  }
-
+  const segments = useMemo<BranchCrumbSegment[]>(() => {
+    const branchSegments = path.map((branch) => ({
+      branchId: branch.id,
+      label: branch.name && branch.name.length > 0 ? branch.name : branch.id
+    }))
+    return [{ branchId: null, label: topicName }, ...branchSegments]
+  }, [path, topicName])
+  const fullLabel = segments.map((segment) => segment.label).join(' / ')
   const switchRoute = (branchId: string | null): void => {
-    // Closing here drops the popover without an onOpenChange call, so a
-    // pending collapse must be cancelled here too.
-    clearHoverCollapse()
-    if (branchId === activeBranchId) {
-      setOpen(false)
-      return
-    }
-    // Single controller entry: synchronously freeze the outgoing DISPLAYED
-    // route's snapshot, open the top transition session, then dispatch. The
-    // target window is chosen from the NEW route's own saved anchor
-    // (`messageId` + `intraRowOffset`); a target with no snapshot takes its
-    // deterministic route-local default (bottom); never outgoing geometry.
-    // The message list adopts this session (same epoch) for fetch/position/
-    // reveal/commit — no second request, no second epoch.
+    closeSelector()
+    if (branchId === activeBranchId) return
+    // Single controller entry: freeze the outgoing DISPLAYED route's snapshot,
+    // open the top transition session, then dispatch. The target window is
+    // chosen from the NEW route's own saved anchor; a target with no snapshot
+    // takes its deterministic route-local default (bottom) — never outgoing
+    // geometry. The message list adopts this session (same epoch) for
+    // fetch/position/reveal/commit — no second request, no second epoch.
     try {
       viewport.requestTopRoute(activeTopic.id, branchId)
     } catch {
-      // fail-closed: route switch proceeds; target falls back to its default
+      // fail-closed: the route switch proceeds; target falls back to its default
     }
-    setOpen(false)
-    setHoverPath(null)
   }
 
-  const commitRename = async (branchId: string): Promise<void> => {
-    const next = draft.trim()
-    if (next.length === 0) {
-      setRenamingId(null)
-      return
-    }
+  /**
+   * Inline rename commit, DB-first: the row keeps its place while the write is
+   * in flight and the refreshed catalog then carries the stored name.
+   */
+  const commitRename = async (branchId: string, next: string): Promise<void> => {
     try {
       await dbService.renameBranch(activeTopic.id, branchId, next)
       requestTopicBranches(dispatch, activeTopic.id)
-      setRenamingId(null)
     } catch (error) {
-      logger.error('[BranchSelectorEntry] Failed to rename branch:', error as Error)
+      logger.error('[TopicContent] Failed to rename branch:', error as Error)
       window.toast.error(t('common.error'))
-      setRenamingId(null)
     }
   }
 
-  // Escape leaves the editor without writing anything: the draft is dropped
-  // and the next edit starts over from the branch's stored name.
-  const cancelRename = (): void => {
-    setRenamingId(null)
-    setDraft('')
-  }
-
+  /** Popconfirm delete commit: the subtree delete owns the route fallback. */
   const confirmDelete = async (branchId: string): Promise<void> => {
     setDeletingId(branchId)
     try {
-      const { fallbackBranchId } = await deleteBranchSubtree(activeTopic.id, branchId, activeBranchId)
-      void fallbackBranchId
+      // The subtree delete owns the route fallback; never switch here.
+      await deleteBranchSubtree(activeTopic.id, branchId, activeBranchId)
       requestTopicBranches(dispatch, activeTopic.id)
       window.toast.success(t('chat.topics.branch.deleted'))
     } catch (error) {
-      logger.error('[BranchSelectorEntry] Failed to delete branch:', error as Error)
+      logger.error('[TopicContent] Failed to delete branch:', error as Error)
       window.toast.error(t('common.error'))
     } finally {
+      deleteConfirmRef.current = false
       setDeletingId(null)
     }
   }
 
+  // Escape closes the popover. A row editor takes Escape for itself and stops
+  // the event, so cancelling an edit never closes the whole selector.
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      closeSelector()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [open, closeSelector])
+
+  // A never-branched topic keeps the plain navbar: no path, no branch tool.
+  const hasBranches = branches.length > 0
+
   const content = (
-    <div ref={columnsRef} data-testid="branch-selector-popover" style={{ display: 'flex', maxWidth: 560 }}>
-      {columns.map((col, colIdx) => (
-        <div
-          key={colIdx}
-          data-testid={`branch-cascader-col-${colIdx}`}
-          style={{
-            minWidth: 160,
-            maxWidth: 220,
-            borderLeft: colIdx > 0 ? '1px solid var(--color-border)' : undefined
-          }}>
-          {col.options.map((opt) => {
-            const isBranch = opt.branchId !== null
-            const renaming = isBranch && renamingId === opt.branchId
-            return (
-              <BranchRouteOptionRow
-                key={opt.key}
-                branchId={opt.branchId}
-                label={opt.label}
-                selected={opt.selected}
-                testIdPrefix="branch-cascader"
-                renaming={renaming}
-                draft={draft}
-                onDraftChange={setDraft}
-                onCommitRename={() => void commitRename(opt.branchId as string)}
-                onCancelRename={cancelRename}
-                onStartRename={() => {
-                  const node = byId.get(opt.branchId as string)
-                  setDraft(node?.name ?? '')
-                  setRenamingId(opt.branchId)
-                }}
-                onConfirmDelete={() => void confirmDelete(opt.branchId as string)}
-                deleting={deletingId === opt.branchId}
-                renameLabel={t('chat.topics.branch.rename')}
-                deleteLabel={t('chat.topics.branch.delete')}
-                deleteConfirmTitle={t('chat.topics.branch.delete_confirm')}
-                hasChildrenIndicator={opt.hasChildren}
-                onSelect={() => switchRoute(opt.branchId)}
-                onHover={() => hoverThrough(colIdx, opt)}
-              />
-            )
-          })}
-        </div>
-      ))}
-    </div>
+    <BranchTreePanel
+      key={openCount}
+      index={index}
+      topicName={topicName}
+      activeBranchId={activeBranchId}
+      visible={treeVisible}
+      deletingBranchId={deletingId}
+      onDeleteConfirmChange={handleDeleteConfirmChange}
+      onSelectRoute={switchRoute}
+      onCommitRename={commitRename}
+      onConfirmDelete={confirmDelete}
+      maxWidth={panelFit.maxWidth}
+    />
   )
 
   return (
-    <>
-      {/* Separator */}
-      <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
-      <Popover
-        content={content}
-        trigger="click"
-        placement="bottomLeft"
-        open={open}
-        onOpenChange={(v) => {
-          setOpen(v)
-          // Every open and every close resets to the default expansion so
-          // repeat close/open preserves the same no-over-expansion behavior.
-          // Clearing the pending collapse keeps it from landing after the
-          // reset (and after the popover content is gone).
-          clearHoverCollapse()
-          setHoverPath(null)
-          if (!v) {
-            setRenamingId(null)
-          }
-        }}
-        destroyOnHidden>
-        <Button
-          data-testid="branch-selector-entry"
-          type="text"
-          size="small"
-          autoInsertSpace={false}
-          icon={<GitFork size={14} />}
-          // Cap against the toolbar budget (320px) and the live navbar column
-          // (100cqw of the navbar scroll container): in a narrow window the
-          // entry shrinks instead of overflowing the navbar, so the crumb's
-          // own tail-first hiding stays user-visible and the tools stay pinned.
-          // Plain % won't do: ancestors are content-sized in the scroll
-          // context, so % never reflects the visible column width.
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            maxWidth: 'min(320px, 100cqw)',
-            minWidth: 0,
-            overflow: 'hidden'
-          }}>
-          <span
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              flex: '1 1 auto',
-              minWidth: 0,
-              maxWidth: '100%',
-              overflow: 'hidden',
-              fontSize: 12
-            }}>
-            {/* Leading overflow marker: in normal flow (never overlaid), so no
-              theme background matching is needed; shown only while scrolled. */}
-            <span ref={leadRef} aria-hidden="true" style={{ display: 'none', flex: '0 0 auto', marginRight: 2 }}>
-              …
-            </span>
-            <span
-              ref={crumbRef}
-              data-testid="branch-selector-breadcrumb"
-              title={breadcrumb}
-              style={{
-                display: 'block',
-                flex: '1 1 auto',
-                minWidth: 0,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap'
-              }}>
-              {breadcrumbSegments.map((segment, index) => (
-                <span key={index}>
-                  {index > 0 && <span>{' / '}</span>}
-                  {segment}
-                </span>
-              ))}
-            </span>
-          </span>
-          <ChevronDown size={13} className="shrink-0" />
-        </Button>
-      </Popover>
-    </>
+    <div className="flex flex-1 items-center gap-2">
+      {/* Model selector (retained) */}
+      <SelectModelButton assistant={assistant} />
+
+      {hasBranches ? (
+        <BranchBreadcrumb
+          segments={segments}
+          fullLabel={fullLabel}
+          segmentTestId={(branchId) => `branch-crumb-${branchId ?? 'main'}`}
+          onSelect={switchRoute}
+        />
+      ) : null}
+
+      {/* Edit / branch / settings share one right-hand tool group. */}
+      <div data-testid="navbar-tools-right" className="ml-auto flex shrink-0 items-center gap-2">
+        {hasBranches ? (
+          <Popover
+            ref={popoverRef}
+            content={content}
+            trigger="click"
+            // Anchored on the entry's left edge: content growth extends to the
+            // right instead of pushing the panel away from the entry.
+            placement="bottomLeft"
+            arrow={false}
+            // The popup's own align pass places it: it starts at the left edge
+            // this open reserved, and its horizontal self-correction is off, so
+            // a growing panel never flips or shifts away from that edge (the
+            // anchor, and the entry's click point, never move).
+            align={popoverAlign}
+            styles={{ body: { padding: 0 } }}
+            open={open}
+            afterOpenChange={(next) => setTreeVisible(next)}
+            onOpenChange={(next) => {
+              if (next) {
+                // Planned before the panel mounts, so the first frame it
+                // appears in already carries its final left edge.
+                planFit()
+                setOpenCount((count) => count + 1)
+                setOpen(true)
+                return
+              }
+              // A row's delete confirmation reports itself through this flag.
+              // It lives in its own popup layer, so the press that dismisses
+              // it arrives here as an outside press as well: that one press
+              // belongs to the confirmation and is spent on it. Closing the
+              // selector through any other path retires the flag with it, so
+              // it can never swallow a later press.
+              if (deleteConfirmRef.current) {
+                deleteConfirmRef.current = false
+                return
+              }
+              closeSelector()
+            }}
+            destroyOnHidden>
+            <Tooltip title={t('chat.topics.branch.tag')} mouseEnterDelay={0.8}>
+              <BranchIconButton
+                ref={entryRef}
+                data-testid="branch-selector-entry"
+                type="text"
+                autoInsertSpace={false}
+                aria-label={t('chat.topics.branch.tag')}
+                aria-haspopup="dialog"
+                aria-expanded={open}>
+                <GitFork size={18} />
+              </BranchIconButton>
+            </Tooltip>
+          </Popover>
+        ) : null}
+        <Tools />
+      </div>
+    </div>
   )
 }
+
+/**
+ * The branch tool: icon only, on the same shape as the neighbouring navbar
+ * icons (30px tall, 8px radius, icon colour from the navbar palette). While the
+ * panel is open it takes the same active shape as the edit-mode toggle — the
+ * accent surface with a light glyph — so the group shows which tool is active
+ * without a text pill.
+ */
+const BranchIconButton = styled(Button)`
+  &&& {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--color-icon);
+    box-shadow: none;
+    transition:
+      background-color 0.2s ease-in-out,
+      color 0.2s ease-in-out;
+
+    &:hover {
+      background: var(--color-background-mute);
+      color: var(--color-text-1);
+    }
+
+    &[aria-expanded='true'],
+    &[aria-expanded='true']:hover {
+      background: var(--color-primary);
+      color: var(--color-icon-white);
+
+      /* The glyph carries its own colour in the app's icon layer (the same
+         override the edit-mode toggle relies on). */
+      .lucide {
+        color: var(--color-icon-white);
+      }
+    }
+
+    &[aria-expanded='true']:hover {
+      opacity: 0.85;
+    }
+  }
+`
 
 export default TopicContent

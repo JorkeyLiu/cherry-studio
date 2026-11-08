@@ -1295,6 +1295,7 @@
         "children": "分支",
         "children_here": "此处有 {{count}} 条分支",
         "collapse": "收起分支",
+        "collapse_all": "全部折叠",
         "current": "当前",
         "default_name": "新建分支",
         "delete": "删除分支",

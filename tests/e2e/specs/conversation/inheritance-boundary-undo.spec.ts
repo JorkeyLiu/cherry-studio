@@ -52,8 +52,10 @@
  * - owner message menubar delete: `[data-testid="message-delete-button"]` inside the rendered
  *   `[id="message-<id>"][data-message-id="<id>"]` container (the real `deleteMessageWithUndo`
  *   entry; the product's optional delete confirmation is confirmed when the setting shows it).
- * - topic-header branch selector: `branch-selector-entry` → `branch-cascader-col-0` →
+ * - topic-header branch selector: `branch-selector-entry` → `branch-selector-popover` →
  *   `branch-cascader-item-<branchId>` (a real route switch, used to establish a narrow window).
+ *   Level-1 rows are visible as soon as the tree opens; deeper rows need their ancestor
+ *   chevrons (the row's `.ant-tree-switcher` slot) expanded first.
  */
 import { expect, test } from '../../fixtures/electron.fixture'
 import {
@@ -764,7 +766,7 @@ async function deleteMessageViaMenubar(page: any, messageId: string): Promise<vo
 async function switchRouteViaTopSelector(page: any, branchId: string | null): Promise<void> {
   await page.locator('[data-testid="branch-selector-entry"]').first().click()
   await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
-  await expect(page.locator('[data-testid="branch-cascader-col-0"]').first()).toBeVisible({ timeout: 15000 })
+  // The vertical tree renders the route rows directly; no cascader columns exist.
   const item = page.locator(`[data-testid="branch-cascader-item-${branchId ?? 'main'}"]`).first()
   await expect(item, `the topic-header selector must offer route ${branchId ?? 'main'}`).toBeVisible({
     timeout: 15000

@@ -1295,6 +1295,7 @@
         "children": "Branches",
         "children_here": "{{count}} branches here",
         "collapse": "Collapse branch",
+        "collapse_all": "Collapse all",
         "current": "Current",
         "default_name": "New Branch",
         "delete": "Delete Branch",

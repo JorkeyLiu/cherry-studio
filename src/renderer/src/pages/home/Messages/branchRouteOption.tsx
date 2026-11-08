@@ -15,6 +15,44 @@ import { useEffect, useRef } from 'react'
  * - No data logic: the caller owns flat vs cascader structure. Dividers pass
  *   a flat peer set only; multi-column cascading stays in the top selector.
  */
+
+/**
+ * Shared inline-rename input behaviour for branch rows.
+ *
+ * Enter or blur commits the draft, Escape cancels it. Cancelling unmounts the
+ * editor, which can still emit a blur: the cancel path arms a guard first so
+ * that blur never reaches `onCommitRename`, and starting the next edit
+ * disarms it again.
+ */
+export function useBranchRenameInput(args: {
+  renaming: boolean
+  onCommitRename: () => void
+  onCancelRename: () => void
+}): {
+  onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void
+  onBlur: () => void
+} {
+  const { renaming, onCommitRename, onCancelRename } = args
+  const renameCancelled = useRef(false)
+  useEffect(() => {
+    if (renaming) renameCancelled.current = false
+  }, [renaming])
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== 'Escape') return
+    // Cancelling the edit is the whole intent: keep the surrounding popover
+    // open (Escape would otherwise also close it).
+    event.preventDefault()
+    event.stopPropagation()
+    renameCancelled.current = true
+    onCancelRename()
+  }
+  const onBlur = (): void => {
+    if (renameCancelled.current) return
+    onCommitRename()
+  }
+  return { onKeyDown, onBlur }
+}
+
 export interface BranchRouteOptionRowProps {
   branchId: string | null
   label: string
@@ -61,26 +99,13 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
     onSelect,
     onHover
   } = props
-  // Cancelling unmounts the editor, which can still emit a blur. The cancel
-  // path arms this guard first so that blur never reaches `onCommitRename`;
-  // starting a new edit disarms it again.
-  const renameCancelled = useRef(false)
-  useEffect(() => {
-    if (renaming) renameCancelled.current = false
-  }, [renaming])
-  const handleRenameKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
-    if (event.key !== 'Escape') return
-    // Cancelling the edit is the whole intent: keep the surrounding popover
-    // open (Escape would otherwise also close it).
-    event.preventDefault()
-    event.stopPropagation()
-    renameCancelled.current = true
-    onCancelRename()
-  }
-  const handleRenameBlur = (): void => {
-    if (renameCancelled.current) return
-    onCommitRename()
-  }
+  // Enter or blur commits the draft; Escape cancels it without a follow-up
+  // blur commit. The same guard is reused by the top selector's tree rows.
+  const { onKeyDown: handleRenameKeyDown, onBlur: handleRenameBlur } = useBranchRenameInput({
+    renaming,
+    onCommitRename,
+    onCancelRename
+  })
   const isBranch = branchId !== null
   const rowTestId =
     testIdPrefix === 'branch-cascader'

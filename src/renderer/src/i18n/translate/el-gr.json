@@ -1264,6 +1264,7 @@
         "children": "[to be translated]:Branches",
         "children_here": "[to be translated]:{{count}} branches here",
         "collapse": "[to be translated]:Collapse branch",
+        "collapse_all": "Σύμπτυξη όλων",
         "current": "[to be translated]:Current",
         "default_name": "[to be translated]:New Branch",
         "delete": "[to be translated]:Delete Branch",

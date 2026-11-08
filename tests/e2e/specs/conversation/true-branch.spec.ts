@@ -14,10 +14,11 @@
  *    src/renderer/src/pages/home/components/ChatNavBar/ChatNavbarContent/__tests__/TopicContent.branch.test.tsx;
  *    this journey uses flat divider peer
  *    navigation for every L1↔L2 and L1→main switch, keeping only a small
- *    top-selector smoke (open, initial col/breadcrumb, col-0 subtree
- *    delete, post-delete absence).
- * 3. Real top-selector rename (branch-rename-btn-*) renames DB-first; the
- *    divider + breadcrumb show the new name; the topic name is untouched.
+ *    top-selector smoke (open, breadcrumb, direct row-control subtree delete
+ *    through its popconfirm, post-delete absence).
+ * 3. Real top-selector rename (direct `branch-rename-btn-*` → inline editor →
+ *    Enter) renames DB-first; the divider + breadcrumb show the new name; the
+ *    topic name is untouched.
  * 4. Bounded nested fork (parent = L1): an IPC createBranch on an
  *    INHERITED message rejects (parent-owned anchors only, including the
  *    parent fork anchor itself); an IPC createBranch on the L1-owned suffix
@@ -610,10 +611,12 @@ test.describe('Topic-internal branches end-to-end', () => {
     await test.step('rename L1 + nested fork L2', async () => {
       await page.locator('[data-testid="branch-selector-entry"]').first().click()
       await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+      // Non-root rows carry their own rename control: no submenu, no dialog.
       await page.locator(`[data-testid="branch-rename-btn-${branch1Id}"]`).first().click()
       const renameInput = page.locator('[data-testid="branch-selector-rename-input"]').first()
       await expect(renameInput).toBeVisible({ timeout: 10000 })
       await renameInput.fill('E2E Renamed Branch')
+      // Enter commits the inline editor; the write stays DB-first.
       await renameInput.press('Enter')
       await expect(page.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
         'E2E Renamed Branch',
@@ -1199,8 +1202,19 @@ test.describe('Topic-internal branches end-to-end', () => {
       const backL2Item = backL2List.locator(`[data-testid="branch-fork-item-${branch2Id}"]`).first()
       await expect(backL2Item, 'child L2 must be offered in the flat peer list').toBeVisible({ timeout: 15000 })
       await backL2Item.click()
-      await expect(page.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
-        'E2E Renamed Branch',
+      // L1 ("E2E Renamed Branch") is a middle ancestor of the L2 route here, and
+      // middle ancestors are omitted as `…` when the path does not fit, so the
+      // full path is proven by the crumb's accessible name (title/aria-label),
+      // never by forcing a hidden ancestor back into visible text.
+      const l2Breadcrumb = page.locator('[data-testid="branch-selector-breadcrumb"]').first()
+      await expect(l2Breadcrumb, 'breadcrumb title must carry the full branch path').toHaveAttribute(
+        'title',
+        /E2E Renamed Branch/,
+        { timeout: 30000 }
+      )
+      await expect(l2Breadcrumb, 'breadcrumb aria-label must carry the full branch path').toHaveAttribute(
+        'aria-label',
+        /E2E Renamed Branch/,
         { timeout: 30000 }
       )
       await page.waitForFunction(
@@ -1355,10 +1369,13 @@ test.describe('Topic-internal branches end-to-end', () => {
         sourceTopicId
       )
       expect(relaunchedL2Ids, 'relaunched L2 resident must be exactly the L2 effective route').toEqual(l2ExpectedIds)
-      await expect(page2.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
-        'E2E Renamed Branch',
-        { timeout: 30000 }
-      )
+      // L1 is a middle ancestor of the restored L2 route, and middle ancestors
+      // are omitted as `…` when the path does not fit — the full path is proven
+      // through the crumb's accessible name instead of visible text.
+      await expect(
+        page2.locator('[data-testid="branch-selector-breadcrumb"]').first(),
+        'breadcrumb title must carry the full branch path'
+      ).toHaveAttribute('title', /E2E Renamed Branch/, { timeout: 30000 })
       const relaunchedBranchId: string | null = await page2.evaluate(
         (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
         sourceTopicId
@@ -1370,21 +1387,24 @@ test.describe('Topic-internal branches end-to-end', () => {
       })
 
       // 8. Top-selector smoke kept to what the durable workflow genuinely
-      // needs (cascader depth/hover/focus lives in
-      // src/renderer/src/pages/home/components/ChatNavBar/ChatNavbarContent/__tests__/TopicContent.branch.test.tsx):
-      // open the selector, prove the initial
-      // column + breadcrumb, delete the L1 subtree through col-0, then prove
-      // the post-delete selector absence. No child-column navigation here.
+      // needs (tree expansion/hover/live geometry lives in
+      // src/renderer/src/pages/home/components/ChatNavBar/ChatNavbarContent/__tests__/TopicContent.branch.test.tsx
+      // and the geometry unit suite): open the selector, prove the breadcrumb
+      // and the L1 row, delete the L1 subtree through the row menu, then prove
+      // the post-delete selector absence. No deeper-row navigation here.
       await page2.locator('[data-testid="branch-selector-entry"]').first().click()
       await expect(page2.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
-      await expect(page2.locator('[data-testid="branch-cascader-col-0"]').first()).toBeVisible({ timeout: 15000 })
-      await expect(page2.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
-        'E2E Renamed Branch',
-        { timeout: 30000 }
-      )
+      // Same ancestor semantics with the selector open: L1 stays a middle
+      // ancestor of the restored L2 route (never the current segment), so its
+      // presence is proven by the crumb's accessible name, not visible text.
+      await expect(
+        page2.locator('[data-testid="branch-selector-breadcrumb"]').first(),
+        'breadcrumb title must carry the full branch path'
+      ).toHaveAttribute('title', /E2E Renamed Branch/, { timeout: 30000 })
       await expect(page2.locator(`[data-testid="branch-cascader-item-${branch1Id}"]`).first()).toBeVisible({
         timeout: 15000
       })
+      // Direct row control: the confirmation is a popconfirm, not a dialog.
       await page2.locator(`[data-testid="branch-delete-btn-${branch1Id}"]`).first().click()
       await page2.locator('.ant-popconfirm-buttons .ant-btn-primary').first().click()
       await page2.waitForFunction(
