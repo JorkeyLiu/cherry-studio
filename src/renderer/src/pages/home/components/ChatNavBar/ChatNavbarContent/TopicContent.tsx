@@ -19,7 +19,7 @@ import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { Button, type GetRef, Popover, Tooltip } from 'antd'
-import { GitFork } from 'lucide-react'
+import { GitBranch } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
@@ -42,28 +42,28 @@ const logger = loggerService.withContext('TopicContent')
 const UNMEASURED_POPOVER_FIT: BranchPopoverFit = { leftShift: 0, maxWidth: BRANCH_POPOVER_MAX_WIDTH }
 
 /**
- * The chat navbar's own row: model selector, the branch path of the viewed
- * route, and the right-hand tool group.
+ * The chat navbar's own row: model selector, the branch selector entry, the
+ * branch path of the viewed route, and the right-hand tool group.
  *
- * - The branch entry is one icon button inside that existing tool group, on
- *   the same 30px/8px-radius shape as edit mode and settings, so it reads as a
- *   third tool of the same kind. It is the popover's only trigger; nothing else
- *   opens the tree.
+ * - The branch entry is one icon button immediately left of the path, on the
+ *   same 30px/8px-radius shape as the navbar's other tools, so the row reads
+ *   model selector, branch entry, branch path, then the right-hand tools. It
+ *   is the popover's only trigger; nothing else opens the tree.
  * - The breadcrumb is pure navigation: every segment — the current route
  *   included — switches through the same `requestTopRoute` entry point
  *   (clicking the current one only closes) and never opens the panel.
  * - The popover is a vertical branch tree, so several forks stay open at once
  *   and a route never has to be walked column by column. Opening expands the
  *   current route's ancestors and puts the current row on screen.
- * - The panel's width belongs to the open session. The entry sits at the right
- *   end of the row, so a panel that kept its right edge on the entry could only
- *   grow leftwards and would drag the whole popover (and the entry's own click
- *   point) with it. Instead the open reserves the room the panel may grow into
- *   from the window's right edge, puts the left edge there through the
- *   popover's align pass, and lets the panel grow rightwards only — up to the
- *   budget, where names truncate instead. That pass is the placement's own
- *   input, so its horizontal self-correction is turned off with it: neither a
- *   wide panel nor a wide row may flip or shift the panel off that edge.
+ * - The panel's width belongs to the open session. The entry anchors the
+ *   panel's left edge, so the panel only grows rightwards; the open therefore
+ *   reserves the room the panel may grow into from the window's right edge,
+ *   puts the left edge there through the popover's align pass, and lets the
+ *   panel grow up to the budget, where names truncate instead. That pass is
+ *   the placement's own input, so its horizontal self-correction is turned off
+ *   with it: neither a wide panel nor a wide row may flip or shift the panel
+ *   off that edge — a narrow window moves the reserved left edge instead, so
+ *   the panel still ends inside the margin.
  * - Row management belongs to the rows themselves: rename edits in place and
  *   delete confirms through a small popconfirm, both DB-first with the catalog
  *   refreshed after the write. The selector stays open across them.
@@ -246,6 +246,62 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
       {/* Model selector (retained) */}
       <SelectModelButton assistant={assistant} />
 
+      {/* The branch selector trigger: immediately left of the path it opens. */}
+      {hasBranches ? (
+        <Popover
+          ref={popoverRef}
+          content={content}
+          trigger="click"
+          // Anchored on the entry's left edge: content growth extends to the
+          // right instead of pushing the panel away from the entry.
+          placement="bottomLeft"
+          arrow={false}
+          // The popup's own align pass places it: it starts at the left edge
+          // this open reserved, and its horizontal self-correction is off, so
+          // a growing panel never flips or shifts away from that edge (the
+          // anchor, and the entry's click point, never move).
+          align={popoverAlign}
+          styles={{ body: { padding: 0 } }}
+          open={open}
+          afterOpenChange={(next) => setTreeVisible(next)}
+          onOpenChange={(next) => {
+            if (next) {
+              // Planned before the panel mounts, so the first frame it
+              // appears in already carries its final left edge.
+              planFit()
+              setOpenCount((count) => count + 1)
+              setOpen(true)
+              return
+            }
+            // A row's delete confirmation reports itself through this flag.
+            // It lives in its own popup layer, so the press that dismisses
+            // it arrives here as an outside press as well: that one press
+            // belongs to the confirmation and is spent on it. Closing the
+            // selector through any other path retires the flag with it, so
+            // it can never swallow a later press.
+            if (deleteConfirmRef.current) {
+              deleteConfirmRef.current = false
+              return
+            }
+            closeSelector()
+          }}
+          destroyOnHidden>
+          <Tooltip title={t('chat.topics.branch.tag')} mouseEnterDelay={0.8}>
+            <BranchIconButton
+              ref={entryRef}
+              data-testid="branch-selector-entry"
+              className="shrink-0"
+              type="text"
+              autoInsertSpace={false}
+              aria-label={t('chat.topics.branch.tag')}
+              aria-haspopup="dialog"
+              aria-expanded={open}>
+              <GitBranch size={18} />
+            </BranchIconButton>
+          </Tooltip>
+        </Popover>
+      ) : null}
+
       {hasBranches ? (
         <BranchBreadcrumb
           segments={segments}
@@ -255,61 +311,8 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
         />
       ) : null}
 
-      {/* Edit / branch / settings share one right-hand tool group. */}
+      {/* Edit / settings share one right-hand tool group. */}
       <div data-testid="navbar-tools-right" className="ml-auto flex shrink-0 items-center gap-2">
-        {hasBranches ? (
-          <Popover
-            ref={popoverRef}
-            content={content}
-            trigger="click"
-            // Anchored on the entry's left edge: content growth extends to the
-            // right instead of pushing the panel away from the entry.
-            placement="bottomLeft"
-            arrow={false}
-            // The popup's own align pass places it: it starts at the left edge
-            // this open reserved, and its horizontal self-correction is off, so
-            // a growing panel never flips or shifts away from that edge (the
-            // anchor, and the entry's click point, never move).
-            align={popoverAlign}
-            styles={{ body: { padding: 0 } }}
-            open={open}
-            afterOpenChange={(next) => setTreeVisible(next)}
-            onOpenChange={(next) => {
-              if (next) {
-                // Planned before the panel mounts, so the first frame it
-                // appears in already carries its final left edge.
-                planFit()
-                setOpenCount((count) => count + 1)
-                setOpen(true)
-                return
-              }
-              // A row's delete confirmation reports itself through this flag.
-              // It lives in its own popup layer, so the press that dismisses
-              // it arrives here as an outside press as well: that one press
-              // belongs to the confirmation and is spent on it. Closing the
-              // selector through any other path retires the flag with it, so
-              // it can never swallow a later press.
-              if (deleteConfirmRef.current) {
-                deleteConfirmRef.current = false
-                return
-              }
-              closeSelector()
-            }}
-            destroyOnHidden>
-            <Tooltip title={t('chat.topics.branch.tag')} mouseEnterDelay={0.8}>
-              <BranchIconButton
-                ref={entryRef}
-                data-testid="branch-selector-entry"
-                type="text"
-                autoInsertSpace={false}
-                aria-label={t('chat.topics.branch.tag')}
-                aria-haspopup="dialog"
-                aria-expanded={open}>
-                <GitFork size={18} />
-              </BranchIconButton>
-            </Tooltip>
-          </Popover>
-        ) : null}
         <Tools />
       </div>
     </div>

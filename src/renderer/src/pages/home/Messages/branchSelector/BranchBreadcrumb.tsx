@@ -14,7 +14,7 @@ import { chooseCrumbEntries, type CrumbEntry } from './branchTreeModel'
  *
  * Two boxes, two jobs:
  *
- * - the slot is the flex item between the model selector and the tool group, so
+ * - the slot is the flex item between the branch entry and the tool group, so
  *   the path gets every pixel the row does not need elsewhere (no arbitrary cap
  *   of its own);
  * - the plate inside it hugs the path — dark, rounded, thin bordered — and the
@@ -171,7 +171,7 @@ export const BranchBreadcrumb = ({ segments, fullLabel, segmentTestId, onSelect 
 }
 
 /**
- * The flex item: it takes whatever the row has left between the model selector
+ * The flex item: it takes whatever the row has left between the branch entry
  * and the tool group, so the path is never squeezed to an arbitrary width. It
  * has no visual identity of its own.
  */

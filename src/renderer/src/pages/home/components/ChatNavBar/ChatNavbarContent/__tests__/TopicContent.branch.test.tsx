@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 /**
  * Behaviour contract for the unified top branch selector.
  *
- * The entry is one icon-only button inside the navbar's right-hand tool group
- * (next to edit mode and settings), and it is the only thing that opens the
- * panel. The selector is a vertical branch tree: opening it expands the current
+ * The entry is one icon-only button immediately left of the path it opens — the
+ * row reads model selector, branch entry, path, then the right-hand tool group
+ * — and it is the only thing that opens the panel. The selector is a vertical
+ * branch tree: opening it expands the current
  * route's ancestors, the chevron slot expands/collapses without switching, the
  * name switches route and closes, hover/focus never changes expansion, and
  * several forks stay open at once. Non-root rows carry their rename/delete
@@ -180,6 +181,10 @@ function renderTopicContent(): ReturnType<typeof render> {
     </RouteViewportProvider>
   )
 }
+
+/** True when `first` really precedes `second` in document order. */
+const precedes = (first: Element, second: Element): boolean =>
+  (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
 
 const rowOf = (id: string): HTMLElement => screen.getByTestId(`branch-cascader-item-${id}`)
 const switcherOf = (id: string): HTMLElement => {
@@ -1052,19 +1057,30 @@ describe('TopicContent unified branch selector', () => {
     expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
   })
 
-  it('keeps the model selector, the path and the branch entry inside the right tool group', () => {
+  it('orders the row model selector, branch entry, then path, with the entry outside the right tool group', () => {
     setTree([b1(), b2()], [], null)
     renderTopicContent()
     expect(screen.queryByTestId('mock-emoji')).not.toBeInTheDocument()
-    expect(screen.getByTestId('mock-model-btn')).toBeInTheDocument()
     expect(screen.getByTestId('branch-selector-breadcrumb')).toHaveTextContent('Runtopic')
+
+    const model = screen.getByTestId('mock-model-btn')
+    const entry = screen.getByTestId('branch-selector-entry')
+    const crumbSlot = screen.getByTestId('branch-crumb-slot')
     const tools = screen.getByTestId('navbar-tools-right')
+
+    // The tool group is still the right-aligned end of the row, and the branch
+    // entry is no longer one of its tools.
     expect(tools.className).toMatch(/ml-auto/)
-    // The branch tool sits in that same group, next to edit mode and settings.
-    expect(within(tools).getByTestId('branch-selector-entry')).toBeInTheDocument()
     expect(within(tools).getByTestId('mock-tools')).toBeInTheDocument()
+    expect(within(tools).queryByTestId('branch-selector-entry')).not.toBeInTheDocument()
     // The path plate is its own element: the tool group is not inside it.
     expect(within(tools).queryByTestId('branch-selector-breadcrumb')).not.toBeInTheDocument()
+
+    // DOM order: model selector, the entry immediately before the path, then
+    // the path, then the tool group.
+    expect(precedes(model, entry)).toBe(true)
+    expect(precedes(entry, crumbSlot)).toBe(true)
+    expect(precedes(crumbSlot, tools)).toBe(true)
   })
 
   it('renders the branch entry as an icon-only button that reports its open state', async () => {

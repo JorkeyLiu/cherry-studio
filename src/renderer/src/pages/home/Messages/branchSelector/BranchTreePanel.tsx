@@ -803,8 +803,6 @@ const Scroller = styled.div`
   overflow-x: hidden;
   /* Room for the 6px the chevron hit target reaches left of its slot. */
   padding: 6px 6px 8px;
-  overflow-x: hidden;
-  scrollbar-width: thin;
 `
 
 const Content = styled.div`
