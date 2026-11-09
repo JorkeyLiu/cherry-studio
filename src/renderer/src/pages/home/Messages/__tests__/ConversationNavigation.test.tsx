@@ -3,6 +3,12 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+/**
+ * The navigator body: the container's only element child is the hover halo, and
+ * the halo's only element child is the body.
+ */
+const outlineBody = (nav: Element | null | undefined) => nav?.firstElementChild?.firstElementChild as HTMLElement
+
 const mocks = vi.hoisted(() => {
   const onNavigate = vi.fn()
   const loadWholeTopicSnapshot = vi.fn()
@@ -735,16 +741,16 @@ describe('ConversationNavigation whole-route user list', () => {
 
     await screen.findByTestId('conversation-nav-item-u3')
     // One compact hitbox per row in the restored original outline DOM
-    // (Container > Body > measured content > Item divs): every item owns exactly
+    // (Container > Halo > Body > measured content > Item divs): every item owns
     // one stable-ID row, so no neighbor row can intercept another row's click
     // point. The extra boxes are the clip and the animated width; they never
     // become rows.
     const nav = container.querySelector('[data-testid="conversation-navigation"]')
     expect(nav).not.toBeNull()
     expect(nav?.tagName).toBe('DIV')
-    const body = nav!.firstElementChild as HTMLElement | null
+    const body = outlineBody(nav)
     expect(body).not.toBeNull()
-    const rows = Array.from(body!.querySelectorAll('div[data-message-id]'))
+    const rows = Array.from(body.querySelectorAll('div[data-message-id]'))
     expect(rows.length).toBe(3)
     for (const row of rows) {
       // Original hierarchy per row: indicator dot div + ellipsis text div.
@@ -1040,7 +1046,7 @@ describe('ConversationNavigation fork markers', () => {
     expect(forkRows()).toHaveLength(1)
     const fork = forkRows()[0]
     // Directly AFTER the u2 row, inside the same row list.
-    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
     expect(Array.from(rowListOf(body).children).indexOf(fork)).toBe(
       Array.from(rowListOf(body).children).indexOf(row) + 1
     )
@@ -1065,7 +1071,7 @@ describe('ConversationNavigation fork markers', () => {
     expect(forkRows()).toHaveLength(1)
     const fork = forkRows()[0]
     // Directly AFTER the u1 row, inside the same row list.
-    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
     expect(Array.from(rowListOf(body).children).indexOf(fork)).toBe(
       Array.from(rowListOf(body).children).indexOf(row) + 1
     )
@@ -1172,7 +1178,7 @@ describe('ConversationNavigation fork markers', () => {
    * rule, so this helper asserts the geometry and returns the text.
    */
   const revealedForkText = (container: HTMLElement): string => {
-    const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
     // The marker's label is mounted in both states (its compact clip and opacity
     // are the switch, never a mount), so the same text is there collapsed and
     // expanded; what this helper proves is that it is the label the flow

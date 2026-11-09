@@ -9,8 +9,15 @@ vi.mock('@renderer/components/Scrollbar', () => ({
 
 import MessageOutline from '../MessageOutline'
 
+/**
+ * The navigator body: the container's only element child is the hover halo, and
+ * the halo's only element child is the body — the box whose collapse/expand
+ * state, pointer target and scroll geometry these cases are about.
+ */
+const outlineBody = (nav: Element | null | undefined) => nav?.firstElementChild?.firstElementChild as HTMLElement
+
 describe('MessageOutline restored original presentation', () => {
-  it('renders caller entries in the original Container > Body > Item div hierarchy', () => {
+  it('renders caller entries in the Container > Halo > Body > Item div hierarchy', () => {
     const onNavigate = vi.fn()
     const { container } = render(
       <MessageOutline
@@ -25,11 +32,16 @@ describe('MessageOutline restored original presentation', () => {
     const nav = container.querySelector('[data-testid="conversation-navigation"]')
     expect(nav).not.toBeNull()
     expect(nav?.tagName).toBe('DIV')
-    const body = nav!.firstElementChild as HTMLElement | null
+    // The halo is the pointer surface and the body is its only element child, so
+    // the rail is wrapped in nothing that paints, clips or re-sizes it.
+    const halo = nav!.firstElementChild
+    expect(halo?.getAttribute('data-testid')).toBe('conversation-nav-hitzone')
+    const body = outlineBody(nav)
     expect(body).not.toBeNull()
+    expect(body.parentElement).toBe(halo)
     // Rows are the content box's children (body > panel > content); the
     // hierarchy the test checks is the row itself.
-    const rows = Array.from(body!.querySelectorAll('div[data-message-id]'))
+    const rows = Array.from(body.querySelectorAll('div[data-message-id]'))
     expect(rows.map((row) => row.getAttribute('data-message-id'))).toEqual(['u1', 'u2'])
     for (const row of rows) {
       expect(row.querySelectorAll(':scope > div').length).toBe(2)
@@ -44,7 +56,7 @@ describe('MessageOutline restored original presentation', () => {
       const { container } = render(
         <MessageOutline entries={[{ id: 'u9', text: 'Only question' }]} onNavigate={onNavigate} />
       )
-      const body = container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+      const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
 
       const item = screen.getByTestId('conversation-nav-item-u9')
       expect(item.getAttribute('title')).toBe('Only question')
@@ -92,8 +104,9 @@ describe('MessageOutline restored original presentation', () => {
       .join('\n')
     const norm = css.replace(/\s+/g, '')
     expect(norm).toContain('font-size:13px')
-    expect(norm).toContain('max-width:min(320px,calc(100%-24px))')
-    expect(norm).toContain('max-height:min(100%,45vh,420px)')
+    // The two caps live on the body's hover halo, grown by its ring on each side.
+    expect(norm).toContain('max-width:calc(min(320px,calc(100%-24px))+20px)')
+    expect(norm).toContain('max-height:calc(min(100%,45vh,420px)+20px)')
     expect(norm).not.toContain('font-size:15px')
 
     // Row geometry + DOM invariants stay unchanged.
@@ -124,9 +137,9 @@ describe('MessageOutline restored original presentation', () => {
     // No count-estimated sticky top: the old midpoint formula is gone.
     expect(norm).not.toContain('position:sticky')
     expect(norm).not.toContain('calc(50%-')
-    // Caps and interaction invariants still hold.
-    expect(norm).toContain('max-width:min(320px,calc(100%-24px))')
-    expect(norm).toContain('max-height:min(100%,45vh,420px)')
+    // Caps and interaction invariants still hold: the caps sit on the halo.
+    expect(norm).toContain('max-width:calc(min(320px,calc(100%-24px))+20px)')
+    expect(norm).toContain('max-height:calc(min(100%,45vh,420px)+20px)')
     expect(norm).toContain('pointer-events:none')
     expect(norm).toContain('pointer-events:auto')
   })
@@ -168,8 +181,7 @@ describe('MessageOutline reading-anchor follow', () => {
 
   const renderOutline = (activeId?: string) => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId={activeId} />)
-    const body = utils.container.querySelector('[data-testid="conversation-navigation"]')!
-      .firstElementChild as HTMLElement
+    const body = outlineBody(utils.container.querySelector('[data-testid="conversation-navigation"]'))
     // Overflowing list by default (jsdom reports zero sizes); short-list
     // tests override via stubScrollable.
     stubScrollable(body, 500, 100)
@@ -397,12 +409,11 @@ describe('MessageOutline expand/collapse grace margin', () => {
     { id: 'u2', text: 'Second question' }
   ]
 
-  // `nav.firstElementChild` is the body: the single element that carries the
+  // The halo's child is the body: the single element that carries the
   // expanded/collapsed presentation (`data-expanded`) and the pointer handlers.
   const renderOutline = () => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
-    const body = utils.container.querySelector('[data-testid="conversation-navigation"]')!
-      .firstElementChild as HTMLElement
+    const body = outlineBody(utils.container.querySelector('[data-testid="conversation-navigation"]'))
     return { ...utils, body }
   }
 
@@ -469,7 +480,7 @@ describe('MessageOutline fork markers', () => {
   ]
 
   const bodyOf = (container: HTMLElement) =>
-    container.querySelector('[data-testid="conversation-navigation"]')!.firstElementChild as HTMLElement
+    outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
 
   // Rows sit in the measured content box: body (clip/scroll) > panel (animated
   // width) > content (intrinsic width) > rows.
@@ -767,8 +778,7 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
   const renderOutline = (activeId?: string) => {
     const onNavigate = vi.fn()
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} activeId={activeId} />)
-    const body = utils.container.querySelector('[data-testid="conversation-navigation"]')!
-      .firstElementChild as HTMLElement
+    const body = outlineBody(utils.container.querySelector('[data-testid="conversation-navigation"]'))
     // A long route: the body keeps its capped height in both states, so the
     // box a ResizeObserver watches never changes size across the switch.
     stubScrollable(body, 5000, 100)
@@ -1238,7 +1248,7 @@ describe('MessageOutline single reversible compact/expanded transition', () => {
   const renderOutline = (activeId?: string) => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId={activeId} />)
     const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
-    const body = nav.firstElementChild as HTMLElement
+    const body = outlineBody(nav)
     const panel = screen.getByTestId('conversation-nav-panel')
     const content = panel.firstElementChild as HTMLElement
     const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
@@ -1416,7 +1426,7 @@ describe('MessageOutline scrollbar paint across the width transition', () => {
   const renderOutline = () => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
     const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
-    const body = nav.firstElementChild as HTMLElement
+    const body = outlineBody(nav)
     const advance = (ms: number) => {
       act(() => {
         vi.advanceTimersByTime(ms)
@@ -1538,7 +1548,7 @@ describe('MessageOutline scrollbar paint across the width transition', () => {
   })
 })
 
-describe('MessageOutline navigation gutter hover surface', () => {
+describe('MessageOutline navigation hover halo', () => {
   const ENTRIES = [
     { id: 'u1', text: 'First question' },
     { id: 'u2', text: 'Second question' }
@@ -1560,7 +1570,7 @@ describe('MessageOutline navigation gutter hover surface', () => {
   const renderOutline = () => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
     const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
-    const body = nav.firstElementChild as HTMLElement
+    const body = outlineBody(nav)
     const zone = screen.getByTestId('conversation-nav-hitzone')
     return { ...utils, nav, body, zone }
   }
@@ -1573,31 +1583,26 @@ describe('MessageOutline navigation gutter hover surface', () => {
     vi.useRealTimers()
   })
 
-  it('makes the whole reserved gutter a hit surface, full height, behind the untouched rail', () => {
+  it('hugs the body with a 10px halo instead of claiming the reading-area height', () => {
     const { nav, body, zone } = renderOutline()
 
-    // The gutter lane spans the container's inset plus the reserved width: it
-    // reaches back over the 10px the container is inset by, and its right edge
-    // is the chat gutter's width, where the chat column begins.
+    // The halo is the body's parent, so its box is the body's own: the ring is
+    // this box's padding, and the matching negative margin pulls the margin box
+    // back to exactly the body's old box, so nothing about the rail's placement
+    // (centering included) moved.
+    expect(nav.firstElementChild).toBe(zone)
+    expect(nav.lastElementChild).toBe(zone)
+    expect(zone.firstElementChild).toBe(body)
     const zoneRule = rulesFor(zone).join('\n')
     expect(zoneRule).not.toBe('')
-    for (const declaration of [
-      'position:absolute',
-      'top:0',
-      'bottom:0',
-      'left:-10px',
-      'width:46px',
-      'pointer-events:auto',
-      'z-index:-1'
-    ]) {
+    for (const declaration of ['padding:10px', 'margin:-10px', 'pointer-events:auto']) {
       expect(zoneRule).toContain(declaration)
     }
-
-    // Nothing about the rail moved: the lane is out of flow and painted behind
-    // the body, so the body (the rail's own box) is still the container's first
-    // element child and still owns the flex row.
-    expect(nav.firstElementChild).toBe(body)
-    expect(nav.lastElementChild).toBe(zone)
+    // The full-height lane is what this is not: nothing out of flow, nothing
+    // stretching to the reading area's top and bottom.
+    for (const declaration of ['position:absolute', 'top:0', 'bottom:0', 'z-index:-1']) {
+      expect(zoneRule).not.toContain(declaration)
+    }
     expect(body.getAttribute('data-expanded')).toBe('false')
     // The chat column and its footer keep the same reserved strip.
     const norm = normalizedCss()
@@ -1605,21 +1610,21 @@ describe('MessageOutline navigation gutter hover surface', () => {
     expect(norm).toContain('margin-left:46px!important')
   })
 
-  it('expands from the lane alone and treats the lane and the panel as one surface', () => {
+  it('expands from the halo alone and treats the halo and the panel as one surface', () => {
     const { body, zone } = renderOutline()
     const expanded = () => body.getAttribute('data-expanded')
 
-    // Entering the lane anywhere expands, exactly as entering the rail does.
+    // Entering the halo anywhere expands, exactly as entering the rail does.
     fireEvent.mouseEnter(zone)
     expect(expanded()).toBe('true')
 
-    // Moving between the lane and the panel is travel inside one surface: the
+    // Moving between the halo and the panel is travel inside one surface: the
     // pair of events a browser reports for it cannot start a collapse.
     fireEvent.mouseLeave(zone)
     fireEvent.mouseEnter(body)
     expect(expanded()).toBe('true')
 
-    // Leaving the panel arms the grace margin; re-entering the lane cancels it.
+    // Leaving the panel arms the grace margin; re-entering the halo cancels it.
     fireEvent.mouseLeave(body)
     act(() => {
       vi.advanceTimersByTime(150)
@@ -1669,7 +1674,7 @@ describe('MessageOutline pointer gate across the switch', () => {
   const renderOutline = () => {
     const utils = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} />)
     const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
-    const body = nav.firstElementChild as HTMLElement
+    const body = outlineBody(nav)
     const panel = screen.getByTestId('conversation-nav-panel')
     const content = panel.firstElementChild as HTMLElement
     const gate = () => panel.getAttribute('data-outline-interactive')
@@ -1785,12 +1790,12 @@ describe('MessageOutline pointer gate across the switch', () => {
     const onNavigate = vi.fn()
     const { container } = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} />)
     const nav = container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
-    const body = nav.firstElementChild as HTMLElement
+    const body = outlineBody(nav)
     const content = screen.getByTestId('conversation-nav-panel').firstElementChild as HTMLElement
     const row = screen.getByTestId('conversation-nav-item-u1')
 
     // Hit testing: only the content subtree is transparent, so the body keeps
-    // the wheel, its scrollbar and the gutter lane live.
+    // the wheel and its scrollbar, and the halo around it keeps the pointer.
     const gateRule = rulesFor(content).find((rule) => rule.includes("[data-outline-interactive='blocked']"))
     expect(gateRule).toBeDefined()
     expect(gateRule).toContain('pointer-events:none')

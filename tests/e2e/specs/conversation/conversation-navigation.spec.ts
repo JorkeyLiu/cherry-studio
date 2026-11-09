@@ -343,22 +343,22 @@ async function waitForViewportIntersection(page: any, messageId: string): Promis
 
 /** Restored original MessageOutline body (collapsed narrow strip, hover expands). */
 function outlineBodySelector(): string {
-  return '[data-testid="conversation-navigation"] > div'
+  return '[data-testid="conversation-navigation"] > div > div'
 }
 
 /**
  * Hover the collapsed outline's own hover surface.
  *
- * The surface is the reserved gutter lane, not a row: rows stay transparent to
- * the pointer until the expand switch has settled, so the lane is the one thing
- * a pointer can enter while the outline is compact (it spans the container's
- * inset plus the gutter width, full height, behind the rail). The point offset
- * stays inside the inset strip the rail never covers, so the move lands on the
- * lane itself instead of on the body above it.
+ * The surface is the ring around the compact body, not a row: rows stay
+ * transparent to the pointer until the expand switch has settled, so the ring is
+ * what a pointer can enter while the outline is compact (it is the body's own box
+ * plus a 10px margin on every side). The point offset stays inside the ring's
+ * left band, which the rail never covers, so the move lands on the ring itself
+ * instead of on the body beside it.
  */
 async function hoverOriginalOutline(page: any): Promise<void> {
-  const lane = page.locator('[data-testid="conversation-nav-hitzone"]').first()
-  await lane.hover({ position: { x: 4, y: 24 }, timeout: 10000 })
+  const halo = page.locator('[data-testid="conversation-nav-hitzone"]').first()
+  await halo.hover({ position: { x: 4, y: 24 }, timeout: 10000 })
   // The rows take the pointer only once the switch has settled: wait for the
   // gate the way the next real hover would experience it.
   await page.waitForFunction(
@@ -373,7 +373,8 @@ async function hoverOriginalOutline(page: any): Promise<void> {
   await page.waitForFunction(
     () => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const body = landmark?.firstElementChild as HTMLElement | null
+      const body = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
+        ?.parentElement as HTMLElement | null
       if (!landmark || !body) return false
       const text = body.querySelector('[data-testid^="conversation-nav-item-"] > div:last-child') as HTMLElement | null
       if (!text) return false
@@ -410,7 +411,7 @@ interface OutlineMetrics {
 async function readOutlineMetrics(page: any): Promise<OutlineMetrics | null> {
   return page.evaluate(() => {
     const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-    const list = landmark?.firstElementChild as HTMLElement | null
+    const list = landmark?.querySelector('[data-testid="conversation-nav-panel"]')?.parentElement as HTMLElement | null
     if (!list || !landmark) return null
     const parent = landmark.parentElement as HTMLElement | null
     const text = list.querySelector('[data-testid^="conversation-nav-item-"] > div:last-child') as HTMLElement | null
@@ -454,7 +455,7 @@ interface OutlineCentering {
 async function readOutlineCentering(page: any): Promise<OutlineCentering | null> {
   return page.evaluate(() => {
     const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-    const body = landmark?.firstElementChild as HTMLElement | null
+    const body = landmark?.querySelector('[data-testid="conversation-nav-panel"]')?.parentElement as HTMLElement | null
     const parent = landmark?.parentElement as HTMLElement | null
     const messages = document.getElementById('messages')
     if (!body || !landmark || !parent || !messages) return null
@@ -1757,7 +1758,8 @@ test.describe('conversation navigation redesign', () => {
     // the original midpoint count formula (top max(calc(50% - count*24/2+10),20px)).
     const collapsed = await page.evaluate(() => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const list = landmark?.firstElementChild as HTMLElement | null
+      const list = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
+        ?.parentElement as HTMLElement | null
       const container = document.getElementById('messages')
       if (!list || !landmark || !container) return null
       const r = (list as HTMLElement).getBoundingClientRect()
@@ -1793,7 +1795,8 @@ test.describe('conversation navigation redesign', () => {
     await hoverOriginalOutline(page)
     const expandedW = await page.evaluate(() => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const body = landmark?.firstElementChild as HTMLElement | null
+      const body = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
+        ?.parentElement as HTMLElement | null
       return body ? body.getBoundingClientRect().width : null
     })
     expect(expandedW).not.toBeNull()
@@ -1817,7 +1820,8 @@ test.describe('conversation navigation redesign', () => {
     // The visible 3-row list retains its physical rect before/after.
     const listRectBefore = await page.evaluate(() => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const body = landmark?.firstElementChild as HTMLElement | null
+      const body = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
+        ?.parentElement as HTMLElement | null
       if (!body) return null
       const r = body.getBoundingClientRect()
       return { x: r.x, y: r.y, width: r.width, height: r.height }
@@ -1851,7 +1855,8 @@ test.describe('conversation navigation redesign', () => {
     expect(graphAbsence.listRows).toBe(3)
     const listRectAfter = await page.evaluate(() => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const body = landmark?.firstElementChild as HTMLElement | null
+      const body = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
+        ?.parentElement as HTMLElement | null
       if (!body) return null
       const r = body.getBoundingClientRect()
       return { x: r.x, y: r.y, width: r.width, height: r.height }

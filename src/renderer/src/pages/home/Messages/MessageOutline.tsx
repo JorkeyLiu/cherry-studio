@@ -57,11 +57,11 @@ const ROW_HEIGHT_SETTLE_TOLERANCE_PX = 0.05
 const GEOMETRY_SETTLE_FALLBACK_MS = EXPAND_TRANSITION_MS + 500
 
 /**
- * Collapse grace margin: expansion is immediate, but the expanded panel hangs
- * off a thin rail, and a pointer travelling between the panel and the gutter
- * lane beside it crosses a gap on the way, so shrinking the moment the pointer
- * left made it trivial to drop the panel mid-travel. Leaving waits this margin
- * first.
+ * Collapse grace margin: expansion is immediate, and the halo is only a thin
+ * ring around the body, so a pointer moving off the open panel can cross a gap
+ * on its way to it — and a hand is not still. Shrinking the moment the pointer
+ * left made it trivial to drop the panel mid-travel, so leaving waits this
+ * margin first.
  */
 const COLLAPSE_GRACE_MS = 160
 
@@ -101,14 +101,20 @@ const RAIL_CONTENT_WIDTH_PX = 18
 /**
  * The navigation gutter the reading area reserves on its left — the chat column
  * and its footer are pushed right by exactly `NAV_GUTTER_WIDTH_PX` — and the
- * container's own inset inside it. The gutter is also the outline's hover
- * surface, so the hit zone spans this inset plus the reserved width: entering
- * the gutter anywhere (above, below, left of or beside the rail) expands the
- * outline, while the reserved strip's right edge is where the chat content
- * begins, so nothing to its right is covered.
+ * container's own inset inside it. The strip is layout only: the thing the
+ * pointer answers to is the body's halo below, so the gutter well above or below
+ * the rail stays conversation territory.
  */
 const NAV_GUTTER_WIDTH_PX = 46
 const NAV_GUTTER_INSET_PX = 10
+/**
+ * The outline's hover halo: how far the pointer surface reaches past the body's
+ * own box, on every side. The body is the drawn navigator — the compact rail, or
+ * the open panel — and its height is its rows' height rather than the reading
+ * area's, so the halo hugs that box: the outline opens from just around the rail,
+ * and a pointer well above or below it is chat territory instead.
+ */
+const OUTLINE_HALO_PAD_PX = 10
 /**
  * Expanded panel cap: the reading column minus the inset the body has always
  * reserved, and never more than this. It is a cap on the *column*, not a width
@@ -315,14 +321,13 @@ const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => 
  * hover until the switch is over. Closing shuts the gate in the commit that
  * starts the collapse. Keyboard navigation is not part of this gate: rows stay
  * focusable and Enter/Space keep navigating.
- * The hover surface is the reserved gutter itself, not the drawn rail: an
- * invisible hit zone spans the container's inset plus the gutter width at the
- * reading area's full height, painted behind the body inside this layer's own
- * stacking context. Entering the gutter anywhere opens the outline, staying over
- * the gutter or the panel keeps it open (they are one surface — the container
- * owns the enter/leave pair), and the rail's own position and size are
- * untouched because nothing about it moved. The zone stops at the gutter's right
- * edge, where the chat column begins, so no chat content is covered.
+ * The hover surface is a halo around the drawn body, not the reserved gutter
+ * itself: the body's box grown by `OUTLINE_HALO_PAD_PX` on every side, so the
+ * outline opens from just around the rail and the reading area above and below
+ * it stays conversation. Entering the halo anywhere opens the outline, staying
+ * over the halo or the panel keeps it open (they are one surface — the container
+ * owns the enter/leave pair), and the rail's own position and size are untouched
+ * because the halo's padding is cancelled by its negative margin.
  * A fork marker (`forkAfter`) is a separate NON-interactive row inserted
  * directly after the marked message row: it is never a navigation target (no
  * role, stable id, tab stop, handler or active highlight), so the marked
@@ -450,7 +455,10 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   const measurePanelWidth = useCallback((expandedTarget: boolean) => {
     const container = containerRef.current
     const content = contentRef.current
-    const host = container?.parentElement
+    // The reading-area-sized container, one level above the body's halo: the
+    // halo is sized by the body, so measuring it would close the loop this
+    // measurement feeds.
+    const host = container?.parentElement?.parentElement
     if (!container || !content || !host) return
     const hostWidth = host.getBoundingClientRect().width
     if (hostWidth <= 0) return
@@ -514,7 +522,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   // transition.
   useEffect(() => {
     const content = contentRef.current
-    const host = containerRef.current?.parentElement
+    const host = containerRef.current?.parentElement?.parentElement
     if (!content || !host || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(() => measurePanelWidth(latestExpandedRef.current))
     observer.observe(content)
@@ -808,9 +816,9 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   //
   // The handler sits on the container, not on the body: the container has no
   // hit box of its own (`pointer-events: none`) and only its interactive
-  // descendants feed it, so it is the one surface that spans BOTH the rail/panel
-  // and the gutter lane beside it. Moving between those two is therefore a move
-  // inside one surface — no leave, no grace, no collapse — and only leaving both
+  // descendants feed it, so it is the one surface that spans the halo AND the
+  // rail/panel inside it. Moving between those two is therefore a move inside
+  // one surface — no leave, no grace, no collapse — and only leaving both
   // reaches the leave path below.
   const handleSurfaceMouseEnter = () => {
     if (collapseTimerRef.current) {
@@ -822,8 +830,8 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   }
 
   // Leaving only starts the collapse; the grace margin above is the travel
-  // slack for a pointer that crosses the gap between the gutter lane and the
-  // panel. The collapse holds the same on-screen row instead of keeping a scroll
+  // slack for a pointer that crosses the gap between the halo and the panel.
+  // The collapse holds the same on-screen row instead of keeping a scroll
   // offset that only made sense at the expanded row heights, so the compact rail
   // ends up showing the row the reader was looking at rather than snapping it
   // back afterwards.
@@ -841,106 +849,102 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
       data-testid="conversation-navigation"
       onMouseEnter={handleSurfaceMouseEnter}
       onMouseLeave={handleSurfaceMouseLeave}>
-      <MessageOutlineBody
-        ref={containerRef}
-        $expanded={expanded}
-        // Painted only where the switch has finished: compact never paints one,
-        // and an open panel only once its final width is on screen.
-        $scrollbarVisible={expanded && scrollbarSettled}
-        onWheel={pauseFollow}
-        onPointerDown={pauseFollow}
-        onKeyDownCapture={pauseFollow}>
-        {/*
-          One measured width, one animated box. The panel is the only thing the
-          switch interpolates horizontally; the content beside it keeps its own
-          intrinsic width in both states, so the panel clips a stable layout
-          instead of reflowing every row on every frame of the transition.
-        */}
-        <MessageOutlinePanel
-          data-testid="conversation-nav-panel"
-          // Projected for the CSS pointer gate (see `MessageOutlineContent`):
-          // the rows take the pointer only once the switch has settled.
-          data-outline-interactive={contentInteractive ? 'ready' : 'blocked'}
-          style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
-          <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
-            {entries.map((entry) => {
-              const isActive = activeId != null && entry.id === activeId
-              const hasFork = forkAfter?.has(entry.id) ?? false
-              const forkText = forkAfter?.get(entry.id) ?? ''
-              return (
-                <Fragment key={entry.id}>
-                  <MessageOutlineItem
-                    $active={isActive}
-                    // Pointer navigation waits for the settled switch. The
-                    // pointer-events gate already keeps a real click off the row
-                    // while it is closed; this guard covers the one window hit
-                    // testing cannot — a press that started on the row before
-                    // the gate shut (a collapse under the held button). Keyboard
-                    // activation is untouched: it is the keydown handler above,
-                    // never a synthesized click.
-                    onClick={() => {
-                      if (!contentInteractive) return
-                      onNavigate(entry.id)
-                    }}
-                    onKeyDown={(event) => handleKeyDown(event, entry.id)}
-                    tabIndex={0}
-                    role="button"
-                    aria-label={entry.text}
-                    aria-current={isActive ? true : undefined}
-                    data-testid={`conversation-nav-item-${entry.id}`}
-                    data-message-id={entry.id}
-                    title={entry.text}>
-                    <MessageOutlineItemDot $level={1} />
-                    <MessageOutlineItemText $level={1} $miniLevel={1}>
-                      {entry.text}
-                    </MessageOutlineItemText>
-                  </MessageOutlineItem>
-                  {/*
-                    Fork marker: a separate row directly AFTER the marked message
-                    row, never a message row itself — no stable id, role, tab stop
-                    or handler, so it can never be a navigation target, a highlight
-                    winner or a follow target. Decorative only (`aria-hidden`): the
-                    message row next to it is the navigation entry.
-
-                    Expanded it reads `── <text> ──`, the message flow's divider
-                    text without its `▾` (that caret belongs to the flow's clickable
-                    popover trigger, and this row is not interactive). The label is
-                    mounted in BOTH states and only its own clip and opacity switch:
-                    mounting it on expansion would replace the fade with a pop, and
-                    the row would lose the label's width while measuring it. It is
-                    always present, because the caller supplies the flow's
-                    untaken-fork count form when the route took no branch here.
-                  */}
-                  {hasFork ? (
-                    <MessageOutlineForkRow
-                      aria-hidden="true"
-                      data-testid="conversation-nav-fork"
-                      key={`fork-${entry.id}`}>
-                      <MessageOutlineForkSegment />
-                      <MessageOutlineForkName data-outline-fork-label>{forkText}</MessageOutlineForkName>
-                      <MessageOutlineForkSegment />
-                    </MessageOutlineForkRow>
-                  ) : null}
-                </Fragment>
-              )
-            })}
-          </MessageOutlineContent>
-        </MessageOutlinePanel>
-      </MessageOutlineBody>
       {/*
-        The gutter lane: an invisible hit surface over the whole reserved strip
-        (the container's own inset plus the reserved width), full height of the
-        reading area. It is what makes the trigger area the gutter itself instead
-        of only the collapsed rail's drawn box, and it is the one thing that
-        moved — the rail's own position and size are untouched.
-
-        Last child and out of flow, so the flex layout that centers the body
-        vertically around it is unchanged. `z-index: -1` keeps it behind the
-        body: where the two overlap the body wins, so the lane never covers a
-        row of the open panel, and it is scoped inside the container's own
-        stacking context (z999), so it cannot reach chat content either.
+        The hover halo (see `MessageOutlineHalo`): the body's own box grown by
+        `OUTLINE_HALO_PAD_PX` on every side, so the rail answers the pointer from
+        just around itself instead of claiming the reading area's full height. It
+        wraps the body — the one position from which a box can take the body's
+        size — and the container's handlers still own entering and leaving, so
+        the ring, the rail and the open panel are one surface for the pointer.
       */}
-      <MessageOutlineHitZone data-testid="conversation-nav-hitzone" aria-hidden="true" />
+      <MessageOutlineHalo data-testid="conversation-nav-hitzone">
+        <MessageOutlineBody
+          ref={containerRef}
+          $expanded={expanded}
+          // Painted only where the switch has finished: compact never paints one,
+          // and an open panel only once its final width is on screen.
+          $scrollbarVisible={expanded && scrollbarSettled}
+          onWheel={pauseFollow}
+          onPointerDown={pauseFollow}
+          onKeyDownCapture={pauseFollow}>
+          {/*
+            One measured width, one animated box. The panel is the only thing the
+            switch interpolates horizontally; the content beside it keeps its own
+            intrinsic width in both states, so the panel clips a stable layout
+            instead of reflowing every row on every frame of the transition.
+          */}
+          <MessageOutlinePanel
+            data-testid="conversation-nav-panel"
+            // Projected for the CSS pointer gate (see `MessageOutlineContent`):
+            // the rows take the pointer only once the switch has settled.
+            data-outline-interactive={contentInteractive ? 'ready' : 'blocked'}
+            style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
+            <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
+              {entries.map((entry) => {
+                const isActive = activeId != null && entry.id === activeId
+                const hasFork = forkAfter?.has(entry.id) ?? false
+                const forkText = forkAfter?.get(entry.id) ?? ''
+                return (
+                  <Fragment key={entry.id}>
+                    <MessageOutlineItem
+                      $active={isActive}
+                      // Pointer navigation waits for the settled switch. The
+                      // pointer-events gate already keeps a real click off the row
+                      // while it is closed; this guard covers the one window hit
+                      // testing cannot — a press that started on the row before
+                      // the gate shut (a collapse under the held button). Keyboard
+                      // activation is untouched: it is the keydown handler above,
+                      // never a synthesized click.
+                      onClick={() => {
+                        if (!contentInteractive) return
+                        onNavigate(entry.id)
+                      }}
+                      onKeyDown={(event) => handleKeyDown(event, entry.id)}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={entry.text}
+                      aria-current={isActive ? true : undefined}
+                      data-testid={`conversation-nav-item-${entry.id}`}
+                      data-message-id={entry.id}
+                      title={entry.text}>
+                      <MessageOutlineItemDot $level={1} />
+                      <MessageOutlineItemText $level={1} $miniLevel={1}>
+                        {entry.text}
+                      </MessageOutlineItemText>
+                    </MessageOutlineItem>
+                    {/*
+                      Fork marker: a separate row directly AFTER the marked message
+                      row, never a message row itself — no stable id, role, tab stop
+                      or handler, so it can never be a navigation target, a highlight
+                      winner or a follow target. Decorative only (`aria-hidden`): the
+                      message row next to it is the navigation entry.
+
+                      Expanded it reads `── <text> ──`, the message flow's divider
+                      text without its `▾` (that caret belongs to the flow's clickable
+                      popover trigger, and this row is not interactive). The label is
+                      mounted in BOTH states and only its own clip and opacity switch:
+                      mounting it on expansion would replace the fade with a pop, and
+                      the row would lose the label's width while measuring it. It is
+                      always present, because the caller supplies the flow's
+                      untaken-fork count form when the route took no branch here.
+                    */}
+                    {hasFork ? (
+                      <MessageOutlineForkRow
+                        aria-hidden="true"
+                        data-testid="conversation-nav-fork"
+                        key={`fork-${entry.id}`}>
+                        <MessageOutlineForkSegment />
+                        <MessageOutlineForkName data-outline-fork-label>{forkText}</MessageOutlineForkName>
+                        <MessageOutlineForkSegment />
+                      </MessageOutlineForkRow>
+                    ) : null}
+                  </Fragment>
+                )
+              })}
+            </MessageOutlineContent>
+          </MessageOutlinePanel>
+        </MessageOutlineBody>
+      </MessageOutlineHalo>
     </MessageOutlineContainer>
   )
 }
@@ -950,9 +954,8 @@ const MessageOutlineContainer = styled.div`
   // Left-edge inset reserves the segment group-label lane: the label pill
   // (LineContainer left:-12, TabContainer max-width 280, z1000) sits above
   // the nav layer (z999), so hover on the pill itself still never expands the
-  // nav. The hit zone below reaches back over this inset — the whole reserved
-  // gutter is the outline's hover surface — and only the pill's own box, which
-  // is painted above it, is excluded.
+  // nav. The body's halo reaches back over this inset by its own negative
+  // margin, and only the pill's own box, which is painted above it, is excluded.
   inset: 0 0 0 ${NAV_GUTTER_INSET_PX}px;
   z-index: 999;
   pointer-events: none;
@@ -969,25 +972,43 @@ const MessageOutlineContainer = styled.div`
 `
 
 /**
- * The gutter's hit surface (see the render site): the container's inset plus the
- * reserved gutter width, at the reading area's full height.
+ * The hover halo (see the render site): the body's box grown by
+ * `OUTLINE_HALO_PAD_PX` on every side, and nothing else.
  *
- * pointer-events: auto is the whole point — the container is none, so this is
- * what gives the reserved strip a hit box — and z-index: -1 orders it behind the
- * body inside the container's stacking context, so the rail and the open panel
- * are always the ones answering a pointer over them and this only answers for
- * the space around them. It carries no cursor of its own: over the lane the
- * pointer is the reading area's default, and the pointer cursor belongs to the
- * settled rows alone.
+ * It wraps the body instead of lying beside it because only an ancestor can take
+ * its box from the body: the body's height is its own content's — rows and fork
+ * markers — so an out-of-flow lane could not mirror it without being measured,
+ * and a measurement would have to re-run on every row, panel width and text
+ * change. The ring is this box's padding, pulled back out of the flex line by the
+ * matching negative margin, so its margin box is exactly the body's old box: the
+ * body is centered and placed precisely where it always was, and the ring is all
+ * the pointer gained.
+ *
+ * `pointer-events: auto` is the whole point — the container is `none`, so this is
+ * what gives the ring a hit box. The body is this box's child, so a pointer over
+ * the rail or the open panel is over this element too: one surface for the whole
+ * navigator, and moving ring -> panel is travel inside it, never a leave. It
+ * carries no cursor of its own: over the ring the pointer is the reading area's
+ * default, and the pointer cursor belongs to the settled rows alone.
+ *
+ * The two caps are the body's former constraints grown by the ring: this box is
+ * the one whose percentages resolve against the container now, so its content box
+ * is exactly the cap the body used to carry, and the body only has to shrink into
+ * it (see `MessageOutlineBody`).
  */
-const MessageOutlineHitZone = styled.div`
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -${NAV_GUTTER_INSET_PX}px;
-  width: ${NAV_GUTTER_WIDTH_PX}px;
+const MessageOutlineHalo = styled.div`
+  align-self: center;
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 0;
+  padding: ${OUTLINE_HALO_PAD_PX}px;
+  margin: -${OUTLINE_HALO_PAD_PX}px;
+  max-width: calc(min(${OUTLINE_MAX_WIDTH_PX}px, calc(100% - ${OUTLINE_MAX_WIDTH_INSET_PX}px)) + ${2 * OUTLINE_HALO_PAD_PX}px);
+  max-height: calc(min(100%, 45vh, 420px) + ${2 * OUTLINE_HALO_PAD_PX}px);
   pointer-events: auto;
-  z-index: -1;
 `
 
 const MessageOutlineItemDot = styled.div<{ $level: number }>`
@@ -1099,7 +1120,8 @@ const MessageOutlinePanel = styled.div`
  * where the expansion hover ended.
  *
  * Only the content is gated, never the body: the body stays the panel's
- * surface for wheel scrolling, its scrollbar and the gutter lane.
+ * surface for wheel scrolling and its scrollbar, and the halo around it stays
+ * the pointer's way in.
  */
 const MessageOutlineContent = styled.div`
   display: flex;
@@ -1205,6 +1227,12 @@ const MessageOutlineForkName = styled.div`
  * box's own padding. Its background, shadow and padding are part of the same
  * transition as the rows, so the chrome eases in with them instead of appearing
  * in one frame.
+ *
+ * Both caps live on the halo (see `MessageOutlineHalo`): this box's percentages
+ * would resolve against the halo's auto-sized content box instead of the
+ * container's definite one. The halo carries them, and this box only has to
+ * shrink into what they leave — `flex` lets it, and an overflow that is not
+ * `visible` is what keeps its automatic minimum size at zero.
  */
 const MessageOutlineBody = styled(Scrollbar).attrs<{
   $expanded: boolean
@@ -1215,9 +1243,7 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
   'data-expanded': props.$expanded ? 'true' : 'false',
   'data-outline-scrollbar': props.$scrollbarVisible ? 'visible' : 'hidden'
 }))`
-   max-width: min(${OUTLINE_MAX_WIDTH_PX}px, calc(100% - ${OUTLINE_MAX_WIDTH_INSET_PX}px));
-   max-height: min(100%, 45vh, 420px);
-   align-self: center;
+   min-height: 0;
    flex: 0 1 auto;
    overflow-x: hidden;
    overflow-y: hidden;
