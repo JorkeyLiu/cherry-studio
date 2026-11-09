@@ -101,12 +101,14 @@ export function pruneExpandedKeys(keys: readonly string[], existingKeys: Readonl
 }
 
 /**
- * Expansion floor used when the selector opens: the root plus the current
- * route's ancestor chain (root first, the route node itself excluded), so the
- * current row is always reachable right away.
+ * Expansion floor used when the selector opens: the root, the current route's
+ * ancestor chain and the current route row itself (root first). Expanding the
+ * current row reveals its direct children too, so one open shows where the
+ * route sits and what grows from it — but only that row is opened: a
+ * grandchild and an unrelated fork stay folded until the user opens them.
  */
-export function baseExpandedKeys(ancestors: readonly string[]): string[] {
-  return mergeExpandedKeys([BRANCH_TREE_ROOT_ID], ancestors)
+export function baseExpandedKeys(ancestors: readonly string[], currentKey: string): string[] {
+  return mergeExpandedKeys([BRANCH_TREE_ROOT_ID], [...ancestors, currentKey])
 }
 
 /**

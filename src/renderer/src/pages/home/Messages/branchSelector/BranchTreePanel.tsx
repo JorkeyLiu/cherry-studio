@@ -44,11 +44,13 @@ import {
  *   arrow keeps its slot and its neutral tone, and green only marks the route;
  * - hover/focus never changes expansion, and several forks can stay expanded
  *   at once;
- * - opening expands the current route's ancestors and scrolls the current row
- *   into view minimally; expanding a node reveals its new first child while
- *   keeping the acted-on row on screen; "collapse all" keeps only that ancestor
- *   chain open (nothing on the main route, so the root folds too); a catalog
- *   refresh drops expansion keys whose branch is gone.
+ * - opening expands the current route's ancestors and the current row itself,
+ *   so the route's direct children are on screen right away (nothing deeper),
+ *   and scrolls the current row into view minimally; expanding a node reveals
+ *   its new first child while keeping the acted-on row on screen; "collapse
+ *   all" keeps only that ancestor chain open (nothing on the main route, so the
+ *   root folds too); a catalog refresh drops expansion keys whose branch is
+ *   gone.
  * - non-root rows manage themselves in place: rename and delete are two direct
  *   icons revealed on hover or keyboard focus only, rename edits inline in the
  *   name column, delete confirms through a small popconfirm with a loading
@@ -131,7 +133,9 @@ export const BranchTreePanel = ({
   const glyphMaskId = `branch-glyph-clear-${maskSeed.replace(/[^a-zA-Z0-9_-]/g, '')}`
   const activeKey = branchRowKey(activeBranchId)
   const ancestors = useMemo(() => index.ancestorsOf(activeBranchId), [index, activeBranchId])
-  const [expandedKeys, setExpandedKeys] = useState<string[]>(() => baseExpandedKeys(ancestors))
+  // The open floor is the ancestor chain plus the current row itself, so the
+  // route is both reachable and showing its own direct children.
+  const [expandedKeys, setExpandedKeys] = useState<string[]>(() => baseExpandedKeys(ancestors, activeKey))
   /** Expanded node whose first child should be revealed on the next frame. */
   const [revealKey, setRevealKey] = useState<string | null>(null)
 
@@ -395,8 +399,9 @@ export const BranchTreePanel = ({
   )
 
   // "Collapse all" folds everything except the current route's ancestor chain —
-  // exactly the chain this panel opens with. On the main route that chain is
-  // empty, so the root row folds as well. It never switches route.
+  // the part of the open floor that keeps the current row reachable, without
+  // the current row's own children. On the main route that chain is empty, so
+  // the root row folds as well. It never switches route.
   const collapseAll = useCallback(() => {
     setExpandedKeys(collapseAllExpandedKeys(ancestors))
   }, [ancestors])

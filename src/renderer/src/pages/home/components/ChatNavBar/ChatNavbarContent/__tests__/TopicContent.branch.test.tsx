@@ -8,8 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  * The entry is one icon-only button immediately left of the path it opens — the
  * row reads model selector, branch entry, path, then the right-hand tool group
  * — and it is the only thing that opens the panel. The selector is a vertical
- * branch tree: opening it expands the current
- * route's ancestors, the chevron slot expands/collapses without switching, the
+ * branch tree: opening it expands the current route's ancestors and the current
+ * row itself, so that row's direct children show while nothing deeper does, the
+ * chevron slot expands/collapses without switching, the
  * name switches route and closes, hover/focus never changes expansion, and
  * several forks stay open at once. Non-root rows carry their rename/delete
  * controls directly: rename edits inline and commits on Enter or blur (Escape
@@ -41,6 +42,7 @@ const b2 = () => wire('b-2', null, 'B2')
 const b3 = () => wire('b-3', 'b-1', 'B1-Child')
 const b4 = () => wire('b-4', 'b-3', 'B1-Grandchild')
 const b5 = () => wire('b-5', 'b-2', 'B2-Child')
+const b6 = () => wire('b-6', 'b-4', 'B1-Great-Grandchild')
 
 const {
   dispatchMock,
@@ -419,8 +421,8 @@ describe('TopicContent unified branch selector', () => {
     }
   })
 
-  it('opens with the current route ancestors expanded and the other forks left collapsed', async () => {
-    setTree([b1(), b2(), b3(), b4(), b5()], [b1(), b3()], 'b-3')
+  it('opens with the current route ancestors and the current row itself expanded, and the other forks left collapsed', async () => {
+    setTree([b1(), b2(), b3(), b4(), b5(), b6()], [b1(), b3()], 'b-3')
     renderTopicContent()
     await openSelector()
 
@@ -428,9 +430,12 @@ describe('TopicContent unified branch selector', () => {
     expect(rowOf('main')).toBeInTheDocument()
     expect(rowOf('b-1')).toBeInTheDocument()
     expect(rowOf('b-3')).toBeInTheDocument()
-    // The current node's own children stay collapsed, and an unrelated fork
-    // stays collapsed too.
-    expect(screen.queryByTestId('branch-cascader-item-b-4')).not.toBeInTheDocument()
+    // The current row is open as well, so its direct children are on screen
+    // without another click…
+    expect(rowOf('b-4')).toBeInTheDocument()
+    // …but nothing deeper is: the current row's grandchild stays folded, and so
+    // does an unrelated fork's child.
+    expect(screen.queryByTestId('branch-cascader-item-b-6')).not.toBeInTheDocument()
     expect(screen.queryByTestId('branch-cascader-item-b-5')).not.toBeInTheDocument()
     expect(rowOf('b-2')).toBeInTheDocument()
   })
@@ -440,14 +445,18 @@ describe('TopicContent unified branch selector', () => {
     renderTopicContent()
     await openSelector()
 
-    fireEvent.click(switcherOf('b-1'))
-    await screen.findByTestId('branch-cascader-item-b-3')
+    // The current row opens with its own direct child already revealed.
+    expect(rowOf('b-3')).toBeInTheDocument()
 
-    expect(routeDispatches()).toHaveLength(0)
-    expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
-    // Collapsing back removes the child row again.
+    // Its chevron folds that child away again without touching the route…
     fireEvent.click(switcherOf('b-1'))
     await waitFor(() => expect(screen.queryByTestId('branch-cascader-item-b-3')).not.toBeInTheDocument())
+    expect(routeDispatches()).toHaveLength(0)
+    expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
+
+    // …and expanding it again reveals the child again.
+    fireEvent.click(switcherOf('b-1'))
+    await screen.findByTestId('branch-cascader-item-b-3')
     expect(routeDispatches()).toHaveLength(0)
   })
 
@@ -793,16 +802,19 @@ describe('TopicContent unified branch selector', () => {
   })
 
   it('re-measures the connectors in the same pass that expands a fork', async () => {
-    setTree([b1(), b3()], [b1()], 'b-1')
+    setTree([b1(), b2(), b3(), b5()], [b1()], 'b-1')
     const restoreLayout = stubLayout({})
     try {
       renderTopicContent()
       await openSelector()
+      // The current row opens with b-3 already revealed, so the fork expanded
+      // below is b-2 — a row the open leaves folded.
+      expect(rowOf('b-3')).toBeInTheDocument()
       const before = edgesOf()?.querySelectorAll('path').length ?? 0
       const activeBefore = edgesOf()?.querySelector('path.edge-active')?.getAttribute('d') ?? ''
 
-      fireEvent.click(switcherOf('b-1'))
-      await screen.findByTestId('branch-cascader-item-b-3')
+      fireEvent.click(switcherOf('b-2'))
+      await screen.findByTestId('branch-cascader-item-b-5')
 
       // The new child row and the connector into it arrive together, and the
       // current route's line is unchanged by the expansion.
@@ -1030,16 +1042,22 @@ describe('TopicContent unified branch selector', () => {
     expect(rowOf('b-1')).toBeInTheDocument()
   })
 
-  it('keeps the current ancestor chain and folds the current node children and other forks', async () => {
-    setTree([b1(), b2(), b3(), b4(), b5()], [b1(), b3()], 'b-3')
+  it('opens the current row to its direct children, then folds it and the other forks on demand', async () => {
+    setTree([b1(), b2(), b3(), b4(), b5(), b6()], [b1(), b3()], 'b-3')
     renderTopicContent()
     await openSelector()
 
-    // Chain open, current node's own child and the other fork closed.
+    // Chain open, and the current row's own child with it; the current row's
+    // grandchild and the other fork's child stay closed.
     expect(rowOf('b-3')).toBeInTheDocument()
-    expect(screen.queryByTestId('branch-cascader-item-b-4')).not.toBeInTheDocument()
+    expect(rowOf('b-4')).toBeInTheDocument()
+    expect(screen.queryByTestId('branch-cascader-item-b-6')).not.toBeInTheDocument()
     expect(screen.queryByTestId('branch-cascader-item-b-5')).not.toBeInTheDocument()
 
+    // The current row's own chevron folds it…
+    fireEvent.click(switcherOf('b-3'))
+    await waitFor(() => expect(screen.queryByTestId('branch-cascader-item-b-4')).not.toBeInTheDocument())
+    // …and opening it again brings its child back.
     fireEvent.click(switcherOf('b-3'))
     await screen.findByTestId('branch-cascader-item-b-4')
     fireEvent.click(switcherOf('b-2'))
@@ -1048,6 +1066,7 @@ describe('TopicContent unified branch selector', () => {
     fireEvent.click(screen.getByTestId('branch-collapse-all'))
     await waitFor(() => expect(screen.queryByTestId('branch-cascader-item-b-4')).not.toBeInTheDocument())
 
+    expect(screen.queryByTestId('branch-cascader-item-b-6')).not.toBeInTheDocument()
     expect(screen.queryByTestId('branch-cascader-item-b-5')).not.toBeInTheDocument()
     expect(rowOf('main')).toBeInTheDocument()
     expect(rowOf('b-1')).toBeInTheDocument()

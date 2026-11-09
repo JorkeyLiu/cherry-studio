@@ -82,13 +82,48 @@ describe('branch tree index', () => {
 })
 
 describe('branch tree expansion bookkeeping', () => {
-  it('opens the root plus the current route ancestors', () => {
-    expect(baseExpandedKeys([])).toEqual([BRANCH_TREE_ROOT_ID])
-    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID])).toEqual([BRANCH_TREE_ROOT_ID])
-    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID, 'a'])).toEqual([BRANCH_TREE_ROOT_ID, 'a'])
+  it('opens the root, the current route ancestors, and the current row itself', () => {
+    // The current row is part of the floor, so its direct children are on
+    // screen at open time; on the main route that row is the root.
+    expect(baseExpandedKeys([], BRANCH_TREE_ROOT_ID)).toEqual([BRANCH_TREE_ROOT_ID])
+    expect(baseExpandedKeys([], 'b')).toEqual([BRANCH_TREE_ROOT_ID, 'b'])
+    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID], 'a')).toEqual([BRANCH_TREE_ROOT_ID, 'a'])
+    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID, 'a'], 'a1')).toEqual([BRANCH_TREE_ROOT_ID, 'a', 'a1'])
     // Duplicates never widen the floor.
-    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID, 'a', 'a'])).toEqual([BRANCH_TREE_ROOT_ID, 'a'])
+    expect(baseExpandedKeys([BRANCH_TREE_ROOT_ID, 'a', 'a'], 'a1')).toEqual([BRANCH_TREE_ROOT_ID, 'a', 'a1'])
     expect(mergeExpandedKeys([BRANCH_TREE_ROOT_ID], ['a', 'b', 'a'])).toEqual([BRANCH_TREE_ROOT_ID, 'a', 'b'])
+  })
+
+  it('reveals the current row direct children only, never a grandchild or another fork', () => {
+    /*
+     * root
+     * ├── a
+     * │   └── a1
+     * │       └── a2   (current)
+     * │           └── a3
+     * │               └── a4
+     * └── b
+     */
+    const index = buildBranchTreeIndex([
+      wire('a3', 'a2', '2026-01-05T00:00:00.000Z'),
+      wire('a4', 'a3', '2026-01-06T00:00:00.000Z'),
+      wire('b', null, '2026-01-07T00:00:00.000Z'),
+      wire('a1', 'a', '2026-01-03T00:00:00.000Z'),
+      wire('a2', 'a1', '2026-01-04T00:00:00.000Z'),
+      wire('a', null, '2026-01-01T00:00:00.000Z')
+    ])
+    const open = new Set(baseExpandedKeys(index.ancestorsOf('a2'), 'a2'))
+
+    // Exactly the path down to the current row, plus that row.
+    expect([...open]).toEqual([BRANCH_TREE_ROOT_ID, 'a', 'a1', 'a2'])
+    // The current row's own child therefore renders…
+    expect(index.childrenOf.get('a2')?.map((branch) => branch.id)).toEqual(['a3'])
+    // …while the grandchild does not: a3 is the current row's child, not a row
+    // the open expands further, so its own child stays folded.
+    expect(open.has('a3')).toBe(false)
+    expect(index.parentKeyOf.get('a4')).toBe('a3')
+    // An unrelated fork under the root stays folded too.
+    expect(open.has('b')).toBe(false)
   })
 
   it('collapsing all keeps only the current ancestor chain, and nothing at all on the main route', () => {
