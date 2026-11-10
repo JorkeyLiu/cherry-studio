@@ -86,6 +86,12 @@ import {
   releasePaginationFetchLease
 } from '@renderer/services/paginationFetchLease'
 import {
+  awaitOrdinaryPageFrame,
+  createPaginationFrameWait,
+  isFrameOrderedPublicationOrigin,
+  type PaginationPageOrigin
+} from '@renderer/services/paginationFrameWait'
+import {
   captureResidentGeneration,
   captureRouteGeneration,
   isPaginationAttemptApplicable,
@@ -1329,6 +1335,12 @@ const Messages = ({
   // cancel-all). Never a queue: an edge event arriving while busy follows the
   // committed state (guarded out here) instead of recording a second copy of
   // scroll intent — and the very next edge event starts the next page.
+  // Frame-ordered ordinary publication (older user edge only): holds ONE queued
+  // publication frame per opted-in attempt. It owns no page lifecycle — the
+  // attempt keeps `loading`/lease/token — and is cancelled by `cancelActiveLoads`
+  // (unmount, route change, deletion fallback) so a cancelled attempt can never
+  // publish its response after the wait.
+  const paginationFrameWaitRef = useRef(createPaginationFrameWait())
   const paginationFetchLeaseRef = useRef(createPaginationFetchLease())
   const unmountedRef = useRef(false)
   // In-flight top fetch pipeline marker (same-session duplicate-run guard).
@@ -2346,6 +2358,9 @@ const Messages = ({
   )
 
   const cancelActiveLoads = useCallback(() => {
+    // A queued publication frame belongs to the attempt being cancelled: drop it
+    // first so its wait settles `cancelled` and the frame never runs.
+    paginationFrameWaitRef.current.cancelAll()
     releasePaginationFetchLease(paginationFetchLeaseRef.current)
     const state = viewportStateRef.current
     for (const direction of ['older', 'newer'] as const) {
@@ -4485,7 +4500,16 @@ const Messages = ({
   // terminal outcome, so the next edge event (or the restore owner's next step)
   // starts the next page.
   const startWindowPageLoad = useCallback(
-    (direction: MessageViewportLoadDirection, preferred?: PreferredRestoreAnchorSnapshot | null): Promise<boolean> => {
+    (
+      direction: MessageViewportLoadDirection,
+      preferred?: PreferredRestoreAnchorSnapshot | null,
+      // Which entry started this page. Only the ordinary user edge in the
+      // `older` direction opts into the frame-ordered publication wait; every
+      // shared caller (selection boundary, restore-owned divider search,
+      // route-transition prefetch) and every `newer` page keeps the synchronous
+      // publication path unchanged.
+      origin: PaginationPageOrigin = 'shared'
+    ): Promise<boolean> => {
       const preferredSnapshot: PreferredRestoreAnchorSnapshot | null = preferred
         ? preferred.kind === 'divider-row'
           ? { kind: 'divider-row', dividerKey: preferred.dividerKey, targetOffset: preferred.targetOffset }
@@ -4636,7 +4660,11 @@ const Messages = ({
             // bumped token and must discard), same viewport topic generation,
             // same resident applicability generation — plus the existing
             // deletion-invalidation guard. Any mismatch publishes nothing.
-            const attemptApplicable =
+            // Re-provable: the frame-ordered publication wait below yields to a
+            // real frame, so every state-dependent guard in here (ownership
+            // token, route value + generation, resident applicability
+            // generation, deletion epoch) is evaluated again after that wait.
+            const evaluateAttemptApplicable = (): boolean =>
               isCurrentLoad(direction, loadToken, topicGeneration) &&
               isPaginationAttemptApplicable({
                 state: store.getState(),
@@ -4654,6 +4682,7 @@ const Messages = ({
                 }
               }) &&
               !isDeletionStale(topicIdAtStart, deletionGenAtStart)
+            const attemptApplicable = evaluateAttemptApplicable()
             if (!attemptApplicable) {
               releaseOwned()
               viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
@@ -4678,6 +4707,35 @@ const Messages = ({
               return
             }
 
+            // Frame-ordered ordinary publication (older user edge only): the
+            // response has passed every state-dependent guard above, and it is
+            // still not captured or committed in the task that resolved the
+            // fetch. The attempt waits ONE frame here — after the guards, before
+            // the instant precommit capture — so the page's growth is committed
+            // in a frame the user actually paints instead of inside the
+            // scroll-echo task that received the read. Everything shared
+            // (selection boundary, restore-owned divider search, route
+            // prefetch) and every `newer` page skips this branch entirely, with
+            // no await and no microtask pause.
+            if (isFrameOrderedPublicationOrigin(origin, direction)) {
+              // Outcomes other than the frame (hidden document, cancelled or
+              // superseded attempt) abandon this ordinary page exactly like any
+              // other cancelled attempt — token-scoped release + `load/cancel` —
+              // so the lease frees and the next genuine edge event pages again.
+              // No timer, no late publication: a hidden document never publishes.
+              const frameStep = await awaitOrdinaryPageFrame({
+                origin,
+                direction,
+                gate: paginationFrameWaitRef.current,
+                stillApplicable: evaluateAttemptApplicable
+              })
+              if (frameStep.step === 'abandon') {
+                logger.silly(`[windowPage:${direction}] frame wait abandoned: ${frameStep.reason}` as never)
+                releaseOwned()
+                viewportDispatch({ type: 'load/cancel', direction, token: loadToken, topicGeneration })
+                return
+              }
+            }
             // Precommit capture: CURRENT stable viewport-top identity + offset,
             // measured after the fetch resolved and all generation guards
             // passed, immediately BEFORE the authoritative merge/window
@@ -5032,7 +5090,10 @@ const Messages = ({
         return
       }
       if (!atEdge) return
-      void startWindowPageLoad(direction)
+      // The ordinary user edge is the ONLY entry that opts into the
+      // frame-ordered publication wait (and only for `older`); `newer` keeps
+      // the synchronous path.
+      void startWindowPageLoad(direction, null, 'ordinary-user-edge')
     },
     [controller, startWindowPageLoad, topic.id]
   )
