@@ -44,6 +44,7 @@ import store from '@renderer/store'
 import { updateAssistant, updateTopics } from '@renderer/store/assistants'
 import type { Assistant, Topic } from '@renderer/types'
 import {
+  hasExplicitTopicOrderMode,
   moveTopicToOrdinaryHead,
   placeTopicBySortKey,
   resolveTopicOrderMode,
@@ -68,6 +69,8 @@ let orderEpoch = 0
 /** True once the boot baseline (or an activation) established comparable keys. */
 let baselineSettled = false
 let baselinePromise: Promise<void> | null = null
+/** In-flight one-time default initialization (never a second concurrent pass). */
+let defaultInitPromise: Promise<boolean> | null = null
 
 /**
  * Drops every cached key (policy disabled, or a fresh activation re-reads) and
@@ -152,15 +155,26 @@ export async function readTopicMessageTimes(topicIds: string[]): Promise<Map<str
   return readChunked(topicIds)
 }
 
-/** Every assistant that persists "by update time" (the only lists we order). */
+/** Every assistant whose topics are kept by "by update time" (explicit or default). */
 function enabledAssistants(): Assistant[] {
   const assistants = store.getState?.()?.assistants?.assistants ?? []
   return assistants.filter((assistant) => resolveTopicOrderMode(assistant.topicOrderMode) === 'updated')
 }
 
 /**
- * One baseline read per topic list at boot: every assistant that persisted
- * "by update time" gets real keys before any message-mutation notification is
+ * Assistants that never decided: no persisted mode, or an unknown legacy value.
+ * They read as the default, and they are the ONLY candidates for the one-time
+ * default initialization below — an explicit `manual`/`updated` choice is never
+ * touched.
+ */
+function undecidedAssistants(): Assistant[] {
+  const assistants = store.getState?.()?.assistants?.assistants ?? []
+  return assistants.filter((assistant) => !hasExplicitTopicOrderMode(assistant.topicOrderMode))
+}
+
+/**
+ * One baseline read per topic list at boot: every assistant that persists "by
+ * update time" gets real keys before any message-mutation notification is
  * compared, so the first message after a restart moves the topic instead of
  * being recorded as an uncomparable first observation.
  */
@@ -281,6 +295,73 @@ export async function prepareTopicMessageWrite(topicId: string): Promise<void> {
 /** Boot entry point: establish the baseline for the persisted policy. */
 export async function primeTopicMessageTimesBaseline(): Promise<boolean> {
   return ensureBaseline()
+}
+
+/**
+ * One-time default application for assistants that never chose an order.
+ *
+ * Runs at the existing boot initialization boundary (after rehydration and the
+ * one-shot import projection, so imported assistants that arrived without a
+ * mode are covered too), never per render. It is not a new persistence marker:
+ * the persisted `topicOrderMode` IS the marker, so an assistant that already
+ * carries an explicit `manual`/`updated` is skipped and never re-sorted — and a
+ * list the user dragged afterwards stays exactly where it was placed.
+ *
+ * The sort reuses the boot baseline read (`ensureBaseline`, shared batch, no
+ * second read): every non-pinned topic is ordered newest-latest-message-instant
+ * first with stable ties, the pinned group keeps its own order, and a topic
+ * without a usable message instant falls back to its own `createdAt`.
+ *
+ * Failure fabricates nothing: no key, no order write, no mode write, and the
+ * assistant stays a candidate, so the next boot (or the next call) retries. A
+ * user ordering action while the read is in flight wins: a `manual`/`updated`
+ * choice made meanwhile is respected, the epoch guard discards a superseded
+ * pass, and a list reordered meanwhile is never silently re-sorted (only the
+ * mode is persisted).
+ */
+export async function initializeTopicOrderDefaults(): Promise<boolean> {
+  if (defaultInitPromise) return defaultInitPromise
+  defaultInitPromise = runDefaultInitialization()
+  try {
+    return await defaultInitPromise
+  } finally {
+    defaultInitPromise = null
+  }
+}
+
+async function runDefaultInitialization(): Promise<boolean> {
+  const candidates = undecidedAssistants()
+  if (candidates.length === 0) return true
+  const startEpoch = orderEpoch
+  const capturedByAssistant = new Map<string, Topic[]>()
+  for (const assistant of candidates) capturedByAssistant.set(assistant.id, assistant.topics ?? [])
+
+  const ready = await ensureBaseline()
+  if (!ready) {
+    logger.warn('Topic order default initialization skipped: no trusted baseline yet (retried on the next boot)')
+    return false
+  }
+
+  for (const [assistantId, capturedTopics] of capturedByAssistant) {
+    const current = findAssistant(assistantId)
+    if (!current) continue
+    // The user decided during the read: that decision is newer than the default.
+    if (hasExplicitTopicOrderMode(current.topicOrderMode)) continue
+    // A later user ordering action ("by creation time") wins over this pass.
+    if (startEpoch !== orderEpoch) continue
+
+    const topics = current.topics ?? []
+    const keyOf = (topic: Topic) => topicSortKeyMs(latestMessageAtByTopic.get(topic.id) ?? null, topic.createdAt)
+    if (!isUserReorder(capturedTopics, topics)) {
+      const sorted = sortTopicsByMessageTimeDesc(topics, keyOf)
+      if (sorted.some((topic, index) => topic.id !== topics[index]?.id)) {
+        store.dispatch(updateTopics({ assistantId, topics: sorted }))
+      }
+    }
+    store.dispatch(updateAssistant({ id: assistantId, topicOrderMode: 'updated' }))
+    baselineSettled = true
+  }
+  return true
 }
 
 /**

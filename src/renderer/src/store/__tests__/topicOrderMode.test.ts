@@ -57,16 +57,19 @@ const reduce = (state: any, action: any) => assistantsReducer(state, action) as 
 const topicIds = (state: any) => state.assistants[0].topics.map((item: Topic) => item.id)
 const topicsOf = (state: any): Topic[] => state.assistants[0].topics
 
-describe('legacy persisted state compatibility', () => {
-  it('an assistant without a topicOrderMode reads as manual and never auto-promotes', () => {
+describe('assistant ordering preference and legacy compatibility', () => {
+  it('an assistant without a persisted topicOrderMode reads as the default and never writes one on a metadata mutation', () => {
     const state = stateWith()
     expect(state.assistants[0].topicOrderMode).toBeUndefined()
 
     const next = reduce(state, updateTopicUpdatedAt({ topicId: 'c' }))
     expect(topicIds(next)).toEqual(['p1', 'a', 'b', 'c'])
-    // The timestamp write itself still happens.
+    // The timestamp write itself still happens, and the persisted preference
+    // stays untouched (the one-time default initialization owns it, not a
+    // metadata reducer).
     const updated = topicsOf(next).find((item) => item.id === 'c')!
     expect(updated.updatedAt).not.toBe(c.updatedAt)
+    expect(next.assistants[0].topicOrderMode).toBeUndefined()
   })
 })
 

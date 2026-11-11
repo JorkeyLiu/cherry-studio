@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_TOPIC_ORDER_MODE,
+  hasExplicitTopicOrderMode,
   mergeVisibleTopicReorder,
   moveTopicToOrdinaryHead,
   placeTopicBySortKey,
@@ -25,13 +26,27 @@ const topic = (id: string, createdAt: string, pinned = false): T => ({ id, name:
 const ids = (topics: T[]) => topics.map((item) => item.id)
 
 describe('resolveTopicOrderMode', () => {
-  it('defaults legacy and unknown persisted values to manual', () => {
-    expect(DEFAULT_TOPIC_ORDER_MODE).toBe<TopicOrderMode>('manual')
-    expect(resolveTopicOrderMode(undefined)).toBe<TopicOrderMode>('manual')
-    expect(resolveTopicOrderMode(null)).toBe<TopicOrderMode>('manual')
+  it('defaults topics with no explicit choice to "by update time"', () => {
+    expect(DEFAULT_TOPIC_ORDER_MODE).toBe<TopicOrderMode>('updated')
+    expect(resolveTopicOrderMode(undefined)).toBe<TopicOrderMode>('updated')
+    expect(resolveTopicOrderMode(null)).toBe<TopicOrderMode>('updated')
+    expect(resolveTopicOrderMode('whatever')).toBe<TopicOrderMode>('updated')
+  })
+
+  it('honors every explicit choice', () => {
     expect(resolveTopicOrderMode('manual')).toBe<TopicOrderMode>('manual')
-    expect(resolveTopicOrderMode('whatever')).toBe<TopicOrderMode>('manual')
     expect(resolveTopicOrderMode('updated')).toBe<TopicOrderMode>('updated')
+  })
+})
+
+describe('hasExplicitTopicOrderMode', () => {
+  it('separates a persisted choice from the never-decided state', () => {
+    expect(hasExplicitTopicOrderMode('manual')).toBe(true)
+    expect(hasExplicitTopicOrderMode('updated')).toBe(true)
+    expect(hasExplicitTopicOrderMode(undefined)).toBe(false)
+    expect(hasExplicitTopicOrderMode(null)).toBe(false)
+    expect(hasExplicitTopicOrderMode('')).toBe(false)
+    expect(hasExplicitTopicOrderMode('whatever')).toBe(false)
   })
 })
 

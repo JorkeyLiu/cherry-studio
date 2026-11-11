@@ -185,6 +185,14 @@ describe('pure defaults factories', () => {
     expect(first.topics[0].id).not.toBe(second.topics[0].id)
   })
 
+  it('a created assistant carries the default topic order explicitly', () => {
+    const defaults = createAssistantDefaults({ name: 'Base', prompt: 'p' })
+    expect(createAssistantFromDefaults(defaults).topicOrderMode).toBe('updated')
+    expect(createInitialAssistant(createAssistantDefaults()).topicOrderMode).toBe('updated')
+    // An explicit choice passed in by the caller is preserved.
+    expect(createAssistantFromDefaults(defaults, { topicOrderMode: 'manual' }).topicOrderMode).toBe('manual')
+  })
+
   it('initial assistant keeps compatibility id with a normally owned topic', () => {
     const initial = createInitialAssistant(createAssistantDefaults())
     expect(initial.id).toBe('default')

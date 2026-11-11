@@ -173,6 +173,10 @@ export function createAssistantFromDefaults(
     enableGenerateImage: defaults.enableGenerateImage,
     knowledgeRecognition: defaults.knowledgeRecognition,
     tags: defaults.tags,
+    // A new assistant starts on the default order ("by update time"), persisted
+    // explicitly so the topic ordering service never has to run its one-time
+    // default initialization for it.
+    topicOrderMode: 'updated',
     ...rest,
     id,
     topics: [getDefaultTopic(id)],

@@ -51,6 +51,7 @@ import type { FetchTopicMessageTimesResponse } from '@shared/chatDb'
 
 import {
   enableUpdateTimeOrder,
+  initializeTopicOrderDefaults,
   noteTopicMessageWrite,
   noteTopicReferenceInvalidation,
   prepareTopicMessageWrite,
@@ -485,8 +486,7 @@ describe('boot baseline (cold start)', () => {
   })
 
   it('reads nothing before a write when the assistant does not order by update time', async () => {
-    buildState(undefined, coldTopics())
-    serve({ a: '2026-05-03T00:00:00.000Z', b: '2026-05-01T00:00:00.000Z', c: '2026-05-02T00:00:00.000Z' })
+    buildState('manual', coldTopics())
 
     await prepareTopicMessageWrite('b')
 
@@ -504,10 +504,10 @@ describe('boot baseline (cold start)', () => {
     expect(testBed.fetchTopicMessageTimes).not.toHaveBeenCalled()
   })
 
-  it('resolves immediately before a write once the topic key is already primed', async () => {
-    buildState('updated', coldTopics())
-    serve({ a: '2026-05-03T00:00:00.000Z', b: '2026-05-01T00:00:00.000Z', c: '2026-05-02T00:00:00.000Z' })
-    await enableUpdateTimeOrder('a1')
+  it('resolves immediately before a write once the topic keys are already primed', async () => {
+    buildState('updated', [topic('a', '2026-01-01T00:00:00.000Z'), topic('b', '2026-01-02T00:00:00.000Z')])
+    serve({ a: '2026-04-01T00:00:00.000Z', b: '2026-05-01T00:00:00.000Z' })
+    await primeTopicMessageTimesBaseline()
 
     testBed.fetchTopicMessageTimes = vi.fn(async () => {
       throw new Error('must not be read again')
@@ -748,6 +748,9 @@ describe('reference invalidation — existing Main push event', () => {
     const sourceAssistant: any = {
       id: 'a2',
       name: 'Source owner',
+      // Explicit manual: the source owner keeps its own order, so this test
+      // covers only the reference-target baseline of the enabled assistant.
+      topicOrderMode: 'manual',
       topics: [topic('src', '2026-01-03T00:00:00.000Z')]
     }
     testBed.state = { assistants: { assistants: [targetAssistant, sourceAssistant] } }
@@ -870,5 +873,123 @@ describe('reference invalidation — existing Main push event', () => {
     expect(topicOrderDispatches()).toHaveLength(0)
 
     delete (window as any).api
+  })
+})
+
+describe('initializeTopicOrderDefaults — the one-time default for assistants that never chose', () => {
+  it('orders the non-pinned topics by the authoritative instant once and persists the default', async () => {
+    buildState(undefined, [
+      topic('t1', '2026-01-01T00:00:00.000Z'),
+      topic('t2', '2026-01-02T00:00:00.000Z'),
+      topic('t3', '2026-01-03T00:00:00.000Z'),
+      topic('pin', '2025-01-01T00:00:00.000Z', true)
+    ])
+    // Main instants conflict with the topic metadata: t1 is newest, t2 middle,
+    // and the empty t3 has no message at all so it falls back to its createdAt.
+    serve({ t1: '2026-05-01T00:00:00.000Z', t2: '2026-03-01T00:00:00.000Z', t3: null })
+
+    expect(await initializeTopicOrderDefaults()).toBe(true)
+
+    expect(lastOrder()).toEqual(['pin', 't1', 't2', 't3'])
+    expect(assistantDispatches().at(-1)?.payload).toEqual({ id: 'a1', topicOrderMode: 'updated' })
+
+    // The persisted mode is the marker: a second pass reads nothing and writes
+    // nothing (no repeated full sort, no per-render churn).
+    testBed.dispatched = []
+    const readsAfterFirstPass = testBed.fetchTopicMessageTimes.mock.calls.length
+    expect(await initializeTopicOrderDefaults()).toBe(true)
+    expect(topicOrderDispatches()).toHaveLength(0)
+    expect(assistantDispatches()).toHaveLength(0)
+    expect(testBed.fetchTopicMessageTimes.mock.calls.length).toBe(readsAfterFirstPass)
+  })
+
+  it('never touches an assistant that already chose manual or updated', async () => {
+    buildState('manual', [topic('a', '2026-01-01T00:00:00.000Z'), topic('b', '2026-01-02T00:00:00.000Z')])
+    serve({ a: '2026-06-01T00:00:00.000Z', b: '2026-07-01T00:00:00.000Z' })
+    expect(await initializeTopicOrderDefaults()).toBe(true)
+    expect(testBed.fetchTopicMessageTimes).not.toHaveBeenCalled()
+    expect(testBed.dispatched).toHaveLength(0)
+    expect(testBed.state.assistants.assistants[0].topics.map((item: T) => item.id)).toEqual(['a', 'b'])
+    expect(testBed.state.assistants.assistants[0].topicOrderMode).toBe('manual')
+  })
+
+  it('leaves everything untouched when the read fails and retries on the next pass', async () => {
+    buildState(undefined, [topic('a', '2026-01-01T00:00:00.000Z'), topic('b', '2026-01-02T00:00:00.000Z')])
+    serve({ a: '2026-04-01T00:00:00.000Z', b: '2026-05-01T00:00:00.000Z' })
+    testBed.fetchTopicMessageTimes.mockRejectedValueOnce(new Error('main read failed'))
+
+    expect(await initializeTopicOrderDefaults()).toBe(false)
+    // No fabricated key, no order write, no mode write: still undecided.
+    expect(testBed.dispatched).toHaveLength(0)
+    expect(testBed.state.assistants.assistants[0].topicOrderMode).toBeUndefined()
+    expect(testBed.state.assistants.assistants[0].topics.map((item: T) => item.id)).toEqual(['a', 'b'])
+
+    expect(await initializeTopicOrderDefaults()).toBe(true)
+    expect(lastOrder()).toEqual(['b', 'a'])
+    expect(assistantDispatches().at(-1)?.payload).toEqual({ id: 'a1', topicOrderMode: 'updated' })
+  })
+
+  it('never re-sorts a list the user dragged while the read was in flight', async () => {
+    buildState(undefined, [
+      topic('a', '2026-01-01T00:00:00.000Z'),
+      topic('b', '2026-01-02T00:00:00.000Z'),
+      topic('c', '2026-01-03T00:00:00.000Z')
+    ])
+    const read = deferred<FetchTopicMessageTimesResponse>()
+    testBed.fetchTopicMessageTimes = vi.fn(() => read.promise)
+
+    const pending = initializeTopicOrderDefaults()
+    await flush()
+    const assistant = testBed.state.assistants.assistants[0]
+    assistant.topics = [assistant.topics[2], assistant.topics[0], assistant.topics[1]]
+    testBed.dispatched = []
+
+    read.resolve(response({ a: '2026-05-01T00:00:00.000Z', b: '2026-04-01T00:00:00.000Z' }))
+    expect(await pending).toBe(true)
+
+    // The dragged order survives; only the default preference is persisted.
+    expect(topicOrderDispatches()).toHaveLength(0)
+    expect(assistantDispatches().at(-1)?.payload).toEqual({ id: 'a1', topicOrderMode: 'updated' })
+    expect(testBed.state.assistants.assistants[0].topics.map((item: T) => item.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  it('respects an explicit choice made while the read was in flight', async () => {
+    buildState(undefined, [topic('a', '2026-01-01T00:00:00.000Z'), topic('b', '2026-01-02T00:00:00.000Z')])
+    const read = deferred<FetchTopicMessageTimesResponse>()
+    testBed.fetchTopicMessageTimes = vi.fn(() => read.promise)
+
+    const pending = initializeTopicOrderDefaults()
+    await flush()
+    // The user picks "by creation time" meanwhile: it persists `manual`.
+    const assistant = testBed.state.assistants.assistants[0]
+    assistant.topicOrderMode = 'manual'
+    assistant.topics = [assistant.topics[1], assistant.topics[0]]
+    testBed.dispatched = []
+
+    read.resolve(response({ a: '2026-05-01T00:00:00.000Z' }))
+    expect(await pending).toBe(true)
+
+    expect(testBed.dispatched).toHaveLength(0)
+    expect(assistant.topicOrderMode).toBe('manual')
+    expect(assistant.topics.map((item: T) => item.id)).toEqual(['b', 'a'])
+  })
+
+  it('discards the pass when a later user ordering action happened while awaiting', async () => {
+    buildState(undefined, [topic('a', '2026-01-01T00:00:00.000Z'), topic('b', '2026-01-02T00:00:00.000Z')])
+    const read = deferred<FetchTopicMessageTimesResponse>()
+    testBed.fetchTopicMessageTimes = vi.fn(() => read.promise)
+
+    const pending = initializeTopicOrderDefaults()
+    await flush()
+    // "By creation time" bumps the ordering epoch (and leaves the mode manual).
+    resetTopicMessageTimes()
+    testBed.state.assistants.assistants[0].topicOrderMode = 'manual'
+    testBed.dispatched = []
+
+    read.resolve(response({ a: '2026-12-01T00:00:00.000Z' }))
+    expect(await pending).toBe(true)
+
+    expect(testBed.dispatched).toHaveLength(0)
+    expect(testBed.state.assistants.assistants[0].topics.map((item: T) => item.id)).toEqual(['a', 'b'])
   })
 })

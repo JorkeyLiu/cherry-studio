@@ -265,10 +265,11 @@ describe('Topics ordering submenu', () => {
   })
 
   it('keeps the same plain labels and no entry icons while creation time is selected', async () => {
-    seedTopics()
+    seedTopics('manual')
     renderTopics()
     openMenu()
     await waitFor(() => expect(sortSubmenu()).toHaveLength(2))
+    expect(testBed.menu.selectedKeys).toEqual(['sort-created-at'])
     expect(sortItem('sort-updated-at').label).toBe('chat.topics.sort.by_updated_at')
     expect(sortItem('sort-created-at').label).toBe('chat.topics.sort.by_created_at')
     expect(sortItem('sort-updated-at').label).not.toContain('active')
@@ -286,14 +287,15 @@ describe('Topics ordering submenu', () => {
     expect(sortItem('sort-updated-at').label).not.toContain('active')
   })
 
-  it('selects the creation-time entry whenever the list is not kept in update order', async () => {
-    // Legacy persisted assistant: no mode field at all.
+  it('selects the update-time entry for an assistant that never chose an order (legacy persisted state)', async () => {
+    // Legacy persisted assistant: no mode field at all. It now reads as the
+    // default, so the menu reports the order the list is kept in.
     seedTopics()
     renderTopics()
     openMenu()
     await waitFor(() => expect(sortSubmenu()).toHaveLength(2))
     expect(testBed.menu.selectable).toBe(true)
-    expect(testBed.menu.selectedKeys).toEqual(['sort-created-at'])
+    expect(testBed.menu.selectedKeys).toEqual(['sort-updated-at'])
     expect(sortParent().className).toBe('topic-sort-submenu')
   })
 
@@ -332,8 +334,21 @@ describe('by creation time', () => {
     expect(testBed.resetTopicMessageTimes).toHaveBeenCalledTimes(1)
   })
 
-  it('does not write a mode when the assistant is already manual (legacy persisted state)', async () => {
+  it('persists the explicit manual choice when an assistant that never chose takes the creation-time order', async () => {
     seedTopics()
+    renderTopics()
+    openMenu()
+    await waitFor(() => expect(sortItem('sort-created-at')).toBeTruthy())
+
+    sortItem('sort-created-at').onClick()
+
+    expect(reportedIds()).toEqual(['t-pin', 't-gamma', 't-beta', 't-alpha'])
+    expect(testBed.updateAssistant).toHaveBeenCalledTimes(1)
+    expect(testBed.updateAssistant).toHaveBeenCalledWith({ topicOrderMode: 'manual' })
+  })
+
+  it('does not rewrite a mode that is already manual', async () => {
+    seedTopics('manual')
     renderTopics()
     openMenu()
     await waitFor(() => expect(sortItem('sort-created-at')).toBeTruthy())

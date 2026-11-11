@@ -694,18 +694,26 @@ export const persistor = persistStore(store, undefined, () => {
     finalizeFreshBootstrap: finalizeFreshChatBootstrapForBoot
   })
     .then(() => {
-      // Baseline for the persisted "by update time" policy: one batch read of
-      // the enabled assistants' topics, AFTER rehydration and the one-shot
-      // import projection, so the first message of this session is compared
-      // against real keys instead of being recorded as a first observation.
-      // Dynamic import keeps the store free of a static cycle into the
-      // ordering service (which reads the store).
+      // Baseline for the "by update time" policy (the default) and the one-time
+      // default application for assistants that never chose an order: one batch
+      // read of the enabled assistants' topics, AFTER rehydration and the
+      // one-shot import projection (so an assistant that arrived through the
+      // import without a mode is covered too), followed by the single default
+      // sort of the undecided assistants' non-pinned topics. After that, only a
+      // topic whose latest message instant really changed moves. Dynamic import
+      // keeps the store free of a static cycle into the ordering service (which
+      // reads the store).
       void import('../services/topicMessageTimes')
-        .then((module) => module.primeTopicMessageTimesBaseline())
+        .then(async (module) => {
+          await module.primeTopicMessageTimesBaseline()
+          await module.initializeTopicOrderDefaults()
+        })
         .catch((error) => {
           // Recoverable by design: a failed baseline fabricates nothing, moves
           // nothing, and the next observation retries it (the read itself logs
-          // its own failure). Only an unexpected throw reaches this guard.
+          // its own failure). A failed default initialization leaves the
+          // assistant undecided, so the next boot retries it. Only an
+          // unexpected throw reaches this guard.
           logger.debug('Topic message-time baseline priming failed (next observation retries):', error as Error)
         })
     })

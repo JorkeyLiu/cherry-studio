@@ -44,7 +44,9 @@ export type Assistant = {
   knowledgeRecognition?: 'off' | 'on'
   tags?: string[] // 助手标签
   // Renderer-owned topic ordering preference (device-local, persists with the
-  // same assistant/topic-array boundary as the order itself). Absent = manual.
+  // same assistant/topic-array boundary as the order itself). Absent/unknown
+  // reads as the default (`updated`) and is only initialized once; an explicit
+  // `manual`/`updated` is always honored.
   topicOrderMode?: TopicOrderMode
   // for translate. 更好的做法是定义base assistant，把 Assistant 作为多种不同定义 assistant 的联合类型，但重构代价太大
   content?: string
@@ -53,10 +55,12 @@ export type Assistant = {
 
 /**
  * Topic ordering policy for an assistant's own topic array.
- * - `manual` (default): the persisted array order is authoritative (drag & drop).
- * - `updated`: newest-updated-first on demand, then every real topic update
- *   moves that non-pinned topic to the head of the ordinary group.
- * Absent on legacy persisted assistants, which must read as `manual`.
+ * - `updated` (default): newest-message-instant-first, then every real topic
+ *   update moves that non-pinned topic to the head of the ordinary group.
+ * - `manual`: the persisted array order is authoritative (drag & drop), chosen
+ *   explicitly by the one-shot "by creation time" action.
+ * Absent on legacy persisted assistants, which read as the default and are
+ * initialized once by the topic ordering service.
  */
 export type TopicOrderMode = 'manual' | 'updated'
 

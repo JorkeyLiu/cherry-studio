@@ -3,10 +3,6 @@
  *
  * Two user-chosen orders exist per assistant, plus the pinned group that is
  * shared by both:
- *
- * - `manual` — the persisted `assistant.topics` array order is authoritative
- *   (drag & drop writes it directly). This is the default, including for
- *   legacy persisted assistants that carry no mode field at all.
  * - `updated` — "by update time". The ordering key is the REAL INSTANT of the
  *   latest message `createdAt` inside that topic (every route of the topic,
  *   reference prefix included), as read from Main. It is never the authority
@@ -14,6 +10,9 @@
  *   `updatedAt`/`createdAt` write: enabling it once re-sorts the non-pinned
  *   topics newest-first, then only a topic whose latest message instant
  *   actually changed is repositioned (unchanged instants never move anything).
+ *   This is the DEFAULT for assistants that carry no explicit choice.
+ * - `manual` — the persisted `assistant.topics` array order is authoritative
+ *   (drag & drop writes it directly). It is only ever an explicit choice.
  *
  * "By creation time" is a one-shot action: it applies a newest-first
  * `createdAt` order and returns the assistant to `manual`.
@@ -26,11 +25,20 @@
  */
 import type { TopicOrderMode } from '@renderer/types'
 
-export const DEFAULT_TOPIC_ORDER_MODE: TopicOrderMode = 'manual'
+export const DEFAULT_TOPIC_ORDER_MODE: TopicOrderMode = 'updated'
 
-/** Legacy persisted assistants carry no mode field: absent/unknown means manual. */
+/**
+ * Explicit choice persisted on the assistant. `undefined`/`null`/unknown mean
+ * "never decided": that reads as the default and is the only state the
+ * one-time default initialization may act on.
+ */
+export function hasExplicitTopicOrderMode(mode: unknown): boolean {
+  return mode === 'manual' || mode === 'updated'
+}
+
+/** The effective mode: an explicit choice always wins, otherwise the default. */
 export function resolveTopicOrderMode(mode: unknown): TopicOrderMode {
-  return mode === 'updated' ? 'updated' : 'manual'
+  return hasExplicitTopicOrderMode(mode) ? (mode as TopicOrderMode) : DEFAULT_TOPIC_ORDER_MODE
 }
 
 function timeMs(value: unknown): number | undefined {
