@@ -24,7 +24,7 @@
  * - upsertAt rejects cross-topic reparenting.
  */
 
-import { and, asc, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { decodeNumericOrderCursor, encodeNumericOrderCursor, type PageCursor, type PageResult } from '../domain/cursor'
@@ -456,6 +456,42 @@ export class MessagesRepository {
       .limit(limit)
       .all()
     return rows.reverse().map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
+   * Bounded cross-route time read: the maximum REAL INSTANT of message
+   * `created_at` per topic across every route owner (main route + every
+   * branch). No message rows leave SQLite.
+   *
+   * Comparison is by instant, never by text: imported ISO strings may carry
+   * offsets, second-only precision or trailing fractions, so a `TEXT MAX`
+   * would order them wrongly. `created_at` is normalized to Unix epoch
+   * milliseconds with SQLite's own ISO-8601 parser (UTC when no offset is
+   * present), and unparseable/NULL values contribute nothing (SQLite's
+   * `julianday()` returns NULL for them and `max()` skips NULL).
+   *
+   * Ownership: deleted branches are physically removed with their owned
+   * rows (FK cascade), so a topic's rows are exactly the rows reachable
+   * through at least one of its routes. Callers that need route-scoped or
+   * reference-prefix results compose them on top of this per-topic max.
+   */
+  getMaxCreatedAtMsByTopics(topicIds: string[]): Map<string, number> {
+    const result = new Map<string, number>()
+    if (topicIds.length === 0) return result
+    const instantMs = sql`cast(round((julianday(${messages.createdAt}) - 2440587.5) * 86400000) as integer)`
+    const rows = this.db
+      .select({ topicId: messages.topicId, maxCreatedAtMs: sql<number | null>`max(${instantMs})` })
+      .from(messages)
+      .where(inArray(messages.topicId, topicIds))
+      .groupBy(messages.topicId)
+      .all()
+    for (const row of rows) {
+      const value = (row as { topicId: string; maxCreatedAtMs: number | null }).maxCreatedAtMs
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        result.set((row as { topicId: string }).topicId, value)
+      }
+    }
+    return result
   }
 
   /**

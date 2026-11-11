@@ -140,3 +140,77 @@ describe('bounded naming/activity contracts — exactness', () => {
     expect(() => validateChatDbResult('chatdb:fetch-topic-activity', { ok: true, value: badEmpty })).toThrow()
   })
 })
+
+describe('batched topic message-time contract — exactness', () => {
+  const channel = 'chatdb:fetch-topic-message-times' as const
+
+  function messageTimesValue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      topics: [{ topicId: 't1', latestMessageAt: '2026-09-01T00:00:00.000Z' }],
+      messageTimes: { completeness: 'topic-activity', requestedTopicCount: 1, returnedTopicCount: 1 },
+      ...overrides
+    }
+  }
+
+  it('request accepts only a bounded topicIds array', () => {
+    expect(() => validateChatDbRequest(channel, { topicIds: ['t1', 't2'] })).not.toThrow()
+    expect(() => validateChatDbRequest(channel, { topicIds: [] })).not.toThrow()
+    expect(() => validateChatDbRequest(channel, { topicIds: ['t1'], extra: 1 })).toThrow()
+    expect(() => validateChatDbRequest(channel, { topicIds: ['t1', ''] })).toThrow()
+    expect(() =>
+      validateChatDbRequest(channel, { topicIds: Array.from({ length: 1001 }, (_, i) => `t${i}`) })
+    ).toThrow()
+  })
+
+  it('success accepts null instants and empty topic lists', () => {
+    expect(() => validateChatDbResult(channel, { ok: true, value: messageTimesValue() })).not.toThrow()
+    expect(() =>
+      validateChatDbResult(channel, {
+        ok: true,
+        value: messageTimesValue({
+          topics: [{ topicId: 't1', latestMessageAt: null }]
+        })
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult(channel, {
+        ok: true,
+        value: messageTimesValue({
+          topics: [],
+          messageTimes: { completeness: 'topic-activity', requestedTopicCount: 1, returnedTopicCount: 0 }
+        })
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects wrong completeness, duplicate topics, unknown keys and inconsistent counts', () => {
+    const wrongCompleteness = messageTimesValue({
+      messageTimes: { completeness: 'window', requestedTopicCount: 1, returnedTopicCount: 1 }
+    })
+    expect(() => validateChatDbResult(channel, { ok: true, value: wrongCompleteness })).toThrow()
+
+    const duplicate = messageTimesValue({
+      topics: [
+        { topicId: 't1', latestMessageAt: null },
+        { topicId: 't1', latestMessageAt: '2026-09-01T00:00:00.000Z' }
+      ],
+      messageTimes: { completeness: 'topic-activity', requestedTopicCount: 2, returnedTopicCount: 2 }
+    })
+    expect(() => validateChatDbResult(channel, { ok: true, value: duplicate })).toThrow()
+
+    const unknownKey = messageTimesValue({
+      topics: [{ topicId: 't1', latestMessageAt: null, sortTail: 1 }]
+    })
+    expect(() => validateChatDbResult(channel, { ok: true, value: unknownKey })).toThrow()
+
+    const countMismatch = messageTimesValue({
+      messageTimes: { completeness: 'topic-activity', requestedTopicCount: 2, returnedTopicCount: 2 }
+    })
+    expect(() => validateChatDbResult(channel, { ok: true, value: countMismatch })).toThrow()
+
+    const emptyInstant = messageTimesValue({
+      topics: [{ topicId: 't1', latestMessageAt: '' }]
+    })
+    expect(() => validateChatDbResult(channel, { ok: true, value: emptyInstant })).toThrow()
+  })
+})

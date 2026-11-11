@@ -692,9 +692,26 @@ export const persistor = persistStore(store, undefined, () => {
     },
     apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }),
     finalizeFreshBootstrap: finalizeFreshChatBootstrapForBoot
-  }).catch((error) => {
-    logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
   })
+    .then(() => {
+      // Baseline for the persisted "by update time" policy: one batch read of
+      // the enabled assistants' topics, AFTER rehydration and the one-shot
+      // import projection, so the first message of this session is compared
+      // against real keys instead of being recorded as a first observation.
+      // Dynamic import keeps the store free of a static cycle into the
+      // ordering service (which reads the store).
+      void import('../services/topicMessageTimes')
+        .then((module) => module.primeTopicMessageTimesBaseline())
+        .catch((error) => {
+          // Recoverable by design: a failed baseline fabricates nothing, moves
+          // nothing, and the next observation retries it (the read itself logs
+          // its own failure). Only an unexpected throw reaches this guard.
+          logger.debug('Topic message-time baseline priming failed (next observation retries):', error as Error)
+        })
+    })
+    .catch((error) => {
+      logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
+    })
 })
 
 export const useAppDispatch = useDispatch.withTypes<AppDispatch>()

@@ -91,6 +91,8 @@ describe('chatDbContracts', () => {
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity',
+    // Batched authoritative latest-message-instant READ (topic ordering)
+    'chatdb:fetch-topic-message-times',
     // Standalone topic JSON data exchange (whole-logical-topic export/import)
     'chatdb:export-topic-data',
     'chatdb:import-topic-data',
@@ -4260,6 +4262,8 @@ describe('coverage consistency', () => {
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity',
+    // Batched authoritative latest-message-instant READ (topic ordering)
+    'chatdb:fetch-topic-message-times',
     // Standalone topic JSON data exchange (whole-logical-topic export/import)
     'chatdb:export-topic-data',
     'chatdb:import-topic-data',

@@ -876,6 +876,52 @@ export interface FetchTopicActivityResponse {
   activity: FetchTopicActivityMeta
 }
 
+/**
+ * @see IpcChannel.ChatDb_FetchTopicMessageTimes — additive bounded READ:
+ * per-topic latest message instant for topic-list ordering.
+ */
+export interface FetchTopicMessageTimesRequest {
+  /** Explicit topics to summarize (deduplicated by Main; bounded). */
+  topicIds: string[]
+}
+
+/**
+ * One topic's authoritative latest message instant.
+ *
+ * `latestMessageAt` is the maximum REAL INSTANT of the `createdAt` of every
+ * message visible in any route of this topic (main route + every branch
+ * route, including a reference target's live foreign prefix). It is never
+ * the authority sort tail, never `message.updatedAt`, and never a topic
+ * `updatedAt`/`createdAt` value, and it is normalized to UTC ISO-8601 so
+ * callers can order it directly. `null` means "no usable message time
+ * exists" — the caller applies its own conservative fallback; Main never
+ * fabricates a timestamp.
+ */
+export interface FetchTopicMessageTimesEntry {
+  topicId: string
+  latestMessageAt: string | null
+}
+
+/** Typed activity-family metadata for the batched message-time read. */
+export interface FetchTopicMessageTimesMeta {
+  /** Completeness is always 'topic-activity' (no messages/blocks cross the wire). */
+  completeness: 'topic-activity'
+  /** Exact number of distinct requested topic IDs. */
+  requestedTopicCount: number
+  /** Exact number of returned entries (requested topics that still exist). */
+  returnedTopicCount: number
+}
+
+/** @see IpcChannel.ChatDb_FetchTopicMessageTimes */
+export interface FetchTopicMessageTimesResponse {
+  /**
+   * One entry per requested topic that still exists; topics deleted between
+   * the request and the read are omitted (never guessed, never fabricated).
+   */
+  topics: FetchTopicMessageTimesEntry[]
+  messageTimes: FetchTopicMessageTimesMeta
+}
+
 // ---------------------------------------------------------------------------
 // Standalone topic JSON data exchange (whole-logical-topic export/import)
 // ---------------------------------------------------------------------------
@@ -2405,6 +2451,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     response: FetchTopicNamingContextResponse
   }
   'chatdb:fetch-topic-activity': { request: FetchTopicActivityRequest; response: FetchTopicActivityResponse }
+  // Batched per-topic latest message instant (topic-list ordering; no messages cross the wire)
+  'chatdb:fetch-topic-message-times': {
+    request: FetchTopicMessageTimesRequest
+    response: FetchTopicMessageTimesResponse
+  }
   // Standalone topic JSON data exchange (whole-logical-topic export/import)
   'chatdb:export-topic-data': { request: ExportTopicDataRequest; response: ExportTopicDataResponse }
   'chatdb:import-topic-data': { request: ImportTopicDataRequest; response: ImportTopicDataResponse }

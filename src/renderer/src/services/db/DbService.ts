@@ -11,6 +11,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FetchTopicActivityResponse,
+  FetchTopicMessageTimesResponse,
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
@@ -133,6 +134,10 @@ class DbService implements MessageDataSource {
   fetchTopicActivity(topicId: string, branchId?: string | null): Promise<FetchTopicActivityResponse> {
     if (!this.ordinarySource.fetchTopicActivity) throw new Error('fetchTopicActivity unavailable')
     return this.ordinarySource.fetchTopicActivity(topicId, branchId)
+  }
+  fetchTopicMessageTimes(topicIds: string[]): Promise<FetchTopicMessageTimesResponse> {
+    if (!this.ordinarySource.fetchTopicMessageTimes) throw new Error('fetchTopicMessageTimes unavailable')
+    return this.ordinarySource.fetchTopicMessageTimes(topicIds)
   }
   exportTopicData(topicId: string): Promise<TopicDataExportPayload> {
     if (!this.ordinarySource.exportTopicData) throw new Error('exportTopicData unavailable')

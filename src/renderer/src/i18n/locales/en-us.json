@@ -1380,6 +1380,11 @@
         "placeholder": "Search topics...",
         "title": "Search topics"
       },
+      "sort": {
+        "by_created_at": "By creation time",
+        "by_updated_at": "By update time",
+        "title": "Sort by"
+      },
       "title": "Topics",
       "trash": {
         "empty": "Trash is empty",

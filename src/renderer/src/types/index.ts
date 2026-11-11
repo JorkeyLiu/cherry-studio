@@ -43,10 +43,22 @@ export type Assistant = {
   enableGenerateImage?: boolean
   knowledgeRecognition?: 'off' | 'on'
   tags?: string[] // 助手标签
+  // Renderer-owned topic ordering preference (device-local, persists with the
+  // same assistant/topic-array boundary as the order itself). Absent = manual.
+  topicOrderMode?: TopicOrderMode
   // for translate. 更好的做法是定义base assistant，把 Assistant 作为多种不同定义 assistant 的联合类型，但重构代价太大
   content?: string
   targetLanguage?: TranslateLanguage
 }
+
+/**
+ * Topic ordering policy for an assistant's own topic array.
+ * - `manual` (default): the persisted array order is authoritative (drag & drop).
+ * - `updated`: newest-updated-first on demand, then every real topic update
+ *   moves that non-pinned topic to the head of the ordinary group.
+ * Absent on legacy persisted assistants, which must read as `manual`.
+ */
+export type TopicOrderMode = 'manual' | 'updated'
 
 export type TranslateAssistant = Assistant & {
   model: Model

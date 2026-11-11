@@ -11,6 +11,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FetchTopicActivityResponse,
+  FetchTopicMessageTimesResponse,
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
@@ -511,6 +512,15 @@ export interface MessageDataSource {
    * Missing topic → throws ChatDbResultError (NOT_FOUND).
    */
   fetchTopicActivity?(topicId: string, branchId?: BranchRoute): Promise<FetchTopicActivityResponse>
+
+  /**
+   * Batched bounded topic message-time READ for the topic list ordering.
+   * Returns the authoritative latest message instant per existing topic
+   * (maximum real `createdAt` instant across every route of that topic,
+   * reference prefix included); no messages/blocks are returned and no
+   * persisted timestamp is written. Missing topics are omitted.
+   */
+  fetchTopicMessageTimes?(topicIds: string[]): Promise<FetchTopicMessageTimesResponse>
 
   /**
    * Standalone JSON export READ — ONE ENTIRE logical topic.

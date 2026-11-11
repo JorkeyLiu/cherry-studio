@@ -153,6 +153,18 @@
   display: none;
 }
 
+/* Keep the "sort by" submenu title in its normal text color while one of its
+   entries is selected. rc-menu marks the parent of a selected child
+   (ant-dropdown-menu-submenu-selected -> primary color via antd's
+   `.ant-dropdown-menu-submenu .ant-dropdown-menu .…-submenu-selected` rule),
+   yet the active ordering is already shown by the selected entry itself.
+   Scoped to the topic sort submenu so no other menu loses its selected color;
+   !important is required because that own-color rule out-specifies a
+   single-class-scoped override. */
+.topic-sort-submenu.ant-dropdown-menu-submenu-selected .ant-dropdown-menu-submenu-title {
+  color: var(--ant-color-text, var(--color-text-1)) !important;
+}
+
 .ant-dropdown-menu-submenu .ant-dropdown-menu-submenu-title {
   align-items: center;
 }

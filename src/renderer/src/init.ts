@@ -163,6 +163,21 @@ async function bootstrapStoreDependent(): Promise<void> {
     bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
   }
 
+  // Topic ordering: reuse the EXISTING Main→renderer history-reference
+  // invalidation event so a reference target's ordering key re-reads when its
+  // source prefix changes — including targets that are not rendered anywhere.
+  // Window-level bootstrap subscription, not tied to a mounted topic list.
+  try {
+    const { subscribeTopicMessageTimeInvalidation } = await import('./services/topicMessageTimes')
+    try {
+      subscribeTopicMessageTimeInvalidation()
+    } catch (e) {
+      bootstrapLogger.warn('[Bootstrap] HistoryReference invalidation subscribe failed', e as Error)
+    }
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] HistoryReference invalidation subscribe failed', e as Error)
+  }
+
   try {
     initExactProviderResolver(store)
   } catch (e) {

@@ -26,6 +26,7 @@ import type {
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   FetchTopicActivityRequest,
+  FetchTopicMessageTimesRequest,
   FetchTopicNamingContextRequest,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
@@ -621,6 +622,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchTopicNamingContext, request),
     fetchTopicActivity: (request: FetchTopicActivityRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchTopicActivity, request),
+    fetchTopicMessageTimes: (request: FetchTopicMessageTimesRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchTopicMessageTimes, request),
     getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
     topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
     ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),

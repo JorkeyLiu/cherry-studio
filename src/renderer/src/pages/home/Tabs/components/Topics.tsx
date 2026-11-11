@@ -24,6 +24,7 @@ import {
 } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { exportTopicDataToFile, importTopicDataFromFile } from '@renderer/services/topicDataJson'
+import { enableUpdateTimeOrder, resetTopicMessageTimes } from '@renderer/services/topicMessageTimes'
 import type { RootState } from '@renderer/store'
 import store from '@renderer/store'
 import { updateTopic as updateTopicAction } from '@renderer/store/assistants'
@@ -34,12 +35,14 @@ import { classNames } from '@renderer/utils'
 import { exportTopicAsMarkdown, exportTopicToNotes } from '@renderer/utils/export'
 import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { reorderTopicsForPin, sortTopicsPinnedFirst } from '@renderer/utils/sort'
+import { mergeVisibleTopicReorder, resolveTopicOrderMode, sortTopicsByCreatedAtDesc } from '@renderer/utils/topicOrder'
 import type { MenuProps } from 'antd'
 import { Dropdown, Tooltip } from 'antd'
 import type { ItemType, MenuItemType } from 'antd/es/menu/interface'
 import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
+  ArrowUpDown,
   CheckSquare,
   FileDown,
   FolderOutput,
@@ -148,7 +151,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const { t } = useTranslation()
   const { notesPath } = useNotesSettings()
   const { assistants } = useAssistants()
-  const { assistant, addTopic, removeTopic, moveTopic, updateTopic, updateTopics } = useAssistant(_assistant.id)
+  const { assistant, addTopic, removeTopic, moveTopic, updateTopic, updateTopics, updateAssistant } = useAssistant(
+    _assistant.id
+  )
 
   const logger = useMemo(() => loggerService.withContext('Topics'), [])
 
@@ -340,6 +345,36 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     [assistant.topics, logger, updateTopic, updateTopics]
   )
 
+  // One-shot "by creation time": newest created first among non-pinned
+  // topics, and the assistant leaves the continuous update ordering. Keys of
+  // a discontinued policy are dropped so a later reactivation re-reads Main.
+  const onSortByCreatedAt = useCallback(() => {
+    updateTopics(sortTopicsByCreatedAtDesc(assistant.topics))
+    resetTopicMessageTimes()
+    if (resolveTopicOrderMode(assistant.topicOrderMode) !== 'manual') {
+      updateAssistant({ topicOrderMode: 'manual' })
+    }
+  }, [assistant.topics, assistant.topicOrderMode, updateAssistant, updateTopics])
+
+  // "By update time": one authoritative read re-orders every non-pinned topic
+  // by its real latest message instant and turns on the persisted continuous
+  // policy. Pinned topics and manual drags are unaffected — a drag reorders the
+  // list without disabling the policy.
+  const onSortByUpdatedAt = useCallback(async () => {
+    try {
+      await enableUpdateTimeOrder(assistant.id)
+    } catch (error) {
+      logger.error('Failed to enable update-time topic ordering', error as Error)
+    }
+  }, [assistant.id, logger])
+
+  // The ordering menu reports the order the list is actually kept in, not a
+  // one-shot action: the continuous "by update time" policy selects its own
+  // entry, and every other mode (manual, including legacy assistants with no
+  // persisted mode) is the creation-time view.
+  const selectedSortKey =
+    resolveTopicOrderMode(assistant.topicOrderMode) === 'updated' ? 'sort-updated-at' : 'sort-created-at'
+
   const onDeleteTopic = useCallback(
     async (topic: Topic) => {
       try {
@@ -530,6 +565,32 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
+        // Ordering submenu: both entries act immediately; "by update time"
+        // additionally persists its continuous policy. The submenu keeps the
+        // shared sort icon while the two entries carry no icons of their own,
+        // and the active order is shown only by the selected entry — no extra
+        // label, badge or "already enabled" wording. A selected entry makes
+        // rc-menu mark its parent as selected, so the title must never inherit
+        // that primary color: `topic-sort-submenu` scopes the suppression to
+        // this submenu instead of touching every menu.
+        label: t('chat.topics.sort.title'),
+        key: 'topic-sort',
+        className: 'topic-sort-submenu',
+        icon: <ArrowUpDown size={14} />,
+        children: [
+          {
+            label: t('chat.topics.sort.by_created_at'),
+            key: 'sort-created-at',
+            onClick: onSortByCreatedAt
+          },
+          {
+            label: t('chat.topics.sort.by_updated_at'),
+            key: 'sort-updated-at',
+            onClick: onSortByUpdatedAt
+          }
+        ] as ItemType<MenuItemType>[]
+      },
+      {
         label: t('chat.save.label'),
         key: 'save',
         icon: <Save size={14} />,
@@ -628,7 +689,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     updateTopic,
     onPinTopic,
     onMoveTopic,
-    onDeleteTopic
+    onDeleteTopic,
+    onSortByCreatedAt,
+    onSortByUpdatedAt
   ])
 
   // LOCK-002: pinned topics always sort to the top.
@@ -643,13 +706,24 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     [sortedTopics, deferredSearchText]
   )
 
+  // Drag & drop writes only the visible (possibly searched) subset back onto
+  // the complete list: hidden topics and the pinned/ordinary grouping survive,
+  // and a drag never removes topics. Dragging never disables the continuous
+  // update ordering either.
+  const onReorderTopics = useCallback(
+    (reorderedTopics: Topic[]) => {
+      updateTopics(mergeVisibleTopicReorder(assistant.topics, filteredTopics, reorderedTopics))
+    },
+    [assistant.topics, filteredTopics, updateTopics]
+  )
+
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <DraggableVirtualList
-        ref={listRef}
         className="topics-tab"
+        ref={listRef}
+        onUpdate={onReorderTopics}
         list={filteredTopics}
-        onUpdate={updateTopics}
         style={{
           flex: '1 1 auto',
           minHeight: 0,
@@ -784,7 +858,14 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           }
 
           return (
-            <Dropdown menu={{ items: getTopicMenuItems }} trigger={['contextMenu']} disabled={isManageMode}>
+            <Dropdown
+              menu={{
+                items: getTopicMenuItems,
+                selectable: true,
+                selectedKeys: [selectedSortKey]
+              }}
+              trigger={['contextMenu']}
+              disabled={isManageMode}>
               <TopicListItem
                 data-testid="topic-item"
                 data-topic-id={topic.id}

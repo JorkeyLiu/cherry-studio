@@ -16,8 +16,8 @@
  * - Renderer→wire JSON boundary: cloneForWire recursively clones, strips undefined,
  *   validates JSON safety, rejects unsupported types.
  */
-
 import { invalidateTopicsDeletion } from '@renderer/services/topicDeletionInvalidation'
+import { noteTopicMessageWrite, prepareTopicMessageWrite } from '@renderer/services/topicMessageTimes'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import type { Usage } from '@renderer/types'
@@ -67,6 +67,8 @@ import type {
   FetchMessagesWindowResponse,
   FetchTopicActivityRequest,
   FetchTopicActivityResponse,
+  FetchTopicMessageTimesRequest,
+  FetchTopicMessageTimesResponse,
   FetchTopicNamingContextRequest,
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotRequest,
@@ -176,6 +178,7 @@ export interface ChatDbApi {
     request: FetchTopicNamingContextRequest
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
   fetchTopicActivity?(request: FetchTopicActivityRequest): Promise<ChatDbResult<FetchTopicActivityResponse>>
+  fetchTopicMessageTimes?(request: FetchTopicMessageTimesRequest): Promise<ChatDbResult<FetchTopicMessageTimesResponse>>
   exportTopicData?(request: ExportTopicDataRequest): Promise<ChatDbResult<ExportTopicDataResponse>>
   importTopicData?(request: ImportTopicDataRequest): Promise<ChatDbResult<ImportTopicDataResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
@@ -302,14 +305,31 @@ function sanitizeInsertIndex(index: number | undefined): number | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// updateTopicUpdatedAt dispatch
+// Topic write seam
 //
 // Preserve the existing Redux timestamp behavior after successful
-// message/topic mutations only.
+// message/topic mutations only, and report the write to the runtime topic
+// ordering: while the assistant orders by real latest message time, that
+// module performs one bounded authoritative re-read for this topic.
 // ---------------------------------------------------------------------------
 
 function dispatchTopicUpdatedAt(topicId: string): void {
   store.dispatch(updateTopicUpdatedAt({ topicId }))
+  noteTopicMessageWrite(topicId)
+}
+
+/**
+ * Pre-write ordering baseline for the topic this mutation is about to change.
+ *
+ * Awaited BEFORE the Main mutation is sent: the post-write comparison must
+ * happen against a key that existed before the write, so a session whose boot
+ * baseline has not settled yet cannot swallow the new maximum as a "first
+ * observation". The ordering service resolves immediately unless its assistant
+ * persists "by update time" and the topic key is still unknown, and it never
+ * blocks or fails the write.
+ */
+async function prepareOrderingBaseline(topicId: string): Promise<void> {
+  await prepareTopicMessageWrite(topicId)
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +452,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       })
     }
 
+    await prepareOrderingBaseline(topicId)
     const tIpc = performance.now()
     let result: ChatDbResult<AppendMessageResponse>
     try {
@@ -481,6 +502,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       updates: cloneForWire(updates as unknown as JsonObject),
       ...(resendAttemptId !== undefined && { resendAttemptId })
     }
+    await prepareOrderingBaseline(topicId)
     unwrap(await this.api.updateMessage(request))
     dispatchTopicUpdatedAt(topicId)
   }
@@ -539,6 +561,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blockIdsToDelete: cloneForWire(blockIdsToDelete),
       ...(resendAttemptId !== undefined && { resendAttemptId })
     }
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -561,6 +584,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     branchId?: string | null
   ): Promise<SelectAnswerMessageResponse> {
     const request: SelectAnswerMessageRequest = cloneForWire({ topicId, branchId: branchId ?? null, selectedMessageId })
+    await prepareOrderingBaseline(topicId)
     const response = unwrap(await this.api.selectAnswerMessage(request))
     dispatchTopicUpdatedAt(topicId)
     return response
@@ -581,6 +605,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     branchId?: string | null
   ): Promise<SelectUsefulAnswerResponse> {
     const request: SelectUsefulAnswerRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageId })
+    await prepareOrderingBaseline(topicId)
     const response = unwrap(await this.api.selectUsefulAnswer(request))
     dispatchTopicUpdatedAt(topicId)
     return response
@@ -588,12 +613,14 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async deleteMessage(topicId: string, messageId: string, branchId?: string | null): Promise<void> {
     const request: DeleteMessageRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageId })
+    await prepareOrderingBaseline(topicId)
     unwrap(await this.api.deleteMessage(request))
     dispatchTopicUpdatedAt(topicId)
   }
 
   async deleteMessages(topicId: string, messageIds: string[], branchId?: string | null): Promise<void> {
     const request: DeleteMessagesRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageIds })
+    await prepareOrderingBaseline(topicId)
     unwrap(await this.api.deleteMessages(request))
     dispatchTopicUpdatedAt(topicId)
   }
@@ -750,6 +777,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       anchorMessageId,
       orderedMessageIds
     })
+    await prepareOrderingBaseline(topicId)
     const response = unwrap(await this.api.reorderAnswerGroup(request))
     dispatchTopicUpdatedAt(topicId)
     return response
@@ -798,6 +826,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async softDeleteTopic(topicId: string, name?: string | null): Promise<void> {
     const request: SoftDeleteTopicRequest = cloneForWire({ topicId, name })
+    await prepareOrderingBaseline(topicId)
     unwrap(await this.api.softDeleteTopic(request))
     dispatchTopicUpdatedAt(topicId)
   }
@@ -806,6 +835,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     // LOCK-532: one Main command that atomically restores and returns the
     // restored TopicWire, or null when no soft-deleted row was restored.
     const request: RestoreTopicRequest = cloneForWire({ topicId })
+    await prepareOrderingBaseline(topicId)
     const restored = unwrap(await this.api.restoreTopic(request))
     if (restored !== null) {
       dispatchTopicUpdatedAt(topicId)
@@ -820,6 +850,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async hardDeleteTopic(topicId: string): Promise<HardDeleteTopicResponse> {
     const request: HardDeleteTopicRequest = cloneForWire({ topicId })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.hardDeleteTopic(request))
     // Invalidate only after successful authoritative deletion, using exact IDs
     if (result.deletedTopicIds.length > 0) {
@@ -884,6 +915,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       anchorMessageId,
       assistantId
     })
+    await prepareOrderingBaseline(targetTopicId)
     const result = unwrap(await this.api.branchMessagesToTopic(request))
     dispatchTopicUpdatedAt(targetTopicId)
     return {
@@ -913,6 +945,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       anchorMessageId,
       name
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.createBranch(request))
     dispatchTopicUpdatedAt(topicId)
     return {
@@ -949,6 +982,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       assistantId,
       name
     })
+    await prepareOrderingBaseline(targetTopicId)
     const result = unwrap(await this.api.createReferencedTopic(request))
     dispatchTopicUpdatedAt(targetTopicId)
     return {
@@ -972,6 +1006,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       throw new Error('ChatDb API unavailable: renameBranch not exposed')
     }
     const request: RenameBranchRequest = cloneForWire({ topicId, branchId, name })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.renameBranch(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -982,6 +1017,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       throw new Error('ChatDb API unavailable: deleteBranch not exposed')
     }
     const request: DeleteBranchRequest = cloneForWire({ topicId, branchId })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.deleteBranch(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1013,6 +1049,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
           }
         : {})
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.moveSelectedTurnsToNewBranch(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1044,6 +1081,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       afterMessageId,
       entries
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.insertMessagesAfterAnchor(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1063,6 +1101,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       messages,
       blockIdsToDelete
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.resetMessagesForResend(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1075,6 +1114,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const wireRequest: ResendUserMessagesRequest = cloneForWire(
       request as unknown as JsonObject
     ) as unknown as ResendUserMessagesRequest
+    await prepareOrderingBaseline(wireRequest.topicId)
     const result = unwrap(await this.api.resendUserMessages(wireRequest))
     dispatchTopicUpdatedAt(wireRequest.topicId)
     return result
@@ -1087,6 +1127,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const wireRequest: RegenerateAssistantMessageRequest = cloneForWire(
       request as unknown as JsonObject
     ) as unknown as RegenerateAssistantMessageRequest
+    await prepareOrderingBaseline(wireRequest.topicId)
     const result = unwrap(await this.api.regenerateAssistantMessage(wireRequest))
     dispatchTopicUpdatedAt(wireRequest.topicId)
     return result
@@ -1102,6 +1143,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       branchId: branchId ?? null,
       messageIds
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.deleteMessagesWithSegments(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1120,6 +1162,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       branchId: branchId ?? null,
       messageIds
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.deleteMessagesWithDependents(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1137,6 +1180,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       entries,
       insertIndex
     })
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.pasteMessagesToTopic(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1159,6 +1203,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
         ? { topicId, branchId: branchId ?? null, groups, boundaryRestores }
         : { topicId, branchId: branchId ?? null, groups }
     )
+    await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.insertMessageGroups(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1410,6 +1455,23 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
     const request: FetchTopicActivityRequest = cloneForWire({ topicId, branchId: branchId ?? null })
     return unwrap(await this.api.fetchTopicActivity(request))
+  }
+
+  /**
+   * Batched per-topic latest message instant for the topic list ordering.
+   *
+   * One Main SQLite transaction computes the maximum REAL INSTANT of message
+   * `createdAt` across every route of each requested topic (including a
+   * reference target's live foreign prefix). No messages or blocks cross the
+   * wire, nothing is dispatched, and no persisted timestamp is written.
+   * Missing topics are omitted from the response; a transport rejection
+   * propagates unchanged so callers keep their current order.
+   */
+  async fetchTopicMessageTimes(topicIds: string[]): Promise<FetchTopicMessageTimesResponse> {
+    if (!this.api.fetchTopicMessageTimes) {
+      throw new Error('ChatDb API unavailable: topic message-time read not exposed')
+    }
+    return unwrap(await this.api.fetchTopicMessageTimes(cloneForWire({ topicIds })))
   }
 
   // ============ Search (Phase 5.2A, read-only) ============

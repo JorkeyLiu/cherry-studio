@@ -41,6 +41,9 @@ import type {
   FetchMessagesWindowResponse,
   FetchTopicActivityRequest,
   FetchTopicActivityResponse,
+  FetchTopicMessageTimesEntry,
+  FetchTopicMessageTimesRequest,
+  FetchTopicMessageTimesResponse,
   FetchTopicNamingContextRequest,
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotRequest,
@@ -245,6 +248,28 @@ function sameUsageSource(a: UpdateMessageUsageSource, b: UpdateMessageUsageSourc
     if (a.fileIds[i] !== b.fileIds[i]) return false
   }
   return true
+}
+
+/**
+ * Real-instant epoch milliseconds of one message `createdAt`.
+ *
+ * Mirrors the SQLite normalizer used by the batched per-topic maximum
+ * (`cast(round((julianday(created_at) - 2440587.5) * 86400000) as integer)`):
+ * an explicit zone (`Z` or `±HH:MM`/`±HHMM`) is honored, and a value with a
+ * time component but no zone is read as **UTC** (SQLite's behavior; JS would
+ * otherwise read it as local time and diverge by the machine offset).
+ * Non-strings, empty values and unparseable values return `null` and simply
+ * contribute nothing — no instant is ever fabricated.
+ */
+function messageCreatedAtMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const raw = value.trim()
+  if (raw === '') return null
+  const hasTimeComponent = /[T ]\d{2}:\d{2}/.test(raw)
+  const hasZone = /(?:[Zz]|[+-]\d{2}:?\d{2})$/.test(raw)
+  const candidate = hasTimeComponent && !hasZone ? `${raw.replace(' ', 'T')}Z` : raw
+  const parsed = Date.parse(candidate)
+  return Number.isNaN(parsed) ? null : parsed
 }
 
 /**
@@ -2989,6 +3014,66 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchTopicActivity(${request.topicId})`)
+  }
+
+  /**
+   * Batched topic message-time READ (`'topic-activity'` completeness).
+   *
+   * Returns, per requested topic that still exists, the maximum REAL INSTANT
+   * of every message `createdAt` visible in ANY route of that topic:
+   *
+   * - Every row owned by the topic counts, because each one is visible in at
+   *   least the route that owns it (main route or its own branch). Deleting a
+   *   branch physically removes its owned rows (FK cascade), so removed
+   *   branches contribute nothing.
+   * - A reference target additionally sees its live foreign prefix, which is
+   *   the source route composed up to the captured endpoint (recursive and
+   *   cycle-guarded). The prefix is bounded by the endpoint, so the target
+   *   never inherits the source topic's full time span.
+   * - Ordering is by instant, never by text or by activity order: the
+   *   authority sort tail, `message.updatedAt` and topic timestamps are
+   *   ignored, and offsets/seconds-only/fractional imported values compare
+   *   correctly.
+   * - `null` means no usable message instant exists. Main never fabricates
+   *   one; the caller owns its conservative fallback.
+   *
+   * One SQLite transaction; no messages or blocks cross the wire.
+   */
+  fetchTopicMessageTimes(request: FetchTopicMessageTimesRequest): ChatDbResult<FetchTopicMessageTimesResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topicIds = Array.from(new Set(request.topicIds))
+        const ownMaxMs = repos.messages.getMaxCreatedAtMsByTopics(topicIds)
+        const entries: FetchTopicMessageTimesEntry[] = []
+        for (const topicId of topicIds) {
+          const topic = repos.topics.getById(topicId)
+          // A topic deleted between the request and this read is omitted, not
+          // guessed: the counts below make that explicit to the caller.
+          if (!topic.found) continue
+          let instantMs = ownMaxMs.get(topicId) ?? null
+          const prefix = this.resolveReferenceBaseInTx(repos, topicId, new Set<string>(), 0)
+          for (const message of prefix.messages) {
+            const messageMs = messageCreatedAtMs(message.createdAt)
+            if (messageMs !== null && (instantMs === null || messageMs > instantMs)) {
+              instantMs = messageMs
+            }
+          }
+          entries.push({
+            topicId,
+            latestMessageAt: instantMs === null ? null : new Date(instantMs).toISOString()
+          })
+        }
+        return {
+          topics: entries,
+          messageTimes: {
+            completeness: 'topic-activity' as const,
+            requestedTopicCount: topicIds.length,
+            returnedTopicCount: entries.length
+          }
+        }
+      })
+    }, `fetchTopicMessageTimes(${request.topicIds.length} topics)`)
   }
 
   /**

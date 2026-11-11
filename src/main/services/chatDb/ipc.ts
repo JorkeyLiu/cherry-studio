@@ -50,6 +50,7 @@ import type {
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   FetchTopicActivityRequest,
+  FetchTopicMessageTimesRequest,
   FetchTopicNamingContextRequest,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
@@ -493,6 +494,11 @@ export function registerChatDbIpc(): () => void {
   // 1g. fetch-topic-activity (bounded rate-limit authority; no messages/blocks)
   handleCommand(IpcChannel.ChatDb_FetchTopicActivity, (agg, req: FetchTopicActivityRequest) => {
     return agg.fetchTopicActivity(req)
+  })
+
+  // 1h. fetch-topic-message-times (batched per-topic latest message instant; no messages/blocks)
+  handleCommand(IpcChannel.ChatDb_FetchTopicMessageTimes, (agg, req: FetchTopicMessageTimesRequest) => {
+    return agg.fetchTopicMessageTimes(req)
   })
 
   // 2. get-raw-topic

@@ -364,6 +364,7 @@ export enum IpcChannel {
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   ChatDb_FetchTopicNamingContext = 'chatdb:fetch-topic-naming-context',
   ChatDb_FetchTopicActivity = 'chatdb:fetch-topic-activity',
+  ChatDb_FetchTopicMessageTimes = 'chatdb:fetch-topic-message-times',
 
   // Standalone topic JSON data exchange (whole-logical-topic export/import)
   ChatDb_ExportTopicData = 'chatdb:export-topic-data',

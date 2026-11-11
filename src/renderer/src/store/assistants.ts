@@ -184,18 +184,25 @@ const assistantsSlice = createSlice({
     updateTopic: (state, action: PayloadAction<{ assistantId: string; topic: Topic }>) => {
       const newTopic = action.payload.topic
       newTopic.updatedAt = new Date().toISOString()
-      state.assistants = state.assistants.map((assistant) =>
-        assistant.id === action.payload.assistantId
-          ? {
-              ...assistant,
-              topics: normalizeTopics(assistant.topics).map((topic) => {
-                const _topic = topic.id === newTopic.id ? newTopic : topic
-                _topic.messages = []
-                return _topic
-              })
-            }
-          : assistant
-      )
+      state.assistants = state.assistants.map((assistant) => {
+        if (assistant.id !== action.payload.assistantId) {
+          return assistant
+        }
+        const topics = normalizeTopics(assistant.topics).map((topic) => {
+          const _topic = topic.id === newTopic.id ? newTopic : topic
+          _topic.messages = []
+          return _topic
+        })
+        // The `updatedAt` bump above is display metadata only. Under the
+        // continuous "by update time" ordering the list position is driven by
+        // the authoritative latest message instant observed at the message
+        // write seam, never by this topic metadata write: renaming, pinning,
+        // auto-naming or any other metadata update must not reorder topics.
+        return {
+          ...assistant,
+          topics
+        }
+      })
     },
     updateTopics: (state, action: PayloadAction<{ assistantId: string; topics: Topic[] }>) => {
       state.assistants = state.assistants.map((assistant) =>
@@ -221,13 +228,18 @@ const assistantsSlice = createSlice({
       })
     },
     updateTopicUpdatedAt: (state, action: PayloadAction<{ topicId: string }>) => {
-      outer: for (const assistant of state.assistants) {
-        for (const topic of normalizeTopics(assistant.topics)) {
-          if (topic.id === action.payload.topicId) {
-            topic.updatedAt = new Date().toISOString()
-            break outer
-          }
+      const updatedTopicId = action.payload.topicId
+      for (const assistant of state.assistants) {
+        const topics = normalizeTopics(assistant.topics)
+        const target = topics.find((topic) => topic.id === updatedTopicId)
+        if (!target) {
+          continue
         }
+        // `updatedAt` is the topic's own write clock, kept for display only.
+        // It is not an ordering key: "by update time" uses the authoritative
+        // latest message instant, and this write must never move a topic.
+        target.updatedAt = new Date().toISOString()
+        return
       }
     },
     setModel: (state, action: PayloadAction<{ assistantId: string; model: Model }>) => {

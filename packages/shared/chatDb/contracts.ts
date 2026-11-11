@@ -38,6 +38,7 @@ import type {
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   FetchTopicActivityRequest,
+  FetchTopicMessageTimesRequest,
   FetchTopicNamingContextRequest,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
@@ -4758,6 +4759,156 @@ const fetchTopicActivityContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Topic message times contract — batched, activity-family bounded READ
+// ---------------------------------------------------------------------------
+
+const FETCH_TOPIC_MESSAGE_TIMES_CHANNEL = 'chatdb:fetch-topic-message-times'
+const FETCH_TOPIC_MESSAGE_TIMES_VALUE_KEYS = new Set(['topics', 'messageTimes'])
+const FETCH_TOPIC_MESSAGE_TIMES_ENTRY_KEYS = new Set(['topicId', 'latestMessageAt'])
+const FETCH_TOPIC_MESSAGE_TIMES_META_KEYS = new Set(['completeness', 'requestedTopicCount', 'returnedTopicCount'])
+/** Request bound: the batched read stays bounded no matter how the caller chunks. */
+const MAX_TOPIC_MESSAGE_TIMES_REQUEST = 1000
+
+const fetchTopicMessageTimesContract: ChatDbContract = {
+  allowedKeys: keySet('topicIds'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchTopicMessageTimesContract.allowedKeys)
+    const req = value as FetchTopicMessageTimesRequest
+    validateStringArray(req.topicIds, 'request.topicIds')
+    if (req.topicIds.length > MAX_TOPIC_MESSAGE_TIMES_REQUEST) {
+      throw new ValidationError(
+        'request.topicIds',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] topicIds length ${req.topicIds.length} exceeds maximum (${MAX_TOPIC_MESSAGE_TIMES_REQUEST})`
+      )
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, FETCH_TOPIC_MESSAGE_TIMES_CHANNEL)
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true) return
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError(
+        'result.value',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected object with topics, messageTimes`
+      )
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError(
+        'result.value',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Success value must be a plain object`
+      )
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!FETCH_TOPIC_MESSAGE_TIMES_VALUE_KEYS.has(key)) {
+        throw new ValidationError(
+          `result.value.${key}`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Unknown key in success value: "${key}"`
+        )
+      }
+    }
+    const entries = v.topics
+    if (!Array.isArray(entries)) {
+      throw new ValidationError('result.value.topics', `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected topics array`)
+    }
+    const seenTopicIds = new Set<string>()
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ValidationError(
+          `result.value.topics[${i}]`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected entry object`
+        )
+      }
+      const entryProto = Object.getPrototypeOf(entry)
+      if (entryProto !== Object.prototype && entryProto !== null) {
+        throw new ValidationError(
+          `result.value.topics[${i}]`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Entry must be a plain object`
+        )
+      }
+      const e = entry as Record<string, unknown>
+      for (const key of Object.keys(e)) {
+        if (!FETCH_TOPIC_MESSAGE_TIMES_ENTRY_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.topics[${i}].${key}`,
+            `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Unknown key in entry: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(e.topicId, `result.value.topics[${i}].topicId`)
+      const topicId = e.topicId as string
+      if (seenTopicIds.has(topicId)) {
+        throw new ValidationError(
+          `result.value.topics[${i}].topicId`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Duplicate topicId "${topicId}"`
+        )
+      }
+      seenTopicIds.add(topicId)
+      if (e.latestMessageAt !== null) {
+        validateNonEmptyString(e.latestMessageAt, `result.value.topics[${i}].latestMessageAt`)
+      }
+    }
+    const meta = v.messageTimes
+    if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
+      throw new ValidationError(
+        'result.value.messageTimes',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected messageTimes object`
+      )
+    }
+    const metaProto = Object.getPrototypeOf(meta)
+    if (metaProto !== Object.prototype && metaProto !== null) {
+      throw new ValidationError(
+        'result.value.messageTimes',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] messageTimes must be a plain object`
+      )
+    }
+    const m = meta as Record<string, unknown>
+    for (const key of Object.keys(m)) {
+      if (!FETCH_TOPIC_MESSAGE_TIMES_META_KEYS.has(key)) {
+        throw new ValidationError(
+          `result.value.messageTimes.${key}`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Unknown key in messageTimes: "${key}"`
+        )
+      }
+    }
+    if (m.completeness !== 'topic-activity') {
+      throw new ValidationError(
+        'result.value.messageTimes.completeness',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected completeness "topic-activity"`
+      )
+    }
+    const requested = m.requestedTopicCount
+    const returned = m.returnedTopicCount
+    for (const [label, count] of [
+      ['requestedTopicCount', requested],
+      ['returnedTopicCount', returned]
+    ] as const) {
+      if (typeof count !== 'number' || !Number.isFinite(count) || !Number.isInteger(count) || count < 0) {
+        throw new ValidationError(
+          `result.value.messageTimes.${label}`,
+          `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] Expected non-negative integer ${label}`
+        )
+      }
+    }
+    if ((returned as number) > (requested as number)) {
+      throw new ValidationError(
+        'result.value.messageTimes.returnedTopicCount',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] returnedTopicCount must not exceed requestedTopicCount`
+      )
+    }
+    if ((returned as number) !== entries.length) {
+      throw new ValidationError(
+        'result.value.messageTimes.returnedTopicCount',
+        `[${FETCH_TOPIC_MESSAGE_TIMES_CHANNEL}] returnedTopicCount must equal topics length`
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Insert message groups contract — stable intents, Main-authoritative
 // ---------------------------------------------------------------------------
 
@@ -5459,6 +5610,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   'chatdb:fetch-topic-naming-context': fetchTopicNamingContextContract,
   'chatdb:fetch-topic-activity': fetchTopicActivityContract,
+  'chatdb:fetch-topic-message-times': fetchTopicMessageTimesContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
   'chatdb:insert-message-groups': insertMessageGroupsContract,

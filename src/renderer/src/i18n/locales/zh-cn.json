@@ -1380,6 +1380,11 @@
         "placeholder": "搜索话题...",
         "title": "搜索话题"
       },
+      "sort": {
+        "by_created_at": "按创建时间",
+        "by_updated_at": "按更新时间",
+        "title": "排序方式"
+      },
       "title": "话题",
       "trash": {
         "empty": "回收站为空",
