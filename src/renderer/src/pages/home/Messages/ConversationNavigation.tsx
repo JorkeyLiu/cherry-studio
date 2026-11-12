@@ -244,6 +244,17 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
 
   // 2) authority mutation metadata: refetch when the current topic's
   // updatedAt changes (baseline established on route load above).
+  //
+  // The route identity is part of this effect's dependencies on purpose: (1)
+  // above drops the baseline on every topic/branch switch, and a switch is not
+  // itself an authority mutation, so no refetch may follow it. Adding the
+  // route lets the very same commit re-capture the baseline from the snapshot
+  // the switch just loaded — a timestamp that merely stayed unchanged across
+  // the switch must never be mistaken for the baseline of the first real
+  // mutation that follows (which would swallow that mutation's refetch and
+  // leave the outline holding rows the authoritative route no longer has).
+  // Effect (1) only re-runs when topicId or activeBranchId changes, so this
+  // effect always re-runs with it: the two can never drift apart.
   useEffect(() => {
     if (!topicId) return
     if (!hasUpdatedAtBaselineRef.current) {
@@ -260,7 +271,7 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     if (topicUpdatedAt === lastUpdatedAtRef.current) return
     lastUpdatedAtRef.current = topicUpdatedAt
     scheduleDebouncedRefetch()
-  }, [topicId, topicUpdatedAt, scheduleDebouncedRefetch])
+  }, [topicId, activeBranchId, topicUpdatedAt, scheduleDebouncedRefetch])
 
   // 3) terminal streaming: MESSAGE_COMPLETE (filtered by topicId) schedules
   // the same coalesced refetch for user-message changes from streaming.

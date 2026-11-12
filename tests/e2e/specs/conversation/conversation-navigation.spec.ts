@@ -17,19 +17,21 @@
  *   stable-ID click positions it; the list is internally
  *   scrollable with bounded height; forking L1 through the real toolbar
  *   button switches the list to the new effective route (route isolation).
- * - T3 independent back-to-bottom button: hidden at the genuine physical
- *   bottom with the navigation toggle OFF (always available, no settings
- *   gate); a real wheel away during an active slow stream reveals it; a real
- *   click returns to the bottom and resumes follow.
+ * - T3 independent back-to-bottom button: hidden (stable-mounted, its own
+ *   disabled/aria-hidden/tabIndex/visibility gate — never DOM absence) at the
+ *   genuine physical bottom with the navigation toggle OFF (always available,
+ *   no settings gate); a real wheel away during an active slow stream reveals
+ *   it; a real click returns to the bottom and resumes follow.
  *
  * Seams (existing only): #messages, [data-testid="topic-item"],
  * [data-testid="conversation-navigation"],
  * [data-testid^="conversation-nav-item-"],
- * [data-testid="conversation-back-to-bottom"], window.store
- * (introspection), window.api.chatDb.ensureTopic/pasteMessagesToTopic
- * (seed), window.keyv (supporting only). Sends go through the real
- * textarea/Enter; all pointer input goes through the real mouse. Never
- * dispatches scrollToBottom or SEND_MESSAGE to fake a gesture.
+ * [data-testid="conversation-back-to-bottom"],
+ * [data-testid="send-message-button"], window.store (introspection),
+ * window.api.chatDb.ensureTopic/pasteMessagesToTopic (seed), window.keyv
+ * (supporting only). Sends go through the real textarea/Enter; all pointer
+ * input goes through the real mouse. Never dispatches scrollToBottom or
+ * SEND_MESSAGE to fake a gesture.
  *
  * Geometry: #messages renders column-reverse, so bottom/newest is
  * scrollTop ~= 0 and reading positions are negative scrollTop.
@@ -46,7 +48,7 @@ import {
   test
 } from '../../fixtures/electron.fixture'
 import { EXTENDED_SLOW_STREAM_MARKER, getExtendedSlowStreamReply } from '../../fixtures/mock-openai-server'
-import { activateTopic, clickToolbarBranch } from '../../utils/branch-route-setup'
+import { activateTopic, clickToolbarBranch, letterMessageId, seedSourceTopic } from '../../utils/branch-route-setup'
 
 // Runner-cwd anchored repo root (same CJS-safe pattern as
 // startup/native-runtime.spec.ts): the Playwright runner executes at the repo
@@ -73,6 +75,16 @@ const DISPLAY_LIMIT = 20
 const SYNTHETIC_TOTAL = 50
 const BOTTOM_TOL = 100
 const PRODUCT_BOTTOM_TOL = 1
+// Delayed composer clear of a real send: `sendMessage` clears the composer
+// immediately and schedules ONE more clear 500 ms later in the SAME
+// synchronous block (src/renderer/src/pages/home/Inputbar/Inputbar.tsx:278-281
+// — `setText('')` + `setTimeoutTimer('sendMessage_1', () => setText(''), 500)`).
+// Text typed inside that window is wiped by the delayed clear, so a send is
+// only complete for the next fill after the window elapses; it is measured
+// from the OBSERVED clear (async rate-limit/upload steps precede it), never
+// from the key press. The guard covers timer/observation granularity only.
+const COMPOSER_CLEAR_DELAY_MS = 500
+const COMPOSER_CLEAR_GUARD_MS = 50
 
 function pad(n: number, w: number): string {
   return String(n).padStart(w, '0')
@@ -244,13 +256,36 @@ async function uiSendMessage(page: Page, text: string): Promise<void> {
   )
   await expect(textarea).toHaveValue(text, { timeout: 5000 })
   // Send readiness (source: InputbarCore handleKeyDown gates Enter on
-  // isSendDisabled = noContent||isLoading||searching; SendMessageButton
-  // mirrors it via aria-disabled). After fill noContent is false, so enabled
-  // proves the loading/searching flags are idle. Enter while disabled is
-  // swallowed — waiting here is a helper precondition, not a prod change.
-  const sendBtn = page.locator('.inputbar .icon-ic_send')
-  await expect(sendBtn).toHaveAttribute('aria-disabled', 'false', { timeout: 30000 })
+  // isSendDisabled = noContent||isLoading||searching; SendMessageButton hands
+  // that same flag to the native `disabled` prop of its ComposerIconButton,
+  // `data-testid="send-message-button"`). After fill noContent is false, so an
+  // enabled native button proves the loading/searching flags are idle. Enter
+  // while disabled is swallowed — waiting here is a helper precondition, not a
+  // prod change.
+  const sendBtn = page.getByTestId('send-message-button')
+  await expect(sendBtn).toBeEnabled({ timeout: 30000 })
   await textarea.press('Enter')
+  // Send completion for the NEXT fill: observe the immediate clear (async
+  // rate-limit/upload work precedes it, so it is not the key-press tick), then
+  // deterministically wait out the remainder of the known delayed-clear window
+  // measured from that observation. No arbitrary sleep: total bounded at
+  // COMPOSER_CLEAR_DELAY_MS + COMPOSER_CLEAR_GUARD_MS and the timer is
+  // scheduled in the same tick the clear becomes observable.
+  const clearedAt = Number(
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.inputbar textarea, textarea[placeholder]') as HTMLTextAreaElement | null
+        return el !== null && el.value === '' ? Date.now() : false
+      },
+      undefined,
+      { timeout: 15000 }
+    )
+  )
+  const clearWindowRemaining = COMPOSER_CLEAR_DELAY_MS + COMPOSER_CLEAR_GUARD_MS - (Date.now() - clearedAt)
+  if (clearWindowRemaining > 0) {
+    await page.waitForTimeout(clearWindowRemaining)
+  }
+  await expect(textarea, 'the delayed composer clear must not be able to wipe the next fill').toHaveValue('')
 }
 
 async function navItemIds(page: any): Promise<string[]> {
@@ -259,6 +294,56 @@ async function navItemIds(page: any): Promise<string[]> {
       (el) => (el as HTMLElement).getAttribute('data-testid') || ''
     )
   )
+}
+
+/**
+ * The topic's authority timestamp exactly as the outline reads it (the redux
+ * topic row the subscription selects). `null` means the topic carries none.
+ */
+async function readTopicUpdatedAt(page: any, topicId: string): Promise<string | null> {
+  return page.evaluate((tid: string) => {
+    const topics = ((window as any).store.getState().assistants?.assistants ?? []).flatMap((a: any) => a.topics ?? [])
+    const topic = topics.find((t: any) => t.id === tid)
+    return typeof topic?.updatedAt === 'string' ? topic.updatedAt : null
+  }, topicId)
+}
+
+/**
+ * Rendered outline order: stable-ID rows and their fork marker rows in DOM
+ * order (`row:<id>` / `fork`). A divider's position relative to a row is then a
+ * layout fact, not an assumption about which row it belongs under.
+ */
+async function navOutlineOrder(page: any): Promise<string[]> {
+  return page.evaluate(() => {
+    const content = document.querySelector('[data-testid="conversation-nav-panel"]')?.firstElementChild
+    if (!content) return [] as string[]
+    return Array.from(content.children)
+      .map((el) => {
+        const messageId = el.getAttribute('data-message-id')
+        if (messageId) return `row:${messageId}`
+        return el.getAttribute('data-testid') === 'conversation-nav-fork' ? 'fork' : ''
+      })
+      .filter((entry) => entry.length > 0)
+  })
+}
+
+/**
+ * Hidden state of the back-to-bottom button exactly as the component expresses
+ * it (`Messages/BackToBottomButton.tsx`): the node is ALWAYS mounted (the
+ * stable-mount contract — inserting a new sibling of `#messages` mid-gesture
+ * aborts native smooth paging), so "hidden" is that component's own gate —
+ * native `disabled`, `aria-hidden="true"`, `tabIndex={-1}` and the styled
+ * `visibility: hidden` — never DOM absence. `toBeHidden` covers the visual gate
+ * for an attached element; the remaining assertions prove it is also inert and
+ * not assistively exposed, so a merely unmounted button cannot pass this check.
+ */
+async function expectBackToBottomHidden(page: any, timeout = 10000): Promise<void> {
+  const button = page.getByTestId('conversation-back-to-bottom')
+  await expect(button, 'the back-to-bottom button stays mounted (stable-mount contract)').toBeAttached({ timeout })
+  await expect(button, 'hidden back-to-bottom button is inert').toBeDisabled({ timeout })
+  await expect(button, 'hidden back-to-bottom button is not assistively exposed').toBeHidden({ timeout })
+  await expect(button).toHaveAttribute('aria-hidden', 'true', { timeout })
+  await expect(button).toHaveAttribute('tabindex', '-1', { timeout })
 }
 
 interface Anchor {
@@ -1432,8 +1517,10 @@ test.describe('conversation navigation redesign', () => {
     const navToggle = await page.evaluate(() => (window as any).store.getState().settings?.messageNavigation)
     expect(navToggle).toBe(false)
 
-    // Hidden at the genuine physical bottom.
-    await expect(page.getByTestId('conversation-back-to-bottom')).toHaveCount(0)
+    // Hidden at the genuine physical newest bottom: the button is always
+    // mounted, so its hidden gate (disabled / aria-hidden / tabIndex -1 /
+    // visibility) is what is asserted here, not DOM absence.
+    await expectBackToBottomHidden(page)
 
     const needle = `convnav button stream ${EXTENDED_SLOW_STREAM_MARKER}`
     const seq = getRequestSequence()
@@ -1584,7 +1671,7 @@ test.describe('conversation navigation redesign', () => {
       holdBlockId!,
       { timeout: 60000 }
     )
-    await expect(page.getByTestId('conversation-back-to-bottom')).toHaveCount(0, { timeout: 10000 })
+    await expectBackToBottomHidden(page)
     console.log(
       `[E2E] T3 button revealed away=${Math.round(awayTop)} settled=${Math.round(settledTop)} holdDone complete hidden`
     )
@@ -1670,14 +1757,33 @@ test.describe('conversation navigation redesign', () => {
       const expected = (i + 1) * 2
       const seq = getRequestSequence()
       await uiSendMessage(page, `T4 resident journey ${i} ${'x'.repeat(1500)}`)
+      // Per-send completion needs TWO independent proofs before the next fill:
+      // (1) the send actually reached the mock provider (a local user echo is
+      // not a send), and (2) the new assistant reply is TERMINAL — its message
+      // status and every block are success/error, the canonical reply gate
+      // (topic-ordering.spec.ts waitForReply). Count + "no streaming block"
+      // alone passed while the assistant message shell existed with no blocks
+      // yet (reqArrived=false), so the next fill raced the reply and, for a
+      // fast reply, the composer's delayed clear.
       try {
+        await expect.poll(async () => findProductRequestAfter(seq), { timeout: 30000 }).not.toBeNull()
         await page.waitForFunction(
           ({ id, expected }: { id: string; expected: number }) => {
             const s = (window as any).store?.getState()
+            if (s?.messages?.loadingByTopic?.[id]) return false
             const ids = s?.messages?.messageIdsByTopic?.[id] ?? []
             if (!Array.isArray(ids) || ids.length !== expected) return false
-            for (const block of Object.values(s?.messageBlocks?.entities ?? {}) as any[]) {
-              if (block && ids.includes(block.messageId) && block.status === 'streaming') return false
+            let latestAssistantId: string | null = null
+            for (const messageId of ids) {
+              if (s?.messages?.entities?.[messageId]?.role === 'assistant') latestAssistantId = messageId
+            }
+            if (!latestAssistantId) return false
+            const latest = s.messages.entities[latestAssistantId]
+            if (!latest) return false
+            if (!['success', 'error'].includes(latest.status)) return false
+            for (const blockId of (latest.blocks ?? []) as string[]) {
+              const block = s?.messageBlocks?.entities?.[blockId]
+              if (!block || !['success', 'error'].includes(block.status)) return false
             }
             return true
           },
@@ -1713,9 +1819,11 @@ test.describe('conversation navigation redesign', () => {
         const req = findProductRequestAfter(seq)
         const curSeq = getRequestSequence()
         const textareaPresent = ((await page.locator('.inputbar textarea').count()) ?? 0) > 0
-        const sendDisabled = await page.locator('.inputbar .icon-ic_send').getAttribute('aria-disabled')
+        const sendButton = page.getByTestId('send-message-button')
+        const sendButtonState =
+          (await sendButton.count()) === 0 ? 'missing' : (await sendButton.isEnabled()) ? 'enabled' : 'disabled'
         console.log(
-          `[E2E] T4 send ${i} wait failed: expected=${expected} current=${diag.count} activeMatch=${diag.activeMatch} loading=${diag.loading} msgStatus=${JSON.stringify(diag.msgStatus)} blockStatus=${JSON.stringify(diag.blockStatus)} reqArrived=${req !== null} seq=${seq} curSeq=${curSeq} textareaPresent=${textareaPresent} sendDisabled=${sendDisabled}`
+          `[E2E] T4 send ${i} wait failed: expected=${expected} current=${diag.count} activeMatch=${diag.activeMatch} loading=${diag.loading} msgStatus=${JSON.stringify(diag.msgStatus)} blockStatus=${JSON.stringify(diag.blockStatus)} reqArrived=${req !== null} seq=${seq} curSeq=${curSeq} textareaPresent=${textareaPresent} sendButton=${sendButtonState}`
         )
         throw waitErr
       }
@@ -1752,10 +1860,13 @@ test.describe('conversation navigation redesign', () => {
     await expect.poll(async () => (await navItemIds(page)).length, { timeout: 20000 }).toBe(3)
     expect(await navItemIds(page)).toEqual(sentUserIds.map((id) => `conversation-nav-item-${id}`))
 
-    // Restored original compact geometry (no hover): three 24px rows with the
-    // original gap/padding (3*24 + gaps + padding, no blank filler, no large
-    // lower void), collapsed to the narrow dot strip, vertically centered via
-    // the original midpoint count formula (top max(calc(50% - count*24/2+10),20px)).
+    // Compact geometry with no hover: three collapsed rows at the compact
+    // 12px height (`MessageOutlineItem` base, MessageOutline.tsx:1045; the
+    // panel only sets 24px under `[data-expanded='true']`, :1282-1292), with
+    // the compact 2px gap (3*12 + gaps + padding, no blank filler, no large
+    // lower void), so the strip stays a narrow dot rail. Centering comes from
+    // the container's pure-CSS flex layout, not a per-count top offset.
+    // (The hover leg below asserts the wider text body, not row heights.)
     const collapsed = await page.evaluate(() => {
       const landmark = document.querySelector('[data-testid="conversation-navigation"]')
       const list = landmark?.querySelector('[data-testid="conversation-nav-panel"]')
@@ -1777,7 +1888,7 @@ test.describe('conversation navigation redesign', () => {
     })
     expect(collapsed).not.toBeNull()
     expect(collapsed!.rowCount).toBe(3)
-    expect(collapsed!.rowHeights.every((h) => h === '24px')).toBe(true)
+    expect(collapsed!.rowHeights.every((h) => h === '12px')).toBe(true)
     expect(collapsed!.w, 'collapsed original strip stays discreet').toBeLessThan(80)
     expect(collapsed!.h, 'three short original rows fit with no large void').toBeLessThan(200)
     expect(collapsed!.h).toBeLessThanOrEqual(collapsed!.viewportHeight * 0.6 + 1)
@@ -1907,5 +2018,301 @@ test.describe('conversation navigation redesign', () => {
     expect(Math.abs(reGeo.scrollTop - reTop)).toBeLessThanOrEqual(2)
     await expectStableScrollTop(page)
     console.log(`[E2E] T4 resident 3-turn nav clicks jumped first/last/middle + stable re-click`)
+  })
+
+  test('T5 branch-tail semantic delete refreshes the authoritative outline', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'T5 INTEGRATED UI: seeded topic (main route A + fork anchor, plus a branch-owned tail turn B whose answer shares B askId) → a real divider peer click switches the route main → branch with the topic authority timestamp UNCHANGED → outline renders A - divider - B → the real menubar delete of B (semantic: Main expands to its answer) is the FIRST authority mutation after the switch → on that timestamp change the outline refetches its whole-route snapshot to the authoritative [A] (B gone, divider still after A), the loaded projection drops B and its answer, the branch stays in the rendered catalog, and a real click on the surviving A row navigates without the missing-message toast. Shared fixture, disposable profile, no provider call.'
+    })
+    const page = mainWindow as Page
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `convnav-t5-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const stamp = '2026-01-01T00:00:00.000Z'
+    // Main route: A (user), its answer (the fork anchor), one further turn pair.
+    const sourceIds = await seedSourceTopic(page, {
+      assistantId: liveAssistantId,
+      topicId,
+      name: `Nav Test ${topicId}`,
+      total: 4,
+      messageIdForIndex: (i) => letterMessageId(topicId, i),
+      contentPrefix: 'nav branch route turn '
+    })
+    const [userA, anchorAssistantId] = sourceIds
+    // Branch-owned tail turn B: the user root the delete targets and the answer
+    // Main will expand to (same askId), so B is the last user row of the route.
+    const tailUserId = `${topicId}-msg-b-tail`
+    const tailAssistantId = `${topicId}-msg-b-answer`
+    const tailBlockId = `${topicId}-block-b-tail`
+    const tailAnswerBlockId = `${topicId}-block-b-answer`
+
+    // Branch + branch-owned suffix seeded at the authority (same shape the real
+    // toolbar fork writes). Seeding is pure IPC: no renderer dispatch happens,
+    // so the topic's authority timestamp is not touched by it.
+    const seededBranch: any = await page.evaluate(
+      async ({
+        tid,
+        anchor,
+        asstId,
+        tailId,
+        tailAnswerId,
+        tailBlock,
+        tailAnswerBlock,
+        createdAt
+      }: Record<string, string>) => {
+        try {
+          const api = (window as any).api.chatDb
+          const created: any = await api.createBranch({
+            topicId: tid,
+            parentBranchId: null,
+            anchorMessageId: anchor,
+            name: 'Tail branch'
+          })
+          if (!created || created.ok !== true) return { ok: false, err: `createBranch ${JSON.stringify(created)}` }
+          const branchId = created.value.branch.id as string
+          const inserted: any = await api.insertMessagesAfterAnchor({
+            topicId: tid,
+            branchId,
+            afterMessageId: anchor,
+            entries: [
+              {
+                message: {
+                  id: tailId,
+                  topicId: tid,
+                  role: 'user',
+                  assistantId: asstId,
+                  status: 'success',
+                  createdAt,
+                  updatedAt: createdAt,
+                  blocks: [tailBlock]
+                },
+                blocks: [
+                  {
+                    id: tailBlock,
+                    messageId: tailId,
+                    type: 'main_text',
+                    content: 'Nav T5 branch tail question',
+                    status: 'success',
+                    createdAt,
+                    updatedAt: createdAt
+                  }
+                ]
+              },
+              {
+                message: {
+                  id: tailAnswerId,
+                  topicId: tid,
+                  role: 'assistant',
+                  assistantId: asstId,
+                  askId: tailId,
+                  status: 'success',
+                  createdAt,
+                  updatedAt: createdAt,
+                  blocks: [tailAnswerBlock],
+                  model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+                  modelId: 'mock-model'
+                },
+                blocks: [
+                  {
+                    id: tailAnswerBlock,
+                    messageId: tailAnswerId,
+                    type: 'main_text',
+                    content: 'Nav T5 branch tail answer',
+                    status: 'success',
+                    createdAt,
+                    updatedAt: createdAt
+                  }
+                ]
+              }
+            ]
+          })
+          if (!inserted || inserted.ok !== true) return { ok: false, err: `insert ${JSON.stringify(inserted)}` }
+          return {
+            ok: true,
+            branchId,
+            insertedIds: inserted.value.insertedMessageIds,
+            beforeId: inserted.value.beforeMessageId,
+            nextId: inserted.value.nextMessageId
+          }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      {
+        tid: topicId,
+        anchor: anchorAssistantId,
+        asstId: liveAssistantId,
+        tailId: tailUserId,
+        tailAnswerId: tailAssistantId,
+        tailBlock: tailBlockId,
+        tailAnswerBlock: tailAnswerBlockId,
+        createdAt: stamp
+      }
+    )
+    expect(seededBranch.ok, `branch tail seed failed: ${seededBranch.err}`).toBe(true)
+    expect(seededBranch.insertedIds).toEqual([tailUserId, tailAssistantId])
+    expect(seededBranch.nextId).toBeNull()
+    const branchId = seededBranch.branchId as string
+
+    await activateTopic(page, topicId, 4)
+    await enableConversationNavigation(page)
+    // The renderer's branch catalog projection for the seeded branch (the same
+    // refresh the app performs after its own branch writes): the message flow's
+    // divider and the outline's fork marker both read it.
+    await page.evaluate(async (tid: string) => {
+      const res: any = await (window as any).api.chatDb.listBranches({ topicId: tid })
+      if (!res || res.ok !== true) throw new Error('catalog refresh failed')
+      ;(window as any).store.dispatch({
+        type: 'topicBranch/branchesReceived',
+        payload: { topicId: tid, branches: res.value.branches }
+      })
+    }, topicId)
+
+    // Main-route outline: its two user turns; the divider belongs after A
+    // because the fork anchor is the assistant answer to A.
+    await expect.poll(async () => (await navItemIds(page)).length, { timeout: 20000 }).toBe(2)
+    await hoverOriginalOutline(page)
+    await page.getByTestId(`conversation-nav-item-${userA}`).click({ timeout: 10000 })
+    await waitForViewportIntersection(page, userA)
+
+    // The switch itself is NOT a mutation: capture the authority timestamp the
+    // outline currently treats as its baseline.
+    const updatedAtBeforeSwitch = await readTopicUpdatedAt(page, topicId)
+    expect(updatedAtBeforeSwitch, 'the seeded topic must carry an authority timestamp').toBeTruthy()
+
+    // REAL route switch main → branch through the divider's flat peer list.
+    const dividerToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorAssistantId}"]`).first()
+    await expect(dividerToggle, 'the main route must render the fork divider at the anchor').toBeVisible({
+      timeout: 30000
+    })
+    await dividerToggle.click()
+    const peerList = page.locator(`[data-testid="branch-fork-list-${anchorAssistantId}"]`).first()
+    await expect(peerList, 'the divider peer list must open').toBeVisible({ timeout: 15000 })
+    await peerList.locator(`[data-testid="branch-fork-item-${branchId}"]`).first().click()
+    await page.waitForFunction(
+      ({ tid, bid }: { tid: string; bid: string }) => {
+        const s = (window as any).store.getState()
+        return (
+          (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid && s.messages?.loadingByTopic?.[tid] !== true
+        )
+      },
+      { tid: topicId, bid: branchId },
+      { timeout: 30000 }
+    )
+    // The branch route is resident up to its own tail turn.
+    await page.waitForFunction(
+      ({ tid, need }: { tid: string; need: string[] }) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[tid]
+        return Array.isArray(ids) && need.every((id) => ids.includes(id)) && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      { tid: topicId, need: [userA, anchorAssistantId, tailUserId, tailAssistantId] },
+      { timeout: 30000 }
+    )
+
+    // The route switch did not move the authority timestamp — that is the
+    // precondition the regression needs.
+    expect(await readTopicUpdatedAt(page, topicId)).toBe(updatedAtBeforeSwitch)
+
+    // Whole-route oracle for the branch route: A (inherited) then B at the tail.
+    const branchSnap: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId: tid, branchId: bid }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(branchSnap.ok).toBe(true)
+    const userIdsOf = (snap: any): string[] =>
+      (snap.value.messages as any[]).filter((m) => m.role === 'user').map((m) => m.id)
+    const preDeleteUserIds = userIdsOf(branchSnap)
+    expect(preDeleteUserIds).toEqual([userA, tailUserId])
+    await expect
+      .poll(async () => await navItemIds(page), { timeout: 20000 })
+      .toEqual(preDeleteUserIds.map((id) => `conversation-nav-item-${id}`))
+    // Pre-delete outline: A, the divider, then B at the tail.
+    expect(await navOutlineOrder(page)).toEqual([`row:${userA}`, 'fork', `row:${tailUserId}`])
+
+    // The delete must be the FIRST authority mutation after the switch.
+    expect(await readTopicUpdatedAt(page, topicId)).toBe(updatedAtBeforeSwitch)
+    // Test setup only: no confirmation dialog in the way of the real click.
+    await page.evaluate(() => {
+      ;(window as any).store.dispatch({ type: 'settings/setConfirmDeleteMessage', payload: false })
+    })
+    // Position B through the outline's own stable-ID navigation (real UI), then
+    // delete it with the real menubar button.
+    await hoverOriginalOutline(page)
+    await page.getByTestId(`conversation-nav-item-${tailUserId}`).click({ timeout: 10000 })
+    await waitForViewportIntersection(page, tailUserId)
+    const tailContainer = page.locator(`[id="message-${tailUserId}"][data-message-id="${tailUserId}"]`).first()
+    await expect(tailContainer, 'the branch tail turn must be in the message flow').toBeVisible({ timeout: 15000 })
+    try {
+      await tailContainer.hover({ timeout: 8000 })
+    } catch {
+      // Menubar buttons are reachable without a settled hover in this layout.
+    }
+    const deleteButton = tailContainer.locator('[data-testid="message-delete-button"]')
+    await expect(deleteButton, 'locale-independent delete button must be attached').toBeAttached({ timeout: 10000 })
+    await deleteButton.click({ timeout: 10000 })
+
+    // The semantic delete published an authority timestamp change (polled: the
+    // dispatch happens after the Main round-trip the click started)...
+    await expect
+      .poll(async () => await readTopicUpdatedAt(page, topicId), { timeout: 30000 })
+      .not.toBe(updatedAtBeforeSwitch)
+    const updatedAtAfterDelete = await readTopicUpdatedAt(page, topicId)
+    expect(updatedAtAfterDelete, 'the semantic delete must publish an authority timestamp').toBeTruthy()
+
+    // ...and the outline must have refreshed its whole-route snapshot from it:
+    // the authoritative route no longer has B, so no row for B survives.
+    const branchSnapAfter: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId: tid, branchId: bid }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(branchSnapAfter.ok).toBe(true)
+    const postDeleteUserIds = userIdsOf(branchSnapAfter)
+    expect(postDeleteUserIds).toEqual([userA])
+    await expect
+      .poll(async () => await navItemIds(page), { timeout: 20000 })
+      .toEqual(postDeleteUserIds.map((id) => `conversation-nav-item-${id}`))
+    // The divider still sits after the surviving row: the branch (and its
+    // anchor) survived the delete.
+    expect(await navOutlineOrder(page)).toEqual([`row:${userA}`, 'fork'])
+    const branchCatalogIds = await page.evaluate(
+      (tid: string) =>
+        ((window as any).store.getState().topicBranch?.branchesByTopic?.[tid] ?? []).map((b: any) => b.id as string),
+      topicId
+    )
+    expect(branchCatalogIds).toContain(branchId)
+    // B and its answer are physically gone from the loaded projection and the
+    // flow (Main expanded the delete to the whole answer group).
+    const residue = await page.evaluate(
+      ({ tid, gone }: { tid: string; gone: string[] }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[tid] ?? []
+        const dom = Array.from(document.querySelectorAll('#messages [data-message-id]')).map((el) =>
+          el.getAttribute('data-message-id')
+        )
+        return { inProjection: gone.filter((id) => ids.includes(id)), inDom: gone.filter((id) => dom.includes(id)) }
+      },
+      { tid: topicId, gone: [tailUserId, tailAssistantId] }
+    )
+    expect(residue.inProjection).toEqual([])
+    expect(residue.inDom).toEqual([])
+
+    // The surviving row still navigates by stable ID, without the
+    // missing-message toast the stale B row used to produce.
+    await hoverOriginalOutline(page)
+    await page.getByTestId(`conversation-nav-item-${userA}`).click({ timeout: 10000 })
+    const survivingGeo = await waitForViewportIntersection(page, userA)
+    expect(intersectsViewport(survivingGeo), 'the surviving row click lands inside the viewport').toBe(true)
+    await expectStableScrollTop(page)
+    const notFoundShown = await page.evaluate(() =>
+      ['Message not found', '消息不存在'].some((text) => document.body.innerText.includes(text))
+    )
+    expect(notFoundShown, 'no missing-message toast after navigating to the surviving row').toBe(false)
+    console.log(
+      `[E2E] T5 branch tail delete: outline pre=${preDeleteUserIds.length} post=${postDeleteUserIds.length} dividerRemained=true`
+    )
   })
 })

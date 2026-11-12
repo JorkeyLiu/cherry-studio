@@ -725,6 +725,67 @@ describe('ConversationNavigation whole-route user list', () => {
     expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
   })
 
+  it('keeps the updatedAt baseline synchronised across a branch switch so the first post-switch deletion refetches', async () => {
+    // Route A (main) holds one user turn; route B (b1) inherits that turn plus
+    // the fork anchor answer and owns a tail user turn. The outline is then
+    // A, the fork divider, B at the tail.
+    const mainBlocks = [textBlock('b1', 'u1', 'Route A question')]
+    const prefixBlocks = [textBlock('b1', 'u1', 'Route A question'), textBlock('b2', 'a1', 'Fork anchor answer')]
+    const branchBlocks = [
+      ...prefixBlocks,
+      textBlock('b3', 'u2', 'Route B tail question'),
+      textBlock('b4', 'a2', 'Route B tail answer')
+    ]
+    // Authority state the fake snapshot source reports: once the tail user
+    // turn is semantically deleted its assistant answer goes with it (same
+    // askId), while the inherited prefix and the branch itself stay.
+    let tailDeleted = false
+    mocks.loadWholeTopicSnapshot.mockImplementation(async (_topic: string, branch: string | null) => {
+      if (branch !== 'b1') {
+        return {
+          messages: [userMsg('u1', ['b1'])],
+          blocks: mainBlocks,
+          blocksById: new Map(mainBlocks.map((b) => [(b as { id: string }).id, b]))
+        }
+      }
+      const snapshotBlocks = tailDeleted ? prefixBlocks : branchBlocks
+      const snapshotMessages = tailDeleted
+        ? [userMsg('u1', ['b1']), assistantMsg('a1', ['b2'])]
+        : [userMsg('u1', ['b1']), assistantMsg('a1', ['b2']), userMsg('u2', ['b3']), assistantMsg('a2', ['b4'])]
+      return {
+        messages: snapshotMessages,
+        blocks: snapshotBlocks,
+        blocksById: new Map(snapshotBlocks.map((b) => [(b as { id: string }).id, b]))
+      }
+    })
+
+    const { rerender } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    // Route switch A -> B with an unchanged authority timestamp: the switch is
+    // not a mutation, so the list follows the new route from its own load only.
+    mocks.setActiveBranchId('b1')
+    rerender(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    expect(await screen.findByTestId('conversation-nav-item-u2')).toBeTruthy()
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenLastCalledWith('topic-1', 'b1')
+
+    // FIRST authority mutation after the switch: the tail user turn is deleted
+    // (its assistant answer with it). The topic timestamp bump is the only
+    // signal — nothing else invalidates this route, so the baseline captured
+    // for the switch must not swallow it.
+    tailDeleted = true
+    mocks.setUpdatedAt('t1')
+    rerender(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await waitFor(() => expect(screen.queryByTestId('conversation-nav-item-u2')).toBeNull(), { timeout: 5000 })
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(3)
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenLastCalledWith('topic-1', 'b1')
+    // The surviving inherited turn keeps its stable row and its route.
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+  })
+
   it('keeps one isolated row hitbox per entry inside the original outline body', async () => {
     const blocks = [
       textBlock('b1', 'u1', 'First question about rivers'),
