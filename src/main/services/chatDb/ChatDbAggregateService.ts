@@ -51,6 +51,7 @@ import type {
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
+  HistoryReferenceChainLayer,
   HistoryReferenceMeta,
   ImportTopicDataRequest,
   ImportTopicDataResponse,
@@ -168,6 +169,26 @@ type ReferenceBaseResolution = {
   /** The relation row, or null when the topic is not a reference target. */
   reference: TopicReferenceData | null
   status: 'none' | 'available' | 'missing'
+}
+
+/**
+ * One reference relation materialized inside a resolved foreign prefix.
+ *
+ * `depth` 0 is the resolved topic's own relation; deeper entries are the
+ * relations of its live source route's own read-only history. `boundaryMessageId`
+ * is the last message this relation contributes to the flattened prefix, so a
+ * divider can be placed truthfully per layer. Accumulated only for available
+ * (materialized) relations; a missing relation contributes no layer.
+ */
+type ReferenceChainPlan = {
+  /** Topic that owns the relation (one relation per target topic). */
+  targetTopicId: string
+  sourceTopicId: string
+  sourceBranchId: TopicReferenceData['sourceBranchId']
+  anchorMessageId: string
+  sourceName: string | null
+  boundaryMessageId: string
+  depth: number
 }
 
 /**
@@ -1144,8 +1165,16 @@ export class ChatDbAggregateService {
         // Cross-topic history reference metadata (null for ordinary topics).
         // Resolved once in this same snapshot; drives both the reference-aware
         // route projection (in-memory path) and the response metadata.
-        const referenceBase = this.resolveReferenceBaseInTx(repos, request.topicId, new Set<string>(), 0)
-        const referenceMeta: HistoryReferenceMeta | null = referenceBase.reference
+        const referenceChain: ReferenceChainPlan[] = []
+        const referenceBase = this.resolveReferenceBaseInTx(
+          repos,
+          request.topicId,
+          new Set<string>(),
+          0,
+          undefined,
+          referenceChain
+        )
+        let referenceMeta: HistoryReferenceMeta | null = referenceBase.reference
           ? {
               sourceTopicId: referenceBase.reference.sourceTopicId,
               sourceBranchId: referenceBase.reference.sourceBranchId,
@@ -1154,7 +1183,13 @@ export class ChatDbAggregateService {
                 ? (repos.topics.getById(referenceBase.reference.sourceTopicId).data?.name ?? null)
                 : null,
               status: referenceBase.status === 'available' ? 'available' : 'missing',
-              boundaryMessageId: referenceBase.status === 'available' ? referenceBase.reference.anchorMessageId : null
+              // Last materialized foreign-prefix message: the captured endpoint
+              // itself while it composes the source route, otherwise the nearest
+              // surviving predecessor (same inheritance-boundary rule).
+              boundaryMessageId:
+                referenceBase.status === 'available' && referenceBase.messages.length > 0
+                  ? referenceBase.messages[referenceBase.messages.length - 1].id
+                  : null
             }
           : null
 
@@ -1238,6 +1273,52 @@ export class ChatDbAggregateService {
         const windowBranchId = this.normalizeBranchId(request.branchId)
         if (windowBranchId !== null || referenceMeta !== null) {
           const effective = this.resolveRouteMessagesInTx(repos, request.topicId, windowBranchId).messages
+          if (referenceMeta) {
+            // Materialized reference layers for the ADDRESSED route: the
+            // resolved source chain (nearest relation first) is clipped at the
+            // first layer whose own boundary message is not part of this
+            // route's history. A downstream endpoint that truncates an
+            // upstream layer therefore reports no divider for it (never a
+            // fabricated upstream boundary), while a layer whose boundary is
+            // simply outside the returned window stays reported so the
+            // renderer can defer it until pagination loads it.
+            const materialized = new Set(effective.map((m) => m.id))
+            const chain = [...referenceChain].sort((a, b) => a.depth - b.depth)
+            const layers: HistoryReferenceChainLayer[] = [
+              {
+                targetTopicId: request.topicId,
+                sourceTopicId: referenceMeta.sourceTopicId,
+                sourceBranchId: referenceMeta.sourceBranchId,
+                anchorMessageId: referenceMeta.anchorMessageId,
+                sourceName: referenceMeta.sourceName,
+                status: referenceMeta.status,
+                boundaryMessageId: referenceMeta.boundaryMessageId
+              }
+            ]
+            if (referenceMeta.status === 'available') {
+              for (const plan of chain) {
+                if (plan.depth === 0) continue
+                if (!materialized.has(plan.boundaryMessageId)) break
+                layers.push({
+                  targetTopicId: plan.targetTopicId,
+                  sourceTopicId: plan.sourceTopicId,
+                  sourceBranchId: plan.sourceBranchId,
+                  anchorMessageId: plan.anchorMessageId,
+                  sourceName: plan.sourceName,
+                  status: 'available',
+                  boundaryMessageId: plan.boundaryMessageId
+                })
+              }
+              // The nearest layer's boundary must be materialized too: when the
+              // addressed route truncates the whole foreign prefix, the chain
+              // is not reported at all (the top-level relation metadata stays
+              // authoritative for the renderer's existing fallback placement).
+              if (layers.length > 1 && !materialized.has(layers[0].boundaryMessageId as string)) {
+                layers.length = 0
+              }
+            }
+            if (layers.length > 0) referenceMeta = { ...referenceMeta, layers }
+          }
           if (request.kind === 'latest') {
             if (effective.length === 0) {
               return buildWindowResponse([], {
@@ -7848,13 +7929,19 @@ export class ChatDbAggregateService {
    * at EVERY missing reference segment in the resolved source chain, so a
    * caller can distinguish a fully materialized prefix from one whose nested
    * source history is incomplete. Ordinary reads omit it.
+   *
+   * `layersOut` (optional) accumulates one `ReferenceChainPlan` per
+   * materialized relation in the resolved chain, so a windowed read can report
+   * the per-layer divider boundaries of a chained reference without re-reading
+   * the source chain on the renderer side.
    */
   private resolveReferenceBaseInTx(
     repos: ChatDbRepositories,
     topicId: string,
     visited: Set<string>,
     depth: number,
-    chainMissing?: ReferenceChainMissingFlag
+    chainMissing?: ReferenceChainMissingFlag,
+    layersOut?: ReferenceChainPlan[]
   ): ReferenceBaseResolution {
     let refRow: { found: boolean; data?: TopicReferenceData }
     try {
@@ -7891,7 +7978,8 @@ export class ChatDbAggregateService {
           this.normalizeBranchId(ref.sourceBranchId),
           visited,
           depth + 1,
-          chainMissing
+          chainMissing,
+          layersOut
         )
       } catch (e) {
         if (e instanceof ChatDbNotFoundError) {
@@ -7911,6 +7999,18 @@ export class ChatDbAggregateService {
         if (chainMissing) chainMissing.missing = true
         return { messages: [], reference: ref, status: 'missing' }
       }
+      // One plan per materialized relation: this relation's own boundary plus
+      // whatever the source route materialized beneath it (pushed deeper-first
+      // by the recursion; consumers order by depth).
+      layersOut?.push({
+        targetTopicId: topicId,
+        sourceTopicId: ref.sourceTopicId,
+        sourceBranchId: ref.sourceBranchId,
+        anchorMessageId: ref.anchorMessageId,
+        sourceName: sourceTopic.data?.name ?? null,
+        boundaryMessageId: sourceRoute[boundaryIdx].id,
+        depth
+      })
       return { messages: sourceRoute.slice(0, boundaryIdx + 1), reference: ref, status: 'available' }
     } finally {
       visited.delete(topicId)
@@ -7929,6 +8029,8 @@ export class ChatDbAggregateService {
    *
    * `chainMissing` (optional) is threaded into the reference base so a nested
    * missing segment in the source chain is reported to provenance callers.
+   * `layersOut` (optional) is threaded the same way for materialized chain
+   * layers.
    */
   private resolveRouteMessagesGuardedInTx(
     repos: ChatDbRepositories,
@@ -7936,14 +8038,15 @@ export class ChatDbAggregateService {
     branchId: string | null,
     visited: Set<string>,
     depth: number,
-    chainMissing?: ReferenceChainMissingFlag
+    chainMissing?: ReferenceChainMissingFlag,
+    layersOut?: ReferenceChainPlan[]
   ): MessageData[] {
     let base: MessageData[]
     if (depth >= MAX_REFERENCE_DEPTH) {
       if (chainMissing) chainMissing.missing = true
       base = []
     } else {
-      base = this.resolveReferenceBaseInTx(repos, topicId, visited, depth, chainMissing).messages
+      base = this.resolveReferenceBaseInTx(repos, topicId, visited, depth, chainMissing, layersOut).messages
     }
     const owner = this.normalizeBranchId(branchId)
     if (owner === null) {

@@ -1,6 +1,7 @@
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import type { Message } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import type { HistoryReferenceMeta } from '@shared/chatDb'
 import type { ReactNode } from 'react'
 
 import { takenChildAtAnchor } from './BranchDividers'
@@ -203,6 +204,102 @@ export function resolveReferenceBoundary(
 }
 
 /**
+ * One history-reference divider resolved against the current display window:
+ * the read-only foreign history of one relation layer ends here, and everything
+ * newer belongs to the next (nearer) layer or to the target's own writable
+ * suffix.
+ */
+export interface ReferenceDividerPlacement {
+  /** Stable unique relation identity (the relation target topic). */
+  boundaryKey: string
+  /** Relation metadata this divider renders and navigates (a chain layer). */
+  reference: HistoryReferenceMeta
+  /** Topic that owns this relation; the divider's stable layer identity. */
+  targetTopicId: string
+  /** Projected group this divider is placed after; null for 'beginning'. */
+  groupKey: string | null
+  /** `after-boundary`: directly below the layer's last materialized message. */
+  placement: 'after-boundary' | 'beginning'
+}
+
+/**
+ * Stable unique divider identity: a topic owns at most one reference relation,
+ * so the relation target is its identity (same-endpoint relations of different
+ * layers stay distinct keyed siblings).
+ */
+export function referenceDividerKey(targetTopicId: string): string {
+  return `history-reference-boundary:${targetTopicId}`
+}
+
+/**
+ * Resolve every history-reference divider of the rendered target: one per
+ * materialized relation layer (nearest first), each at its OWN boundary.
+ *
+ * Layer 0 (the topic's own relation) keeps the established single-boundary
+ * semantics: resident boundary group, the demonstrated foreign→owned
+ * transition fallback, and the beginning placement for a missing source.
+ * Deeper layers are placed only on their own Main-reported boundary message;
+ * while that message is not loaded the divider is DEFERRED (never promoted to
+ * the head), so an upstream boundary is never shown where it does not belong.
+ * A deeper layer whose boundary is not materialized is not reported by Main at
+ * all, so a downstream endpoint never fabricates upstream history.
+ */
+export function resolveReferenceDividers(
+  groupedMessages: readonly MessageViewportProjectedGroup[],
+  reference: HistoryReferenceMeta | null | undefined,
+  targetTopicId: string
+): ReferenceDividerPlacement[] {
+  if (!reference) return []
+  const layers = reference.layers && reference.layers.length > 0 ? reference.layers : null
+  if (!layers) {
+    const boundary = resolveReferenceBoundary(groupedMessages, reference, targetTopicId)
+    if (!boundary) return []
+    return [
+      {
+        boundaryKey: referenceDividerKey(targetTopicId),
+        reference,
+        targetTopicId,
+        groupKey: boundary.groupKey,
+        placement: boundary.placement
+      }
+    ]
+  }
+  const placements: ReferenceDividerPlacement[] = []
+  for (let index = 0; index < layers.length; index++) {
+    const layer = layers[index]
+    if (index === 0) {
+      const boundary = resolveReferenceBoundary(groupedMessages, layer, targetTopicId)
+      if (!boundary) continue
+      placements.push({
+        boundaryKey: referenceDividerKey(layer.targetTopicId),
+        reference: layer,
+        targetTopicId: layer.targetTopicId,
+        groupKey: boundary.groupKey,
+        placement: boundary.placement
+      })
+      continue
+    }
+    if (layer.status !== 'available' || !layer.boundaryMessageId) continue
+    let groupKey: string | null = null
+    for (const [key, groupMessages] of groupedMessages) {
+      if (groupMessages.some((m) => m.id === layer.boundaryMessageId)) {
+        groupKey = key
+        break
+      }
+    }
+    if (groupKey === null) continue // Boundary outside the loaded window: deferred.
+    placements.push({
+      boundaryKey: referenceDividerKey(layer.targetTopicId),
+      reference: layer,
+      targetTopicId: layer.targetTopicId,
+      groupKey,
+      placement: 'after-boundary'
+    })
+  }
+  return placements
+}
+
+/**
  * A projected message is part of the read-only foreign prefix when it carries
  * an explicit topicId that is not the rendered target topic. Messages without a
  * canonical topicId never count as foreign (fail-closed, never misplace).
@@ -258,9 +355,12 @@ export interface BuildMessageFlowNodesInput {
   renderBody: (args: MessageFlowBodyArgs) => ReactNode
   renderForkBoundary: (args: MessageFlowForkArgs) => ReactNode
   renderContextBoundary: (legacyKey: string) => ReactNode
-  /** History-reference divider placement (absent/null = no reference target). */
-  referenceBoundary?: ReferenceBoundary | null
-  renderReferenceBoundary?: () => ReactNode
+  /**
+   * History-reference divider placements for this display window, nearest
+   * relation layer first (empty/absent = not a reference target).
+   */
+  referenceDividers?: readonly ReferenceDividerPlacement[]
+  renderReferenceDivider?: (placement: ReferenceDividerPlacement) => ReactNode
 }
 
 /**
@@ -274,7 +374,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   const {
     layerRuns,
     contextDividerGroupKey,
-    referenceBoundary,
+    referenceDividers,
     forkDividers,
     branchPath,
     branches,
@@ -285,7 +385,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     renderBody,
     renderForkBoundary,
     renderContextBoundary,
-    renderReferenceBoundary
+    renderReferenceDivider
   } = input
   const nodes: FlowNode[] = []
   const forkParentLabel = (parentBranchId: string | null): string =>
@@ -343,17 +443,21 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             }
           })
         }
-        // History-reference divider: placed DOM-before the boundary group so it
-        // renders visually directly below the last foreign-prefix message (the
-        // same placement family as a fork divider). Missing/absent boundary is
+        // History-reference dividers: one per materialized relation layer,
+        // placed DOM-before the boundary group so each renders visually
+        // directly below its OWN layer's last message (the same placement
+        // family as a fork divider). Placement order (nearest layer first)
+        // keeps the nearest divider adjacent to the target-owned suffix when
+        // layers share a boundary message. Missing/absent boundaries are
         // handled once at the beginning after the loop.
-        if (referenceBoundary?.placement === 'after-boundary' && legacyKey === referenceBoundary.groupKey) {
+        for (const divider of referenceDividers ?? []) {
+          if (divider.placement !== 'after-boundary' || legacyKey !== divider.groupKey) continue
           nodes.push({
             kind: 'boundary',
             entry: {
-              boundaryKey: 'history-reference-boundary',
+              boundaryKey: divider.boundaryKey,
               boundaryKind: 'reference',
-              node: renderReferenceBoundary?.()
+              node: renderReferenceDivider?.(divider)
             }
           })
         }
@@ -426,16 +530,17 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     })
   }
 
-  // Missing reference (or a loaded window with no foreign prefix): the divider
-  // marks the beginning (top) of the target's own content. Appended last in
-  // newest→oldest DOM order so it renders at the visual beginning.
-  if (referenceBoundary?.placement === 'beginning') {
+  // Beginning placement: a missing reference (the prefix is absent) marks the
+  // top of the target's own content. Appended last in newest→oldest DOM order
+  // so it renders at the visual beginning.
+  for (const divider of referenceDividers ?? []) {
+    if (divider.placement !== 'beginning') continue
     nodes.push({
       kind: 'boundary',
       entry: {
-        boundaryKey: 'history-reference-boundary',
+        boundaryKey: divider.boundaryKey,
         boundaryKind: 'reference',
-        node: renderReferenceBoundary?.()
+        node: renderReferenceDivider?.(divider)
       }
     })
   }

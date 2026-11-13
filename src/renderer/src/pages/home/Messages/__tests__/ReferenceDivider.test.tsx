@@ -23,10 +23,19 @@ const reference = (over: Partial<HistoryReferenceMeta> = {}): HistoryReferenceMe
 describe('ReferenceDivider', () => {
   it('renders the live source title link and navigates on click', () => {
     const onNavigateSource = vi.fn()
-    render(<ReferenceDivider reference={reference()} sourceName="Live Source" onNavigateSource={onNavigateSource} />)
+    render(
+      <ReferenceDivider
+        reference={reference()}
+        targetTopicId="dst-1"
+        sourceName="Live Source"
+        onNavigateSource={onNavigateSource}
+      />
+    )
     const divider = screen.getByTestId('history-reference-divider')
     expect(divider.getAttribute('data-reference-status')).toBe('available')
     expect(divider.getAttribute('data-reference-source-topic')).toBe('src-1')
+    // The rendered relation's own target is the stable per-layer identity.
+    expect(divider.getAttribute('data-reference-target-topic')).toBe('dst-1')
     const link = screen.getByTestId('history-reference-divider-link')
     expect(link.textContent).toBe('chat.message.reference_divider.label:Live Source')
     fireEvent.click(link)
@@ -38,6 +47,7 @@ describe('ReferenceDivider', () => {
     render(
       <ReferenceDivider
         reference={reference({ sourceName: 'Authority Source' })}
+        targetTopicId="dst-1"
         sourceName={null}
         onNavigateSource={() => {}}
       />
@@ -51,6 +61,7 @@ describe('ReferenceDivider', () => {
     render(
       <ReferenceDivider
         reference={reference({ status: 'missing', sourceName: null, boundaryMessageId: null })}
+        targetTopicId="dst-1"
         sourceName={null}
         onNavigateSource={() => {}}
       />

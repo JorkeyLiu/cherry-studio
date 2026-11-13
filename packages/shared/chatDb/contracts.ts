@@ -3397,14 +3397,49 @@ const fetchMessagesWindowContract: ChatDbContract = {
           )
         }
         const r = ref as Record<string, unknown>
-        const REF_KEYS = new Set([
+        const REF_VALUE_KEYS = [
           'sourceTopicId',
           'sourceBranchId',
           'anchorMessageId',
           'sourceName',
           'status',
           'boundaryMessageId'
-        ])
+        ] as const
+        const REF_KEYS = new Set<string>([...REF_VALUE_KEYS, 'layers'])
+        /** Validate one relation's own fields (shared by the meta and each layer). */
+        const validateRefFields = (entry: Record<string, unknown>, at: string): void => {
+          validateNonEmptyString(entry.sourceTopicId, `${at}.sourceTopicId`)
+          if (entry.sourceBranchId !== null) {
+            validateNonEmptyString(entry.sourceBranchId, `${at}.sourceBranchId`)
+          }
+          validateNonEmptyString(entry.anchorMessageId, `${at}.anchorMessageId`)
+          if (entry.sourceName !== null) {
+            validateNonEmptyString(entry.sourceName, `${at}.sourceName`)
+          }
+          if (entry.status !== 'available' && entry.status !== 'missing') {
+            throw new ValidationError(
+              `${at}.status`,
+              '[chatdb:fetch-messages-window] Expected reference status "available" or "missing"'
+            )
+          }
+          if (entry.boundaryMessageId !== null) {
+            validateNonEmptyString(entry.boundaryMessageId, `${at}.boundaryMessageId`)
+          }
+          // A missing relation has no materialized boundary; an available one
+          // always reports the message its divider is placed after.
+          if (entry.status === 'missing' && entry.boundaryMessageId !== null) {
+            throw new ValidationError(
+              `${at}.boundaryMessageId`,
+              '[chatdb:fetch-messages-window] Missing reference must have a null boundaryMessageId'
+            )
+          }
+          if (entry.status === 'available' && entry.boundaryMessageId === null) {
+            throw new ValidationError(
+              `${at}.boundaryMessageId`,
+              '[chatdb:fetch-messages-window] Available reference must have a boundaryMessageId'
+            )
+          }
+        }
         for (const key of Object.keys(r)) {
           if (!REF_KEYS.has(key)) {
             throw new ValidationError(
@@ -3413,22 +3448,70 @@ const fetchMessagesWindowContract: ChatDbContract = {
             )
           }
         }
-        validateNonEmptyString(r.sourceTopicId, 'result.value.reference.sourceTopicId')
-        if (r.sourceBranchId !== null) {
-          validateNonEmptyString(r.sourceBranchId, 'result.value.reference.sourceBranchId')
-        }
-        validateNonEmptyString(r.anchorMessageId, 'result.value.reference.anchorMessageId')
-        if (r.sourceName !== null) {
-          validateNonEmptyString(r.sourceName, 'result.value.reference.sourceName')
-        }
-        if (r.status !== 'available' && r.status !== 'missing') {
-          throw new ValidationError(
-            'result.value.reference.status',
-            '[chatdb:fetch-messages-window] Expected reference status "available" or "missing"'
-          )
-        }
-        if (r.boundaryMessageId !== null) {
-          validateNonEmptyString(r.boundaryMessageId, 'result.value.reference.boundaryMessageId')
+        validateRefFields(r, 'result.value.reference')
+        // Materialized reference layers (nearest first). Each layer is this
+        // same strict shape plus the relation target ("which relation this
+        // layer is"). The chain is gap-free and duplicate-free so every
+        // divider has a stable unique identity, and the nearest layer mirrors
+        // the relation metadata above so the chain cannot contradict it.
+        if (r.layers !== undefined) {
+          if (!Array.isArray(r.layers) || r.layers.length === 0) {
+            throw new ValidationError(
+              'result.value.reference.layers',
+              '[chatdb:fetch-messages-window] Expected a non-empty reference layer array'
+            )
+          }
+          const layerTargets = new Set<string>()
+          const LAYER_KEYS = new Set<string>([...REF_VALUE_KEYS, 'targetTopicId'])
+          for (let i = 0; i < r.layers.length; i++) {
+            const at = `result.value.reference.layers[${i}]`
+            const layer = r.layers[i]
+            if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) {
+              throw new ValidationError(at, '[chatdb:fetch-messages-window] Expected a reference layer object')
+            }
+            const l = layer as Record<string, unknown>
+            for (const key of Object.keys(l)) {
+              if (!LAYER_KEYS.has(key)) {
+                throw new ValidationError(
+                  `${at}.${key}`,
+                  `[chatdb:fetch-messages-window] Unknown key in reference layer: "${key}"`
+                )
+              }
+            }
+            validateNonEmptyString(l.targetTopicId, `${at}.targetTopicId`)
+            const targetTopicId = l.targetTopicId as string
+            if (layerTargets.has(targetTopicId)) {
+              throw new ValidationError(
+                `${at}.targetTopicId`,
+                '[chatdb:fetch-messages-window] Reference layer target topics must be unique'
+              )
+            }
+            layerTargets.add(targetTopicId)
+            if (i === 0) {
+              if (targetTopicId !== (w.topicId as string)) {
+                throw new ValidationError(
+                  `${at}.targetTopicId`,
+                  '[chatdb:fetch-messages-window] First reference layer must target the read topic'
+                )
+              }
+              for (const key of REF_VALUE_KEYS) {
+                if (l[key] !== r[key]) {
+                  throw new ValidationError(
+                    `${at}.${key}`,
+                    '[chatdb:fetch-messages-window] First reference layer must mirror reference metadata'
+                  )
+                }
+              }
+            } else if (l.status !== 'available' || l.boundaryMessageId === null) {
+              // Ancestor layers are emitted only while materialized; an
+              // unmaterialized upstream boundary must never be reported.
+              throw new ValidationError(
+                `${at}.status`,
+                '[chatdb:fetch-messages-window] Ancestor reference layers must be available with a boundary'
+              )
+            }
+            validateRefFields(l, at)
+          }
         }
       }
     }

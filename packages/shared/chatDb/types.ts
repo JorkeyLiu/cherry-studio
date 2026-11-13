@@ -1764,10 +1764,18 @@ export interface CreateReferencedTopicResponse {
 /**
  * History-reference metadata exposed on windowed reads for a target topic.
  *
+ * A reference target's history is a live, read-only prefix: the captured
+ * source route through its endpoint, itself possibly carrying its own
+ * referenced history. `layers` reports every materialized reference layer of
+ * that chain so each boundary can be shown as its own divider; the fields
+ * above describe the topic's own (nearest) relation and are mirrored as
+ * `layers[0]`.
+ *
  * `status` is 'missing' when the source topic/branch/anchor is gone (soft or
  * hard delete, branch removal, missing endpoint): the prefix is omitted while
  * the target topic and its own suffix survive. `boundaryMessageId` is the last
- * foreign-prefix message (the divider boundary), or null when missing.
+ * materialized message of this relation's history (the divider boundary), or
+ * null when missing.
  */
 export interface HistoryReferenceMeta {
   sourceTopicId: string
@@ -1778,6 +1786,28 @@ export interface HistoryReferenceMeta {
   status: 'available' | 'missing'
   /** Stable ID of the last foreign-prefix message (divider boundary); null when missing. */
   boundaryMessageId: string | null
+  /**
+   * Materialized reference layers of this topic's history, nearest first
+   * (`layers[0]` is this topic's own relation and mirrors the fields above).
+   * A deeper layer is present only while its own boundary message is
+   * materialized in the addressed route, so an upstream boundary beyond a
+   * captured endpoint is never invented. Absent for ordinary topics and for
+   * single-level history whose boundary is not materialized (the fields above
+   * remain the authority in that case).
+   */
+  layers?: HistoryReferenceChainLayer[]
+}
+
+/**
+ * One layer of a reference target's materialized history chain.
+ *
+ * The layer's `targetTopicId` is the topic that owns the relation (one relation
+ * per target topic), so it is the stable, unique layer identity. Read-only
+ * derived metadata: the persisted relation wire (`TopicReferenceWire`) remains
+ * the single durable relation row, never a chain.
+ */
+export interface HistoryReferenceChainLayer extends HistoryReferenceMeta {
+  targetTopicId: string
 }
 
 // ---------------------------------------------------------------------------

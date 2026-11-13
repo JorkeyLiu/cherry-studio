@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import messagesReducer, { newMessagesActions, selectHistoryReferenceForTopic } from '../newMessage'
+import messagesReducer, {
+  newMessagesActions,
+  selectHistoryReferenceForTopic,
+  selectReferenceSourceNames
+} from '../newMessage'
 import { publishResidentComplete, retentionEvict } from '../residentRegistry'
 
 const reference = {
@@ -141,5 +145,119 @@ describe('newMessage historyReference metadata', () => {
     const state = { messages: withRef } as never
     expect(selectHistoryReferenceForTopic(state, 'dst-1')).toEqual(reference)
     expect(selectHistoryReferenceForTopic(state, 'ordinary')).toBeUndefined()
+  })
+
+  it('carries the materialized chain layers through every authority write', () => {
+    const layered = {
+      ...reference,
+      layers: [
+        { ...reference, targetTopicId: 'dst-1' },
+        {
+          targetTopicId: 'src-0',
+          sourceTopicId: 'src-0-root',
+          sourceBranchId: null,
+          anchorMessageId: 'anchor-0',
+          sourceName: 'Root',
+          status: 'available' as const,
+          boundaryMessageId: 'b-0'
+        }
+      ]
+    }
+    const set = messagesReducer(
+      init(),
+      newMessagesActions.historyReferenceSet({ topicId: 'dst-1', reference: layered })
+    )
+    expect(set.historyReferenceByTopic['dst-1']).toEqual(layered)
+    const rebased = messagesReducer(
+      init(),
+      newMessagesActions.rebaseRouteMessages({ topicId: 'dst-1', messages: [], reference: layered })
+    )
+    expect(rebased.historyReferenceByTopic['dst-1'].layers).toEqual(layered.layers)
+    // Layers are derived metadata of the same relation: the nearest layer
+    // still mirrors the relation itself.
+    expect(rebased.historyReferenceByTopic['dst-1'].layers?.[0]).toEqual({
+      ...reference,
+      targetTopicId: 'dst-1'
+    })
+  })
+
+  it('selects live source names for the immediate relation and every chain layer', () => {
+    const layered = {
+      ...reference,
+      layers: [
+        { ...reference, targetTopicId: 'dst-1' },
+        {
+          targetTopicId: 'src-1',
+          sourceTopicId: 'src-0',
+          sourceBranchId: null,
+          anchorMessageId: 'anchor-0',
+          sourceName: 'Stale ancestor name',
+          status: 'available' as const,
+          boundaryMessageId: 'b-0'
+        }
+      ]
+    }
+    const messages = messagesReducer(
+      init(),
+      newMessagesActions.historyReferenceSet({ topicId: 'dst-1', reference: layered })
+    )
+    const assistants = (topics: Array<{ id: string; name: string }>) => ({ assistants: [{ topics }] })
+    const state = {
+      messages,
+      assistants: assistants([
+        { id: 'src-1', name: 'Live Source' },
+        { id: 'src-0', name: 'Live Root' }
+      ])
+    } as never
+    expect(selectReferenceSourceNames(state, 'dst-1')).toEqual({
+      'src-1': 'Live Source',
+      'src-0': 'Live Root'
+    })
+    // Per-(assistant slice, metadata) memoization keeps the result stable.
+    const again = selectReferenceSourceNames(state, 'dst-1')
+    expect(again).toBe(selectReferenceSourceNames(state, 'dst-1'))
+    // An ancestor rename (a new assistant slice) reflects immediately.
+    const renamed = {
+      messages,
+      assistants: assistants([
+        { id: 'src-1', name: 'Live Source' },
+        { id: 'src-0', name: 'Renamed Root' }
+      ])
+    } as never
+    expect(selectReferenceSourceNames(renamed, 'dst-1')['src-0']).toBe('Renamed Root')
+  })
+
+  it('selects an empty, referentially stable name map for ordinary topics', () => {
+    const state = { messages: stateWith('dst-1') } as never
+    const ordinary = selectReferenceSourceNames(state, 'ordinary')
+    expect(ordinary).toEqual({})
+    expect(selectReferenceSourceNames(state, 'ordinary')).toBe(ordinary)
+  })
+
+  it('omits sources that left the assistant catalog (metadata name stays the UI fallback)', () => {
+    const layered = {
+      ...reference,
+      layers: [
+        { ...reference, targetTopicId: 'dst-1' },
+        {
+          targetTopicId: 'src-1',
+          sourceTopicId: 'gone-source',
+          sourceBranchId: null,
+          anchorMessageId: 'anchor-0',
+          sourceName: 'Gone',
+          status: 'available' as const,
+          boundaryMessageId: 'b-0'
+        }
+      ]
+    }
+    const messages = messagesReducer(
+      init(),
+      newMessagesActions.historyReferenceSet({ topicId: 'dst-1', reference: layered })
+    )
+    const state = {
+      messages,
+      assistants: { assistants: [{ topics: [{ id: 'src-1', name: 'Live Source' }] }] }
+    } as never
+    expect(selectReferenceSourceNames(state, 'dst-1')).toEqual({ 'src-1': 'Live Source' })
   })
 })

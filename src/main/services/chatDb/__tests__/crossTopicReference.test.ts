@@ -506,4 +506,114 @@ describe('cross-topic history references', () => {
     // getRawTopic tolerates the same missing source route.
     expect((okValue(agg.getRawTopic(target))!.messages as any[]).map((m) => m.id)).toEqual([own.id])
   })
+
+  // -------------------------------------------------------------------------
+  // Chained reference layers (A→B→C): per-layer divider boundaries
+  // -------------------------------------------------------------------------
+
+  describe('chained reference layers', () => {
+    /**
+     * A→B→C fixture: A rows, B references A at its last row and owns b1/b2,
+     * C references B at b2 and owns c1.
+     */
+    function seedChain(): { a: string; b: string; c: string; aIds: string[]; bIds: string[]; cId: string } {
+      const a = `t-a-${uid()}`
+      const b = `t-b-${uid()}`
+      const c = `t-c-${uid()}`
+      const aIds = seedTopic(a, 3)
+      okValue(agg.createReferencedTopic(a, null, b, aIds[2]))
+      const bIds: string[] = []
+      for (let i = 1; i <= 2; i++) {
+        const msg = makeMessageJson(b, {
+          id: `m-b${i}-${uid()}`,
+          role: i === 1 ? 'user' : 'assistant',
+          content: `b-${i}`
+        })
+        bIds.push(msg.id as string)
+        okValue(agg.appendMessage(b, msg as any, []))
+      }
+      okValue(agg.createReferencedTopic(b, null, c, bIds[1]))
+      const cMsg = makeMessageJson(c, { id: `m-c1-${uid()}`, role: 'user', content: 'c-1' })
+      okValue(agg.appendMessage(c, cMsg as any, []))
+      return { a, b, c, aIds, bIds, cId: cMsg.id as string }
+    }
+
+    it('reports one divider boundary per materialized relation (nearest layer first)', () => {
+      const { a, b, c, aIds, bIds, cId } = seedChain()
+      const win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: c, limit: 50 }))
+      expect((win.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([...aIds, ...bIds, cId])
+      expect(win.reference?.status).toBe('available')
+      // The topic's own relation still describes the nearest layer.
+      expect(win.reference?.sourceTopicId).toBe(b)
+      expect(win.reference?.anchorMessageId).toBe(bIds[1])
+      expect(win.reference?.boundaryMessageId).toBe(bIds[1])
+      const layers = win.reference?.layers ?? []
+      expect(layers.map((layer) => layer.targetTopicId)).toEqual([c, b])
+      // The nearest layer mirrors the relation metadata field-for-field
+      // (plus its own relation target identity).
+      const meta: Record<string, unknown> = { ...(win.reference as object) }
+      delete meta.layers
+      expect(layers[0]).toEqual({ ...meta, targetTopicId: c })
+      // The ancestor layer keeps its own truthful captured relation.
+      expect(layers[1]).toMatchObject({
+        sourceTopicId: a,
+        sourceBranchId: null,
+        anchorMessageId: aIds[2],
+        boundaryMessageId: aIds[2],
+        status: 'available'
+      })
+      const windowIds = new Set((win.messages as Array<{ id: string }>).map((m) => m.id))
+      for (const layer of layers) expect(windowIds.has(layer.boundaryMessageId as string)).toBe(true)
+    })
+
+    it('keeps reporting the layers when the returned window is truncated (renderer defers)', () => {
+      const { b, c, bIds, cId } = seedChain()
+      const partial = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: c, limit: 3 }))
+      expect((partial.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([bIds[0], bIds[1], cId])
+      expect(partial.window.hasMoreBefore).toBe(true)
+      // Both relations stay truthfully reported: the ancestor boundary is
+      // simply not loaded yet, never relocated to the head.
+      expect((partial.reference?.layers ?? []).map((layer) => layer.targetTopicId)).toEqual([c, b])
+    })
+
+    it('does not report an upstream layer that a downstream endpoint truncates', () => {
+      const { b, aIds } = seedChain()
+      const d = `t-d-${uid()}`
+      // The downstream endpoint is an A-inherited message inside B's route,
+      // before B's own rows: B's own relation boundary (A's last row) never
+      // enters D's history, so no divider may be invented for it.
+      okValue(agg.createReferencedTopic(b, null, d, aIds[1]))
+      const win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: d, limit: 50 }))
+      expect((win.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([aIds[0], aIds[1]])
+      expect(win.reference?.boundaryMessageId).toBe(aIds[1])
+      expect((win.reference?.layers ?? []).map((layer) => layer.targetTopicId)).toEqual([d])
+    })
+
+    it('keeps same-endpoint layers distinct by relation target', () => {
+      const { b, aIds } = seedChain()
+      const e = `t-e-${uid()}`
+      // E references B at B's own relation endpoint: both relations end on the
+      // same boundary message and must stay two truthful, distinctly keyed lines.
+      okValue(agg.createReferencedTopic(b, null, e, aIds[2]))
+      const win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: e, limit: 50 }))
+      expect((win.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([...aIds])
+      const layers = win.reference?.layers ?? []
+      expect(layers.map((layer) => layer.targetTopicId)).toEqual([e, b])
+      expect(layers[0].boundaryMessageId).toBe(aIds[2])
+      expect(layers[1].boundaryMessageId).toBe(aIds[2])
+      expect(layers[0].targetTopicId).not.toBe(layers[1].targetTopicId)
+    })
+
+    it('reports no ancestor layer when the upstream relation is missing', () => {
+      const { a, b, c, bIds, cId } = seedChain()
+      okValue(agg.softDeleteTopic(a))
+      const win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: c, limit: 50 }))
+      expect((win.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([...bIds, cId])
+      expect(win.reference?.status).toBe('available')
+      expect(win.reference?.boundaryMessageId).toBe(bIds[1])
+      expect((win.reference?.layers ?? []).map((layer) => layer.targetTopicId)).toEqual([c])
+      // Only the upstream part degrades; the nearest relation stays available.
+      expect(win.reference?.sourceTopicId).toBe(b)
+    })
+  })
 })

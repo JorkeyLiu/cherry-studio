@@ -5175,6 +5175,91 @@ describe('fetch-messages-window reference metadata contract', () => {
     ).not.toThrow()
   })
 
+  const validateReference = (reference: unknown): void => {
+    validateChatDbResult('chatdb:fetch-messages-window', {
+      ok: true,
+      value: { messages: [], blocks: [], window: baseWindow, mutableMessageIds: [], reference }
+    })
+  }
+  const singleReference = {
+    sourceTopicId: 't-src',
+    sourceBranchId: null,
+    anchorMessageId: 'm-a',
+    sourceName: 'Source',
+    status: 'available',
+    boundaryMessageId: 'm-a'
+  }
+  const layeredReference = {
+    ...singleReference,
+    layers: [
+      { ...singleReference, targetTopicId: 't-dst' },
+      {
+        targetTopicId: 't-src',
+        sourceTopicId: 't-root',
+        sourceBranchId: null,
+        anchorMessageId: 'm-a',
+        sourceName: 'Root',
+        status: 'available',
+        boundaryMessageId: 'm-a'
+      }
+    ]
+  }
+
+  it('accepts materialized reference layers (nearest first, distinct relation targets)', () => {
+    expect(() => validateReference(layeredReference)).not.toThrow()
+    // A single layer is a legal chain too.
+    expect(() => validateReference({ ...singleReference, layers: [layeredReference.layers[0]] })).not.toThrow()
+  })
+
+  it('rejects unknown keys, an empty layer list, and duplicate layer targets', () => {
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [{ ...layeredReference.layers[0], extra: 1 }, layeredReference.layers[1]]
+      })
+    ).toThrow(ValidationError)
+    expect(() => validateReference({ ...layeredReference, layers: [] })).toThrow(ValidationError)
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [layeredReference.layers[0], { ...layeredReference.layers[1], targetTopicId: 't-dst' }]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects a first layer that does not mirror the relation metadata', () => {
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [{ ...layeredReference.layers[0], targetTopicId: 't-other' }, layeredReference.layers[1]]
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [{ ...layeredReference.layers[0], anchorMessageId: 'm-other' }, layeredReference.layers[1]]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects an unmaterialized ancestor layer (missing status or null boundary)', () => {
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [
+          layeredReference.layers[0],
+          { ...layeredReference.layers[1], status: 'missing', boundaryMessageId: null }
+        ]
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateReference({
+        ...layeredReference,
+        layers: [layeredReference.layers[0], { ...layeredReference.layers[1], boundaryMessageId: null }]
+      })
+    ).toThrow(ValidationError)
+  })
+
   it('rejects an invalid reference status', () => {
     expect(() =>
       validateChatDbResult('chatdb:fetch-messages-window', {
