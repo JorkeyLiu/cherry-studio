@@ -89,6 +89,9 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
         lastMessageId: segment.lastMessageId,
         messageCount: segment.messageCount
       }
+      if (typeof segment.folded === 'boolean') {
+        mapped.folded = segment.folded
+      }
       if (typeof segment.color === 'string') {
         mapped.color = segment.color
       }
@@ -119,7 +122,8 @@ export const saveTopicSegmentThunk = createAsyncThunk<void, TopicSegment>(
       segment.name,
       segment.messageIds,
       segment.color,
-      routeOfTopic(segment.topicId)
+      routeOfTopic(segment.topicId),
+      segment.folded
     )
   }
 )
@@ -225,8 +229,19 @@ export const restoreSegmentsAfterUndo = async (
       // Segment was removed (all messages were deleted) — recreate from snapshot.
       // Authority order/boundaries come from Main, not the snapshot guess.
       // Same pinned-route rule as the replace path above.
+      // Same pinned-route rule as the replace path above.
       const upsertRoute = typeof addressedRoute === 'undefined' ? routeOfTopic(snap.topicId, getState) : addressedRoute
-      await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color, upsertRoute)
+      // Snapshot folded state is restored with its original semantics: a
+      // recreate must not silently re-enable folded request context.
+      await dbService.upsertSegment(
+        snap.id,
+        snap.topicId,
+        snap.name,
+        snap.messageIds,
+        snap.color,
+        upsertRoute,
+        snap.folded
+      )
     }
   }
 
@@ -275,6 +290,7 @@ export const collectWholeSelectedSegmentsForClipboard = (
         originalSegmentId: segment.id,
         name: segment.name,
         color: segment.color || getSegmentColor(segment.id),
+        folded: segment.folded === true ? true : undefined,
         originalMessageIds: [...segment.messageIds]
       })
     }
@@ -342,7 +358,8 @@ export const restoreTargetSegments = async (
     const gsForRoute = getState ?? store.getState
     const route =
       typeof addressedRoute === 'undefined' ? routeOfTopic(snap.topicId, gsForRoute as () => RootState) : addressedRoute
-    await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color, route)
+    // Redo/paste target recreate carries the snapshot's folded state verbatim.
+    await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color, route, snap.folded)
   }
   const gs = (getState ?? store.getState) as () => any
   let pendingConvergence: unknown = null

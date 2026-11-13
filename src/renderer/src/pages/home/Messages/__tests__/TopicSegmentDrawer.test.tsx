@@ -16,7 +16,8 @@ const { emitMock, state } = vi.hoisted(() => ({
         sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
-        firstMessageId: 'msg-offscreen'
+        firstMessageId: 'msg-offscreen',
+        folded: false
       },
       {
         id: 'seg-2',
@@ -25,7 +26,8 @@ const { emitMock, state } = vi.hoisted(() => ({
         sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
-        firstMessageId: 'msg-4'
+        firstMessageId: 'msg-4',
+        folded: false
       }
     ]
   }
@@ -39,10 +41,13 @@ vi.mock('@renderer/services/EventService', () => ({
   EVENT_NAMES: { NAVIGATE_TO_MESSAGE: 'NAVIGATE_TO_MESSAGE' },
   EventEmitter: { emit: (...args: unknown[]) => emitMock(...args) }
 }))
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => key })
+}))
 
 vi.mock('antd', () => ({
-  Popover: ({ content, children }: any) => (
-    <div>
+  Popover: ({ content, children, zIndex }: any) => (
+    <div data-testid="drawer-popover" data-z-index={zIndex}>
       <div data-testid="drawer-trigger">{children}</div>
       <div data-testid="drawer-content">{content}</div>
     </div>
@@ -63,7 +68,8 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
-        firstMessageId: 'msg-offscreen'
+        firstMessageId: 'msg-offscreen',
+        folded: false
       },
       {
         id: 'seg-2',
@@ -72,7 +78,8 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
-        firstMessageId: 'msg-4'
+        firstMessageId: 'msg-4',
+        folded: false
       }
     ]
   })
@@ -119,5 +126,77 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
     state.segments = []
     const { container } = render(<TopicSegmentDrawer topicId="topic-1" />)
     expect(container.querySelector('[data-testid="drawer-trigger"]')).toBeNull()
+  })
+
+  it('lists the drawer title above the navigation rows', () => {
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    expect(screen.getByText('topicSegment.navigation.title')).toBeTruthy()
+  })
+
+  it('shows a folded group by its fold state instead of the hidden name, keeping the count', () => {
+    state.segments = [
+      {
+        id: 'seg-1',
+        name: 'Segment One',
+        color: '#fff',
+        sortOrder: 1,
+        memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
+        messageCount: 3,
+        firstMessageId: 'msg-offscreen',
+        folded: true
+      },
+      {
+        id: 'seg-2',
+        name: 'Segment Two',
+        color: '#000',
+        sortOrder: 0,
+        memberIds: ['msg-4'],
+        messageCount: 1,
+        firstMessageId: 'msg-4',
+        folded: false
+      }
+    ]
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+
+    // Folded row: i18n fold label, no original name in the row text, the
+    // original name preserved as the hover title, and the count unchanged.
+    const foldedRow = screen.getByText('topicSegment.folded')
+    expect(foldedRow.textContent).not.toContain('Segment One')
+    const foldedItem = foldedRow.closest('[title]') as HTMLElement | null
+    expect(foldedItem?.getAttribute('title')).toBe('Segment One')
+    expect(screen.queryByText('Segment One')).toBeNull()
+    expect(screen.getByText('3')).toBeTruthy()
+
+    // Expanded row keeps its original name and count.
+    expect(screen.getByText('Segment Two')).toBeTruthy()
+    expect(screen.getByText('1')).toBeTruthy()
+  })
+
+  it('keeps navigation by the folded row on the projected first member', () => {
+    state.segments = [
+      {
+        id: 'seg-1',
+        name: 'Segment One',
+        color: '#fff',
+        sortOrder: 1,
+        memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
+        messageCount: 3,
+        firstMessageId: 'msg-offscreen',
+        folded: true
+      }
+    ]
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    fireEvent.click(screen.getByText('topicSegment.folded'))
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-offscreen')
+  })
+
+  it('portals the trigger and its popover above the group-header layer', () => {
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    // The floating trigger carries its own test id so the layer contract can be
+    // observed (portaled node, explicit z above the z1000 group header).
+    expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
+    expect(document.body.contains(screen.getByTestId('drawer-popover'))).toBe(true)
+    const popoverZ = Number(screen.getByTestId('drawer-popover').getAttribute('data-z-index'))
+    expect(popoverZ).toBeGreaterThan(1000)
   })
 })

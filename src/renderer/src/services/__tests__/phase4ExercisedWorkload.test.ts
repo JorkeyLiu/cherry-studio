@@ -135,6 +135,7 @@ function makeClosureResp(
       returnedCount: ids.length,
       totalTurnCount: 2,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: null
     }
   } as any

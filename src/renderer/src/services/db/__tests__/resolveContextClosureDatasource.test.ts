@@ -21,6 +21,7 @@ describe('SqliteMessageDataSource — resolveContextClosure', () => {
       returnedCount: 2,
       totalTurnCount: 3,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: 'u2'
     },
     resolvedAnchorGroupKey: 'u2',

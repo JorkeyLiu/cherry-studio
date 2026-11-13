@@ -5089,6 +5089,9 @@
       "confirm": "确定要解散此消息组吗？消息不会被删除。"
     },
     "dissolveAction": "解散消息组",
+    "fold": "折叠消息组",
+    "folded": "已折叠",
+    "foldedHint": "展开以恢复上下文",
     "merge": {
       "success": "消息组合并成功"
     },

@@ -74,6 +74,7 @@ describe('S6.3 context closure — contract validation', () => {
           returnedCount: 1,
           totalTurnCount: 1,
           selectedTurnCount: 1,
+          foldedMessageIds: [],
           boundaryMessageId: null
         }
       }
@@ -96,6 +97,7 @@ describe('S6.3 context closure — contract validation', () => {
             returnedCount: 2,
             totalTurnCount: 5,
             selectedTurnCount: 2,
+            foldedMessageIds: [],
             boundaryMessageId: 'm1'
           }
         }

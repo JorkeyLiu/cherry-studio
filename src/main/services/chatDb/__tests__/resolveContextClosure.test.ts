@@ -321,4 +321,64 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
     expect(v.closure.boundaryMessageId).toBe(v.closure.firstMessageId)
     expect(v.closure.returnedCount).toBe(v.messages.length)
   })
+
+  it('fold parity: the resolver closure and the fetch closure derive the same participating counts and divider', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4'])
+    // The whole third turn is folded: it stops participating, while the raw
+    // window and the anchor resolution stay untouched.
+    okValue(agg.upsertSegment('seg-fold-3', topicId, 'G3', ['u3', 'a-u3'], null, undefined, true))
+
+    const resolved = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    // Reanchor-default default index = max(0, total - 2) over the RAW turns.
+    expect(resolved.resolvedAnchorGroupKey).toBe('u3')
+    expect(resolved.closure.firstMessageId).toBe('u3')
+    expect(resolved.closure.anchorGroupKey).toBe('u3')
+    // Participating turns: 3 (turns 1, 2 and 4). Window = turns 3..4 → 1.
+    expect(resolved.closure.totalTurnCount).toBe(3)
+    expect(resolved.closure.selectedTurnCount).toBe(1)
+    // Divider names the first PARTICIPATING row of the window (u4): turn 3 is
+    // fully folded, so its hidden rows can never carry the divider.
+    expect(resolved.closure.boundaryMessageId).toBe('u4')
+    expect(resolved.closure.foldedMessageIds.sort()).toEqual(['a-u3', 'u3'])
+    expect(() =>
+      validateChatDbResult('chatdb:resolve-context-closure', { ok: true, value: resolved } as any)
+    ).not.toThrow()
+
+    // Same anchor through the other producer → identical participation shape.
+    const fetched = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u3' }))
+    expect(fetched.closure.totalTurnCount).toBe(resolved.closure.totalTurnCount)
+    expect(fetched.closure.selectedTurnCount).toBe(resolved.closure.selectedTurnCount)
+    expect(fetched.closure.boundaryMessageId).toBe(resolved.closure.boundaryMessageId)
+    expect(fetched.closure.firstMessageId).toBe(resolved.closure.firstMessageId)
+    expect(fetched.closure.foldedMessageIds.sort()).toEqual(resolved.closure.foldedMessageIds)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: fetched } as any)
+    ).not.toThrow()
+
+    // Expanding restores the pre-fold participation (context restored in place).
+    okValue(agg.updateSegmentMetadata('seg-fold-3', undefined, undefined, false))
+    const expanded = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u3' }))
+    expect(expanded.closure.totalTurnCount).toBe(4)
+    expect(expanded.closure.selectedTurnCount).toBe(2)
+    expect(expanded.closure.boundaryMessageId).toBe('u3')
+    expect(expanded.closure.foldedMessageIds).toEqual([])
+  })
+
+  it('whole-topic snapshot carries the authority folded exclusion set', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2'])
+    okValue(agg.upsertSegment('seg-snap', topicId, 'G', ['u2', 'a-u2'], null, undefined, true))
+    const snapshot = okValue(agg.fetchWholeTopicSnapshot({ topicId }))
+    expect(snapshot.snapshot.completeness).toBe('whole-topic')
+    expect(snapshot.snapshot.foldedMessageIds.slice().sort()).toEqual(['a-u2', 'u2'])
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', { ok: true, value: snapshot } as any)
+    ).not.toThrow()
+    // Expanding clears it again: the same read path reports no exclusions.
+    okValue(agg.updateSegmentMetadata('seg-snap', undefined, undefined, false))
+    expect(okValue(agg.fetchWholeTopicSnapshot({ topicId })).snapshot.foldedMessageIds).toEqual([])
+  })
 })

@@ -574,4 +574,252 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
       'u2'
     ])
   })
+  // Folded (collapsed) message groups are presentation state persisted in the
+  // segment row's extra overflow. Membership stays authority
+  // (`topic_segment_messages`): the rows keep their place in the authority
+  // window slice and the anchor still resolves on the raw turn set, while the
+  // counts describe *participating* turns only (a turn participates when at
+  // least one of its rows is not a folded member). That single definition is
+  // what the actual request, the token-estimation list and the context count
+  // consume, so folding can never move the window start and expanding restores
+  // exactly the pre-fold participation.
+  describe('folded group participation', () => {
+    function seedTurns(topicId: string, turnCount: number): void {
+      for (let i = 1; i <= turnCount; i++) {
+        const userId = `u${i}`
+        const assistantId = `a${i}`
+        agg.appendMessage(topicId, makeMsg(topicId, userId, 'user') as any, [makeBlock(userId) as any])
+        agg.appendMessage(topicId, makeMsg(topicId, assistantId, 'assistant', userId) as any, [
+          makeBlock(assistantId) as any
+        ])
+      }
+    }
+
+    it('keeps the raw authority window and anchor but drops participating counts', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      const upserted = okValue(agg.upsertSegment('seg-fold', topicId, 'Group', ['u2', 'a2'], null))
+      // Expanded by default: no folded property on the wire at all.
+      expect(upserted.folded).toBeUndefined()
+      expect((upserted as any).messageIds).toEqual(['u2', 'a2'])
+
+      const foldedWire = okValue(agg.updateSegmentMetadata('seg-fold', undefined, undefined, true))
+      expect(foldedWire.folded).toBe(true)
+      // Folding is presentation only: membership is untouched.
+      expect((foldedWire as any).messageIds).toEqual(['u2', 'a2'])
+      expect((foldedWire as any).messageCount).toBe(2)
+
+      const v = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      // The authority slice still carries the folded rows in authority order.
+      expect(v.messages.map((m: any) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3', 'a3'])
+      expect(v.blocks).toHaveLength(6)
+      expect(v.closure.firstMessageId).toBe('u1')
+      expect(v.closure.lastMessageId).toBe('a3')
+      expect(v.closure.returnedCount).toBe(6)
+      // Participating turns: the u1 turn and the u3 turn (the u2 turn is fully folded).
+      expect(v.closure.totalTurnCount).toBe(2)
+      expect(v.closure.selectedTurnCount).toBe(2)
+      expect(v.closure.boundaryMessageId).toBeNull()
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: v } as any)).not.toThrow()
+    })
+
+    it('folding above the anchor never moves the window start', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      okValue(agg.upsertSegment('seg-above', topicId, 'Group', ['u1', 'a1'], null))
+
+      const before = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u2' }))
+      expect(before.closure.firstMessageId).toBe('u2')
+      expect(before.closure.totalTurnCount).toBe(3)
+      expect(before.closure.selectedTurnCount).toBe(2)
+      expect(before.closure.boundaryMessageId).toBe('u2')
+
+      okValue(agg.updateSegmentMetadata('seg-above', undefined, undefined, true))
+      const after = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u2' }))
+      // Same persisted anchor, same window origin, same raw slice.
+      expect(after.closure.anchorGroupKey).toBe('u2')
+      expect(after.closure.firstMessageId).toBe('u2')
+      expect(after.messages.map((m: any) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3'])
+      expect(after.closure.returnedCount).toBe(4)
+      // The folded turn is no longer history this route would send, so the
+      // participating window now covers the whole participating topic.
+      expect(after.closure.totalTurnCount).toBe(2)
+      expect(after.closure.selectedTurnCount).toBe(2)
+      expect(after.closure.boundaryMessageId).toBeNull()
+      expect(() =>
+        validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: after } as any)
+      ).not.toThrow()
+    })
+
+    it('expanding restores the pre-fold counts, boundary and participation exactly', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      okValue(agg.upsertSegment('seg-toggle', topicId, 'Group', ['u2', 'a2'], null))
+      const baseline = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      expect(baseline.closure.totalTurnCount).toBe(3)
+      expect(baseline.closure.selectedTurnCount).toBe(3)
+      expect(baseline.closure.boundaryMessageId).toBeNull()
+
+      okValue(agg.updateSegmentMetadata('seg-toggle', undefined, undefined, true))
+      const folded = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      expect(folded.closure.totalTurnCount).toBe(2)
+      expect(folded.closure.selectedTurnCount).toBe(2)
+
+      okValue(agg.updateSegmentMetadata('seg-toggle', undefined, undefined, false))
+      const expanded = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      // Identity restore: same messages, same blocks, same counts, same boundary.
+      expect(expanded.messages.map((m: any) => m.id)).toEqual(baseline.messages.map((m: any) => m.id))
+      expect(expanded.blocks.map((b: any) => b.id)).toEqual(baseline.blocks.map((b: any) => b.id))
+      expect(expanded.closure.totalTurnCount).toBe(baseline.closure.totalTurnCount)
+      expect(expanded.closure.selectedTurnCount).toBe(baseline.closure.selectedTurnCount)
+      expect(expanded.closure.boundaryMessageId).toBe(baseline.closure.boundaryMessageId)
+      expect(expanded.closure.anchorGroupKey).toBe(baseline.closure.anchorGroupKey)
+    })
+
+    it('persists folded state so a fresh service instance reads it back, and null clears it', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 2)
+      okValue(agg.upsertSegment('seg-persist', topicId, 'Group', ['u2', 'a2'], '#ff0000'))
+      okValue(agg.updateSegmentMetadata('seg-persist', undefined, undefined, true))
+
+      // Fresh aggregate over the same database = process-restart readback of the
+      // segment catalog (no in-memory folded cache anywhere).
+      const reloaded = new ChatDbAggregateService(db, sqlite)
+      const listed = okValue(reloaded.listSegments(topicId))
+      expect(listed).toHaveLength(1)
+      expect(listed[0].folded).toBe(true)
+      // Unrelated overflow keys survive the folded write.
+      expect(listed[0].color).toBe('#ff0000')
+      // The segment wire validator accepts the persisted folded flag.
+      expect(() => validateChatDbResult('chatdb:list-segments', { ok: true, value: listed } as any)).not.toThrow()
+
+      // Clearing (null) removes the persisted flag, i.e. back to expanded.
+      const cleared = okValue(reloaded.updateSegmentMetadata('seg-persist', undefined, undefined, null))
+      expect(cleared.folded).toBeUndefined()
+      expect(okValue(reloaded.listSegments(topicId))[0].folded).toBeUndefined()
+      expect(okValue(reloaded.listSegments(topicId))[0].folded).toBeUndefined()
+      const restored = okValue(reloaded.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      expect(restored.closure.totalTurnCount).toBe(2)
+      expect(restored.closure.selectedTurnCount).toBe(2)
+      expect(restored.closure.boundaryMessageId).toBeNull()
+    })
+
+    it('branch-owned folded groups do not change the main route windows', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      const branchId = okValue(agg.createBranch(topicId, null, 'a2', 'B')).branch.id
+      agg.appendMessage(
+        topicId,
+        makeMsg(topicId, 'b1u', 'user') as any,
+        [makeBlock('b1u') as any],
+        undefined,
+        undefined,
+        { branchId }
+      )
+      agg.appendMessage(
+        topicId,
+        makeMsg(topicId, 'b1a', 'assistant', 'b1u') as any,
+        [makeBlock('b1a') as any],
+        undefined,
+        undefined,
+        { branchId }
+      )
+      // Segment owned by the branch route (its own rows only).
+      okValue(agg.upsertSegment('seg-branch', topicId, 'BranchGroup', ['b1u', 'b1a'], null, branchId))
+
+      const mainBefore = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      const branchBefore = okValue(agg.fetchContextClosure({ topicId, branchId, anchorGroupKey: 'u1' }))
+      expect(mainBefore.closure.totalTurnCount).toBe(3)
+      // Effective branch route: inherited u1/u2 turns plus the branch-owned turn.
+      expect(branchBefore.closure.totalTurnCount).toBe(3)
+
+      // Owner-only mutation: folding removes request context, so it may only
+      // happen through the route that owns every member. Through the main
+      // route the branch-owned group is read-only and rejects unchanged.
+      const rejected = agg.updateSegmentMetadata('seg-branch', undefined, undefined, true)
+      expect(rejected.ok).toBe(false)
+      expect((rejected as any).error.code).toBe('VALIDATION_ERROR')
+      expect((rejected as any).error.message).toContain('read-only from the addressed route')
+      const mainAfter = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
+      // Main route ownership/order/window untouched: folded members are branch rows.
+      expect(mainAfter.closure.totalTurnCount).toBe(3)
+      expect(mainAfter.closure.selectedTurnCount).toBe(3)
+      expect(mainAfter.messages.map((m: any) => m.id)).toEqual(mainBefore.messages.map((m: any) => m.id))
+
+      // Its own route owns the members, so the fold lands there.
+      okValue(agg.updateSegmentMetadata('seg-branch', undefined, undefined, true, branchId))
+      const branchAfter = okValue(agg.fetchContextClosure({ topicId, branchId, anchorGroupKey: 'u1' }))
+      // The folded branch group stops taking part on its own route only.
+      expect(branchAfter.closure.totalTurnCount).toBe(2)
+      expect(branchAfter.closure.selectedTurnCount).toBe(2)
+      expect(branchAfter.closure.boundaryMessageId).toBeNull()
+      expect(branchAfter.messages.map((m: any) => m.id)).toContain('b1u')
+      // Branch anchor ownership is unchanged: the branch segment's own members
+      // remain resolvable as an anchor (authority rows, not projection).
+      const ownedAnchor = okValue(agg.fetchContextClosure({ topicId, branchId, anchorGroupKey: 'b1u' }))
+      expect(ownedAnchor.closure.selectedTurnCount).toBe(1)
+    })
+
+    it('an inherited main-route group cannot be folded through a branch route', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      okValue(agg.upsertSegment('seg-main', topicId, 'MainGroup', ['u2', 'a2'], null))
+      const branchId = okValue(agg.createBranch(topicId, null, 'a2', 'B')).branch.id
+      agg.appendMessage(
+        topicId,
+        makeMsg(topicId, 'b1u', 'user') as any,
+        [makeBlock('b1u') as any],
+        undefined,
+        undefined,
+        { branchId }
+      )
+      // The effective branch route inherits the main rows, but inheritance is
+      // read-only: the owner of u2/a2 is the main route.
+      const inherited = agg.updateSegmentMetadata('seg-main', undefined, undefined, true, branchId)
+      expect(inherited.ok).toBe(false)
+      expect((inherited as any).error.code).toBe('VALIDATION_ERROR')
+      expect((inherited as any).error.message).toContain('read-only from the addressed route')
+      // Nothing changed anywhere.
+      const before = okValue(agg.listSegments(topicId)).find((s) => s.id === 'seg-main')
+      expect(before?.folded).toBeUndefined()
+      // The owner route may fold it.
+      okValue(agg.updateSegmentMetadata('seg-main', undefined, undefined, true))
+      const after = okValue(agg.listSegments(topicId)).find((s) => s.id === 'seg-main')
+      expect(after?.folded).toBe(true)
+    })
+
+    it('partial fold at the anchor keeps the raw window start but names the first participating divider', () => {
+      const topicId = `t-${uid()}`
+      seedTurns(topicId, 3)
+      // The anchor turn's first row (u2) is hidden; a2 of the same turn still
+      // participates, so the turn itself still participates.
+      okValue(agg.upsertSegment('seg-partial-anchor', topicId, 'Partial', ['u2'], null))
+      okValue(agg.updateSegmentMetadata('seg-partial-anchor', undefined, undefined, true))
+      const v = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u2' }))
+      okValue(agg.updateSegmentMetadata('seg-partial-anchor', undefined, undefined, true))
+      expect(v.closure.anchorGroupKey).toBe('u2')
+      // Raw window keeps the persisted anchor row even though it is folded.
+      expect(v.closure.firstMessageId).toBe('u2')
+      expect(v.messages.map((m: any) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3'])
+      // All three turns participate (each keeps one participating row); the
+      // window keeps two of them and its divider is the first PARTICIPATING row
+      // of the window (a2), never the hidden u2.
+      expect(v.closure.totalTurnCount).toBe(3)
+      expect(v.closure.selectedTurnCount).toBe(2)
+      expect(v.closure.boundaryMessageId).toBe('a2')
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: v } as any)).not.toThrow()
+
+      // Cleared, then a partial window whose first row is folded (anchor u3).
+      okValue(agg.updateSegmentMetadata('seg-partial-anchor', undefined, undefined, null))
+      okValue(agg.upsertSegment('seg-partial-u3', topicId, 'Partial3', ['u3'], null, undefined, true))
+      const partial = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u3' }))
+      expect(partial.closure.firstMessageId).toBe('u3')
+      expect(partial.closure.totalTurnCount).toBe(3)
+      expect(partial.closure.selectedTurnCount).toBe(1)
+      expect(partial.closure.boundaryMessageId).toBe('a3')
+      expect(() =>
+        validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: partial } as any)
+      ).not.toThrow()
+    })
+  })
 })

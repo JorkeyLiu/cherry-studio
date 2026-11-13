@@ -43,12 +43,19 @@ vi.mock('@renderer/utils/topicSegmentColor', () => ({
   getSegmentColor: (id: string) => `color-${id}`
 }))
 
+import {
+  getCachedContextClosure,
+  getClosureSemanticToken,
+  resetAllClosureStateForTests,
+  setCachedContextClosure,
+  subscribeClosureInvalidations
+} from '@renderer/services/contextClosure'
 import { dbService } from '@renderer/services/db'
 import { rootReducer } from '@renderer/store'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { bumpGeneration, publishResidentComplete } from '@renderer/store/residentRegistry'
 import { resetCatalogRequestSeqForTests } from '@renderer/utils/topicSegmentCatalog'
-import type { FetchMessagesWindowResponse } from '@shared/chatDb'
+import type { FetchContextClosureResponse, FetchMessagesWindowResponse } from '@shared/chatDb'
 
 import { useTopicSegments } from '../useTopicSegments'
 
@@ -223,5 +230,86 @@ describe('useTopicSegments mounted-hook catalog preservation — real root store
     stop()
     expectStableProjection(store, topicId, gen, ['m1', 'm2'], seen)
     expect((store.getState() as any).topicSegments.segments.entities['seg-r'].name).toBe('Renamed')
+  })
+
+  it('actual setSegmentFolded persists true/false and converges the catalog (projection preserved)', async () => {
+    const topicId = 't-hook-fold'
+    const store = configureStore({ reducer: rootReducer })
+    const gen = establishResident(store, topicId, ['m1', 'm2'], [seg('seg-f', topicId, 0, ['m1', 'm2'])])
+    const withFold = (folded: boolean) => ({ ...seg('seg-f', topicId, 0, ['m1', 'm2']), folded })
+    const { seen, stop } = trackLoaded(store, topicId)
+    const wrapper = ({ children }: { children: React.ReactNode }) => createElement(Provider, { store, children } as any)
+    const { result } = renderHook(() => useTopicSegments(topicId), { wrapper })
+
+    // Fold: the presentation flag is written through the single metadata
+    // mutation (membership is never part of it) and the authority catalog is
+    // re-published preserving the resident window.
+    ;(dbService.updateSegmentMetadata as any).mockResolvedValue(withFold(true))
+    ;(dbService.listSegments as any).mockResolvedValue([withFold(true)])
+    await result.current.setSegmentFolded('seg-f', true)
+    expect(mockUpdateMeta).toHaveBeenLastCalledWith('seg-f', undefined, undefined, true, null)
+    expect((store.getState() as any).topicSegments.segments.entities['seg-f'].folded).toBe(true)
+    expectStableProjection(store, topicId, gen, ['m1', 'm2'], seen)
+
+    // Expand: the flag flips back to an explicit `false` (never a dropped key),
+    // restoring participation at the same position.
+    ;(dbService.updateSegmentMetadata as any).mockResolvedValue(withFold(false))
+    ;(dbService.listSegments as any).mockResolvedValue([withFold(false)])
+    await result.current.setSegmentFolded('seg-f', false)
+    expect(mockUpdateMeta).toHaveBeenLastCalledWith('seg-f', undefined, undefined, false, null)
+    expect((store.getState() as any).topicSegments.segments.entities['seg-f'].folded).toBe(false)
+    expect((store.getState() as any).topicSegments.segments.entities['seg-f'].messageIds).toEqual(['m1', 'm2'])
+    stop()
+    expectStableProjection(store, topicId, gen, ['m1', 'm2'], seen)
+  })
+
+  it('a read-only/inherited group never reaches IPC through setSegmentFolded', async () => {
+    const topicId = 't-hook-fold-ro'
+    const store = configureStore({ reducer: rootReducer })
+    establishResident(store, topicId, ['m1', 'm2'], [seg('seg-ro', topicId, 0, ['m1', 'm2'])])
+    // Only m1 is mutable through the active route: m2 is inherited read-only
+    // (capability re-published so the union merge cannot keep it mutable).
+    store.dispatch(newMessagesActions.invalidateRouteMutability({ topicId }) as any)
+    store.dispatch(newMessagesActions.mergeRouteMutability({ topicId, route: null, mutableMessageIds: ['m1'] }) as any)
+    const wrapper = ({ children }: { children: React.ReactNode }) => createElement(Provider, { store, children } as any)
+    const { result } = renderHook(() => useTopicSegments(topicId), { wrapper })
+
+    // Folding changes request context, so an inherited member rejects before any
+    // IPC call (Main re-verifies the whole membership atomically as well).
+    await expect(result.current.setSegmentFolded('seg-ro', true)).rejects.toThrow(/immutable through this route/)
+    expect(mockUpdateMeta).not.toHaveBeenCalled()
+  })
+
+  it('actual setSegmentFolded invalidates the accepted closure projection for every route of the topic', async () => {
+    const topicId = 't-hook-fold-cache'
+    const branchId = 'branch-x'
+    resetAllClosureStateForTests()
+    const store = configureStore({ reducer: rootReducer })
+    establishResident(store, topicId, ['m1', 'm2'], [seg('seg-c', topicId, 0, ['m1', 'm2'])])
+    const cached = { messages: [], blocks: [], closure: {} } as unknown as FetchContextClosureResponse
+    setCachedContextClosure(topicId, cached)
+    setCachedContextClosure(topicId, cached, branchId)
+    const tokenBefore = getClosureSemanticToken(topicId)
+    const branchTokenBefore = getClosureSemanticToken(topicId, branchId)
+    let notified = 0
+    const unsubscribe = subscribeClosureInvalidations(() => {
+      notified += 1
+    })
+    const foldedSeg = { ...seg('seg-c', topicId, 0, ['m1', 'm2']), folded: true }
+    ;(dbService.updateSegmentMetadata as any).mockResolvedValue(foldedSeg)
+    ;(dbService.listSegments as any).mockResolvedValue([foldedSeg])
+    const wrapper = ({ children }: { children: React.ReactNode }) => createElement(Provider, { store, children } as any)
+    const { result } = renderHook(() => useTopicSegments(topicId), { wrapper })
+
+    // Fold changes participation, which is part of the accepted closure: the
+    // projection must be refetched, not served from a folded-inclusive snapshot.
+    await result.current.setSegmentFolded('seg-c', true)
+    unsubscribe()
+    expect(getCachedContextClosure(topicId)).toBeNull()
+    expect(getCachedContextClosure(topicId, branchId)).toBeNull()
+    expect(getClosureSemanticToken(topicId)).not.toBe(tokenBefore)
+    expect(getClosureSemanticToken(topicId, branchId)).not.toBe(branchTokenBefore)
+    expect(notified).toBeGreaterThan(0)
+    resetAllClosureStateForTests()
   })
 })

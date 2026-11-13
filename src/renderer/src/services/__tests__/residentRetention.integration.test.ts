@@ -142,6 +142,7 @@ function seedResidentTopic(
         returnedCount: 1,
         totalTurnCount: 1,
         selectedTurnCount: 1,
+        foldedMessageIds: [],
         boundaryMessageId: null
       }
     } as any,

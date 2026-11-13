@@ -150,6 +150,7 @@ function closureFor(topicId: string, anchor: string, totalTurns: number, selecte
       returnedCount: messages.length,
       totalTurnCount: totalTurns,
       selectedTurnCount: selectedTurns,
+      foldedMessageIds: [],
       boundaryMessageId: selectedTurns === totalTurns ? null : firstMessageId
     },
     resolvedAnchorGroupKey: anchor,

@@ -216,6 +216,7 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
           returnedCount: resolvedAnchorGroupKey ? 1 : 0,
           totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
           selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+          foldedMessageIds: [],
           boundaryMessageId: null
         },
         resolvedAnchorGroupKey,
@@ -290,6 +291,7 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
         returnedCount: 1,
         totalTurnCount: 1,
         selectedTurnCount: 1,
+        foldedMessageIds: [],
         boundaryMessageId: null
       },
       resolvedAnchorGroupKey: 'u2',
@@ -321,6 +323,7 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
         returnedCount: 1,
         totalTurnCount: 1,
         selectedTurnCount: 1,
+        foldedMessageIds: [],
         boundaryMessageId: null
       },
       resolvedAnchorGroupKey: 'u1',
@@ -385,6 +388,7 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
         returnedCount: 0,
         totalTurnCount: 0,
         selectedTurnCount: 0,
+        foldedMessageIds: [],
         boundaryMessageId: null
       },
       resolvedAnchorGroupKey: null,

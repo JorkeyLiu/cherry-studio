@@ -605,12 +605,12 @@ export function registerChatDbIpc(): () => void {
 
   // 15. upsert-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpsertSegment, (agg, req: UpsertSegmentRequest) => {
-    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color, req.branchId)
+    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color, req.branchId, req.folded)
   })
 
   // 16. update-segment-metadata (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpdateSegmentMetadata, (agg, req: UpdateSegmentMetadataRequest) => {
-    return agg.updateSegmentMetadata(req.segmentId, req.name, req.color)
+    return agg.updateSegmentMetadata(req.segmentId, req.name, req.color, req.folded, req.branchId)
   })
 
   // 17. delete-segment (Phase 5.1A)

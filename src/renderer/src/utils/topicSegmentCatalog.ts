@@ -27,6 +27,12 @@ export function mapSegmentWireToTopicSegment(wire: SegmentWire): TopicSegment {
     lastMessageId: wire.lastMessageId,
     messageCount: wire.messageCount
   }
+  // Persisted folded state travels through extra overflow: keep the own
+  // property only for a legal boolean so the entity stays JSON-safe.
+  if (typeof wire.folded === 'boolean') {
+    segment.folded = wire.folded
+  }
+
   if (typeof wire.color === 'string') {
     segment.color = wire.color
   }

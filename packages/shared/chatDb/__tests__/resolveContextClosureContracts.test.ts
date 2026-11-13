@@ -10,6 +10,7 @@ const baseClosure = {
   lastMessageId: 'u3',
   returnedCount: 2,
   totalTurnCount: 3,
+  foldedMessageIds: [],
   selectedTurnCount: 2,
   boundaryMessageId: 'u2'
 }
@@ -197,6 +198,7 @@ describe('chatdb:resolve-context-closure result validation', () => {
           returnedCount: 0,
           totalTurnCount: 0,
           selectedTurnCount: 0,
+          foldedMessageIds: [],
           boundaryMessageId: null
         },
         resolvedAnchorGroupKey: null,

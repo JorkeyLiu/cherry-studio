@@ -30,6 +30,7 @@ function makeResp(topicId: string, anchor: string, ids: string[] = ['u1', 'a1'])
       returnedCount: ids.length,
       totalTurnCount: 1,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null
     }
   } as any

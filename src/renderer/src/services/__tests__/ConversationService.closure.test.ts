@@ -8,14 +8,25 @@ import {
 } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { fetchClosureMock, fetchWholeTopicSnapshotMock, getSettingsMock, getDefaultModelMock, blockEntities } =
-  vi.hoisted(() => ({
-    fetchClosureMock: vi.fn(),
-    fetchWholeTopicSnapshotMock: vi.fn(),
-    getSettingsMock: vi.fn(),
-    getDefaultModelMock: vi.fn(() => ({ id: 'm', provider: 'p', name: 'm', group: 'g' }) as any),
-    blockEntities: {} as Record<string, any>
-  }))
+const {
+  fetchClosureMock,
+  fetchWholeTopicSnapshotMock,
+  getSettingsMock,
+  getDefaultModelMock,
+  blockEntities,
+  foldedCatalog
+} = vi.hoisted(() => ({
+  fetchClosureMock: vi.fn(),
+  fetchWholeTopicSnapshotMock: vi.fn(),
+  getSettingsMock: vi.fn(),
+  getDefaultModelMock: vi.fn(() => ({ id: 'm', provider: 'p', name: 'm', group: 'g' }) as any),
+  blockEntities: {} as Record<string, any>,
+  // Authority segment catalog held by the renderer store (folded participation).
+  foldedCatalog: {
+    entities: {} as Record<string, any>,
+    segmentsByTopic: {} as Record<string, string[]>
+  }
+}))
 
 vi.mock('@renderer/i18n', () => ({ default: { t: (k: string) => k } }))
 vi.mock('@renderer/store', () => ({
@@ -23,7 +34,11 @@ vi.mock('@renderer/store', () => ({
     getState: () => ({
       settings: { injectContextTimestamp: false },
       messageBlocks: { entities: blockEntities },
-      messages: { entities: {}, messageIdsByTopic: {} }
+      messages: { entities: {}, messageIdsByTopic: {} },
+      topicSegments: {
+        segments: { entities: foldedCatalog.entities, ids: Object.keys(foldedCatalog.entities) },
+        segmentsByTopic: foldedCatalog.segmentsByTopic
+      }
     }),
     dispatch: vi.fn()
   }
@@ -38,6 +53,7 @@ vi.mock('@renderer/services/db', () => ({
     fetchWholeTopicSnapshot: (...args: any[]) => fetchWholeTopicSnapshotMock(...args)
   }
 }))
+import { deriveContextInfoFromClosure } from '@renderer/services/contextInfoService'
 import { buildBlockOverlay } from '@renderer/services/requestBlockOverlay'
 
 import { ConversationService } from '../ConversationService'
@@ -97,7 +113,14 @@ function assistantMsg(id: string, askId: string, text: string): { message: Messa
 
 function makeClosureResponse(
   entries: Array<{ message: Message; block: MessageBlock }>,
-  opts: { topicId: string; anchorGroupKey: string; totalTurnCount: number; selectedTurnCount: number }
+  opts: {
+    topicId: string
+    anchorGroupKey: string
+    totalTurnCount: number
+    selectedTurnCount: number
+    /** Authority folded member ids reported by the Main closure producer. */
+    foldedMessageIds?: string[]
+  }
 ) {
   const messages = entries.map((e) => ({ ...e.message }))
   const blocks = entries.map((e) => ({ ...e.block }))
@@ -116,12 +139,17 @@ function makeClosureResponse(
       returnedCount: messages.length,
       totalTurnCount: opts.totalTurnCount,
       selectedTurnCount: opts.selectedTurnCount,
-      boundaryMessageId: boundary
+      boundaryMessageId: boundary,
+      foldedMessageIds: opts.foldedMessageIds ?? []
     }
   }
 }
 
-function makeRouteSnapshot(entries: Array<{ message: Message; block: MessageBlock }>, topicId: string) {
+function makeRouteSnapshot(
+  entries: Array<{ message: Message; block: MessageBlock }>,
+  topicId: string,
+  foldedMessageIds: string[] = []
+) {
   const messages = entries.map((e) => ({ ...e.message }))
   const blocks = entries.map((e) => ({ ...e.block }))
   return {
@@ -132,7 +160,8 @@ function makeRouteSnapshot(entries: Array<{ message: Message; block: MessageBloc
       topicId,
       firstMessageId: messages[0]?.id ?? null,
       lastMessageId: messages[messages.length - 1]?.id ?? null,
-      returnedCount: messages.length
+      returnedCount: messages.length,
+      foldedMessageIds
     }
   }
 }
@@ -158,10 +187,45 @@ function sdkTexts(modelMessages: any[], role: string): string[] {
     })
 }
 
+/**
+ * Folded (collapsed) message groups take no part in an actual provider
+ * request, in both request shapes: the anchored closure slice and the pre-anchor
+ * route history read. The exclusion set comes from the AUTHORITY closure
+ * metadata (`foldedMessageIds`), never from the renderer segment catalog: a
+ * missing/non-resident/stale catalog must not be able to re-enable a body that
+ * Main still reports as folded. The exclusion is unconditional — folded history
+ * can never leak, not above the window start, and not when the request's own
+ * triggering prompt belongs to the folded group (such a request fails closed
+ * instead of re-injecting the hidden body).
+ */
+
+/**
+ * Stages a deliberately STALE renderer projection (catalog entry marked folded)
+ * so tests can prove request/token/count exclusion does not read it.
+ */
+function stageStaleProjection(segmentId: string, messageIds: string[]): void {
+  foldedCatalog.entities[segmentId] = {
+    id: segmentId,
+    topicId: 't1',
+    name: `group-${segmentId}`,
+    messageIds,
+    createdAt: TS,
+    updatedAt: TS,
+    sortOrder: 0,
+    firstMessageId: messageIds[0],
+    lastMessageId: messageIds[messageIds.length - 1],
+    messageCount: messageIds.length,
+    folded: true
+  }
+  foldedCatalog.segmentsByTopic.t1 = [...(foldedCatalog.segmentsByTopic.t1 ?? []), segmentId]
+}
+
 describe('ConversationService actual outbound window (authority closure)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     for (const k of Object.keys(blockEntities)) delete blockEntities[k]
+    for (const k of Object.keys(foldedCatalog.entities)) delete foldedCatalog.entities[k]
+    for (const k of Object.keys(foldedCatalog.segmentsByTopic)) delete foldedCatalog.segmentsByTopic[k]
     getDefaultModelMock.mockReturnValue({ id: 'm', provider: 'p', name: 'm', group: 'g' } as any)
   })
 
@@ -531,5 +595,243 @@ describe('ConversationService actual outbound window (authority closure)', () =>
     )
 
     expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+  })
+  it('anchor-clipped closure: folded group bodies are excluded from the request', async () => {
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    // Folded group holds a historical turn inside the anchored window; the
+    // exclusion set is reported by the Main closure producer.
+    const closure = makeClosureResponse([u2, a2, u3, a3, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3,
+      foldedMessageIds: ['u3', 'a3']
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+
+    // Folded group holds a historical turn inside the anchored window.
+    const result = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      'b1'
+    )
+
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u4'])
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['hist-u2', 'trigger-u4'])
+    expect(sdkTexts(result.modelMessages, 'assistant')).toEqual(['hist-a2'])
+    expect(sdkTexts(result.modelMessages, 'user')).not.toContain('hist-u3')
+    expect(sdkTexts(result.modelMessages, 'assistant')).not.toContain('hist-a3')
+  })
+
+  it('folded history above the anchor never leaks into the pre-anchor request', async () => {
+    // Persisted anchor u3, trigger u2 (insert above the boundary): the request
+    // carries the authority prefix above the trigger — minus folded groups.
+    const u0 = userMsg('u0', 'hist-u0')
+    const a0 = assistantMsg('a0', 'u0', 'hist-a0')
+    const u1 = userMsg('u1', 'hist-u1')
+    const a1 = assistantMsg('a1', 'u1', 'hist-a1')
+    const u2 = userMsg('u2', 'trigger-u2')
+    const a2old = assistantMsg('a2-old', 'u2', 'old-reply-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const closure = makeClosureResponse([u3, a3], {
+      topicId: 't1',
+      anchorGroupKey: 'u3',
+      totalTurnCount: 3,
+      selectedTurnCount: 1
+    })
+    closure.closure.firstMessageId = 'u3'
+    closure.closure.boundaryMessageId = 'u3'
+    fetchClosureMock.mockResolvedValue(closure)
+    fetchWholeTopicSnapshotMock.mockResolvedValue(
+      makeRouteSnapshot([u0, a0, u1, a1, u2, a2old, u3, a3], 't1', ['u0', 'a0'])
+    )
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u3' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u3')
+    const authorityUser = { message: u2.message, blocks: buildBlockOverlay([u2.block]) }
+
+    const result = await ConversationService.prepareMessagesForModel([], assistant, 't1', authorityUser, 'b1')
+
+    expect(fetchWholeTopicSnapshotMock).toHaveBeenCalledWith('t1', 'b1')
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['hist-u1', 'trigger-u2'])
+    expect(sdkTexts(result.modelMessages, 'assistant')).toEqual(['hist-a1'])
+    // The folded prefix rows are hidden bodies AND excluded request context.
+    expect(result.uiMessages.map((m) => m.id)).not.toContain('u0')
+    expect(result.uiMessages.map((m) => m.id)).not.toContain('a0')
+  })
+
+  it('a folded trigger fails closed instead of re-injecting the hidden prompt', async () => {
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    const closure = makeClosureResponse([u2, a2, u3, a3, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3,
+      foldedMessageIds: ['u3', 'a3', 'u4']
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+
+    // Historical retry/resend pointing into a collapsed group: the fold
+    // exclusion wins over the trigger, so the request is refused instead of
+    // silently carrying the hidden body back or sending an empty prompt.
+    await expect(
+      ConversationService.prepareMessagesForModel([u4.message] as Message[], assistant, 't1', undefined, 'b1')
+    ).rejects.toThrow(/folded context group/)
+  })
+
+  it('a partially folded answer group keeps its participating member', async () => {
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    // One answer group (same askId) with two members: the FIRST is folded and
+    // the alternative member still participates.
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const a3alt = assistantMsg('a3-alt', 'u3', 'hist-a3-alt')
+    const u4 = userMsg('u4', 'trigger-u4')
+    const closure = makeClosureResponse([u2, a2, u3, a3, a3alt, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3,
+      foldedMessageIds: ['a3']
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+
+    // Retry dedup keeps the first member of one askId group. Folding only part
+    // of the group must not take the still-participating alternative with it.
+    const result = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      'b1'
+    )
+
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3-alt', 'u4'])
+    expect(sdkTexts(result.modelMessages, 'assistant')).toEqual(['hist-a2', 'hist-a3-alt'])
+    expect(result.uiMessages.map((m) => m.id)).not.toContain('a3')
+  })
+
+  it('folding then expanding keeps request, counts and token estimation consistent', async () => {
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    for (const entry of [u2, a2, u3, a3, u4]) blockEntities[entry.block.id] = { ...entry.block }
+    const closure = makeClosureResponse([u2, a2, u3, a3, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3,
+      foldedMessageIds: ['u3', 'a3']
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+    const prepare = () =>
+      ConversationService.prepareMessagesForModel([u4.message] as Message[], assistant, 't1', undefined, 'b1')
+
+    const foldedRequest = await prepare()
+    const foldedInfo = deriveContextInfoFromClosure(closure as any)
+    // Request, projection and token estimation consume the same exclusion.
+    expect(foldedRequest.uiMessages.map((m) => m.id)).toEqual(foldedInfo.uiMessages.map((m) => m.id))
+    expect(foldedInfo.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u4'])
+    expect(foldedInfo.tokenEstimationMessages.map((m) => m.id)).not.toContain('u3')
+    expect(foldedInfo.tokenEstimationMessages.map((m) => m.id)).not.toContain('a3')
+    // Counts are the Main authority's participating turns: folding never moves
+    // the window origin, so the anchored window start and the boundary stay.
+    expect(foldedInfo.contextCount).toEqual({ current: 3, max: 3 })
+    expect(foldedInfo.anchorGroupKey).toBe('u2')
+    expect(foldedInfo.boundaryMessageId).toBeNull()
+
+    // Expanding restores participation at the same position — and a stale
+    // folded projection (window no longer resident/converged) must not veto it.
+    closure.closure.foldedMessageIds = []
+    stageStaleProjection('seg-hist', ['u3', 'a3'])
+    const expandedRequest = await prepare()
+    const expandedInfo = deriveContextInfoFromClosure(closure as any)
+    expect(expandedRequest.uiMessages.map((m) => m.id)).toEqual(expandedInfo.uiMessages.map((m) => m.id))
+    expect(expandedInfo.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+    expect(expandedInfo.contextCount).toEqual({ current: 3, max: 3 })
+    expect(expandedInfo.anchorGroupKey).toBe('u2')
+  })
+
+  it('a missing or stale renderer catalog can never re-enable or hide a folded body', async () => {
+    const u2 = userMsg('u2', 'hist-u2')
+    const a2 = assistantMsg('a2', 'u2', 'hist-a2')
+    const u3 = userMsg('u3', 'hist-u3')
+    const a3 = assistantMsg('a3', 'u3', 'hist-a3')
+    const u4 = userMsg('u4', 'trigger-u4')
+    // Authority reports the fold; the renderer catalog is EMPTY (segment window
+    // not resident / convergence publish discarded the entity).
+    const closure = makeClosureResponse([u2, a2, u3, a3, u4], {
+      topicId: 't1',
+      anchorGroupKey: 'u2',
+      totalTurnCount: 3,
+      selectedTurnCount: 3,
+      foldedMessageIds: ['u3', 'a3']
+    })
+    fetchClosureMock.mockResolvedValue(closure)
+    getSettingsMock.mockReturnValue({
+      contextCount: 5,
+      contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u2' } }
+    })
+    const assistant = assistantWithAnchor('t1:b1', 'u2')
+    const result = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      'b1'
+    )
+    expect(result.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u4'])
+    expect(sdkTexts(result.modelMessages, 'user')).toEqual(['hist-u2', 'trigger-u4'])
+    expect(sdkTexts(result.modelMessages, 'user')).not.toContain('hist-u3')
+    expect(sdkTexts(result.modelMessages, 'assistant')).not.toContain('hist-a3')
+    // Symmetric direction: a stale folded projection cannot hide a body that
+    // Main no longer reports as folded.
+    closure.closure.foldedMessageIds = []
+    stageStaleProjection('seg-stale', ['u3', 'a3'])
+    const reopened = await ConversationService.prepareMessagesForModel(
+      [u4.message] as Message[],
+      assistant,
+      't1',
+      undefined,
+      'b1'
+    )
+    expect(reopened.uiMessages.map((m) => m.id)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+    expect(sdkTexts(reopened.modelMessages, 'user')).toEqual(['hist-u2', 'hist-u3', 'trigger-u4'])
   })
 })

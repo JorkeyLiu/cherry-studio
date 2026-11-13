@@ -455,6 +455,34 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
+  it('update-segment-metadata: folded presentation flag (boolean sets, null clears)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1',
+        folded: true
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1',
+        folded: false
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1',
+        folded: null
+      })
+    ).not.toThrow()
+    // Expanding/collapsing is an explicit boolean — never a truthy string.
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1',
+        folded: 'false'
+      })
+    ).toThrow(ValidationError)
+  })
+
   it('delete-segment: { segmentId }', () => {
     expect(() => validateChatDbRequest('chatdb:delete-segment', { segmentId: 'seg-1' })).not.toThrow()
   })
@@ -2166,6 +2194,34 @@ describe('validateChatDbResult — valid success envelopes', () => {
     ).not.toThrow()
   })
 
+  it('list-segments: segment wire carries the persisted folded presentation flag', () => {
+    const wire = {
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['m1', 'm2'],
+      createdAt: null,
+      updatedAt: null,
+      sortOrder: 0,
+      firstMessageId: 'm1',
+      lastMessageId: 'm2',
+      messageCount: 2
+    }
+    // Folded state rides the segment row's extra overflow and is part of the
+    // declared wire surface (never an accidental pass-through key).
+    expect(() =>
+      validateChatDbResult('chatdb:list-segments', { ok: true, value: [{ ...wire, folded: true }] })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:list-segments', { ok: true, value: [{ ...wire, folded: false }] })
+    ).not.toThrow()
+    // An expanded group omits the flag entirely (JSON-safe, no `undefined` own property).
+    expect(() => validateChatDbResult('chatdb:list-segments', { ok: true, value: [wire] })).not.toThrow()
+    // Only a legal boolean is tolerated.
+    expect(() =>
+      validateChatDbResult('chatdb:list-segments', { ok: true, value: [{ ...wire, folded: 'yes' }] })
+    ).toThrow(ValidationError)
+  })
   it('upsert-segment: segment wire value', () => {
     expect(() =>
       validateChatDbResult('chatdb:upsert-segment', {
@@ -3771,7 +3827,8 @@ describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () 
             topicId: 't1',
             firstMessageId: 'm1',
             lastMessageId: 'm2',
-            returnedCount: 2
+            returnedCount: 2,
+            foldedMessageIds: ['m2']
           }
         }
       })
@@ -3790,11 +3847,44 @@ describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () 
             topicId: 't1',
             firstMessageId: null,
             lastMessageId: null,
-            returnedCount: 0
+            returnedCount: 0,
+            foldedMessageIds: []
           }
         }
       })
     ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: the folded exclusion set is a typed required field', () => {
+    const value = (snapshot: Record<string, unknown>) => ({
+      ok: true,
+      value: {
+        messages: [{ id: 'm1' }, { id: 'm2' }],
+        blocks: [],
+        snapshot: {
+          completeness: 'whole-topic',
+          topicId: 't1',
+          firstMessageId: 'm1',
+          lastMessageId: 'm2',
+          returnedCount: 2,
+          ...snapshot
+        }
+      }
+    })
+    // Missing / malformed / duplicated exclusion lists fail closed instead of
+    // letting a caller guess (a guess can leak a folded body).
+    const missing: any = value({})
+    delete missing.value.snapshot.foldedMessageIds
+    expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', missing)).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', value({ foldedMessageIds: 'm2' }))).toThrow(
+      ValidationError
+    )
+    expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', value({ foldedMessageIds: [''] }))).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', value({ foldedMessageIds: ['m1', 'm1'] }))
+    ).toThrow(ValidationError)
   })
 
   it('fetch-whole-topic-snapshot: rejects wrong completeness', () => {

@@ -1,8 +1,8 @@
 # 上下文窗口治理（Context Window Governance）— 稳定锚点规范
 
 > **文档状态**：Authoritative（权威规范，实现阶段的目标契约）。本文档是上下文窗口（context window）语义的**唯一权威规范**：定义默认上下文数量（`contextCount`）、稳定 topic 锚点（`contextWindowAnchor`）、上下文窗口、允许的锚点迁移、持久化归属、兼容性修复与测试边界，防止既有语义漂移再次发生。
-> **决策锁**：CW-1 … CW-9（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-11-01
+> **决策锁**：CW-1 … CW-10（§3 决策表，durable decision IDs）。
+> **最后更新**：2026-11-01（CW-10 折叠消息组参与语义）
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
@@ -37,6 +37,8 @@
 | 兼容性修复 | compatibility repair | 对缺少锚点的遗留非空 topic 恰好一次初始化锚点（CW-5） |
 | 现状标识符映射 | legacy mapping | 现状 `contextStartOverride[topicId]`（`{ kind: 'active'; groupKey }`）即旧版锚点表达；其 `active.groupKey` 语义等价于本规范的锚点值，由 §10/§11 字段演进为 `contextWindowAnchor` |
 | 锚点之上请求 | above-anchor request | 一次性的临时请求：触发用户先于该 route 的持久化锚点（锚点之上插入后发送、同一路径上的历史重发/编辑重发）。它携带有效路由触发点以上的完整历史 + 触发用户，不含触发点之后的对话与该触发的已有回复；不读取、不移动、不重算、不持久化锚点（CW-9） |
+| 折叠消息组 | folded message group | 已折叠（`topic_segments.extra.folded`）的 UI 消息组。折叠是表现状态，不改变权威成员、顺序、边界或锚点；其成员**不参与**上下文：不出现在模型请求、token 估算、上下文数量与边界口径中（CW-10） |
+| 参与成员 | participating members | 一个 turn 中**未被折叠**的消息行。turn 只要含至少一个参与成员即「参与」；计数以参与 turn 表达 |
 
 ---
 
@@ -53,6 +55,7 @@
 | **CW-7** | **持久化是普通 renderer assistant-settings 持久化**。迁移测试覆盖字段演进；**不需要**锚点专用重启 E2E | **Locked** |
 | **CW-8** | **不恢复 fixed/sliding 双模式**。只有一种模型：稳定锚点到末尾（stable anchor-to-end） | **Locked** |
 | **CW-9** | **锚点之上触发的一次请求是临时的、无锚点的**：在锚点之前发送（锚点之上插入后发送、以及同一路径上的历史重发/编辑重发）时，该次请求携带**当前有效路由上触发用户之前的完整历史 + 触发用户本身**，不含触发点之后的对话，也不含该触发消息已有回复；该前缀**不被当前 `contextCount` 截断**（系统提示与模型容量等既有非锚点规则保持不变）。它**不读取、不拓宽、不重算、不持久化**锚点，持久化锚点、边界分隔线与后续常规请求起点均不变；窗口内普通发送/重发的语义不变 | **Locked** |
+| **CW-10** | **折叠消息组不参与上下文，但永不改变窗口结构**：已折叠组的成员在模型请求、token 估算、上下文数量与边界分隔线中**一致地被排除**；`contextWindowAnchor`、窗口起点（锚点 turn）与其连续性、`contextCount` 均**不因折叠而移动、重算或收缩**，展开后成员在原有位置恢复参与资格。计数以**参与 turn** 表达（turn 含至少一个非折叠成员即参与）；边界分隔线同以参与历史为口径，折叠只会让「窗口起点之前已无参与历史」的分隔线消失、**永不新增**分隔线，窗口起点本身不动；窗口内全被折叠的退化情形仍报告一致的非零参与计数与同一 Main 权威窗口切片。该排除同时作用于锚点之下的常规请求与 CW-9 的**锚点之上请求**（起点之前的重新请求同样不得携带折叠历史）。折叠状态是 `topic_segments` 的表现状态（extra），成员权威仍是 `topic_segment_messages`，不得由加载投影推断 | **Locked** |
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：CW-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
 
@@ -78,6 +81,8 @@
 - **I-5**：锚点迁移的完整集合 = CW-4 六类；其余事件（CW-5 列表）均不是迁移。
 - **I-6**：删除锚点 turn 时锚点确定性转移（§9）；删除非锚点 turn 不移动锚点。
 - **I-7**：已初始化的非空路由在任何时刻（含重锚定交互之后）都保留恰好一个锚点；「无锚点」只对空路由或尚未修复的遗留路由存在。
+- **I-8**：折叠只移除参与资格：请求、token 估算、上下文数量与边界分隔线共享同一「参与成员」定义（CW-10）；折叠、展开均不是锚点迁移（CW-4 全集不变），也不重新锚定窗口起点。折叠/展开会改变参与集合，故渲染层对已接受的闭包投影按 topic 整体失效并据权威重取（投影新鲜度只是 UI 展示口径，从不作为请求依据）。
+- **I-9**：折叠写入是 **owner-only** 变异（与成员变更同一权限域，BRANCH-4/11）：只有拥有全部成员的 route 可折叠/展开；继承/只读组及其后代引用一律拒绝（写入 fail-closed，UI 不提供该写入入口但保留可见标签）。折叠状态跟随 topic 级 segment 实体本身（owner 变更与后代引用随之继承），不是 route-local 独立状态，也不新增同步/导入实体。
 
 ---
 
@@ -175,6 +180,7 @@
 ## 12. 请求与 UI 一致性（Request/UI Consistency）
 
 - 单一解析器（现状 `computeContextInfo` 的演进形态）从**同一持久化锚点 + topic turns** 计算全部消费方：锚点高亮（anchor group key）、TokenCount（current/max）、边界分隔线（`boundaryMessageId`）、模型请求消息列表（CW-6）。
+- **折叠消息组（CW-10）**：同一解析链（实际请求、token 估算、TokenCount current/max、边界分隔线）在**参与成员**上一致：折叠组成员在四处口径中同时被排除，权威关窗计数由 Main 依参与 turn 给出；边界分隔线同以参与历史为口径（折叠只会让「起点之前已无参与历史」的分隔线消失，永不新增，窗口起点不动）。成员来自权威段目录（`topic_segment_messages`），不来自加载投影。折叠、展开均不进入锚点解析链，不移动锚点/`contextCount`/边界起点，展开即在原位置恢复参与资格。
 - 任何组件不得自行推导窗口；运行时不存在「动态推导」语义（§6）。锚点缺失只出现在空 topic 或未修复的遗留 topic，由 §6/§10 处理，而非每次调用时重新推导。
 - **锚点之上请求（CW-9）**：触发用户先于该 route 持久化锚点时，该一次请求的历史前缀取自**当前有效路由的调用者本地完整读取**（`fetchWholeTopicSnapshot`，`whole-topic` 完备性；非视口、非共享投影、不做投影水合），并以稳定 ID 裁剪至触发用户（含）——不含触发之后的对话与该触发的已有回复，也不按 `contextCount` 截断。该请求不读取、不推导、不拓宽、不重算、不持久化锚点，因此不进入本节的锚点解析链：锚点高亮、TokenCount、边界分隔线仍由同一持久化锚点解析，分界线与后续常规请求起点不变。触发目标缺失或不在所寻址的有效路由上、以及真实权威读取失败，一律 fail-closed 并经既有请求错误通道报错。
 

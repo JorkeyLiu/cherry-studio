@@ -172,6 +172,7 @@ async function buildAuthorityClipboardPayload(
           originalSegmentId: wire.id,
           name: wire.name ?? '',
           color: wire.color || getSegmentColor(wire.id),
+          folded: wire.folded === true ? true : undefined,
           originalMessageIds: [...memberIds]
         })
       }
@@ -592,7 +593,8 @@ export async function pasteMessages(
           clipSnap.name,
           newMessageIds,
           clipSnap.color,
-          targetBranchId
+          targetBranchId,
+          clipSnap.folded
         )
         const newSegment = mapSegmentWireToTopicSegment(wire)
         if (wire.name == null) newSegment.name = clipSnap.name

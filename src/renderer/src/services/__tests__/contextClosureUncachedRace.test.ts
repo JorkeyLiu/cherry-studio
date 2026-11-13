@@ -32,6 +32,7 @@ function makeResp(topicId = 't-uncached', anchor = 'u1'): FetchContextClosureRes
       returnedCount: 2,
       totalTurnCount: 1,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null
     }
   } as any

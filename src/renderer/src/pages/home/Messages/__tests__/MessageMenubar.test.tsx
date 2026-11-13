@@ -304,6 +304,7 @@ describe('MessageMenubar context-anchor button', () => {
         returnedCount: resolvedAnchorGroupKey ? 1 : 0,
         totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
         selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+        foldedMessageIds: [],
         boundaryMessageId: null
       },
       resolvedAnchorGroupKey,

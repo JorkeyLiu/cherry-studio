@@ -287,6 +287,14 @@ export interface FlowBodyEntry {
   segmentIsFirst?: boolean
   /** This group's last message is the owning segment's authority last message. */
   segmentIsLast?: boolean
+  /**
+   * This group settles to zero flow height because every member is
+   * presentation-hidden (the group is folded as a whole). The motion wrapper
+   * still mounts to own the exit/enter animation, so the run's height at rest
+   * cannot be inferred from `bodyNode` alone. Undefined = not reported by the
+   * flow builder (probes/fixtures), which falls back to `bodyNode` presence.
+   */
+  zeroFlow?: boolean
   /** The group wrapper (group div only — never a divider). */
   bodyNode: ReactNode
 }
@@ -403,21 +411,44 @@ interface RenderEditFlowNodesOptions {
   isEditMode: boolean
   onTurnClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
   /**
-   * Renders the owning topic-segment chrome (vertical rule + label) for one
-   * turn run. It is invoked at the run chrome host — a sibling of the
-   * interactive turn, outside its `inert` content and its click-capture
-   * cover — so segment controls stay independently hit-testable while turn
-   * selection is unaffected. Omit to render no chrome (tests/probes).
+   * Renders the owning topic-segment chrome for one turn run. It is invoked at
+   * the run chrome host — a sibling of the interactive turn, outside its
+   * `inert` content and its click-capture cover — so segment controls stay
+   * independently hit-testable while turn selection is unaffected. The
+   * payload is emitted once per carrying run; exactly one of them per segment
+   * has `ownsLabel` set and paints the group's single header (rule + label +
+   * fold target), the others paint only the rule continuation. Omit to render
+   * no chrome (tests/probes).
    */
   renderSegmentChrome?: (chrome: RunSegmentChrome) => ReactNode
 }
 
-/** Resolved per-run segment chrome feeding the chrome renderer. */
-export interface RunSegmentChrome {
+/**
+ * Resolved per-run segment chrome base: the owning segment plus its position
+ * flags inside this run.
+ */
+export interface RunSegmentChromeBase {
   segment: TopicSegment
   isFirst: boolean
   isLast: boolean
   messageCount?: number
+}
+
+/**
+ * Full chrome payload handed to the chrome renderer: the derived base plus the
+ * run-level composition identities it needs to render exactly one header host
+ * per segment and to keep coincident collapsed labels distinguishable.
+ */
+export interface RunSegmentChrome extends RunSegmentChromeBase {
+  /**
+   * This run paints the segment's single chrome header host (rule + label +
+   * fold target). Exactly one carrying run per segment has it; every other
+   * carrying run paints only the rule continuation (or nothing when the
+   * group is collapsed).
+   */
+  ownsLabel: boolean
+  /** Cascade slot among coincident collapsed labels (0 = no cascade). */
+  stackIndex: number
 }
 
 /**
@@ -433,7 +464,7 @@ export interface RunSegmentChrome {
  * matching the character of the per-group rule it replaces, aggregated to
  * the run that actually owns the content.
  */
-export function deriveRunSegmentChrome(run: readonly FlowBodyEntry[]): RunSegmentChrome | null {
+export function deriveRunSegmentChrome(run: readonly FlowBodyEntry[]): RunSegmentChromeBase | null {
   let anchor: FlowBodyEntry | undefined
   for (const g of run) {
     if (g.segment && g.segmentIsFirst) {
@@ -487,10 +518,96 @@ export function renderEditFlowNodes({
   const ordered = buildOrderedFlowItems(nodes)
   const out: ReactNode[] = []
 
+  // Run-level chrome composition over the ordered flow (computed before
+  // rendering so it never depends on selection chunking):
+  // - One chrome host per segment, elected up front. A segment can be split
+  //   across several runs (a divider between two of its turns, a differing
+  //   turn id, or a viewport-partial membership) and every such run carries
+  //   the same owning segment, so exactly one run is elected to paint the
+  //   group's single chrome host (rule + label + fold target): the run
+  //   anchored on the segment's own first member when that member is mounted
+  //   (expanded), and otherwise the first carrying run — a collapsed group
+  //   whose authority-first message lies outside the mounted window (or is
+  //   fully hidden by the collapse) still gets exactly one expandable header.
+  //   Every other carrying run paints a rule-only continuation track, so a
+  //   split group keeps its vertical line without a second header host.
+  // - Coincident collapsed labels. A fully collapsed run has zero flow
+  //   height, so consecutive fully collapsed runs paint their labels at the
+  //   same seam position. A fixed cascade slot keeps each label identifiable
+  //   without adding any vertical footprint (no row height, no padding, no
+  //   min-height). A divider, or any run that still occupies flow height,
+  //   separates the seams and restarts the cascade.
+  const chromeByRun = new Map<readonly FlowBodyEntry[], RunSegmentChrome>()
+  if (renderSegmentChrome) {
+    // Pass 1: resolve every carrying run's base and elect one host run per
+    // segment. Election is run-order independent for the expanded case: the
+    // authority-first member renders last in newest→oldest order, so the
+    // host candidate must be searched across every carrying run, not just
+    // the first one seen.
+    const baseByRun = new Map<readonly FlowBodyEntry[], RunSegmentChromeBase>()
+    const firstCarryingRunBySegment = new Map<string, readonly FlowBodyEntry[]>()
+    const firstMemberRunBySegment = new Map<string, readonly FlowBodyEntry[]>()
+    for (const item of ordered) {
+      if (item.kind !== 'turn-run') continue
+      const base = deriveRunSegmentChrome(item.run)
+      if (!base) continue
+      baseByRun.set(item.run, base)
+      if (!firstCarryingRunBySegment.has(base.segment.id)) {
+        firstCarryingRunBySegment.set(base.segment.id, item.run)
+      }
+      if (base.isFirst && !firstMemberRunBySegment.has(base.segment.id)) {
+        firstMemberRunBySegment.set(base.segment.id, item.run)
+      }
+    }
+    const headerRunBySegment = new Map<string, readonly FlowBodyEntry[]>()
+    for (const [segmentId, firstCarryingRun] of firstCarryingRunBySegment) {
+      const base = baseByRun.get(firstCarryingRun)
+      // A collapsed group is a whole: its single header sits on the seam of
+      // the first carrying run (the group's newest visible run). An expanded
+      // group anchors its label on the run owning the group's first member;
+      // when that member lies outside the mounted window the first carrying
+      // run still keeps the group's single rule + fold target (with no label,
+      // exactly as before) so the expanded side line stays foldable.
+      const headerRun =
+        base?.segment.folded === true ? firstCarryingRun : (firstMemberRunBySegment.get(segmentId) ?? firstCarryingRun)
+      if (headerRun) headerRunBySegment.set(segmentId, headerRun)
+    }
+
+    // Pass 2: compose each carrying run's chrome payload in flow order, and
+    // cascade coincident collapsed labels at the seams.
+    let coincidentCollapsedLabels = 0
+    for (const item of ordered) {
+      if (item.kind !== 'turn-run') {
+        coincidentCollapsedLabels = 0
+        continue
+      }
+      // Any run that still renders message content separates the seams,
+      // including an unsegmented run (which paints no chrome of its own). A
+      // fully collapsed group reports zero flow explicitly: its motion wrapper
+      // stays mounted for the exit/enter animation but paints no row at rest.
+      const occupiesFlowHeight = item.run.some((g) => (g.zeroFlow === undefined ? !!g.bodyNode : !g.zeroFlow))
+      if (occupiesFlowHeight) coincidentCollapsedLabels = 0
+      const base = baseByRun.get(item.run)
+      if (!base) continue
+      const ownsLabel = headerRunBySegment.get(base.segment.id) === item.run
+      const collapsedLabel = ownsLabel && base.segment.folded === true
+      const stackIndex = !occupiesFlowHeight && collapsedLabel ? coincidentCollapsedLabels : 0
+      if (!occupiesFlowHeight && collapsedLabel) coincidentCollapsedLabels += 1
+      chromeByRun.set(item.run, { ...base, ownsLabel, stackIndex })
+    }
+  }
+
   const renderTurnRun = (run: FlowBodyEntry[], isSelected: boolean) => {
-    const chrome = renderSegmentChrome ? deriveRunSegmentChrome(run) : null
+    const chrome = chromeByRun.get(run)
+    // The elected header run is the segment group's structural scope owner for
+    // same-route in-place geometry: it spans the chrome host AND the turn
+    // bodies, so it survives the fold (a collapsed run keeps its entries and
+    // loses only its body height) and re-resolves to the same owner after the
+    // mutation. Only the header run carries the identity — continuation runs
+    // must never compete for it (one stable scope per segment).
+    const scopeId = chrome && chrome.ownsLabel ? chrome.segment.id : undefined
     return (
-      <RunHost key={deriveTurnKey(run)}>
+      <RunHost key={deriveTurnKey(run)} data-interaction-scope-id={scopeId}>
         {chrome && renderSegmentChrome ? renderSegmentChrome(chrome) : null}
         <EditTurn
           turnAskId={run[0]?.turnAskId ?? ''}

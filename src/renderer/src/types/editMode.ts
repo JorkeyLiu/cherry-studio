@@ -26,6 +26,12 @@ export interface ClipboardSegmentSnapshot {
   originalSegmentId: string
   name: string
   color?: string
+  /**
+   * Folded state of the source group at cut/copy time. Carried so a pasted
+   * group keeps the same request-context semantics instead of silently
+   * re-enabling folded content.
+   */
+  folded?: boolean
   originalMessageIds: string[]
 }
 

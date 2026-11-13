@@ -6,6 +6,7 @@ import {
   turnsToMessages
 } from '@renderer/services/contextTurnService'
 import { isResolvableAnchor, resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
+import { excludeFoldedMessages, foldedMessageIdsForTopic } from '@renderer/services/foldedSegmentService'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -186,7 +187,16 @@ export function computeContextInfo(
   const contextCount = settings.contextCount
 
   // --- Step 1: Build turns from all topic messages ---
-  const allTurns = buildContextTurns(messages)
+  // Folded (collapsed) groups are excluded here, before turn construction.
+  // This bounded derivation is a PROJECTION-LEVEL estimate (it only sees the
+  // messages handed in), so its fold set comes from the loaded catalog; the
+  // authority path is `deriveContextInfoFromClosure`, which uses the
+  // `foldedMessageIds` carried by the Main read. Never a request input.
+  const participatingMessages = excludeFoldedMessages(
+    messages,
+    topicId ? Array.from(foldedMessageIdsForTopic(topicId)) : undefined
+  )
+  const allTurns = buildContextTurns(participatingMessages)
   const totalTurns = allTurns.length
 
   // --- Step 2: Turn selection (single stable anchor-to-end mode) ---
@@ -332,9 +342,17 @@ export function resolveSharedContextInfo(
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
   // Closure messages are already the authoritative anchor-to-end slice, so only
   // the shared message-level pipeline applies — no turn grouping, no anchor
-  // resolution. No overlay is passed (unchanged): this projection keeps
-  // resolving blocks from the store rather than from closure blocks.
-  const { uiMessages, tokenEstimationMessages } = filterContextMessages(closure.messages as unknown as Message[])
+  // resolution.
+  // The fold set is the authority list carried by this closure read, so the
+  // token-estimation list and the UI projection consume exactly the set the
+  // authoritative counts describe and the request sends. No overlay is passed
+  // (unchanged): this projection keeps resolving blocks from the store rather
+  // than from closure blocks.
+  const participatingMessages = excludeFoldedMessages(
+    closure.messages as unknown as Message[],
+    closure.closure.foldedMessageIds
+  )
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(participatingMessages)
 
   return {
     uiMessages,

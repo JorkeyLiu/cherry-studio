@@ -1,7 +1,12 @@
 import { loggerService } from '@logger'
+import { bumpAndInvalidate } from '@renderer/services/contextClosure'
 import { dbService } from '@renderer/services/db'
 import { useAppDispatch, useAppSelector, useAppStore } from '@renderer/store'
-import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
+import {
+  requireIdsMutableForRoute,
+  requireSegmentFoldableThroughRoute,
+  selectRouteCapability
+} from '@renderer/store/routeAnswerGroup'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
@@ -115,6 +120,45 @@ export function useTopicSegments(topicId: string) {
     },
     [dispatch, appStore, topicId]
   )
+  /**
+   * Persist the folded (collapsed) presentation state of one segment.
+   *
+   * DB-first metadata mutation converged through the ONE shared authority
+   * catalog publication (preserves the resident window, installs the full
+   * catalog). Membership is untouched: folding only adds/removes the persisted
+   * `folded` state that request context, token estimation and context counts
+   * consult, so expanding restores participation without moving the window
+   * origin.
+   */
+  const setSegmentFolded = useCallback(
+    async (segmentId: string, folded: boolean) => {
+      const before = appStore.getState() as any
+      const existing = before?.topicSegments?.segments?.entities?.[segmentId]
+      const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
+      const memberIds: string[] = Array.isArray(existing?.messageIds) ? existing.messageIds : []
+      // Folding changes request context, so it is an owner-only mutation like
+      // membership: an inherited/read-only group rejects here with zero IPC
+      // calls, and Main re-verifies complete membership ownership atomically.
+      if (tid === topicId) {
+        requireSegmentFoldableThroughRoute(routeCapability, tid, memberIds)
+      }
+      await dbService.updateSegmentMetadata(
+        segmentId,
+        undefined,
+        undefined,
+        folded,
+        tid === topicId ? activeBranchId : null
+      )
+      await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
+      // Fold state changes participation, and participation is part of the
+      // accepted closure projection: bump/invalidate every route key of this
+      // topic so the next projection read refetches instead of serving a
+      // folded-inclusive snapshot. Bare-topic form is branch-safe because fold
+      // state is topic-level entity state (no route-local copy).
+      bumpAndInvalidate(tid)
+    },
+    [dispatch, appStore, topicId, activeBranchId, routeCapability]
+  )
 
   const updateSegmentMessageIds = useCallback(
     async (segmentId: string, newMessageIds: string[]) => {
@@ -126,8 +170,12 @@ export function useTopicSegments(topicId: string) {
       // path (empty membership deletes in Main; the converged list reflects
       // it). No raw update/remove — those would invalidate the resident
       // window and blank until reload.
+      const existing = (appStore.getState() as any)?.topicSegments?.segments?.entities?.[segmentId]
       await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
       await convergeTopicSegmentCatalog(dispatch, topicId, appStore.getState)
+      // A folded group's membership replacement changes the excluded set, so
+      // the accepted closure projection for this topic is stale.
+      if (existing?.folded === true) bumpAndInvalidate(topicId)
     },
     [dispatch, activeBranchId, routeCapability, topicId, appStore]
   )
@@ -141,6 +189,9 @@ export function useTopicSegments(topicId: string) {
       const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
       await dbService.deleteSegment(segmentId)
       await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
+      // A dissolved folded group re-enables its members' participation, so the
+      // accepted closure projection for this topic is stale.
+      if (existing?.folded === true) bumpAndInvalidate(tid)
       logger.info(`Deleted segment ${segmentId}`)
     },
     [dispatch, appStore, topicId]
@@ -197,6 +248,7 @@ export function useTopicSegments(topicId: string) {
       getSegmentsForTopic,
       createSegment,
       updateSegmentName,
+      setSegmentFolded,
       updateSegmentMessageIds,
       deleteSegment,
       getSegmentForMessage,
@@ -212,6 +264,7 @@ export function useTopicSegments(topicId: string) {
       getSegmentsForTopic,
       createSegment,
       updateSegmentName,
+      setSegmentFolded,
       updateSegmentMessageIds,
       deleteSegment,
       getSegmentForMessage,

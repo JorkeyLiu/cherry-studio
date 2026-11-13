@@ -593,8 +593,22 @@ export interface FetchContextClosureMeta {
   totalTurnCount: number
   /** Selected turn count from anchor through newest. */
   selectedTurnCount: number
-  /** Boundary divider message id, null iff selected===total else firstMessageId. */
+  /**
+   * Boundary divider message id: null iff selected===total (no divider), else
+   * the first PARTICIPATING message of the returned window. A folded (hidden)
+   * row is never named as the divider.
+   */
   boundaryMessageId: string | null
+  /**
+   * Authority folded member message IDs of the read topic (topic-level segment
+   * catalog, de-duplicated). Ordering is not significant — callers treat the
+   * list as an exclusion set.
+   * Request builders MUST use this list — never a renderer projection — to
+   * exclude folded messages from the outgoing context. The list describes the
+   * topic, not the returned window, so a folded member outside the window is
+   * still excluded.
+   */
+  foldedMessageIds: string[]
 }
 
 /** @see IpcChannel.ChatDb_FetchContextClosure */
@@ -675,8 +689,17 @@ export interface ResolveContextClosureMeta {
   totalTurnCount: number
   /** Selected turn count from resolved anchor through newest (0 when empty). */
   selectedTurnCount: number
-  /** Boundary divider message id, null iff selected===total (or empty) else firstMessageId. */
+  /**
+   * Boundary divider message id: null iff selected===total (or empty), else the
+   * first PARTICIPATING message of the resolved window (never a folded row).
+   */
   boundaryMessageId: string | null
+  /**
+   * Authority folded member message IDs of the observed topic (same semantics
+   * as `FetchContextClosureMeta.foldedMessageIds`): the resolver's own snapshot
+   * exclusion set, never a renderer projection.
+   */
+  foldedMessageIds: string[]
 }
 
 /** @see IpcChannel.ChatDb_ResolveContextClosure */
@@ -795,6 +818,12 @@ export interface FetchWholeTopicSnapshotMeta {
   lastMessageId: string | null
   /** Number of messages returned. */
   returnedCount: number
+  /**
+   * Authority folded member message IDs of the read topic (same semantics as
+   * `FetchContextClosureMeta.foldedMessageIds`). Pre-anchor request paths use
+   * this authoritative exclusion set instead of the renderer segment catalog.
+   */
+  foldedMessageIds: string[]
 }
 
 /** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot */
@@ -1146,6 +1175,13 @@ export interface SegmentWire {
   messageIds: string[]
   /** Optional color bridged through SQLite extra overflow. */
   color?: string | null
+  /**
+   * Folded (collapsed) presentation state, bridged through SQLite extra
+   * overflow. Absent/false = expanded. Folding never changes authority
+   * membership (messageIds/messageCount stay intact); folded members are
+   * excluded from request context, token estimation and context counts.
+   */
+  folded?: boolean
   createdAt: string | null
   updatedAt: string | null
   /** Authority catalog order from Main SQLite `topic_segments.sort_order` (dense 0..n-1). */
@@ -1172,6 +1208,12 @@ export interface UpsertSegmentRequest {
   messageIds: string[]
   /** Optional color stored in extra overflow. */
   color?: string | null
+  /**
+   * Folded presentation state (extra overflow); absent = unchanged, null clears
+   * it, true folds. Restoring a snapshot must pass the snapshot's value so a
+   * restore never silently re-enables folded context.
+   */
+  folded?: boolean | null
 }
 
 /** @see IpcChannel.ChatDb_UpsertSegment */
@@ -1180,9 +1222,17 @@ export type UpsertSegmentResponse = SegmentWire
 /** @see IpcChannel.ChatDb_UpdateSegmentMetadata */
 export interface UpdateSegmentMetadataRequest {
   segmentId: string
+  /**
+   * Route owner of the mutation (absent/null = main route). Authoritative for
+   * `folded` changes: folding changes request context, so Main verifies every
+   * segment member belongs to this route and is mutable.
+   */
+  branchId?: BranchRouteId
   /** Partial metadata patch. Absent keys unchanged, null clears field. */
   name?: string | null
   color?: string | null
+  /** Folded presentation state (extra overflow); absent = unchanged, null clears it. */
+  folded?: boolean | null
 }
 
 /** @see IpcChannel.ChatDb_UpdateSegmentMetadata */

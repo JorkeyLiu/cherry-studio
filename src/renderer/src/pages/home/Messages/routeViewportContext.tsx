@@ -851,14 +851,28 @@ export const resolveAnswerTabElement = (container: HTMLElement, tabMessageId: st
  * Shared interaction-region semantics (stable layout identities, never button
  * names): `answer-tab` is the clicked answer tab strip; `message-controls`
  * is the message footer ↔ editor action area surviving editor replacement as
- * the same stable interaction area; `fold-controls` is the group-level
- * expand/compress control. Any non-empty region key is structurally
- * resolvable — the resolver accepts no allowlist, so new regions need no
- * code change, only the annotation.
+ * the same stable interaction area; `fold-controls` is the answer group's
+ * expand/compress control; `segment-header` is a topic-segment group's header
+ * chrome at its seam (the region the fold/expand gesture keeps stationary,
+ * because the group body — not the header — is what enters or leaves the flow).
+ * Any non-empty region key is structurally resolvable — the resolver accepts no
+ * allowlist, so new regions need no code change, only the annotation.
  */
 export const INTERACTION_REGION_TAB = 'answer-tab' as const
 export const INTERACTION_REGION_CONTROLS = 'message-controls' as const
 export const INTERACTION_REGION_FOLD = 'fold-controls' as const
+export const INTERACTION_REGION_SEGMENT_HEADER = 'segment-header' as const
+
+/**
+ * Stable interaction-scope owner annotation for a group-like layout owner that
+ * is neither a message row nor an answer-group wrapper. A topic-segment group's
+ * header run host carries it: the scope owner spans the chrome host AND the
+ * turn bodies, so it exists in both the expanded and the collapsed state (the
+ * collapsed run keeps its entries and loses only its body height). It is the
+ * structural counterpart of `data-stable-group-id` for segments, kept as its
+ * own attribute so the two identity spaces never mix.
+ */
+export const INTERACTION_SCOPE_ID_ATTR = 'data-interaction-scope-id' as const
 
 /**
  * Per-region visual baseline edge (VIEWPORT-13/14 visual-baseline rule).
@@ -1056,8 +1070,10 @@ const escapeSelectorValue = (v: string): string => {
 
 /**
  * Resolve the structural scope element (the layout owner): a message row's
- * real content box for message scopes, the stable group wrapper for group
- * scopes. Fail-closed (null) when the scope is missing or disconnected.
+ * real content box for message scopes, the stable group wrapper — or the
+ * annotated group-like layout owner (a topic-segment header run host, see
+ * `INTERACTION_SCOPE_ID_ATTR`) — for group scopes. Fail-closed (null) when the
+ * scope is missing or disconnected.
  */
 export const resolveInteractionScopeElement = (
   container: HTMLElement,
@@ -1066,9 +1082,12 @@ export const resolveInteractionScopeElement = (
   try {
     if (!scope || typeof scope.id !== 'string' || scope.id.length === 0) return null
     if (scope.kind === 'group') {
+      const id = escapeSelectorValue(scope.id)
       let el: HTMLElement | null = null
       try {
-        el = container.querySelector(`[data-stable-group-id="${escapeSelectorValue(scope.id)}"]`) as HTMLElement | null
+        el = container.querySelector(
+          `[data-stable-group-id="${id}"], [${INTERACTION_SCOPE_ID_ATTR}="${id}"]`
+        ) as HTMLElement | null
       } catch {
         el = null
       }
@@ -1181,6 +1200,74 @@ export const resolveBelowVisibleRow = (
       if (!Number.isFinite(top)) continue
       // Strictly below the scope bottom (1px tolerance for subpixel seams).
       if (!(top >= scopeBottom - 1)) continue
+      if (!best || top < best.top) best = { id, offset: top - containerTop, top }
+    }
+    if (!best) return null
+    return { id: best.id, offset: best.offset }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * First visible message row strictly BELOW an arbitrary structural anchor
+ * element (visual order), resolved from the container.
+ *
+ * The change domain of some in-place interactions removes its own reading rows
+ * entirely — a fully collapsed topic-segment group leaves its run at the seam
+ * with no body rows — so the handoff target can only be the stable boundary
+ * BELOW that seam: the content that absorbed the height delta. Same rule the
+ * message-controls handoff already uses for its bottom baseline, generalized
+ * from a message row to any structural owner. Fail-closed (null) when the
+ * anchor or its geometry is unmeasurable, or when no visible row exists below
+ * (the caller then keeps the retained baseline instead of inventing one).
+ */
+export const resolveBelowVisibleRowFromElement = (
+  container: HTMLElement,
+  anchorEl: HTMLElement
+): { id: string; offset: number } | null => {
+  try {
+    if (!container || !anchorEl || !anchorEl.isConnected) return null
+    const containerTop = container.getBoundingClientRect().top
+    if (!Number.isFinite(containerTop)) return null
+    const anchorBottom = anchorEl.getBoundingClientRect().bottom
+    if (!Number.isFinite(anchorBottom)) return null
+    let rows: NodeListOf<Element> | null = null
+    try {
+      rows = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+    } catch {
+      return null
+    }
+    if (!rows) return null
+    let best: { id: string; offset: number; top: number } | null = null
+    for (const cand of rows) {
+      if (!(cand instanceof HTMLElement)) continue
+      if (anchorEl.contains(cand)) continue
+      let id: string | null = null
+      try {
+        id =
+          cand.getAttribute('data-message-id') ??
+          (typeof cand.id === 'string' && cand.id.startsWith('message-') ? cand.id.replace(/^message-/, '') : null)
+      } catch {
+        id = null
+      }
+      if (typeof id !== 'string' || id.length === 0) continue
+      const real = resolveRealMessageBox(container, id)
+      if (!real) continue
+      try {
+        if (isKeeperAnchorRowHidden(real, container)) continue
+      } catch {
+        continue
+      }
+      let top = NaN
+      try {
+        top = real.getBoundingClientRect().top
+      } catch {
+        continue
+      }
+      if (!Number.isFinite(top)) continue
+      // Strictly below the anchor bottom (1px tolerance for subpixel seams).
+      if (!(top >= anchorBottom - 1)) continue
       if (!best || top < best.top) best = { id, offset: top - containerTop, top }
     }
     if (!best) return null
@@ -1304,8 +1391,10 @@ export const resolveDeletionSurvivorRow = (
  * moving TOP and never to a row above with the changing row height between
  * them, both of which re-anchor later steps of the same session to the
  * wrong end; group scopes hand off to the first visible real box in the
- * group. Null when no visible representative exists (pending or
- * fail-closed, decided by the caller).
+ * group, or — for a segment header whose group body left the flow entirely
+ * (fully collapsed group) — to the first visible row below that seam. Null
+ * when no visible representative exists (pending or fail-closed, decided by
+ * the caller).
  */
 export const resolveInteractionRepresentative = (
   container: HTMLElement,
@@ -1377,6 +1466,14 @@ export const resolveInteractionRepresentative = (
       const top = real.getBoundingClientRect().top
       if (!Number.isFinite(top)) continue
       return { id, offset: top - containerTop }
+    }
+    // A segment header scope whose group body left the flow (fully collapsed
+    // group) has no reading row of its own left to hand off to. The stable
+    // boundary below the seam absorbed the height delta, so it is the handoff
+    // target; the region baseline stays the retained, still-connected
+    // measurable geometry when no such row exists (fail-closed, never invented).
+    if (region === INTERACTION_REGION_SEGMENT_HEADER) {
+      return resolveBelowVisibleRowFromElement(container, scopeEl)
     }
     return null
   } catch {
@@ -1514,8 +1611,9 @@ export const captureInteractionFromEvent = (
     }
     if (!scope) {
       try {
-        const groupEl = target.closest?.('[data-stable-group-id]') as HTMLElement | null
-        const groupId = groupEl?.getAttribute('data-stable-group-id') ?? null
+        const groupEl = target.closest?.(`[data-stable-group-id], [${INTERACTION_SCOPE_ID_ATTR}]`) as HTMLElement | null
+        const groupId =
+          groupEl?.getAttribute('data-stable-group-id') ?? groupEl?.getAttribute(INTERACTION_SCOPE_ID_ATTR) ?? null
         if (typeof groupId === 'string' && groupId.length > 0) {
           scope = { kind: 'group', id: groupId }
         }

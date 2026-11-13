@@ -4,6 +4,13 @@ export interface TopicSegment {
   name: string
   messageIds: string[] // 连续的消息 ID 列表（有序，完整成员，用于本地编辑/兼容包含判断）
   color?: string // 连线颜色（可选，默认 primary color）
+  /**
+   * Folded (collapsed) presentation state persisted in Main `topic_segments.extra`.
+   * Folding never changes membership (`messageIds`/`messageCount` stay the
+   * authority values); folded members are excluded from request context, token
+   * estimation and context counts until the group is expanded again.
+   */
+  folded?: boolean
   createdAt: string
   updatedAt: string
   /** Authority catalog order from Main SQLite (dense 0..n-1). Never fabricated locally. */

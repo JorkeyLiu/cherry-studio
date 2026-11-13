@@ -49,7 +49,7 @@ export function isValidContextClosureResponse(
   const lastId = (messages[(messages as unknown[]).length - 1] as Record<string, unknown>)?.id
   if (c.firstMessageId !== firstId) return false
   if (c.lastMessageId !== lastId) return false
-  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else non-empty and exactly firstMessageId
+  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else the first participating returned row (never a folded row)
   const totalTurnCount = c.totalTurnCount
   const selectedTurnCount = c.selectedTurnCount
   const boundaryMessageId = c.boundaryMessageId
@@ -68,16 +68,31 @@ export function isValidContextClosureResponse(
     'returnedCount',
     'totalTurnCount',
     'selectedTurnCount',
-    'boundaryMessageId'
+    'boundaryMessageId',
+    'foldedMessageIds'
   ])
   for (const key of Object.keys(c)) {
     if (!allowedClosureKeys.has(key)) return false
+  }
+  // Authority folded exclusion set: unique non-empty message IDs. A missing or
+  // malformed list fails the whole response closed (the request path would
+  // otherwise have to guess, and a guess can leak folded bodies).
+  const foldedMessageIds = c.foldedMessageIds
+  if (!Array.isArray(foldedMessageIds)) return false
+  const foldedSet = new Set<string>()
+  for (const id of foldedMessageIds) {
+    if (typeof id !== 'string' || id.length === 0) return false
+    if (foldedSet.has(id)) return false
+    foldedSet.add(id)
   }
   if (selectedTurnCount === totalTurnCount) {
     if (boundaryMessageId !== null) return false
   } else {
     if (typeof boundaryMessageId !== 'string' || boundaryMessageId.length === 0) return false
-    if (boundaryMessageId !== c.firstMessageId) return false
+    // Divider must be a returned message that participates: a folded row can
+    // never anchor the visible window (folding does not move the window start).
+    if (!(messages as unknown[]).map((m) => (m as Record<string, unknown>).id).includes(boundaryMessageId)) return false
+    if (foldedSet.has(boundaryMessageId)) return false
   }
   // missing anchor row: messages must contain a row that resolves to anchorGroupKey
   // Resolution priority: user id, assistant askId, recognized non-user id (assistant/system only)
@@ -166,7 +181,7 @@ export function isValidContextClosureCacheHit(
   // LOCK-R06-004: reject every empty anchor-based closure
   if (cached.closure.returnedCount === 0) return false
   if (cached.closure.firstMessageId === null || cached.closure.lastMessageId === null) return false
-  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else firstMessageId
+  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else the first participating returned row
   const totalTurnCount = (cached.closure as unknown as Record<string, unknown>).totalTurnCount as number
   const selectedTurnCount = (cached.closure as unknown as Record<string, unknown>).selectedTurnCount as number
   const boundaryMessageId = (cached.closure as unknown as Record<string, unknown>).boundaryMessageId
@@ -183,16 +198,30 @@ export function isValidContextClosureCacheHit(
     'returnedCount',
     'totalTurnCount',
     'selectedTurnCount',
-    'boundaryMessageId'
+    'boundaryMessageId',
+    'foldedMessageIds'
   ])
   for (const key of Object.keys(cached.closure as unknown as Record<string, unknown>)) {
     if (!allowedCacheKeys.has(key)) return false
+  }
+  // Authority folded exclusion set (same shape rule as the full validator).
+  const foldedMessageIds = (cached.closure as unknown as Record<string, unknown>).foldedMessageIds
+  if (!Array.isArray(foldedMessageIds)) return false
+  const foldedSet = new Set<string>()
+  for (const id of foldedMessageIds) {
+    if (typeof id !== 'string' || id.length === 0) return false
+    if (foldedSet.has(id)) return false
+    foldedSet.add(id)
   }
   if (selectedTurnCount === totalTurnCount) {
     if (boundaryMessageId !== null) return false
   } else {
     if (typeof boundaryMessageId !== 'string' || boundaryMessageId.length === 0) return false
-    if (boundaryMessageId !== cached.closure.firstMessageId) return false
+    // Divider names the first PARTICIPATING row of the returned window: a
+    // folded row is hidden and can never carry the divider.
+    const ids = cached.messages.map((m) => (m as Record<string, unknown>)?.id)
+    if (!ids.includes(boundaryMessageId)) return false
+    if (foldedSet.has(boundaryMessageId)) return false
   }
   // Viewport fingerprint intentionally ignored (see doc above): loaded
   // viewport membership/shape never gates a route/anchor/generation-valid

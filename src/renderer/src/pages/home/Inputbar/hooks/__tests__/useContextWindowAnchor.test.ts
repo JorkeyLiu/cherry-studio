@@ -85,6 +85,7 @@ const resolverSuccess = (resolvedAnchorGroupKey: string | null) => {
         returnedCount: 0,
         totalTurnCount: 0,
         selectedTurnCount: 0,
+        foldedMessageIds: [],
         boundaryMessageId: null
       },
       resolvedAnchorGroupKey: null,
@@ -109,6 +110,7 @@ const resolverSuccess = (resolvedAnchorGroupKey: string | null) => {
       returnedCount: messages.length,
       totalTurnCount: 1,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null
     },
     resolvedAnchorGroupKey: u,
@@ -390,6 +392,7 @@ function makeAuthoritativeClosure(topicId: string, anchor: string, totalTurns: n
       returnedCount: messages.length,
       totalTurnCount: totalTurns,
       selectedTurnCount: selectedTurns,
+      foldedMessageIds: [],
       boundaryMessageId: selectedTurns === totalTurns ? null : firstMessageId
     },
     resolvedAnchorGroupKey: firstMessageId,

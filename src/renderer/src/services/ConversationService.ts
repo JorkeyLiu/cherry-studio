@@ -4,6 +4,7 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { isValidContextClosureResponse } from '@renderer/services/contextClosure'
 import { computeContextInfo, filterContextUiMessages } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db'
+import { excludeFoldedMessages, isMessageFolded } from '@renderer/services/foldedSegmentService'
 import {
   notifyUnavailableAttachmentsSkipped,
   type RequestAttachmentFilter,
@@ -187,11 +188,34 @@ export class ConversationService {
     // resolves off-viewport blocks without mutating Redux.
     const closureOverlay = buildBlockOverlay(closureBlocks)
     const overlay = mergeBlockOverlays(closureOverlay, authorityUser?.blocks)
+    // Folded (collapsed) groups take no part in an actual request. The
+    // exclusion list is Main authority carried by this same closure response
+    // (`foldedMessageIds`), never the renderer segment projection: a stale or
+    // unloaded catalog can therefore never let a folded body reach a provider,
+    // and folding is not claimed absent merely because a window is unloaded.
+    // The exclusion is unconditional: a folded member is excluded even when it
+    // is the message this request would answer (a historical retry/resend
+    // pointing into the group), so folding can never leak a hidden body back
+    // into the provider payload. Providers therefore never receive folded
+    // bodies, and expanding a group restores participation at its existing
+    // position without moving the window origin.
+    const authoritativeFoldedIds = closureResponse.closure.foldedMessageIds
+    const participatingClosureMessages = excludeFoldedMessages(closureMessages, authoritativeFoldedIds)
+    // A request always carries its own prompt. When the trigger itself is a
+    // folded member there is nothing to answer from: the fold exclusion wins
+    // over the trigger, so this fails closed through the existing request error
+    // path instead of sending an empty request (or silently re-injecting the
+    // hidden body back in).
+    if (isMessageFolded(triggerId, authoritativeFoldedIds)) {
+      throw new Error(
+        `[ConversationService] triggering message ${triggerId} belongs to a folded context group for route ${anchorKey}; refusing a request without its prompt`
+      )
+    }
 
     // Clip the full closure through the triggering user inclusive (stable ID),
     // keeping the existing last-assistant/filter policy downstream. Future
     // queued users and assistant stubs after the trigger are excluded.
-    const triggerIndex = closureMessages.findIndex((m) => m?.id === triggerId)
+    const triggerIndex = participatingClosureMessages.findIndex((m) => m?.id === triggerId)
     let requestMessages: Message[]
     let requestOverlay = overlay
     if (triggerIndex === -1) {
@@ -210,13 +234,15 @@ export class ConversationService {
         anchorKey,
         authorityUser
       )
-      requestMessages = preAnchorHistory.messages
+      // Same authority exclusion set, read in the same snapshot: a fold is
+      // respected above the anchor too (never re-enabled by position).
+      requestMessages = excludeFoldedMessages(preAnchorHistory.messages, preAnchorHistory.foldedMessageIds)
       requestOverlay = mergeBlockOverlays(buildBlockOverlay(preAnchorHistory.blocks), authorityUser?.blocks)
     } else if (authorityUser && authorityUser.message.id === triggerId) {
       // Fresh triggering object (edited resend) at the same stable position.
-      requestMessages = [...closureMessages.slice(0, triggerIndex), authorityUser.message]
+      requestMessages = [...participatingClosureMessages.slice(0, triggerIndex), authorityUser.message]
     } else {
-      requestMessages = closureMessages.slice(0, triggerIndex + 1)
+      requestMessages = participatingClosureMessages.slice(0, triggerIndex + 1)
     }
 
     // Message conversion boundary: the validated closure (or, above the
@@ -293,11 +319,25 @@ export class ConversationService {
     triggerId: string,
     anchorKey: string,
     authorityUser?: AuthorityUserSnapshot
-  ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
+  ): Promise<{ messages: Message[]; blocks: MessageBlock[]; foldedMessageIds: string[] }> {
     const snapshot = await dbService.fetchWholeTopicSnapshot(topicId, pinnedRoute)
     if (snapshot?.snapshot?.completeness !== 'whole-topic' || snapshot.snapshot.topicId !== topicId) {
       throw new Error(
         `[ConversationService] invalid route history for route ${anchorKey}; refusing partial viewport request`
+      )
+    }
+    // Fold exclusion for this path comes from the same Main snapshot response,
+    // never from the renderer segment catalog (which may be unloaded or stale).
+    // A missing/invalid list fails closed through the existing request error
+    // path rather than risking a leak of folded history.
+    const foldedMessageIds = snapshot.snapshot.foldedMessageIds
+    if (
+      !Array.isArray(foldedMessageIds) ||
+      foldedMessageIds.some((id) => typeof id !== 'string' || id.length === 0) ||
+      new Set(foldedMessageIds).size !== foldedMessageIds.length
+    ) {
+      throw new Error(
+        `[ConversationService] invalid folded exclusion set for route ${anchorKey}; refusing partial viewport request`
       )
     }
     const routeMessages = snapshot.messages as unknown as Message[]
@@ -312,7 +352,7 @@ export class ConversationService {
       // Fresh triggering object (edited resend) at the same stable position.
       messages[messages.length - 1] = authorityUser.message
     }
-    return { messages, blocks: snapshot.blocks as unknown as MessageBlock[] }
+    return { messages, blocks: snapshot.blocks as unknown as MessageBlock[], foldedMessageIds }
   }
 
   /**

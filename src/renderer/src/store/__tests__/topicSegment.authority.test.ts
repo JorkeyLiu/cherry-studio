@@ -1,7 +1,8 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { describe, expect, it } from 'vitest'
 
-import { publishResidentComplete } from '../residentRegistry'
+import { fingerprintSegmentCatalog, publishResidentComplete, publishSegmentCatalogComplete } from '../residentRegistry'
+import { isSegmentFoldableThroughRoute, requireSegmentFoldableThroughRoute } from '../routeAnswerGroup'
 import topicSegmentReducer, { addSegment, loadSegments, replaceSegmentsForTopic } from '../topicSegment'
 
 function seg(id: string, topicId: string, sortOrder: number, messageIds: string[]) {
@@ -107,5 +108,81 @@ describe('topicSegment slice authority catalog', () => {
     const s2 = (store.getState() as any).topicSegments
     expect(s2.segments.entities['seg-1']).toBeUndefined()
     expect(s2.segmentsByTopic[topicId]).toEqual([])
+  })
+  it('folded presentation state is publishable and survives catalog convergence', () => {
+    const topicId = 't-fold'
+    const foldedCatalog = [{ ...seg('seg-1', topicId, 0, ['m1']), folded: true }]
+    const expandedCatalog = [{ ...seg('seg-1', topicId, 0, ['m1']), folded: false }]
+    // A fold/expand toggle changes the catalog fingerprint, so an identical
+    // snapshot guard never discards a legitimate folded-state publication.
+    expect(fingerprintSegmentCatalog(foldedCatalog)).not.toBe(fingerprintSegmentCatalog(expandedCatalog))
+    expect(fingerprintSegmentCatalog(foldedCatalog)).not.toBe(
+      fingerprintSegmentCatalog([seg('seg-1', topicId, 0, ['m1'])])
+    )
+
+    const store = setup()
+    store.dispatch(
+      publishSegmentCatalogComplete({
+        topicId,
+        generation: 0,
+        segments: foldedCatalog,
+        messageIds: null,
+        route: null,
+        baseFingerprint: '',
+        routeGeneration: 0
+      } as any)
+    )
+    const entity = (store.getState() as any).topicSegments.segments.entities['seg-1']
+    expect(entity.folded).toBe(true)
+    expect(entity.messageIds).toEqual(['m1'])
+  })
+})
+
+/**
+ * Fold is a request-context mutation, so it follows the same owner-only
+ * capability rule as membership: unknown capability rejects, an inherited
+ * (loaded-but-immutable) member rejects, and an unloaded member defers to Main's
+ * atomic whole-membership check instead of blocking a valid owner fold.
+ */
+describe('segment fold route capability', () => {
+  const snap = (
+    over: Partial<Record<'activeRoute' | 'mutableRoute', string | null>> & {
+      mutableIds?: string[]
+      loadedIds?: string[]
+    }
+  ) =>
+    ({
+      activeRoute: null,
+      mutableRoute: null,
+      mutableIds: ['m1', 'm2'],
+      loadedIds: ['m1', 'm2'],
+      ...over
+    }) as any
+
+  it('allows an owner-only fold through the active route', () => {
+    expect(() => requireSegmentFoldableThroughRoute(snap({}), 't1', ['m1', 'm2'])).not.toThrow()
+    expect(isSegmentFoldableThroughRoute(snap({}), 't1', ['m1'])).toBe(true)
+    // A window-outside member defers to Main rather than blocking.
+    expect(() => requireSegmentFoldableThroughRoute(snap({ loadedIds: ['m1'] }), 't1', ['m1', 'm2'])).not.toThrow()
+  })
+
+  it('rejects an unknown capability with zero IPC', () => {
+    // Route mismatch (a sibling/inherited route) is unknown through this route.
+    expect(() => requireSegmentFoldableThroughRoute(snap({ mutableRoute: 'b1' }), 't1', ['m1'])).toThrow(
+      /unknown through this route/
+    )
+    expect(isSegmentFoldableThroughRoute(snap({ mutableRoute: 'b1' }), 't1', ['m1'])).toBe(false)
+    // Capability never published: no mutable member list at all.
+    expect(() => requireSegmentFoldableThroughRoute(snap({ mutableIds: undefined }), 't1', ['m1'])).toThrow(
+      /unknown through this route/
+    )
+    expect(isSegmentFoldableThroughRoute(snap({ mutableIds: undefined }), 't1', ['m1'])).toBe(false)
+  })
+
+  it('rejects an inherited/read-only loaded member', () => {
+    expect(() => requireSegmentFoldableThroughRoute(snap({ mutableIds: ['m1'] }), 't1', ['m1', 'm2'])).toThrow(
+      /immutable through this route/
+    )
+    expect(isSegmentFoldableThroughRoute(snap({ mutableIds: ['m1'] }), 't1', ['m1', 'm2'])).toBe(false)
   })
 })

@@ -326,6 +326,14 @@ export interface MessageFlowBodyArgs {
   segment: TopicSegment | undefined
   isFirst: boolean
   isLast: boolean
+  /**
+   * This body is the DOM-first node of the composed flow, i.e. the visually
+   * bottom-most body under the column-reverse render order — nothing (no fork
+   * or reference divider) is placed below it. That is the position the
+   * route-tail fold slot may occupy; it is derived from the stable flow order,
+   * never from scroll position or a measured/unmounted DOM node.
+   */
+  flowBottom: boolean
   groupMessages: (Message & { index: number })[]
 }
 
@@ -408,6 +416,15 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         const lastMsg = groupMessages[groupMessages.length - 1]
         const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
         const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
+        // A group whose authority membership is entirely presentation-hidden
+        // (folded) paints no message row at rest. Its run therefore contributes
+        // zero flow height even though the motion wrapper stays mounted to own
+        // the exit/enter animation — the cascade below must see the collapsed
+        // run, not the (always present) wrapper.
+        const collapsedWhole =
+          segment?.folded === true &&
+          segment.messageIds.length > 0 &&
+          groupMessages.every((message) => segment.messageIds.includes((message as Message).id))
         // Fork-divider placement (DOM order is newest→oldest under
         // column-reverse): the divider renders BEFORE the anchor group
         // (visually directly below the anchor). One divider per
@@ -468,6 +485,10 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
           segment,
           isFirst,
           isLast,
+          // `nodes` is built in render order (newest→oldest under
+          // column-reverse), so an empty list means no boundary node has been
+          // placed below this body: it IS the flow bottom.
+          flowBottom: nodes.length === 0,
           groupMessages: groupMessages as (Message & { index: number })[]
         })
         nodes.push({
@@ -483,6 +504,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             segment,
             segmentIsFirst: isFirst,
             segmentIsLast: isLast,
+            zeroFlow: collapsedWhole,
             bodyNode
           }
         })

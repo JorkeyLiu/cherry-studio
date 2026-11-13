@@ -19,6 +19,13 @@ export interface RouteScopedSegment {
   memberIds: string[]
   /** Reachable member count = |members ∩ route|; never the topic-wide count. */
   messageCount: number
+  /**
+   * Authority catalog fold flag, carried through unchanged. It is a
+   * presentation state of the group, never a route-scoped fact: the projection
+   * must not infer it from the loaded window, and it must survive the
+   * route intersection exactly as the catalog published it.
+   */
+  folded: boolean
   /** First reachable member in effective-route order (navigation target); null when empty. */
   firstMessageId: string | null
 }
@@ -95,6 +102,7 @@ export function projectSegmentsOntoRoute(
       sortOrder: segment.sortOrder,
       memberIds,
       messageCount: memberIds.length,
+      folded: segment.folded === true,
       firstMessageId: memberIds[0] ?? null
     }
     if (typeof segment.color === 'string') item.color = segment.color

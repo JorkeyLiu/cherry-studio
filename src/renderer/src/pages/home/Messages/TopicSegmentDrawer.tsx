@@ -1,14 +1,41 @@
 import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
-import { Popover } from 'antd'
+import { Popover, type PopoverProps } from 'antd'
 import { Layers } from 'lucide-react'
-import { memo, useCallback, useMemo, useRef } from 'react'
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 interface TopicSegmentDrawerProps {
   topicId: string
 }
+
+/**
+ * Floating layer contract for this drawer.
+ *
+ * The composer is a positioned stacking context (`Inputbar` Container, z 2),
+ * so a trigger placed inside it can never paint above the message-flow segment
+ * chrome (the group header sits at z 1000 inside `#messages`, whose scroll host
+ * deliberately has no z-index of its own). The trigger and its popover are
+ * therefore portaled to `document.body` and given their own explicit layers
+ * above the group header while staying clear of antd's modal layer range
+ * (1000 + container offsets). The conversation navigation body (z 999) and the
+ * group header (z 1000) keep their existing relative order — this drawer only
+ * sits above both.
+ */
+const DRAWER_TRIGGER_Z_INDEX = 1004
+const DRAWER_POPOVER_Z_INDEX = 1005
+const TRIGGER_SIZE_PX = 24
+const TRIGGER_GAP_PX = 8
+
+/**
+ * antd forwards this override to the tooltip layer at runtime, but its public
+ * props type does not declare it; the wrapper below keeps the call typed.
+ */
+type PopoverWithZIndexProps = PopoverProps & { zIndex?: number }
+const ZIndexPopover = Popover as unknown as React.FC<PopoverWithZIndexProps>
 
 const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
   // Route-scoped projection of the topic-wide catalog: only the active route's
@@ -16,6 +43,7 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
   // The projected `firstMessageId` is always reachable on the current route, so
   // the Messages unified navigate path only needs its window complement.
   const { segments, routeKey } = useRouteScopedSegments(topicId)
+  const { t } = useTranslation()
 
   // Live route key: a queued click whose row was rendered under a previous
   // route must not navigate the new route to an off-route member.
@@ -28,56 +56,123 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
     void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstMessageId)
   }, [])
 
+  // In-flow measurement anchor: the floating trigger is portaled out of the
+  // composer's stacking context, so it is positioned from this anchor's live
+  // rect (the same spot the trigger occupied before the portal).
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const [triggerBox, setTriggerBox] = useState<{ left: number; top: number } | null>(null)
+
+  useLayoutEffect(() => {
+    if (segments.length === 0) {
+      setTriggerBox(null)
+      return
+    }
+    const anchor = anchorRef.current
+    if (!anchor) return
+    // The anchor IS the original trigger slot (same left/bottom gap and the
+    // same 24×24 box), so the portaled trigger is placed on that rect as-is:
+    // applying the gap a second time here would double the spacer and drift
+    // the icon right/up by that gap.
+    const update = () => {
+      const rect = anchor.getBoundingClientRect()
+      if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top)) return
+      setTriggerBox({ left: rect.left, top: rect.top })
+    }
+    update()
+    const parent = anchor.parentElement
+    let observer: ResizeObserver | null = null
+    if (parent && typeof ResizeObserver === 'function') {
+      observer = new ResizeObserver(update)
+      observer.observe(parent)
+    }
+    window.addEventListener('resize', update)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [segments.length])
+
   const popoverContent = useMemo(() => {
     if (segments.length === 0) return null
 
     return (
       <PopoverList>
-        {segments.map((segment) => (
-          <PopoverItem key={segment.id} onClick={() => scrollToSegment(segment.firstMessageId, routeKey)}>
-            <Dot $color={segment.color || getSegmentColor(segment.id)} />
-            <SegmentName>{segment.name}</SegmentName>
-            <MessageCount>{segment.messageCount}</MessageCount>
-          </PopoverItem>
-        ))}
+        <PopoverTitle>{t('topicSegment.navigation.title')}</PopoverTitle>
+        {segments.map((segment) => {
+          // Folded groups are listed by their presentation state, never by the
+          // hidden group name: the row is a navigation target, not a second
+          // naming surface. The authority count stays visible either way.
+          const label = segment.folded ? t('topicSegment.folded') : segment.name
+          return (
+            <PopoverItem
+              key={segment.id}
+              $folded={segment.folded}
+              data-testid="topic-segment-drawer-row"
+              data-segment-folded={segment.folded ? 'true' : 'false'}
+              title={segment.folded ? segment.name : label}
+              onClick={() => scrollToSegment(segment.firstMessageId, routeKey)}>
+              <Dot $folded={segment.folded} $color={segment.color || getSegmentColor(segment.id)} />
+              <SegmentName $folded={segment.folded}>{label}</SegmentName>
+              <MessageCount>{segment.messageCount}</MessageCount>
+            </PopoverItem>
+          )
+        })}
       </PopoverList>
     )
-  }, [segments, routeKey, scrollToSegment])
+  }, [segments, routeKey, scrollToSegment, t])
 
   if (segments.length === 0) return null
 
   return (
-    <Popover
-      content={popoverContent}
-      trigger={['hover', 'click']}
-      placement="topLeft"
-      arrow={false}
-      mouseEnterDelay={0.3}
-      overlayInnerStyle={{ padding: '4px 0' }}>
-      <TriggerWrapper>
-        <Layers size={18} />
-      </TriggerWrapper>
-    </Popover>
+    <>
+      <TriggerAnchor ref={anchorRef} aria-hidden="true" />
+      {triggerBox &&
+        createPortal(
+          <ZIndexPopover
+            content={popoverContent}
+            trigger={['hover', 'click']}
+            placement="topLeft"
+            arrow={false}
+            mouseEnterDelay={0.3}
+            zIndex={DRAWER_POPOVER_Z_INDEX}
+            overlayInnerStyle={{ padding: '4px 0' }}>
+            <TriggerWrapper $left={triggerBox.left} $top={triggerBox.top} data-testid="topic-segment-drawer-trigger">
+              <Layers size={18} />
+            </TriggerWrapper>
+          </ZIndexPopover>,
+          document.body
+        )}
+    </>
   )
 }
 
-const TriggerWrapper = styled.div`
+// Zero-paint, hit-transparent replica of the original in-flow trigger slot:
+// the `left`/`bottom` gaps come from the single spacing constant and the box is
+// the trigger's own size, so the portaled (fixed) trigger paints exactly where
+// the in-flow element used to sit. It carries no paint and no hit area.
+const TriggerAnchor = styled.span`
   position: absolute;
-  // Composer-left lane: sits above the LEFT side of the inputbar; the
-  // original simple navigation rows are unchanged (no action buttons).
-  left: 8px;
-  right: auto;
-  bottom: calc(100% + 8px);
+  left: ${TRIGGER_GAP_PX}px;
+  bottom: calc(100% + ${TRIGGER_GAP_PX}px);
   top: auto;
-  z-index: 3;
+  width: ${TRIGGER_SIZE_PX}px;
+  height: ${TRIGGER_SIZE_PX}px;
+  pointer-events: none;
+`
+
+const TriggerWrapper = styled.div<{ $left: number; $top: number }>`
+  position: fixed;
+  left: ${(props) => props.$left}px;
+  top: ${(props) => props.$top}px;
+  z-index: ${DRAWER_TRIGGER_Z_INDEX};
   cursor: pointer;
   opacity: 0.75;
   transition: opacity 0.2s;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: ${TRIGGER_SIZE_PX}px;
+  height: ${TRIGGER_SIZE_PX}px;
   color: hsl(215, 32%, 48%);
 
   &:hover {
@@ -95,7 +190,15 @@ const PopoverList = styled.div`
   min-width: 160px;
 `
 
-const PopoverItem = styled.div`
+const PopoverTitle = styled.div`
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  color: var(--color-text-3);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 2px;
+`
+
+const PopoverItem = styled.div<{ $folded?: boolean }>`
   display: flex;
   align-items: center;
   gap: 8px;
@@ -108,17 +211,17 @@ const PopoverItem = styled.div`
   }
 `
 
-const Dot = styled.div<{ $color: string }>`
+const Dot = styled.div<{ $folded?: boolean; $color: string }>`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background-color: ${(props) => props.$color};
+  background-color: ${(props) => (props.$folded ? 'var(--color-text-3)' : props.$color)};
   flex-shrink: 0;
 `
 
-const SegmentName = styled.span`
+const SegmentName = styled.span<{ $folded?: boolean }>`
   font-size: 12px;
-  color: var(--color-text-1);
+  color: ${(props) => (props.$folded ? 'var(--color-text-3)' : 'var(--color-text-1)')};
   max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;

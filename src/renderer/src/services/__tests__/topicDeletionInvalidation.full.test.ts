@@ -33,6 +33,7 @@ function makeClosure(topicId: string, anchor: string): FetchContextClosureRespon
       returnedCount: 2,
       totalTurnCount: 1,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null
     }
   }

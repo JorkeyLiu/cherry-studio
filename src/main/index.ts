@@ -46,7 +46,15 @@ import { runStartupRecoveryGate } from './services/chatDbImport/promotion/gate'
 import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
 import type { PromotionJournalObservation } from './services/chatDbImport/promotion/recovery'
 import { runAsyncFunction } from './utils'
+import { installStdioBrokenPipeGuard } from './utils/stdioErrorGuard'
 import { extractRtkBinaries } from './utils/rtk'
+
+// Dev-only broken-pipe guard: a retired Electron runner closes the stdio pipe
+// under a still-running dev main. Only EPIPE is absorbed; any other stream
+// error keeps propagating (production installs no guard at all).
+if (isDev) {
+  installStdioBrokenPipeGuard([process.stdout, process.stderr])
+}
 
 const logger = loggerService.withContext('MainEntry')
 

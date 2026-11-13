@@ -105,6 +105,7 @@ function makeResp(
       returnedCount: ids.length,
       totalTurnCount,
       selectedTurnCount,
+      foldedMessageIds: [],
       boundaryMessageId: isWhole ? null : (ids[0] ?? null)
     }
   } as any

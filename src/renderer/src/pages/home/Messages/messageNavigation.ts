@@ -570,6 +570,52 @@ export const resolveMessageNavigation = (
   return target ? { kind: 'message', targetId: target.id, alignment: intent.alignment ?? 'start' } : null
 }
 
+// ---------------------------------------------------------------------------
+// Navigation presentation target (collapsed message groups)
+// ---------------------------------------------------------------------------
+
+/**
+ * Presentation that physically owns a resolved navigation message identity.
+ *
+ * A message row is the ordinary case: the stable `message-<id>` element is the
+ * geometry and the anchor identity. A member of a COLLAPSED (folded) group has
+ * no mounted row at all — the fold removes its bodies from the flow while the
+ * group keeps one header label at the seam — so navigation positions the group
+ * header and keeps the group folded. The target is therefore resolved once,
+ * here, and every status/geometry/anchor read below uses the same answer.
+ */
+export type MessageNavigationPresentationTarget =
+  | { kind: 'message-row'; messageId: string }
+  | { kind: 'segment-header'; messageId: string; segmentId: string }
+
+/**
+ * Maps a navigation message identity to the presentation that owns it.
+ *
+ * `foldedSegmentIdForMessage` is the caller's AUTHORITY catalog lookup
+ * (message → owning segment, folded segments only). It is injected rather than
+ * read from the DOM on purpose: a closing fold keeps its body mounted for the
+ * exit motion, and a collapsed group's membership can span runs that are not
+ * all mounted, so only the authority catalog can say which messages have no
+ * row. DOM-local membership inference is never an identity source.
+ *
+ * Pure: no DOM, no store, no side effects.
+ */
+export const resolveNavigationPresentationTarget = (
+  messageId: string,
+  foldedSegmentIdForMessage: (messageId: string) => string | null | undefined
+): MessageNavigationPresentationTarget => {
+  let segmentId: string | null | undefined = null
+  try {
+    segmentId = foldedSegmentIdForMessage(messageId)
+  } catch {
+    segmentId = null
+  }
+  if (typeof segmentId === 'string' && segmentId.length > 0) {
+    return { kind: 'segment-header', messageId, segmentId }
+  }
+  return { kind: 'message-row', messageId }
+}
+
 export const chooseNavigationWindow = (
   messages: Message[],
   currentWindow: MessageWindow | null,

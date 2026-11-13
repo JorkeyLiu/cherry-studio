@@ -113,6 +113,9 @@ export const fingerprintSegmentCatalog = (segments: unknown): string => {
           s.topicId,
           s.name,
           s.color ?? '',
+          // Folded presentation state is part of catalog identity: a fold
+          // toggle must be publishable, not treated as an identical snapshot.
+          s.folded === true ? 'folded' : 'expanded',
           s.sortOrder,
           s.firstMessageId,
           s.lastMessageId,

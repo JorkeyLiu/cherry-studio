@@ -13,7 +13,12 @@
 import { act, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { RouteViewportContext, type RouteViewportContextValue, useStableVisualAnchor } from '../routeViewportContext'
+import {
+  markInteractionLayoutDeferred,
+  RouteViewportContext,
+  type RouteViewportContextValue,
+  useStableVisualAnchor
+} from '../routeViewportContext'
 import { RouteViewportController } from '../routeViewportController'
 
 vi.mock('@renderer/services/scrollSnapshotCache', () => ({
@@ -1940,6 +1945,340 @@ describe('compensation write truth and the app echo marker', () => {
     expect(refreshed.interactionId).toBe(token.interactionId)
     expect(controller.consumeCompensationEcho(-220)).toBe(false)
     expect(controller.hasActiveUserInteraction()).toBe(true)
+    keeper.unmount()
+  })
+})
+
+describe('segment fold/expand: the group header is the viewport anchor', () => {
+  const BODY_H = 200
+  const HEADER_CONTENT_TOP = -200
+  const BELOW_CONTENT_TOP = 20
+  const SEGMENT_SCOPE_ID = 'seg-1'
+
+  /**
+   * A topic-segment group in the real column-reverse layout. The layout is
+   * bottom-anchored: removing the group body from the flow shifts the seam —
+   * and everything above it — DOWN by the removed body height, while the
+   * content BELOW the seam keeps its content-space position. That is exactly
+   * the recorded production displacement (header + above moved, below stayed),
+   * reproduced here as the honest starting point for the compensation.
+   *
+   * Rects are coupled to the container's real scroll position, so the keeper's
+   * compensation write moves the rows exactly as it does in production and a
+   * physical clamp moves them only by what was actually realized.
+   */
+  const buildSegmentViewport = (
+    initialScrollTop: number,
+    clampMin: number,
+    opts: { bodyHeight?: number; scrollHeight?: number; clientHeight?: number } = {}
+  ) => {
+    const bodyHeight = opts.bodyHeight ?? BODY_H
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    let value = initialScrollTop
+    Object.defineProperty(container, 'scrollTop', {
+      configurable: true,
+      get: () => value,
+      set: (next: number) => {
+        value = Math.min(0, Math.max(clampMin, next))
+      }
+    })
+    Object.defineProperty(container, 'scrollHeight', {
+      value: opts.scrollHeight ?? 9000,
+      writable: true,
+      configurable: true
+    })
+    Object.defineProperty(container, 'clientHeight', {
+      value: opts.clientHeight ?? 600,
+      writable: true,
+      configurable: true
+    })
+    const rectAt =
+      (contentTop: number, height: number): (() => DOMRect) =>
+      () => {
+        const top = contentTop - container.scrollTop
+        return {
+          top,
+          bottom: top + height,
+          height,
+          left: 0,
+          right: 300,
+          width: 300,
+          x: 0,
+          y: top,
+          toJSON: () => ({})
+        } as DOMRect
+      }
+    const run = document.createElement('div')
+    run.setAttribute('data-interaction-scope-id', SEGMENT_SCOPE_ID)
+    const chrome = document.createElement('div')
+    chrome.setAttribute('data-interaction-region', 'segment-header')
+    const body = document.createElement('div')
+    body.id = 'message-s1'
+    body.setAttribute('data-message-id', 's1')
+    const below = document.createElement('div')
+    below.id = 'message-below'
+    below.setAttribute('data-message-id', 'below')
+    run.append(chrome, body)
+    container.append(run, below)
+    document.body.append(container)
+    let folded = false
+    const sync = (): void => {
+      const delta = folded ? bodyHeight : 0
+      run.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + delta, folded ? 0 : bodyHeight)
+      chrome.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + delta, folded ? 0 : bodyHeight)
+      body.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP, bodyHeight)
+      below.getBoundingClientRect = rectAt(BELOW_CONTENT_TOP, 120)
+    }
+    sync()
+    return {
+      container,
+      ref: { current: container } as { current: HTMLDivElement | null },
+      chrome,
+      below,
+      setFolded: (next: boolean) => {
+        folded = next
+        if (next) {
+          // Fully collapsed: the chrome host stays, the body rows leave the
+          // flow entirely (zero height at the seam, no placeholder band).
+          if (body.parentElement === run) run.removeChild(body)
+        } else if (body.parentElement !== run) {
+          run.append(body)
+        }
+        sync()
+      }
+    }
+  }
+
+  const viewportTop = (el: HTMLElement): number => el.getBoundingClientRect().top
+
+  it('non-tail fold holds the header while the content below absorbs the delta', async () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(-400, -8400)
+    expect(viewportTop(chrome)).toBe(200)
+    expect(viewportTop(below)).toBe(420)
+    // The click boundary armed the region hold for this group's header before
+    // React ran the handler: the seam (not the body) is the baseline.
+    expect(
+      controller.beginInteractionIntent(
+        { topicId: 't1', route: null },
+        { kind: 'group', id: SEGMENT_SCOPE_ID },
+        'segment-header',
+        200,
+        { fingerprint: { scopeH: BODY_H, scopeW: 300 } }
+      )
+    ).toBe(true)
+    // The persisted fold state is written DB-first, so the rows land only after
+    // the authority round-trip: the gesture declares its layout effect deferred
+    // and must not be mistaken for a no-effect click while the DOM is unchanged.
+    const deferred = markInteractionLayoutDeferred(
+      controller,
+      { kind: 'group', id: SEGMENT_SCOPE_ID },
+      'segment-header'
+    )
+    expect(typeof deferred).toBe('number')
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent?.pendingLayoutMutation).toBe(true)
+    expect(controller.activeInteractionIntent?.gestureId).toBe(deferred)
+    // Rows land: the body leaves the flow, so the seam would move down by the
+    // removed height if nothing held it.
+    act(() => {
+      setFolded(true)
+      keeper.rerender(1)
+    })
+    // The keeper realized the compensation write toward the newest edge
+    // (`scrollTop += foldedBodyHeight`, no clamp here), so the header keeps its
+    // captured position and the content BELOW absorbs the whole delta.
+    expect(container.scrollTop).toBe(-200)
+    expect(viewportTop(chrome)).toBe(200)
+    expect(viewportTop(below)).toBe(220)
+    // Quiet handoff: the stable boundary below the seam becomes the snapshot
+    // anchor at its post-compensation position.
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('below')
+    expect(stored?.intraRowOffset).toBe(220)
+    expect(stored?.scrollTop).toBe(-200)
+    expect(stored?.isAtBottom).toBe(false)
+    keeper.unmount()
+  })
+
+  it('newest edge: the natural clamp wins with no invented blank and no forced scroll', async () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(-50, -8400)
+    // Not enough room toward the newest edge to hold the seam: only 50px of the
+    // 200px delta can be realized.
+    expect(container.scrollTop).toBe(-50)
+    expect(viewportTop(chrome)).toBe(-150)
+    expect(viewportTop(below)).toBe(70)
+    expect(
+      controller.beginInteractionIntent(
+        { topicId: 't1', route: null },
+        { kind: 'group', id: SEGMENT_SCOPE_ID },
+        'segment-header',
+        -150,
+        { fingerprint: { scopeH: BODY_H, scopeW: 300 } }
+      )
+    ).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      setFolded(true)
+      keeper.rerender(1)
+    })
+    // The write is a REQUEST: the container stops at its real physical boundary
+    // (scrollTop 0) instead of being pulled past it or padded to fake a hold.
+    expect(container.scrollTop).toBe(0)
+    expect(container.scrollHeight).toBe(9000)
+    expect(viewportTop(chrome)).toBe(0)
+    expect(viewportTop(below)).toBe(20)
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    // The handoff is truthful: the row actually reached, at the honest bottom.
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('below')
+    expect(stored?.intraRowOffset).toBe(20)
+    expect(stored?.scrollTop).toBe(0)
+    expect(stored?.isAtBottom).toBe(true)
+    keeper.unmount()
+  })
+
+  // ------------------------------------------------------------- E2E exact numbers
+  // The recorded production placement was `scrollTop: -124` on a container of
+  // `scrollHeight: 936` / `clientHeight: 403`, and the observed header
+  // displacement was exactly 41.5px. Both follow from one law:
+  // `residual = max(0, foldedGroupHeight - |scrollTop|)`. The hold is a
+  // REQUEST bounded by the real scroll range, never a padding invention. These
+  // two cases pin both regimes at the same 124px of room: below the clamp
+  // threshold for a 165.5px group (partial hold), above it for a 41.5px group
+  // (full hold).
+  it('E2E clamp regime: a 165.5px group under 124px of room leaves an honest 41.5px residual', async () => {
+    const H = 165.5
+    const START = -124
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, -8400, {
+      bodyHeight: H,
+      scrollHeight: 936,
+      clientHeight: 403
+    })
+    const headerBefore = viewportTop(chrome)
+    const belowBefore = viewportTop(below)
+    expect(headerBefore).toBe(-76)
+    expect(belowBefore).toBe(144)
+    expect(
+      controller.beginInteractionIntent(
+        { topicId: 't1', route: null },
+        { kind: 'group', id: SEGMENT_SCOPE_ID },
+        'segment-header',
+        headerBefore,
+        { fingerprint: { scopeH: H, scopeW: 300 } }
+      )
+    ).toBe(true)
+    // DB-first fold: the gesture declares its layout effect deferred, so the
+    // unchanged DOM is never read as a no-effect click while the authority
+    // round-trip is in flight.
+    const deferred = markInteractionLayoutDeferred(
+      controller,
+      { kind: 'group', id: SEGMENT_SCOPE_ID },
+      'segment-header'
+    )
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent?.pendingLayoutMutation).toBe(true)
+    expect(controller.activeInteractionIntent?.gestureId).toBe(deferred)
+    // The write is bounded by the physical range: -124 + 165.5 would leave the
+    // container, so it stops at 0 instead of being forced past it.
+    act(() => {
+      setFolded(true)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+    // No invented geometry: the scroll range is untouched, so no blank band
+    // was fabricated to fake a hold.
+    expect(container.scrollHeight).toBe(936)
+    expect(container.clientHeight).toBe(403)
+    const residual = Math.max(0, H - Math.abs(START))
+    expect(residual).toBe(41.5)
+    expect(Math.abs(viewportTop(chrome) - headerBefore)).toBeCloseTo(residual, 6)
+    // The content below absorbed exactly the realized part of the request.
+    expect(Math.abs(viewportTop(below) - belowBefore)).toBeCloseTo(Math.abs(START), 6)
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('below')
+    expect(stored?.scrollTop).toBe(0)
+    expect(stored?.isAtBottom).toBe(true)
+    keeper.unmount()
+  })
+
+  it('E2E clamp regime: a 41.5px group inside the same 124px of room holds fully', async () => {
+    const H = 41.5
+    const START = -124
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    containerRect.top = 0
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, -8400, {
+      bodyHeight: H,
+      scrollHeight: 936,
+      clientHeight: 403
+    })
+    const headerBefore = viewportTop(chrome)
+    const belowBefore = viewportTop(below)
+    expect(headerBefore).toBe(-76)
+    expect(
+      controller.beginInteractionIntent(
+        { topicId: 't1', route: null },
+        { kind: 'group', id: SEGMENT_SCOPE_ID },
+        'segment-header',
+        headerBefore,
+        { fingerprint: { scopeH: H, scopeW: 300 } }
+      )
+    ).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      setFolded(true)
+      keeper.rerender(1)
+    })
+    // Inside the range, the same request is fully realized: the header keeps
+    // its exact captured position and the content below absorbs the whole
+    // delta. No residual, no clamp.
+    expect(container.scrollTop).toBeCloseTo(START + H, 6)
+    expect(Math.abs(viewportTop(chrome) - headerBefore)).toBe(0)
+    expect(Math.abs(viewportTop(below) - belowBefore)).toBeCloseTo(H, 6)
+    expect(container.scrollHeight).toBe(936)
+    await act(async () => {
+      for (let i = 0; i < 6; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.scrollTop).toBeCloseTo(START + H, 6)
+    expect(stored?.isAtBottom).toBe(false)
     keeper.unmount()
   })
 })

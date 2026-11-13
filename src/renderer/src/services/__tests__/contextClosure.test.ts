@@ -23,6 +23,7 @@ function makeClosure(
     returnedCount: messages.length,
     totalTurnCount: 2,
     selectedTurnCount: 2,
+    foldedMessageIds: [],
     boundaryMessageId: null,
     ...overrides
   }
@@ -38,6 +39,7 @@ function makeClosure(
   if (overrides.totalTurnCount !== undefined) closure.totalTurnCount = overrides.totalTurnCount
   if (overrides.selectedTurnCount !== undefined) closure.selectedTurnCount = overrides.selectedTurnCount
   if (overrides.boundaryMessageId !== undefined) closure.boundaryMessageId = overrides.boundaryMessageId
+  if (overrides.foldedMessageIds !== undefined) closure.foldedMessageIds = overrides.foldedMessageIds
   return { messages: messages as any, blocks: blocks as any, closure } as FetchContextClosureResponse
 }
 
@@ -83,6 +85,7 @@ describe('isValidContextClosureResponse', () => {
       lastMessageId: 'u1' as any,
       totalTurnCount: 1 as any,
       selectedTurnCount: 1 as any,
+      foldedMessageIds: [],
       boundaryMessageId: null as any
     })
     expect(isValidContextClosureResponse(req, res)).toBe(false)
@@ -127,6 +130,7 @@ describe('isValidContextClosureResponse', () => {
         returnedCount: 0,
         totalTurnCount: 1,
         selectedTurnCount: 1,
+        foldedMessageIds: [],
         boundaryMessageId: null
       }
     }
@@ -168,6 +172,7 @@ describe('isValidContextClosureResponse', () => {
       anchorGroupKey: 'u-orphan',
       totalTurnCount: 2,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: null
     } as any)
     // firstMessageId/lastMessageId must match for aRes; makeClosure computes from messages
@@ -182,6 +187,7 @@ describe('isValidContextClosureResponse', () => {
       anchorGroupKey: 's1',
       totalTurnCount: 2,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: null
     } as any)
     expect(isValidContextClosureResponse({ topicId: 't1', anchorGroupKey: 's1' }, sRes)).toBe(true)
@@ -195,6 +201,7 @@ describe('isValidContextClosureResponse', () => {
       anchorGroupKey: 'aNoAsk',
       totalTurnCount: 2,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: null
     } as any)
     expect(isValidContextClosureResponse({ topicId: 't1', anchorGroupKey: 'aNoAsk' }, oRes)).toBe(true)
@@ -246,12 +253,13 @@ describe('isValidContextClosureResponse', () => {
       anchorGroupKey: 'u2',
       totalTurnCount: 2,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null as any
     } as any)
     expect(isValidContextClosureResponse(req2, res2)).toBe(false)
   })
 
-  it('rejects boundaryMessageId not equal to firstMessageId when partial', () => {
+  it('rejects boundaryMessageId that is not a returned message when partial', () => {
     const res = makeClosure({ totalTurnCount: 5, selectedTurnCount: 2, boundaryMessageId: 'wrong' as any })
     expect(isValidContextClosureResponse(req, res)).toBe(false)
   })
@@ -284,10 +292,63 @@ describe('isValidContextClosureResponse', () => {
       anchorGroupKey: 'u2',
       totalTurnCount: 2,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: 'u2'
     } as any)
     const req2: FetchContextClosureRequest = { topicId: 't1', anchorGroupKey: 'u2' }
     expect(isValidContextClosureResponse(req2, res)).toBe(true)
+  })
+
+  it('accepts a partial divider at the first participating row when the anchor turn starts folded', () => {
+    const msgs = [
+      { id: 'u1', role: 'user', topicId: 't1' },
+      { id: 'a1', role: 'assistant', askId: 'u1', topicId: 't1' },
+      { id: 'u2', role: 'user', topicId: 't1' },
+      { id: 'a2', role: 'assistant', askId: 'u2', topicId: 't1' }
+    ]
+    // Turns: [u1+a1], [u2+a2]. Anchor is u2 (second turn) and its first row
+    // u2 is folded: the window still starts at u2, but the divider must name
+    // the first PARTICIPATING row of the window (a2), never the hidden u2.
+    const req2: FetchContextClosureRequest = { topicId: 't1', anchorGroupKey: 'u2' }
+    const res = makeClosure({
+      messages: [msgs[2], msgs[3]] as any,
+      anchorGroupKey: 'u2',
+      totalTurnCount: 2,
+      selectedTurnCount: 1,
+      boundaryMessageId: 'a2' as any,
+      foldedMessageIds: ['u2'] as any
+    } as any)
+    expect(isValidContextClosureResponse(req2, res)).toBe(true)
+  })
+
+  it('rejects a divider that points at a folded (hidden) row', () => {
+    const msgs = [
+      { id: 'u1', role: 'user', topicId: 't1' },
+      { id: 'a1', role: 'assistant', askId: 'u1', topicId: 't1' },
+      { id: 'u2', role: 'user', topicId: 't1' },
+      { id: 'a2', role: 'assistant', askId: 'u2', topicId: 't1' }
+    ]
+    const req2: FetchContextClosureRequest = { topicId: 't1', anchorGroupKey: 'u2' }
+    const res = makeClosure({
+      messages: [msgs[2], msgs[3]] as any,
+      anchorGroupKey: 'u2',
+      totalTurnCount: 2,
+      selectedTurnCount: 1,
+      boundaryMessageId: 'u2' as any,
+      foldedMessageIds: ['u2'] as any
+    } as any)
+    expect(isValidContextClosureResponse(req2, res)).toBe(false)
+  })
+
+  it('rejects a missing or malformed folded exclusion list', () => {
+    const base = makeClosure()
+    const missing: any = { ...base, closure: { ...base.closure } }
+    delete missing.closure.foldedMessageIds
+    expect(isValidContextClosureResponse(req, missing)).toBe(false)
+    expect(isValidContextClosureResponse(req, makeClosure({ foldedMessageIds: 'u1' } as any))).toBe(false)
+    expect(isValidContextClosureResponse(req, makeClosure({ foldedMessageIds: [''] } as any))).toBe(false)
+    expect(isValidContextClosureResponse(req, makeClosure({ foldedMessageIds: ['u1', 'u1'] } as any))).toBe(false)
+    expect(isValidContextClosureResponse(req, makeClosure({ foldedMessageIds: [] } as any))).toBe(true)
   })
 })
 
@@ -325,6 +386,7 @@ describe('isValidContextClosureCacheHit', () => {
         returnedCount: 0,
         totalTurnCount: 1,
         selectedTurnCount: 1,
+        foldedMessageIds: [],
         boundaryMessageId: null
       }
     }
@@ -354,6 +416,7 @@ describe('isValidContextClosureCacheHit', () => {
     const badBoundaryNotFirst = makeClosure({
       totalTurnCount: 5,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: 'wrong' as any
     })
     expect(isValidContextClosureCacheHit(badBoundaryNotFirst, 't1', 'u1')).toBe(false)

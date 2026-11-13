@@ -41,11 +41,13 @@ import {
   computeRestoreMessageScrollTop,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
+  type MessageNavigationPresentationTarget,
   type MessageNavigationResult,
   type MessageNavigationScrollOutcome,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
+  resolveNavigationPresentationTarget,
   runMessageNavigationTransaction,
   shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
@@ -241,6 +243,7 @@ import {
   RouteViewportController,
   type RouteViewportSnapshot
 } from './routeViewportController'
+import SegmentFoldTransition, { presentationOnlyMessageElementRegistrar } from './SegmentFoldTransition'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import { hasActiveStreamingReply, shouldPauseStreamingOnPrimaryMouseDown } from './streamingPause'
 import TopicSegmentLine from './TopicSegmentLine'
@@ -348,6 +351,37 @@ const measureRect = (element: Element | null | undefined): MeasuredRect | null =
   } catch {
     return null
   }
+}
+
+/**
+ * Painted target of one topic-segment group: the collapsed/expanded label pill
+ * inside the group's single chrome host.
+ *
+ * The chrome host itself is an out-of-flow track (`position:absolute`, zero flow
+ * height, and a ZERO bounding box once the group is collapsed), so it is never
+ * the geometry: the label pill is the only element with a real box. The host is
+ * matched by its stable `data-segment-id`, never by selector-interpolated ids.
+ * Returns the connected label, or `null` when this group paints no header in the
+ * mounted flow.
+ */
+const findSegmentHeaderLabelElement = (
+  container: HTMLElement | null | undefined,
+  segmentId: string
+): HTMLElement | null => {
+  if (!container || !segmentId) return null
+  try {
+    const hosts = container.querySelectorAll('[data-testid="topic-segment-line"]')
+    for (const host of hosts) {
+      if (!(host instanceof HTMLElement)) continue
+      if (host.getAttribute('data-segment-id') !== segmentId) continue
+      if (!host.isConnected || !container.contains(host)) continue
+      const label = host.querySelector('[data-testid="topic-segment-label"]')
+      if (label instanceof HTMLElement && label.isConnected && container.contains(label)) return label
+    }
+  } catch {
+    return null
+  }
+  return null
 }
 
 /**
@@ -753,7 +787,20 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const referenceSourceNames = useAppSelector((state) => selectReferenceSourceNames(state, topic.id))
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
-  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
+  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment, segmentsForTopic } = useTopicSegments(
+    topic.id
+  )
+  // Folded (collapsed) group membership, from authority catalog membership
+  // only (never the loaded window): a folded group's bodies leave the flow
+  // while its chrome slot keeps the label.
+  const foldedMessageIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const segment of segmentsForTopic) {
+      if (segment.folded !== true) continue
+      for (const messageId of segment.messageIds) ids.add(messageId)
+    }
+    return ids
+  }, [segmentsForTopic])
   useClipboardKeyboard()
   // Boundary-aware native selection: ordinary within-message selection is
   // preserved; cross-message native ranges are cleared. Edit-mode native
@@ -893,21 +940,64 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           onSelectRoute={onSelectRoute}
         />
       ),
-      renderBody: ({ kind, stableGroupId, layerRunId, groupMessages }) => (
-        <div
-          style={{ position: 'relative' }}
-          data-layer-kind={kind}
-          data-stable-group-id={stableGroupId}
-          data-layer-run-id={layerRunId}>
-          <MessageGroup
-            messages={groupMessages}
-            topic={topic}
-            registerMessageElement={registerMessageElement}
-            isEditMode={isEditMode}
-            onGroupClick={handleGroupClick}
-          />
-        </div>
-      ),
+      renderBody: ({ kind, stableGroupId, layerRunId, flowBottom, groupMessages }) => {
+        // Folded groups: their member bodies leave the mounted flow entirely
+        // (no placeholder row, no extra padding/margin). The run keeps its
+        // entries, so the segment chrome still renders the collapsed label —
+        // as out-of-flow paint at the seam of this now zero-height run.
+        //
+        // The exit/enter motion is presentation-only: the authority fold flag
+        // already excludes (or restores) the members for the next request, so
+        // keeping the body on screen for the fade/space motion can never put a
+        // hidden row back into the context. A group whose membership is only
+        // partially folded keeps the ordinary instant filter (the motion is
+        // defined for a whole group body, never a partial run).
+        //
+        // A CLOSING body is presentation-only and must not leak into anything
+        // durable: it is inert (see SegmentFoldTransition), it receives the
+        // registry channel that owns no anchor (the identity change makes
+        // MessageGroup's own effect cleanup unregister the ids it registered
+        // while the body was live), and it offers no click/selection target.
+        // Opening keeps the live channel: the authority already restored the
+        // members, so the returning body is a real reading/selection target
+        // from the first frame of the enter motion.
+        //
+        // Route-tail label slot: only the group that ends the WHOLE message
+        // flow keeps a minimal reserved slot for its collapsed label, so the
+        // pill stays fully inside the scrollport instead of painting into the
+        // scroll host's bottom padding. The position is derived from the stable
+        // flow order (`flowBottom`: nothing is placed below this body) plus the
+        // authority window fact that no newer page is withheld (`hasMoreNewer`)
+        // — never from scroll position, a measured DOM box or the loaded-canvas
+        // page count. Every other folded group keeps the zero-flow seam.
+        const visibleMessages =
+          foldedMessageIds.size > 0
+            ? groupMessages.filter((message) => !foldedMessageIds.has(message.id))
+            : groupMessages
+        if (visibleMessages.length === 0 && groupMessages.length === 0) return null
+        const tailSlot = flowBottom && !hasMoreNewer && visibleMessages.length === 0
+        return (
+          <div
+            style={{ position: 'relative' }}
+            data-layer-kind={kind}
+            data-stable-group-id={stableGroupId}
+            data-layer-run-id={layerRunId}>
+            <SegmentFoldTransition
+              tailSlot={tailSlot}
+              folded={visibleMessages.length === 0}
+              renderBody={({ includeFolded, inert }) => (
+                <MessageGroup
+                  messages={includeFolded ? groupMessages : visibleMessages}
+                  topic={topic}
+                  registerMessageElement={inert ? presentationOnlyMessageElementRegistrar : registerMessageElement}
+                  isEditMode={inert ? false : isEditMode}
+                  onGroupClick={inert ? undefined : handleGroupClick}
+                />
+              )}
+            />
+          </div>
+        )
+      },
       renderContextBoundary: (legacyKey) => (
         <ContextWindowDivider data-context-boundary data-testid="context-boundary" data-context-legacy-key={legacyKey}>
           <ContextWindowDividerLine />
@@ -935,11 +1025,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       nodes,
       isEditMode,
       onTurnClick: handleGroupClick,
-      renderSegmentChrome: ({ segment, isFirst, isLast }) => (
+      renderSegmentChrome: ({ segment, isFirst, isLast, ownsLabel, stackIndex }) => (
         <TopicSegmentLine
           segment={segment}
           isFirst={isFirst}
           isLast={isLast}
+          ownsLabel={ownsLabel}
+          stackIndex={stackIndex}
           messageCount={isFirst ? segment.messageCount : undefined}
         />
       )
@@ -2756,6 +2848,32 @@ const Messages = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, displayCount])
 
+  // Authoritative message → folded segment id, used ONLY to choose the
+  // navigated PRESENTATION (the collapsed header label instead of an
+  // unmounted body). Target identity stays the authority message id; fold
+  // state is presentation, never a navigation target of its own.
+  //
+  // Read from the authority catalog (Main-published segments), never from the
+  // loaded window: a member missing from the DOM is either folded or merely
+  // outside the display window, and only the catalog distinguishes them.
+  const topicSegmentIds = useAppSelector((state) => state.topicSegments?.segmentsByTopic?.[topic.id])
+  const topicSegmentEntities = useAppSelector((state) => state.topicSegments?.segments?.entities)
+  const foldedSegmentIdByMessage = useMemo(() => {
+    const map = new Map<string, string>()
+    if (!topicSegmentIds || !topicSegmentEntities) return map
+    for (const segmentId of topicSegmentIds) {
+      const segment = topicSegmentEntities[segmentId]
+      if (!segment || segment.folded !== true) continue
+      for (const messageId of segment.messageIds) map.set(messageId, segment.id)
+    }
+    return map
+  }, [topicSegmentEntities, topicSegmentIds])
+  // Long-lived navigation callbacks read the catalog through a ref so their
+  // identity (and the transaction dependency graph) does not churn on every
+  // catalog publication; the ref always holds the current commit's catalog.
+  const foldedSegmentIdByMessageRef = useRef(foldedSegmentIdByMessage)
+  foldedSegmentIdByMessageRef.current = foldedSegmentIdByMessage
+
   /**
    * Check the DOM status of a message element.
    * - 'visible': element exists and is displayed
@@ -2768,6 +2886,83 @@ const Messages = ({
     if (window.getComputedStyle(el).display === 'none') return 'hidden'
     return 'visible'
   }, [])
+
+  /**
+   * Authority input of the navigation presentation seam: which COLLAPSED group
+   * owns this message, from the topic's authority catalog only. A closing fold
+   * keeps its body mounted for the exit motion and the DOM cannot tell a
+   * presentation-only body from a live row, so the catalog is the only source.
+   */
+  const foldedSegmentIdForMessage = useCallback(
+    (messageId: string): string | null => foldedSegmentIdByMessageRef.current.get(messageId) ?? null,
+    []
+  )
+
+  /**
+   * What a navigation target is positioned on: its own row, or — for a folded
+   * segment member whose body is unmounted — the collapsed segment header
+   * label. Folding never changes the target identity, only its presentation.
+   */
+  const resolveNavigationPresentation = useCallback(
+    (targetId: string): MessageNavigationPresentationTarget =>
+      resolveNavigationPresentationTarget(targetId, foldedSegmentIdForMessage),
+    [foldedSegmentIdForMessage]
+  )
+
+  /**
+   * Physical element of one navigation presentation target.
+   * - message row: the ordinary stable `message-<id>` row path, unchanged.
+   * - segment header: the collapsed group's label pill. A folded member has no
+   *   mounted row, and a closing fold's still-mounted body is presentation-only,
+   *   so the label is the only admissible geometry and scroll target.
+   */
+  const resolveNavigationTargetElement = useCallback(
+    (target: MessageNavigationPresentationTarget): HTMLElement | null => {
+      if (target.kind === 'message-row') return getMessageRowById(target.messageId)
+      return findSegmentHeaderLabelElement(scrollContainerRef.current, target.segmentId)
+    },
+    [scrollContainerRef]
+  )
+
+  /**
+   * Fold-aware navigation target status.
+   *
+   * The collapsed group's chrome host is an out-of-flow track whose own box is
+   * zero, so visibility is proven on the label pill's own rect — never on the
+   * host. `missing`/`hidden` stay truthful (the transaction then fails instead
+   * of pretending a target is on screen), and an ordinary message row keeps the
+   * existing `#message-<id>` status semantics exactly.
+   */
+  const navigationTargetStatus = useCallback(
+    (targetId: string): 'visible' | 'hidden' | 'missing' => {
+      const target = resolveNavigationPresentation(targetId)
+      if (target.kind === 'message-row') return checkElement(target.messageId)
+      const label = resolveNavigationTargetElement(target)
+      if (!label) return 'missing'
+      try {
+        if (window.getComputedStyle(label).display === 'none') return 'hidden'
+        return label.getBoundingClientRect().height > 0 ? 'visible' : 'hidden'
+      } catch {
+        return 'hidden'
+      }
+    },
+    [checkElement, resolveNavigationPresentation, resolveNavigationTargetElement]
+  )
+
+  /**
+   * Fold-aware reveal. A collapsed group is a product presentation decision,
+   * not a hidden row: answering it with the row-reveal path (answer selection)
+   * would expand the group and change request context. There is nothing to
+   * reveal for a group header, so this is a no-op for those targets.
+   */
+  const revealNavigationTarget = useCallback(
+    async (targetId: string) => {
+      const target = resolveNavigationPresentation(targetId)
+      if (target.kind === 'segment-header') return
+      await selectMessageForFold(target.messageId)
+    },
+    [resolveNavigationPresentation, selectMessageForFold]
+  )
 
   const settleNavigationDom = useCallback(
     () =>
@@ -3001,8 +3196,8 @@ const Messages = ({
           viewportDispatch({ type: 'navigation/apply-window', token, window })
           return committed
         },
-        getTargetStatus: checkElement,
-        revealTarget: selectMessageForFold,
+        getTargetStatus: navigationTargetStatus,
+        revealTarget: revealNavigationTarget,
         settleDom: settleNavigationDom,
         beginProgrammaticScroll: async (token) => {
           viewportDispatch({ type: 'navigation/phase', token, phase: 'scrolling' })
@@ -3073,10 +3268,16 @@ const Messages = ({
           // (owned/dirty/route/epoch/phase) adopts nothing and commits
           // nothing — never a false success. No new scroll
           // owner/controller/lifecycle/state.
-          const adoptRowAnchor = (targetId: string): MessageNavigationScrollOutcome => {
+          // `target` is the resolved PRESENTATION: a folded member's collapsed
+          // segment label, never its unmounted body. The adopted anchor
+          // identity stays `target.messageId` (the authority message), so the
+          // route keeps a stable reading row; the fold body is never measured,
+          // held or persisted, and any later restore re-resolves through this
+          // same seam.
+          const adoptRowAnchor = (target: MessageNavigationPresentationTarget): MessageNavigationScrollOutcome => {
             try {
-              const targetEl = document.getElementById(`message-${targetId}`)
-              if (!targetEl || !(targetEl instanceof HTMLElement)) return 'not-found' as const
+              const targetEl = resolveNavigationTargetElement(target)
+              if (!targetEl) return 'not-found' as const
               if (!targetEl.isConnected) return 'not-found' as const
               try {
                 if (!live.contains(targetEl)) return 'not-found' as const
@@ -3123,7 +3324,7 @@ const Messages = ({
               const out = controller.adoptInteractionViewport(
                 { topicId: topicAtStart, route: routeAtStart },
                 {
-                  messageId: targetId,
+                  messageId: target.messageId,
                   intraRowOffset,
                   scrollTop: postScrollTop,
                   isAtBottom: atBottom
@@ -3190,7 +3391,9 @@ const Messages = ({
                 // With the row adopted, the keeper's hold is layout-only
                 // (displacement 0 for a pure scroll), so the movement survives;
                 // the adoption is repeated on the settled position below.
-                if (adoptRowAnchor(resolved.targetId) !== 'success') return 'cancelled' as const
+                if (adoptRowAnchor(resolveNavigationPresentation(resolved.targetId)) !== 'success') {
+                  return 'cancelled' as const
+                }
                 return (async () => {
                   const motion = await animateSearchMatchScroll(live, plan.top, token)
                   if (motion !== 'completed') return 'cancelled' as const
@@ -3199,7 +3402,7 @@ const Messages = ({
                   // hand the viewport to the keeper.
                   if (!isCurrentNavigation(token)) return 'cancelled' as const
                   if (!stillCurrent()) return 'cancelled' as const
-                  return adoptRowAnchor(resolved.targetId)
+                  return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
                 })()
               }
               try {
@@ -3210,17 +3413,16 @@ const Messages = ({
             }
             // Already clearly visible (or a short instant write): adopt the
             // resulting position without a journey.
-            return adoptRowAnchor(resolved.targetId)
+            return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
           }
           const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
-            // Explicit-container row scroll (column-reverse fundamental):
-            // native scrollIntoView({ block: 'start' }) is a verified no-op
-            // for resident rows in this layout, so position the known
-            // `#messages` container arithmetically from live rects. No new
-            // controller, no global duplicate mechanism — the same canonical
-            // transaction scroll callback, same element lookup.
-            // Missing/hidden/unmeasurable physical target -> not-found.
-            const target = document.getElementById(`message-${targetId}`)
+            // Element lookup goes through the presentation seam: a folded
+            // member resolves to its collapsed segment label (the only painted
+            // box it has), so the arithmetic below positions the label — a
+            // status check that called the body "visible" while the write still
+            // targeted an unmounted row would be a lie. No scrollTop is written
+            // outside this single arbiter.
+            const target = resolveNavigationTargetElement(resolveNavigationPresentation(targetId))
             if (!target) return 'not-found' as const
             let containerRect: { top: number }
             let elRect: { top: number; height: number }
@@ -3273,7 +3475,7 @@ const Messages = ({
           // Message paths install the navigated row as the reading anchor; the
           // explicit top/bottom/scrollTop kinds keep their existing semantics
           // (explicit bottom suspends via beginSendBottom elsewhere).
-          if (resolved.kind === 'message') return adoptRowAnchor(resolved.targetId)
+          if (resolved.kind === 'message') return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
           // Explicit top/bottom/scrollTop canonical: success when written above.
           return 'success' as const
         },
@@ -3288,13 +3490,15 @@ const Messages = ({
       animateSearchMatchScroll,
       beginScroll,
       cancelNavigationLoadsAndTimers,
-      checkElement,
       controller,
       displayCount,
       isCurrentNavigation,
+      navigationTargetStatus,
       notifyViewport,
+      resolveNavigationPresentation,
+      resolveNavigationTargetElement,
+      revealNavigationTarget,
       scrollContainerRef,
-      selectMessageForFold,
       settleNavigationDom,
       viewportDispatch,
       waitForNavigationCommit

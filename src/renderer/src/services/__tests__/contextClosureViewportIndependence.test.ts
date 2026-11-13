@@ -62,6 +62,7 @@ function makeClosure(
       returnedCount: ids.length,
       totalTurnCount: counts.total,
       selectedTurnCount: counts.selected,
+      foldedMessageIds: [],
       boundaryMessageId: counts.selected === counts.total ? null : ids[0]
     }
   } as any

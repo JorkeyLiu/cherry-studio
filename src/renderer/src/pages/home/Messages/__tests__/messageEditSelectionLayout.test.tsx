@@ -1206,6 +1206,199 @@ describe('segment-homogeneous run invariant', () => {
     ])
     expect(split.filter((i) => i.kind === 'turn-run').length).toBe(2)
   })
+
+  /** A turn whose group body is fully hidden by a folded (collapsed) group. */
+  const foldedTurn = (
+    groupKey: string,
+    segment: any,
+    opts?: { turnAskId?: string; segmentIsFirst?: boolean; segmentIsLast?: boolean }
+  ): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? 'u1',
+      selected: false,
+      segmentId: 'seg:fold',
+      segmentIsLive: false,
+      kind: 'history',
+      layerRunId: 'layer:x',
+      segment,
+      segmentIsFirst: opts?.segmentIsFirst,
+      segmentIsLast: opts?.segmentIsLast,
+      bodyNode: null
+    }
+  })
+
+  it('paints exactly one label for a collapsed group split across runs by a divider', () => {
+    const seg = segmentFixture({ id: 'seg-fold', folded: true, messageCount: 5 })
+    const nodes: FlowNode[] = [
+      foldedTurn('g-older', seg, { turnAskId: 'ask-x' }),
+      {
+        kind: 'boundary',
+        entry: { boundaryKey: 'b1', boundaryKind: 'fork', node: <div data-testid="div-1" /> }
+      },
+      foldedTurn('g-newer', seg, { turnAskId: 'ask-x' })
+    ]
+    const seen: Array<{ id: string; isFirst: boolean; ownsLabel: boolean }> = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          renderSegmentChrome: ({ segment, isFirst, ownsLabel }) => {
+            seen.push({ id: segment.id, isFirst, ownsLabel })
+            return ownsLabel ? <div data-testid="segment-label" /> : null
+          }
+        })}
+      </>
+    )
+    // Both runs carry the owning group; only the first paints its label.
+    expect(seen.map((s) => s.ownsLabel)).toEqual([true, false])
+    expect(container.querySelectorAll('[data-testid="segment-label"]').length).toBe(1)
+  })
+
+  /**
+   * Regression for the duplicate-chrome defect: a segment whose members land
+   * in two turn runs (an assistant row without a shared `askId` derives a
+   * different turn id than its user row) used to paint one full chrome host
+   * per run — two active `topic-segment-line` hosts with the same
+   * `data-segment-id` and two fold write targets. Exactly one run must own the
+   * header, and it is the run carrying the group's own first member.
+   */
+  it('elects one chrome host for an expanded segment split across runs by turn id', () => {
+    const seg = segmentFixture({ id: 'seg-split', folded: false, messageCount: 5 })
+    const nodes: FlowNode[] = [
+      segmentedTurn('g-assistant', { turnAskId: 'a1', segment: seg, segmentIsLast: true }),
+      segmentedTurn('g-user', { turnAskId: 'u1', segment: seg, segmentIsFirst: true })
+    ]
+    const seen: Array<{ isFirst: boolean; isLast: boolean; ownsLabel: boolean }> = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          renderSegmentChrome: ({ isFirst, isLast, ownsLabel }) => {
+            seen.push({ isFirst, isLast, ownsLabel })
+            return ownsLabel ? <div data-testid="segment-header" /> : <div data-testid="segment-continuation" />
+          }
+        })}
+      </>
+    )
+    // Two carrying runs, exactly one header, and it is the segment-first run
+    // (the run holding the group's authority first member).
+    expect(seen).toEqual([
+      { isFirst: false, isLast: true, ownsLabel: false },
+      { isFirst: true, isLast: false, ownsLabel: true }
+    ])
+    expect(container.querySelectorAll('[data-testid="segment-header"]').length).toBe(1)
+    expect(container.querySelectorAll('[data-testid="segment-continuation"]').length).toBe(1)
+  })
+
+  it('elects one chrome host for an expanded segment split by a divider', () => {
+    const seg = segmentFixture({ id: 'seg-split', folded: false, messageCount: 5 })
+    const seen: boolean[] = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes: [
+            segmentedTurn('g-newer', { turnAskId: 'ask-x', segment: seg, segmentIsLast: true }),
+            {
+              kind: 'boundary',
+              entry: { boundaryKey: 'b1', boundaryKind: 'fork', node: <div data-testid="div-1" /> }
+            },
+            segmentedTurn('g-older', { turnAskId: 'ask-x', segment: seg, segmentIsFirst: true })
+          ],
+          isEditMode: true,
+          renderSegmentChrome: ({ ownsLabel }) => {
+            seen.push(ownsLabel)
+            return ownsLabel ? <div data-testid="segment-header" /> : <div data-testid="segment-continuation" />
+          }
+        })}
+      </>
+    )
+    expect(seen).toEqual([false, true])
+    expect(container.querySelectorAll('[data-testid="segment-header"]').length).toBe(1)
+    expect(container.querySelectorAll('[data-testid="segment-continuation"]').length).toBe(1)
+  })
+
+  it('keeps exactly one expanded side-line host when the group first member is outside the window', () => {
+    const seg = segmentFixture({ id: 'seg-split', folded: false, messageCount: 5 })
+    const seen: Array<{ isFirst: boolean; ownsLabel: boolean }> = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes: [
+            segmentedTurn('g-newer', { turnAskId: 'ask-new', segment: seg, segmentIsLast: true }),
+            segmentedTurn('g-older', { turnAskId: 'ask-old', segment: seg })
+          ],
+          isEditMode: true,
+          renderSegmentChrome: ({ isFirst, ownsLabel }) => {
+            seen.push({ isFirst, ownsLabel })
+            return ownsLabel ? <div data-testid="segment-header" /> : <div data-testid="segment-continuation" />
+          }
+        })}
+      </>
+    )
+    // No run owns the group's first member (windowed projection): the first
+    // carrying run keeps the single rule + fold target so the expanded side
+    // line stays foldable, and never a second host.
+    expect(seen).toEqual([
+      { isFirst: false, ownsLabel: true },
+      { isFirst: false, ownsLabel: false }
+    ])
+    expect(container.querySelectorAll('[data-testid="segment-header"]').length).toBe(1)
+    expect(container.querySelectorAll('[data-testid="segment-continuation"]').length).toBe(1)
+  })
+
+  it('keeps one expandable label when the authority-first member is outside the mounted window', () => {
+    const seg = segmentFixture({ id: 'seg-fold', folded: true, messageCount: 5 })
+    const seen: Array<{ isFirst: boolean; ownsLabel: boolean }> = []
+    render(
+      <>
+        {renderEditFlowNodes({
+          nodes: [foldedTurn('g-a', seg, { turnAskId: 'ask-a' }), foldedTurn('g-b', seg, { turnAskId: 'ask-b' })],
+          isEditMode: true,
+          renderSegmentChrome: ({ isFirst, ownsLabel }) => {
+            seen.push({ isFirst, ownsLabel })
+            return null
+          }
+        })}
+      </>
+    )
+    // isFirst false: the group's authority first message is not mounted. The
+    // label still has exactly one owner so the collapsed group stays expandable.
+    expect(seen).toEqual([
+      { isFirst: false, ownsLabel: true },
+      { isFirst: false, ownsLabel: false }
+    ])
+  })
+
+  it('cascades coincident collapsed labels and restarts after content', () => {
+    const segA = segmentFixture({ id: 'seg-a', folded: true })
+    const segB = segmentFixture({ id: 'seg-b', folded: true })
+    const segC = segmentFixture({ id: 'seg-c', folded: true })
+    const nodes: FlowNode[] = [
+      foldedTurn('g-a', segA, { turnAskId: 'ask-a' }),
+      foldedTurn('g-b', segB, { turnAskId: 'ask-b' }),
+      // A run that still occupies flow height separates the seams.
+      segmentedTurn('g-plain', { turnAskId: 'ask-plain', segment: undefined }),
+      foldedTurn('g-c', segC, { turnAskId: 'ask-c' })
+    ]
+    const seen: number[] = []
+    render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          renderSegmentChrome: ({ stackIndex }) => {
+            seen.push(stackIndex)
+            return null
+          }
+        })}
+      </>
+    )
+    expect(seen).toEqual([0, 1, 0])
+  })
 })
 
 describe('edit-mode native selection suppression owned by the turn', () => {

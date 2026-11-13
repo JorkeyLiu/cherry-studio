@@ -295,3 +295,57 @@ export function requireIdsMutableForRoute(snap: RouteCapabilitySnapshot, topicId
     }
   }
 }
+
+/**
+ * Pure segment-fold precheck (owner-only mutation, same authority as
+ * membership): folding removes a group from request context, so it may only
+ * happen through the route that owns every member.
+ *
+ * - Unknown capability / route mismatch rejects (fail closed, zero IPC).
+ * - A member that is LOADED but not mutable is an inherited read-only row and
+ *   rejects; Main re-verifies the complete membership atomically.
+ * - A member that is NOT loaded defers to Main's full-membership owner gate:
+ *   the renderer never authorizes what Main would reject, and never blocks a
+ *   valid owner-only fold merely because part of the window is unloaded.
+ */
+export function requireSegmentFoldableThroughRoute(
+  snap: RouteCapabilitySnapshot,
+  topicId: string,
+  memberIds: readonly string[]
+): void {
+  const storedRoute = snap.mutableRoute ?? null
+  if (storedRoute !== snap.activeRoute) {
+    throw new Error(`Segment fold for topic ${topicId} is unknown through this route`)
+  }
+  if (!Array.isArray(snap.mutableIds)) {
+    throw new Error(`Segment fold for topic ${topicId} is unknown through this route`)
+  }
+  const mutable = new Set(snap.mutableIds)
+  const loaded = new Set(Array.isArray(snap.loadedIds) ? snap.loadedIds : [])
+  for (const id of memberIds) {
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new Error(`Segment member ${String(id)} is not a message of this topic`)
+    }
+    if (loaded.has(id) && !mutable.has(id)) {
+      throw new Error(`Segment member ${id} is immutable through this route`)
+    }
+  }
+}
+
+/**
+ * Non-throwing variant for UI affordance: a group whose fold would be
+ * rejected through the active route renders as read-only (no fold hit target,
+ * no expand interaction) while its collapsed/expanded label stays visible.
+ */
+export function isSegmentFoldableThroughRoute(
+  snap: RouteCapabilitySnapshot,
+  topicId: string,
+  memberIds: readonly string[]
+): boolean {
+  try {
+    requireSegmentFoldableThroughRoute(snap, topicId, memberIds)
+    return true
+  } catch {
+    return false
+  }
+}

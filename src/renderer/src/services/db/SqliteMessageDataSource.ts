@@ -709,7 +709,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     name: string | null | undefined,
     messageIds: string[],
     color?: string | null,
-    branchId?: string | null
+    branchId?: string | null,
+    folded?: boolean | null
   ): Promise<UpsertSegmentResponse> {
     const request: UpsertSegmentRequest = cloneForWire({
       segmentId,
@@ -717,7 +718,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       branchId: branchId ?? null,
       name,
       messageIds,
-      color
+      color,
+      folded
     })
     return unwrap(await this.api.upsertSegment(request))
   }
@@ -725,9 +727,17 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async updateSegmentMetadata(
     segmentId: string,
     name: string | null | undefined,
-    color?: string | null
+    color?: string | null,
+    folded?: boolean | null,
+    branchId?: string | null
   ): Promise<UpdateSegmentMetadataResponse> {
-    const request: UpdateSegmentMetadataRequest = cloneForWire({ segmentId, name, color })
+    const request: UpdateSegmentMetadataRequest = cloneForWire({
+      segmentId,
+      branchId: branchId ?? null,
+      name,
+      color,
+      folded
+    })
     return unwrap(await this.api.updateSegmentMetadata(request))
   }
 

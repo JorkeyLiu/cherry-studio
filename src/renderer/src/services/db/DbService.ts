@@ -308,9 +308,10 @@ class DbService implements MessageDataSource {
     name: string | null | undefined,
     messageIds: string[],
     color?: string | null,
-    branchId?: string | null
+    branchId?: string | null,
+    folded?: boolean | null
   ) {
-    return this.ordinarySource.upsertSegment(segmentId, topicId, name, messageIds, color, branchId)
+    return this.ordinarySource.upsertSegment(segmentId, topicId, name, messageIds, color, branchId, folded)
   }
   deleteSegment(segmentId: string) {
     return this.ordinarySource.deleteSegment(segmentId)
@@ -338,8 +339,14 @@ class DbService implements MessageDataSource {
   countFileRefsByFile(fileId: string) {
     return this.ordinarySource.countFileRefsByFile(fileId)
   }
-  updateSegmentMetadata(segmentId: string, name?: string | null, color?: string | null) {
-    return this.ordinarySource.updateSegmentMetadata(segmentId, name, color)
+  updateSegmentMetadata(
+    segmentId: string,
+    name?: string | null,
+    color?: string | null,
+    folded?: boolean | null,
+    branchId?: string | null
+  ) {
+    return this.ordinarySource.updateSegmentMetadata(segmentId, name, color, folded, branchId)
   }
   branchMessagesToTopic(
     sourceTopicId: string,

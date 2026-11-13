@@ -116,6 +116,7 @@ function makeResp(topicId: string, anchor: string, ids: string[] = ['u1', 'a1', 
       returnedCount: ids.length,
       totalTurnCount,
       selectedTurnCount,
+      foldedMessageIds: [],
       boundaryMessageId
     }
   } as any

@@ -173,6 +173,25 @@ describe('projectSegmentsOntoRoute', () => {
     }
   })
 
+  it('carries the authority folded flag through the route intersection (never infers it from the window)', () => {
+    const foldedPrefix = seg('s-folded', 0, ['m5', 'm6'], { folded: true })
+    const expanded = seg('s-expanded', 1, ['m7'], { folded: false })
+    const unfoldedDefault = seg('s-default', 2, ['m8'])
+
+    const projected = projectSegmentsOntoRoute(MAIN, [foldedPrefix, expanded, unfoldedDefault])
+    expect(projected.find((s) => s.id === 's-folded')?.folded).toBe(true)
+    expect(projected.find((s) => s.id === 's-expanded')?.folded).toBe(false)
+    // A catalog row without the optional flag projects as not folded.
+    expect(projected.find((s) => s.id === 's-default')?.folded).toBe(false)
+
+    // A folded segment that is only partially reachable keeps its fold state:
+    // the projection trims membership, never the group's presentation state.
+    const cross = seg('s-cross-folded', 0, ['m14', 'm15', 'p1', 'p2'], { folded: true })
+    const onC = projectSegmentsOntoRoute(ROUTE_C, [cross])[0]
+    expect(onC.messageCount).toBe(3)
+    expect(onC.folded).toBe(true)
+  })
+
   it('returns an empty projection for an empty route or an empty catalog', () => {
     expect(projectSegmentsOntoRoute([], [seg('s', 0, ['m1'])])).toEqual([])
     expect(projectSegmentsOntoRoute(['m1'], [])).toEqual([])

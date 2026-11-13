@@ -101,6 +101,7 @@ import {
   type StoredResendAttempt
 } from '../sync/syncResendAttempt'
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
+import { OVERFLOW_REMOVE } from './domain/codec'
 import type {
   EntityPatchInput,
   FileReferenceData,
@@ -1760,10 +1761,23 @@ export class ChatDbAggregateService {
 
         const firstMessageId = closureMessages.length > 0 ? closureMessages[0].id : null
         const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
-        // LOCK-001: derive authoritative counts and boundary from same complete turn set and resolved anchor
-        const totalTurnCount = turns.length
-        const selectedTurnCount = turns.length - anchorTurnIdx
-        const boundaryMessageId = anchorTurnIdx > 0 ? turns[anchorTurnIdx].messages[0].id : null
+        // Authoritative counts and boundary come from the same complete turn
+        // set and the same resolved anchor as the message slice above.
+        //
+        // Folded (collapsed) groups are the one participation exception: their
+        // rows keep authority order, membership and boundaries, but they no
+        // longer take part in the request context. Both closure producers
+        // derive counts from the same helper, so the actual request, the token
+        // estimation list, the context count and the boundary divider share
+        // exactly one definition. Folding never moves the window start: the
+        // anchor is resolved above, before participation is applied, and the
+        // raw window slice is preserved for the client.
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
+        const { totalTurnCount, selectedTurnCount, boundaryMessageId } = this.deriveParticipatingClosureCounts(
+          turns,
+          anchorTurnIdx,
+          foldedMemberIds
+        )
 
         return {
           messages: messagesWithBlocks,
@@ -1777,7 +1791,10 @@ export class ChatDbAggregateService {
             returnedCount: closureMessages.length,
             totalTurnCount,
             selectedTurnCount,
-            boundaryMessageId
+            boundaryMessageId,
+            // Authority folded membership of the read topic, for the request
+            // filter — never a renderer projection.
+            foldedMessageIds: Array.from(foldedMemberIds)
           }
         }
       })
@@ -2265,7 +2282,11 @@ export class ChatDbAggregateService {
               returnedCount: 0,
               totalTurnCount: 0,
               selectedTurnCount: 0,
-              boundaryMessageId: null
+              boundaryMessageId: null,
+              // Empty target: no context turns, so no folded participation
+              // either (the renderer may still hold segment rows with folded
+              // members, but none of them is a context turn here).
+              foldedMessageIds: []
             },
             resolvedAnchorGroupKey: null,
             changed
@@ -2345,8 +2366,16 @@ export class ChatDbAggregateService {
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
         const firstMessageId = closureMessages.length > 0 ? closureMessages[0].id : null
         const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
-        const selectedTurnCount = total - resolvedIdx
-        const boundaryMessageId = resolvedIdx > 0 ? turns[resolvedIdx].messages[0].id : null
+        // Same participation definition as fetchContextClosure: counts and
+        // divider derive from the shared helper against the same turn set, so
+        // a fold toggle can never make the two producers diverge. The raw
+        // anchor/window slice above is untouched.
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
+        const { totalTurnCount, selectedTurnCount, boundaryMessageId } = this.deriveParticipatingClosureCounts(
+          turns,
+          resolvedIdx,
+          foldedMemberIds
+        )
         return {
           messages: messagesWithBlocks,
           blocks: wireBlocks,
@@ -2357,9 +2386,11 @@ export class ChatDbAggregateService {
             firstMessageId,
             lastMessageId,
             returnedCount: closureMessages.length,
-            totalTurnCount: total,
+            totalTurnCount,
             selectedTurnCount,
-            boundaryMessageId
+            boundaryMessageId,
+            // Same authority folded membership the request filter consumes.
+            foldedMessageIds: Array.from(foldedMemberIds)
           },
           resolvedAnchorGroupKey: resolvedKey,
           changed: resolvedKey !== currentKey
@@ -2407,6 +2438,10 @@ export class ChatDbAggregateService {
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
         const firstMessageId = allMessages.length > 0 ? allMessages[0].id : null
         const lastMessageId = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
+        // Authority folded membership of the read topic: the pre-anchor
+        // request path filters against this list instead of the renderer
+        // segment catalog, which may be unloaded or stale.
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
         return {
           messages: messagesWithBlocks,
           blocks: wireBlocks,
@@ -2415,7 +2450,8 @@ export class ChatDbAggregateService {
             topicId: request.topicId,
             firstMessageId,
             lastMessageId,
-            returnedCount: allMessages.length
+            returnedCount: allMessages.length,
+            foldedMessageIds: Array.from(foldedMemberIds)
           }
         }
       })
@@ -6465,7 +6501,8 @@ export class ChatDbAggregateService {
     name: string | null | undefined,
     messageIds: string[],
     color: string | null | undefined,
-    branchId?: string | null
+    branchId?: string | null,
+    folded?: boolean | null
   ): ChatDbResult<SegmentWire> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('upsertSegment')
@@ -6497,10 +6534,21 @@ export class ChatDbAggregateService {
           )
         }
 
-        // Build segment data
+        // Build segment data. `folded` is presentation state carried in extra
+        // overflow and must survive an upsert: undo/paste/create restores pass
+        // the snapshot's value, so true folds, null clears, absent keeps.
         const overflow: Record<string, unknown> = {}
         if (color !== undefined && color !== null) {
           overflow.color = color
+        }
+        if (folded === true) {
+          overflow.folded = true
+        }
+        // The existing-row patch is a merge delta (mergeOverflow), so unrelated
+        // overflow keys (foldSelected/useful) are never replaced.
+        const overflowDelta: Record<string, unknown> = { ...overflow }
+        if (folded === null) {
+          overflowDelta.folded = OVERFLOW_REMOVE
         }
 
         const existing = repos.segments.getById(segmentId)
@@ -6508,7 +6556,7 @@ export class ChatDbAggregateService {
           // Update metadata
           const patch: Record<string, unknown> = {}
           if (name !== undefined) patch.name = name
-          if (color !== undefined) patch.overflow = overflow
+          if (Object.keys(overflowDelta).length > 0) patch.overflow = overflowDelta
           if (Object.keys(patch).length > 0) {
             repos.segments.updateMetadata(segmentId, patch as any)
           }
@@ -6613,41 +6661,73 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Update segment metadata (name, color). No membership change.
+   * Update segment metadata (name, color, folded). No membership change.
+   * `folded` is presentation state bridged through extra overflow: a boolean
+   * sets it, `null` clears it, `undefined` leaves it untouched. Folding never
+   * touches authority membership, catalog order, or boundaries.
    * Missing segment: throws ChatDbNotFoundError → ERR_NOT_FOUND.
    * Returns the updated segment wire.
    */
   updateSegmentMetadata(
     segmentId: string,
     name: string | null | undefined,
-    color: string | null | undefined
+    color: string | null | undefined,
+    folded?: boolean | null,
+    branchId?: string | null
   ): ChatDbResult<SegmentWire> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('updateSegmentMetadata')
-      const repos = this.repos()
-      const existing = repos.segments.getById(segmentId)
-      if (!existing.found) {
-        throw new ChatDbNotFoundError(`Segment ${segmentId} does not exist`)
-      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const existing = repos.segments.getById(segmentId)
+        if (!existing.found) {
+          throw new ChatDbNotFoundError(`Segment ${segmentId} does not exist`)
+        }
 
-      const patch: Record<string, unknown> = {}
-      if (name !== undefined) patch.name = name
-      if (color !== undefined) {
-        patch.overflow = { ...existing.data.overflow, color }
-      }
-      if (Object.keys(patch).length > 0) {
-        repos.segments.updateMetadata(segmentId, patch as any)
-      }
+        // Folding changes request context, so it is an owner-only mutation
+        // (BRANCH-4/11 owner equality): every member of the group must be
+        // owned by the addressed route and therefore mutable through it.
+        // An inherited/read-only group rejects instead of silently folding
+        // ancestor rows. Name/color stay ordinary metadata (ungated).
+        if (folded !== undefined) {
+          const route = this.normalizeBranchId(branchId)
+          for (const mid of repos.segments.getMessageIds(segmentId)) {
+            const ownerRow = repos.messages.getById(mid)
+            if (!ownerRow.found || ownerRow.data.topicId !== existing.data.topicId) {
+              throw new ChatDbValidationError(
+                `Segment ${segmentId} carries message ${mid} that no longer belongs to topic ${existing.data.topicId}`
+              )
+            }
+            if ((ownerRow.data.branchId ?? null) !== route) {
+              throw new ChatDbValidationError(
+                `Segment ${segmentId} is read-only from the addressed route and its folded state cannot change here`
+              )
+            }
+          }
+        }
 
-      // Read back
-      const updated = repos.segments.getById(segmentId)
-      if (!updated.found) {
-        // Defensive: segment was deleted between getById and updateMetadata
-        // within the same operation. Should not happen in practice.
-        throw new ChatDbNotFoundError(`Segment ${segmentId} was deleted during update`)
-      }
-      const messageIds = repos.segments.getMessageIds(segmentId)
-      return segmentToWire(updated.data, messageIds)
+        const patch: Record<string, unknown> = {}
+        if (name !== undefined) patch.name = name
+        // Overflow is a merge delta (mergeOverflow), so a partial metadata write
+        // never replaces unrelated existing overflow keys.
+        const overflowDelta: Record<string, unknown> = {}
+        if (color !== undefined) overflowDelta.color = color
+        if (folded !== undefined) overflowDelta.folded = folded === null ? OVERFLOW_REMOVE : folded
+        if (Object.keys(overflowDelta).length > 0) patch.overflow = overflowDelta
+        if (Object.keys(patch).length > 0) {
+          repos.segments.updateMetadata(segmentId, patch as any)
+        }
+
+        // Read back
+        const updated = repos.segments.getById(segmentId)
+        if (!updated.found) {
+          // Defensive: segment was deleted between getById and updateMetadata
+          // within the same operation. Should not happen in practice.
+          throw new ChatDbNotFoundError(`Segment ${segmentId} was deleted during update`)
+        }
+        const messageIds = repos.segments.getMessageIds(segmentId)
+        return segmentToWire(updated.data, messageIds)
+      })
     }, `updateSegmentMetadata(${segmentId})`)
   }
 
@@ -7597,6 +7677,68 @@ export class ChatDbAggregateService {
    */
   private normalizeBranchId(branchId: string | null | undefined): string | null {
     return typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+  }
+
+  /**
+   * Authority membership of every folded (collapsed) topic segment, as one
+   * message-id set.
+   *
+   * Folded state is presentation state carried in the segment row's `extra`
+   * overflow; membership itself stays in `topic_segment_messages`. This is
+   * therefore always resolved from authority rows, never inferred from a
+   * loaded/projected message window.
+   */
+  private resolveFoldedMemberMessageIdsInTx(repos: ChatDbRepositories, topicId: string): Set<string> {
+    const foldedIds = new Set<string>()
+    for (const segment of repos.segments.listByTopic(topicId)) {
+      if (segment.overflow['folded'] !== true) continue
+      for (const messageId of repos.segments.getMessageIds(segment.id)) foldedIds.add(messageId)
+    }
+    return foldedIds
+  }
+
+  /**
+   * Participating-turn counts and window divider, derived once from the same
+   * ordered authority turn set both closure producers use.
+   *
+   * A turn participates when at least one of its rows is not a folded member.
+   * `totalTurnCount` / `selectedTurnCount` are expressed in participating turns
+   * so the actual request, token estimation, context count and divider share
+   * one definition. Folding never moves the window start (`windowStartIdx`
+   * comes from the anchor resolved before participation is applied), and when
+   * the window clips participating history the divider is the first
+   * *participating* message of the window — a hidden folded row can never be
+   * the divider.
+   */
+  private deriveParticipatingClosureCounts(
+    turns: ReadonlyArray<{ messages: ReadonlyArray<{ id: string }> }>,
+    windowStartIdx: number,
+    foldedMemberIds: ReadonlySet<string>
+  ): { totalTurnCount: number; selectedTurnCount: number; boundaryMessageId: string | null } {
+    const participates = (turn: { messages: ReadonlyArray<{ id: string }> }): boolean =>
+      turn.messages.some((message) => !foldedMemberIds.has(message.id))
+    const participatingTotal = turns.filter(participates).length
+    const windowTurns = windowStartIdx >= 0 && windowStartIdx < turns.length ? turns.slice(windowStartIdx) : []
+    const participatingWindow = windowTurns.filter(participates).length
+    // Degenerate shape guard: a window whose every turn is folded still
+    // reports a coherent 1/N participation count (the persisted anchor and the
+    // request trigger keep the window alive), never 0/0 or selected > total.
+    const totalTurnCount = Math.max(1, participatingTotal, participatingWindow)
+    const selectedTurnCount = Math.max(1, participatingWindow)
+    let boundaryMessageId: string | null = null
+    // Boundary: present exactly when the window start clips participating
+    // history, i.e. when the window does not begin at the route's first
+    // participating turn. Folding alone never introduces a divider.
+    if (selectedTurnCount !== totalTurnCount) {
+      for (const turn of windowTurns) {
+        const firstParticipating = turn.messages.find((message) => !foldedMemberIds.has(message.id))
+        if (firstParticipating) {
+          boundaryMessageId = firstParticipating.id
+          break
+        }
+      }
+    }
+    return { totalTurnCount, selectedTurnCount, boundaryMessageId }
   }
 
   /** Domain branch node → wire (exact TopicBranchWire keys, null-preserving). */

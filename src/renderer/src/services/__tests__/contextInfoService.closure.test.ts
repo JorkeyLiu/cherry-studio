@@ -85,6 +85,7 @@ const makeClosure = (
       returnedCount: messages.length,
       totalTurnCount: 10,
       selectedTurnCount: 10,
+      foldedMessageIds: [],
       boundaryMessageId: null,
       ...closure
     } as FetchContextClosureResponse['closure']
@@ -107,6 +108,7 @@ describe('deriveContextInfoFromClosure', () => {
     const closure = makeClosure(msgs, {
       totalTurnCount: 2,
       selectedTurnCount: 2,
+      foldedMessageIds: [],
       boundaryMessageId: null,
       anchorGroupKey: 'm0',
       firstMessageId: 'm0',
@@ -131,6 +133,7 @@ describe('deriveContextInfoFromClosure', () => {
     const closure = makeClosure(msgs, {
       totalTurnCount: 10,
       selectedTurnCount: 6,
+      foldedMessageIds: [],
       boundaryMessageId: 'm8',
       anchorGroupKey: 'm8',
       firstMessageId: 'm8',
@@ -151,6 +154,7 @@ describe('deriveContextInfoFromClosure', () => {
     const closurePartial = makeClosure(msgs, {
       totalTurnCount: 10,
       selectedTurnCount: 6,
+      foldedMessageIds: [],
       boundaryMessageId: 'm8',
       anchorGroupKey: 'm8',
       firstMessageId: 'm8',
@@ -163,6 +167,7 @@ describe('deriveContextInfoFromClosure', () => {
     const closureWhole = makeClosure(msgs, {
       totalTurnCount: 1,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: null,
       anchorGroupKey: 'm8',
       firstMessageId: 'm8',
@@ -190,6 +195,7 @@ describe('deriveContextInfoFromClosure', () => {
     const closure = makeClosure([emptyMsg, okMsg], {
       totalTurnCount: 2,
       selectedTurnCount: 1,
+      foldedMessageIds: [],
       boundaryMessageId: 'u1',
       anchorGroupKey: 'u1',
       firstMessageId: 'u1',

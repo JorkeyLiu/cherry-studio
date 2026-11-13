@@ -15,9 +15,11 @@
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus } from '@renderer/types/newMessage'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import SegmentFoldTransition, { presentationOnlyMessageElementRegistrar } from '../SegmentFoldTransition'
 
 const mocks = vi.hoisted(() => ({
   editMessage: vi.fn(),
@@ -409,5 +411,130 @@ describe('MessageGroup stable render isolation (real assembly)', () => {
     rerender(<MessageGroup messages={[a0, a1Selected]} topic={topic} />)
     expect(renderCountFor('a0')).toBe(1)
     expect(renderCountFor('a1')).toBe(2)
+  })
+})
+
+/**
+ * Presentation-only retained body.
+ *
+ * Mounts the real `MessageGroup` (its own registry effect, real `MessageItem`
+ * rows) through the real fold transition, and proves the closing body that is
+ * still painted while the exit motion runs can never become a durable reading
+ * anchor: the rows stay in the DOM but leave the message-element registry, the
+ * host is inert, and the settled folded state owns no body at all (zero flow).
+ *
+ * The `inert ? presentationOnlyMessageElementRegistrar : registerMessageElement`
+ * binding mirrors the production `renderBody` in Messages.tsx; the registrar
+ * below is the production export, and the unregister itself comes from
+ * MessageGroup's existing effect cleanup (no second authority is added).
+ */
+describe('presentation-only fold body (registry + inert contract)', () => {
+  const originalGetAnimations = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getAnimations')
+  const originalGetBoundingClientRect = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect')
+  const settleAnimations: Array<() => void> = []
+
+  beforeEach(() => {
+    settleAnimations.length = 0
+    // A real box height: the motion refuses to arm a clip it cannot measure.
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value() {
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 200,
+          bottom: 60,
+          width: 200,
+          height: 60,
+          toJSON() {}
+        }
+      }
+    })
+    Object.defineProperty(HTMLElement.prototype, 'getAnimations', {
+      configurable: true,
+      value(this: HTMLElement) {
+        if (!this.dataset.segmentFoldPhase) return []
+        return [
+          {
+            finished: new Promise<void>((resolve) => {
+              settleAnimations.push(resolve)
+            })
+          }
+        ]
+      }
+    })
+  })
+
+  afterEach(() => {
+    if (originalGetAnimations) {
+      Object.defineProperty(HTMLElement.prototype, 'getAnimations', originalGetAnimations)
+    } else {
+      delete (HTMLElement.prototype as { getAnimations?: unknown }).getAnimations
+    }
+    if (originalGetBoundingClientRect) {
+      Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', originalGetBoundingClientRect)
+    } else {
+      delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect
+    }
+  })
+
+  it('keeps the closing rows painted but unregistered and inert, and settles to zero flow', async () => {
+    const a0 = createMessage('a0', 1)
+    const a1 = createMessage('a1', 0)
+    const topic = createTopic()
+    // Stable array identity: production passes the same `groupMessages` array
+    // to the retained body, so the registry effect only re-runs on the channel.
+    const groupMessages = [a0, a1]
+    const registry = new Map<string, HTMLElement>()
+    const registerMessageElement = vi.fn((id: string, element: HTMLElement | null) => {
+      if (element) registry.set(id, element)
+      else registry.delete(id)
+    })
+    const onGroupClick = vi.fn()
+
+    const renderFoldBody = (folded: boolean) => (
+      <SegmentFoldTransition
+        folded={folded}
+        renderBody={({ includeFolded: _includeFolded, inert }) => (
+          <MessageGroup
+            messages={groupMessages}
+            topic={topic}
+            registerMessageElement={inert ? presentationOnlyMessageElementRegistrar : registerMessageElement}
+            isEditMode={false}
+            onGroupClick={inert ? undefined : onGroupClick}
+          />
+        )}
+      />
+    )
+
+    const { rerender, container } = render(renderFoldBody(false))
+    // Live body: the real rows publish their stable DOM anchors and own them.
+    expect(registry.size).toBe(2)
+    expect(registry.has('a0')).toBe(true)
+    expect(registry.has('a1')).toBe(true)
+    expect(container.querySelector('#message-a0')).not.toBeNull()
+
+    rerender(renderFoldBody(true))
+
+    // Exit motion: the body is still painted...
+    const motionHost = container.querySelector('[data-segment-fold-phase="closing"]') as HTMLElement | null
+    expect(motionHost).not.toBeNull()
+    expect(container.querySelector('#message-a0')).not.toBeNull()
+    // ...but it owns nothing: inert for the whole motion, and out of the
+    // registry (the live channel's own cleanup unregistered both members).
+    expect(motionHost?.hasAttribute('inert')).toBe(true)
+    expect(registry.size).toBe(0)
+    const unregistered = registerMessageElement.mock.calls.filter((call) => call[1] === null).map((call) => call[0])
+    expect(unregistered).toEqual(expect.arrayContaining(['a0', 'a1']))
+
+    // Settled folded: no body, no phase host (zero flow), registry still empty.
+    await act(async () => {
+      settleAnimations[0]?.()
+    })
+    expect(container.querySelector('[data-segment-fold-phase]')).toBeNull()
+    expect(container.querySelector('#message-a0')).toBeNull()
+    expect(registry.size).toBe(0)
   })
 })

@@ -142,6 +142,7 @@ function closureResponse(messages: Message[], blocks: MessageBlock[], anchorGrou
       returnedCount: messages.length,
       totalTurnCount: 3,
       selectedTurnCount: 3,
+      foldedMessageIds: [],
       boundaryMessageId: null
     }
   }

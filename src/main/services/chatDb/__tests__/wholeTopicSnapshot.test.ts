@@ -128,6 +128,7 @@ describe('ChatDbAggregateService.fetchWholeTopicSnapshot', () => {
       topicId,
       firstMessageId: null,
       lastMessageId: null,
+      foldedMessageIds: [],
       returnedCount: 0
     })
     expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', { ok: true, value })).not.toThrow()
@@ -164,6 +165,7 @@ describe('ChatDbAggregateService.fetchWholeTopicSnapshot', () => {
       topicId,
       firstMessageId: messageIds[0],
       lastMessageId: messageIds[messageIds.length - 1],
+      foldedMessageIds: [],
       returnedCount: count
     })
     expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', { ok: true, value })).not.toThrow()

@@ -669,11 +669,23 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
       ...clone(),
       segments: clone().segments.map((s) => ({ ...s, color: 42 as never }))
     }
+    // `folded` rides the same segment overflow and decides context
+    // participation, so a coerced non-boolean must reject the whole import.
+    const badFoldedString: TopicDataExportPayload = {
+      ...clone(),
+      segments: clone().segments.map((s) => ({ ...s, folded: 'true' as never }))
+    }
+    const badFoldedNumber: TopicDataExportPayload = {
+      ...clone(),
+      segments: clone().segments.map((s) => ({ ...s, folded: 1 as never }))
+    }
     for (const [name, payload] of [
       ['pinned', badTopic],
       ['prompt', badPrompt],
       ['isNameManuallyEdited', badEdited],
-      ['color', badColor]
+      ['color', badColor],
+      ['folded:string', badFoldedString],
+      ['folded:number', badFoldedNumber]
     ] as const) {
       const before = tableCounts()
       const result = agg.importTopicData({ payload, assistantId: target() })
@@ -699,6 +711,17 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
     const newMessages = repos.messages.listAllByTopic(imported.topic.id)
     expect(newMessages.length).toBeGreaterThan(0)
     expect(newMessages[0].overflow.foldSelected).toBe(true)
+
+    // A legal boolean fold survives the round-trip: import writes the
+    // persisted presentation state, so the re-imported topic is already folded.
+    const withFold: TopicDataExportPayload = {
+      ...clone(),
+      segments: clone().segments.map((s) => ({ ...s, folded: true }) as typeof s)
+    }
+    const foldedImport = okValue(agg.importTopicData({ payload: withFold, assistantId: target() }))
+    const foldedList = okValue(agg.listSegments(foldedImport.topic.id))
+    expect(foldedList).toHaveLength(1)
+    expect(foldedList[0].folded).toBe(true)
   })
 
   it('rejects duplicate ordering keys within one scope but preserves sparse gaps (F4)', () => {

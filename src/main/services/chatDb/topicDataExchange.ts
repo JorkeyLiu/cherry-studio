@@ -544,6 +544,14 @@ export function validateTopicDataImport(payload: unknown): ValidatedTopicDataImp
         fail(`payload.segments[${index}]`, 'expected string|null for "color"')
       }
     }
+    // Folded presentation state rides the segment overflow like `color`; a
+    // non-boolean value would be silently coerced and flip context participation.
+    if ('folded' in overflow) {
+      const value = overflow.folded
+      if (value !== null && value !== undefined && typeof value !== 'boolean') {
+        fail(`payload.segments[${index}]`, 'expected boolean|null for "folded"')
+      }
+    }
   }
 
   // F1: every non-null message owner must resolve to an exported branch.

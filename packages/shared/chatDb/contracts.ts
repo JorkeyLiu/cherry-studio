@@ -907,6 +907,7 @@ const SEGMENT_VALUE_KEYS = new Set([
   'topicId',
   'name',
   'messageIds',
+  'folded',
   'color',
   'createdAt',
   'updatedAt',
@@ -965,6 +966,9 @@ function validateSegmentWireBody(
       }
       seenMsg.add(mid)
     }
+  }
+  if (rec.folded !== undefined && typeof rec.folded !== 'boolean') {
+    throw new ValidationError(`${path}.folded`, `[${channel}] Expected boolean for folded`)
   }
   if (rec.color !== undefined && rec.color !== null && typeof rec.color !== 'string') {
     throw new ValidationError(`${path}.color`, `[${channel}] Expected string|null for color`)
@@ -1038,7 +1042,7 @@ function validateSegmentResult(channel: string): (result: unknown) => void {
 }
 
 const upsertSegmentContract: ChatDbContract = {
-  allowedKeys: keySet('segmentId', 'topicId', 'branchId', 'name', 'messageIds', 'color'),
+  allowedKeys: keySet('segmentId', 'topicId', 'branchId', 'name', 'messageIds', 'color', 'folded'),
   validate(value: unknown): void {
     validateRequest(value, upsertSegmentContract.allowedKeys)
     const req = value as UpsertSegmentRequest
@@ -1047,6 +1051,9 @@ const upsertSegmentContract: ChatDbContract = {
     validateOptionalBranchId(req.branchId, 'request.branchId')
     if (req.name !== undefined && req.name !== null) {
       validateNonEmptyString(req.name, 'request.name')
+    }
+    if (req.folded !== undefined && req.folded !== null && typeof req.folded !== 'boolean') {
+      throw new ValidationError('request.folded', 'Expected boolean|null for folded')
     }
     if (!Array.isArray(req.messageIds)) {
       throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
@@ -1061,11 +1068,15 @@ const upsertSegmentContract: ChatDbContract = {
 }
 
 const updateSegmentMetadataContract: ChatDbContract = {
-  allowedKeys: keySet('segmentId', 'name', 'color'),
+  allowedKeys: keySet('segmentId', 'branchId', 'name', 'color', 'folded'),
   validate(value: unknown): void {
     validateRequest(value, updateSegmentMetadataContract.allowedKeys)
     const req = value as UpdateSegmentMetadataRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    if (req.folded !== undefined && req.folded !== null && typeof req.folded !== 'boolean') {
+      throw new ValidationError('request.folded', 'Expected boolean|null for folded')
+    }
   },
   validateResult: validateSegmentResult('chatdb:update-segment-metadata')
 }
@@ -2598,6 +2609,7 @@ const DELETE_WITH_DEPENDENTS_SEGMENT_KEYS = new Set([
   'topicId',
   'name',
   'messageIds',
+  'folded',
   'color',
   'createdAt',
   'updatedAt',
@@ -3603,6 +3615,57 @@ const fetchAnswerGroupContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const FETCH_CONTEXT_CLOSURE_VALUE_KEYS = new Set(['messages', 'blocks', 'closure'])
+/**
+ * Authority folded-member exclusion list carried by every closure producer.
+ * Structural validation only: unique non-empty message IDs. Folded members may
+ * legitimately sit outside the returned window (the list is topic-scoped), so
+ * membership against `messages` is not required here.
+ */
+function validateFoldedMessageIds(value: unknown, path: string, channel: string): ReadonlySet<string> {
+  if (!Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected array of folded member message IDs`)
+  }
+  const seen = new Set<string>()
+  for (let i = 0; i < value.length; i++) {
+    const id = value[i]
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new ValidationError(`${path}[${i}]`, `[${channel}] Expected a non-empty message ID`)
+    }
+    if (seen.has(id)) {
+      throw new ValidationError(`${path}[${i}]`, `[${channel}] Duplicate folded member message ID`)
+    }
+    seen.add(id)
+  }
+  return seen
+}
+
+/**
+ * Partial-window divider invariant: the divider must name a returned message
+ * that is not folded. A folded row is hidden from the UI and excluded from the
+ * request, so it can never anchor the visible context window.
+ */
+function validatePartialBoundary(
+  boundary: unknown,
+  messages: unknown[],
+  foldedIds: ReadonlySet<string>,
+  path: string,
+  channel: string
+): void {
+  if (typeof boundary !== 'string' || boundary.length === 0) {
+    throw new ValidationError(path, `[${channel}] boundaryMessageId must be non-empty string when partial`)
+  }
+  if (foldedIds.has(boundary)) {
+    throw new ValidationError(path, `[${channel}] boundaryMessageId must not be a folded (hidden) message`)
+  }
+  const returnedIds = new Set<string>()
+  for (const message of messages as Array<Record<string, unknown>>) {
+    returnedIds.add(message.id as string)
+  }
+  if (!returnedIds.has(boundary)) {
+    throw new ValidationError(path, `[${channel}] boundaryMessageId must be a returned message id when partial`)
+  }
+}
+
 const FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
   'completeness',
   'topicId',
@@ -3612,7 +3675,8 @@ const FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
   'returnedCount',
   'totalTurnCount',
   'selectedTurnCount',
-  'boundaryMessageId'
+  'boundaryMessageId',
+  'foldedMessageIds'
 ])
 
 const fetchContextClosureContract: ChatDbContract = {
@@ -3683,6 +3747,11 @@ const fetchContextClosureContract: ChatDbContract = {
       if (c.lastMessageId !== null) {
         validateNonEmptyString(c.lastMessageId, 'result.value.closure.lastMessageId')
       }
+      const foldedIds = validateFoldedMessageIds(
+        c.foldedMessageIds,
+        'result.value.closure.foldedMessageIds',
+        'chatdb:fetch-context-closure'
+      )
       if (
         typeof c.returnedCount !== 'number' ||
         !Number.isFinite(c.returnedCount) ||
@@ -3769,18 +3838,13 @@ const fetchContextClosureContract: ChatDbContract = {
           )
         }
       } else {
-        if (typeof c.boundaryMessageId !== 'string' || c.boundaryMessageId.length === 0) {
-          throw new ValidationError(
-            'result.value.closure.boundaryMessageId',
-            '[chatdb:fetch-context-closure] boundaryMessageId must be non-empty string when selected<total (partial)'
-          )
-        }
-        if (c.boundaryMessageId !== c.firstMessageId) {
-          throw new ValidationError(
-            'result.value.closure.boundaryMessageId',
-            '[chatdb:fetch-context-closure] boundaryMessageId must equal firstMessageId when partial'
-          )
-        }
+        validatePartialBoundary(
+          c.boundaryMessageId,
+          msgs,
+          foldedIds,
+          'result.value.closure.boundaryMessageId',
+          'chatdb:fetch-context-closure'
+        )
       }
     }
   }
@@ -3807,7 +3871,8 @@ const RESOLVE_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
   'returnedCount',
   'totalTurnCount',
   'selectedTurnCount',
-  'boundaryMessageId'
+  'boundaryMessageId',
+  'foldedMessageIds'
 ])
 const RESOLVE_CONTEXT_CLOSURE_INTENTS = new Set(['establish', 'reanchor-default', 'move', 'inherit'])
 
@@ -4028,6 +4093,11 @@ const resolveContextClosureContract: ChatDbContract = {
       if (c.lastMessageId !== null) {
         validateNonEmptyString(c.lastMessageId, 'result.value.closure.lastMessageId')
       }
+      const foldedIds = validateFoldedMessageIds(
+        c.foldedMessageIds,
+        'result.value.closure.foldedMessageIds',
+        'chatdb:resolve-context-closure'
+      )
       if (
         typeof c.returnedCount !== 'number' ||
         !Number.isFinite(c.returnedCount) ||
@@ -4132,18 +4202,13 @@ const resolveContextClosureContract: ChatDbContract = {
             )
           }
         } else {
-          if (typeof c.boundaryMessageId !== 'string' || c.boundaryMessageId.length === 0) {
-            throw new ValidationError(
-              'result.value.closure.boundaryMessageId',
-              '[chatdb:resolve-context-closure] boundaryMessageId must be non-empty string when selected<total (partial)'
-            )
-          }
-          if (c.boundaryMessageId !== c.firstMessageId) {
-            throw new ValidationError(
-              'result.value.closure.boundaryMessageId',
-              '[chatdb:resolve-context-closure] boundaryMessageId must equal firstMessageId when partial'
-            )
-          }
+          validatePartialBoundary(
+            c.boundaryMessageId,
+            msgs,
+            foldedIds,
+            'result.value.closure.boundaryMessageId',
+            'chatdb:resolve-context-closure'
+          )
         }
       }
     }
@@ -4160,7 +4225,8 @@ const FETCH_WHOLE_TOPIC_SNAPSHOT_META_KEYS = new Set([
   'topicId',
   'firstMessageId',
   'lastMessageId',
-  'returnedCount'
+  'returnedCount',
+  'foldedMessageIds'
 ])
 
 const fetchWholeTopicSnapshotContract: ChatDbContract = {
@@ -4235,6 +4301,11 @@ const fetchWholeTopicSnapshotContract: ChatDbContract = {
       if (s.lastMessageId !== null) {
         validateNonEmptyString(s.lastMessageId, 'result.value.snapshot.lastMessageId')
       }
+      validateFoldedMessageIds(
+        s.foldedMessageIds,
+        'result.value.snapshot.foldedMessageIds',
+        'chatdb:fetch-whole-topic-snapshot'
+      )
       if (
         typeof s.returnedCount !== 'number' ||
         !Number.isFinite(s.returnedCount) ||

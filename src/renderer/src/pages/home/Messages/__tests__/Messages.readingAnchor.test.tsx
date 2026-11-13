@@ -136,7 +136,10 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
   useTopicSegments: () => ({
     isMessageFirstInSegment: vi.fn(() => false),
     isMessageLastInSegment: vi.fn(() => false),
-    isMessageInSegment: vi.fn(() => undefined)
+    isMessageInSegment: vi.fn(() => undefined),
+    // Folded-membership projection comes from authority catalog membership; this
+    // suite exercises reading-anchor reporting only, so no folded group.
+    segmentsForTopic: []
   })
 }))
 vi.mock('@renderer/context/EditModeContext', () => ({

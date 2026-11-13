@@ -354,4 +354,37 @@ describe('segment restore batch convergence', () => {
     // Omitted resolves live (store fallback) — never the previously pinned route.
     expect(mockUpsert.mock.calls[0][5]).not.toBe('branch-tgt')
   })
+
+  it('restoring a snapshot recreates its persisted folded state (no silent context re-enable)', async () => {
+    const foldedSnap = {
+      id: 'seg-fold',
+      topicId: 't1',
+      name: 'F',
+      messageIds: ['m-f'],
+      color: 'color-seg-fold',
+      folded: true,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-f',
+      lastMessageId: 'm-f',
+      messageCount: 1
+    }
+    const getState = () => ({ topicSegments: { segments: { entities: {} }, segmentsByTopic: {} } }) as any
+
+    // Undo recreate path: the folded flag travels as the last upsert argument.
+    mockUpsert.mockResolvedValue(wire('seg-fold', 't1', 0, ['m-f']))
+    mockList.mockResolvedValue([wire('seg-fold', 't1', 0, ['m-f'])])
+    await restoreSegmentsAfterUndo(vi.fn(), getState, [foldedSnap] as any)
+    expect(mockUpsert).toHaveBeenCalledTimes(1)
+    expect(mockUpsert.mock.calls[0].slice(0, 7)).toEqual(['seg-fold', 't1', 'F', ['m-f'], 'color-seg-fold', null, true])
+
+    // Redo/paste target recreate path: same snapshot semantics.
+    vi.clearAllMocks()
+    mockUpsert.mockResolvedValue(wire('seg-fold', 't1', 0, ['m-f']))
+    mockList.mockResolvedValue([wire('seg-fold', 't1', 0, ['m-f'])])
+    await restoreTargetSegments(vi.fn(), [foldedSnap] as any, 'branch-tgt', getState)
+    expect(mockUpsert.mock.calls[0][5]).toBe('branch-tgt')
+    expect(mockUpsert.mock.calls[0][6]).toBe(true)
+  })
 })

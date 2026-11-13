@@ -368,3 +368,95 @@ describe('visual baseline edge (default start vs declared end)', () => {
     expect(mod.resolveViewportBaselineEdge(el)).toBe('start')
   })
 })
+
+describe('segment fold: header region scope and below-seam handoff', () => {
+  const rect = (top: number, h: number, w: number) =>
+    ({ top, bottom: top + h, height: h, width: w, left: 0, right: w, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+
+  /**
+   * Production composition of a topic-segment group: the chrome host (the
+   * fold/expand region) sits inside the turn-run host that carries the
+   * segment's structural scope id — OUTSIDE every message row and outside a
+   * `data-stable-group-id` wrapper. `body` is the group's own seamless row and
+   * `below` the neighbouring row under the seam.
+   */
+  const buildSegmentDom = (folded: boolean) => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    container.getBoundingClientRect = () => rect(0, 600, 300)
+    const run = document.createElement('div')
+    run.setAttribute('data-interaction-scope-id', 'seg-1')
+    const chrome = document.createElement('div')
+    chrome.setAttribute('data-interaction-region', 'segment-header')
+    const pill = document.createElement('div')
+    const word = document.createElement('span')
+    pill.append(word)
+    chrome.append(pill)
+    const body = document.createElement('div')
+    body.id = 'message-s1'
+    body.setAttribute('data-message-id', 's1')
+    const below = document.createElement('div')
+    below.id = 'message-below'
+    below.setAttribute('data-message-id', 'below')
+    run.append(chrome)
+    // A fully collapsed group keeps its chrome host and drops its body rows
+    // entirely (zero flow height at the seam): that is the DOM the keeper must
+    // re-resolve after the mutation lands.
+    if (!folded) run.append(body)
+    container.append(run, below)
+    document.body.append(container)
+    // Column-reverse bottom-anchored layout: folding removes the body from the
+    // flow, so the seam and everything above it shift DOWN while the content
+    // below keeps its content-space position.
+    run.getBoundingClientRect = () => (folded ? rect(400, 0, 300) : rect(200, 200, 300))
+    chrome.getBoundingClientRect = () => (folded ? rect(400, 0, 300) : rect(200, 200, 300))
+    body.getBoundingClientRect = () => rect(200, 200, 300)
+    below.getBoundingClientRect = () => rect(460, 120, 300)
+    return { container, word, run, chrome, body, below }
+  }
+
+  it('derives the segment group scope + header region from a click inside the run host', async () => {
+    const mod = await import('../routeViewportContext')
+    const c = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c, 'm1', -100)
+    document.body.innerHTML = ''
+    const { container, word } = buildSegmentDom(false)
+    // No message row and no answer-group wrapper anywhere up the tree: the
+    // click is identified by the run host's segment scope + the chrome host's
+    // region annotation only, so the shared keeper holds the HEADER (the seam)
+    // instead of a body row that the fold is about to remove.
+    expect(mod.captureInteractionFromEvent(c, { target: word }, container)).toBe(true)
+    expect(c.activeInteractionIntent).toMatchObject({
+      scopeKind: 'group',
+      scopeId: 'seg-1',
+      region: 'segment-header',
+      offset: 200,
+      fingerprint: { scopeH: 200, scopeW: 300 }
+    })
+    document.body.innerHTML = ''
+  })
+
+  it('hands off to the row below the seam once the group body leaves the flow', async () => {
+    const mod = await import('../routeViewportContext')
+    document.body.innerHTML = ''
+    const expanded = buildSegmentDom(false)
+    // Expanded: the group's own first visible row is the handoff target.
+    expect(mod.resolveInteractionRepresentative(expanded.container, GROUP('seg-1'), 'segment-header')).toEqual({
+      id: 's1',
+      offset: 200
+    })
+    document.body.innerHTML = ''
+    const folded = buildSegmentDom(true)
+    // Fully collapsed: the group has no visible row of its own left, so the
+    // stable boundary BELOW the seam (the content that absorbed the height
+    // delta) is the only valid representative — never an invented one.
+    expect(mod.resolveInteractionRepresentative(folded.container, GROUP('seg-1'), 'segment-header')).toEqual({
+      id: 'below',
+      offset: 460
+    })
+    // The same scope with no visible row below stays fail-closed (no guess).
+    folded.below.remove()
+    expect(mod.resolveInteractionRepresentative(folded.container, GROUP('seg-1'), 'segment-header')).toBeNull()
+    document.body.innerHTML = ''
+  })
+})

@@ -447,11 +447,19 @@ export function segmentToWire(
     lastMessageId,
     messageCount: messageIds.length
   }
+  // Optional/JSON-safe overlays bridged through SQLite extra overflow: each
+  // own property is emitted ONLY when overflow carries a legal value, so an
+  // absent state is never encoded as `undefined`/`null`.
+  let wire: SegmentWire = base
   const color = segment.overflow.color
   if (typeof color === 'string') {
-    return { ...base, color }
+    wire = { ...wire, color }
   }
-  return base
+  const folded = segment.overflow.folded
+  if (typeof folded === 'boolean') {
+    wire = { ...wire, folded }
+  }
+  return wire
 }
 
 // ---------------------------------------------------------------------------
