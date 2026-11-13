@@ -112,7 +112,8 @@ import {
   newMessagesActions,
   readLoadedProjectionMessages,
   selectHistoryReferenceForTopic,
-  selectLoadedMessagesForTopic
+  selectLoadedMessagesForTopic,
+  selectReferenceSourceNames
 } from '@renderer/store/newMessage'
 import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import {
@@ -175,7 +176,7 @@ import {
   buildMessageFlowNodes,
   resolveContextDividerGroupKey,
   resolveForkDividers,
-  resolveReferenceBoundary
+  resolveReferenceDividers
 } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
@@ -743,30 +744,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     navigator?: { push: (to: string, state?: unknown) => void }
   } | null
   // Cross-topic history reference (Reference submenu): the active topic's
-  // topic-level reference metadata + live source title + the router navigate
-  // used only to jump to the captured source endpoint.
+  // topic-level reference metadata + live titles of every chain source + the
+  // router navigate used only to jump to the captured source endpoint.
   const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topic.id))
-  // Live source title: prefer the current Redux topics (rename reflects
-  // immediately) read inline (never importing `store/assistants`, which pulls
-  // the i18n index); fall back to the metadata's refreshed authoritative name.
-  const referenceSourceName = useAppSelector((state) => {
-    const ref = (
-      state as {
-        messages?: { historyReferenceByTopic?: Record<string, { sourceTopicId: string; sourceName: string | null }> }
-      }
-    )?.messages?.historyReferenceByTopic?.[topic.id]
-    if (!ref) return null
-    const assistants = (
-      state as {
-        assistants?: { assistants?: Array<{ topics?: Array<{ id: string; name?: string }> }> }
-      } | null
-    )?.assistants
-    for (const assistant of assistants?.assistants ?? []) {
-      const name = assistant.topics?.find((candidate) => candidate.id === ref.sourceTopicId)?.name
-      if (typeof name === 'string' && name.length > 0) return name
-    }
-    return ref.sourceName ?? null
-  })
+  // Live source titles, keyed by source topic (one per materialized layer):
+  // current Redux topics win so a rename reflects immediately, with each
+  // layer's refreshed authoritative name as fallback.
+  const referenceSourceNames = useAppSelector((state) => selectReferenceSourceNames(state, topic.id))
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
@@ -844,30 +828,37 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     [groupedMessages, contextBoundaryMessageId]
   )
 
-  // History-reference divider placement (topic-level; null for ordinary
-  // topics). The divider marks the readonly foreign-prefix / writable
-  // target-owned-suffix boundary; missing sources render at the beginning.
-  const referenceBoundary = useMemo(
-    () => resolveReferenceBoundary(groupedMessages, historyReference, topic.id),
+  // History-reference divider placements (topic-level; empty for ordinary
+  // topics): one per materialized relation layer, each marking the readonly
+  // foreign-prefix / writable target-owned-suffix boundary it actually owns.
+  // Missing sources render at the beginning; deeper layers whose boundary is
+  // not loaded stay deferred rather than promoted to the head.
+  const referenceDividers = useMemo(
+    () => resolveReferenceDividers(groupedMessages, historyReference, topic.id),
     [groupedMessages, historyReference, topic.id]
   )
 
-  const onNavigateReferenceSource = useCallback(() => {
-    if (!historyReference || historyReference.status !== 'available') return
-    const navigator = navigationContext?.navigator
-    if (!navigator) return
-    // Retain the captured source branch + exact stable anchor: select the
-    // captured route on the source topic BEFORE navigating so the topic-default
-    // active branch never wins, then navigate the stable ID cross-topic.
-    dispatch(activeBranchSet({ topicId: historyReference.sourceTopicId, branchId: historyReference.sourceBranchId }))
-    const navigateCompat = ((to: string, opts?: { state?: unknown }) => navigator.push(to, opts?.state)) as Parameters<
-      typeof locateToMessageTarget
-    >[0]
-    void locateToMessageTarget(navigateCompat, {
-      topicId: historyReference.sourceTopicId,
-      messageId: historyReference.anchorMessageId
-    })
-  }, [dispatch, historyReference, navigationContext])
+  // Jump to the captured source endpoint of the clicked divider's OWN relation
+  // (each chain layer navigates to its own source topic, branch and anchor).
+  const onNavigateReferenceSource = useCallback(
+    (reference: HistoryReferenceMeta) => {
+      if (reference.status !== 'available') return
+      const navigator = navigationContext?.navigator
+      if (!navigator) return
+      // Retain the captured source branch + exact stable anchor: select the
+      // captured route on the source topic BEFORE navigating so the
+      // topic-default active branch never wins, then navigate the stable ID
+      // cross-topic.
+      dispatch(activeBranchSet({ topicId: reference.sourceTopicId, branchId: reference.sourceBranchId }))
+      const navigateCompat = ((to: string, opts?: { state?: unknown }) =>
+        navigator.push(to, opts?.state)) as Parameters<typeof locateToMessageTarget>[0]
+      void locateToMessageTarget(navigateCompat, {
+        topicId: reference.sourceTopicId,
+        messageId: reference.anchorMessageId
+      })
+    },
+    [dispatch, navigationContext]
+  )
 
   const renderMessageSegments = () => {
     // Mounted message flow in newest→oldest render order: turn bodies and
@@ -881,7 +872,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     const nodes = buildMessageFlowNodes({
       layerRuns,
       contextDividerGroupKey,
-      referenceBoundary,
+      referenceDividers,
       forkDividers,
       branchPath: branchTree.path,
       branches: branchTree.branches,
@@ -924,14 +915,14 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           <ContextWindowDividerLine />
         </ContextWindowDivider>
       ),
-      renderReferenceBoundary: () =>
-        historyReference ? (
-          <ReferenceDivider
-            reference={historyReference}
-            sourceName={referenceSourceName}
-            onNavigateSource={onNavigateReferenceSource}
-          />
-        ) : null
+      renderReferenceDivider: ({ reference, targetTopicId }) => (
+        <ReferenceDivider
+          reference={reference}
+          targetTopicId={targetTopicId}
+          sourceName={referenceSourceNames[reference.sourceTopicId] ?? reference.sourceName}
+          onNavigateSource={() => onNavigateReferenceSource(reference)}
+        />
+      )
     })
 
     // Turn runs group adjacent mounted bodies of one Q&A turn under a

@@ -18,12 +18,18 @@ import styled from 'styled-components'
  */
 export interface ReferenceDividerProps {
   reference: HistoryReferenceMeta
+  /**
+   * Topic that owns the rendered relation: the stable layer identity. A
+   * chained reference renders one divider per materialized layer, each keyed
+   * and tagged by its own relation target.
+   */
+  targetTopicId: string
   /** Live source topic title resolved from the current Redux topics. */
   sourceName: string | null
   onNavigateSource: () => void
 }
 
-export const ReferenceDivider = ({ reference, sourceName, onNavigateSource }: ReferenceDividerProps) => {
+export const ReferenceDivider = ({ reference, targetTopicId, sourceName, onNavigateSource }: ReferenceDividerProps) => {
   const { t } = useTranslation()
   const missing = reference.status === 'missing'
   const label = sourceName && sourceName.length > 0 ? sourceName : (reference.sourceName ?? '')
@@ -32,7 +38,8 @@ export const ReferenceDivider = ({ reference, sourceName, onNavigateSource }: Re
     <ReferenceDividerRow
       data-testid="history-reference-divider"
       data-reference-status={reference.status}
-      data-reference-source-topic={reference.sourceTopicId}>
+      data-reference-source-topic={reference.sourceTopicId}
+      data-reference-target-topic={targetTopicId}>
       <ReferenceDividerLine />
       {missing ? (
         <ReferenceDividerText data-testid="history-reference-divider-missing">

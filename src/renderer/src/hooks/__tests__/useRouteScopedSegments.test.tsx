@@ -161,7 +161,7 @@ describe('useRouteScopedSegments route scope and guards', () => {
     act(() => setBranch(store, TOPIC, 'C'))
     expect(result.current.segments).toEqual([])
 
-    cDeferred.resolve(snapshot(ROUTE_C) as Any)
+    cDeferred.resolve(snapshot(ROUTE_C))
     await waitFor(() => expect(result.current.segments).toEqual([]))
   })
 
@@ -183,7 +183,7 @@ describe('useRouteScopedSegments route scope and guards', () => {
     await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-child']))
 
     // Superseded main-route read resolves late and must be discarded.
-    mainDeferred.resolve(snapshot(MAIN) as Any)
+    mainDeferred.resolve(snapshot(MAIN))
     await new Promise((r) => setTimeout(r, 30))
     expect(result.current.segments.map((s) => s.id)).toEqual(['s-child'])
   })
@@ -205,7 +205,7 @@ describe('useRouteScopedSegments route scope and guards', () => {
     expect(result.current.segments[0].memberIds).toEqual(['m14', 'm15', 'p1'])
 
     // Persisted authority catalog (order/membership/counts/entities) is unchanged.
-    const state = store.getState() as Any
+    const state = store.getState()
     expect(state.topicSegments.segmentsByTopic[TOPIC]).toEqual(['s-cross', 's-other'])
     expect(state.topicSegments.segments.entities['s-cross'].messageCount).toBe(4)
     expect(state.topicSegments.segments.entities['s-cross'].messageIds).toEqual(['m14', 'm15', 'p1', 'p2'])
@@ -279,6 +279,61 @@ describe('useRouteScopedSegments route scope and guards', () => {
             sourceName: null,
             status: 'missing',
             boundaryMessageId: null
+          }
+        })
+      )
+    })
+    await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(3), { timeout: 5000 })
+  })
+
+  it('refetches when the materialized chain layers of the same relation change', async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-prefix', 0, ['m5'])])
+    mockLoadSnapshot.mockResolvedValue(snapshot(MAIN))
+
+    setBranch(store, TOPIC, null)
+    renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(1))
+
+    const single = {
+      sourceTopicId: 'SRC',
+      sourceBranchId: null,
+      anchorMessageId: 'm9',
+      sourceName: 'Source',
+      status: 'available' as const,
+      boundaryMessageId: 'm9'
+    }
+    act(() => {
+      store.dispatch(newMessagesActions.historyReferenceSet({ topicId: TOPIC, reference: single }))
+    })
+    await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(2), { timeout: 5000 })
+
+    // Re-dispatching the same relation (equivalent token) does not refetch.
+    act(() => {
+      store.dispatch(newMessagesActions.historyReferenceSet({ topicId: TOPIC, reference: { ...single } }))
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(mockLoadSnapshot).toHaveBeenCalledTimes(2)
+
+    // A deeper layer entering the route is a same-route authority change.
+    act(() => {
+      store.dispatch(
+        newMessagesActions.historyReferenceSet({
+          topicId: TOPIC,
+          reference: {
+            ...single,
+            layers: [
+              { ...single, targetTopicId: TOPIC },
+              {
+                targetTopicId: 'SRC',
+                sourceTopicId: 'SRC-ROOT',
+                sourceBranchId: null,
+                anchorMessageId: 'm-ancestor',
+                sourceName: 'Root',
+                status: 'available',
+                boundaryMessageId: 'm-ancestor'
+              }
+            ]
           }
         })
       )

@@ -121,6 +121,53 @@ function buildSourceEntries(
   return entries
 }
 
+/**
+ * Own-suffix entries for a chain layer: plain user/assistant turns inserted
+ * through the Main capability after a captured foreign endpoint (`askId` links
+ * each assistant reply to its user message so the UI groups them).
+ */
+function buildChainEntries(
+  topicId: string,
+  assistantId: string,
+  tag: string,
+  count: number
+): Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> {
+  const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+  for (let i = 0; i < count; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant'
+    const msgId = `${topicId}-${tag}-${pad(i, 3)}`
+    const blockId = `${msgId}-block`
+    const createdAt = `2026-07-19T00:01:${pad(i, 2)}.000Z`
+    const message: Record<string, unknown> = {
+      id: msgId,
+      topicId,
+      role,
+      assistantId,
+      content: `${tag} ${role} ${i}`,
+      createdAt,
+      updatedAt: createdAt,
+      status: 'success',
+      blocks: [blockId]
+    }
+    if (role === 'assistant') message.askId = `${topicId}-${tag}-${pad(i - 1, 3)}`
+    entries.push({
+      message,
+      blocks: [
+        {
+          id: blockId,
+          messageId: msgId,
+          type: 'main_text',
+          content: `${tag} ${role} ${i}`,
+          status: 'success',
+          createdAt,
+          updatedAt: createdAt
+        }
+      ]
+    })
+  }
+  return entries
+}
+
 async function activateTopicAndWaitLoaded(page: any, topicId: string, atLeast = 1): Promise<void> {
   const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
   await topicItem.waitFor({ state: 'attached', timeout: 15000 })
@@ -1247,5 +1294,220 @@ test.describe('Cross-topic history reference', () => {
       'inherited branch strip must match the enabled strip horizontal advance'
     ).toBeLessThanOrEqual(4)
     logStrip('inherited-branch(disabled)', branchStrip)
+  })
+
+  /**
+   * Chained reference (A→B→C): each materialized relation layer keeps its OWN
+   * truthful divider — own live source title, captured branch, endpoint
+   * navigation — instead of one folded boundary. A upstream line appears only
+   * while its boundary message really composes the addressed route, so nothing
+   * beyond a captured endpoint is ever invented.
+   */
+  test('chained reference (A→B→C): one truthful divider per layer, each navigating to its own endpoint', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(360000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'INTEGRATED: A→B→C chained reference — real UI Reference creation twice through the Clone Topic submenu + Main-authoritative own-suffix inserts; Main-derived per-layer boundaries over IPC; two dividers with distinct stable identities, each showing its OWN live source title and navigating to its OWN captured source endpoint (main route retained).'
+    })
+
+    const page = mainWindow
+    const assistantId = await prepareDisplayCountAndAssistant(page)
+
+    // --- Layer A: the first (oldest) source -------------------------------
+    const topicA = `chain-a-${Date.now()}`
+    const nameA = 'Chain Layer A'
+    await seedTopicAndProject(page, topicA, assistantId, nameA, buildSourceEntries(topicA, assistantId))
+    await activateTopicAndWaitLoaded(page, topicA, SOURCE_TOTAL)
+
+    const aAnchorId = `${topicA}-msg-${pad(ANCHOR_IDX, 5)}`
+    const aRoute = await getRawTopicIds(page, topicA)
+    const aPrefix = aRoute.slice(0, ANCHOR_IDX + 1)
+    expect(aPrefix[aPrefix.length - 1], 'captured A endpoint must be the anchor message').toBe(aAnchorId)
+
+    // Real UI reference creation A→B at the A endpoint.
+    await hoverMessageAndOpenMore(page, aAnchorId)
+    await clickReferenceSubmenu(page)
+    const topicB = await waitForTargetTopic(page, topicA, aAnchorId)
+
+    // --- Layer B: own writable suffix after the captured A endpoint -------
+    const bEntries = buildChainEntries(topicB, assistantId, 'b', 2)
+    const bInserted: any = await page.evaluate(
+      async ({ topicId, afterMessageId, entries }: { topicId: string; afterMessageId: string; entries: any }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId,
+          branchId: null,
+          afterMessageId,
+          entries
+        }),
+      { topicId: topicB, afterMessageId: aAnchorId, entries: bEntries }
+    )
+    expect(bInserted?.ok, `B own suffix insert must succeed: ${JSON.stringify(bInserted)}`).toBe(true)
+    const bIds = (bInserted.value?.insertedMessages ?? []).map((m: any) => m.id as string)
+    expect(bIds).toHaveLength(bEntries.length)
+    const bAnchorId = bIds[bIds.length - 1]
+
+    // Live B title through the REAL Main path, then the real caller projects it
+    // into Redux so every divider that uses B as its source shows it.
+    const nameB = 'Chain Layer B'
+    await page.evaluate(
+      async ({ topicId, name }: { topicId: string; name: string }) =>
+        await (window as any).api.chatDb.updateTopicMetadata({ topicId, name }),
+      { topicId: topicB, name: nameB }
+    )
+    await page.evaluate(
+      ({ topicId, newName }: { topicId: string; newName: string }) => {
+        const store = (window as any).store
+        const assistant = store
+          .getState()
+          .assistants.assistants.find((a: any) => a.topics.some((t: any) => t.id === topicId))
+        if (!assistant) throw new Error('B assistant not found')
+        const topic = assistant.topics.find((t: any) => t.id === topicId)
+        store.dispatch({
+          type: 'assistants/updateTopic',
+          payload: { assistantId: assistant.id, topic: { ...topic, name: newName } }
+        })
+      },
+      { topicId: topicB, newName: nameB }
+    )
+
+    // Re-read B from authority (the suffix write happened while B was active).
+    await activateTopicAndWaitLoaded(page, topicA, aPrefix.length)
+    await activateTopicAndWaitLoaded(page, topicB, aPrefix.length + bIds.length)
+    // B's OWN relation is B→A, so B's reference boundary is A's captured
+    // endpoint. `bAnchorId` is B's own suffix row (later C's nearest-layer
+    // boundary), never B's foreign-prefix boundary.
+    await page.waitForFunction(
+      ({ tid, source, boundary }: { tid: string; source: string; boundary: string }) => {
+        const ref = (window as any).store.getState().messages?.historyReferenceByTopic?.[tid]
+        return ref?.sourceTopicId === source && ref?.boundaryMessageId === boundary
+      },
+      { tid: topicB, source: topicA, boundary: aAnchorId },
+      { timeout: 30000 }
+    )
+
+    // --- Layer C: reference B at B's own last message (real UI) -----------
+    await hoverMessageAndOpenMore(page, bAnchorId)
+    await clickReferenceSubmenu(page)
+    const topicC = await waitForTargetTopic(page, topicB, bAnchorId)
+
+    const cEntries = buildChainEntries(topicC, assistantId, 'c', 1)
+    const cInserted: any = await page.evaluate(
+      async ({ topicId, afterMessageId, entries }: { topicId: string; afterMessageId: string; entries: any }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId,
+          branchId: null,
+          afterMessageId,
+          entries
+        }),
+      { topicId: topicC, afterMessageId: bAnchorId, entries: cEntries }
+    )
+    expect(cInserted?.ok, `C own suffix insert must succeed: ${JSON.stringify(cInserted)}`).toBe(true)
+    const cIds = (cInserted.value?.insertedMessages ?? []).map((m: any) => m.id as string)
+
+    await activateTopicAndWaitLoaded(page, topicB, aPrefix.length + bIds.length)
+    const cExpectedIds = [...aPrefix, ...bIds, ...cIds]
+    await activateTopicAndWaitLoaded(page, topicC, cExpectedIds.length)
+
+    // --- Main-derived chain: one layer per materialized relation ----------
+    const cRouteIds: string[] = await page.evaluate(
+      (tid: string) => (window as any).store.getState().messages.messageIdsByTopic[tid] ?? [],
+      topicC
+    )
+    expect(cRouteIds, 'C route must be A prefix → B rows → C own row').toEqual(cExpectedIds)
+
+    const chainProbe: any = await page.evaluate(
+      async (tid: string) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: null,
+          limit: 100
+        }),
+      topicC
+    )
+    expect(chainProbe?.ok, `fetchMessagesWindow failed: ${JSON.stringify(chainProbe)}`).toBe(true)
+    const layers = chainProbe.value?.reference?.layers ?? []
+    expect(layers.map((layer: any) => layer.targetTopicId)).toEqual([topicC, topicB])
+    expect(layers[0].boundaryMessageId).toBe(bAnchorId)
+    expect(layers[1].boundaryMessageId).toBe(aAnchorId)
+    expect(layers[0].sourceTopicId).toBe(topicB)
+    expect(layers[1].sourceTopicId).toBe(topicA)
+
+    // --- Two rendered dividers, each at its OWN boundary ------------------
+    const dividers = page.locator('[data-testid="history-reference-divider"]')
+    await expect(dividers, 'one divider per materialized layer').toHaveCount(2, { timeout: 15000 })
+    await expect(dividers.nth(0)).toHaveAttribute('data-reference-target-topic', topicC)
+    await expect(dividers.nth(1)).toHaveAttribute('data-reference-target-topic', topicB)
+    await expect(dividers.nth(0)).toHaveAttribute('data-reference-status', 'available')
+    await expect(dividers.nth(1)).toHaveAttribute('data-reference-status', 'available')
+
+    const placement = await page.evaluate(
+      ({ ownBoundary, ancestorBoundary }: { ownBoundary: string; ancestorBoundary: string }) => {
+        const nodes = Array.from(document.querySelectorAll('[data-testid="history-reference-divider"]'))
+        const msg = (id: string) => document.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
+        const follows = (a: Element | null, b: Element | null) =>
+          !!a && !!b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        return nodes.map((node) => ({
+          target: node.getAttribute('data-reference-target-topic'),
+          link: node.querySelector('[data-testid="history-reference-divider-link"]')?.textContent ?? null,
+          beforeOwnBoundary: follows(node, msg(ownBoundary)),
+          beforeAncestorBoundary: follows(node, msg(ancestorBoundary))
+        }))
+      },
+      { ownBoundary: bAnchorId, ancestorBoundary: aAnchorId }
+    )
+    expect(placement).toHaveLength(2)
+    // Nearest layer (C→B) sits directly below B's last message.
+    expect(placement[0].beforeOwnBoundary, 'own layer divider must sit below its own endpoint').toBe(true)
+    // Ancestor layer (B→A) sits directly below A's last message and NEVER at
+    // B's boundary (each layer shows only its own boundary).
+    expect(placement[1].beforeAncestorBoundary, 'ancestor divider must sit below its own endpoint').toBe(true)
+    expect(placement[1].beforeOwnBoundary, 'ancestor divider must not be misplaced at a nearer boundary').toBe(false)
+    // Each divider shows the live title of its OWN source topic.
+    expect(placement[0].link).toContain(nameB)
+    expect(placement[1].link).toContain(nameA)
+
+    // --- Navigation: each line jumps to its own captured endpoint ---------
+    await dividers.nth(0).locator('[data-testid="history-reference-divider-link"]').click()
+    await page.waitForFunction(
+      ({ tid, anchor }: { tid: string; anchor: string }) => {
+        const s = (window as any).store.getState()
+        if (s.messages?.currentTopicId !== tid) return false
+        return ((s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]).includes(anchor)
+      },
+      { tid: topicB, anchor: bAnchorId },
+      { timeout: 30000 }
+    )
+    // The captured source route (main) is retained, so the endpoint is in the
+    // active route rather than a topic-default branch.
+    expect(
+      await page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicB
+      )
+    ).toBeNull()
+
+    // Back to C, then the ancestor divider must land A's captured endpoint.
+    await activateTopicAndWaitLoaded(page, topicC, cExpectedIds.length)
+    await expect(dividers).toHaveCount(2, { timeout: 15000 })
+    await dividers.nth(1).locator('[data-testid="history-reference-divider-link"]').click()
+    await page.waitForFunction(
+      ({ tid, anchor }: { tid: string; anchor: string }) => {
+        const s = (window as any).store.getState()
+        if (s.messages?.currentTopicId !== tid) return false
+        return ((s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]).includes(anchor)
+      },
+      { tid: topicA, anchor: aAnchorId },
+      { timeout: 30000 }
+    )
+    expect(
+      await page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicA
+      )
+    ).toBeNull()
   })
 })

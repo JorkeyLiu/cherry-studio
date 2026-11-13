@@ -69,8 +69,18 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     return undefined
   })
   const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topicId))
+  // The token covers the relation AND every materialized chain layer, so a
+  // deeper layer appearing/disappearing (an upstream boundary entering or
+  // leaving the route) also invalidates the route list like any other
+  // authority change of the same route.
   const referenceToken = historyReference
-    ? `${historyReference.sourceTopicId}|${historyReference.sourceBranchId ?? 'main'}|${historyReference.anchorMessageId}|${historyReference.status}|${historyReference.boundaryMessageId ?? ''}`
+    ? [
+        `${historyReference.sourceTopicId}|${historyReference.sourceBranchId ?? 'main'}|${historyReference.anchorMessageId}|${historyReference.status}|${historyReference.boundaryMessageId ?? ''}`,
+        ...(historyReference.layers ?? []).map(
+          (layer) =>
+            `${layer.targetTopicId}:${layer.sourceTopicId}:${layer.sourceBranchId ?? 'main'}:${layer.anchorMessageId}:${layer.boundaryMessageId ?? ''}`
+        )
+      ].join(',')
     : ''
 
   const hasCatalog = orderedSegmentsForTopic.length > 0

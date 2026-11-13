@@ -1342,6 +1342,15 @@ export function selectIsMessageMutable(
 }
 
 /**
+ * Per-assistant-slice cache of live source-topic titles, keyed by the
+ * reference metadata object. Both keys are identity-stable in the Redux store
+ * (the assistant slice is replaced only when a topic/member changes, and the
+ * relation metadata object only when an authoritative read replaces it), so a
+ * selector result stays referentially stable across unrelated dispatches.
+ */
+const assistantNameCache = new WeakMap<object, WeakMap<HistoryReferenceMeta, Record<string, string>>>()
+
+/**
  * Topic-level history-reference metadata for the current loaded window.
  * `undefined` means the topic is not a reference target (ordinary topic) or
  * no authoritative metadata is resident; callers must fail closed (no divider)
@@ -1352,4 +1361,51 @@ export function selectHistoryReferenceForTopic(state: RootState, topicId: string
     state as { messages?: { historyReferenceByTopic?: Record<string, HistoryReferenceMeta> } } | null | undefined
   )?.messages?.historyReferenceByTopic?.[topicId]
   return reference ?? undefined
+}
+
+/** Shared empty result so an ordinary topic never allocates a new object. */
+const NO_REFERENCE_SOURCE_NAMES: Record<string, string> = Object.freeze({}) as Record<string, string>
+
+/**
+ * Live authoritative titles for every source topic of a reference target's
+ * materialized chain, keyed by source topic id. Each divider shows the live
+ * title of its OWN source (a rename reflects immediately); the per-layer
+ * metadata name stays the fallback for a source that left the assistant
+ * catalog. Memoized per (assistant slice, relation metadata) identity so the
+ * selector keeps a stable result across unrelated dispatches while a rename
+ * still invalidates it.
+ */
+export function selectReferenceSourceNames(state: RootState, topicId: string): Record<string, string> {
+  const reference = selectHistoryReferenceForTopic(state, topicId)
+  if (!reference) return NO_REFERENCE_SOURCE_NAMES
+  const assistants = (
+    state as { assistants?: { assistants?: Array<{ topics?: Array<{ id: string; name?: string }> }> } }
+  ).assistants
+  const cacheable = typeof assistants === 'object' && assistants !== null
+  const bucket = cacheable ? assistantNameCache.get(assistants as object) : undefined
+  const fromCache = bucket?.get(reference)
+  if (fromCache) return fromCache
+  const names: Record<string, string> = {}
+  const collect = (sourceTopicId: string): void => {
+    if (Object.prototype.hasOwnProperty.call(names, sourceTopicId)) return
+    for (const assistant of assistants?.assistants ?? []) {
+      const name = assistant.topics?.find((candidate) => candidate.id === sourceTopicId)?.name
+      if (typeof name === 'string' && name.length > 0) {
+        names[sourceTopicId] = name
+        return
+      }
+    }
+  }
+  collect(reference.sourceTopicId)
+  for (const layer of reference.layers ?? []) collect(layer.sourceTopicId)
+  const result = Object.keys(names).length > 0 ? names : NO_REFERENCE_SOURCE_NAMES
+  if (cacheable) {
+    let target = bucket
+    if (!target) {
+      target = new WeakMap<HistoryReferenceMeta, Record<string, string>>()
+      assistantNameCache.set(assistants as object, target)
+    }
+    target.set(reference, result)
+  }
+  return result
 }

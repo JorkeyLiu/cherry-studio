@@ -88,6 +88,7 @@ export type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  HistoryReferenceChainLayer,
   HistoryReferenceInvalidationEvent,
   HistoryReferenceMeta,
   ImportTopicDataRequest,
