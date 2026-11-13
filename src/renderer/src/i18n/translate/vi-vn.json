@@ -1976,8 +1976,6 @@
     "search": "Tìm kiếm cơ sở kiến thức",
     "search_placeholder": "Nhập văn bản để tìm kiếm",
     "settings": {
-      "preprocessing": "Tiền xử lý",
-      "preprocessing_tooltip": "Tiền xử lý các tệp đã tải lên",
       "title": "Cài đặt Cơ sở Tri thức"
     },
     "sitemap_added": "Đã thêm thành công",
@@ -1991,8 +1989,6 @@
     "status_failed": "Thất bại",
     "status_new": "Đã thêm",
     "status_pending": "Đang chờ xử lý",
-    "status_preprocess_completed": "Tiền xử lý đã hoàn thành",
-    "status_preprocess_failed": "Tiền xử lý thất bại",
     "status_processing": "Đang xử lý",
     "subtitle_file": "tập tin phụ đề",
     "threshold": "Ngưỡng khớp",
@@ -4913,18 +4909,6 @@
     },
     "title": "Cài đặt",
     "tool": {
-      "preprocess": {
-        "paddleocr": {
-          "aistudio_access_token": "Mã truy cập của Cộng đồng AI Studio",
-          "api_url": "URL API",
-          "api_url_label": "Lấy Mã Truy Cập và URL API",
-          "paddleocr_url_label": "Trang web chính thức của PaddleOCR"
-        },
-        "provider": "Nhà cung cấp Xử lý Tài liệu",
-        "provider_placeholder": "Chọn nhà cung cấp xử lý tài liệu",
-        "title": "Xử lý tài liệu",
-        "tooltip": "Trong Cài đặt -> Công cụ, hãy đặt nhà cung cấp dịch vụ xử lý tài liệu. Xử lý tài liệu có thể cải thiện hiệu quả khả năng truy xuất của các tài liệu có định dạng phức tạp và tài liệu đã quét."
-      },
       "title": "Các Cài Đặt Khác"
     },
     "translate": {

@@ -2,8 +2,7 @@ import { loggerService } from '@logger'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import SelectProviderModelPopup from '@renderer/pages/settings/ProviderSettings/SelectProviderModelPopup'
 import { checkApi } from '@renderer/services/ApiService'
-import type { Model, PreprocessProvider, Provider } from '@renderer/types'
-import { isPreprocessProviderId } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import type { ApiKeyConnectivity, ApiKeyWithStatus } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { formatApiKeys, splitApiKeyString } from '@renderer/utils/api'
@@ -199,10 +198,8 @@ export function useApiKeys({ provider, updateProvider }: UseApiKeysProps) {
 
       try {
         const startTime = Date.now()
-        if (isLlmProvider(provider) && model) {
+        if (model) {
           await checkApi({ ...provider, apiKey: keyToCheck }, model)
-        } else {
-          // 不处理预处理供应商（外部搜索已移除）
         }
         const latency = Date.now() - startTime
 
@@ -241,7 +238,7 @@ export function useApiKeys({ provider, updateProvider }: UseApiKeysProps) {
       const currentState = connectivityStates.get(keyToCheck)
       if (currentState?.checking) return
 
-      const model = isLlmProvider(provider) ? await getModelForCheck(provider, t) : undefined
+      const model = await getModelForCheck(provider, t)
       if (model === null) return
 
       await runConnectivityCheck(index, model)
@@ -253,7 +250,7 @@ export function useApiKeys({ provider, updateProvider }: UseApiKeysProps) {
   const checkAllKeysConnectivity = useCallback(async () => {
     if (!provider || keys.length === 0) return
 
-    const model = isLlmProvider(provider) ? await getModelForCheck(provider, t) : undefined
+    const model = await getModelForCheck(provider, t)
     if (model === null) return
 
     await Promise.allSettled(keys.map((_, index) => runConnectivityCheck(index, model)))
@@ -274,16 +271,6 @@ export function useApiKeys({ provider, updateProvider }: UseApiKeysProps) {
     checkAllKeysConnectivity,
     isChecking
   }
-}
-
-export function isLlmProvider(provider: ApiProvider): provider is Provider {
-  return 'models' in provider
-}
-
-export function isPreprocessProvider(provider: ApiProvider): provider is PreprocessProvider {
-  // NOTE: mistral 同时提供预处理和llm服务，所以其llm provier可能被误判为预处理provider
-  // 后面需要使用更严格的判断方式
-  return isPreprocessProviderId(provider.id) && !isLlmProvider(provider)
 }
 
 // 获取模型用于检查

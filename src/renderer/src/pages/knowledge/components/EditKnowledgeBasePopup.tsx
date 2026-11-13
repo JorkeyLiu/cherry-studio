@@ -30,12 +30,7 @@ interface PopupContainerProps extends ShowParams {
 const PopupContainer: React.FC<PopupContainerProps> = ({ base: _base, resolve }) => {
   const { t } = useTranslation()
   const { base, updateKnowledgeBase, migrateBase } = useKnowledge(_base.id)
-  const {
-    newBase,
-    setNewBase,
-    handlers,
-    providerData: { selectedDocPreprocessProvider, docPreprocessSelectOptions }
-  } = useKnowledgeBaseForm(_base)
+  const { newBase, setNewBase, handlers } = useKnowledgeBaseForm(_base)
 
   const [open, setOpen] = useState(true)
 
@@ -117,14 +112,7 @@ const PopupContainer: React.FC<PopupContainerProps> = ({ base: _base, resolve })
     {
       key: 'advanced',
       label: t('settings.advanced.title'),
-      panel: (
-        <AdvancedSettingsPanel
-          newBase={newBase}
-          selectedDocPreprocessProvider={selectedDocPreprocessProvider}
-          docPreprocessSelectOptions={docPreprocessSelectOptions}
-          handlers={handlers}
-        />
-      )
+      panel: <AdvancedSettingsPanel newBase={newBase} handlers={handlers} />
     }
   ]
 

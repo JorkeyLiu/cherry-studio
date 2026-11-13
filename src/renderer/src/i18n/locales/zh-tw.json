@@ -2025,8 +2025,6 @@
     "search": "搜尋知識庫",
     "search_placeholder": "輸入查詢內容",
     "settings": {
-      "preprocessing": "預處理",
-      "preprocessing_tooltip": "預處理上傳的檔案",
       "title": "知識庫設定"
     },
     "sitemap_added": "新增成功",
@@ -2040,8 +2038,6 @@
     "status_failed": "失敗",
     "status_new": "已新增",
     "status_pending": "等待中",
-    "status_preprocess_completed": "預處理完成",
-    "status_preprocess_failed": "預處理失敗",
     "status_processing": "處理中",
     "subtitle_file": "字幕檔案",
     "threshold": "相符度門檻",
@@ -4991,18 +4987,6 @@
     },
     "title": "設定",
     "tool": {
-      "preprocess": {
-        "paddleocr": {
-          "aistudio_access_token": "星河社區訪問令牌",
-          "api_url": "API 網址",
-          "api_url_label": "取得訪問令牌及 API 網址",
-          "paddleocr_url_label": "PaddleOCR 官方網站"
-        },
-        "provider": "文件處理供應商",
-        "provider_placeholder": "選擇一個文件處理供應商",
-        "title": "文件處理",
-        "tooltip": "在「設定」->「工具」中設定文件處理服務供應商。文件處理可有效提升複雜格式文件及掃描文件的檢索效能"
-      },
       "title": "其他設定"
     },
     "translate": {

@@ -4,12 +4,7 @@ import { getStoreSetting } from '@renderer/hooks/useSettings'
 import { getKnowledgeBaseParams } from '@renderer/services/KnowledgeService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import store from '@renderer/store'
-import {
-  clearCompletedProcessing,
-  updateBaseItemIsPreprocessed,
-  updateBaseItemUniqueId,
-  updateItemProcessingStatus
-} from '@renderer/store/knowledge'
+import { clearCompletedProcessing, updateBaseItemUniqueId, updateItemProcessingStatus } from '@renderer/store/knowledge'
 import type { KnowledgeItem } from '@renderer/types'
 import { uuid } from '@renderer/utils'
 import type { LoaderReturn } from '@shared/config/types'
@@ -207,9 +202,7 @@ class KnowledgeQueue {
         logger.error(`Backend processing error for item ${item.id}: ${result.message}`)
 
         const errorPrefix =
-          result.messageSource === 'embedding'
-            ? t('knowledge.status_embedding_failed')
-            : t('knowledge.status_preprocess_failed')
+          result.messageSource === 'embedding' ? t('knowledge.status_embedding_failed') : t('knowledge.status_failed')
 
         throw new Error(
           result.message ? `${errorPrefix}: ${result.message}` : `Backend processing failed for item ${item.id}`
@@ -233,13 +226,6 @@ class KnowledgeQueue {
             itemId: item.id,
             uniqueId: result.uniqueId,
             uniqueIds: result.uniqueIds
-          })
-        )
-        store.dispatch(
-          updateBaseItemIsPreprocessed({
-            baseId,
-            itemId: item.id,
-            isPreprocessed: !!base.preprocessProvider
           })
         )
       }

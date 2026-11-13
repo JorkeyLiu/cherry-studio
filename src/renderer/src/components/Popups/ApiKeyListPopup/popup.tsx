@@ -1,16 +1,14 @@
 import { TopView } from '@renderer/components/TopView'
-import { isPreprocessProviderId } from '@renderer/types'
 import { Modal } from 'antd'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { DocPreprocessApiKeyList, LlmApiKeyList } from './list'
+import { LlmApiKeyList } from './list'
 
 interface ShowParams {
   providerId: string
   title?: string
   showHealthCheck?: boolean
-  providerType?: 'llm' | 'preprocess'
 }
 
 interface Props extends ShowParams {
@@ -20,7 +18,7 @@ interface Props extends ShowParams {
 /**
  * API Key 列表弹窗容器组件
  */
-const PopupContainer: React.FC<Props> = ({ providerId, title, resolve, showHealthCheck = true, providerType }) => {
+const PopupContainer: React.FC<Props> = ({ providerId, title, resolve, showHealthCheck = true }) => {
   const [open, setOpen] = useState(true)
   const { t } = useTranslation()
 
@@ -32,18 +30,6 @@ const PopupContainer: React.FC<Props> = ({ providerId, title, resolve, showHealt
     resolve(null)
   }
 
-  const ListComponent = useMemo(() => {
-    const type = providerType || (isPreprocessProviderId(providerId) ? 'preprocess' : 'llm')
-
-    switch (type) {
-      case 'preprocess':
-        return <DocPreprocessApiKeyList providerId={providerId as any} showHealthCheck={showHealthCheck} />
-      case 'llm':
-      default:
-        return <LlmApiKeyList providerId={providerId} showHealthCheck={showHealthCheck} />
-    }
-  }, [providerId, showHealthCheck, providerType])
-
   return (
     <Modal
       title={title || t('settings.provider.api.key.list.title')}
@@ -54,7 +40,7 @@ const PopupContainer: React.FC<Props> = ({ providerId, title, resolve, showHealt
       centered
       width={600}
       footer={null}>
-      {ListComponent}
+      <LlmApiKeyList providerId={providerId} showHealthCheck={showHealthCheck} />
     </Modal>
   )
 }

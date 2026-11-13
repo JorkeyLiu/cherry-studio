@@ -49,7 +49,6 @@ import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
-import preprocess from './preprocess'
 import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
   RETENTION_EVICT,
@@ -77,7 +76,6 @@ const appReducer = combineReducers({
   shortcuts,
   knowledge,
   tabs,
-  preprocess,
   messages: newMessagesReducer,
   messageBlocks: messageBlocksReducer,
   inputTools: inputToolsReducer,
@@ -480,7 +478,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 228,
+    version: 229,
     transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',

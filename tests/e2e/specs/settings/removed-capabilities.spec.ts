@@ -1,10 +1,11 @@
 /**
- * Removed capabilities regression — MCP / external+provider-native websearch / global memory / OCR.
+ * Removed capabilities regression — MCP / external+provider-native websearch /
+ * global memory / OCR / document processing (PDF preprocess providers).
  *
- * User-authorized full removal; retained: MinerU document processing
- * (PreprocessSettings on the real `/settings/docprocess` route), model native
- * image input, knowledge base, inputbar native webpage context (Anthropic
- * webFetch_20260209 / Google urlContext), ordinary chat, old-data
+ * User-authorized full removal; retained: ordinary knowledge base ingestion,
+ * search, embedding, rerank and directory progress, model native image input,
+ * inputbar native webpage context (Anthropic webFetch_20260209 / Google
+ * urlContext), ordinary chat, remote-file Mistral upload, old-data
  * compatibility. No live network, no API keys, no user data, no manual
  * Electron launch — standard shared fixture only.
  *
@@ -12,21 +13,23 @@
  * - Source: current SettingsPage routes/menu, preload `window.api`, Redux
  *   slices, Inputbar tool registry ordering, Assistant type fields.
  * - Legacy/schema: pre-227 `persist:cherry-studio` payload (mcp/memory/
- *   websearch/ocr slices + assistant legacy fields + inputTools legacy keys,
- *   `_persist.version=225`) run through migrations 226+227 on same-profile
- *   relaunch (227 strips the ocr slice; 226 strips the other three).
+ *   websearch/ocr/preprocess slices + legacy knowledge-base preprocess fields
+ *   + assistant legacy fields + inputTools legacy keys, `_persist.version=225`)
+ *   run through migrations 226..229 on same-profile relaunch (227 strips the
+ *   ocr slice; 226 strips the other three; 229 strips document preprocess).
  * - Authority: ordinary chat SQLite `chat.db` via `queryChatDbViaElectron` at
  *   the runtime path; mock request logs prove the AI SDK actually sent the
  *   request; Redux/UI alone are never persistence proof.
  *
  * Coverage (cross UI / persistence / IPC / native request):
  * 1. Settings menu + docprocess route + assistant popup + inputbar absence;
- *    preload/store expose none of the four capabilities; preprocess/MinerU,
- *    urlContext + knowledge retained (real DOM, not source grep).
+ *    preload/store expose none of the five capabilities; urlContext + ordinary
+ *    knowledge settings retained (real DOM, not source grep).
  * 2. Same-profile legacy persist injection → relaunchSameProfile proves
- *    migration 227 strips all four slices, retains urlContext + preprocess
- *    MinerU configs, and the same profile still sends ordinary chat (real
- *    input + mock request + ChatDb).
+ *    migrations 226..229 strip all five slices (including the document
+ *    preprocess provider keys), scrub legacy knowledge-base preprocess fields,
+ *    retain urlContext + ordinary knowledge configuration, and the same
+ *    profile still sends ordinary chat (real input + mock request + ChatDb).
  * 3. Mock Anthropic provider + real urlContext toggle + URL send proves the
  *    final Anthropic payload carries the native web_fetch tool and no
  *    web_search/MCP/memory/OCR injection; mock reply only (no real fetch claim).
@@ -159,7 +162,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
   //    preload+store; urlContext + knowledge retained)
   // ---------------------------------------------------------------------------
 
-  test('removed settings entries absent, capability surfaces stripped, docprocess retained without OCR, urlContext+knowledge retained', async ({
+  test('removed settings entries absent, capability surfaces stripped, no docprocess surface, urlContext+knowledge retained', async ({
     mainWindow
   }) => {
     const page = mainWindow
@@ -169,21 +172,21 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
       await expect(page.getByTestId('settings-page')).toBeVisible({ timeout: 15000 })
     })
 
-    await test.step('settings menu has no MCP/websearch/memory/OCR href entries (structural, not translation)', async () => {
+    await test.step('settings menu has no MCP/websearch/memory/OCR/docprocess href entries (structural, not translation)', async () => {
       // Accurate locators: structural hrefs on real <a> links + link roles.
       await expect(page.locator('a[href*="/settings/mcp"]')).toHaveCount(0)
       await expect(page.locator('a[href*="/settings/memory"]')).toHaveCount(0)
       await expect(page.locator('a[href*="/settings/websearch"]')).toHaveCount(0)
       await expect(page.locator('a[href*="/settings/ocr"]')).toHaveCount(0)
-      // Retention: the document-processing route keeps exactly one menu entry.
-      await expect(page.locator('a[href*="/settings/docprocess"]')).toHaveCount(1)
+      // The document-processing section is retired with its preprocess providers.
+      await expect(page.locator('a[href*="/settings/docprocess"]')).toHaveCount(0)
       // Exhaustive menu inventory: no settings link may point at removed routes.
       const hrefs = await page
         .locator('a[href*="/settings/"]')
         .evaluateAll((els) => els.map((el) => (el as HTMLAnchorElement).getAttribute('href') ?? ''))
       expect(hrefs.length).toBeGreaterThan(0)
       for (const href of hrefs) {
-        expect(href).not.toMatch(/\/settings\/(mcp|memory|websearch|ocr)/)
+        expect(href).not.toMatch(/\/settings\/(mcp|memory|websearch|ocr|docprocess)/)
       }
       // Role dimension: the settings menu renders real links; none carries a
       // removed accessible destination.
@@ -211,7 +214,8 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
           hasMcpSlice: typeof state.mcp !== 'undefined',
           hasMemorySlice: typeof state.memory !== 'undefined',
           hasWebsearchSlice: typeof state.websearch !== 'undefined',
-          hasOcrSlice: typeof state.ocr !== 'undefined'
+          hasOcrSlice: typeof state.ocr !== 'undefined',
+          hasPreprocessSlice: typeof state.preprocess !== 'undefined'
         }
       })
       expect(surfaces.hasMcpApi, `window.api must not expose mcp (keys: ${surfaces.apiKeys.join(',')})`).toBe(false)
@@ -222,42 +226,36 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
       expect(surfaces.hasMemorySlice, 'Redux must not retain memory slice').toBe(false)
       expect(surfaces.hasWebsearchSlice, 'Redux must not retain websearch slice').toBe(false)
       expect(surfaces.hasOcrSlice, 'Redux must not retain ocr slice').toBe(false)
+      expect(surfaces.hasPreprocessSlice, 'Redux must not retain preprocess slice').toBe(false)
     })
 
-    await test.step('real docprocess route retains preprocess/MinerU with no OCR surface (real DOM)', async () => {
-      // Real route confirmed in SettingsPage (`/settings/docprocess`): the
-      // document-processing entry point stays, only the OCR service goes.
+    await test.step('docprocess route renders no document-processing / preprocess surface (real DOM)', async () => {
+      // The route element is gone from SettingsPage: direct navigation lands on
+      // the settings shell with an unmatched child route, never the removed
+      // preprocess UI (locale-independent structural + DOM assertions, all
+      // locales: en + zh-cn + zh-tw).
       await page.evaluate(() => {
         window.location.hash = '#/settings/docprocess'
       })
-      await expect(page).toHaveURL(/.*#\/settings\/docprocess.*/, { timeout: 10000 })
       await expect(page.getByTestId('settings-page')).toBeVisible({ timeout: 15000 })
-      // OCR absence on the real rendered DOM (all locales: en + zh-cn +
-      // zh-tw), not a source grep: neither the OCR section title nor the OCR
-      // image-provider row may render. (PaddleOCR-as-preprocess is a separate
-      // provider surface and is never asserted absent here.)
+      await expect(page.locator('a[href*="/settings/docprocess"]')).toHaveCount(0)
+      // Neither the section title nor the provider row/select may render.
+      await expect(page.getByText(/文档处理|文件處理|Document Processing/i)).toHaveCount(0)
+      await expect(page.getByText(/文档处理服务商|文件處理供應商|Document Processing Provider/i)).toHaveCount(0)
+      await expect(page.getByText('MinerU', { exact: false })).toHaveCount(0)
+      await expect(page.getByText(/PaddleOCR|Doc2X|Mistral/i)).toHaveCount(0)
+      // OCR absence retained (previously covered here, now only the removal).
       await expect(page.getByText(/OCR\s*服|OCR service/i)).toHaveCount(0)
-      await expect(page.getByText(/OCR\s*服.{0,3}提供|OCR\s*服.{0,3}供應|OCR service provider/i)).toHaveCount(0)
-      // Preprocess retention on the real rendered DOM: the content-area
-      // provider row label (the menu shows only the section title) plus the
-      // default MinerU selection and a real select control.
-      await expect(page.getByText(/文档处理服务商|文件處理供應商|Document Processing Provider/i).first()).toBeVisible({
-        timeout: 15000
-      })
-      await expect(page.locator('.ant-select').first()).toBeVisible({ timeout: 15000 })
-      await expect(page.getByText('MinerU', { exact: false }).first()).toBeVisible({ timeout: 15000 })
-      // Redux oracle for the same retention: preprocess slice keeps MinerU.
+      // Redux oracle: the preprocess slice is not registered at all.
       const preprocess = await page.evaluate(() => {
         const s = (window as any).store.getState()
         return {
           retained: typeof s.preprocess !== 'undefined',
-          defaultProvider: s.preprocess?.defaultProvider ?? null,
-          providerIds: Array.isArray(s.preprocess?.providers) ? s.preprocess.providers.map((p: any) => p?.id) : []
+          sliceKeys: Object.keys(s)
         }
       })
-      expect(preprocess.retained, 'Redux must retain preprocess slice').toBe(true)
-      expect(preprocess.defaultProvider).toBe('mineru')
-      expect(preprocess.providerIds).toContain('mineru')
+      expect(preprocess.retained, 'Redux must not retain preprocess slice').toBe(false)
+      expect(preprocess.sliceKeys).not.toContain('preprocess')
     })
 
     await test.step('assistant popup exposes only prompt/model/knowledge_base tabs', async () => {
@@ -344,7 +342,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
   // 2. Legacy persist migration + same-profile ordinary chat authority
   // ---------------------------------------------------------------------------
 
-  test('pre-227 legacy persist migrates on same-profile relaunch; same profile still chats', async ({
+  test('pre-227 legacy persist migrates to version 229 on same-profile relaunch; same profile still chats', async ({
     electronApp,
     mainWindow,
     mockPort,
@@ -361,9 +359,10 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
     try {
       await test.step('inject pre-227 legacy persist payload (same key, old schema only)', async () => {
         // Same protected key `persist:cherry-studio`; only values mutate.
-        // Legacy schema: mcp/memory/websearch/ocr slices + assistant legacy
-        // fields + inputTools legacy ordering keys, pinned to version 225 so
-        // the terminal 226+227 scrubs run on the next launch.
+        // Legacy schema: mcp/memory/websearch/ocr/preprocess slices + legacy
+        // knowledge-base preprocess fields + assistant legacy fields +
+        // inputTools legacy ordering keys, pinned to version 225 so the
+        // terminal 226..229 scrubs run on the next launch.
         // Writer guard (mirrors disposable-seed-zip seedLocalStorageProjection
         // steps 0/3): PAUSE the app's own redux-persist writer and drain any
         // already-scheduled write BEFORE touching the wire — otherwise the live
@@ -436,6 +435,46 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
             ],
             imageProviderId: 'system'
           })
+          // Legacy document-preprocess slice (provider keys must not survive) +
+          // legacy knowledge-base/item fields (must be scrubbed while ordinary
+          // knowledge values survive).
+          writeSlice('preprocess', {
+            providers: [
+              { id: 'mineru', name: 'MinerU', apiKey: 'legacy-mineru-secret', apiHost: 'https://mineru.net' },
+              { id: 'paddleocr', name: 'PaddleOCR', apiKey: 'legacy-paddle-secret', apiHost: '' }
+            ],
+            defaultProvider: 'mineru'
+          })
+          const knowledgeSlice = parseSlice('knowledge') ?? { bases: [] }
+          knowledgeSlice.bases = [
+            {
+              id: 'legacy-kb',
+              name: 'Legacy KB',
+              model: { id: 'legacy-embed', provider: 'legacy-provider' },
+              chunkSize: 800,
+              chunkOverlap: 100,
+              threshold: 0.3,
+              items: [
+                {
+                  id: 'legacy-file-item',
+                  uniqueId: 'legacy-unique-1',
+                  uniqueIds: ['legacy-unique-1'],
+                  type: 'file',
+                  isPreprocessed: true,
+                  content: { id: 'legacy-file-1', name: 'legacy.pdf', ext: '.pdf' }
+                },
+                { id: 'legacy-note-item', type: 'note', content: 'legacy note', isPreprocessed: false }
+              ],
+              preprocessProvider: {
+                type: 'preprocess',
+                provider: { id: 'mineru', name: 'MinerU', apiKey: 'legacy-mineru-secret' }
+              },
+              created_at: 1,
+              updated_at: 2,
+              version: 1
+            }
+          ]
+          writeSlice('knowledge', knowledgeSlice)
           const persistRaw = outer._persist
           if (typeof persistRaw === 'string') {
             const persistObj = JSON.parse(persistRaw)
@@ -458,7 +497,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
               ? (JSON.parse(checkPersistRaw) as Record<string, unknown>).version
               : (checkPersistRaw as Record<string, unknown> | null)?.version
           if (checkVersion !== 225) throw new Error(`legacy persist version readback mismatch: ${String(checkVersion)}`)
-          for (const k of ['mcp', 'memory', 'websearch', 'ocr']) {
+          for (const k of ['mcp', 'memory', 'websearch', 'ocr', 'preprocess', 'knowledge']) {
             if (typeof checkOuter[k] !== 'string') throw new Error(`legacy slice ${k} missing on the wire`)
           }
           return {
@@ -492,7 +531,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
         )
       })
 
-      await test.step('close, relaunch same disposable profile, prove 227 scrub', async () => {
+      await test.step('close, relaunch same disposable profile, prove 226..229 scrub', async () => {
         // Close handshake triggers Main ↔ renderer save-data (`persistor.flush`
         // + ack). The writer is paused, so the flush is a no-op over the
         // already-queued keys and the injected legacy wire survives; the
@@ -520,14 +559,15 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
               typeof s.mcp === 'undefined' &&
               typeof s.memory === 'undefined' &&
               typeof s.websearch === 'undefined' &&
-              typeof s.ocr === 'undefined'
+              typeof s.ocr === 'undefined' &&
+              typeof s.preprocess === 'undefined'
             )
           },
           undefined,
           { timeout: 60000 }
         )
         // Effectiveness criterion 2 (wire): the persist writer has written back
-        // the migrated state — outer version 227. Poll, never immediate read.
+        // the migrated state — outer version 229. Poll, never immediate read.
         await rpage.waitForFunction(
           (key: string) => {
             try {
@@ -539,7 +579,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
                 typeof persistRaw === 'string'
                   ? (JSON.parse(persistRaw) as Record<string, unknown>).version
                   : (((persistRaw as Record<string, unknown> | null)?.version ?? null) as unknown)
-              return version === 227
+              return version === 229
             } catch {
               return false
             }
@@ -548,9 +588,10 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
           { timeout: 60000 }
         )
         // Dual-state evidence (Redux + wire captured together): Redux stripped
-        // AND wire version 227 AND wire stripped jointly prove migration 227
-        // executed at runtime. No direct persistor reference is available from
-        // the spec; the polled Redux/wire states are the existing surfaces.
+        // AND wire version 229 AND wire stripped jointly prove migrations
+        // 226..229 executed at runtime. No direct persistor reference is
+        // available from the spec; the polled Redux/wire states are the existing
+        // surfaces.
         const scrub = await rpage.evaluate(() => {
           const s = (window as any).store.getState()
           const a = s.assistants.assistants[0] ?? {}
@@ -560,6 +601,7 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
           let wireHasMemory = false
           let wireHasWebsearch = false
           let wireHasOcr = false
+          let wireHasPreprocess = false
           try {
             const outer = JSON.parse(raw)
             const persistRaw = (outer as Record<string, unknown>)._persist
@@ -571,25 +613,38 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
             wireHasMemory = typeof (outer as Record<string, unknown>).memory !== 'undefined'
             wireHasWebsearch = typeof (outer as Record<string, unknown>).websearch !== 'undefined'
             wireHasOcr = typeof (outer as Record<string, unknown>).ocr !== 'undefined'
+            wireHasPreprocess = typeof (outer as Record<string, unknown>).preprocess !== 'undefined'
           } catch {
             version = null
           }
+          const legacyBase = (s.knowledge?.bases?.[0] ?? {}) as Record<string, any>
           return {
             version,
             wireHasMcp,
             wireHasMemory,
             wireHasWebsearch,
             wireHasOcr,
+            wireHasPreprocess,
+            wireHasMineruSecret: raw.includes('legacy-mineru-secret'),
+            wireHasPaddleSecret: raw.includes('legacy-paddle-secret'),
             rehydrated: (s._persist as { rehydrated?: unknown } | undefined)?.rehydrated ?? null,
             reduxVersion: (s._persist as { version?: unknown } | undefined)?.version ?? null,
             hasMcpSlice: typeof s.mcp !== 'undefined',
             hasMemorySlice: typeof s.memory !== 'undefined',
             hasWebsearchSlice: typeof s.websearch !== 'undefined',
             hasOcrSlice: typeof s.ocr !== 'undefined',
-            preprocess: {
-              retained: typeof s.preprocess !== 'undefined',
-              defaultProvider: s.preprocess?.defaultProvider ?? null,
-              providerIds: Array.isArray(s.preprocess?.providers) ? s.preprocess.providers.map((p: any) => p?.id) : []
+            hasPreprocessSlice: typeof s.preprocess !== 'undefined',
+            knowledgeBase: {
+              hasPreprocessProvider: Object.prototype.hasOwnProperty.call(legacyBase, 'preprocessProvider'),
+              chunkSize: legacyBase.chunkSize ?? null,
+              chunkOverlap: legacyBase.chunkOverlap ?? null,
+              threshold: legacyBase.threshold ?? null,
+              itemPreprocessedFlags: Array.isArray(legacyBase.items)
+                ? legacyBase.items.map((i: any) => (i?.isPreprocessed === undefined ? 'absent' : i.isPreprocessed))
+                : [],
+              itemUniqueIds: Array.isArray(legacyBase.items)
+                ? legacyBase.items.map((i: any) => i?.uniqueId ?? null)
+                : []
             },
             assistant: {
               enableWebSearch: (a as Record<string, unknown>).enableWebSearch,
@@ -603,27 +658,36 @@ test.describe('Removed capabilities regression (MCP / websearch / memory / OCR)'
           }
         })
         expect(scrub.rehydrated).toBe(true)
-        expect(scrub.reduxVersion).toBe(227)
-        expect(scrub.version).toBe(227)
+        expect(scrub.reduxVersion).toBe(229)
+        expect(scrub.version).toBe(229)
         expect(scrub.wireHasMcp).toBe(false)
         expect(scrub.wireHasMemory).toBe(false)
         expect(scrub.wireHasWebsearch).toBe(false)
         expect(scrub.wireHasOcr).toBe(false)
+        expect(scrub.wireHasPreprocess).toBe(false)
         expect(scrub.hasMcpSlice).toBe(false)
         expect(scrub.hasMemorySlice).toBe(false)
         expect(scrub.hasWebsearchSlice).toBe(false)
         expect(scrub.hasOcrSlice).toBe(false)
+        expect(scrub.hasPreprocessSlice).toBe(false)
+        // Provider secrets of the retired feature are gone from the wire.
+        expect(scrub.wireHasMineruSecret).toBe(false)
+        expect(scrub.wireHasPaddleSecret).toBe(false)
         expect(scrub.assistant.enableWebSearch).toBeUndefined()
         expect(scrub.assistant.webSearchProviderId).toBeUndefined()
         expect(scrub.assistant.mcpMode).toBeUndefined()
         expect(scrub.assistant.mcpServers).toBeUndefined()
         expect(scrub.assistant.enableMemory).toBeUndefined()
-        // Retention: urlContext survives the scrub; preprocess MinerU configs
-        // are not damaged by the four-slice strip.
+        // Retention: urlContext survives the scrub; the legacy knowledge base
+        // keeps its ordinary ingestion/search configuration while the
+        // document-preprocess fields are scrubbed (no re-import needed).
         expect(scrub.assistant.enableUrlContext).toBe(true)
-        expect(scrub.preprocess.retained, 'migration 227 must retain preprocess slice').toBe(true)
-        expect(scrub.preprocess.defaultProvider).toBe('mineru')
-        expect(scrub.preprocess.providerIds).toContain('mineru')
+        expect(scrub.knowledgeBase.hasPreprocessProvider, 'base.preprocessProvider must be scrubbed').toBe(false)
+        expect(scrub.knowledgeBase.chunkSize).toBe(800)
+        expect(scrub.knowledgeBase.chunkOverlap).toBe(100)
+        expect(scrub.knowledgeBase.threshold).toBe(0.3)
+        expect(scrub.knowledgeBase.itemPreprocessedFlags).toEqual(['absent', 'absent'])
+        expect(scrub.knowledgeBase.itemUniqueIds).toEqual(['legacy-unique-1', null])
         const visible: unknown[] = Array.isArray((scrub.toolOrder as any)?.visible)
           ? (scrub.toolOrder as any).visible
           : []

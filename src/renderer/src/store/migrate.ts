@@ -31,7 +31,6 @@ import i18n from '@renderer/i18n'
 import { isSystemProvider, SystemProviderIds } from '@renderer/store/migrations/history/brandIds'
 import { qwenModel, SYSTEM_MODELS } from '@renderer/store/migrations/history/systemModels'
 import { SYSTEM_PROVIDERS } from '@renderer/store/migrations/history/systemProviders'
-import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
   ContextWindowAnchor,
@@ -436,14 +435,11 @@ function updateWebSearchProvider(state: any, provider: Record<string, unknown>) 
 }
 
 function addPreprocessProviders(state: any, id: string) {
-  if (state.preprocess && state.preprocess.providers) {
-    if (!state.preprocess.providers.find((p) => p.id === id)) {
-      const provider = defaultPreprocessProviders.find((p) => p.id === id)
-      if (provider) {
-        state.preprocess.providers.push({ ...provider })
-      }
-    }
-  }
+  // Removed feature: historical document-preprocess provider additions are
+  // no-ops. Any old persisted `preprocess` slice they would have extended is
+  // dropped wholesale by the terminal scrub migration (229).
+  void state
+  void id
 }
 
 const migrateConfig = {
@@ -4847,6 +4843,42 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 228 error', error as Error)
+      return state
+    }
+  },
+  '229': (state: any) => {
+    try {
+      // The document-preprocess feature is retired (user-authorized full
+      // removal): the slice is no longer registered, so the persisted
+      // `preprocess` slice is dropped wholesale — provider ids, api keys,
+      // hosts, models and the default provider selection all go with it.
+      // Legacy knowledge-base/ item fields that only fed that flow are
+      // scrubbed too, so old rows carry no provider secrets and no stale
+      // preprocessed flags. Ordinary knowledge fields (embedding/ rerank
+      // model refs, chunk size/ overlap, threshold, items, uniqueIds) are
+      // untouched, and generated markdown files on disk are never deleted.
+      // Idempotent and tolerant of a missing/ empty/ null knowledge base list.
+      const s = state
+      if (s && typeof s === 'object') {
+        delete s.preprocess
+        const bases = s.knowledge?.bases
+        if (Array.isArray(bases)) {
+          for (const base of bases) {
+            if (!base || typeof base !== 'object') continue
+            delete base.preprocessProvider
+            const items = base.items
+            if (Array.isArray(items)) {
+              for (const item of items) {
+                if (item && typeof item === 'object') delete item.isPreprocessed
+              }
+            }
+          }
+        }
+      }
+      logger.info('migrate 229 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 229 error', error as Error)
       return state
     }
   }

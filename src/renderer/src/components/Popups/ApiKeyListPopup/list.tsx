@@ -1,10 +1,8 @@
 import { DeleteIcon } from '@renderer/components/Icons'
 import { StreamlineGoodHealthAndWellBeing } from '@renderer/components/Icons/SVGIcon'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { usePreprocessProvider } from '@renderer/hooks/usePreprocess'
 import { useProvider } from '@renderer/hooks/useProvider'
 import { SettingHelpText } from '@renderer/pages/settings'
-import type { PreprocessProviderId } from '@renderer/types'
 import type { ApiKeyWithStatus } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { Button, Card, Flex, List, Popconfirm, Space, Tooltip, Typography } from 'antd'
@@ -14,7 +12,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { isLlmProvider, useApiKeys } from './hook'
+import { useApiKeys } from './hook'
 import ApiKeyItem from './item'
 import type { ApiProvider, UpdateApiProviderFunc } from './types'
 
@@ -73,7 +71,7 @@ export const ApiKeyList: FC<ApiKeyListProps> = ({ provider, updateProvider, show
 
   const shouldAutoFocus = () => {
     if (provider.apiKey) return false
-    return isLlmProvider(provider) && provider.enabled
+    return provider.enabled
   }
 
   // 合并真实 keys 和临时新项
@@ -182,18 +180,8 @@ interface SpecificApiKeyListProps {
   showHealthCheck?: boolean
 }
 
-type DocPreprocessApiKeyListProps = SpecificApiKeyListProps & {
-  providerId: PreprocessProviderId
-}
-
 export const LlmApiKeyList: FC<SpecificApiKeyListProps> = ({ providerId, showHealthCheck = true }) => {
   const { provider, updateProvider } = useProvider(providerId)
-
-  return <ApiKeyList provider={provider} updateProvider={updateProvider} showHealthCheck={showHealthCheck} />
-}
-
-export const DocPreprocessApiKeyList: FC<DocPreprocessApiKeyListProps> = ({ providerId, showHealthCheck = true }) => {
-  const { provider, updateProvider } = usePreprocessProvider(providerId)
 
   return <ApiKeyList provider={provider} updateProvider={updateProvider} showHealthCheck={showHealthCheck} />
 }

@@ -2025,8 +2025,6 @@
     "search": "Search knowledge base",
     "search_placeholder": "Enter text to search",
     "settings": {
-      "preprocessing": "Preprocessing",
-      "preprocessing_tooltip": "Preprocess uploaded files",
       "title": "Knowledge Base Settings"
     },
     "sitemap_added": "Added successfully",
@@ -2040,8 +2038,6 @@
     "status_failed": "Failed",
     "status_new": "Added",
     "status_pending": "Pending",
-    "status_preprocess_completed": "Preprocessing Completed",
-    "status_preprocess_failed": "Preprocessing Failed",
     "status_processing": "Processing",
     "subtitle_file": "subtitle file",
     "threshold": "Matching threshold",
@@ -4991,18 +4987,6 @@
     },
     "title": "Settings",
     "tool": {
-      "preprocess": {
-        "paddleocr": {
-          "aistudio_access_token": "Access token of AI Studio Community",
-          "api_url": "API URL",
-          "api_url_label": "Obtain Access Token and API URL",
-          "paddleocr_url_label": "PaddleOCR Official Website"
-        },
-        "provider": "Document Processing Provider",
-        "provider_placeholder": "Choose a document processing provider",
-        "title": "Document Processing",
-        "tooltip": "In Settings -> Tools, set a document processing service provider. Document processing can effectively improve the retrieval performance of complex format documents and scanned documents."
-      },
       "title": "Other Settings"
     },
     "translate": {

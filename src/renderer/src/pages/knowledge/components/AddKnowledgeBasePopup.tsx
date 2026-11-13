@@ -29,12 +29,7 @@ const PopupContainer: React.FC<PopupContainerProps> = ({ title, resolve }) => {
   const [open, setOpen] = useState(true)
   const { t } = useTranslation()
   const { addKnowledgeBase } = useKnowledgeBases()
-  const {
-    newBase,
-    setNewBase,
-    handlers,
-    providerData: { selectedDocPreprocessProvider, docPreprocessSelectOptions }
-  } = useKnowledgeBaseForm()
+  const { newBase, setNewBase, handlers } = useKnowledgeBaseForm()
 
   const onOk = async () => {
     if (!newBase.name?.trim()) {
@@ -78,14 +73,7 @@ const PopupContainer: React.FC<PopupContainerProps> = ({ title, resolve }) => {
     {
       key: 'advanced',
       label: t('settings.advanced.title'),
-      panel: (
-        <AdvancedSettingsPanel
-          newBase={newBase}
-          selectedDocPreprocessProvider={selectedDocPreprocessProvider}
-          docPreprocessSelectOptions={docPreprocessSelectOptions}
-          handlers={handlers}
-        />
-      )
+      panel: <AdvancedSettingsPanel newBase={newBase} handlers={handlers} />
     }
   ]
 

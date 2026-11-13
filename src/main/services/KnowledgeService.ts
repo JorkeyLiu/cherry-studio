@@ -25,9 +25,7 @@ import { loggerService } from '@logger'
 import Embeddings from '@main/knowledge/embedjs/embeddings/Embeddings'
 import { addFileLoader } from '@main/knowledge/embedjs/loader'
 import { NoteLoader } from '@main/knowledge/embedjs/loader/noteLoader'
-import PreprocessProvider from '@main/knowledge/preprocess/PreprocessProvider'
 import Reranker from '@main/knowledge/reranker/Reranker'
-import { fileStorage } from '@main/services/FileStorage'
 import { windowService } from '@main/services/WindowService'
 import { getDataPath } from '@main/utils'
 import { getAllFiles, sanitizeFilename } from '@main/utils/file'
@@ -319,7 +317,7 @@ class KnowledgeService {
     ragApplication: RAGApplication,
     options: KnowledgeBaseAddItemOptionsNonNullableAttribute
   ): LoaderTask {
-    const { base, item, forceReload, userId } = options
+    const { base, item, forceReload } = options
     const file = item.content as FileMetadata
 
     const loaderTask: LoaderTask = {
@@ -327,36 +325,21 @@ class KnowledgeService {
         {
           state: LoaderTaskItemState.PENDING,
           task: async () => {
-            try {
-              // Add preprocessing logic
-              const fileToProcess: FileMetadata = await this.preprocessing(file, base, item, userId)
-
-              // Use processed file for loading
-              return addFileLoader(ragApplication, fileToProcess, base, forceReload)
-                .then((result) => {
-                  loaderTask.loaderDoneReturn = result
-                  return result
-                })
-                .catch((e) => {
-                  logger.error(`Error in addFileLoader for ${file.name}: ${e}`)
-                  const errorResult: LoaderReturn = {
-                    ...KnowledgeService.ERROR_LOADER_RETURN,
-                    message: e.message,
-                    messageSource: 'embedding'
-                  }
-                  loaderTask.loaderDoneReturn = errorResult
-                  return errorResult
-                })
-            } catch (e: any) {
-              logger.error(`Preprocessing failed for ${file.name}: ${e}`)
-              const errorResult: LoaderReturn = {
-                ...KnowledgeService.ERROR_LOADER_RETURN,
-                message: e.message,
-                messageSource: 'preprocess'
-              }
-              loaderTask.loaderDoneReturn = errorResult
-              return errorResult
-            }
+            return addFileLoader(ragApplication, file, base, forceReload)
+              .then((result) => {
+                loaderTask.loaderDoneReturn = result
+                return result
+              })
+              .catch((e) => {
+                logger.error(`Error in addFileLoader for ${file.name}: ${e}`)
+                const errorResult: LoaderReturn = {
+                  ...KnowledgeService.ERROR_LOADER_RETURN,
+                  message: e.message,
+                  messageSource: 'embedding'
+                }
+                loaderTask.loaderDoneReturn = errorResult
+                return errorResult
+              })
           },
           evaluateTaskWorkload: { workload: file.size }
         }
@@ -756,43 +739,6 @@ class KnowledgeService {
 
   public getStorageDir = (): string => {
     return this.storageDir
-  }
-
-  private preprocessing = async (
-    file: FileMetadata,
-    base: KnowledgeBaseParams,
-    item: KnowledgeItem,
-    userId: string
-  ): Promise<FileMetadata> => {
-    let fileToProcess: FileMetadata = file
-    if (base.preprocessProvider && file.ext.toLowerCase() === '.pdf') {
-      try {
-        const provider = new PreprocessProvider(base.preprocessProvider.provider, userId)
-        const filePath = fileStorage.getFilePathById(file)
-        // Check if file has already been preprocessed
-        const alreadyProcessed = await provider.checkIfAlreadyProcessed(file)
-        if (alreadyProcessed) {
-          logger.debug(`File already preprocess processed, using cached result: ${filePath}`)
-          return alreadyProcessed
-        }
-
-        // Execute preprocessing
-        logger.debug(`Starting preprocess processing for scanned PDF: ${filePath}`)
-        const { processedFile } = await provider.parseFile(item.id, file)
-        fileToProcess = processedFile
-        const mainWindow = windowService.getMainWindow()
-        mainWindow?.webContents.send('file-preprocess-finished', {
-          itemId: item.id
-        })
-      } catch (err) {
-        logger.error(`Preprocess processing failed: ${err}`)
-        // If preprocessing fails, use original file
-        // fileToProcess = file
-        throw new Error(`Preprocess processing failed: ${err}`)
-      }
-    }
-
-    return fileToProcess
   }
 }
 

@@ -38,8 +38,6 @@ const { Dragger } = Upload
 
 interface KnowledgeContentProps {
   selectedBase: KnowledgeBase
-  progressMap: Map<string, number>
-  preprocessMap: Map<string, boolean>
 }
 
 const fileTypes = [...bookExts, ...thirdPartyApplicationExts, ...documentExts, ...textExts]
@@ -49,7 +47,7 @@ const getDisplayTime = (item: KnowledgeItem) => {
   return dayjs(timestamp).format('MM-DD HH:mm')
 }
 
-const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase, progressMap, preprocessMap }) => {
+const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   const { t } = useTranslation()
   const [windowHeight, setWindowHeight] = useState(window.innerHeight)
   const { onSelectFile, selecting } = useFiles({ extensions: fileTypes })
@@ -128,16 +126,6 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase, progressMap, 
     }
   }
 
-  const showPreprocessIcon = (item: KnowledgeItem) => {
-    if (base.preprocessProvider && item.isPreprocessed !== false) {
-      return true
-    }
-    if (!base.preprocessProvider && item.isPreprocessed === true) {
-      return true
-    }
-    return false
-  }
-
   return (
     <ItemContainer>
       <ItemHeader>
@@ -203,18 +191,6 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase, progressMap, 
                         <FlexAlignCenter>
                           {item.uniqueId && (
                             <Button type="text" icon={<RefreshIcon />} onClick={() => refreshItem(item)} />
-                          )}
-                          {showPreprocessIcon(item) && (
-                            <StatusIconWrapper>
-                              <StatusIcon
-                                sourceId={item.id}
-                                base={base}
-                                getProcessingStatus={getProcessingStatus}
-                                type="file"
-                                isPreprocessed={preprocessMap.get(item.id) || item.isPreprocessed || false}
-                                progress={progressMap.get(item.id)}
-                              />
-                            </StatusIconWrapper>
                           )}
                           <StatusIconWrapper>
                             <StatusIcon

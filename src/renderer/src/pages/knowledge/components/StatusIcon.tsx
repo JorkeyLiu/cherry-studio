@@ -14,17 +14,9 @@ interface StatusIconProps {
   getProcessingStatus: (sourceId: string) => ProcessingStatus | undefined
   type: string
   progress?: number
-  isPreprocessed?: boolean
 }
 
-const StatusIcon: FC<StatusIconProps> = ({
-  sourceId,
-  base,
-  getProcessingStatus,
-  type,
-  progress = 0,
-  isPreprocessed
-}) => {
+const StatusIcon: FC<StatusIconProps> = ({ sourceId, base, getProcessingStatus, type, progress = 0 }) => {
   const { t } = useTranslation()
   const status = getProcessingStatus(sourceId)
   const item = base.items.find((item) => item.id === sourceId)
@@ -34,13 +26,6 @@ const StatusIcon: FC<StatusIconProps> = ({
   return useMemo(() => {
     if (!status) {
       if (item?.uniqueId) {
-        if (isPreprocessed && item.type === 'file') {
-          return (
-            <Tooltip title={t('knowledge.status_preprocess_completed')} placement="left">
-              <CheckCircleOutlined style={{ color: '#52c41a' }} />
-            </Tooltip>
-          )
-        }
         return (
           <Tooltip title={t('knowledge.status_embedding_completed')} placement="left">
             <CheckCircleOutlined style={{ color: '#52c41a' }} />
@@ -86,7 +71,7 @@ const StatusIcon: FC<StatusIconProps> = ({
       default:
         return null
     }
-  }, [status, item?.uniqueId, item?.type, t, isPreprocessed, errorText, type, progress])
+  }, [status, item?.uniqueId, t, errorText, type, progress])
 }
 
 const StatusDot = styled.div<{ $status: 'pending' | 'processing' | 'new' }>`

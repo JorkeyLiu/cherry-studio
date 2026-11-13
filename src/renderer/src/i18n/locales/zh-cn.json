@@ -2025,8 +2025,6 @@
     "search": "搜索知识库",
     "search_placeholder": "输入查询内容",
     "settings": {
-      "preprocessing": "预处理",
-      "preprocessing_tooltip": "使用 OCR 预处理上传的文件",
       "title": "知识库设置"
     },
     "sitemap_added": "添加成功",
@@ -2040,8 +2038,6 @@
     "status_failed": "失败",
     "status_new": "已添加",
     "status_pending": "等待中",
-    "status_preprocess_completed": "预处理完成",
-    "status_preprocess_failed": "预处理失败",
     "status_processing": "处理中",
     "subtitle_file": "字幕文件",
     "threshold": "匹配度阈值",
@@ -4991,18 +4987,6 @@
     },
     "title": "设置",
     "tool": {
-      "preprocess": {
-        "paddleocr": {
-          "aistudio_access_token": "星河社区访问令牌",
-          "api_url": "API URL",
-          "api_url_label": "获取访问令牌及API URL",
-          "paddleocr_url_label": "PaddleOCR 官网"
-        },
-        "provider": "文档处理服务商",
-        "provider_placeholder": "选择一个文档处理服务商",
-        "title": "文档处理",
-        "tooltip": "在设置 -> 工具中设置文档处理服务商，文档处理可以有效提升复杂格式文档与扫描版文档的检索效果"
-      },
       "title": "其他设置"
     },
     "translate": {

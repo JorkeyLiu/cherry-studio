@@ -34,20 +34,11 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   )
   const [activeKey, setActiveKey] = useState('files')
   const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map())
-  const [preprocessMap, setPreprocessMap] = useState<Map<string, boolean>>(new Map())
 
   const providerName = getProviderName(base?.model)
 
   useEffect(() => {
     const handlers = [
-      window.electron.ipcRenderer.on('file-preprocess-finished', (_, { itemId }) => {
-        setPreprocessMap((prev) => new Map(prev).set(itemId, true))
-      }),
-
-      window.electron.ipcRenderer.on('file-preprocess-progress', (_, { itemId, progress }) => {
-        setProgressMap((prev) => new Map(prev).set(itemId, progress))
-      }),
-
       window.electron.ipcRenderer.on('directory-processing-percent', (_, { itemId, percent }) => {
         logger.debug('[Progress] Directory:', itemId, percent)
         setProgressMap((prev) => new Map(prev).set(itemId, percent))
@@ -64,7 +55,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
       title: t('files.title'),
       icon: activeKey === 'files' ? <Book size={16} color="var(--color-primary)" /> : <Book size={16} />,
       items: fileItems,
-      content: <KnowledgeFiles selectedBase={selectedBase} progressMap={progressMap} preprocessMap={preprocessMap} />,
+      content: <KnowledgeFiles selectedBase={selectedBase} />,
       show: true
     },
 

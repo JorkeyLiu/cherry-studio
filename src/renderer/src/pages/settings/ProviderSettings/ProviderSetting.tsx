@@ -157,8 +157,7 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
 
     await ApiKeyListPopup.show({
       providerId: provider.id,
-      title: `${fancyProviderName} ${t('settings.provider.api.key.list.title')}`,
-      providerType: 'llm'
+      title: `${fancyProviderName} ${t('settings.provider.api.key.list.title')}`
     })
   }
 

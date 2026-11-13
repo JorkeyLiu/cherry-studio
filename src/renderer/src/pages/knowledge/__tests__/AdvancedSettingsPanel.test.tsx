@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => {
           'knowledge.chunk_overlap': '分块重叠',
           'knowledge.threshold': '检索相似度阈值',
           'knowledge.chunk_size_change_warning': '避免修改这个高级设置。',
-          'settings.tool.preprocess.title': '文档预处理',
           'models.rerank_model': '重排模型',
           'settings.models.empty': '未选择'
         }
@@ -24,7 +23,6 @@ const mocks = vi.hoisted(() => {
       handleChunkSizeChange: vi.fn(),
       handleChunkOverlapChange: vi.fn(),
       handleThresholdChange: vi.fn(),
-      handleDocPreprocessChange: vi.fn(),
       handleRerankModelChange: vi.fn()
     }
   }
@@ -58,16 +56,6 @@ vi.mock('antd', () => ({
       disabled={disabled}
       style={style}
     />
-  ),
-  Select: ({ value, onChange, options, placeholder }: any) => (
-    <select value={value} onChange={(e) => onChange(e.target.value)} data-testid="select">
-      <option value="">{placeholder}</option>
-      {options?.map((opt: any) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
   )
 }))
 
@@ -126,9 +114,7 @@ describe('AdvancedSettingsPanel', () => {
 
   describe('basic rendering', () => {
     it('should match snapshot', () => {
-      const { container } = render(
-        <AdvancedSettingsPanel newBase={mockBase} handlers={mocks.handlers} docPreprocessSelectOptions={[]} />
-      )
+      const { container } = render(<AdvancedSettingsPanel newBase={mockBase} handlers={mocks.handlers} />)
 
       expect(container.firstChild).toMatchSnapshot()
     })
@@ -136,7 +122,7 @@ describe('AdvancedSettingsPanel', () => {
 
   describe('handlers', () => {
     it('should call handlers when values are changed', () => {
-      render(<AdvancedSettingsPanel newBase={mockBase} handlers={mocks.handlers} docPreprocessSelectOptions={[]} />)
+      render(<AdvancedSettingsPanel newBase={mockBase} handlers={mocks.handlers} />)
 
       const chunkSizeInput = screen.getByLabelText('分块大小')
       fireEvent.change(chunkSizeInput, { target: { value: '600' } })

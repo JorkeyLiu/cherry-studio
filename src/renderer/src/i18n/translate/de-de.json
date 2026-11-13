@@ -1976,8 +1976,6 @@
     "search": "Wissensdatenbank durchsuchen",
     "search_placeholder": "Suchanfrage eingeben",
     "settings": {
-      "preprocessing": "Vorverarbeitung",
-      "preprocessing_tooltip": "OCR zur Vorverarbeitung hochgeladener Dateien verwenden",
       "title": "Wissensdatenbank-Einstellungen"
     },
     "sitemap_added": "Erfolgreich hinzugefügt",
@@ -1991,8 +1989,6 @@
     "status_failed": "Fehlgeschlagen",
     "status_new": "Hinzugefügt",
     "status_pending": "Wartend",
-    "status_preprocess_completed": "Vorverarbeitung abgeschlossen",
-    "status_preprocess_failed": "Vorverarbeitung fehlgeschlagen",
     "status_processing": "In Bearbeitung",
     "subtitle_file": "Untertiteldatei",
     "threshold": "Übereinstimmungsschwelle",
@@ -4913,18 +4909,6 @@
     },
     "title": "Einstellungen",
     "tool": {
-      "preprocess": {
-        "paddleocr": {
-          "aistudio_access_token": "Zugriffstoken der AI Studio Community",
-          "api_url": "API-URL",
-          "api_url_label": "Zugriffstoken und API-URL abrufen",
-          "paddleocr_url_label": "Offizielle Website von PaddleOCR"
-        },
-        "provider": "Dokumentverarbeitungsanbieter",
-        "provider_placeholder": "Einen Dokumentverarbeitungsanbieter auswählen",
-        "title": "Dokumentverarbeitung",
-        "tooltip": "Setzen Sie den Dokumentverarbeitungsanbieter in den Einstellungen -> Tools, um die Suche nach komplexen Formatdokumenten und gescannten Dokumenten zu verbessern"
-      },
       "title": "Weitere Einstellungen"
     },
     "translate": {

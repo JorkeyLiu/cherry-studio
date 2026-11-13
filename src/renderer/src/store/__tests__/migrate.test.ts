@@ -2425,4 +2425,133 @@ describe('store migrations', () => {
       expect(migrated.settings.exportPath === undefined || migrated.settings.exportPath === null).toBe(true)
     })
   })
+
+  describe('migration 229: document-preprocess removal scrub (slice + legacy knowledge fields)', () => {
+    const makeState = () => ({
+      preprocess: {
+        providers: [
+          { id: 'mineru', name: 'MinerU', apiKey: 'secret-mineru-key', apiHost: 'https://mineru.net' },
+          { id: 'paddleocr', name: 'PaddleOCR', apiKey: 'secret-paddle-token', apiHost: 'https://paddle.example' }
+        ],
+        defaultProvider: 'mineru'
+      },
+      knowledge: {
+        bases: [
+          {
+            id: 'kb1',
+            name: 'KB',
+            model: { id: 'emb-1', provider: 'p1' },
+            rerankModel: { id: 're-1', provider: 'p1' },
+            chunkSize: 1000,
+            chunkOverlap: 200,
+            threshold: 0.4,
+            documentCount: 3,
+            version: 1,
+            preprocessProvider: {
+              type: 'preprocess',
+              provider: { id: 'mineru', name: 'MinerU', apiKey: 'secret-mineru-key' }
+            },
+            items: [
+              {
+                id: 'item-file',
+                uniqueId: 'u1',
+                uniqueIds: ['u1'],
+                type: 'file',
+                isPreprocessed: true,
+                processingStatus: 'completed'
+              },
+              { id: 'item-note', type: 'note', isPreprocessed: false }
+            ]
+          }
+        ]
+      },
+      assistants: {
+        assistants: [{ id: 'a1', knowledge_bases: [{ id: 'kb1' }] }],
+        assistantDefaults: { knowledge_bases: [] }
+      },
+      settings: { chunkSize: 1024 },
+      _persist: { version: 228, rehydrated: false }
+    })
+
+    it('deletes the preprocess slice with every provider secret', async () => {
+      const migrated: any = await migrate(makeState() as any, 229)
+
+      expect(migrated.preprocess).toBeUndefined()
+      expect(JSON.stringify(migrated)).not.toContain('secret-mineru-key')
+      expect(JSON.stringify(migrated)).not.toContain('secret-paddle-token')
+    })
+
+    it('scrubs legacy base/item preprocess fields and keeps ordinary knowledge values', async () => {
+      const migrated: any = await migrate(makeState() as any, 229)
+      const base = migrated.knowledge.bases[0]
+
+      expect(base.preprocessProvider).toBeUndefined()
+      expect(JSON.stringify(base)).not.toContain('secret-mineru-key')
+      expect(base.items[0].isPreprocessed).toBeUndefined()
+      expect(base.items[1].isPreprocessed).toBeUndefined()
+      // Ordinary knowledge/ingestion state is untouched, so an existing base
+      // keeps working without re-import.
+      expect(base.model).toEqual({ id: 'emb-1', provider: 'p1' })
+      expect(base.rerankModel).toEqual({ id: 're-1', provider: 'p1' })
+      expect(base.chunkSize).toBe(1000)
+      expect(base.chunkOverlap).toBe(200)
+      expect(base.threshold).toBe(0.4)
+      expect(base.documentCount).toBe(3)
+      expect(base.items[0].uniqueId).toBe('u1')
+      expect(base.items[0].uniqueIds).toEqual(['u1'])
+      expect(base.items[0].processingStatus).toBe('completed')
+      expect(base.items[1].type).toBe('note')
+      expect(migrated.assistants.assistants[0].knowledge_bases).toEqual([{ id: 'kb1' }])
+      expect(migrated.settings.chunkSize).toBe(1024)
+    })
+
+    it('is idempotent', async () => {
+      const once: any = await migrate(makeState() as any, 229)
+      const twice: any = await migrate(once, 229)
+
+      expect(twice.preprocess).toBeUndefined()
+      expect(twice.knowledge.bases[0].items[0].isPreprocessed).toBeUndefined()
+      expect(JSON.stringify(twice)).not.toContain('secret-mineru-key')
+    })
+
+    it('tolerates a missing slice and missing/empty/null knowledge containers', async () => {
+      const noSlice: any = await migrate({ settings: {}, _persist: { version: 228 } } as any, 229)
+      expect(noSlice.preprocess).toBeUndefined()
+
+      const emptyKnowledge: any = await migrate({ knowledge: { bases: [] }, _persist: { version: 228 } } as any, 229)
+      expect(emptyKnowledge.knowledge.bases).toEqual([])
+
+      const noBases: any = await migrate({ knowledge: {}, _persist: { version: 228 } } as any, 229)
+      expect(noBases.knowledge).toEqual({})
+
+      const nullBases: any = await migrate({ knowledge: { bases: null }, _persist: { version: 228 } } as any, 229)
+      expect(nullBases.knowledge.bases).toBeNull()
+
+      // createMigrate short-circuits a null root state; 229 must not throw.
+      const nullState: any = await migrate(null as any, 229)
+      expect(nullState).toBeUndefined()
+    })
+
+    it('92 → 229 runs the whole chain and ends without any document-preprocess surface', async () => {
+      const state = {
+        translate: {},
+        assistants: { assistants: [], assistantDefaults: {} },
+        llm: { providers: [], settings: {} },
+        settings: {},
+        inputTools: { toolOrder: { visible: [], hidden: [] } },
+        preprocess: { providers: [{ id: 'mineru', apiKey: 'secret-mineru-key' }], defaultProvider: 'mineru' },
+        knowledge: { bases: [{ id: 'kb1', items: [{ id: 'i1', type: 'file', isPreprocessed: true }] }] },
+        _persist: { version: 92, rehydrated: false }
+      }
+      const migrated: any = await migrate(state as any, 229)
+
+      expect(migrated.preprocess).toBeUndefined()
+      expect(JSON.stringify(migrated)).not.toContain('secret-mineru-key')
+      const base = migrated.knowledge.bases[0]
+      expect(base.preprocessProvider).toBeUndefined()
+      for (const item of base.items) {
+        expect(item.isPreprocessed).toBeUndefined()
+      }
+    })
+  })
 })

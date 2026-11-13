@@ -1,10 +1,9 @@
 import { getEmbeddingMaxContext } from '@renderer/config/embedings'
-import { usePreprocessProviders } from '@renderer/hooks/usePreprocess'
 import { useProviders } from '@renderer/hooks/useProvider'
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { KnowledgeBase } from '@renderer/types'
 import { nanoid } from 'nanoid'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 const createInitialKnowledgeBase = (): KnowledgeBase => ({
@@ -28,41 +27,22 @@ const createInitialKnowledgeBase = (): KnowledgeBase => ({
  *   - `handleEmbeddingModelChange`: Updates the embedding model.
  *   - `handleRerankModelChange`: Updates the rerank model.
  *   - `handleDimensionChange`: Updates the dimensions.
- *   - `handleDocPreprocessChange`: Updates the document preprocess provider.
  *   - `handleChunkSizeChange`: Updates the chunk size.
  *   - `handleChunkOverlapChange`: Updates the chunk overlap.
  *   - `handleThresholdChange`: Updates the threshold.
  * @param base - The base knowledge base to use as the initial state. If not provided, an empty base will be used.
  * @returns An object containing the new base state, a function to update the base, and handlers for various form actions.
- *          Also includes provider data for dropdown options and selected provider.
  */
 export const useKnowledgeBaseForm = (base?: KnowledgeBase) => {
   const { t } = useTranslation()
   const [newBase, setNewBase] = useState<KnowledgeBase>(base || createInitialKnowledgeBase())
   const { providers } = useProviders()
-  const { preprocessProviders } = usePreprocessProviders()
 
   useEffect(() => {
     if (base) {
       setNewBase(base)
     }
   }, [base])
-
-  const selectedDocPreprocessProvider = useMemo(
-    () => newBase.preprocessProvider?.provider,
-    [newBase.preprocessProvider]
-  )
-
-  const docPreprocessSelectOptions = useMemo(() => {
-    const preprocessOptions = {
-      label: t('settings.tool.preprocess.provider'),
-      title: t('settings.tool.preprocess.provider'),
-      options: preprocessProviders
-        .filter((p) => p.apiKey !== '' || ['mineru', 'open-mineru', 'paddleocr'].includes(p.id))
-        .map((p) => ({ value: p.id, label: p.name }))
-    }
-    return [preprocessOptions]
-  }, [preprocessProviders, t])
 
   const handleEmbeddingModelChange = useCallback(
     (value: string) => {
@@ -87,24 +67,6 @@ export const useKnowledgeBaseForm = (base?: KnowledgeBase) => {
   const handleDimensionChange = useCallback((value: number | null) => {
     setNewBase((prev) => ({ ...prev, dimensions: value || undefined }))
   }, [])
-
-  const handleDocPreprocessChange = useCallback(
-    (value: string) => {
-      const provider = preprocessProviders.find((p) => p.id === value)
-      if (!provider) {
-        setNewBase((prev) => ({ ...prev, preprocessProvider: undefined }))
-        return
-      }
-      setNewBase((prev) => ({
-        ...prev,
-        preprocessProvider: {
-          type: 'preprocess',
-          provider
-        }
-      }))
-    },
-    [preprocessProviders]
-  )
 
   const handleChunkSizeChange = useCallback(
     (value: number | null) => {
@@ -140,18 +102,10 @@ export const useKnowledgeBaseForm = (base?: KnowledgeBase) => {
     handleEmbeddingModelChange,
     handleRerankModelChange,
     handleDimensionChange,
-    handleDocPreprocessChange,
     handleChunkSizeChange,
     handleChunkOverlapChange,
     handleThresholdChange
   }
 
-  const providerData = {
-    providers,
-    preprocessProviders,
-    selectedDocPreprocessProvider,
-    docPreprocessSelectOptions
-  }
-
-  return { newBase, setNewBase, handlers, providerData }
+  return { newBase, setNewBase, handlers }
 }

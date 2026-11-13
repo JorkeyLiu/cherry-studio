@@ -18,7 +18,6 @@ export type KnowledgeItem = {
   processingProgress?: number
   processingError?: string
   retryCount?: number
-  isPreprocessed?: boolean
 }
 
 export type KnowledgeFileItem = KnowledgeItem & {
@@ -98,38 +97,9 @@ export interface KnowledgeBase {
   chunkOverlap?: number
   threshold?: number
   rerankModel?: Model
-  // topN?: number
-  // preprocessing?: boolean
-  preprocessProvider?: {
-    type: 'preprocess'
-    provider: PreprocessProvider
-  }
 }
 
 export type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'failed'
-
-export const PreprocessProviderIds = {
-  doc2x: 'doc2x',
-  mistral: 'mistral',
-  mineru: 'mineru',
-  'open-mineru': 'open-mineru',
-  paddleocr: 'paddleocr'
-} as const
-
-export type PreprocessProviderId = keyof typeof PreprocessProviderIds
-
-export const isPreprocessProviderId = (id: string): id is PreprocessProviderId => {
-  return Object.hasOwn(PreprocessProviderIds, id)
-}
-
-export interface PreprocessProvider {
-  id: PreprocessProviderId
-  name: string
-  apiKey?: string
-  apiHost?: string
-  model?: string
-  options?: any
-}
 
 export type KnowledgeBaseParams = {
   id: string
@@ -139,11 +109,6 @@ export type KnowledgeBaseParams = {
   embedApiClient: ApiClient
   rerankApiClient?: ApiClient
   documentCount?: number
-  // preprocessing?: boolean
-  preprocessProvider?: {
-    type: 'preprocess'
-    provider: PreprocessProvider
-  }
 }
 
 export type KnowledgeReference = {
@@ -159,8 +124,4 @@ export interface KnowledgeSearchResult {
   pageContent: string
   score: number
   metadata: Record<string, any>
-}
-
-export interface PreprocessReadPdfResult {
-  numPages: number
 }

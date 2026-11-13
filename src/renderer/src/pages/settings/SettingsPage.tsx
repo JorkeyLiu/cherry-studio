@@ -2,7 +2,7 @@ import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
 import Scrollbar from '@renderer/components/Scrollbar'
 import ModelSettings from '@renderer/pages/settings/ModelSettings/ModelSettings'
 import { Divider as AntDivider } from 'antd'
-import { Cloud, Command, FileCode, HardDrive, Info, MonitorCog, Package, Server, Settings2 } from 'lucide-react'
+import { Cloud, Command, HardDrive, Info, MonitorCog, Package, Server, Settings2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
@@ -11,7 +11,6 @@ import styled from 'styled-components'
 import AboutSettings from './AboutSettings'
 import DataSettings from './DataSettings/DataSettings'
 import DisplaySettings from './DisplaySettings/DisplaySettings'
-import DocProcessSettings from './DocProcessSettings'
 import GeneralSettings from './GeneralSettings'
 import { ProviderList } from './ProviderSettings'
 import ShortcutSettings from './ShortcutSettings'
@@ -68,12 +67,6 @@ const SettingsPage: FC = () => {
               {t('apiServer.title')}
             </MenuItem>
           </MenuItemLink>
-          <MenuItemLink to="/settings/docprocess">
-            <MenuItem className={isRoute('/settings/docprocess')}>
-              <FileCode size={18} />
-              {t('settings.tool.preprocess.title')}
-            </MenuItem>
-          </MenuItemLink>
           <MenuItemLink to="/settings/shortcut">
             <MenuItem className={isRoute('/settings/shortcut')}>
               <Command size={18} />
@@ -93,7 +86,6 @@ const SettingsPage: FC = () => {
             <Route path="provider" element={<ProviderList />} />
             <Route path="model" element={<ModelSettings />} />
             <Route path="api-server" element={<ApiServerSettings />} />
-            <Route path="docprocess" element={<DocProcessSettings />} />
             <Route path="general/*" element={<GeneralSettings />} />
             <Route path="display" element={<DisplaySettings />} />
             <Route path="shortcut" element={<ShortcutSettings />} />

@@ -74,7 +74,7 @@ const makeBase = (overrides: Partial<KnowledgeBase> = {}): KnowledgeBase =>
 describe('KnowledgeService explicit-unconfigured embedding model', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetState.mockReturnValue({ preprocess: { providers: [] }, settings: {} })
+    mockGetState.mockReturnValue({ settings: {} })
     mockGetProviderByModel.mockImplementation(((model: { provider?: string } | undefined) => {
       if (!model) return undefined
       if (model.provider === 'emb-provider') return embeddingProvider

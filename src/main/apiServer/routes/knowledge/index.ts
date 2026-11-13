@@ -56,14 +56,6 @@ const knowledgeRouter = express.Router()
  *             provider:
  *               type: string
  *           description: Rerank model configuration
- *         preprocessProvider:
- *           type: object
- *           properties:
- *             type:
- *               type: string
- *             provider:
- *               type: string
- *           description: Preprocess provider configuration
  *         items:
  *           type: array
  *           items:

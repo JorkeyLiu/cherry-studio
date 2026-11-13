@@ -8,8 +8,8 @@
  * join keys only; Anthropic-protocol support follows `type === 'anthropic'`
  * plus the per-connection stored `anthropicApiHost`.
  *
- * Mistral preprocess and WebSearch/MCP domain ids live in their own
- * stores and are intentionally untouched here.
+ * Non-LLM provider domain stores (websearch/MCP, document preprocess) were
+ * retired together with their features; nothing brand-specific remains here.
  */
 
 export {}
