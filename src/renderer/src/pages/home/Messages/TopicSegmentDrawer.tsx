@@ -8,6 +8,8 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { COMPOSER_FLOATING_CONTROL_INSET_PX, COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
+
 interface TopicSegmentDrawerProps {
   topicId: string
 }
@@ -27,8 +29,6 @@ interface TopicSegmentDrawerProps {
  */
 const DRAWER_TRIGGER_Z_INDEX = 1004
 const DRAWER_POPOVER_Z_INDEX = 1005
-const TRIGGER_SIZE_PX = 24
-const TRIGGER_GAP_PX = 8
 
 /**
  * antd forwards this override to the tooltip layer at runtime, but its public
@@ -147,16 +147,18 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 }
 
 // Zero-paint, hit-transparent replica of the original in-flow trigger slot:
-// the `left`/`bottom` gaps come from the single spacing constant and the box is
-// the trigger's own size, so the portaled (fixed) trigger paints exactly where
-// the in-flow element used to sit. It carries no paint and no hit area.
+// the `left`/`bottom` gaps come from the shared composer floating control inset
+// and the box is the control's own size, so the portaled (fixed) trigger paints
+// exactly where the in-flow element used to sit. It carries no paint and no
+// hit area, and the same band is what the scroll content reserves as its tail
+// clearance (`composerFloatingBand`).
 const TriggerAnchor = styled.span`
   position: absolute;
-  left: ${TRIGGER_GAP_PX}px;
-  bottom: calc(100% + ${TRIGGER_GAP_PX}px);
+  left: ${COMPOSER_FLOATING_CONTROL_INSET_PX}px;
+  bottom: calc(100% + ${COMPOSER_FLOATING_CONTROL_INSET_PX}px);
   top: auto;
-  width: ${TRIGGER_SIZE_PX}px;
-  height: ${TRIGGER_SIZE_PX}px;
+  width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
   pointer-events: none;
 `
 
@@ -171,8 +173,8 @@ const TriggerWrapper = styled.div<{ $left: number; $top: number }>`
   display: flex;
   align-items: center;
   justify-content: center;
-  width: ${TRIGGER_SIZE_PX}px;
-  height: ${TRIGGER_SIZE_PX}px;
+  width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
   color: hsl(215, 32%, 48%);
 
   &:hover {

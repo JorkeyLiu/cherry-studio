@@ -504,7 +504,10 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             segment,
             segmentIsFirst: isFirst,
             segmentIsLast: isLast,
-            zeroFlow: collapsedWhole,
+            // Content-only classification: the group's HEADER ROW always
+            // occupies its own flow row, so this flag only says the body
+            // content is hidden, never that the run host is zero-height.
+            contentZeroFlow: collapsedWhole,
             bodyNode
           }
         })

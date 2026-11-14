@@ -5089,9 +5089,11 @@
       "confirm": "Are you sure you want to dissolve this group? Messages will not be deleted."
     },
     "dissolveAction": "Dissolve Group",
+    "expand": "Expand group",
     "fold": "Collapse group",
     "folded": "Collapsed",
     "foldedHint": "Expand to restore context",
+    "jumpToStart": "Jump to start",
     "merge": {
       "success": "Group merged successfully"
     },

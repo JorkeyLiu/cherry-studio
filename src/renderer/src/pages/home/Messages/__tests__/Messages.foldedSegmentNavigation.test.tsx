@@ -12,11 +12,12 @@
  * navigates its LABEL (presentation wins over the disappearing body).
  *
  * The mocked `MessageGroup`/`TopicSegmentLine` render no rows, so geometry
- * fixtures (rows and the real chrome DOM contract: a zero-height
- * `topic-segment-line` host wrapping a 24px `topic-segment-label`) are grafted
- * into the live `#messages` host — the same technique the reading-anchor and
- * selection-follow suites use. Host-visibility is never asserted: the host is
- * an out-of-flow track, only the label has a real box.
+ * fixtures (rows and the real chrome DOM contract: the group's in-flow 32px
+ * `topic-segment-group` header row holding a 24px `topic-segment-label`) are
+ * grafted into the live `#messages` host — the same technique the
+ * reading-anchor and selection-follow suites use. The header row is a real
+ * normal-flow row in both states; navigation still measures the LABEL, the only
+ * painted box, never the row band.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import clipboardReducer from '@renderer/store/clipboard'
@@ -415,7 +416,7 @@ const cleanupRows = (): void => {
       el.remove()
     } catch {}
   }
-  for (const el of Array.from(document.querySelectorAll('[data-testid="topic-segment-line"]'))) {
+  for (const el of Array.from(document.querySelectorAll('[data-testid="topic-segment-group"]'))) {
     try {
       el.remove()
     } catch {}
@@ -441,21 +442,23 @@ const graftRow = (host: HTMLElement, id: string, top: number, height = 100): HTM
   host.appendChild(el)
   return el
 }
-
 /**
- * Grafts the production collapsed-chrome DOM contract: a zero-height
- * out-of-flow `topic-segment-line` host (its own box must never be trusted)
- * wrapping the `topic-segment-label` pill that carries the real painted box.
+ * Grafts the production collapsed-chrome DOM contract: the group's one in-flow
+ * header row (`topic-segment-group`, 32px occupancy in both states) holding the
+ * `topic-segment-label` pill that carries the real painted box. The label pill
+ * is the geometry; the row only carries the stable `data-segment-id`.
  */
 const graftSegmentChrome = (
   host: HTMLElement,
   options: { segmentId: string; folded: boolean; labelTop: number; labelHeight?: number }
 ): { chrome: HTMLElement; label: HTMLElement } => {
   const chrome = document.createElement('div')
-  chrome.setAttribute('data-testid', 'topic-segment-line')
+  chrome.setAttribute('data-testid', 'topic-segment-group')
   chrome.setAttribute('data-segment-id', options.segmentId)
   chrome.setAttribute('data-segment-folded', options.folded ? 'true' : 'false')
-  chrome.getBoundingClientRect = () => rect(options.labelTop, 0)
+  // The header row occupies its normal-flow 32px row in both states; the label
+  // pill inside it is what navigation measures.
+  chrome.getBoundingClientRect = () => rect(options.labelTop, 32)
   const label = document.createElement('div')
   label.setAttribute('data-testid', 'topic-segment-label')
   label.setAttribute('data-segment-folded', options.folded ? 'true' : 'false')

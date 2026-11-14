@@ -5089,9 +5089,11 @@
       "confirm": "確定要解散此消息組嗎？消息不會被刪除。"
     },
     "dissolveAction": "解散消息組",
+    "expand": "展開訊息組",
     "fold": "摺疊訊息組",
     "folded": "已摺疊",
     "foldedHint": "展開以恢復上下文",
+    "jumpToStart": "跳轉至起點",
     "merge": {
       "success": "消息組合併成功"
     },

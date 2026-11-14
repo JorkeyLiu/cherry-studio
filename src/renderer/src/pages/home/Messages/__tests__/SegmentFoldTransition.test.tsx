@@ -3,16 +3,19 @@
  *
  * The authority fold flag drives the body: the settled folded state mounts
  * nothing (zero-flow, no placeholder) except for the flow-terminal group, which
- * keeps the minimal label slot; a live flip plays one phased motion whose
+ * keeps the minimal label slot; a live flip plays one concurrent gesture whose
  * completion comes from the element's own animations (never a timer); a group
  * that mounts already folded never animates; and reduced motion settles
  * immediately.
  *
- * The phased schedule is the contract of this component: closing fades the body
- * out FIRST and only then shrinks the space, opening expands the space FIRST and
- * only then fades the body in. Both phases are armed from the four per-phase
- * CSS custom properties asserted below, so the phase order can never regress
- * into a single height clip that cuts readable rows at a moving boundary.
+ * One shared time base is the contract of this component: closing and opening
+ * both run the body's opacity and its space height concurrently from the four
+ * CSS custom properties asserted below. The fade leads (it lands inside the
+ * clip window, so readable rows are gone before the moving boundary reaches
+ * them) without waiting for the space to collapse first; the expansion fades
+ * the body in as the space opens, so there is no empty-box gap before the
+ * text. Serializing the two would bring back the disconnected
+ * fade-then-dead-space feel this motion exists to remove.
  *
  * Reversal continuity is the point of the `from` pair: a flip that reverses a
  * running motion starts from the height AND the opacity the body currently has
@@ -34,12 +37,9 @@ const originalGetBoundingClientRect = Object.getOwnPropertyDescriptor(HTMLElemen
 const originalGetComputedStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle')
 const nativeGetComputedStyle = window.getComputedStyle.bind(window)
 
-// A real folded group body is far taller than the reserved tail slot, so the
-// measured fixture must exceed it (a body already shorter than the slot settles
-// immediately instead of shrinking "up" to it).
+// A real group body is tall; the fixture must be measurable so a closing motion
+// has a genuine height to clip from.
 const MEASURED_BODY_HEIGHT = 240
-/** Reserved route-tail label slot the component documents (44px). */
-const TAIL_SLOT_HEIGHT = 44
 
 // Live box height the motion measures. Mutable so a test can emulate the body
 // being mid-motion when the inverse flip arrives.
@@ -54,16 +54,11 @@ function installAnimationHost() {
   boxHeight = MEASURED_BODY_HEIGHT
   liveOpacity = null
   // jsdom reports a zero-size box; the motion measures a real pixel height
-  // before it arms the clip, so give every box a height. The reserved tail slot
-  // reports its own reserved height.
+  // before it arms the clip, so give every box a height.
   Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
     configurable: true,
     value(this: HTMLElement) {
-      const height = this.dataset.segmentFoldTailSlot
-        ? TAIL_SLOT_HEIGHT
-        : this.dataset.segmentFoldPhase
-          ? boxHeight
-          : MEASURED_BODY_HEIGHT
+      const height = this.dataset.segmentFoldPhase ? boxHeight : MEASURED_BODY_HEIGHT
       return {
         x: 0,
         y: 0,
@@ -157,7 +152,6 @@ describe('SegmentFoldTransition', () => {
   it('mounts nothing for a group that is already folded (no restart animation)', () => {
     render(<SegmentFoldTransition folded renderBody={body} />)
     expect(screen.queryByTestId('body')).toBeNull()
-    expect(screen.queryByTestId('fold-tail-slot')).toBeNull()
     expect(animationArms).toHaveLength(0)
   })
 
@@ -178,30 +172,31 @@ describe('SegmentFoldTransition', () => {
     expect(screen.queryByTestId('body')).toBeNull()
   })
 
-  it('closing fades the body out before the space collapses (phase order + endpoints)', async () => {
+  it('closing runs the fade and the space collapse concurrently (one gesture + endpoints)', async () => {
     const { rerender } = render(<SegmentFoldTransition folded={false} renderBody={body} />)
     rerender(<SegmentFoldTransition folded renderBody={body} />)
 
-    // Fade starts immediately; the space motion is delayed until the body is
-    // effectively invisible, so no readable row is ever cut by a moving clip.
+    // Both motions start on the same frame. The fade is the shorter one so the
+    // readable rows are already gone before the clip boundary passes them, but
+    // it runs INSIDE the space window instead of owning a dead lead in front of
+    // it: one gesture, no visible pause between the body fading and the box
+    // collapsing.
+    const spaceDuration = Number.parseFloat(cssVar('--fold-space-duration'))
+    const spaceDelay = Number.parseFloat(cssVar('--fold-space-delay'))
     const fadeDuration = Number.parseFloat(cssVar('--fold-fade-duration'))
     const fadeDelay = Number.parseFloat(cssVar('--fold-fade-delay'))
-    const spaceDelay = Number.parseFloat(cssVar('--fold-space-delay'))
-    const spaceDuration = Number.parseFloat(cssVar('--fold-space-duration'))
-    expect(fadeDelay, 'the fade owns the first frame').toBe(0)
-    expect(spaceDelay, 'the space motion must not start on the first frame').toBeGreaterThan(0)
-    expect(spaceDelay, 'the space motion starts while the fade is finishing (one gesture)').toBeLessThanOrEqual(
-      fadeDuration
-    )
-    expect(spaceDelay, 'the body is effectively faded out before the space collapses').toBeGreaterThanOrEqual(
-      fadeDuration * 0.6
-    )
+    expect(fadeDelay, 'the fade starts with the gesture, not after it').toBe(0)
+    expect(spaceDelay, 'the space motion starts with the fade, not after it').toBe(0)
     expect(spaceDuration).toBeGreaterThan(0)
-    // The fade-only lead is a window in which the flow does not move at all:
-    // the rows above the group stay put only while the layout is changing, so a
-    // long lead measurably drifts them (100ms lead ≈ 3-4px, 40ms lead ≤1px of
-    // anchor drift on the row above). Keep it short — a fast fade is the point.
-    expect(fadeDuration, 'the fade-only lead stays short enough to hold the rows above').toBeLessThanOrEqual(60)
+    expect(fadeDuration, 'the fade lands inside the clip window so no readable row is cut').toBeLessThan(spaceDuration)
+    expect(
+      fadeDuration,
+      'the fade covers most of the gesture instead of leaving dead space at the end'
+    ).toBeGreaterThanOrEqual(spaceDuration * 0.5)
+    // Concurrent overlap: the two runs share the whole space window (there is no
+    // serial gap in which only one of them is moving).
+    const overlap = Math.min(spaceDelay + spaceDuration, fadeDelay + fadeDuration) - Math.max(spaceDelay, fadeDelay)
+    expect(overlap, 'fade and space move together, not one after the other').toBeGreaterThanOrEqual(spaceDuration * 0.6)
 
     // Height runs from the live box to zero; opacity runs from 1 to 0.
     expect(cssVar('--fold-height-from')).toBe(`${MEASURED_BODY_HEIGHT}px`)
@@ -226,7 +221,7 @@ describe('SegmentFoldTransition', () => {
     expect(screen.queryByTestId('body')).toBeNull()
   })
 
-  it('plays a space-then-fade enter motion when a folded group expands and settles into the plain body', async () => {
+  it('expands and fades the body in concurrently when a folded group opens and settles into the plain body', async () => {
     const { rerender } = render(<SegmentFoldTransition folded renderBody={body} />)
     expect(screen.queryByTestId('body')).toBeNull()
 
@@ -234,21 +229,21 @@ describe('SegmentFoldTransition', () => {
     expect(screen.getByTestId('body').textContent).toBe('include-folded/live')
     expect(motionHost().getAttribute('data-segment-fold-phase')).toBe('opening')
 
-    // The space opens first and the body stays invisible until it is open: the
-    // fade is delayed past most of the expansion, so no boundary is left when
-    // the text becomes visible.
+    // The space opens on the first frame and the body joins it a short step
+    // later, landing while the space is still opening: the content arrives
+    // during the motion instead of after an empty box has already been drawn.
     const spaceDelay = Number.parseFloat(cssVar('--fold-space-delay'))
     const spaceDuration = Number.parseFloat(cssVar('--fold-space-duration'))
     const fadeDelay = Number.parseFloat(cssVar('--fold-fade-delay'))
+    const fadeDuration = Number.parseFloat(cssVar('--fold-fade-duration'))
     expect(spaceDelay, 'the space motion owns the first frame').toBe(0)
-    expect(fadeDelay, 'the body must not become visible while the space is still moving').toBeGreaterThan(0)
-    expect(fadeDelay, 'the fade follows the expansion (one gesture, no dead time)').toBeGreaterThanOrEqual(
-      spaceDuration * 0.7
-    )
+    expect(fadeDelay, 'the fade joins the expansion, not after it').toBeGreaterThan(0)
+    expect(fadeDelay, 'the body must not pop in before the space has started opening').toBeLessThan(spaceDuration * 0.5)
+    const overlap = Math.min(spaceDelay + spaceDuration, fadeDelay + fadeDuration) - Math.max(spaceDelay, fadeDelay)
+    expect(overlap, 'fade and space move together, not one after the other').toBeGreaterThanOrEqual(spaceDuration * 0.6)
     expect(cssVar('--fold-height-from')).toBe('0px')
     expect(cssVar('--fold-height-to')).toBe(`${MEASURED_BODY_HEIGHT}px`)
-    // A settled fold starts hidden: the content must not be visible while the
-    // space opens.
+    // A settled fold starts hidden: the body fades in rather than popping visible.
     expect(cssVar('--fold-fade-from')).toBe('0')
     expect(cssVar('--fold-fade-to')).toBe('1')
 
@@ -370,46 +365,34 @@ describe('SegmentFoldTransition', () => {
     expect(screen.queryAllByTestId('body')).toHaveLength(0)
   })
 
-  it('reserves the minimal label slot for the flow-terminal folded group and animates into it', async () => {
-    // Settled route-tail fold: the group keeps exactly the documented slot (no
-    // body rows), so its collapsed pill stays inside the scrollport.
-    render(<SegmentFoldTransition folded tailSlot renderBody={body} />)
+  it('settles a folded group body to nothing at all (no slot, no reserved row)', () => {
+    // The group's header row is separate chrome and keeps its own in-flow row, so
+    // the body owns no exception: a settled fold mounts no rows and reserves no
+    // label slot anywhere in the flow.
+    render(<SegmentFoldTransition folded renderBody={body} />)
     expect(screen.queryByTestId('body')).toBeNull()
-    const slot = screen.getByTestId('fold-tail-slot')
-    expect(slot.getAttribute('aria-hidden')).toBe('true')
     expect(animationArms, 'an already folded group never replays a motion').toHaveLength(0)
   })
 
-  it('closes a route-tail fold onto the reserved slot instead of zero height', async () => {
-    const { rerender } = render(<SegmentFoldTransition folded={false} tailSlot renderBody={body} />)
-    rerender(<SegmentFoldTransition folded tailSlot renderBody={body} />)
+  it('closes the body to ZERO height, never to a reserved slot', async () => {
+    const { rerender } = render(<SegmentFoldTransition folded={false} renderBody={body} />)
+    rerender(<SegmentFoldTransition folded renderBody={body} />)
     expect(cssVar('--fold-height-from')).toBe(`${MEASURED_BODY_HEIGHT}px`)
-    expect(cssVar('--fold-height-to')).toBe(`${TAIL_SLOT_HEIGHT}px`)
+    expect(cssVar('--fold-height-to')).toBe('0px')
 
     await settleArm(0)
     expect(screen.queryByTestId('body')).toBeNull()
-    expect(screen.getByTestId('fold-tail-slot')).toBeTruthy()
   })
 
-  it('opens a route-tail fold from the reserved slot height (no jump on expand)', async () => {
-    const { rerender } = render(<SegmentFoldTransition folded tailSlot renderBody={body} />)
-    expect(screen.getByTestId('fold-tail-slot')).toBeTruthy()
-    rerender(<SegmentFoldTransition folded={false} tailSlot renderBody={body} />)
-    expect(cssVar('--fold-height-from')).toBe(`${TAIL_SLOT_HEIGHT}px`)
+  it('opens a folded body from zero height (no jump on expand)', async () => {
+    const { rerender } = render(<SegmentFoldTransition folded renderBody={body} />)
+    rerender(<SegmentFoldTransition folded={false} renderBody={body} />)
+    // A settled fold has no mounted box to measure, so the entrance starts at the
+    // settled zero height and measures the natural target before paint.
+    expect(cssVar('--fold-height-from')).toBe('0px')
     expect(cssVar('--fold-height-to')).toBe(`${MEASURED_BODY_HEIGHT}px`)
     await settleArm(0)
     expect(screen.getByTestId('body').textContent).toBe('visible/live')
-    expect(screen.queryByTestId('fold-tail-slot')).toBeNull()
-  })
-
-  it('drops the reserved slot when the group is no longer the flow terminal', () => {
-    const { rerender } = render(<SegmentFoldTransition folded tailSlot renderBody={body} />)
-    expect(screen.getByTestId('fold-tail-slot')).toBeTruthy()
-    // A newer message arrived below this group: the tail slot must leave with
-    // the terminal position, and the folded group returns to zero flow.
-    rerender(<SegmentFoldTransition folded tailSlot={false} renderBody={body} />)
-    expect(screen.queryByTestId('fold-tail-slot')).toBeNull()
-    expect(screen.queryByTestId('body')).toBeNull()
   })
 
   it('gives each direction its own animation identity so a reversal restarts its clock', () => {

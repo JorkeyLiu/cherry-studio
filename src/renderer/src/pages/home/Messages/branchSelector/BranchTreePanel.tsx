@@ -1,5 +1,6 @@
+import ConfirmPopover from '@renderer/components/ConfirmPopover'
 import type { TopicBranchWire } from '@renderer/services/db/types'
-import { Button, Input, Popconfirm, Tree } from 'antd'
+import { Button, Input, Tree } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { Pencil, Trash2 } from 'lucide-react'
 import type { Key, ReactNode } from 'react'
@@ -461,14 +462,8 @@ export const BranchTreePanel = ({
                     onMouseDown={(event) => event.stopPropagation()}>
                     <Pencil size={13} />
                   </RowIconButton>
-                  <Popconfirm
+                  <ConfirmPopover
                     title={t('chat.topics.branch.delete_confirm')}
-                    // Confirmation wording is the app's own, in the current
-                    // locale, like every other destructive confirmation: the
-                    // generic control never falls back to a popup library's
-                    // default language.
-                    okText={t('common.confirm')}
-                    cancelText={t('common.cancel')}
                     okButtonProps={{ danger: true }}
                     onOpenChange={onDeleteConfirmChange}
                     onConfirm={() => onConfirmDelete(key)}>
@@ -482,7 +477,7 @@ export const BranchTreePanel = ({
                       onMouseDown={(event) => event.stopPropagation()}>
                       <Trash2 size={13} />
                     </RowIconButton>
-                  </Popconfirm>
+                  </ConfirmPopover>
                 </>
               )}
             </RowActions>

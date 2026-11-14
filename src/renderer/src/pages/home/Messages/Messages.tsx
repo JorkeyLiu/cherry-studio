@@ -244,6 +244,7 @@ import {
   type RouteViewportSnapshot
 } from './routeViewportController'
 import SegmentFoldTransition, { presentationOnlyMessageElementRegistrar } from './SegmentFoldTransition'
+import { SegmentGroupPresentationProvider } from './SegmentGroupPresentation'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import { hasActiveStreamingReply, shouldPauseStreamingOnPrimaryMouseDown } from './streamingPause'
 import TopicSegmentLine from './TopicSegmentLine'
@@ -355,14 +356,14 @@ const measureRect = (element: Element | null | undefined): MeasuredRect | null =
 
 /**
  * Painted target of one topic-segment group: the collapsed/expanded label pill
- * inside the group's single chrome host.
+ * inside the group's single header row.
  *
- * The chrome host itself is an out-of-flow track (`position:absolute`, zero flow
- * height, and a ZERO bounding box once the group is collapsed), so it is never
- * the geometry: the label pill is the only element with a real box. The host is
- * matched by its stable `data-segment-id`, never by selector-interpolated ids.
- * Returns the connected label, or `null` when this group paints no header in the
- * mounted flow.
+ * The header row is the group's ONE in-flow chrome row (same 32px occupancy in
+ * both presentation states), but its own band is not the geometry: the label
+ * pill is the only painted, hit-testable element and the only thing navigation
+ * may land on. The row is matched by its stable `data-segment-id`, never by
+ * selector-interpolated ids. Returns the connected label, or `null` when this
+ * group paints no header in the mounted flow.
  */
 const findSegmentHeaderLabelElement = (
   container: HTMLElement | null | undefined,
@@ -370,7 +371,7 @@ const findSegmentHeaderLabelElement = (
 ): HTMLElement | null => {
   if (!container || !segmentId) return null
   try {
-    const hosts = container.querySelectorAll('[data-testid="topic-segment-line"]')
+    const hosts = container.querySelectorAll('[data-testid="topic-segment-group"]')
     for (const host of hosts) {
       if (!(host instanceof HTMLElement)) continue
       if (host.getAttribute('data-segment-id') !== segmentId) continue
@@ -940,7 +941,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           onSelectRoute={onSelectRoute}
         />
       ),
-      renderBody: ({ kind, stableGroupId, layerRunId, flowBottom, groupMessages }) => {
+      renderBody: ({ kind, stableGroupId, layerRunId, groupMessages }) => {
         // Folded groups: their member bodies leave the mounted flow entirely
         // (no placeholder row, no extra padding/margin). The run keeps its
         // entries, so the segment chrome still renders the collapsed label —
@@ -962,20 +963,17 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         // members, so the returning body is a real reading/selection target
         // from the first frame of the enter motion.
         //
-        // Route-tail label slot: only the group that ends the WHOLE message
-        // flow keeps a minimal reserved slot for its collapsed label, so the
-        // pill stays fully inside the scrollport instead of painting into the
-        // scroll host's bottom padding. The position is derived from the stable
-        // flow order (`flowBottom`: nothing is placed below this body) plus the
-        // authority window fact that no newer page is withheld (`hasMoreNewer`)
-        // — never from scroll position, a measured DOM box or the loaded-canvas
-        // page count. Every other folded group keeps the zero-flow seam.
+        // No reserved tail slot exists any more: every group — the flow
+        // terminal one included — owns a normal-flow header row in both
+        // presentation states (see TopicSegmentLine), so a collapsed group
+        // simply settles its BODY content to zero height below that row. The
+        // collapsed label therefore always stays inside the scrollport without
+        // opening a blank band, and no flow-order/window fact is needed here.
         const visibleMessages =
           foldedMessageIds.size > 0
             ? groupMessages.filter((message) => !foldedMessageIds.has(message.id))
             : groupMessages
         if (visibleMessages.length === 0 && groupMessages.length === 0) return null
-        const tailSlot = flowBottom && !hasMoreNewer && visibleMessages.length === 0
         return (
           <div
             style={{ position: 'relative' }}
@@ -983,7 +981,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
             data-stable-group-id={stableGroupId}
             data-layer-run-id={layerRunId}>
             <SegmentFoldTransition
-              tailSlot={tailSlot}
               folded={visibleMessages.length === 0}
               renderBody={({ includeFolded, inert }) => (
                 <MessageGroup
@@ -1021,21 +1018,29 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     // boundaries — see renderEditFlowNodes. Segment chrome (vertical rule +
     // label) is group/segment identity, not turn content, so it renders on
     // the run chrome host as a sibling of the interactive turn.
-    return renderEditFlowNodes({
-      nodes,
-      isEditMode,
-      onTurnClick: handleGroupClick,
-      renderSegmentChrome: ({ segment, isFirst, isLast, ownsLabel, stackIndex }) => (
-        <TopicSegmentLine
-          segment={segment}
-          isFirst={isFirst}
-          isLast={isLast}
-          ownsLabel={ownsLabel}
-          stackIndex={stackIndex}
-          messageCount={isFirst ? segment.messageCount : undefined}
-        />
-      )
-    })
+    // The group presentation registry is created ABOVE the run/selection
+    // composition: one manager (one shared ResizeObserver) owns every mounted
+    // group's measured rail span, so the composition below stays a pure
+    // projection (no per-run chrome, no per-run observer).
+    return (
+      <SegmentGroupPresentationProvider>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode,
+          onTurnClick: handleGroupClick,
+          // ONE invocation per mounted group: the group's own boundary/rail
+          // owner, rendered inside its elected header run host.
+          renderSegmentChrome: ({ segment, firstMounted, lastMounted, messageCount }) => (
+            <TopicSegmentLine
+              segment={segment}
+              isFirst={firstMounted}
+              isLast={lastMounted}
+              messageCount={messageCount}
+            />
+          )
+        })}
+      </SegmentGroupPresentationProvider>
+    )
   }
 
   return (

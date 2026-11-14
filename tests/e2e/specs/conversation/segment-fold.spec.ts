@@ -19,12 +19,18 @@
  *   flag's durable home) and across a relaunch with the same disposable profile.
  *
  * Locators (stable, presentation-only — no decorative classes):
- *   [data-testid="topic-segment-line"][data-segment-id][data-segment-folded]
- *   topic-segment-label / topic-segment-rule / topic-segment-fold
- *   topic-segment-expand / topic-segment-count / topic-segment-actions
- * The collapsed header is absolutely positioned chrome (zero flow height), so
- * these tests never assert a row band; they assert that content above the
- * group keeps its position and the fold's height delta lands below it.
+ *   [data-testid="topic-segment-group"][data-segment-id][data-segment-folded]
+ *   topic-segment-label / topic-segment-rail / topic-segment-rule /
+ *   topic-segment-fold / topic-segment-expand / topic-segment-count /
+ *   topic-segment-actions
+ *   ONE `topic-segment-group` row per mounted group: the group owns ONE
+ *     in-flow header row (same 32px occupancy folded and expanded), ONE
+ *     continuous `topic-segment-rail` spanning every mounted run of the group,
+ *     ONE `topic-segment-rule` mark and ONE menu. There is no per-run rail, no
+ *     continuation mark and no reserved tail slot.
+ * The header row is a REAL normal-flow row in both presentation states, so a
+ * folded group is not a zero-flow seam: its body settles to zero height below
+ * that row counter which keeps the collapsed label inside the scrollport.
  */
 
 import {
@@ -180,6 +186,10 @@ function buildSeedEntries(topicId: string, assistantId: string) {
  * segment is created BEFORE cold activation so its catalog reaches Redux only
  * through the production joint publication (loadTopicMessagesThunk).
  * Returns the folded group's member ids.
+ *
+ * `memberIds` defaults to the two rows of `foldTurn`. A caller that needs a
+ * group spanning SEVERAL turn runs (a later-rail fixture) passes its own
+ * consecutive member list.
  */
 async function seedFoldedCandidateTopic(
   page: any,
@@ -187,7 +197,8 @@ async function seedFoldedCandidateTopic(
   topicId: string,
   segmentId: string,
   segmentName: string,
-  foldTurn: number = FOLD_TURN
+  foldTurn: number = FOLD_TURN,
+  memberIds?: string[]
 ): Promise<string[]> {
   const name = `Segment Fold Test ${topicId}`
   const addOk = await page.evaluate(
@@ -216,7 +227,12 @@ async function seedFoldedCandidateTopic(
   expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
 
   const entries = buildSeedEntries(topicId, assistantId)
-  const memberIds = [msgId(topicId, turnIndices(foldTurn).user), msgId(topicId, turnIndices(foldTurn).assistant)]
+  // A caller-supplied consecutive member list wins; the default is the one
+  // turn's two rows. `members` (never the parameter) is what gets written.
+  const members = memberIds ?? [
+    msgId(topicId, turnIndices(foldTurn).user),
+    msgId(topicId, turnIndices(foldTurn).assistant)
+  ]
 
   const persisted = await page.evaluate(
     async ({ topicId, assistantId, name, entries, segmentId, segmentName, memberIds }: Record<string, any>) => {
@@ -233,13 +249,80 @@ async function seedFoldedCandidateTopic(
         return { ok: false, err: e instanceof Error ? e.message : String(e) }
       }
     },
-    { topicId, assistantId, name, entries, segmentId, segmentName, memberIds }
+    { topicId, assistantId, name, entries, segmentId, segmentName, memberIds: members }
   )
   expect(persisted.ok, `seed failed: ${(persisted as any).err}`).toBe(true)
   // Unfolded by default: the wire carries no folded property at all.
   expect((persisted as any).wire?.folded).toBeUndefined()
-  expect((persisted as any).wire?.messageCount).toBe(memberIds.length)
-  return memberIds
+  expect((persisted as any).wire?.messageCount).toBe(members.length)
+  return members
+}
+/**
+ * Seeds ONE topic that carries SEVERAL message groups in a single transaction
+ * (one `ensureTopic` + one `pasteMessagesToTopic` + one `upsertSegment` per
+ * group). An adjacency contract needs groups that really are neighbours in the
+ * mounted flow, which a single-group seed cannot express; seeding each group
+ * through its own `seedFoldedCandidateTopic` call would re-paste the same topic
+ * twice.
+ */
+async function seedAdjacentSegmentTopic(
+  page: any,
+  assistantId: string,
+  topicId: string,
+  groups: Array<{ segmentId: string; segmentName: string; memberIds: string[] }>
+): Promise<void> {
+  const name = `Segment Adjacency Test ${topicId}`
+  const addOk = await page.evaluate(
+    ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+      try {
+        ;(window as any).store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          }
+        })
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name }
+  )
+  expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+
+  const entries = buildSeedEntries(topicId, assistantId)
+  const persisted = await page.evaluate(
+    async ({ topicId, assistantId, name, entries, groups }: Record<string, any>) => {
+      try {
+        const api: any = (window as any).api.chatDb
+        const ensured = await api.ensureTopic({ topicId, assistantId, name })
+        if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
+        const pasted = await api.pasteMessagesToTopic({ topicId, entries })
+        if (!pasted || pasted.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
+        for (const group of groups as Array<{ segmentId: string; segmentName: string; memberIds: string[] }>) {
+          const upserted = await api.upsertSegment({
+            segmentId: group.segmentId,
+            topicId,
+            name: group.segmentName,
+            messageIds: group.memberIds
+          })
+          if (!upserted || upserted.ok !== true) return { ok: false, err: `upsert ${JSON.stringify(upserted)}` }
+        }
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name, entries, groups }
+  )
+  expect(persisted.ok, `seed failed: ${(persisted as any).err}`).toBe(true)
 }
 
 /**
@@ -301,7 +384,7 @@ interface SegmentChrome {
 async function readSegmentChrome(page: any, segmentId: string): Promise<SegmentChrome> {
   return page.evaluate((segmentId: string) => {
     const host = document.querySelector(
-      `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+      `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
     ) as HTMLElement | null
     const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
     const expand = host?.querySelector('[data-testid="topic-segment-expand"]') as HTMLElement | null
@@ -316,7 +399,13 @@ async function readSegmentChrome(page: any, segmentId: string): Promise<SegmentC
       countText:
         (host?.querySelector('[data-testid="topic-segment-count"]') as HTMLElement | null)?.textContent ?? null,
       hasActions: !!host?.querySelector('[data-testid="topic-segment-actions"]'),
-      ruleVisible: !!rule && (rule as HTMLElement).getBoundingClientRect().height > 0
+      // "Visible" also means "not faded out": a folded group keeps its rule
+      // mounted (the chrome fades with the body instead of unmounting ahead of
+      // it), so the settled folded rule is attached but fully transparent.
+      ruleVisible:
+        !!rule &&
+        (rule as HTMLElement).getBoundingClientRect().height > 0 &&
+        Number.parseFloat(window.getComputedStyle(rule as HTMLElement).opacity || '0') > 0
     }
   }, segmentId)
 }
@@ -377,7 +466,7 @@ async function readTailChrome(
     const container = document.getElementById('messages') as HTMLElement | null
     if (!container) return empty
     const host = document.querySelector(
-      `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+      `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
     ) as HTMLElement | null
     const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
     const fold = host?.querySelector('[data-testid="topic-segment-fold"]') as HTMLElement | null
@@ -627,7 +716,7 @@ async function placeGroupAtNonTailViewport(
         const container = document.getElementById('messages') as HTMLElement | null
         if (!container) return null
         const host = document.querySelector(
-          `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
         ) as HTMLElement | null
         const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
         const c = container.getBoundingClientRect()
@@ -900,7 +989,7 @@ async function expectTokenCount(page: any, current: number, max: number, timeout
 }
 
 function segmentHostSelector(segmentId: string): string {
-  return `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+  return `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
 }
 
 test.describe('Topic segment fold — participating context', () => {
@@ -945,7 +1034,7 @@ test.describe('Topic segment fold — participating context', () => {
     await expect(host, 'segment chrome must render for the seeded group').toBeVisible({ timeout: 15000 })
     // Exactly one chrome host per group: a group split across runs (a divider,
     // a differing turn id, or windowed membership) must not paint a second
-    // `topic-segment-line` host, a second label or a second fold write target.
+    // `topic-segment-group` host, a second label or a second fold write target.
     // A duplicate host breaks the strict-mode gesture locators below.
     await expect(host).toHaveCount(1)
     // One label per group (a divider-split or multi-run group must not duplicate
@@ -1000,7 +1089,7 @@ test.describe('Topic segment fold — participating context', () => {
       await page.waitForTimeout(40)
       hoverState = await page.evaluate((id: string) => {
         const host = document.querySelector(
-          `#messages [data-testid="topic-segment-line"][data-segment-id="${id}"]`
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${id}"]`
         ) as HTMLElement | null
         const target = host?.querySelector('[data-testid="topic-segment-fold"]') as HTMLElement | null
         const rule = host?.querySelector('[data-testid="topic-segment-rule"]') as HTMLElement | null
@@ -1017,7 +1106,7 @@ test.describe('Topic segment fold — participating context', () => {
     const hoverChrome = await page.evaluate(
       ({ segmentId, menubarSelector }: { segmentId: string; menubarSelector: string }) => {
         const host = document.querySelector(
-          `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
         ) as HTMLElement | null
         const target = host?.querySelector('[data-testid="topic-segment-fold"]') as HTMLElement | null
         const rule = host?.querySelector('[data-testid="topic-segment-rule"]') as HTMLElement | null
@@ -1076,8 +1165,11 @@ test.describe('Topic segment fold — participating context', () => {
 
     const collapsed: SegmentChrome = await readSegmentChrome(page, segmentId)
     expect(collapsed.folded).toBe(true)
-    expect(collapsed.hasRule, 'collapsed state has no left rule').toBe(false)
-    expect(collapsed.ruleVisible).toBe(false)
+    // The rule stays mounted and fades with the body: the chrome never switches
+    // ahead of the content it belongs to, so the folded state has a transparent
+    // (faded-out) rule rather than a missing one.
+    expect(collapsed.hasRule, 'collapsed state keeps the left rule mounted').toBe(true)
+    expect(collapsed.ruleVisible, 'the mounted rule is fully faded out while folded').toBe(false)
     expect(collapsed.hasFoldTarget, 'collapsed state has no fold hit target').toBe(false)
     expect(collapsed.hasActions, 'collapsed state hides hover rename/dissolve actions').toBe(false)
     expect(collapsed.hasExpandTarget, 'collapsed state exposes exactly one expand target').toBe(true)
@@ -1230,7 +1322,10 @@ test.describe('Topic segment fold — participating context', () => {
     expect(distanceFromBottom(placement.scroll), 'non-tail placement is away from the newest edge').toBeGreaterThan(100)
     const scrollBeforeFold = await readScroll(page)
 
-    // Collapsed chrome is out of flow: it contributes no row height of its own.
+    // The group header row is the chrome host, and it is a REAL normal-flow row:
+    // it owns the group's only flow contribution (a fixed compact row, identical
+    // in both presentation states) and must add no padding/margin/min-height on
+    // top of that row.
     const hostFlow = await host.evaluate((el) => {
       const cs = window.getComputedStyle(el as HTMLElement)
       return {
@@ -1243,7 +1338,7 @@ test.describe('Topic segment fold — participating context', () => {
         height: (el as HTMLElement).getBoundingClientRect().height
       }
     })
-    expect(hostFlow.position, 'chrome host is out of the message flow (absolute)').toBe('absolute')
+    expect(hostFlow.position, 'the group header is a real normal-flow row').toBe('relative')
     for (const value of [
       hostFlow.paddingTop,
       hostFlow.paddingBottom,
@@ -1264,10 +1359,12 @@ test.describe('Topic segment fold — participating context', () => {
       const rect = (el as HTMLElement).getBoundingClientRect()
       return { height: rect.height, minHeight: window.getComputedStyle(el as HTMLElement).minHeight }
     })
-    // Zero-height flow contribution at the seam: any painted pixels belong to
-    // the absolutely positioned label, never to a placeholder band between
-    // neighbouring messages.
-    expect(hostFolded.height, 'collapsed chrome takes no flow height').toBe(0)
+    // The group header row is the group's FIXED in-flow occupancy: the same
+    // compact row height in both presentation states. A collapsed group therefore
+    // keeps its header row instead of collapsing the seam to zero flow, and the
+    // body below it settles to zero height.
+    expect(hostFolded.height, 'the collapsed header keeps its normal-flow row').toBeGreaterThanOrEqual(30)
+    expect(hostFolded.height, 'the collapsed header keeps its normal-flow row').toBeLessThanOrEqual(34)
     expect(['', 'auto', 'normal', '0px']).toContain(hostFolded.minHeight)
 
     const [aboveAfter, belowAfter, labelAfter] = await settleRects(page, geometrySelectors)
@@ -1387,9 +1484,17 @@ test.describe('Topic segment fold — participating context', () => {
       tailBefore.scrollHeight - tailAfter.scrollHeight,
       'tail fold shrinks the scroll height by the removed rows'
     ).toBeGreaterThanOrEqual(40)
-    // No artificial band: the chrome host stays out of flow and no placeholder
-    // element is mounted to hold a blank gap open.
-    expect(tailHostHeight, 'collapsed chrome takes no flow height at the tail').toBe(0)
+    // The group header row is a real normal-flow row: it keeps its fixed compact
+    // height at the flow terminal too (identical to the expanded measurement
+    // taken above), and the collapsed body contributes exactly zero below it —
+    // no reserved tail slot and no placeholder element holding a blank gap open.
+    expect(tailHostHeight, 'the group header row keeps its fixed normal-flow height at the flow terminal').toBe(
+      hostFlow.height
+    )
+    expect(
+      hostFlow.height,
+      'the fixed group header row is the compact 32px row, folded and expanded alike'
+    ).toBeCloseTo(SEGMENT_GROUP_HEADER_ROW_PX, 0)
     await expect(page.locator('#messages [data-testid="folded-placeholder"]')).toHaveCount(0)
     await expect(page.locator('#messages [data-testid="folded-spacer"]')).toHaveCount(0)
     // The header is allowed to leave the viewport (a clamp is the honest outcome);
@@ -1456,7 +1561,8 @@ test.describe('Topic segment fold — participating context', () => {
       })
       const restored: SegmentChrome = await readSegmentChrome(page2, segmentId)
       expect(restored.folded, 'folded flag restored from the persisted catalog').toBe(true)
-      expect(restored.hasRule).toBe(false)
+      expect(restored.hasRule, 'folded state keeps the left rule mounted after relaunch').toBe(true)
+      expect(restored.ruleVisible, 'the restored rule is faded out while folded').toBe(false)
       expect(restored.hasExpandTarget).toBe(true)
       expect(restored.expandTitle).toContain(segmentName)
       expect(parseAuthorityCount(restored.countText), 'authority count survives the relaunch').toBe(
@@ -1503,300 +1609,159 @@ test.describe('Topic segment fold — participating context', () => {
   })
 
   /**
-   * Route-tail label slot (the one place a folded group is NOT zero-flow).
+   * Group-owned header row — the redesign contract.
    *
-   * The collapsed label pill is out-of-flow chrome painted downward from the
-   * group's seam. When that group ends the whole message flow, the seam IS the
-   * scroll end, so the pill used to land in the scroll host's bottom padding and
-   * get clipped (and could sit under the composer's Layers trigger). The
-   * product rule is: the flow-terminal folded group keeps ONE minimal reserved
-   * slot (pill height + a small safety gap) so the pill stays completely inside
-   * the scrollport and clickable; every other folded group keeps the zero-flow
-   * seam; consecutive terminal folds share that single slot and stay non-
-   * overlapping through the existing horizontal cascade.
+   * Every message group owns ONE in-flow header row that occupies the same
+   * normal-flow height in BOTH presentation states. The old route-tail exception
+   * (a folded group was zero-flow everywhere except for one reserved label slot
+   * at the flow end, with consecutive terminal folds spread by a horizontal
+   * cascade) is gone: collapsing settles the group BODY to zero height below
+   * that row, so the collapsed label always stays inside the scrollport without
+   * any reserved band. Two adjacent groups (one folded, one expanded) therefore
+   * keep separate, non-overlapping header rows and each keeps exactly one rail.
    */
-  test('route-terminal fold keeps exactly one minimal label slot inside the scrollport', async ({ mainWindow }) => {
+  test('adjacent folded and expanded groups keep one stable occupied header row each, with no tail slot and no cascade', async ({
+    mainWindow
+  }) => {
     test.setTimeout(300000)
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'INTEGRATED route-tail label slot: seeded 5-turn topic with two segments (the flow-terminal group + its adjacent older group) + real left-rule fold clicks → exactly ONE reserved tail slot, both collapsed labels fully inside the #messages scrollport, the pill clearing the previous visible row, the composer and the Layers trigger, and the expand target word never covered by that trigger; real expand → the slot disappears with the returning body while the non-terminal group keeps its zero-flow seam.'
+        'INTEGRATED group header occupancy: seeded 5-turn topic with two ADJACENT groups (seeded turns 3 and 4) + a real rail fold click on the older group → exactly two in-flow `topic-segment-group` rows at the fixed compact height, no `[data-segment-fold-tail-slot]`, no `data-segment-cascade`, the folded and expanded header rows vertically disjoint, the folded group’s header NODE identity unchanged across expand (one stable anchor), and one rail / one fold target per group.'
     })
 
     const page = mainWindow
     const assistantId = await prepareDisplayCountAndAssistant(page)
-    const topicId = `segfoldtail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const midSegmentId = `${topicId}-mid-seg`
-    const tailSegmentId = `${topicId}-tail-seg`
-    const midSegmentName = 'Fold Mid Group'
-    const tailSegmentName = 'Fold Tail Group'
-    console.log(`[E2E][SegmentFold] seeding terminal-slot topic ${topicId}`)
+    await seedContextCount(page, CONTEXT_COUNT, assistantId)
+    const topicId = `segfoldadjacent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const olderSegmentId = `${topicId}-older-seg`
+    const newerSegmentId = `${topicId}-newer-seg`
+    console.log(`[E2E][SegmentFold] seeding adjacent-group topic ${topicId}`)
 
-    const addOk = await page.evaluate(
-      ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
-        try {
-          ;(window as any).store.dispatch({
-            type: 'assistants/addTopic',
-            payload: {
-              assistantId,
-              topic: {
-                id: topicId,
-                assistantId,
-                name,
-                createdAt: '2026-01-01T00:00:00.000Z',
-                updatedAt: '2026-01-01T00:00:00.000Z'
-              }
-            }
-          })
-          return { ok: true }
-        } catch (e) {
-          return { ok: false, err: e instanceof Error ? e.message : String(e) }
-        }
-      },
-      { topicId, assistantId, name: `Segment Tail Slot ${topicId}` }
-    )
-    expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
-
-    const entries = buildSeedEntries(topicId, assistantId)
-    // turn 4 → mid group, turn 5 → the group that ends the flow.
-    const midMembers = [
-      msgId(topicId, turnIndices(SEED_TURNS - 1).user),
-      msgId(topicId, turnIndices(SEED_TURNS - 1).assistant)
-    ]
-    const tailMembers = [
-      msgId(topicId, turnIndices(SEED_TURNS).user),
-      msgId(topicId, turnIndices(SEED_TURNS).assistant)
-    ]
-    const persisted = await page.evaluate(
-      async ({
-        topicId,
-        assistantId,
-        name,
-        entries,
-        midSegmentId,
-        midSegmentName,
-        midMembers,
-        tailSegmentId,
-        tailSegmentName,
-        tailMembers
-      }: Record<string, any>) => {
-        try {
-          const api: any = (window as any).api.chatDb
-          const ensured = await api.ensureTopic({ topicId, assistantId, name })
-          if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
-          const pasted = await api.pasteMessagesToTopic({ topicId, entries })
-          if (!pasted || pasted.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
-          const mid = await api.upsertSegment({
-            segmentId: midSegmentId,
-            topicId,
-            name: midSegmentName,
-            messageIds: midMembers
-          })
-          if (!mid || mid.ok !== true) return { ok: false, err: `upsert mid ${JSON.stringify(mid)}` }
-          const tail = await api.upsertSegment({
-            segmentId: tailSegmentId,
-            topicId,
-            name: tailSegmentName,
-            messageIds: tailMembers
-          })
-          if (!tail || tail.ok !== true) return { ok: false, err: `upsert tail ${JSON.stringify(tail)}` }
-          return { ok: true }
-        } catch (e) {
-          return { ok: false, err: e instanceof Error ? e.message : String(e) }
-        }
-      },
-      {
-        topicId,
-        assistantId,
-        name: `Segment Tail Slot ${topicId}`,
-        entries,
-        midSegmentId,
-        midSegmentName,
-        midMembers,
-        tailSegmentId,
-        tailSegmentName,
-        tailMembers
-      }
-    )
-    expect(persisted.ok, `terminal-slot seed failed: ${(persisted as any).err}`).toBe(true)
-
+    // Seeded turns 3 and 4 are consecutive rows of the mounted flow, so the two
+    // groups are neighbours with no unsegmented content between them.
+    const olderMembers = [msgId(topicId, turnIndices(3).user), msgId(topicId, turnIndices(3).assistant)]
+    const newerMembers = [msgId(topicId, turnIndices(4).user), msgId(topicId, turnIndices(4).assistant)]
+    await seedAdjacentSegmentTopic(page, assistantId, topicId, [
+      { segmentId: olderSegmentId, segmentName: 'Adjacent Older Group', memberIds: olderMembers },
+      { segmentId: newerSegmentId, segmentName: 'Adjacent Newer Group', memberIds: newerMembers }
+    ])
     await activateTopicAndWaitForBootstrap(page, topicId, SEED_MESSAGES)
-    // The row above the terminal group that stays visible in both states.
-    const rowAboveTerminalId = msgId(topicId, turnIndices(SEED_TURNS - 2).assistant)
 
-    // Fold the adjacent older group first: it is NOT the flow terminal, so it
-    // must take no flow height and reserve no slot of its own.
-    await page.locator(`${segmentHostSelector(midSegmentId)} [data-testid="topic-segment-fold"]`).click()
-    await expect(page.locator(segmentHostSelector(midSegmentId))).toHaveAttribute('data-segment-folded', 'true', {
-      timeout: 15000
-    })
+    const olderHost = page.locator(segmentHostSelector(olderSegmentId))
+    const newerHost = page.locator(segmentHostSelector(newerSegmentId))
+    await expect(olderHost, 'the older group owns one header row').toHaveCount(1, { timeout: 15000 })
+    await expect(newerHost, 'the newer group owns one header row').toHaveCount(1, { timeout: 15000 })
+
+    // One real rail click folds the older group (no test-only dispatch).
+    const foldSelector = `${segmentHostSelector(olderSegmentId)} [data-testid="topic-segment-fold"]`
+    const foldReveal = await revealChromeInViewport(page, foldSelector)
+    expect(foldReveal?.inside ?? false, 'the rail fold target is revealable with real wheels').toBe(true)
+    await page.locator(foldSelector).click()
+    await expect(olderHost).toHaveAttribute('data-segment-folded', 'true', { timeout: 15000 })
     await settleFoldMotion(page)
+    await expect(newerHost).toHaveAttribute('data-segment-folded', 'false')
+
+    // No reserved tail slot, no horizontal cascade: the group owns its own row.
     await expect(page.locator('#messages [data-segment-fold-tail-slot]')).toHaveCount(0)
-    const midHostHeight = await page
-      .locator(segmentHostSelector(midSegmentId))
-      .evaluate((el) => (el as HTMLElement).getBoundingClientRect().height)
-    expect(midHostHeight, 'a non-terminal collapsed chrome host takes no flow height').toBe(0)
-
-    // Fold the flow-terminal group: exactly one minimal slot appears.
-    await page.locator(`${segmentHostSelector(tailSegmentId)} [data-testid="topic-segment-fold"]`).click()
-    await expect(page.locator(segmentHostSelector(tailSegmentId))).toHaveAttribute('data-segment-folded', 'true', {
-      timeout: 15000
-    })
-    await settleFoldMotion(page)
-    await settleTwoFrames(page)
+    await expect(page.locator('#messages [data-segment-cascade]')).toHaveCount(0)
+    // One continuous rail per group (never one per run).
+    await expect(page.locator('#messages [data-testid="topic-segment-rail"]')).toHaveCount(2)
 
     const geometry = await page.evaluate(
-      ({
-        tailSegmentId,
-        midSegmentId,
-        rowAboveTerminalId
-      }: {
-        tailSegmentId: string
-        midSegmentId: string
-        rowAboveTerminalId: string
-      }) => {
-        const box = (document.getElementById('messages') as HTMLElement | null)?.getBoundingClientRect() ?? null
-        const hostRect = (segmentId: string) => {
-          const host = document.querySelector(
-            `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+      ({ olderSegmentId, newerSegmentId }: { olderSegmentId: string; newerSegmentId: string }) => {
+        const pick = (segmentId: string) => {
+          const row = document.querySelector(
+            `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
           ) as HTMLElement | null
-          const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
-          const expand = host?.querySelector('[data-testid="topic-segment-expand"]') as HTMLElement | null
-          const labelRect = label?.getBoundingClientRect() ?? null
-          const expandRect = expand?.getBoundingClientRect() ?? null
+          if (!row) return null
+          const rect = row.getBoundingClientRect()
+          const rail = row.querySelector('[data-testid="topic-segment-rail"]') as HTMLElement | null
+          const fold = row.querySelector('[data-testid="topic-segment-fold"]') as HTMLElement | null
+          const expand = row.querySelector('[data-testid="topic-segment-expand"]') as HTMLElement | null
           return {
-            labelText: label?.textContent ?? '',
-            cascade: label?.getAttribute('data-segment-cascade') ?? null,
-            label: labelRect
-              ? {
-                  top: labelRect.top,
-                  bottom: labelRect.bottom,
-                  left: labelRect.left,
-                  right: labelRect.right,
-                  height: labelRect.height
-                }
-              : null,
-            expand: expandRect
-              ? {
-                  top: expandRect.top,
-                  bottom: expandRect.bottom,
-                  left: expandRect.left,
-                  right: expandRect.right
-                }
-              : null
+            top: rect.top,
+            bottom: rect.bottom,
+            height: rect.height,
+            railId: rail?.getAttribute('data-segment-id') ?? null,
+            hasFold: !!fold,
+            hasExpand: !!expand,
+            label: (() => {
+              const label = row.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
+              if (!label) return null
+              const l = label.getBoundingClientRect()
+              return { top: l.top, bottom: l.bottom, height: l.height }
+            })()
           }
         }
-        const slots = Array.from(document.querySelectorAll('#messages [data-segment-fold-tail-slot]')).map(
-          (element) => {
-            const rect = (element as HTMLElement).getBoundingClientRect()
-            return { top: rect.top, bottom: rect.bottom, height: rect.height, width: rect.width }
-          }
-        )
-        const rowAbove =
-          (
-            document.querySelector(`#messages [data-message-id="${rowAboveTerminalId}"]`) as HTMLElement | null
-          )?.getBoundingClientRect() ?? null
-        const composer = (document.getElementById('inputbar') as HTMLElement | null)?.getBoundingClientRect() ?? null
-        const trigger =
-          (
-            document.querySelector('[data-testid="topic-segment-drawer-trigger"]') as HTMLElement | null
-          )?.getBoundingClientRect() ?? null
-        const labels = Array.from(document.querySelectorAll('#messages [data-testid="topic-segment-label"]')).length
-        return {
-          box: box ? { top: box.top, bottom: box.bottom, height: box.height, left: box.left, right: box.right } : null,
-          slots,
-          labels,
-          tail: hostRect(tailSegmentId),
-          mid: hostRect(midSegmentId),
-          rowAbove: rowAbove ? { top: rowAbove.top, bottom: rowAbove.bottom } : null,
-          composer: composer ? { top: composer.top, bottom: composer.bottom } : null,
-          trigger: trigger
-            ? { top: trigger.top, bottom: trigger.bottom, left: trigger.left, right: trigger.right }
-            : null
-        }
+        return { older: pick(olderSegmentId), newer: pick(newerSegmentId) }
       },
-      { tailSegmentId, midSegmentId, rowAboveTerminalId }
+      { olderSegmentId, newerSegmentId }
     )
-    console.log(`[E2E][SegmentFold] route-tail slot geometry ${JSON.stringify(geometry)}`)
-
-    expect(geometry.box, 'the #messages scrollport must be measurable').not.toBeNull()
-    expect(geometry.labels, 'each collapsed group keeps exactly one label').toBe(2)
-    expect(geometry.slots, 'exactly ONE reserved tail slot exists for the whole flow').toHaveLength(1)
-    const slot = geometry.slots[0]
-    expect(slot.height, 'the reserved slot is one label height plus a small safety gap').toBeGreaterThanOrEqual(24)
-    expect(slot.height, 'the reserved slot never grows into a blank band').toBeLessThanOrEqual(48)
-    expect(slot.width, 'the reserved slot spans the body column').toBeGreaterThan(0)
-
-    // The collapsed pill is completely inside the scrollport (this is exactly
-    // what the previous zero-flow tail could not guarantee).
-    expect(geometry.tail.label, 'the terminal group must paint its collapsed label').not.toBeNull()
-    expect(geometry.tail.label!.top, 'the pill starts inside the scrollport').toBeGreaterThanOrEqual(
-      geometry.box!.top + 1
+    expect(geometry.older, 'the folded group still paints its header row').not.toBeNull()
+    expect(geometry.newer, 'the expanded group paints its header row').not.toBeNull()
+    // Fixed compact occupancy, identical in the collapsed and expanded state.
+    expect(geometry.older!.height).toBeGreaterThanOrEqual(30)
+    expect(geometry.older!.height).toBeLessThanOrEqual(34)
+    expect(geometry.newer!.height).toBeGreaterThanOrEqual(30)
+    expect(geometry.newer!.height).toBeLessThanOrEqual(34)
+    // Adjacent headers never overlap: each owns its own row.
+    const disjoint =
+      geometry.older!.bottom <= geometry.newer!.top + 0.5 || geometry.newer!.bottom <= geometry.older!.top + 0.5
+    expect(disjoint, 'adjacent group header rows must not overlap').toBe(true)
+    // Each group owns its own rail; the folded group offers no fold write,
+    // the expanded one does.
+    expect(geometry.older!.railId).toBe(olderSegmentId)
+    expect(geometry.newer!.railId).toBe(newerSegmentId)
+    expect(geometry.older!.hasFold).toBe(false)
+    expect(geometry.older!.hasExpand).toBe(true)
+    expect(geometry.newer!.hasFold).toBe(true)
+    // The collapsed label is complete inside its OWN header row: the row is the
+    // normal-flow occupant in both states, so the pill can never be pushed out of
+    // the row into a reserved tail band.
+    //
+    // Scrollport containment is deliberately NOT asserted here: the fold's intent
+    // capture keeps the header row (and the content above it) stationary, and this
+    // fixture folds with more removed body height than the room left toward the
+    // newest edge, so the viewport is honestly clamped there and the row can sit
+    // a few px above the scrollport edge (measured row top 71.48 vs box top
+    // 84.5). Reachability of the collapsed label through a real wheel gesture is
+    // asserted right below.
+    expect(geometry.older!.label, 'the folded group paints its label pill').not.toBeNull()
+    expect(geometry.older!.label!.height, 'the collapsed label keeps its 24px pill height').toBeCloseTo(24, 0)
+    expect(geometry.older!.label!.top, 'the collapsed label starts inside its own header row').toBeGreaterThanOrEqual(
+      geometry.older!.top - 0.5
     )
-    expect(geometry.tail.label!.bottom, 'the pill ends inside the scrollport (no clipped bottom)').toBeLessThanOrEqual(
-      geometry.box!.bottom - 1
-    )
-    expect(geometry.tail.label!.height, 'the pill keeps its own height').toBeGreaterThanOrEqual(20)
-
-    // No artificial blank: the pill sits within the reserved slot height of the
-    // scroll end, so the bottom padding stays the ordinary one.
-    const pillToScrollEnd = geometry.box!.bottom - geometry.tail.label!.bottom
-    expect(pillToScrollEnd, 'the tail pill is not pushed away from the scroll end').toBeLessThanOrEqual(
-      slot.height + 24
+    expect(geometry.older!.label!.bottom, 'the collapsed label ends inside its own header row').toBeLessThanOrEqual(
+      geometry.older!.bottom + 0.5
     )
 
-    // It never engages the previous visible message row.
-    expect(geometry.rowAbove, 'the row above the terminal group must stay mounted').not.toBeNull()
-    expect(
-      geometry.rowAbove!.bottom,
-      'the tail pill must sit below the previous message, not over it'
-    ).toBeLessThanOrEqual(geometry.tail.label!.top + 1)
-
-    // It never engages the composer or the Layers trigger, and the trigger
-    // icon (still the higher layer) never covers the expand target's word.
-    expect(geometry.composer, 'the composer must be measurable').not.toBeNull()
-    expect(geometry.tail.label!.bottom, 'the tail pill stays above the composer').toBeLessThanOrEqual(
-      geometry.composer!.top + 1
-    )
-    if (geometry.trigger) {
-      const trigger = geometry.trigger
-      const overlaps = (rect: { top: number; bottom: number; left: number; right: number }) =>
-        Math.min(rect.bottom, trigger.bottom) - Math.max(rect.top, trigger.top) > 0 &&
-        Math.min(rect.right, trigger.right) - Math.max(rect.left, trigger.left) > 0
-      expect(overlaps(geometry.tail.label!), 'the tail pill must not overlap the Layers trigger').toBe(false)
-      expect(geometry.tail.expand, 'the expand target must exist while folded').not.toBeNull()
-      expect(overlaps(geometry.tail.expand!), 'the trigger icon must not cover the expand target').toBe(false)
-    }
-
-    // Consecutive terminal folds share that one slot: coincident labels keep the
-    // existing horizontal cascade, so they stay distinguishable and never overlap.
-    expect(geometry.mid.label, 'the adjacent collapsed group keeps its own label').not.toBeNull()
-    expect(geometry.mid.label!.top, 'coincident collapsed labels share one seam').toBeCloseTo(
-      geometry.tail.label!.top,
-      0
-    )
-    expect(geometry.mid.cascade, 'coincident labels are cascaded, never stacked').not.toBe(geometry.tail.cascade)
-    expect(
-      Math.abs(geometry.mid.label!.left - geometry.tail.label!.left),
-      'the cascade keeps the two labels horizontally apart'
-    ).toBeGreaterThanOrEqual(100)
-
-    // ── Reverse: expanding the terminal group removes the slot with the body ─
-    await page.locator(`${segmentHostSelector(tailSegmentId)} [data-testid="topic-segment-expand"]`).click()
-    await expect(page.locator(segmentHostSelector(tailSegmentId))).toHaveAttribute('data-segment-folded', 'false', {
-      timeout: 15000
-    })
+    // The header NODE identity is stable across the fold: mark the node, expand
+    // through the group's own expand word, and compare.
+    await page.evaluate((segmentId: string) => {
+      ;(window as any).__segmentHeaderProbe = document.querySelector(
+        `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
+      )
+    }, olderSegmentId)
+    const expandSelector = `${segmentHostSelector(olderSegmentId)} [data-testid="topic-segment-expand"]`
+    const expandReveal = await revealChromeInViewport(page, expandSelector)
+    expect(expandReveal?.inside ?? false, 'the collapsed label is revealable with real wheels').toBe(true)
+    await page.locator(expandSelector).click()
+    await expect(olderHost).toHaveAttribute('data-segment-folded', 'false', { timeout: 15000 })
     await settleFoldMotion(page)
-    await settleTwoFrames(page)
-    await expect(page.locator('#messages [data-segment-fold-tail-slot]')).toHaveCount(0)
-    const tailRowsBack = await mountedMessageIds(page)
-    for (const id of tailMembers) expect(tailRowsBack, `expanded row ${id} must return to the flow`).toContain(id)
-    // The adjacent collapsed group is still zero-flow (nothing forced a band).
-    const midHostHeightAfter = await page
-      .locator(segmentHostSelector(midSegmentId))
-      .evaluate((el) => (el as HTMLElement).getBoundingClientRect().height)
-    expect(midHostHeightAfter, 'a non-terminal folded group keeps its zero-flow seam').toBe(0)
-    console.log('[E2E][SegmentFold] route-tail slot verified')
+    const identity = await page.evaluate((segmentId: string) => {
+      const header = document.querySelector(
+        `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
+      ) as HTMLElement | null
+      return {
+        sameNode: header === (window as any).__segmentHeaderProbe,
+        height: header?.getBoundingClientRect().height ?? null
+      }
+    }, olderSegmentId)
+    expect(identity.sameNode, 'the group header node survives the fold (one stable anchor)').toBe(true)
+    expect(identity.height).toBeGreaterThanOrEqual(30)
+    expect(identity.height).toBeLessThanOrEqual(34)
+    console.log('[E2E][SegmentFold] adjacent group header rows verified')
   })
 
   /**
@@ -1834,7 +1799,7 @@ test.describe('Topic segment fold — participating context', () => {
     const foldedMembers = await seedFoldedCandidateTopic(page, assistantId, topicId, segmentId, segmentName, 1)
     await activateTopicAndWaitForBootstrap(page, topicId, SEED_MESSAGES)
     await expect(
-      page.locator(`#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`)
+      page.locator(`#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`)
     ).toHaveCount(1, { timeout: 15000 })
 
     // Real left-rule fold click (never a dispatch): the group is folded by the
@@ -1854,7 +1819,7 @@ test.describe('Topic segment fold — participating context', () => {
       page.evaluate((segmentId: string) => {
         const container = document.getElementById('messages') as HTMLElement | null
         const host = document.querySelector(
-          `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
         ) as HTMLElement | null
         const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
         if (!container || !label) return null
@@ -1900,7 +1865,7 @@ test.describe('Topic segment fold — participating context', () => {
       (segmentId: string) => {
         const container = document.getElementById('messages') as HTMLElement | null
         const host = document.querySelector(
-          `#messages [data-testid="topic-segment-line"][data-segment-id="${segmentId}"]`
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
         ) as HTMLElement | null
         const label = host?.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
         if (!container || !label) return false
@@ -1924,21 +1889,25 @@ test.describe('Topic segment fold — participating context', () => {
     ).toBeLessThanOrEqual(afterState.box.top + 8)
     expect(
       afterState.label.height,
-      'the navigated box is the label pill, not the zero-height chrome host'
+      'the navigated box is the label pill, never the header row band'
     ).toBeGreaterThanOrEqual(20)
     expect(
       Math.abs(afterState.scrollTop - beforeState!.scrollTop),
       'navigation moved the viewport to the folded label'
     ).toBeGreaterThan(0)
 
-    // Fold presentation is untouched: still folded, bodies still unmounted, and
-    // the group keeps its zero-flow seam (it is not the flow terminal).
+    // Fold presentation is untouched: still folded and bodies still unmounted, while
+    // the group keeps its fixed normal-flow header row (it is never zero-flow — the
+    // group boundary owns that row in BOTH presentation states, non-terminal included).
     await expect(page.locator(segmentHostSelector(segmentId))).toHaveAttribute('data-segment-folded', 'true')
     await expect(page.locator('#messages [data-segment-fold-tail-slot]')).toHaveCount(0)
     const hostHeight = await page
       .locator(segmentHostSelector(segmentId))
       .evaluate((el) => (el as HTMLElement).getBoundingClientRect().height)
-    expect(hostHeight, 'a non-terminal folded group keeps its zero-flow seam').toBe(0)
+    expect(hostHeight, 'a collapsed group keeps its fixed in-flow header row (no zero-flow seam)').toBeCloseTo(
+      SEGMENT_GROUP_HEADER_ROW_PX,
+      0
+    )
     const mountedAfter = await mountedMessageIds(page)
     for (const id of foldedMembers) {
       expect(mountedAfter, `navigation must not expand folded row ${id}`).not.toContain(id)
@@ -1978,5 +1947,1129 @@ test.describe('Topic segment fold — participating context', () => {
     expect(catalogAfter!.folded, 'navigation never writes the folded flag').toBe(true)
     for (const id of foldedMembers) expect(catalogAfter!.members).toContain(id)
     console.log('[E2E][SegmentFold] folded navigation verified')
+  })
+
+  /**
+   * The group edge carries the group's own right-click menu.
+   *
+   * The menu is the SAME write/navigation surface the chrome already offers,
+   * reached from the same edge (never from message content): collapse/expand
+   * (owner-only, exactly the rail's write), rename, dissolve (same confirmation
+   * string), and jump to the group's first message (the drawer's navigation
+   * event). It claims the right click, so the message list's own context-menu
+   * host never opens a second menu for the same gesture. Collapse and expand
+   * from the menu run the one concurrent motion (fade + space on one time base),
+   * and the group header + everything above it stay put while the delta lands
+   * below.
+   */
+  test('the group edge right-click menu folds, expands and jumps without opening the message menu', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        "INTEGRATED group-edge menu: seeded topic + real right-click ON THE GROUP EDGE (the rail's collapse hit target while expanded, the pill while folded) → the group menu opens and the message list context menu does not; real menu collapse → rendered fold motion phase then settle, the SAME rule DOM node still mounted but faded out, rows above held within 1px; real right-click on the folded pill → expand + jump offered, rename/dissolve withheld; real menu expand → motion phase then settle with the rule visible again; real menu jump → the group start row lands start-aligned inside the #messages scrollport with participation unchanged."
+    })
+
+    const page = mainWindow
+    const assistantId = await prepareDisplayCountAndAssistant(page)
+    await seedContextCount(page, CONTEXT_COUNT, assistantId)
+    const topicId = `segfoldmenu-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const segmentId = `${topicId}-seg`
+    const segmentName = 'Fold Menu Group'
+    console.log(`[E2E][SegmentFold] seeding menu topic ${topicId}`)
+
+    const foldedMembers = await seedFoldedCandidateTopic(page, assistantId, topicId, segmentId, segmentName)
+    await activateTopicAndWaitForBootstrap(page, topicId, SEED_MESSAGES)
+
+    const host = page.locator(segmentHostSelector(segmentId))
+    await expect(host, 'segment chrome must render for the seeded group').toHaveCount(1, { timeout: 15000 })
+    const rule = page.locator(`${segmentHostSelector(segmentId)} [data-testid="topic-segment-rule"]`)
+    // Real user targets on the group edge: the rail's transparent collapse
+    // target covers the rule (4px of rule + 4px gutter) in the expanded state,
+    // and the pill is the edge object while folded (the fold target is only
+    // mounted expanded). Clicking the bare rule node would be intercepted by
+    // the hit target that exists exactly to make that edge clickable.
+    const foldTarget = page.locator(`${segmentHostSelector(segmentId)} [data-testid="topic-segment-fold"]`)
+    const label = page.locator(`${segmentHostSelector(segmentId)} [data-testid="topic-segment-label"]`)
+
+    const collapseItem = page.getByRole('menuitem', { name: /^(Collapse group|折叠消息组)$/ })
+    const expandItem = page.getByRole('menuitem', { name: /^(Expand group|展开消息组)$/ })
+    const renameItem = page.getByRole('menuitem', { name: /^(Rename|重命名)$/ })
+    const dissolveItem = page.getByRole('menuitem', { name: /^(Dissolve Group|解散消息组)$/ })
+    const jumpItem = page.getByRole('menuitem', { name: /^(Jump to start|跳转至起点|跳轉至起點)$/ })
+
+    // Non-tail placement: the fold's height delta must land on content below,
+    // which is the only placement where "rows above stay put" is a real claim
+    // (at the newest edge the honest outcome is a natural clamp).
+    const placement = await placeGroupAtNonTailViewport(page, segmentId, foldedMembers)
+    expect(placement.belowBandPx, 'non-tail placement keeps content below the header').toBeGreaterThanOrEqual(150)
+
+    // ── Step 1: real right click ON THE GROUP EDGE ───────────────────────────
+    // The collapse hit target IS the group edge in the expanded state (it
+    // covers the 4px rule plus the gutter, by design), so a real user right
+    // click lands here — never on the rule node underneath it.
+    await foldTarget.click({ button: 'right' })
+    await expect(collapseItem, 'the group menu offers collapse').toBeVisible({ timeout: 10000 })
+    await expect(renameItem, 'the group menu offers rename').toBeVisible()
+    await expect(dissolveItem, 'the group menu offers dissolve').toBeVisible()
+    await expect(jumpItem, 'the group menu offers jump to the group start').toBeVisible()
+    // Exactly one popup is open, and it is the group's: the message list's own
+    // context-menu host never opens a second, conflicting menu.
+    await expect(page.locator('.ant-dropdown-menu:visible'), 'one menu, the group menu').toHaveCount(1)
+    console.log('[E2E][SegmentFold] group-edge menu opened')
+    const aboveId = msgId(topicId, turnIndices(FOLD_TURN - 1).assistant)
+    const aboveSelector = `#messages [data-message-id="${aboveId}"]`
+    const aboveBefore = (await settleRects(page, [aboveSelector]))[0]
+    expect(aboveBefore, 'row above the group must be mounted').not.toBeNull()
+
+    // Under OS reduced motion the component settles instantly; the phase is then
+    // never painted, which is the correct behaviour and not a missed motion.
+    const motionEnabled = await page.evaluate(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+    const waitForFoldPhase = () =>
+      page.waitForFunction(() => !!document.querySelector('#messages [data-segment-fold-phase]'), undefined, {
+        timeout: 5000,
+        polling: 10
+      })
+
+    // Node identity is part of the rendered claim: the chrome must animate in
+    // place, so the SAME rule element has to survive the fold (a replaced node
+    // could only be committed already faded — no transition left to run).
+    await rule.evaluate((el) => ((el as any).__segmentFoldRuleMark = 'before-fold'))
+    await collapseItem.click()
+    if (motionEnabled) await waitForFoldPhase()
+    await expect(host).toHaveAttribute('data-segment-folded', 'true', { timeout: 15000 })
+    await settleFoldMotion(page)
+
+    const collapsed = await readSegmentChrome(page, segmentId)
+    expect(collapsed.folded, 'the menu collapses the group').toBe(true)
+    expect(collapsed.hasRule, 'the rule stays mounted while folded (it fades, it does not switch)').toBe(true)
+    expect(collapsed.ruleVisible, 'the folded rule is faded out').toBe(false)
+    expect(collapsed.hasFoldTarget, 'the fold hit target leaves with the expanded chrome').toBe(false)
+    expect(
+      await rule.evaluate((el) => ((el as any).__segmentFoldRuleMark as string | undefined) ?? null),
+      'the folded rule is the same DOM node (the fade runs on it in place)'
+    ).toBe('before-fold')
+    expect(collapsed.hasActions, 'hover rename/dissolve are withheld while folded').toBe(false)
+    const aboveAfter = (await settleRects(page, [aboveSelector]))[0]
+    expect(
+      Math.abs((aboveAfter as any).top - (aboveBefore as any).top),
+      'content above the group stays put across the menu fold'
+    ).toBeLessThanOrEqual(1)
+
+    // ── Step 2: the folded pill's menu keeps the whole group menu ────────────
+    // The folded header offers the SAME four items: rename and dissolve stay
+    // reachable because the rename popover and the dissolve Popconfirm are
+    // anchored surfaces with no dependency on an expanded body. Only the
+    // fold switch flips its label, and only the fold write stays owner-only.
+    await label.click({ button: 'right' })
+    await expect(expandItem, 'a folded group offers expand').toBeVisible({ timeout: 10000 })
+    await expect(jumpItem).toBeVisible()
+    await expect(renameItem, 'the folded menu keeps rename (anchored popover)').toBeVisible()
+    await expect(dissolveItem, 'the folded menu keeps dissolve (anchored Popconfirm)').toBeVisible()
+    await expect(page.locator('.ant-dropdown-menu:visible'), 'one menu, the group menu').toHaveCount(1)
+
+    await expandItem.click()
+    if (motionEnabled) await waitForFoldPhase()
+    await expect(host).toHaveAttribute('data-segment-folded', 'false', { timeout: 15000 })
+    await settleFoldMotion(page)
+
+    const reExpanded = await readSegmentChrome(page, segmentId)
+    expect(reExpanded.hasRule, 'the rule is back with the expanded chrome').toBe(true)
+    expect(reExpanded.ruleVisible, 'the expanded rule is visible again').toBe(true)
+    expect(reExpanded.hasFoldTarget, 'the fold hit target returns').toBe(true)
+    expect(reExpanded.hasActions, 'hover rename/dissolve return').toBe(true)
+    const mountedBack = await mountedMessageIds(page)
+    for (const id of foldedMembers) expect(mountedBack, `expanded row ${id} is back in the flow`).toContain(id)
+
+    // ── Step 3: jump to the group start from the same edge menu ─────────────
+    const tokenBefore = await page.locator('[data-testid="token-count-context"]').textContent()
+    const anchorBefore = await getPersistedAnchorGroupKey(page, topicId)
+    await foldTarget.click({ button: 'right' })
+    await expect(jumpItem).toBeVisible({ timeout: 10000 })
+    await jumpItem.click()
+
+    const firstMemberId = foldedMembers[0]
+    const firstMemberSelector = `#messages [data-message-id="${firstMemberId}"]`
+    await settleRects(page, [firstMemberSelector])
+    const landing = await page.evaluate((firstMemberId: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      const row = document.querySelector(`#messages [data-message-id="${firstMemberId}"]`) as HTMLElement | null
+      if (!container || !row) return null
+      const c = container.getBoundingClientRect()
+      const r = row.getBoundingClientRect()
+      return { top: r.top, bottom: r.bottom, box: { top: c.top, bottom: c.bottom }, scrollTop: container.scrollTop }
+    }, firstMemberId)
+    expect(landing, 'the group start row must be mounted for the jump').not.toBeNull()
+    console.log(`[E2E][SegmentFold] menu jump landing ${JSON.stringify(landing)}`)
+    expect(landing!.top, 'start-aligned: the group start row lands on the scrollport top edge').toBeLessThanOrEqual(
+      landing!.box.top + 8
+    )
+    expect(landing!.bottom, 'the jump target is inside the scrollport').toBeGreaterThan(landing!.box.top)
+    // Navigation never changes participation.
+    expect(await page.locator('[data-testid="token-count-context"]').textContent()).toBe(tokenBefore)
+    expect(await getPersistedAnchorGroupKey(page, topicId)).toBe(anchorBefore)
+    console.log('[E2E][SegmentFold] group-edge menu verified')
+  })
+})
+
+/**
+ * Places the GROUP's single continuous rail under the pointer while the group's
+ * elected header pill sits entirely OUTSIDE the `#messages` scrollport — the
+ * geometry a reader actually meets after scrolling into a group: the header is
+ * far offscreen and the same group edge is still at hand further down.
+ *
+ * The rail is ONE overlay owned by the group (it spans every mounted run plus
+ * the group's internal divider heights), so this helper places it instead of
+ * picking “a later rail”. It returns the offset (inside the rail element) of a
+ * point that is both inside the scrollport and inside the rail, which is where a
+ * real click/hover must land: Playwright clicks the CENTER of an element, and
+ * the center of a group-long rail is legitimately far outside the scrollport.
+ *
+ * Real wheel gestures only, same direction convention as
+ * `revealChromeInViewport`: a NEGATIVE `deltaY` pushes content DOWN (toward
+ * older rows), a positive one pushes it UP (toward newer rows).
+ */
+async function placeGroupRailWithHeaderOffscreen(
+  page: any,
+  segmentId: string,
+  timeoutMs = 15000
+): Promise<{
+  railTop: number
+  railBottom: number
+  labelTop: number
+  labelBottom: number
+  boxTop: number
+  boxBottom: number
+  scrollTop: number
+  clickOffsetY: number
+  labelOutside: boolean
+}> {
+  const EDGE = 10
+  const MIN_VISIBLE = 48
+  const clampStep = (n: number) => Math.sign(n) * Math.max(48, Math.min(220, Math.round(Math.abs(n))))
+  let last: any = null
+  let stagnant = 0
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const state = await page.evaluate(
+      ({ segmentId, edge, minVisible }: { segmentId: string; edge: number; minVisible: number }) => {
+        const container = document.getElementById('messages') as HTMLElement | null
+        const header = document.querySelector(
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
+        ) as HTMLElement | null
+        if (!container || !header) return null
+        const rail = header.querySelector('[data-testid="topic-segment-rail"]') as HTMLElement | null
+        const label = header.querySelector('[data-testid="topic-segment-label"]') as HTMLElement | null
+        if (!rail || !label) return null
+        const c = container.getBoundingClientRect()
+        const r = rail.getBoundingClientRect()
+        const l = label.getBoundingClientRect()
+        // The usable part of the rail: the intersection of the rail and the
+        // scrollport, with an edge margin on both sides.
+        const visibleTop = Math.max(r.top, c.top + edge)
+        const visibleBottom = Math.min(r.bottom, c.bottom - edge)
+        const visibleHeight = visibleBottom - visibleTop
+        return {
+          railTop: r.top,
+          railBottom: r.bottom,
+          labelTop: l.top,
+          labelBottom: l.bottom,
+          boxTop: c.top,
+          boxBottom: c.bottom,
+          scrollTop: container.scrollTop,
+          clickOffsetY: Math.round(visibleTop + Math.min(visibleHeight / 2, visibleHeight - 12) - r.top),
+          visibleHeight,
+          labelOutside: l.bottom <= c.top || l.top >= c.bottom
+        }
+      },
+      { segmentId, edge: EDGE, minVisible: MIN_VISIBLE }
+    )
+    if (!state) throw new Error(`the group rail of ${segmentId} is not rendered`)
+    last = state
+    if (state.labelOutside && state.visibleHeight >= MIN_VISIBLE && state.clickOffsetY > 0) {
+      return state
+    }
+
+    let deltaY: number
+    if (state.labelBottom > state.boxTop && state.labelTop < state.boxBottom) {
+      // The pill still overlaps the box: content has to move UP until it clears
+      // the top edge (the rail continues far below, so it survives that move).
+      deltaY = clampStep(state.labelBottom - state.boxTop + 24)
+    } else if (state.visibleHeight < MIN_VISIBLE) {
+      // No usable piece of the rail is inside the box: bring the group's span
+      // into view from whichever side it is closer to.
+      const overflowAbove = state.railTop < state.boxTop ? state.railBottom - state.boxTop : 0
+      deltaY = clampStep(overflowAbove > 0 ? -(state.boxBottom - state.railBottom + MIN_VISIBLE) : MIN_VISIBLE)
+    } else {
+      deltaY = clampStep(MIN_VISIBLE)
+    }
+
+    const scrollTopBefore = state.scrollTop
+    await wheelMessagesViewport(page, deltaY)
+    const scrollTopAfter = await page.evaluate(
+      () => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? null
+    )
+    stagnant = scrollTopAfter !== null && Math.abs(scrollTopAfter - scrollTopBefore) < 2 ? stagnant + 1 : 0
+    if (stagnant >= 2) {
+      throw new Error(`the viewport cannot travel any further for ${segmentId}: ${JSON.stringify(last)}`)
+    }
+  }
+  throw new Error(`the group rail never reached the header-offscreen placement: ${JSON.stringify(last)}`)
+}
+/** Fixed normal-flow row height of one group header row (see TopicSegmentLine). */
+const SEGMENT_GROUP_HEADER_ROW_PX = 32
+
+/**
+ * Ownership probe for one viewport point: does `document.elementFromPoint`
+ * resolve to the SAME group's own rail surface? Used before AND after a
+ * real-pointer gesture, so the gesture is proven to land on this group's edge
+ * rather than on whatever else might occupy that coordinate.
+ */
+async function readRailOwnership(
+  page: any,
+  segmentId: string,
+  point: { x: number; y: number }
+): Promise<{ owned: boolean; testId: string | null; onHeaderPill: boolean }> {
+  return page.evaluate(
+    ({ segmentId, point }: { segmentId: string; point: { x: number; y: number } }) => {
+      const el = document.elementFromPoint(point.x, point.y) as HTMLElement | null
+      const owner = el?.closest('[data-testid="topic-segment-group"]')
+      return {
+        owned: !!owner && owner.getAttribute('data-segment-id') === segmentId,
+        testId: el?.getAttribute('data-testid') ?? el?.tagName.toLowerCase() ?? null,
+        onHeaderPill: !!el?.closest('[data-testid="topic-segment-label"]')
+      }
+    },
+    { segmentId, point }
+  )
+}
+
+interface RailPointerPoint {
+  x: number
+  y: number
+  railTop: number
+  railBottom: number
+  boxTop: number
+  boxBottom: number
+  scrollTop: number
+  hitTestId: string | null
+}
+
+/**
+ * Resolves a REAL-pointer point on the group's ONE continuous rail that is
+ * ALREADY inside the `#messages` scrollport, from the CURRENTLY measured rects.
+ *
+ * `locator.hover/click({ position })` cannot be used on this rail: Playwright
+ * scrolls a locator target into view before gesturing, and this rail is taller
+ * than the column-reverse scrollport, so the auto-scroll moves the viewport and
+ * invalidates both the header-offscreen placement and the measurement. The
+ * gesture therefore takes an ABSOLUTE viewport coordinate that
+ * `document.elementFromPoint` already proves to be this group's own rail
+ * surface (never the header pill, never a message body, never another group's
+ * chrome), and drives `page.mouse` directly. When the current placement has no
+ * usable slice of the rail inside the box, one bounded real wheel step is taken
+ * (never a `scrollTop` write) and the probe is repeated.
+ */
+async function resolveRailPointerPoint(page: any, segmentId: string, attempts = 8): Promise<RailPointerPoint> {
+  const EDGE = 10
+  const MIN_SLICE = 16
+  let last: any = null
+  let lastScrollTop: number | null = null
+  let stagnant = 0
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const state: any = await page.evaluate(
+      ({ segmentId, edge, minSlice }: { segmentId: string; edge: number; minSlice: number }) => {
+        const container = document.getElementById('messages') as HTMLElement | null
+        const header = document.querySelector(
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
+        ) as HTMLElement | null
+        const rail = header?.querySelector('[data-testid="topic-segment-rail"]') as HTMLElement | null
+        if (!container || !header || !rail) return { ok: false, reason: 'the group rail is not rendered' }
+        const c = container.getBoundingClientRect()
+        const r = rail.getBoundingClientRect()
+        const top = Math.max(r.top, c.top + edge)
+        const bottom = Math.min(r.bottom, c.bottom - edge)
+        const base = {
+          railTop: r.top,
+          railBottom: r.bottom,
+          boxTop: c.top,
+          boxBottom: c.bottom,
+          scrollTop: container.scrollTop
+        }
+        if (bottom - top < minSlice) {
+          return { ...base, ok: false, reason: `no usable rail slice inside the scrollport (${top}..${bottom})` }
+        }
+        // The 8px hit target sits over the 4px rail: the coordinate is proven by
+        // hit-testing, never by assuming this gutter belongs to the group.
+        const x = Math.round(r.left + 3)
+        const mid = Math.round((top + bottom) / 2)
+        const candidates: number[] = [mid]
+        for (let step = 1; step <= 8; step++) {
+          const span = Math.min(step * 16, Math.floor((bottom - top) / 2) - 2)
+          if (span <= 0) break
+          candidates.push(mid - span, mid + span)
+        }
+        for (const y of candidates) {
+          if (y < top || y > bottom) continue
+          const el = document.elementFromPoint(x, y) as HTMLElement | null
+          const owner = el?.closest('[data-testid="topic-segment-group"]')
+          if (!owner || owner.getAttribute('data-segment-id') !== segmentId) continue
+          if (el?.closest('[data-testid="topic-segment-label"]')) continue
+          return {
+            ...base,
+            ok: true,
+            x,
+            y,
+            hitTestId: el?.getAttribute('data-testid') ?? el?.tagName.toLowerCase() ?? null
+          }
+        }
+        return {
+          ...base,
+          ok: false,
+          reason: 'elementFromPoint does not resolve to this group rail inside the scrollport'
+        }
+      },
+      { segmentId, edge: EDGE, minSlice: MIN_SLICE }
+    )
+    if (!state) throw new Error(`the group rail of ${segmentId} is not rendered`)
+    if (state.ok) return state
+    last = state
+    const scrollTop = await page.evaluate(
+      () => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? null
+    )
+    stagnant =
+      lastScrollTop !== null && scrollTop !== null && Math.abs(scrollTop - lastScrollTop) < 2 ? stagnant + 1 : 0
+    lastScrollTop = scrollTop
+    if (stagnant >= 2) break
+    await wheelMessagesViewport(page, attempt % 2 === 0 ? -160 : 160)
+  }
+  throw new Error(`no real-pointer point on the group rail of ${segmentId}: ${JSON.stringify(last)}`)
+}
+
+/**
+ * Later-turn rail surface — the group edge on a run that is NOT the elected
+ * header run. The point of this asset is that the rail is a full group edge:
+ * left click collapses through the one shared fold write, right click opens the
+ * group's one menu, and the anchored rename/dissolve popovers follow the rail
+ * pointer with the header label far outside the scrollport (nothing here
+ * depends on the pill being rendered).
+ */
+test.describe('Topic segment fold — later-turn rail', () => {
+  test('the ONE group rail collapses and opens the group menu anywhere on the line, and rename, jump and dissolve work with the header offscreen', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        "INTEGRATED one group rail: seeded consecutive 8-row group spanning turns 1..4 (turn 5 stays newer, outside the group) — FOUR turn runs physically carry the group, so the single group-owned rail must span all of them + real wheel gestures until a deep point of that ONE rail is inside the #messages scrollport while the elected header pill is entirely outside it; with the pill on screen the group name and its hover pencil rename INLINE in the pill itself (focused with the whole name selected, Enter/blur commit a trimmed name, Escape writes nothing, no popover, no mask, no fold and no navigation) and the header's own Trash2 dissolve is the original anchored Popconfirm at its trigger button (arrow, no mask, no modal, i18n copy + 取消/确认) and cancels without touching the group; a right click on the pill opens the same group menu at the group TOP, where a menu action surface still keeps its region beside the WHOLE menu 8px clear and its LEFT arrow on the group rail (the boundary clamp opens it below the whole menu when the region above would leave the arrow past the rail); hover on a deep rail point → the groupwide hover state turns on (pill actions visible) with exactly ONE rail/ONE rule mark for the whole line (no per-run marks); real LEFT CLICK on the same deep point collapses the group through the one shared fold write (participating turns 10 → 2, the group's rows leave the mounted flow) and the collapsed label expands back (2 → 10); real RIGHT CLICK on the same rail point → exactly one group menu with the exact item order (rename, collapse group, jump to start, dissolve group), no second message menu; menu rename → one compact anchored popover beside the WHOLE menu whose box is captured while the menu is still open (8px clear above the menu, LEFT arrow on its own left edge pointing at the group rail: the 1px pin IS the rail line, 13px between the rail and the surface's left edge), no backdrop, single-line input prefilled with the current name, Enter saves and the name persists, reopen + Escape leaves it unchanged; menu jump start-aligns the group's first row without changing participation; menu dissolve → the same anchored Popconfirm beside the whole menu (same rail-pointer geometry, body-size copy, no heading, ≤360px wide, LEFT arrow, no mask) cancels without touching the group, then confirmed removes the group while all ten messages stay mounted and participating."
+    })
+
+    const page = mainWindow
+    const assistantId = await prepareDisplayCountAndAssistant(page)
+    await seedContextCount(page, CONTEXT_COUNT, assistantId)
+    const topicId = `segfoldlaterrail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const segmentId = `${topicId}-seg`
+    const segmentName = 'Later Rail Group'
+    console.log(`[E2E][SegmentFold] seeding later-rail topic ${topicId}`)
+
+    // Turns 1..4 are the group. Seeded rows carry no shared askId, so those
+    // eight rows are FOUR separate turn runs — the group-owned rail must span
+    // every one of them as ONE line. Turn 5 deliberately stays OUT of the group:
+    // it is the newer content a wheel gesture uses to hold the group edge at
+    // hand while the header sits far off above it — and after the fold it is
+    // what stays mounted while the group's own rows leave the flow.
+    const LATER_TURNS = [1, 2, 3, 4]
+    const laterMembers = LATER_TURNS.flatMap((turn) => [
+      msgId(topicId, turnIndices(turn).user),
+      msgId(topicId, turnIndices(turn).assistant)
+    ])
+    // Folding removes the group's eight rows: 8 of 10 context turns leave, and
+    // the two turn-5 rows outside the group are what stays mounted.
+    const whileFolded = SEED_MESSAGES - laterMembers.length
+
+    const seeded = await seedFoldedCandidateTopic(
+      page,
+      assistantId,
+      topicId,
+      segmentId,
+      segmentName,
+      LATER_TURNS[0],
+      laterMembers
+    )
+    expect(seeded, 'the seeded group is the whole consecutive member list').toEqual(laterMembers)
+    await activateTopicAndWaitForBootstrap(page, topicId, SEED_MESSAGES)
+
+    const host = page.locator(segmentHostSelector(segmentId))
+    await expect(host, 'segment chrome must render for the seeded group').toHaveCount(1, { timeout: 15000 })
+    // ONE continuous rail owned by the group — never one per run, never a
+    // continuation mark on a later turn.
+    const rail = host.locator('[data-testid="topic-segment-rail"]')
+    await expect(rail, 'the group owns exactly ONE continuous rail').toHaveCount(1, { timeout: 15000 })
+    await expect(page.locator('#messages [data-segment-continuation-host]')).toHaveCount(0)
+    await expect(page.locator('#messages [data-testid="topic-segment-fold-continuation"]')).toHaveCount(0)
+    // One label pill, on the header only.
+    await expect(host.locator('[data-testid="topic-segment-label"]')).toHaveCount(1)
+
+    // ── Shared reads for the rail-anchored group surfaces ───────────────────
+    // The WHOLE menu box a group action surface relates to, captured while that
+    // menu is still open (it unmounts with the user's click).
+    type MenuBox = { left: number; right: number; top: number; bottom: number }
+    const RENAME_ITEM = /^(Rename|重命名|重新命名)$/
+    const COLLAPSE_ITEM = /^(Collapse group|折叠消息组|摺疊訊息組)$/
+    const JUMP_ITEM = /^(Jump to start|跳转至起点|跳轉至起點)$/
+    const DISSOLVE_ITEM = /^(Dissolve Group|解散消息组|解散訊息組)$/
+    const DISSOLVE_COPY = /确定要解散此消息组吗|確定要解散此消息組嗎|Are you sure you want to dissolve this group/
+    const visibleMenuItems = page.locator('.ant-dropdown-menu:visible .ant-dropdown-menu-item')
+    // Anchored action surfaces (rename Popover / dissolve Popconfirm) share one
+    // antd overlay class family: `.ant-popover` is the surface root (a Popconfirm
+    // root carries BOTH `ant-popover` and `ant-popconfirm`) and
+    // `.ant-popover-arrow` is the direction indicator. Neither paints a modal
+    // mask, so a stray `.ant-modal` anywhere is a regression.
+    const actionSurface = page.locator('.ant-popover:visible')
+    const actionArrow = actionSurface.locator('.ant-popover-arrow')
+    const modalMask = page.locator('.ant-modal-mask')
+    const modalWrap = page.locator('.ant-modal-wrap')
+    const renameInput = actionSurface.locator('input')
+    // The popup speaks the locale's own wording: never the library's `OK`.
+    const CANCEL_TEXT = /^(取消|Cancel)$/
+    const CONFIRM_TEXT = /^(确认|確認|Confirm)$/
+    const readSegmentName = () =>
+      page.evaluate((segmentId: string) => {
+        const s = (window as any).store?.getState()
+        return (s?.topicSegments?.segments?.entities?.[segmentId]?.name as string | undefined) ?? null
+      }, segmentId)
+
+    // Production reads the WHOLE menu box while the click is still dispatching: a
+    // group action surface sits beside the whole menu the user chose from — never
+    // beside one row of it — and that menu unmounts with the click. A pre-click
+    // measurement can still be moving with the menu's open animation, so the test
+    // reads the SAME box from the DOM at the click instant.
+    const armMenuBoxCapture = async (rowIndex: number) => {
+      await visibleMenuItems.nth(rowIndex).evaluate((el) => {
+        ;(window as any).__segmentFoldMenuBox = null
+        el.addEventListener(
+          'click',
+          () => {
+            const menu = (el as HTMLElement).closest('.ant-dropdown-menu') ?? el
+            const rect = menu.getBoundingClientRect()
+            ;(window as any).__segmentFoldMenuBox = {
+              left: rect.left,
+              right: rect.right,
+              top: rect.top,
+              bottom: rect.bottom
+            }
+          },
+          { capture: true, once: true }
+        )
+      })
+    }
+    const readMenuBox = () => page.evaluate(() => (window as any).__segmentFoldMenuBox as MenuBox | null)
+
+    /**
+     * One anchored surface's geometry, read against the WHOLE menu box captured
+     * for this invocation. `side` is where the surface sits relative to that box;
+     * the rail is the arrow's target, so its span comes with the read.
+     */
+    const readMenuSurfaceGeometry = (pinTestId: string, menuBox: MenuBox) =>
+      actionSurface.evaluate(
+        (el, args: { pinTestId: string; menuBox: MenuBox }) => {
+          const rect = el.getBoundingClientRect()
+          const arrow = el.querySelector('.ant-popover-arrow') as HTMLElement | null
+          const arrowRect = arrow ? arrow.getBoundingClientRect() : null
+          const pin = document.querySelector(`[data-testid="${args.pinTestId}"]`) as HTMLElement | null
+          const pinRect = pin ? pin.getBoundingClientRect() : null
+          const rail = document.querySelector('#messages [data-testid="topic-segment-rule"]') as HTMLElement | null
+          const railRect = rail ? rail.getBoundingClientRect() : null
+          const side = rect.bottom <= args.menuBox.top + 1 ? 'above' : 'below'
+          const arrowMidY = arrowRect ? (arrowRect.top + arrowRect.bottom) / 2 : null
+          return {
+            side,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+            gapAboveMenu: Math.round(args.menuBox.top - rect.bottom),
+            gapBelowMenu: Math.round(rect.top - args.menuBox.bottom),
+            aboveRoom: Math.round(args.menuBox.top - 8),
+            belowRoom: Math.round(window.innerHeight - args.menuBox.bottom - 8),
+            leftOffsetFromRail: railRect ? Math.round(rect.left - railRect.left) : null,
+            arrowPresent: arrowRect !== null,
+            arrowLeft: arrowRect ? arrowRect.left : null,
+            arrowRight: arrowRect ? arrowRect.right : null,
+            arrowDepth: arrowRect ? Math.round(rect.left - arrowRect.left) : null,
+            arrowMidY,
+            // The paint that makes the arrow a LEFT arrow (not merely a box at
+            // the left edge) comes from the placement class: log both, so a lost
+            // class or a lost transform is visible in the evidence itself.
+            surfaceClass: el.className,
+            arrowTransform: arrow ? getComputedStyle(arrow).transform : null,
+            arrowOnRail:
+              arrowMidY !== null && railRect !== null
+                ? arrowMidY >= railRect.top + 1 && arrowMidY <= railRect.bottom - 1
+                : false,
+            pinWidth: pinRect ? pinRect.width : null,
+            pinHeight: pinRect ? pinRect.height : null,
+            pinLeft: pinRect ? pinRect.left : null,
+            pinTop: pinRect ? pinRect.top : null,
+            railLeft: railRect ? railRect.left : null,
+            railTop: railRect ? railRect.top : null,
+            railBottom: railRect ? railRect.bottom : null,
+            insideViewport:
+              rect.top >= -1 &&
+              rect.bottom <= window.innerHeight + 1 &&
+              rect.left >= -1 &&
+              rect.right <= window.innerWidth + 1
+          }
+        },
+        { pinTestId, menuBox }
+      )
+
+    /**
+     * Assert the rail-pointer contract of one anchored group-action surface and
+     * return its measured geometry:
+     * - the WHOLE menu's box is the vertical reference: the surface keeps the
+     *   region above it `8px` clear, or opens below it `8px` clear;
+     * - its arrow is painted on the surface's own LEFT edge and points at the
+     *   group rail, whose span the arrow's middle must land INSIDE;
+     * - the surface's left edge keeps only the arrow's room from the rail
+     *   (`13px`), and the `1px` pin IS the rail's line at the anchored edge.
+     */
+    const expectMenuSurfaceGeometry = async (options: {
+      pinTestId: string
+      menuBox: MenuBox
+      label: string
+      maxWidth: number
+      requireArrowOnRail?: boolean
+    }) => {
+      // A popup is read only once its own open motion has settled: the zoom
+      // animation scales the whole rectangle, so an early read reports every
+      // edge (and the arrow) at the animation's scale instead of the rectangle
+      // the user actually sees.
+      await actionSurface.evaluate(async (el) => {
+        const animations = el.getAnimations({ subtree: true })
+        await Promise.all(animations.map((animation) => animation.finished.catch(() => undefined)))
+      })
+      const geometry = await readMenuSurfaceGeometry(options.pinTestId, options.menuBox)
+      console.log(`[E2E][SegmentFold] ${options.label} surface geometry ${JSON.stringify(geometry)}`)
+      expect(geometry, `the ${options.label} surface is mounted`).not.toBeNull()
+      const g = geometry!
+      expect(g.insideViewport, `the ${options.label} surface stays inside the viewport`).toBe(true)
+      expect(g.width, `compact ${options.label} surface width`).toBeGreaterThanOrEqual(180)
+      expect(g.width, `compact ${options.label} surface width`).toBeLessThanOrEqual(options.maxWidth)
+      const menuGap = g.side === 'above' ? g.gapAboveMenu : g.gapBelowMenu
+      const menuSide = g.side === 'above' ? 'above' : 'below'
+      expect(
+        menuGap,
+        `the ${options.label} surface opens ${menuSide} the WHOLE menu, 8px clear`
+      ).toBeGreaterThanOrEqual(6)
+      expect(menuGap, `the ${options.label} surface opens ${menuSide} the WHOLE menu, 8px clear`).toBeLessThanOrEqual(
+        11
+      )
+      expect(g.railLeft, 'the group rail is mounted as the arrow target').not.toBeNull()
+      expect(g.arrowPresent, 'the surface carries a direction arrow').toBe(true)
+      expect(g.arrowRight, 'the arrow is painted on the surface LEFT edge, never its right').not.toBeNull()
+      expect(g.arrowRight!, 'the arrow is painted on the surface LEFT edge, never its right').toBeLessThanOrEqual(
+        g.left + 2
+      )
+      expect(g.arrowLeft!, 'the arrow sticks out to the LEFT, toward the rail').toBeLessThanOrEqual(g.left - 4)
+      expect(g.arrowLeft!, 'the arrow stops at the rail, never in empty space left of it').toBeGreaterThanOrEqual(
+        g.railLeft! - 10
+      )
+      expect(
+        g.leftOffsetFromRail!,
+        'the surface LEFT edge keeps only the arrow gap from the rail'
+      ).toBeGreaterThanOrEqual(11)
+      expect(g.leftOffsetFromRail!, 'the surface LEFT edge keeps only the arrow gap from the rail').toBeLessThanOrEqual(
+        15
+      )
+      if (options.requireArrowOnRail !== false) {
+        expect(g.arrowMidY, 'the arrow points INSIDE the rail span, never above or below it').not.toBeNull()
+        expect(g.arrowMidY!, 'the arrow points INSIDE the rail span').toBeGreaterThanOrEqual(g.railTop! + 1)
+        expect(g.arrowMidY!, 'the arrow points INSIDE the rail span').toBeLessThanOrEqual(g.railBottom! - 1)
+      }
+      expect(g.pinWidth, 'the pin is a 1px point on the rail').not.toBeNull()
+      expect(g.pinWidth!).toBeLessThanOrEqual(1.5)
+      expect(g.pinHeight!).toBeLessThanOrEqual(1.5)
+      expect(g.pinLeft, 'the pin is a 1px point on the rail').not.toBeNull()
+      expect(Math.abs(g.pinLeft! - g.railLeft!), 'the pin IS the rail line').toBeLessThanOrEqual(1)
+      const anchoredEdge = g.side === 'above' ? options.menuBox.top - 8 : options.menuBox.bottom + 8
+      expect(
+        Math.abs(g.pinTop! - anchoredEdge),
+        'the pin is the anchored edge, 8px clear of the WHOLE menu'
+      ).toBeLessThanOrEqual(2)
+      return g
+    }
+
+    // The one rail really spans the whole group: its measured box starts at the
+    // header and reaches the group’s last mounted row, i.e. it crosses all four
+    // turn runs instead of stopping at the elected run.
+    const railSpan = await page.evaluate(
+      ({ segmentId, firstMemberId, lastMemberId }: Record<string, string>) => {
+        const header = document.querySelector(
+          `#messages [data-testid="topic-segment-group"][data-segment-id="${segmentId}"]`
+        ) as HTMLElement | null
+        const rail = header?.querySelector('[data-testid="topic-segment-rail"]') as HTMLElement | null
+        const first = document.querySelector(`#messages [data-message-id="${firstMemberId}"]`) as HTMLElement | null
+        const last = document.querySelector(`#messages [data-message-id="${lastMemberId}"]`) as HTMLElement | null
+        if (!rail || !first || !last) return null
+        const r = rail.getBoundingClientRect()
+        const f = first.getBoundingClientRect()
+        const l = last.getBoundingClientRect()
+        return {
+          railTop: r.top,
+          railBottom: r.bottom,
+          railHeight: r.height,
+          firstTop: f.top,
+          lastBottom: l.bottom,
+          rules: header?.querySelectorAll('[data-testid="topic-segment-rule"]').length ?? 0
+        }
+      },
+      {
+        segmentId,
+        firstMemberId: laterMembers[0],
+        lastMemberId: laterMembers[laterMembers.length - 1]
+      }
+    )
+    expect(railSpan, 'the group rail and its boundary rows must be mounted').not.toBeNull()
+    // Headed at the group header, tailed just above the group’s last row, and
+    // taller than any single row: one line across four runs.
+    expect(railSpan!.railTop, 'the rail starts at the group header').toBeLessThanOrEqual(railSpan!.firstTop + 48)
+    expect(railSpan!.railBottom, 'the rail reaches the group’s last mounted row').toBeGreaterThanOrEqual(
+      railSpan!.lastBottom - 48
+    )
+    expect(railSpan!.railHeight, 'the rail spans the whole multi-run group').toBeGreaterThan(
+      (railSpan!.lastBottom - railSpan!.firstTop) * 0.5
+    )
+    expect(railSpan!.rules, 'exactly one rule mark for the whole line').toBe(1)
+
+    // ── The direct header dissolve is the ORIGINAL anchored Popconfirm ───────
+    // The Trash2 action inside the header pill keeps the pre-existing surface:
+    // an antd Popconfirm wrapped around that trigger button, arrow at the
+    // button, no backdrop, and the app's own i18n copy/button wording. This
+    // runs BEFORE the header is pushed offscreen, so the button-anchored path
+    // itself is what is under test here (the menu path is covered later).
+    const headerLabelSelector = `${segmentHostSelector(segmentId)} [data-testid="topic-segment-label"]`
+    const headerReveal = await revealChromeInViewport(page, headerLabelSelector)
+    expect(headerReveal?.inside ?? false, 'the group header is revealable for the direct dissolve').toBe(true)
+    await page.locator(headerLabelSelector).hover()
+    await expect(host.locator('[data-testid="topic-segment-actions"]')).toHaveCSS('opacity', '1')
+    const headerDissolveSurface = page.locator('.ant-popover:visible')
+    const HEADER_DISSOLVE_ACTION = /^(Dissolve Group|解散消息组|解散訊息組)$/
+    const HEADER_DISSOLVE_COPY =
+      /确定要解散此消息组吗|確定要解散此消息組嗎|Are you sure you want to dissolve this group/
+    const HEADER_CANCEL_TEXT = /^(取消|Cancel)$/
+    const HEADER_CONFIRM_TEXT = /^(确认|確認|Confirm)$/
+    const headerTrigger = host.getByTitle(HEADER_DISSOLVE_ACTION)
+    await expect(headerTrigger, 'the header offers its own dissolve button').toHaveCount(1)
+    const headerTriggerRect = await headerTrigger.boundingBox()
+    expect(headerTriggerRect, 'the header dissolve trigger must have a box').not.toBeNull()
+    await headerTrigger.click()
+    await expect(headerDissolveSurface, 'the direct dissolve opens exactly one anchored surface').toHaveCount(1, {
+      timeout: 10000
+    })
+    await expect(
+      page.locator('.ant-popover.ant-popconfirm:visible'),
+      'the header dissolves through the original Popconfirm, never a modal'
+    ).toHaveCount(1)
+    await expect(
+      headerDissolveSurface.locator('.ant-popover-arrow'),
+      'the direct confirm carries a direction arrow'
+    ).toHaveCount(1)
+    await expect(page.locator('.ant-modal-mask'), 'the direct dissolve paints no backdrop').toHaveCount(0)
+    await expect(page.locator('.ant-modal-wrap'), 'the direct dissolve is not a modal').toHaveCount(0)
+    await expect(page.locator('.ant-modal'), 'no modal box at all').toHaveCount(0)
+    await expect(headerDissolveSurface.locator('.ant-popconfirm-title')).toHaveText(HEADER_DISSOLVE_COPY)
+    await expect(
+      headerDissolveSurface.locator('.ant-popconfirm-description'),
+      'the copy is the only body text (never a heading band)'
+    ).toHaveCount(0)
+    const headerAppearance = await headerDissolveSurface.evaluate(
+      (el, anchor) => {
+        const buttons = Array.from(el.querySelectorAll('.ant-popconfirm-buttons .ant-btn')) as HTMLElement[]
+        const rect = el.getBoundingClientRect()
+        return {
+          width: rect.width,
+          insideViewport:
+            rect.top >= -1 &&
+            rect.bottom <= window.innerHeight + 1 &&
+            rect.left >= -1 &&
+            rect.right <= window.innerWidth + 1,
+          horizontalOffset: Math.round((rect.left + rect.right) / 2 - anchor.centerX),
+          aboveGap: Math.round(anchor.top - rect.bottom),
+          belowGap: Math.round(rect.top - anchor.bottom),
+          buttonTexts: buttons.map((button) => button.textContent ?? ''),
+          dangerButtons: el.querySelectorAll('.ant-popconfirm-buttons .ant-btn-dangerous').length
+        }
+      },
+      {
+        centerX: headerTriggerRect!.x + headerTriggerRect!.width / 2,
+        top: headerTriggerRect!.y,
+        bottom: headerTriggerRect!.y + headerTriggerRect!.height
+      }
+    )
+    console.log(`[E2E][SegmentFold] header dissolve appearance ${JSON.stringify(headerAppearance)}`)
+    expect(headerAppearance.width, 'compact header confirm width').toBeLessThanOrEqual(360)
+    expect(headerAppearance.insideViewport, 'the header confirm stays inside the viewport').toBe(true)
+    expect(
+      Math.abs(headerAppearance.horizontalOffset),
+      'the header confirm points at its button, never the window'
+    ).toBeLessThanOrEqual(120)
+    expect(
+      Math.min(Math.abs(headerAppearance.aboveGap), Math.abs(headerAppearance.belowGap)),
+      'the header confirm sits beside its trigger'
+    ).toBeLessThanOrEqual(40)
+    expect(headerAppearance.buttonTexts).toHaveLength(2)
+    expect(headerAppearance.buttonTexts[0]).toMatch(HEADER_CANCEL_TEXT)
+    expect(headerAppearance.buttonTexts[1]).toMatch(HEADER_CONFIRM_TEXT)
+    expect(headerAppearance.buttonTexts[1], 'the app wording, never the library default').not.toMatch(/^OK$/i)
+    expect(headerAppearance.dangerButtons, 'the header confirm keeps its danger style').toBe(1)
+    await headerDissolveSurface.locator('.ant-popconfirm-buttons .ant-btn').first().click()
+    await expect(headerDissolveSurface, 'cancelling the header confirm closes it').toHaveCount(0, {
+      timeout: 10000
+    })
+    await expect(host, 'a cancelled header dissolve keeps the group').toHaveCount(1)
+    await expect(page.locator('.ant-modal-mask'), 'no mask lingers after the anchored confirm closes').toHaveCount(0, {
+      timeout: 5000
+    })
+
+    // ── Step 0a: the pill's own rename happens INLINE, never in a surface ─────
+    // Clicking the group name (or its hover pencil) turns the pill into a
+    // one-line editor in place: no popover, no popconfirm, no mask, no row
+    // movement. It opens focused with the whole name selected, Enter/blur commit
+    // a trimmed draft, a blank or unchanged draft writes nothing, Escape drops
+    // it, and neither gesture folds the group nor navigates the conversation.
+    const inlineRenamed = 'Inline Renamed Group'
+    const inlineEditor = host.locator('[data-testid="topic-segment-rename-inline"]')
+    const headerRenameTrigger = host.getByTitle(/^(Rename|重命名|重新命名)$/)
+    await expect(host.getByText(segmentName, { exact: true }), 'the pill shows the seeded name').toHaveCount(1)
+    await host.getByText(segmentName, { exact: true }).click()
+    await expect(inlineEditor, 'the pill itself becomes the editor').toHaveCount(1, { timeout: 10000 })
+    await expect(inlineEditor, 'the editor is the pill, not an overlay').toBeFocused()
+    await expect(inlineEditor, 'the editor opens on the current name').toHaveValue(segmentName)
+    const inlineSelection = await inlineEditor.evaluate((el) => {
+      const input = el as HTMLInputElement
+      return { start: input.selectionStart, end: input.selectionEnd, length: input.value.length }
+    })
+    expect(inlineSelection.start, 'the whole name is selected on open (one keystroke away)').toBe(0)
+    expect(inlineSelection.end).toBe(inlineSelection.length)
+    await expect(actionSurface, 'the inline editor opens NO anchored surface').toHaveCount(0)
+    await expect(page.locator('.ant-modal-mask'), 'the inline editor paints no backdrop').toHaveCount(0)
+    await inlineEditor.fill(inlineRenamed)
+    await inlineEditor.press('Enter')
+    await expect(inlineEditor, 'Enter closes the inline editor').toHaveCount(0, { timeout: 10000 })
+    await expect.poll(async () => await readSegmentName(), { timeout: 15000 }).toBe(inlineRenamed)
+    await expect(host.locator('[data-testid="topic-segment-label"]')).toContainText(inlineRenamed)
+    await expect(host, 'an inline rename never folds the group').toHaveAttribute('data-segment-folded', 'false')
+    // The hover pencil is the SAME inline entrance, and Escape drops the draft.
+    await page.locator(headerLabelSelector).hover()
+    await expect(host.locator('[data-testid="topic-segment-actions"]')).toHaveCSS('opacity', '1')
+    await headerRenameTrigger.click()
+    await expect(inlineEditor, 'the pencil opens the same inline editor').toHaveCount(1, { timeout: 10000 })
+    await expect(inlineEditor).toHaveValue(inlineRenamed)
+    await expect(actionSurface, 'the pencil opens NO anchored surface either').toHaveCount(0)
+    await inlineEditor.fill('Discarded Inline Name')
+    await inlineEditor.press('Escape')
+    await expect(inlineEditor, 'Escape closes the inline editor').toHaveCount(0, { timeout: 10000 })
+    expect(await readSegmentName(), 'a cancelled inline rename writes nothing').toBe(inlineRenamed)
+    await expect(actionSurface, 'no surface is left behind by the inline editor').toHaveCount(0)
+
+    // ── Step 0b: a menu surface at the group top still points at the rail ────
+    // The pill IS the group's own top edge, so a right click on it opens the group
+    // menu at the group top. The surface keeps its region beside the WHOLE menu,
+    // 8px clear, and the boundary clamp opens it BELOW that menu whenever the
+    // region above would leave the LEFT arrow past the rail's span (the rail only
+    // starts below the pill) and the below side can still host a compact surface.
+    await page.locator(headerLabelSelector).click({ button: 'right' })
+    await expect(page.locator('.ant-dropdown-menu:visible'), 'one group menu from the pill').toHaveCount(1)
+    await expect(visibleMenuItems, 'the group menu offers its four actions').toHaveCount(4, { timeout: 10000 })
+    await armMenuBoxCapture(0)
+    await visibleMenuItems.nth(0).click()
+    const flipMenuBox = await readMenuBox()
+    expect(flipMenuBox, 'the whole menu box is read at click time').not.toBeNull()
+    await renameInput.waitFor({ state: 'visible', timeout: 10000 })
+    const flip = await expectMenuSurfaceGeometry({
+      pinTestId: 'topic-segment-rename-anchor',
+      menuBox: flipMenuBox!,
+      label: 'menu at the group top',
+      maxWidth: 320,
+      requireArrowOnRail: false
+    })
+    // The clamp applies when the other side can host a compact surface; a viewport
+    // too short for it keeps the roomier side. Either way the arrow must keep a
+    // meaningful target.
+    expect(
+      flip.arrowOnRail || flip.belowRoom < 140,
+      'the LEFT arrow points at the rail whenever a side can host the surface'
+    ).toBe(true)
+    await renameInput.press('Escape')
+    await expect(actionSurface, 'Escape closes the menu surface').toHaveCount(0, { timeout: 10000 })
+    await expect(page.locator('.ant-modal-mask'), 'no mask is ever painted').toHaveCount(0)
+
+    const placement = await placeGroupRailWithHeaderOffscreen(page, segmentId)
+    expect(placement.labelOutside, 'the header pill is offscreen while the group rail is at hand').toBe(true)
+    console.log(`[E2E][SegmentFold] group rail placement ${JSON.stringify(placement)}`)
+
+    const interactionTarget = host.locator('[data-testid="topic-segment-fold"]')
+    await expect(interactionTarget, 'the one rail is interactive while expanded').toHaveCount(1)
+    const usePlacement = async () => {
+      const next = await placeGroupRailWithHeaderOffscreen(page, segmentId)
+      expect(next.labelOutside, 'the header pill stays offscreen').toBe(true)
+      await expect(interactionTarget).toHaveCount(1)
+      return next
+    }
+
+    // ── Step 0: the whole line is ONE mark and ONE hover state ───────────────
+    // A REAL pointer is moved onto a point deep inside the rail (far below the
+    // header). The point comes from the current rects and is proven with
+    // `elementFromPoint`, so no locator-level auto-scroll can move this
+    // column-reverse viewport out of the placement that was just established.
+    const railPoint = await resolveRailPointerPoint(page, segmentId)
+    console.log(`[E2E][SegmentFold] group rail pointer point ${JSON.stringify(railPoint)}`)
+    const pointOwnership = await readRailOwnership(page, segmentId, railPoint)
+    expect(pointOwnership.owned, `the resolved point belongs to this group rail (${pointOwnership.testId})`).toBe(true)
+    expect(pointOwnership.onHeaderPill, 'the resolved point is on the rail, never on the header pill').toBe(false)
+    await page.mouse.move(railPoint.x, railPoint.y)
+    // The gesture must not have moved the pointer off the group's own surface.
+    await expect.poll(async () => (await readRailOwnership(page, segmentId, railPoint)).owned).toBe(true)
+    await expect(host.locator('[data-testid="topic-segment-actions"]')).toHaveCSS('opacity', '1')
+    await expect(host.locator('[data-testid="topic-segment-rule"]')).toHaveCSS('filter', 'brightness(1.35)')
+    await expect(page.locator('#messages [data-testid="topic-segment-rule"]')).toHaveCount(1)
+    // Leaving the line releases the same single hover state.
+    const box = await page.locator('#messages').first().boundingBox()
+    expect(box, '#messages must have a box').not.toBeNull()
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + 8)
+    await expect(host.locator('[data-testid="topic-segment-actions"]')).toHaveCSS('opacity', '0')
+    await expect(host.locator('[data-testid="topic-segment-rule"]')).toHaveCSS('filter', 'none')
+
+    // The menu is opened by a REAL right click on the already-proven rail point:
+    // the coordinate is re-resolved from the current rects (and ownership
+    // re-checked) so a placement drift can never turn this into a click on the
+    // message body or on the nav.
+    const openMenu = async () => {
+      const point = await resolveRailPointerPoint(page, segmentId)
+      expect((await readRailOwnership(page, segmentId, point)).owned, 'right click lands on the group rail').toBe(true)
+      await page.mouse.click(point.x, point.y, { button: 'right' })
+      // The open menu is a portal overlay: it may legitimately cover this
+      // coordinate, so the ownership precondition belongs BEFORE the gesture
+      // (asserted above), not after it.
+      await expect(page.locator('.ant-dropdown-menu:visible'), 'one menu, the group menu').toHaveCount(1)
+      await expect(visibleMenuItems, 'the group menu offers its four actions').toHaveCount(4, { timeout: 10000 })
+      // The surface is anchored on the group RAIL beside the WHOLE menu, never at
+      // the group header row. The placement above proves the header pill is
+      // outside the scrollport, so a header-anchored surface would paint above the
+      // viewport instead of beside the click; the menu must therefore be painted
+      // inside the viewport.
+      const menuPlacement = await page.evaluate(() => {
+        const rectOf = (selector: string) => {
+          const element = document.querySelector(selector) as HTMLElement | null
+          const rect = element ? element.getBoundingClientRect() : null
+          return rect ? { top: rect.top, bottom: rect.bottom } : null
+        }
+        return {
+          menu: rectOf('.ant-dropdown-menu'),
+          label: rectOf('#messages [data-testid="topic-segment-label"]'),
+          viewportHeight: window.innerHeight
+        }
+      })
+      expect(menuPlacement.menu, 'the opened group menu is mounted').not.toBeNull()
+      expect(
+        menuPlacement.menu!.top,
+        'the group menu follows the rail pointer, never the offscreen header row'
+      ).toBeGreaterThanOrEqual(0)
+      expect(menuPlacement.menu!.bottom, 'the whole group menu stays inside the viewport').toBeLessThanOrEqual(
+        menuPlacement.viewportHeight
+      )
+      console.log(`[E2E][SegmentFold] menu pointer anchor ${JSON.stringify(menuPlacement)}`)
+      // The pointer only anchors the MENU itself (it is also the engine's
+      // fallback when a menu box is unreachable); the action surfaces pin the
+      // WHOLE menu's box and the group RAIL, so the caller compares both gaps.
+      return point
+    }
+    // ── Step 1: the group rail's right click IS the group menu ───────────────
+    await openMenu()
+    await expect(visibleMenuItems, 'the group rail menu lists the four group actions in order').toHaveText([
+      RENAME_ITEM,
+      COLLAPSE_ITEM,
+      JUMP_ITEM,
+      DISSOLVE_ITEM
+    ])
+    console.log('[E2E][SegmentFold] group rail menu opened with the exact item order')
+
+    // ── Step 2: rename through the anchored rename popover ───────────────────
+    const renamed = 'Rail Renamed Group'
+    // The WHOLE menu box is captured at the click instant: the surface hangs off
+    // the whole menu, 8px clear, with its LEFT arrow on the group rail. The row
+    // that is clicked unmounts with the menu the moment the item is chosen.
+    await armMenuBoxCapture(0)
+    await visibleMenuItems.nth(0).click()
+    const renameMenuBox = await readMenuBox()
+    expect(renameMenuBox, 'the whole menu box is read at click time').not.toBeNull()
+    await renameInput.waitFor({ state: 'visible', timeout: 10000 })
+    await expect(actionSurface, 'rename opens exactly one anchored surface').toHaveCount(1)
+    await expect(actionArrow, 'the rename surface carries its LEFT direction arrow').toHaveCount(1)
+    await expect(modalMask, 'rename paints no backdrop').toHaveCount(0)
+    await expect(modalWrap, 'rename is not a modal').toHaveCount(0)
+    await expect(page.locator('.ant-modal'), 'no modal box at all').toHaveCount(0)
+    await expectMenuSurfaceGeometry({
+      pinTestId: 'topic-segment-rename-anchor',
+      menuBox: renameMenuBox!,
+      label: 'rename',
+      maxWidth: 320
+    })
+    await expect(renameInput, 'one single-line input').toHaveCount(1)
+    await expect(renameInput, 'the input opens prefilled with the current name').toHaveValue(inlineRenamed)
+    const renameButtons = actionSurface.locator('.ant-popover-inner button')
+    await expect(renameButtons, 'the surface offers exactly two actions').toHaveCount(2)
+    await expect(renameButtons.nth(0)).toHaveText(CANCEL_TEXT)
+    await expect(renameButtons.nth(1)).toHaveText(CONFIRM_TEXT)
+    await expect(renameButtons.nth(1), 'the app wording, never the library default').not.toHaveText(/^OK$/i)
+    await renameInput.fill(renamed)
+    await expect(renameInput).toHaveValue(renamed, { timeout: 5000 })
+    await renameInput.press('Enter')
+    await expect(actionSurface, 'Enter confirms and closes the surface').toHaveCount(0, { timeout: 10000 })
+    await expect.poll(async () => await readSegmentName(), { timeout: 15000 }).toBe(renamed)
+    await expect(host.locator('[data-testid="topic-segment-label"]')).toContainText(renamed)
+
+    // ── Step 3: rename cancel writes nothing ─────────────────────────────────
+    await openMenu()
+    await visibleMenuItems.nth(0).click()
+    await renameInput.waitFor({ state: 'visible', timeout: 10000 })
+    await expect(renameInput, 'the surface opens prefilled with the current name').toHaveValue(renamed)
+    await renameInput.fill('Discarded Rename')
+    await renameInput.press('Escape')
+    await expect(actionSurface, 'Escape cancels the surface').toHaveCount(0, { timeout: 10000 })
+    expect(await readSegmentName(), 'a cancelled rename writes nothing').toBe(renamed)
+    // No modal mask may linger: the real pointer must be able to return to the
+    // message column (a live mask legitimately wins `elementFromPoint`).
+    await expect(page.locator('.ant-modal-mask'), 'no mask is ever painted').toHaveCount(0, { timeout: 5000 })
+
+    // ── Step 4: left click on the SAME group rail collapses the group ────────
+    // Real pointer, pre-proven coordinate: the rail is longer than the
+    // scrollport, so a locator click would auto-scroll and destroy the
+    // header-offscreen placement established for this step.
+    const foldPoint = await resolveRailPointerPoint(page, segmentId)
+    expect((await readRailOwnership(page, segmentId, foldPoint)).owned, 'left click lands on the group rail').toBe(true)
+    await page.mouse.click(foldPoint.x, foldPoint.y)
+    await expect(host).toHaveAttribute('data-segment-folded', 'true', { timeout: 15000 })
+    // Same contract as the baseline fold (segment-fold.spec.ts:1124): the
+    // participating-context block reports the folded denominator as its MAX too,
+    // because the folded turns leave BOTH the current count and the reachable
+    // window of `contextCount` turns.
+    await expectTokenCount(page, whileFolded, whileFolded)
+    await expect.poll(async () => (await mountedMessageIds(page)).length, { timeout: 15000 }).toBe(whileFolded)
+    await expect
+      .poll(
+        async () => {
+          const ids = await mountedMessageIds(page)
+          return laterMembers.every((id) => !ids.includes(id))
+        },
+        { timeout: 15000 }
+      )
+      .toBe(true)
+
+    // The collapsed label expands back through the same shared fold write.
+    const expandSelector = `${segmentHostSelector(segmentId)} [data-testid="topic-segment-expand"]`
+    const revealed = await revealChromeInViewport(page, expandSelector)
+    expect(revealed?.inside ?? false, 'the collapsed label is revealable with real wheels').toBe(true)
+    await page.locator(expandSelector).click()
+    await expect(host).toHaveAttribute('data-segment-folded', 'false', { timeout: 15000 })
+    await expectTokenCount(page, CONTEXT_COUNT, CONTEXT_COUNT)
+    await expect.poll(async () => (await mountedMessageIds(page)).length, { timeout: 15000 }).toBe(SEED_MESSAGES)
+
+    // ── Step 5: jump to the group start from the group rail menu ─────────────
+    await usePlacement()
+    const tokenBeforeJump = await page.locator('[data-testid="token-count-context"]').textContent()
+    await openMenu()
+    await visibleMenuItems.nth(2).click()
+    const firstMemberId = laterMembers[0]
+    const firstMemberSelector = `#messages [data-message-id="${firstMemberId}"]`
+    await settleRects(page, [firstMemberSelector])
+    const landing = await page.evaluate((firstMemberId: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      const row = document.querySelector(`#messages [data-message-id="${firstMemberId}"]`) as HTMLElement | null
+      if (!container || !row) return null
+      const c = container.getBoundingClientRect()
+      const r = row.getBoundingClientRect()
+      return { top: r.top, bottom: r.bottom, box: { top: c.top, bottom: c.bottom } }
+    }, firstMemberId)
+    expect(landing, 'the group start row must be mounted for the jump').not.toBeNull()
+    console.log(`[E2E][SegmentFold] group rail jump landing ${JSON.stringify(landing)}`)
+    expect(landing!.top, 'start-aligned: the group start row lands on the scrollport top edge').toBeLessThanOrEqual(
+      landing!.box.top + 8
+    )
+    expect(landing!.bottom, 'the jump target is inside the scrollport').toBeGreaterThan(landing!.box.top)
+    expect(await page.locator('[data-testid="token-count-context"]').textContent()).toBe(tokenBeforeJump)
+
+    // ── Step 6: dissolve — the same anchored Popconfirm, then removal ────────
+    const readSegmentEntity = () =>
+      page.evaluate((segmentId: string) => {
+        const s = (window as any).store?.getState()
+        return s?.topicSegments?.segments?.entities?.[segmentId] ? true : false
+      }, segmentId)
+    // The dissolve step starts from the group rail again (the jump moved the
+    // viewport to the group start, where the header is at hand).
+    await usePlacement()
+    await openMenu()
+    // The WHOLE menu box is captured at the click instant: the surface hangs off
+    // the whole menu (the region the user already knows), never off one row of
+    // it, and that menu unmounts the moment an item is chosen.
+    await armMenuBoxCapture(3)
+    await visibleMenuItems.nth(3).click()
+    const dissolveMenuBox = await readMenuBox()
+    expect(dissolveMenuBox, 'the whole menu box is read at click time').not.toBeNull()
+    await expect(actionSurface, 'dissolve opens exactly one anchored surface').toHaveCount(1, { timeout: 10000 })
+    await expect(
+      page.locator('.ant-popover.ant-popconfirm:visible'),
+      'the dissolve surface is the same anchored Popconfirm'
+    ).toHaveCount(1)
+    await expect(actionArrow, 'the confirm carries a direction arrow').toHaveCount(1)
+    await expect(modalMask, 'dissolve paints no backdrop').toHaveCount(0)
+    await expect(modalWrap, 'dissolve is not a modal').toHaveCount(0)
+    await expect(page.locator('.ant-modal'), 'no modal box at all').toHaveCount(0)
+    await expect(actionSurface.locator('.ant-popconfirm-title')).toHaveText(DISSOLVE_COPY)
+    await expect(
+      actionSurface.locator('.ant-popconfirm-description'),
+      'the copy is the only body text (never a heading band)'
+    ).toHaveCount(0)
+    await expectMenuSurfaceGeometry({
+      pinTestId: 'topic-segment-dissolve-anchor',
+      menuBox: dissolveMenuBox!,
+      label: 'dissolve',
+      maxWidth: 360
+    })
+    const dissolveButtons = actionSurface.locator('.ant-popconfirm-buttons .ant-btn')
+    await expect(dissolveButtons, 'the confirm offers exactly two actions').toHaveCount(2)
+    await expect(dissolveButtons.first()).toHaveText(CANCEL_TEXT)
+    await expect(dissolveButtons.last()).toHaveText(CONFIRM_TEXT)
+    await expect(dissolveButtons.last(), 'the app wording, never the library default').not.toHaveText(/^OK$/i)
+    await expect(actionSurface.locator('.ant-popconfirm-buttons .ant-btn-dangerous'), 'one danger confirm').toHaveCount(
+      1
+    )
+
+    await actionSurface.locator('.ant-popconfirm-buttons .ant-btn').first().click()
+    await expect(actionSurface, 'cancel closes the confirm').toHaveCount(0, { timeout: 10000 })
+    await expect(host, 'a cancelled dissolve keeps the group').toHaveCount(1)
+    expect(await readSegmentEntity(), 'a cancelled dissolve keeps the authority entity').toBe(true)
+    await expect.poll(async () => (await mountedMessageIds(page)).length, { timeout: 15000 }).toBe(SEED_MESSAGES)
+
+    await openMenu()
+    await visibleMenuItems.nth(3).click()
+    await expect(actionSurface, 'the confirm re-opens beside the WHOLE menu').toHaveCount(1, { timeout: 10000 })
+    await actionSurface.locator('.ant-popconfirm-buttons .ant-btn').last().click()
+    await expect(actionSurface, 'confirm closes the surface').toHaveCount(0, { timeout: 10000 })
+    await expect(host, 'a confirmed dissolve removes the group chrome').toHaveCount(0, { timeout: 15000 })
+    expect(await readSegmentEntity(), 'the authority entity is gone').toBe(false)
+    await expect.poll(async () => (await mountedMessageIds(page)).length, { timeout: 15000 }).toBe(SEED_MESSAGES)
+    const mountedAfterDissolve = await mountedMessageIds(page)
+    for (const id of laterMembers) {
+      expect(mountedAfterDissolve, `dissolved member ${id} stays an ordinary message`).toContain(id)
+    }
+    await expectTokenCount(page, CONTEXT_COUNT, CONTEXT_COUNT)
+    console.log('[E2E][SegmentFold] later-rail group surface verified')
   })
 })

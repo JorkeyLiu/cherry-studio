@@ -1,4 +1,5 @@
-import { Button, Input, Popconfirm } from 'antd'
+import ConfirmPopover from '@renderer/components/ConfirmPopover'
+import { Button, Input } from 'antd'
 import { Pencil, Trash2 } from 'lucide-react'
 import type { KeyboardEvent } from 'react'
 import { useEffect, useRef } from 'react'
@@ -168,7 +169,7 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
             onClick={onStartRename}
             style={{ width: 26, minWidth: 26, padding: 0 }}
           />
-          <Popconfirm title={deleteConfirmTitle} okButtonProps={{ danger: true }} onConfirm={onConfirmDelete}>
+          <ConfirmPopover title={deleteConfirmTitle} okButtonProps={{ danger: true }} onConfirm={onConfirmDelete}>
             <Button
               data-testid={deleteTestId}
               type="text"
@@ -179,7 +180,7 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
               aria-label={deleteLabel}
               style={{ width: 26, minWidth: 26, padding: 0 }}
             />
-          </Popconfirm>
+          </ConfirmPopover>
         </>
       )}
     </div>

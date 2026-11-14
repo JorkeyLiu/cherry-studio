@@ -1,0 +1,2181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>消息组折叠动画沙盒 · Segment Fold Preview</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #16181d;
+    --panel-2: #1b1e24;
+    --panel-3: #101216;
+    --bd: #2a2e36;
+    --bd-soft: #23262d;
+    --text: #e7e9ee;
+    --text-2: #cfd3db;
+    --muted: #9aa0ac;
+    --muted-2: #7d8492;
+    --purple: #8b5cf6;
+    --purple-2: #a78bfa;
+    --purple-ink: #c4b5fd;
+    --purple-bg: rgba(139, 92, 246, 0.14);
+    --purple-line: rgba(139, 92, 246, 0.3);
+    --green: #34d399;
+    --amber: #fbbf24;
+    --danger: #f87171;
+    --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+      "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 408px;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .stage {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border-right: 1px solid var(--bd);
+    background: radial-gradient(1200px 500px at 20% -10%, rgba(139, 92, 246, 0.08), transparent 70%), var(--bg);
+  }
+
+  .stage-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 20px 10px;
+    flex-wrap: wrap;
+  }
+  .stage-head h1 {
+    margin: 0 0 3px;
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+  }
+  .stage-head .sub {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .badge-sandbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--purple-line);
+    background: var(--purple-bg);
+    color: var(--purple-ink);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .notice {
+    margin: 0 20px 12px;
+    padding: 9px 12px;
+    border: 1px solid rgba(251, 191, 36, 0.28);
+    background: rgba(251, 191, 36, 0.07);
+    color: #e9d8a6;
+    border-radius: 9px;
+    font-size: 11.5px;
+    line-height: 1.55;
+  }
+  .notice b { color: #fde68a; font-weight: 650; }
+  .notice span.en { color: #cbbf9a; }
+
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 0 20px 12px;
+  }
+  .toolbar .spacer { flex: 1 1 8px; }
+  .speed-wrap {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid var(--bd);
+    background: var(--panel);
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .speed-wrap input[type="range"] { width: 104px; }
+  .speed-wrap output { font-family: var(--mono); color: var(--text-2); min-width: 44px; text-align: right; }
+
+  .btn {
+    appearance: none;
+    border: 1px solid var(--bd);
+    background: var(--panel-2);
+    color: var(--text-2);
+    border-radius: 9px;
+    padding: 6px 11px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #23262e; border-color: #363b45; color: var(--text); }
+  .btn:focus-visible { outline: 2px solid var(--purple-2); outline-offset: 1px; }
+  .btn.primary {
+    background: rgba(139, 92, 246, 0.18);
+    border-color: rgba(139, 92, 246, 0.46);
+    color: #ddd2ff;
+    font-weight: 600;
+  }
+  .btn.primary:hover { background: rgba(139, 92, 246, 0.26); }
+  .btn.ghost { background: transparent; }
+  .btn.small { padding: 4px 8px; font-size: 11.5px; border-radius: 7px; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-2);
+    cursor: pointer;
+    user-select: none;
+  }
+  .check input { accent-color: var(--purple); width: 14px; height: 14px; margin: 0; }
+
+  .previews {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 20px 16px;
+  }
+  .previews.two {
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
+  .preview-card {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--bd);
+    background: var(--panel);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+  }
+  .preview-card[hidden] { display: none; }
+  .preview-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--bd-soft);
+    background: var(--panel-2);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .preview-card-head b { color: var(--text-2); font-weight: 600; font-size: 11.5px; }
+  .preview-card-head .tag {
+    border: 1px solid var(--bd);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .hud {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+    gap: 6px;
+    width: 100%;
+    max-width: 640px;
+  }
+  .hud-item {
+    border: 1px solid var(--bd);
+    background: var(--panel-3);
+    border-radius: 8px;
+    padding: 5px 8px;
+    min-width: 0;
+  }
+  .hud-item span {
+    display: block;
+    font-size: 10px;
+    color: var(--muted-2);
+    white-space: nowrap;
+  }
+  .hud-item b {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 550;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hud-item b.live { color: var(--purple-ink); }
+
+  /* ── Chat scene (recreated dark chat region) ── */
+  .chat {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    background: #101216;
+  }
+  .chat-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--bd-soft);
+    color: var(--muted-2);
+    font-size: 11px;
+    flex: 0 0 auto;
+  }
+  .chat-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); opacity: 0.8; }
+  .chat-hint { margin-left: auto; font-size: 10.5px; border: 1px dashed var(--bd); border-radius: 5px; padding: 1px 6px; }
+  .chat-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px 16px 24px;
+    scrollbar-width: thin;
+    scrollbar-color: #343944 transparent;
+  }
+  .chat-scroll .row { display: flex; gap: 10px; margin-bottom: 16px; }
+  .chat-scroll .row.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 80%;
+    background: var(--purple-bg);
+    border: 1px solid rgba(139, 92, 246, 0.26);
+    border-radius: 12px;
+    padding: 9px 12px;
+    color: var(--text);
+    font-size: 12.5px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+  .avatar {
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(150deg, #40345f, #23242c);
+    border: 1px solid #4a3f68;
+    color: #d8c9ff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .msg { min-width: 0; flex: 1; }
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 5px;
+    color: var(--muted-2);
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+  .meta strong { color: var(--text); font-size: 11.5px; font-weight: 650; }
+  .model {
+    border: 1px solid var(--bd);
+    border-radius: 5px;
+    padding: 0 5px;
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .time { font-family: var(--mono); font-size: 10px; }
+  .md {
+    color: #d5d8df;
+    font-size: 12.5px;
+    line-height: 1.68;
+    overflow-wrap: anywhere;
+  }
+  .md + .md { margin-top: 8px; }
+
+  /* group chrome */
+  .group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-bottom: 16px;
+    min-width: 0;
+  }
+  .pill {
+    appearance: none;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 9px 0 7px;
+    margin: 0 0 8px;
+    background: color-mix(in srgb, var(--purple) 13%, #14161a);
+    border: 1px solid rgba(139, 92, 246, 0.34);
+    border-radius: 4px 8px 8px 4px;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .pill:hover { border-color: rgba(139, 92, 246, 0.55); }
+  .pill:focus-visible { outline: 2px solid var(--purple-2); outline-offset: 1px; }
+  .pill-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--purple-2); }
+  .pill-name { font-size: 12px; font-weight: 600; color: var(--text); }
+  .pill-count { font-size: 11px; color: #b9b3c8; }
+  .pill-chevron { font-size: 10px; color: #b9a7ff; margin-left: 1px; }
+  .group-body {
+    position: relative;
+    width: 100%;
+    padding-left: 18px;
+    min-width: 0;
+  }
+  .rail {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--purple);
+    opacity: 1;
+    z-index: 1;
+  }
+  .clip {
+    overflow: hidden;
+    width: 100%;
+    min-width: 0;
+  }
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 2px 0 10px;
+    transform-origin: top center;
+    will-change: height, opacity, transform;
+  }
+  .body[data-length="short"] .extra { display: none; }
+  .reasoning {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(139, 92, 246, 0.22);
+    background: rgba(139, 92, 246, 0.08);
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: #c3b2ff;
+    font-size: 11.5px;
+    min-width: 0;
+  }
+  .reasoning-mark { color: var(--purple-2); font-size: 11px; }
+  .reasoning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reasoning-chev { margin-left: auto; opacity: 0.65; font-size: 10px; }
+  .body .row { margin-bottom: 0; }
+  .extra { display: flex; flex-direction: column; gap: 12px; }
+  .bullets { margin: 0; padding-left: 18px; color: #cbd0d8; font-size: 12px; line-height: 1.7; }
+  .bullets li { margin: 3px 0; }
+  .quote {
+    border-left: 2px solid rgba(139, 92, 246, 0.5);
+    background: #14161b;
+    border-radius: 0 7px 7px 0;
+    padding: 7px 10px;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.6;
+  }
+
+  /* ── Controls panel ── */
+  .controls {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 18px 40px;
+    background: var(--panel);
+    scrollbar-width: thin;
+    scrollbar-color: #343944 transparent;
+  }
+  .controls-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .controls-title h2 { margin: 0; font-size: 13px; font-weight: 650; color: var(--text); }
+  .controls-title .tag {
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--bd);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: var(--mono);
+  }
+  .controls h3 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 650;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .controls h3 .en { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted-2); font-size: 10.5px; }
+  .section {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 13px 0;
+    border-bottom: 1px solid var(--bd-soft);
+  }
+  .field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-2);
+    min-width: 0;
+  }
+  .field > label { flex: 1; min-width: 0; cursor: pointer; }
+  .field .hint { display: block; color: var(--muted-2); font-size: 10.5px; margin-top: 1px; }
+  .field .control { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+  input[type="number"], input[type="text"], select, textarea {
+    background: var(--panel-3);
+    border: 1px solid var(--bd);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 5px 7px;
+    min-width: 0;
+  }
+  input[type="number"] { width: 74px; }
+  input[type="number"]:focus-visible, input[type="text"]:focus-visible,
+  select:focus-visible, textarea:focus-visible {
+    outline: 2px solid rgba(167, 139, 250, 0.6);
+    outline-offset: 0;
+    border-color: transparent;
+  }
+  select { font-family: inherit; max-width: 100%; }
+  input[type="range"] {
+    accent-color: var(--purple);
+    width: 100%;
+    min-width: 60px;
+    margin: 0;
+  }
+  .range-field { display: flex; flex-direction: column; gap: 4px; }
+  .range-row { display: flex; align-items: center; gap: 8px; }
+  .range-row input[type="range"] { flex: 1; }
+  .unit { color: var(--muted-2); font-size: 10.5px; font-family: var(--mono); white-space: nowrap; }
+  .coefs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+  .coefs input { width: 100%; text-align: center; }
+  .bezier-text { width: 100%; }
+  .error {
+    color: var(--danger);
+    font-size: 10.5px;
+    line-height: 1.4;
+    min-height: 0;
+  }
+  .mode-note {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.55;
+    background: #121419;
+    border: 1px solid var(--bd-soft);
+    border-radius: 8px;
+    padding: 7px 9px;
+  }
+  .status {
+    margin: 4px 0 0;
+    min-height: 16px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .status strong { color: var(--purple-ink); font-weight: 600; }
+  .save-state { color: var(--muted-2); font-size: 10.5px; }
+  textarea.json {
+    width: 100%;
+    min-height: 190px;
+    resize: vertical;
+    line-height: 1.5;
+    white-space: pre;
+    padding: 9px;
+  }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .radio-row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .footer-note {
+    margin-top: 12px;
+    color: var(--muted-2);
+    font-size: 10.5px;
+    line-height: 1.5;
+    border-top: 1px dashed var(--bd);
+    padding-top: 10px;
+  }
+
+  @media (max-width: 1000px) {
+    .app { display: flex; flex-direction: column; height: auto; min-height: 100dvh; overflow: visible; }
+    .stage { border-right: none; border-bottom: 1px solid var(--bd); }
+    .previews { flex: none; min-height: 0; height: 56vh; }
+    .preview-card { min-height: 380px; }
+    .controls { overflow: visible; max-height: none; }
+    .hud { max-width: none; }
+  }
+  @media (max-width: 560px) {
+    .stage-head, .notice, .toolbar, .previews { padding-left: 12px; padding-right: 12px; }
+    .stage-head { padding-top: 14px; }
+    .previews { height: 58vh; }
+    .controls { padding: 14px 12px 32px; }
+    .field { align-items: flex-start; flex-direction: column; gap: 5px; }
+    .field .control { width: 100%; }
+    .field .control input[type="range"] { flex: 1; }
+    input[type="number"] { width: 84px; }
+    .coefs { gap: 4px; }
+    .speed-wrap input[type="range"] { width: 78px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .btn, .pill { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <main class="stage">
+    <header class="stage-head">
+      <div>
+        <h1>消息组折叠动画沙盒</h1>
+        <p class="sub">独立 HTML 动画预览 · 参数可直接手调</p>
+      </div>
+      <span class="badge-sandbox">独立沙盒 · 非应用内页面</span>
+      <div class="hud" aria-label="实时动画读数">
+        <div class="hud-item"><span>状态</span><b id="hudState">展开静止</b></div>
+        <div class="hud-item"><span>时间轴进度</span><b id="hudProgress">100%</b></div>
+        <div class="hud-item"><span>实时高度</span><b class="live" id="hudHeight">—</b></div>
+        <div class="hud-item"><span>内容透明度</span><b class="live" id="hudOpacity">—</b></div>
+        <div class="hud-item"><span>位移</span><b id="hudTranslate">—</b></div>
+        <div class="hud-item"><span>左侧竖线</span><b id="hudRail">—</b></div>
+        <div class="hud-item"><span>模式 / 速度</span><b id="hudMode">A · 1.00×</b></div>
+      </div>
+    </header>
+
+    <p class="notice">
+      <b>这是模拟，不是应用内真实过渡。</b>页面用 WAAPI + 像素高度裁剪复刻折叠/展开的手感，<span class="en">不包含 React 重挂载、消息树更新、滚动视口所有权或应用内实测播放。</span>
+      参数与观感只在此沙盒成立，<b>不代表已修复生产环境中的闪烁</b>。
+    </p>
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" id="btnExpand">展开</button>
+      <button type="button" class="btn" id="btnCollapse">折叠</button>
+      <button type="button" class="btn" id="btnReverse" title="在过渡中途从当前实时高度反向；若静止则先开始并在约 50% 处反向">中途反向</button>
+      <button type="button" class="btn" id="btnStress" title="连续 5 次快速反向，用于观察是否闪烁或跳变">快速抖动 ×5</button>
+      <label class="check"><input type="checkbox" id="autoRepeat"> 自动循环</label>
+      <button type="button" class="btn small" id="btnStopAuto">停止</button>
+      <span class="spacer"></span>
+      <div class="speed-wrap">
+        <label for="speedRange">慢放</label>
+        <input type="range" id="speedRange" min="0.25" max="2" step="0.05" value="1" aria-label="播放速度倍率">
+        <output id="speedOut" for="speedRange">1.00×</output>
+      </div>
+      <label class="check"><input type="checkbox" id="showBaseline"> 并排对比基线</label>
+      <button type="button" class="btn" id="btnReplay">重播一次</button>
+    </div>
+
+    <div class="previews" id="previews">
+      <section class="preview-card" aria-label="试验参数预览">
+        <div class="preview-card-head">
+          <b>当前参数试验</b>
+          <span class="tag" id="trialTag">A · 220 / 200 ms</span>
+        </div>
+        <div id="trialMount"></div>
+      </section>
+      <section class="preview-card" id="baselineCard" hidden aria-label="基线预览">
+        <div class="preview-card-head">
+          <b>基线 · 应用近似（模拟，非生产实测）</b>
+          <span class="tag">close 200 / fade 140 · open 200 / fade 150 + 50 · h .65/.35</span>
+        </div>
+        <div id="baselineMount"></div>
+      </section>
+    </div>
+  </main>
+
+  <aside class="controls" id="controls" aria-label="动画参数控制面板">
+    <div class="controls-title">
+      <h2>参数调节</h2>
+      <span class="tag">本地保存</span>
+    </div>
+
+    <section class="section">
+      <h3>模式 <span class="en">mode preset</span></h3>
+      <div class="field">
+        <label for="modeSel">预设
+          <span class="hint">切换后写入该模式的默认数值，之后仍可继续手调</span>
+        </label>
+        <div class="control">
+          <select id="modeSel">
+            <option value="A">A · 仅高度（推荐）</option>
+            <option value="B">B · 应用近似（模拟）</option>
+            <option value="C">C · 高度 + 位移</option>
+          </select>
+        </div>
+      </div>
+      <p class="mode-note" id="modeNote"></p>
+    </section>
+
+    <section class="section">
+      <h3>时间与循环 <span class="en">timing</span></h3>
+      <div class="range-field">
+        <div class="field">
+          <label for="openDurNum">展开时长
+            <span class="hint">80–800 ms，独立于折叠</span>
+          </label>
+          <div class="control">
+            <input type="number" id="openDurNum" min="80" max="800" step="10" value="220" aria-label="展开时长毫秒">
+            <span class="unit">ms</span>
+          </div>
+        </div>
+        <div class="range-row">
+          <input type="range" id="openDurRange" min="80" max="800" step="10" value="220" aria-label="展开时长滑块">
+        </div>
+      </div>
+      <div class="range-field">
+        <div class="field">
+          <label for="closeDurNum">折叠时长
+            <span class="hint">80–800 ms，独立于展开</span>
+          </label>
+          <div class="control">
+            <input type="number" id="closeDurNum" min="80" max="800" step="10" value="200" aria-label="折叠时长毫秒">
+            <span class="unit">ms</span>
+          </div>
+        </div>
+        <div class="range-row">
+          <input type="range" id="closeDurRange" min="80" max="800" step="10" value="200" aria-label="折叠时长滑块">
+        </div>
+      </div>
+      <div class="field">
+        <label for="dwellInput">自动循环停留
+          <span class="hint">展开/折叠完成后静止多久再继续</span>
+        </label>
+        <div class="control">
+          <input type="number" id="dwellInput" min="200" max="5000" step="50" value="900" aria-label="自动循环停留毫秒">
+          <span class="unit">ms</span>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="autoReplay"> 参数改变后自动重播一次</label>
+    </section>
+
+    <section class="section">
+      <h3>透明度 <span class="en">opacity</span></h3>
+      <label class="check"><input type="checkbox" id="fadeEnabled"> 启用透明度渐变（内容 + 左侧竖线）</label>
+      <p class="error" id="fadeHint" style="color:var(--muted)"></p>
+      <div class="field">
+        <label for="opacityFrom">折叠端透明度 <span class="hint">折叠完成时内容的不透明度</span></label>
+        <div class="control"><input type="number" id="opacityFrom" min="0" max="1" step="0.05" value="0" aria-label="折叠端透明度"></div>
+      </div>
+      <div class="field">
+        <label for="opacityTo">展开端透明度 <span class="hint">展开完成时内容的不透明度</span></label>
+        <div class="control"><input type="number" id="opacityTo" min="0" max="1" step="0.05" value="1" aria-label="展开端透明度"></div>
+      </div>
+      <div class="field">
+        <label for="openFadeDur">展开渐显时长</label>
+        <div class="control"><input type="number" id="openFadeDur" min="0" max="800" step="10" value="150" aria-label="展开渐显时长毫秒"><span class="unit">ms</span></div>
+      </div>
+      <div class="field">
+        <label for="openFadeDelay">展开渐显延迟</label>
+        <div class="control"><input type="number" id="openFadeDelay" min="0" max="800" step="10" value="50" aria-label="展开渐显延迟毫秒"><span class="unit">ms</span></div>
+      </div>
+      <div class="field">
+        <label for="closeFadeDur">折叠渐隐时长</label>
+        <div class="control"><input type="number" id="closeFadeDur" min="0" max="800" step="10" value="140" aria-label="折叠渐隐时长毫秒"><span class="unit">ms</span></div>
+      </div>
+      <div class="field">
+        <label for="closeFadeDelay">折叠渐隐延迟</label>
+        <div class="control"><input type="number" id="closeFadeDelay" min="0" max="800" step="10" value="0" aria-label="折叠渐隐延迟毫秒"><span class="unit">ms</span></div>
+      </div>
+      <div class="field" style="align-items:flex-start">
+        <label for="opacityEasingText">透明度缓动 <span class="hint">cubic-bezier 四个系数，x 必须在 0–1</span></label>
+      </div>
+      <div class="control" style="width:100%">
+        <select id="opacityEasingPreset" style="width:100%"></select>
+      </div>
+      <div class="coefs" aria-label="透明度缓动系数">
+        <input type="number" id="ox1" min="0" max="1" step="0.01" value="0.3" aria-label="透明度缓动 x1">
+        <input type="number" id="oy1" step="0.01" value="0" aria-label="透明度缓动 y1">
+        <input type="number" id="ox2" min="0" max="1" step="0.01" value="0.7" aria-label="透明度缓动 x2">
+        <input type="number" id="oy2" step="0.01" value="1" aria-label="透明度缓动 y2">
+      </div>
+      <input type="text" id="opacityEasingText" class="bezier-text" aria-label="透明度缓动自定义文本" spellcheck="false">
+      <p class="error" id="opacityEasingError"></p>
+    </section>
+
+    <section class="section">
+      <h3>高度缓动 <span class="en">height easing</span></h3>
+      <div class="control" style="width:100%">
+        <select id="heightEasingPreset" style="width:100%"></select>
+      </div>
+      <div class="coefs" aria-label="高度缓动系数">
+        <input type="number" id="hx1" min="0" max="1" step="0.01" value="0.3" aria-label="高度缓动 x1">
+        <input type="number" id="hy1" step="0.01" value="0" aria-label="高度缓动 y1">
+        <input type="number" id="hx2" min="0" max="1" step="0.01" value="0.7" aria-label="高度缓动 x2">
+        <input type="number" id="hy2" step="0.01" value="1" aria-label="高度缓动 y2">
+      </div>
+      <input type="text" id="heightEasingText" class="bezier-text" aria-label="高度缓动自定义文本" spellcheck="false">
+      <p class="error" id="heightEasingError"></p>
+    </section>
+
+    <section class="section">
+      <h3>位移与内容 <span class="en">translate &amp; content</span></h3>
+      <div class="range-field">
+        <div class="field">
+          <label for="translateRange">折叠位移 <span class="hint">0 = 关闭；正值让内容在折叠时轻微上移</span></label>
+          <div class="control"><output id="translateOut" for="translateRange">0 px</output></div>
+        </div>
+        <div class="range-row">
+          <input type="range" id="translateRange" min="0" max="12" step="1" value="0" aria-label="折叠位移像素">
+        </div>
+      </div>
+      <div class="field">
+        <span>内容长度</span>
+        <div class="control radio-row">
+          <label class="check"><input type="radio" name="content" value="short" checked> 短内容</label>
+          <label class="check"><input type="radio" name="content" value="long"> 长内容</label>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3>可访问性 <span class="en">reduced motion</span></h3>
+      <label class="check"><input type="checkbox" id="respectRM" checked> 跟随系统「减少动态效果」</label>
+      <p class="mode-note" id="rmHint"></p>
+    </section>
+
+    <section class="section">
+      <h3>参数 JSON <span class="en">export / import</span></h3>
+      <textarea id="jsonArea" class="json" aria-label="参数 JSON 文本" spellcheck="false"></textarea>
+      <p class="error" id="jsonError"></p>
+      <div class="btn-row">
+        <button type="button" class="btn small" id="btnCopyJson">复制 JSON</button>
+        <button type="button" class="btn small" id="btnDownloadJson">下载 .json</button>
+        <button type="button" class="btn small" id="btnImportJson">导入上方 JSON</button>
+        <button type="button" class="btn small ghost" id="btnRefreshJson">显示当前参数</button>
+        <label class="btn small ghost" style="margin:0; display:inline-flex; align-items:center; cursor:pointer">
+          从文件导入
+          <input type="file" id="jsonFile" accept=".json,application/json" hidden>
+        </label>
+      </div>
+      <div class="btn-row" style="margin-top:2px">
+        <button type="button" class="btn small" id="btnReset">恢复默认（模式 A）</button>
+        <span class="save-state" id="saveState"></span>
+      </div>
+    </section>
+
+    <p class="status" id="statusLine" role="status" aria-live="polite">就绪。切换模式或直接拖动参数即可预览。</p>
+    <p class="footer-note">
+      本页是独立调试工件：中文标签不进入应用 i18n 语言包，也不依赖应用源码、CDN 或构建步骤。可离线用 file:// 打开。
+    </p>
+  </aside>
+</div>
+
+<template id="sceneTpl">
+  <article class="chat">
+    <header class="chat-bar">
+      <span class="chat-dot"></span>
+      <span>会话预览 · 深色</span>
+      <span class="chat-hint">示意内容</span>
+    </header>
+    <div class="chat-scroll">
+      <div class="row user">
+        <div class="bubble">你看下这个消息组折叠的动画，展开的时候有点闪，能单独调一下吗？</div>
+      </div>
+      <div class="row assistant">
+        <div class="avatar">D</div>
+        <div class="msg">
+          <div class="meta"><strong>DeepSeek</strong><span class="model">deepseek-chat</span><span class="time">14:02</span></div>
+          <div class="md">可以。我用独立沙盒复刻这段过渡，参数在右侧直接调；这里不涉及 React 重挂载和滚动视口所有权。</div>
+        </div>
+      </div>
+
+      <div class="group" data-role="group">
+        <button type="button" class="pill" data-role="toggle" aria-expanded="true" title="折叠 / 展开此消息组">
+          <span class="pill-dot" aria-hidden="true"></span>
+          <span class="pill-name">新建消息组</span>
+          <span class="pill-count">2 条消息</span>
+          <span class="pill-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="group-body">
+          <div class="rail" data-role="rail" aria-hidden="true"></div>
+          <div class="clip" data-role="clip">
+            <div class="body" data-role="body" data-length="short">
+              <div class="reasoning">
+                <span class="reasoning-mark" aria-hidden="true">✦</span>
+                <span class="reasoning-text">已深度思考（用时 12 秒）</span>
+                <span class="reasoning-chev" aria-hidden="true">▸</span>
+              </div>
+              <div class="row assistant">
+                <div class="avatar">D</div>
+                <div class="msg">
+                  <div class="meta"><strong>DeepSeek</strong><span class="model">deepseek-chat</span><span class="time">14:03</span></div>
+                  <div class="md">折叠是一段连续手势：高度裁剪和透明度在同一时间窗里推进，中途反向时从屏幕上的实时高度继续，而不是跳回起点。</div>
+                </div>
+              </div>
+              <div class="extra">
+                <div class="row assistant">
+                  <div class="avatar">D</div>
+                  <div class="msg">
+                    <div class="meta"><strong>DeepSeek</strong><span class="time">14:04</span></div>
+                    <div class="md">长内容用于观察更大的高度差：同一套裁剪逻辑，目标高度由内容自然高度实测得到；内容越长，折叠时被裁掉的行越多。</div>
+                  </div>
+                </div>
+                <div class="md">可以重点观察这几件事：</div>
+                <ul class="bullets">
+                  <li>起止帧是否闪出一帧空白、错位或跳变；</li>
+                  <li>中途反向时高度和透明度是否从当前值继续；</li>
+                  <li>左侧竖线和标题胶囊是否在动画中途换样式或被重挂载；</li>
+                  <li>下方消息是否只随高度变化平滑移动，没有二次抖动。</li>
+                </ul>
+                <div class="quote">当前为独立沙盒读数：高度由 clip 元素的像素高度驱动，透明度由 body 元素驱动，均使用 Web Animations API 并可在中途取消后从计算值重启。</div>
+                <div class="md">继续往下是示例段落，用来把内容撑到足够高度。折叠时这些行会被竖直裁切，展开时再按同一时间轴露出。</div>
+                <div class="md">第二段示例：如果看到文字先消失、留下空白盒，再突然收高度，说明透明度比高度提前结束太多；如果看到高度先收、文字仍完整可见并被硬切，说明渐隐太慢。两种都值得调。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row assistant">
+        <div class="avatar">D</div>
+        <div class="msg">
+          <div class="meta"><strong>DeepSeek</strong><span class="time">14:05</span></div>
+          <div class="md">上方消息组的高度变化时，这一条会跟着移动——这就是普通文档流对高度差的吸收，动画期间它应当每帧平滑移动。</div>
+        </div>
+      </div>
+      <div class="row user">
+        <div class="bubble">再往下还有内容，用来观察底部有没有抖动或闪烁。</div>
+      </div>
+      <div class="row assistant">
+        <div class="avatar">D</div>
+        <div class="msg">
+          <div class="meta"><strong>DeepSeek</strong><span class="time">14:06</span></div>
+          <div class="md">底部段落结束。把参数填好之后，复制右侧 JSON 发回来即可复现同一组数值。</div>
+        </div>
+      </div>
+    </div>
+  </article>
+</template>
+
+<script>
+(function () {
+  'use strict';
+
+  var SCHEMA = 'segment-fold-preview/v1';
+  var LS_KEY = 'segment-fold-preview.params.v1';
+  var EASING_PRESETS = [
+    { id: 'soft', label: '柔和进出 (0.3, 0, 0.7, 1)', values: [0.3, 0, 0.7, 1] },
+    { id: 'app-height', label: '应用高度曲线 (0.65, 0, 0.35, 1)', values: [0.65, 0, 0.35, 1] },
+    { id: 'standard', label: '标准 ease (0.25, 0.1, 0.25, 1)', values: [0.25, 0.1, 0.25, 1] },
+    { id: 'ease-out', label: '缓出 (0, 0, 0.2, 1)', values: [0, 0, 0.2, 1] },
+    { id: 'linear', label: '线性 (0, 0, 1, 1)', values: [0, 0, 1, 1] },
+  ];
+
+  var MODE_PRESETS = {
+    A: {
+      label: 'A · 仅高度（推荐）',
+      note: '只裁剪高度，内容始终不透明。没有高度/透明度并发，最容易判断是否存在闪烁；左侧竖线不淡出，随高度自然收缩。',
+      patch: {
+        fadeEnabled: false,
+        opacityFrom: 0,
+        opacityTo: 1,
+        translatePx: 0,
+        open: { duration: 220, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 150, fadeDelay: 50, fadeEasing: [0.3, 0, 0.7, 1] },
+        close: { duration: 200, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 140, fadeDelay: 0, fadeEasing: [0.3, 0, 0.7, 1] },
+      },
+    },
+    B: {
+      label: 'B · 应用近似（模拟）',
+      note: '与当前应用数值对齐的模拟：折叠 200 ms / 渐隐 140 ms / 延迟 0；展开 200 ms / 渐显 150 ms / 延迟 50；高度缓动 (0.65, 0, 0.35, 1)，透明度缓动 (0.3, 0, 0.7, 1)。仍是本页沙盒复刻，不含 React 重挂载、消息树更新与滚动视口所有权。',
+      patch: {
+        fadeEnabled: true,
+        opacityFrom: 0,
+        opacityTo: 1,
+        translatePx: 0,
+        open: { duration: 200, heightEasing: [0.65, 0, 0.35, 1], fadeDuration: 150, fadeDelay: 50, fadeEasing: [0.3, 0, 0.7, 1] },
+        close: { duration: 200, heightEasing: [0.65, 0, 0.35, 1], fadeDuration: 140, fadeDelay: 0, fadeEasing: [0.3, 0, 0.7, 1] },
+      },
+    },
+    C: {
+      label: 'C · 高度 + 位移',
+      note: '在相近的时间数值上叠加 6 px 的折叠上移：内容一边被裁剪、渐隐，一边轻微向上收，用来观察位移是否造成重影。',
+      patch: {
+        fadeEnabled: true,
+        opacityFrom: 0,
+        opacityTo: 1,
+        translatePx: 6,
+        open: { duration: 200, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 150, fadeDelay: 50, fadeEasing: [0.3, 0, 0.7, 1] },
+        close: { duration: 200, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 140, fadeDelay: 0, fadeEasing: [0.3, 0, 0.7, 1] },
+      },
+    },
+  };
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+  function num(v, fallback) {
+    var n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  function round(v, d) {
+    var f = Math.pow(10, d == null ? 3 : d);
+    return Math.round(v * f) / f;
+  }
+  function cssBezier(vals) {
+    return 'cubic-bezier(' + vals.map(function (v) { return round(v, 3); }).join(', ') + ')';
+  }
+  function fmtBezier(vals) {
+    return vals.map(function (v) { return round(v, 3); }).join(', ');
+  }
+  function sanitizeEasing(vals, fallback) {
+    if (!Array.isArray(vals) || vals.length !== 4) return fallback.slice();
+    var out = vals.map(function (v) { return Number(v); });
+    if (!out.every(Number.isFinite)) return fallback.slice();
+    out[0] = clamp(out[0], 0, 1);
+    out[2] = clamp(out[2], 0, 1);
+    return out;
+  }
+  function parseBezierText(text) {
+    if (typeof text !== 'string') return null;
+    var cleaned = text.trim().replace(/cubic-bezier/i, '').replace(/[()]/g, '');
+    var parts = cleaned.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (parts.length !== 4) return null;
+    var vals = parts.map(function (s) { return Number(s); });
+    if (!vals.every(Number.isFinite)) return null;
+    if (vals[0] < 0 || vals[0] > 1 || vals[2] < 0 || vals[2] > 1) return null;
+    return vals;
+  }
+  function parseTranslateY(transform) {
+    if (!transform || transform === 'none') return 0;
+    try {
+      var m = new DOMMatrixReadOnly(transform);
+      if (Number.isFinite(m.m42)) return m.m42;
+    } catch (e) { /* fall through */ }
+    var m3 = transform.match(/matrix3d\((.+)\)/);
+    if (m3) {
+      var p3 = m3[1].split(',').map(Number);
+      return Number.isFinite(p3[13]) ? p3[13] : 0;
+    }
+    var m2 = transform.match(/matrix\((.+)\)/);
+    if (m2) {
+      var p2 = m2[1].split(',').map(Number);
+      return Number.isFinite(p2[5]) ? p2[5] : 0;
+    }
+    return 0;
+  }
+
+  /* ── Animation engine: WAAPI height clip, live-value reversals ── */
+  function FoldEngine(root, getConfig, onChange) {
+    this.root = root;
+    this.clip = $('[data-role="clip"]', root);
+    this.body = $('[data-role="body"]', root);
+    this.rail = $('[data-role="rail"]', root);
+    this.pill = $('[data-role="toggle"]', root);
+    this.getConfig = getConfig;
+    this.onChange = onChange || function () {};
+    this.open = true;
+    this.direction = null;
+    this.anims = [];
+    this.spaceAnim = null;
+    this.settlePromise = Promise.resolve();
+    this.token = 0;
+    var self = this;
+    if (typeof ResizeObserver === 'function') {
+      this.ro = new ResizeObserver(function () {
+        if (!self.direction && self.open) {
+          var natural = self.measureNatural();
+          var current = parseFloat(self.clip.style.height);
+          if (!Number.isFinite(current) || Math.abs(current - natural) > 0.5) {
+            self.clip.style.height = natural + 'px';
+            self.onChange();
+          }
+        }
+      });
+      this.ro.observe(this.body);
+    }
+  }
+
+  FoldEngine.prototype.measureNatural = function () {
+    return Math.max(0, this.body.getBoundingClientRect().height);
+  };
+
+  FoldEngine.prototype.readLive = function () {
+    var clipStyle = getComputedStyle(this.clip);
+    var height = parseFloat(clipStyle.height);
+    if (!Number.isFinite(height)) height = this.clip.getBoundingClientRect().height;
+    var bodyStyle = getComputedStyle(this.body);
+    var opacity = parseFloat(bodyStyle.opacity);
+    var railOpacity = parseFloat(getComputedStyle(this.rail).opacity);
+    return {
+      height: height,
+      opacity: Number.isFinite(opacity) ? opacity : 1,
+      translate: parseTranslateY(bodyStyle.transform),
+      railOpacity: Number.isFinite(railOpacity) ? railOpacity : 1,
+    };
+  };
+
+  FoldEngine.prototype.applySettled = function (open) {
+    var cfg = this.getConfig();
+    var fade = cfg.fadeEnabled;
+    var natural = this.measureNatural();
+    this.clip.style.height = (open ? natural : 0) + 'px';
+    this.body.style.opacity = fade ? String(open ? cfg.opacityTo : cfg.opacityFrom) : '1';
+    this.body.style.transform = 'translateY(' + (open ? 0 : -(Number(cfg.translatePx) || 0)) + 'px)';
+    this.rail.style.opacity = fade ? (open ? '1' : '0') : '1';
+    this.pill.setAttribute('aria-expanded', open ? 'true' : 'false');
+    this.root.dataset.state = open ? 'open' : 'closed';
+  };
+
+  FoldEngine.prototype.primeInline = function (live) {
+    this.clip.style.height = live.height + 'px';
+    this.body.style.opacity = String(live.opacity);
+    this.body.style.transform = 'translateY(' + live.translate + 'px)';
+    this.rail.style.opacity = String(live.railOpacity);
+  };
+
+  FoldEngine.prototype.cancelAnims = function () {
+    this.token += 1;
+    for (var i = 0; i < this.anims.length; i += 1) {
+      try { this.anims[i].cancel(); } catch (e) { /* already gone */ }
+    }
+    this.anims = [];
+    this.spaceAnim = null;
+  };
+
+  FoldEngine.prototype.init = function () {
+    this.cancelAnims();
+    this.open = true;
+    this.direction = null;
+    this.applySettled(true);
+    this.onChange();
+    return Promise.resolve();
+  };
+
+  FoldEngine.prototype.jumpTo = function (open) {
+    this.cancelAnims();
+    this.open = open;
+    this.direction = null;
+    this.applySettled(open);
+    this.onChange();
+    return Promise.resolve();
+  };
+
+  FoldEngine.prototype.syncIdle = function () {
+    if (this.direction) return;
+    this.applySettled(this.open);
+    this.onChange();
+  };
+
+  FoldEngine.prototype.setOpen = function (newOpen) {
+    if (this.direction === 'open' && newOpen === true) return this.settlePromise;
+    if (this.direction === 'close' && newOpen === false) return this.settlePromise;
+    if (!this.direction && this.open === newOpen) return Promise.resolve();
+    return this.transition(newOpen);
+  };
+
+  FoldEngine.prototype.transition = function (newOpen) {
+    var cfg = this.getConfig();
+    var dir = newOpen ? cfg.open : cfg.close;
+    var fade = cfg.fadeEnabled;
+    var live = this.readLive();
+    this.primeInline(live);
+    this.cancelAnims();
+    this.open = newOpen;
+    this.direction = newOpen ? 'open' : 'close';
+    this.root.dataset.state = newOpen ? 'opening' : 'closing';
+    this.pill.setAttribute('aria-expanded', newOpen ? 'true' : 'false');
+
+    var targetHeight = newOpen ? this.measureNatural() : 0;
+    var speed = clamp(Number(cfg.speed) || 1, 0.25, 2);
+    var anims = [];
+
+    var heightAnim = this.clip.animate(
+      [{ height: live.height + 'px' }, { height: targetHeight + 'px' }],
+      { duration: dir.duration, easing: cssBezier(dir.heightEasing), fill: 'forwards' }
+    );
+    heightAnim.playbackRate = speed;
+    anims.push(heightAnim);
+    this.spaceAnim = heightAnim;
+
+    if (fade) {
+      var toOpacity = newOpen ? cfg.opacityTo : cfg.opacityFrom;
+      var opacityAnim = this.body.animate(
+        [{ opacity: live.opacity }, { opacity: toOpacity }],
+        { duration: dir.fadeDuration, delay: dir.fadeDelay, easing: cssBezier(dir.fadeEasing), fill: 'both' }
+      );
+      opacityAnim.playbackRate = speed;
+      anims.push(opacityAnim);
+
+      var railAnim = this.rail.animate(
+        [{ opacity: live.railOpacity }, { opacity: newOpen ? 1 : 0 }],
+        { duration: dir.duration, easing: cssBezier(dir.fadeEasing), fill: 'forwards' }
+      );
+      railAnim.playbackRate = speed;
+      anims.push(railAnim);
+    }
+
+    var translatePx = Number(cfg.translatePx) || 0;
+    if (translatePx > 0 || Math.abs(live.translate) > 0.5) {
+      var translateAnim = this.body.animate(
+        [{ transform: 'translateY(' + live.translate + 'px)' }, { transform: 'translateY(' + (newOpen ? 0 : -translatePx) + 'px)' }],
+        { duration: dir.duration, easing: cssBezier(dir.heightEasing), fill: 'forwards' }
+      );
+      translateAnim.playbackRate = speed;
+      anims.push(translateAnim);
+    }
+
+    this.anims = anims;
+    var token = this.token;
+    var self = this;
+    this.settlePromise = Promise.all(anims.map(function (a) {
+      return a.finished.then(function () { return true; }, function () { return false; });
+    })).then(function () {
+      if (token !== self.token) return;
+      self.finish(newOpen);
+    });
+    this.onChange();
+    return this.settlePromise;
+  };
+
+  FoldEngine.prototype.finish = function (open) {
+    this.applySettled(open);
+    this.cancelAnims();
+    this.open = open;
+    this.direction = null;
+    this.onChange();
+  };
+
+  FoldEngine.prototype.setSpeed = function (rate) {
+    var speed = clamp(Number(rate) || 1, 0.25, 2);
+    for (var i = 0; i < this.anims.length; i += 1) {
+      this.anims[i].playbackRate = speed;
+    }
+  };
+
+  FoldEngine.prototype.setContentLength = function (len) {
+    if (this.body.dataset.length === len) return;
+    this.body.dataset.length = len;
+    if (this.direction === 'open') {
+      this.transition(true);
+    } else if (!this.direction) {
+      this.applySettled(this.open);
+      this.onChange();
+    }
+  };
+
+  FoldEngine.prototype.readout = function () {
+    var live = this.readLive();
+    var state = this.direction ? (this.direction === 'open' ? 'opening' : 'closing') : (this.open ? 'open' : 'closed');
+    var progress = this.open ? 1 : 0;
+    if (this.spaceAnim && this.direction) {
+      var p = this.spaceAnim.effect.getComputedTiming().progress;
+      progress = p == null ? 0 : p;
+    }
+    return {
+      state: state,
+      open: this.open,
+      progress: progress,
+      height: live.height,
+      opacity: live.opacity,
+      translate: live.translate,
+      railOpacity: live.railOpacity,
+      animating: !!this.direction,
+    };
+  };
+
+  /* ── Config model ── */
+  function defaultConfig() {
+    return {
+      mode: 'A',
+      speed: 1,
+      dwell: 900,
+      contentLength: 'short',
+      showBaseline: false,
+      fadeEnabled: false,
+      opacityFrom: 0,
+      opacityTo: 1,
+      open: { duration: 220, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 150, fadeDelay: 50, fadeEasing: [0.3, 0, 0.7, 1] },
+      close: { duration: 200, heightEasing: [0.3, 0, 0.7, 1], fadeDuration: 140, fadeDelay: 0, fadeEasing: [0.3, 0, 0.7, 1] },
+      translatePx: 0,
+      respectRM: true,
+      autoReplay: false,
+      autoRepeat: false,
+    };
+  }
+
+  function baselineConfig(cfg) {
+    return Object.assign({}, cfg, {
+      mode: 'B',
+      fadeEnabled: true,
+      opacityFrom: 0,
+      opacityTo: 1,
+      translatePx: 0,
+      open: { duration: 200, heightEasing: [0.65, 0, 0.35, 1], fadeDuration: 150, fadeDelay: 50, fadeEasing: [0.3, 0, 0.7, 1] },
+      close: { duration: 200, heightEasing: [0.65, 0, 0.35, 1], fadeDuration: 140, fadeDelay: 0, fadeEasing: [0.3, 0, 0.7, 1] },
+    });
+  }
+
+  function toExport(cfg) {
+    return {
+      schema: SCHEMA,
+      mode: cfg.mode,
+      speed: round(cfg.speed, 2),
+      dwellMs: cfg.dwell,
+      contentLength: cfg.contentLength,
+      translatePx: cfg.translatePx,
+      opacity: {
+        enabled: cfg.fadeEnabled,
+        from: round(cfg.opacityFrom, 2),
+        to: round(cfg.opacityTo, 2),
+      },
+      open: {
+        durationMs: cfg.open.duration,
+        heightEasing: cfg.open.heightEasing.map(function (v) { return round(v, 3); }),
+        fade: { durationMs: cfg.open.fadeDuration, delayMs: cfg.open.fadeDelay, easing: cfg.open.fadeEasing.map(function (v) { return round(v, 3); }) },
+      },
+      close: {
+        durationMs: cfg.close.duration,
+        heightEasing: cfg.close.heightEasing.map(function (v) { return round(v, 3); }),
+        fade: { durationMs: cfg.close.fadeDuration, delayMs: cfg.close.fadeDelay, easing: cfg.close.fadeEasing.map(function (v) { return round(v, 3); }) },
+      },
+      respectReducedMotion: cfg.respectRM,
+    };
+  }
+
+  function fromExport(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('JSON 根节点必须是对象');
+    if (raw.schema != null && raw.schema !== SCHEMA) throw new Error('schema 不匹配：' + String(raw.schema));
+    var d = defaultConfig();
+    var mode = ['A', 'B', 'C'].indexOf(raw.mode) >= 0 ? raw.mode : d.mode;
+    var openRaw = raw.open || {};
+    var closeRaw = raw.close || {};
+    var opacityRaw = raw.opacity || {};
+    var originOpen = MODE_PRESETS[mode].patch.open;
+    var originClose = MODE_PRESETS[mode].patch.close;
+    function readDir(src, origin, fallbackDur) {
+      var fadeRaw = src.fade || {};
+      return {
+        duration: clamp(num(src.durationMs, fallbackDur), 80, 800),
+        heightEasing: sanitizeEasing(src.heightEasing, origin.heightEasing),
+        fadeDuration: clamp(num(fadeRaw.durationMs, origin.fadeDuration), 0, 800),
+        fadeDelay: clamp(num(fadeRaw.delayMs, origin.fadeDelay), 0, 800),
+        fadeEasing: sanitizeEasing(fadeRaw.easing, origin.fadeEasing),
+      };
+    }
+    return {
+      mode: mode,
+      speed: clamp(num(raw.speed, d.speed), 0.25, 2),
+      dwell: clamp(num(raw.dwellMs, d.dwell), 200, 5000),
+      contentLength: raw.contentLength === 'long' ? 'long' : 'short',
+      showBaseline: !!cfgStateRef.showBaseline,
+      fadeEnabled: opacityRaw.enabled != null ? !!opacityRaw.enabled : MODE_PRESETS[mode].patch.fadeEnabled,
+      opacityFrom: clamp(num(opacityRaw.from, 0), 0, 1),
+      opacityTo: clamp(num(opacityRaw.to, 1), 0, 1),
+      open: readDir(openRaw, originOpen, originOpen.duration),
+      close: readDir(closeRaw, originClose, originClose.duration),
+      translatePx: clamp(num(raw.translatePx, 0), 0, 12),
+      respectRM: raw.respectReducedMotion != null ? !!raw.respectReducedMotion : true,
+      autoReplay: false,
+      autoRepeat: false,
+    };
+  }
+
+  /* ── UI wiring ── */
+  var cfgStateRef = { showBaseline: false };
+  var cfg = defaultConfig();
+  var trialMount = $('#trialMount');
+  var baselineMount = $('#baselineMount');
+  var baselineCard = $('#baselineCard');
+  var previewsEl = $('#previews');
+  var controlsEl = $('#controls');
+  var tpl = $('#sceneTpl');
+  var trialRoot = tpl.content.firstElementChild.cloneNode(true);
+  var baselineRoot = tpl.content.firstElementChild.cloneNode(true);
+  trialMount.appendChild(trialRoot);
+  baselineMount.appendChild(baselineRoot);
+
+  var mainEngine = new FoldEngine(trialRoot, function () { return cfg; }, function () { kick(); });
+  var baseEngine = new FoldEngine(baselineRoot, function () { return baselineConfig(cfg); }, function () { kick(); });
+
+  /* controls */
+  var modeSel = $('#modeSel');
+  var modeNote = $('#modeNote');
+  var openDurNum = $('#openDurNum');
+  var openDurRange = $('#openDurRange');
+  var closeDurNum = $('#closeDurNum');
+  var closeDurRange = $('#closeDurRange');
+  var dwellInput = $('#dwellInput');
+  var fadeEnabled = $('#fadeEnabled');
+  var opacityFrom = $('#opacityFrom');
+  var opacityTo = $('#opacityTo');
+  var openFadeDur = $('#openFadeDur');
+  var openFadeDelay = $('#openFadeDelay');
+  var closeFadeDur = $('#closeFadeDur');
+  var closeFadeDelay = $('#closeFadeDelay');
+  var translateRange = $('#translateRange');
+  var translateOut = $('#translateOut');
+  var respectRM = $('#respectRM');
+  var autoReplay = $('#autoReplay');
+  var speedRange = $('#speedRange');
+  var speedOut = $('#speedOut');
+  var autoRepeat = $('#autoRepeat');
+  var showBaseline = $('#showBaseline');
+  var jsonArea = $('#jsonArea');
+  var jsonError = $('#jsonError');
+  var saveState = $('#saveState');
+  var statusLine = $('#statusLine');
+  var hudState = $('#hudState');
+  var hudProgress = $('#hudProgress');
+  var hudHeight = $('#hudHeight');
+  var hudOpacity = $('#hudOpacity');
+  var hudTranslate = $('#hudTranslate');
+  var hudRail = $('#hudRail');
+  var hudMode = $('#hudMode');
+  var trialTag = $('#trialTag');
+
+  var heightEasingPreset = $('#heightEasingPreset');
+  var opacityEasingPreset = $('#opacityEasingPreset');
+  var heightEasingText = $('#heightEasingText');
+  var opacityEasingText = $('#opacityEasingText');
+  var heightEasingError = $('#heightEasingError');
+  var opacityEasingError = $('#opacityEasingError');
+  var heightCoefIds = ['hx1', 'hy1', 'hx2', 'hy2'];
+  var opacityCoefIds = ['ox1', 'oy1', 'ox2', 'oy2'];
+
+  EASING_PRESETS.concat([{ id: 'custom', label: '自定义', values: null }]).forEach(function (p) {
+    var o1 = document.createElement('option');
+    o1.value = p.id; o1.textContent = p.label;
+    heightEasingPreset.appendChild(o1);
+    var o2 = document.createElement('option');
+    o2.value = p.id; o2.textContent = p.label;
+    opacityEasingPreset.appendChild(o2);
+  });
+
+  var mq = null;
+  var systemReduce = false;
+  try {
+    mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    systemReduce = mq.matches;
+  } catch (e) { mq = null; systemReduce = false; }
+
+  function getCoefVals(ids) {
+    return ids.map(function (id) { return num($('#' + id).value, NaN); });
+  }
+
+  function readEasing(ids, fallback) {
+    var vals = getCoefVals(ids);
+    if (!vals.every(Number.isFinite)) return fallback.slice();
+    return sanitizeEasing(vals, fallback);
+  }
+
+  function presetFor(vals) {
+    for (var i = 0; i < EASING_PRESETS.length; i += 1) {
+      var p = EASING_PRESETS[i];
+      var same = p.values.every(function (v, idx) { return Math.abs(v - round(vals[idx], 3)) < 0.001; });
+      if (same) return p.id;
+    }
+    return 'custom';
+  }
+
+  function setEasingInputs(ids, vals) {
+    ids.forEach(function (id, idx) { $('#' + id).value = String(round(vals[idx], 3)); });
+  }
+
+  function updateEasingUi(ids, selectEl, textEl) {
+    var vals = readEasing(ids, [0.3, 0, 0.7, 1]);
+    selectEl.value = presetFor(vals);
+    if (document.activeElement !== textEl) textEl.value = fmtBezier(vals);
+    return vals;
+  }
+
+  function validateEasingField(kind) {
+    var isHeight = kind === 'height';
+    var ids = isHeight ? heightCoefIds : opacityCoefIds;
+    var textEl = isHeight ? heightEasingText : opacityEasingText;
+    var errorEl = isHeight ? heightEasingError : opacityEasingError;
+    var selectEl = isHeight ? heightEasingPreset : opacityEasingPreset;
+    var parsed = parseBezierText(textEl.value);
+    if (!parsed) {
+      errorEl.textContent = '无效缓动：需要 4 个数字，且 x1 / x2 在 0–1 之间（如 0.3, 0, 0.7, 1）。';
+      return null;
+    }
+    errorEl.textContent = '';
+    setEasingInputs(ids, parsed);
+    selectEl.value = presetFor(parsed);
+    return parsed;
+  }
+
+  function readForm() {
+    var base = defaultConfig();
+    var openDur = clamp(num(openDurNum.value, base.open.duration), 80, 800);
+    var closeDur = clamp(num(closeDurNum.value, base.close.duration), 80, 800);
+    var hEase = readEasing(heightCoefIds, base.open.heightEasing);
+    var oEase = readEasing(opacityCoefIds, base.close.fadeEasing);
+    var contentEl = document.querySelector('input[name="content"]:checked');
+    var translatePx = clamp(num(translateRange.value, 0), 0, 12);
+    return {
+      mode: ['A', 'B', 'C'].indexOf(modeSel.value) >= 0 ? modeSel.value : 'A',
+      speed: clamp(num(speedRange.value, 1), 0.25, 2),
+      dwell: clamp(num(dwellInput.value, base.dwell), 200, 5000),
+      contentLength: contentEl && contentEl.value === 'long' ? 'long' : 'short',
+      showBaseline: !!showBaseline.checked,
+      fadeEnabled: !!fadeEnabled.checked,
+      opacityFrom: clamp(num(opacityFrom.value, 0), 0, 1),
+      opacityTo: clamp(num(opacityTo.value, 1), 0, 1),
+      open: {
+        duration: openDur,
+        heightEasing: hEase.slice(),
+        fadeDuration: clamp(num(openFadeDur.value, 150), 0, 800),
+        fadeDelay: clamp(num(openFadeDelay.value, 50), 0, 800),
+        fadeEasing: oEase.slice(),
+      },
+      close: {
+        duration: closeDur,
+        heightEasing: hEase.slice(),
+        fadeDuration: clamp(num(closeFadeDur.value, 140), 0, 800),
+        fadeDelay: clamp(num(closeFadeDelay.value, 0), 0, 800),
+        fadeEasing: oEase.slice(),
+      },
+      translatePx: translatePx,
+      respectRM: !!respectRM.checked,
+      autoReplay: !!autoReplay.checked,
+      autoRepeat: !!autoRepeat.checked,
+    };
+  }
+
+  function configToForm(c) {
+    modeSel.value = c.mode;
+    speedRange.value = String(c.speed);
+    dwellInput.value = String(c.dwell);
+    openDurNum.value = String(c.open.duration);
+    openDurRange.value = String(c.open.duration);
+    closeDurNum.value = String(c.close.duration);
+    closeDurRange.value = String(c.close.duration);
+    fadeEnabled.checked = !!c.fadeEnabled;
+    opacityFrom.value = String(c.opacityFrom);
+    opacityTo.value = String(c.opacityTo);
+    openFadeDur.value = String(c.open.fadeDuration);
+    openFadeDelay.value = String(c.open.fadeDelay);
+    closeFadeDur.value = String(c.close.fadeDuration);
+    closeFadeDelay.value = String(c.close.fadeDelay);
+    translateRange.value = String(c.translatePx);
+    setEasingInputs(heightCoefIds, c.open.heightEasing);
+    setEasingInputs(opacityCoefIds, c.close.fadeEasing);
+    heightEasingPreset.value = presetFor(c.open.heightEasing);
+    opacityEasingPreset.value = presetFor(c.close.fadeEasing);
+    heightEasingText.value = fmtBezier(c.open.heightEasing);
+    opacityEasingText.value = fmtBezier(c.close.fadeEasing);
+    heightEasingError.textContent = '';
+    opacityEasingError.textContent = '';
+    var contentEl = document.querySelector('input[name="content"][value="' + (c.contentLength === 'long' ? 'long' : 'short') + '"]');
+    if (contentEl) contentEl.checked = true;
+    respectRM.checked = !!c.respectRM;
+    autoReplay.checked = !!c.autoReplay;
+    showBaseline.checked = !!c.showBaseline;
+    autoRepeat.checked = false;
+    cfgStateRef.showBaseline = !!c.showBaseline;
+    speedOut.textContent = c.speed.toFixed(2) + '×';
+    translateOut.textContent = String(c.translatePx) + ' px';
+  }
+
+  function isModePristine(c) {
+    var patch = MODE_PRESETS[c.mode].patch;
+    return (
+      c.fadeEnabled === patch.fadeEnabled &&
+      c.translatePx === patch.translatePx &&
+      c.open.duration === patch.open.duration &&
+      c.close.duration === patch.close.duration &&
+      c.open.fadeDuration === patch.open.fadeDuration &&
+      c.open.fadeDelay === patch.open.fadeDelay &&
+      c.close.fadeDuration === patch.close.fadeDuration &&
+      c.close.fadeDelay === patch.close.fadeDelay &&
+      Math.abs(c.opacityFrom - patch.opacityFrom) < 0.001 &&
+      Math.abs(c.opacityTo - patch.opacityTo) < 0.001 &&
+      c.open.heightEasing.every(function (v, i) { return Math.abs(v - patch.open.heightEasing[i]) < 0.001; }) &&
+      c.close.heightEasing.every(function (v, i) { return Math.abs(v - patch.close.heightEasing[i]) < 0.001; })
+    );
+  }
+
+  function syncLabels() {
+    speedOut.textContent = cfg.speed.toFixed(2) + '×';
+    translateOut.textContent = String(cfg.translatePx) + ' px';
+    var modeInfo = MODE_PRESETS[cfg.mode];
+    modeNote.textContent = modeInfo.note + (isModePristine(cfg) ? '' : '（当前数值已手调，不再等于预设）');
+    trialTag.textContent = cfg.mode + (isModePristine(cfg) ? '' : '·手调') + ' · ' + cfg.open.duration + ' / ' + cfg.close.duration + ' ms';
+    fadeHint.textContent = cfg.fadeEnabled
+      ? '渐变按方向独立计时；折叠端 / 展开端透明度会与高度裁剪并行推进。'
+      : '已关闭渐变：内容保持不透明，只靠高度裁剪揭示 / 收起，竖线也不淡出。';
+    var rmActive = cfg.respectRM && systemReduce;
+    rmHint.textContent = rmActive
+      ? '系统当前偏好减少动态效果：动画会即时完成（没有过渡）。取消勾选可强制播放动画——仅用于本沙盒排查。'
+      : (systemReduce
+        ? '系统偏好减少动态效果，但当前已取消勾选，动画照常播放（仅沙盒覆盖）。'
+        : '系统未开启减少动态效果；勾选后若系统偏好为 reduce，动画将即时完成。');
+  }
+
+  function refreshJson() {
+    if (document.activeElement !== jsonArea) {
+      jsonArea.value = JSON.stringify(toExport(cfg), null, 2);
+    }
+  }
+
+  function saveConfig() {
+    try {
+      window.localStorage.setItem(LS_KEY, JSON.stringify(toExport(cfg)));
+      saveState.textContent = '已自动保存到 localStorage';
+    } catch (e) {
+      saveState.textContent = 'localStorage 不可用，本次参数只保留在当前页面';
+    }
+  }
+
+  function loadSaved() {
+    cfgStateRef.showBaseline = false;
+    try {
+      var raw = window.localStorage.getItem(LS_KEY);
+      if (!raw) return null;
+      return fromExport(JSON.parse(raw));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function status(msg, strong) {
+    statusLine.innerHTML = '';
+    var b = document.createElement('strong');
+    b.textContent = strong || '提示：';
+    statusLine.appendChild(b);
+    statusLine.appendChild(document.createTextNode(msg));
+  }
+
+  function setText(el, text) {
+    var value = String(text);
+    if (el.textContent !== value) el.textContent = value;
+  }
+
+  var timerIds = new Set();
+  var sleepers = new Set();
+
+  function later(fn, ms) {
+    var id = setTimeout(function () {
+      timerIds.delete(id);
+      fn();
+    }, ms);
+    timerIds.add(id);
+    return id;
+  }
+
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      var item = { id: null, resolve: resolve };
+      item.id = setTimeout(function () {
+        sleepers.delete(item);
+        resolve();
+      }, ms);
+      sleepers.add(item);
+    });
+  }
+
+  function cancelSleeps() {
+    Array.from(sleepers).forEach(function (item) {
+      clearTimeout(item.id);
+      item.resolve();
+    });
+    sleepers.clear();
+  }
+
+  function clearTimer(id) {
+    if (id == null) return;
+    clearTimeout(id);
+    timerIds.delete(id);
+  }
+
+  function clearTimers() {
+    Array.from(timerIds).forEach(function (id) { clearTimeout(id); });
+    timerIds.clear();
+  }
+
+  var autoGen = 0;
+  var reverseTimer = null;
+  var replayTimer = null;
+  var stressTimer = null;
+
+  function stopStress() {
+    if (stressTimer != null) {
+      clearInterval(stressTimer);
+      stressTimer = null;
+    }
+  }
+
+  function cancelPending() {
+    autoGen += 1;
+    cancelSleeps();
+    clearTimers();
+    if (reverseTimer != null) { reverseTimer = null; }
+    if (replayTimer != null) { replayTimer = null; }
+  }
+
+  function stopAuto() {
+    autoRepeat.checked = false;
+    cancelPending();
+    cfg.autoRepeat = false;
+  }
+
+  function stopEverything() {
+    stopAuto();
+    stopStress();
+  }
+
+  function settleBoth() {
+    var list = [mainEngine.settlePromise];
+    if (!baselineCard.hidden) list.push(baseEngine.settlePromise);
+    return Promise.all(list).then(function () { return undefined; });
+  }
+
+  function driveBoth(target) {
+    var instant = cfg.respectRM && systemReduce;
+    var mainPromise;
+    if (instant) {
+      mainPromise = mainEngine.jumpTo(target);
+    } else {
+      mainPromise = mainEngine.setOpen(target);
+    }
+    if (!baselineCard.hidden) {
+      if (instant) baseEngine.jumpTo(target);
+      else baseEngine.setOpen(target);
+    }
+    return Promise.resolve(mainPromise).then(settleBoth);
+  }
+
+  function autoLoop(gen) {
+    if (gen !== autoGen || !autoRepeat.checked) return;
+    driveBoth(!mainEngine.open).then(function () {
+      if (gen !== autoGen || !autoRepeat.checked) return;
+      return sleep(cfg.dwell).then(function () {
+        if (gen !== autoGen || !autoRepeat.checked) return;
+        autoLoop(gen);
+      });
+    });
+  }
+
+  function startAuto() {
+    stopStress();
+    cancelPending();
+    if (!autoRepeat.checked) return;
+    status('自动循环开始：每次完成过渡后停留 ' + cfg.dwell + ' ms。', '自动：');
+    autoLoop(autoGen);
+  }
+
+  function reverseMidFlight() {
+    stopEverything();
+    if (reverseTimer != null) { clearTimeout(reverseTimer); reverseTimer = null; }
+    if (mainEngine.direction) {
+      driveBoth(mainEngine.direction === 'open' ? false : true);
+      status('已在过渡中途反向：高度与透明度从当前实时值继续。', '反向：');
+      return;
+    }
+    var target = !mainEngine.open;
+    driveBoth(target);
+    var dirCfg = target ? cfg.open : cfg.close;
+    var wait = Math.max(40, (dirCfg.duration * 0.5) / Math.max(0.25, cfg.speed));
+    reverseTimer = later(function () {
+      reverseTimer = null;
+      driveBoth(!target);
+      status('已从静止出发，并在约 50% 处反向。', '反向：');
+    }, wait);
+  }
+
+  function stressRun() {
+    stopEverything();
+    status('快速抖动测试：连续 5 次中途反向（每 130 ms 一次）。', '抖动：');
+    var n = 0;
+    stressTimer = setInterval(function () {
+      n += 1;
+      driveBoth(!mainEngine.open);
+      if (n >= 5) stopStress();
+    }, 130);
+  }
+
+  function scheduleReplay() {
+    if (!cfg.autoReplay || autoRepeat.checked) return;
+    if (replayTimer != null) { clearTimeout(replayTimer); replayTimer = null; }
+    replayTimer = later(function () {
+      replayTimer = null;
+      if (mainEngine.direction || autoRepeat.checked) return;
+      driveBoth(false).then(function () {
+        if (autoRepeat.checked) return;
+        later(function () {
+          if (!autoRepeat.checked) driveBoth(true);
+        }, 100);
+      });
+    }, 320);
+  }
+
+  var baselineVisible = false;
+
+  function applyBaselineVisibility(on) {
+    var changed = on !== baselineVisible;
+    baselineVisible = on;
+    previewsEl.classList.toggle('two', on);
+    baselineCard.hidden = !on;
+    if (on && changed) {
+      baseEngine.setContentLength(cfg.contentLength);
+      requestAnimationFrame(function () {
+        if (baselineCard.hidden) return;
+        baseEngine.jumpTo(mainEngine.open);
+        kick();
+      });
+    }
+  }
+
+  function applyContentIfChanged() {
+    mainEngine.setContentLength(cfg.contentLength);
+    baseEngine.setContentLength(cfg.contentLength);
+  }
+
+  var lastContent = null;
+
+  function commit(opts) {
+    var options = opts || {};
+    cfg = readForm();
+    cfgStateRef.showBaseline = cfg.showBaseline;
+    if (lastContent !== cfg.contentLength) {
+      lastContent = cfg.contentLength;
+      applyContentIfChanged();
+    }
+    if (!options.keepJson) refreshJson();
+    syncLabels();
+    saveConfig();
+    applyBaselineVisibility(cfg.showBaseline);
+    if (!mainEngine.direction) mainEngine.syncIdle();
+    if (!baseEngine.direction) baseEngine.syncIdle();
+    mainEngine.setSpeed(cfg.speed);
+    baseEngine.setSpeed(cfg.speed);
+    if (options.replay !== false) scheduleReplay();
+    kick();
+  }
+
+  var hudTick = 0;
+  var hudValues = {};
+
+  function renderHud() {
+    var r = mainEngine.readout();
+    var progressText = r.animating ? Math.round(r.progress * 100) + '%' : (r.open ? '100%' : '0%');
+    var modeText = cfg.mode + (isModePristine(cfg) ? '' : '·手调') + ' · ' + cfg.speed.toFixed(2) + '×';
+    setText(hudState, r.state === 'open' ? '展开静止' : r.state === 'closed' ? '折叠静止' : r.state === 'opening' ? '展开中' : '折叠中');
+    setText(hudProgress, progressText);
+    setText(hudHeight, r.height.toFixed(1) + ' px');
+    setText(hudOpacity, r.opacity.toFixed(2));
+    setText(hudTranslate, r.translate.toFixed(1) + ' px');
+    setText(hudRail, r.railOpacity.toFixed(2));
+    setText(hudMode, modeText);
+  }
+
+  function kick() {
+    if (hudTick) return;
+    hudTick = requestAnimationFrame(function () {
+      hudTick = 0;
+      renderHud();
+      if (mainEngine.direction || baseEngine.direction) kick();
+    });
+  }
+
+  function setApplyMode(mode) {
+    modeSel.value = mode;
+    var patch = MODE_PRESETS[mode].patch;
+    fadeEnabled.checked = patch.fadeEnabled;
+    opacityFrom.value = String(patch.opacityFrom);
+    opacityTo.value = String(patch.opacityTo);
+    translateRange.value = String(patch.translatePx);
+    translateOut.textContent = String(patch.translatePx) + ' px';
+    openDurNum.value = String(patch.open.duration);
+    openDurRange.value = String(patch.open.duration);
+    closeDurNum.value = String(patch.close.duration);
+    closeDurRange.value = String(patch.close.duration);
+    openFadeDur.value = String(patch.open.fadeDuration);
+    openFadeDelay.value = String(patch.open.fadeDelay);
+    closeFadeDur.value = String(patch.close.fadeDuration);
+    closeFadeDelay.value = String(patch.close.fadeDelay);
+    setEasingInputs(heightCoefIds, patch.open.heightEasing);
+    setEasingInputs(opacityCoefIds, patch.close.fadeEasing);
+    heightEasingPreset.value = presetFor(patch.open.heightEasing);
+    opacityEasingPreset.value = presetFor(patch.close.fadeEasing);
+    heightEasingText.value = fmtBezier(patch.open.heightEasing);
+    opacityEasingText.value = fmtBezier(patch.close.fadeEasing);
+    heightEasingError.textContent = '';
+    opacityEasingError.textContent = '';
+    commit();
+    status('已应用模式 ' + MODE_PRESETS[mode].label + '。', '模式：');
+  }
+
+  function applyImportText(text) {
+    jsonError.textContent = '';
+    var parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      jsonError.textContent = 'JSON 解析失败：' + e.message;
+      return false;
+    }
+    try {
+      var imported = fromExport(parsed);
+      imported.showBaseline = cfgStateRef.showBaseline;
+      configToForm(imported);
+      lastContent = imported.contentLength;
+      cfg = readForm();
+      cfgStateRef.showBaseline = cfg.showBaseline;
+      mainEngine.jumpTo(mainEngine.open);
+      baseEngine.jumpTo(mainEngine.open);
+      applyContentIfChanged();
+      commit({ replay: false });
+      status('参数已导入并立即生效（未自动重播）。', '导入：');
+      return true;
+    } catch (e) {
+      jsonError.textContent = '参数无效：' + e.message;
+      return false;
+    }
+  }
+
+  function normalizeOnChange(force) {
+    function fix(el, min, max) {
+      if (!force && document.activeElement === el) return;
+      var v = clamp(num(el.value, min), min, max);
+      if (String(v) !== el.value) el.value = String(v);
+    }
+    fix(openDurNum, 80, 800); fix(closeDurNum, 80, 800);
+    fix(dwellInput, 200, 5000);
+    fix(opacityFrom, 0, 1); fix(opacityTo, 0, 1);
+    fix(openFadeDur, 0, 800); fix(openFadeDelay, 0, 800);
+    fix(closeFadeDur, 0, 800); fix(closeFadeDelay, 0, 800);
+    fix($('#hx1'), 0, 1); fix($('#hx2'), 0, 1);
+    fix($('#ox1'), 0, 1); fix($('#ox2'), 0, 1);
+    openDurRange.value = String(clamp(num(openDurNum.value, 220), 80, 800));
+    closeDurRange.value = String(clamp(num(closeDurNum.value, 200), 80, 800));
+    if (force) {
+      heightCoefIds.forEach(function (id, i) {
+        var el = $('#' + id);
+        if (el.value.trim() === '' || !Number.isFinite(Number(el.value))) el.value = String(round(cfg.open.heightEasing[i], 3));
+      });
+      opacityCoefIds.forEach(function (id, i) {
+        var el = $('#' + id);
+        if (el.value.trim() === '' || !Number.isFinite(Number(el.value))) el.value = String(round(cfg.close.fadeEasing[i], 3));
+      });
+    }
+  }
+
+  /* ── Events ── */
+  function bindControls() {
+    function onConfigEvent() {
+      normalizeOnChange();
+      commit();
+    }
+
+    controlsEl.addEventListener('input', function (event) {
+      var el = event.target;
+      if (el === modeSel) return;
+      if (el === jsonArea) return;
+      if (el === heightEasingText) return;
+      if (el === opacityEasingText) return;
+      onConfigEvent();
+      if (el === openDurRange || el === closeDurRange) {
+        openDurNum.value = String(openDurRange.value);
+        closeDurNum.value = String(closeDurRange.value);
+      }
+    });
+
+    controlsEl.addEventListener('change', function (event) {
+      var el = event.target;
+      normalizeOnChange(true);
+      if (el === modeSel) {
+        setApplyMode(modeSel.value);
+        return;
+      }
+      if (el === jsonArea || el === jsonFile) return;
+      if (el === heightEasingText) {
+        if (!validateEasingField('height')) {
+          setEasingInputs(heightCoefIds, readEasing(heightCoefIds, MODE_PRESETS[cfg.mode].patch.open.heightEasing));
+          heightEasingText.value = fmtBezier(readEasing(heightCoefIds, MODE_PRESETS[cfg.mode].patch.open.heightEasing));
+        }
+        onConfigEvent();
+        return;
+      }
+      if (el === opacityEasingText) {
+        if (!validateEasingField('opacity')) {
+          setEasingInputs(opacityCoefIds, readEasing(opacityCoefIds, MODE_PRESETS[cfg.mode].patch.close.fadeEasing));
+          opacityEasingText.value = fmtBezier(readEasing(opacityCoefIds, MODE_PRESETS[cfg.mode].patch.close.fadeEasing));
+        }
+        onConfigEvent();
+        return;
+      }
+      if (el === heightEasingPreset || el === opacityEasingPreset) {
+        var preset = EASING_PRESETS.filter(function (p) { return p.id === el.value; })[0];
+        if (preset) {
+          if (el === heightEasingPreset) {
+            setEasingInputs(heightCoefIds, preset.values);
+            heightEasingText.value = fmtBezier(preset.values);
+            heightEasingError.textContent = '';
+          } else {
+            setEasingInputs(opacityCoefIds, preset.values);
+            opacityEasingText.value = fmtBezier(preset.values);
+            opacityEasingError.textContent = '';
+          }
+          onConfigEvent();
+        }
+        return;
+      }
+      normalizeOnChange(true);
+      onConfigEvent();
+    });
+
+    jsonArea.addEventListener('input', function () { jsonError.textContent = ''; });
+    $('#btnImportJson').addEventListener('click', function () { applyImportText(jsonArea.value); });
+    $('#btnRefreshJson').addEventListener('click', function () {
+      jsonArea.value = JSON.stringify(toExport(cfg), null, 2);
+      jsonError.textContent = '';
+      status('已把当前参数写入 JSON 文本框。', '参数：');
+    });
+    $('#btnCopyJson').addEventListener('click', function () {
+      var text = JSON.stringify(toExport(cfg), null, 2);
+      copyText(text).then(function (ok) {
+        if (ok) status('参数 JSON 已复制到剪贴板，可直接粘贴发送。', '复制：');
+        else {
+          jsonArea.value = text;
+          jsonError.textContent = '剪贴板不可用：已把 JSON 写入文本框，可手动选中复制或用「下载 .json」。';
+        }
+      });
+    });
+    $('#btnDownloadJson').addEventListener('click', function () {
+      try {
+        var text = JSON.stringify(toExport(cfg), null, 2);
+        var blob = new Blob([text], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'segment-fold-params.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+        status('已触发 JSON 下载。', '导出：');
+      } catch (e) {
+        status('下载失败：' + e.message, '导出：');
+      }
+    });
+    $('#jsonFile').addEventListener('change', function (event) {
+      var file = event.target.files && event.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        jsonArea.value = String(reader.result);
+        if (applyImportText(String(reader.result))) status('已从文件导入参数。', '导入：');
+      };
+      reader.onerror = function () { jsonError.textContent = '文件读取失败。'; };
+      reader.readAsText(file);
+    });
+    $('#btnReset').addEventListener('click', function () {
+      stopEverything();
+      var defaults = defaultConfig();
+      configToForm(defaults);
+      lastContent = null;
+      cfg = readForm();
+      cfgStateRef.showBaseline = false;
+      mainEngine.jumpTo(true);
+      baseEngine.jumpTo(true);
+      applyContentIfChanged();
+      commit();
+      status('已恢复默认参数（模式 A · 仅高度）。', '重置：');
+    });
+
+    speedRange.addEventListener('input', function () {
+      cfg = readForm();
+      speedOut.textContent = cfg.speed.toFixed(2) + '×';
+      mainEngine.setSpeed(cfg.speed);
+      baseEngine.setSpeed(cfg.speed);
+      saveConfig();
+      syncLabels();
+      if (document.activeElement !== jsonArea) refreshJson();
+      kick();
+    });
+
+    autoRepeat.addEventListener('change', function () {
+      cfg = readForm();
+      if (autoRepeat.checked) {
+        status('自动循环已开启。', '自动：');
+        startAuto();
+      } else {
+        stopAuto();
+        status('自动循环已停止（当前过渡会自然完成）。', '自动：');
+      }
+    });
+
+    $('#btnStopAuto').addEventListener('click', function () {
+      stopEverything();
+      status('已停止自动循环与抖动测试；当前过渡会自然完成。', '停止：');
+    });
+
+    $('#btnExpand').addEventListener('click', function () {
+      stopEverything();
+      driveBoth(true);
+      status('展开：高度从当前实时值继续到内容自然高度。', '展开：');
+    });
+    $('#btnCollapse').addEventListener('click', function () {
+      stopEverything();
+      driveBoth(false);
+      status('折叠：高度从当前实时值继续到 0，并按设定渐隐。', '折叠：');
+    });
+    $('#btnReverse').addEventListener('click', reverseMidFlight);
+    $('#btnStress').addEventListener('click', stressRun);
+    $('#btnReplay').addEventListener('click', function () {
+      stopEverything();
+      driveBoth(false).then(function () {
+        if (autoRepeat.checked) return;
+        later(function () {
+          if (!autoRepeat.checked) driveBoth(true);
+        }, 100);
+      });
+      status('重播一次：先折叠，短暂停留后展开。', '重播：');
+    });
+
+    $all('[data-role="toggle"]').forEach(function (pill) {
+      pill.addEventListener('click', function () {
+        stopEverything();
+        driveBoth(!mainEngine.open);
+        status('通过标题胶囊切换了展开状态。', '切换：');
+      });
+    });
+
+    respectRM.addEventListener('change', function () {
+      commit({ replay: false });
+    });
+
+    showBaseline.addEventListener('change', function () {
+      commit({ replay: false });
+      status(showBaseline.checked ? '已开启并排对比：基线固定为应用近似参数（模拟，高度 .65/.35，渐隐 140 / 渐显 150+50）；本页不是生产实测。' : '已关闭基线对比。', '对比：');
+    });
+
+    if (mq) {
+      var onRm = function () {
+        systemReduce = mq.matches;
+        syncLabels();
+        if (cfg.respectRM && systemReduce) {
+          mainEngine.jumpTo(mainEngine.open);
+          if (!baselineCard.hidden) baseEngine.jumpTo(mainEngine.open);
+        }
+      };
+      if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onRm);
+      else if (typeof mq.addListener === 'function') mq.addListener(onRm);
+    }
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return legacyCopy(text); });
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      var ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* ── Boot ── */
+  function boot() {
+    var saved = loadSaved();
+    var initial = saved || defaultConfig();
+    configToForm(initial);
+    cfg = readForm();
+    cfg.autoRepeat = false;
+    autoRepeat.checked = false;
+    cfgStateRef.showBaseline = cfg.showBaseline;
+    lastContent = cfg.contentLength;
+    applyContentIfChanged();
+    mainEngine.init();
+    baseEngine.init();
+    bindControls();
+    syncLabels();
+    refreshJson();
+    applyBaselineVisibility(cfg.showBaseline);
+    if (cfg.showBaseline) {
+      requestAnimationFrame(function () { baseEngine.jumpTo(true); kick(); });
+    }
+    saveConfig();
+    renderHud();
+    kick();
+    status(saved ? '已载入上次保存的参数。' : '就绪：切换模式或直接拖动参数即可预览。', saved ? '已恢复：' : '就绪：');
+
+    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+      document.fonts.ready.then(function () {
+        if (!mainEngine.direction) mainEngine.syncIdle();
+        if (!baseEngine.direction) baseEngine.syncIdle();
+        kick();
+      });
+    }
+
+    /* Debug hook for this standalone sandbox only. */
+    window.__foldPreview = {
+      getConfig: function () { return cfg; },
+      readout: function () { return mainEngine.readout(); },
+      driveBoth: driveBoth,
+      resetAll: function () { $('#btnReset').click(); },
+      mainEngine: mainEngine,
+      baselineEngine: baseEngine,
+    };
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

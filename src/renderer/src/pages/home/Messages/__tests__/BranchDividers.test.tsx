@@ -18,6 +18,8 @@ vi.mock('react-i18next', () => ({
         'chat.topics.branch.deleted': 'Branch deleted',
         'chat.topics.branch.collapse': 'Collapse branch',
         'chat.topics.branch.expand': 'Expand branch',
+        'common.confirm': 'Confirm',
+        'common.cancel': 'Cancel',
         'common.error': 'Error'
       }
       if (map[key] !== undefined) return map[key]
@@ -292,9 +294,9 @@ describe('ForkDivider', () => {
     )
     fireEvent.click(screen.getByTestId('branch-fork-toggle-m1'))
     await waitFor(() => expect(screen.getByTestId('branch-fork-list-m1')).toBeInTheDocument())
-    // The Popconfirm confirm button commits the delete.
+    // The shared confirmation's localized confirm button commits the delete.
     fireEvent.click(screen.getByTestId('branch-fork-delete-btn-b-1'))
-    const confirmBtn = await screen.findByRole('button', { name: 'OK' })
+    const confirmBtn = await screen.findByRole('button', { name: 'Confirm' })
     fireEvent.click(confirmBtn)
     await waitFor(() => expect(deleteBranchSubtreeMock).toHaveBeenCalledWith('t-1', 'b-1', null))
     expect(requestBranchesMock).toHaveBeenCalledWith(expect.anything(), 't-1')

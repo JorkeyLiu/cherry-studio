@@ -32,8 +32,17 @@ vi.mock('react-i18next', async (importOriginal) => {
 })
 
 vi.mock('antd', () => ({
-  Input: (props: any) => createElement('input', props),
-  Popconfirm: ({ children }: any) => createElement('div', null, children)
+  // The group's rename/dissolve surfaces are anchored overlays this file never
+  // opens (their behaviour is covered by the folded-presentation suite): the
+  // stubs only keep the badge render free of portals.
+  Input: (props: any) => createElement('input', { ...props, ref: props.ref, onChange: props.onChange }),
+  Popconfirm: ({ children }: any) => createElement('div', null, children),
+  Popover: ({ children }: any) => children ?? null,
+  Button: ({ children }: any) => createElement('button', { type: 'button' }, children),
+  // The group edge is a context-menu Dropdown trigger; this test only reads
+  // the badge, so the stub returns the child unchanged (the real trigger
+  // clones it rather than wrapping it in an extra DOM level).
+  Dropdown: ({ children }: any) => children ?? null
 }))
 
 vi.mock('@renderer/utils/topicSegmentColor', () => ({
@@ -78,9 +87,13 @@ describe('segment authority UI badges', () => {
     expect(screen.getByText('5')).toBeTruthy()
   })
 
-  it('Messages.tsx segment line badge is wired to segment.messageCount', () => {
+  it('Messages.tsx wires ONE group-level chrome owner to the authority message count', () => {
     const src = readFileSync(join(process.cwd(), 'src/renderer/src/pages/home/Messages/Messages.tsx'), 'utf8')
-    expect(src).toContain('messageCount={isFirst ? segment.messageCount : undefined}')
+    // One invocation per mounted group carrying merged group facts — never a
+    // per-run `isFirst ? …` branch, and never a loaded-membership length.
+    expect(src).toContain('renderSegmentChrome: ({ segment, firstMounted, lastMounted, messageCount })')
+    expect(src).toContain('messageCount={messageCount}')
+    expect(src).not.toContain('messageCount={isFirst ?')
     expect(src).not.toContain('segment.messageIds.length')
   })
 

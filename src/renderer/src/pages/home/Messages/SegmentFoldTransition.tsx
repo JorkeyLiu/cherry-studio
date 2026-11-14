@@ -10,27 +10,38 @@ import { css, keyframes, styled } from 'styled-components'
  * never re-introduce a hidden body into a request. The body is mounted only
  * while the exit/enter motion is playing (`closing`/`opening`) and leaves the
  * DOM once the CSS animation finishes — the settled folded state is exactly the
- * former zero-flow state (no placeholder, no padding, no mounted rows), except
- * for the one route-tail group, which keeps the minimal label slot described
- * below.
+ * former zero-flow state for the group's CONTENT (no placeholder, no padding, no
+ * mounted rows). The group's own header row is never part of this box: it lives
+ * in the group's in-flow header host and keeps its occupied row in both
+ * presentation states, so a collapsed group never needs a reserved tail slot,
+ * an extra row or a seam exception — the body simply ends at zero height
+ * under the header that already exists.
  *
- * ── Phase separation (why the motion is built this way) ──
- * A single height clip makes rows slide under a hard moving boundary, so the
- * last visible text line / toolbar of the group is cut while it is still
- * readable. The motion therefore separates VISIBILITY from SPACE:
- * - closing: the body fades out first (fast), and only once it is effectively
- *   invisible does the box shrink. Nothing readable is ever painted while the
- *   clip boundary moves.
- * - opening: the box expands first with the content still transparent, and the
- *   body fades in afterwards, at its full natural height — there is no
- *   boundary left to cut anything at the moment the text becomes visible.
- * The two properties run as two animations on the same box with per-phase
- * delays (see the timing constants below), so both phases of one group share a
- * single time base. Every instance starts its animations inside the same
- * commit, i.e. at the same document-timeline time, so a group spanning several
- * turn runs (each run owns its own body wrapper) cannot drift into per-run
- * steps; the schedule is carried by the same four CSS custom properties on
- * every instance, never by an independent timer.
+ * ── One concurrent gesture (why the motion is built this way) ──
+ * A fold is ONE gesture, not two serial events: the body's visibility and its
+ * space change on the same box, started in the same commit, over the same time
+ * base. Both properties therefore read as the content moving and shrinking
+ * together — there is no window in which the body is already faded/blank while
+ * the box is still standing (or already standing while the text is still
+ * invisible), which is exactly the "faded first, then a dead gap, then a
+ * disconnected size step" feeling a serial schedule produces.
+ *
+ * The two properties overlap instead of serialising, and the schedule is honest
+ * about the overlap: the fade is the shorter animation (and NOT a front-loaded
+ * curve — see the timing constants below), so it is essentially complete when
+ * the clip boundary lands. Inside that window the clip boundary does cross rows
+ * that are still partly visible, i.e. a row can be cut while it is already
+ * fading — a brief, low-contrast clip within one gesture, never a cut of fully
+ * opaque text and never "fade, then a dead gap, then a size step". Expanding
+ * mirrors it: the space starts opening and the fade joins it one short step
+ * later, so the text appears while the body is opening instead of after an
+ * empty expansion.
+ * Both properties remain two animations on the same box carrying one shared
+ * schedule, and every instance starts inside the same commit — i.e. at the same
+ * document-timeline time — so a group spanning several turn runs (each run owns
+ * its own body wrapper) cannot drift into per-run steps. The schedule is
+ * carried by the same four CSS custom properties on every instance, never by an
+ * independent timer.
  *
  * Motion lifecycle:
  * - mount already folded → `closed` with NO animation (initial load / restart
@@ -55,58 +66,51 @@ import { css, keyframes, styled } from 'styled-components'
  * Layout: the animating wrapper clips to MEASURED pixel heights. A concrete
  * length is required because a percentage/fr track in an indefinite-height box
  * does not shrink, and `height: auto` is not animatable. `from` is the height
- * read at the flip. `to` for a closing motion is the reserved tail slot height
- * (route-tail group) or zero; for an opening motion it is the remembered
+ * read at the flip, `to` for a closing motion is ZERO (the group's header row
+ * stays in flow above this box, so the body ends at zero height like any other
+ * fully hidden content), and for an opening motion it is the remembered
  * natural height when the body is still mounted (a reversal of a running
  * exit), otherwise the body is rendered unclipped for one extra layout pass to
  * read the natural target; that pass is committed before paint. The shared
  * route viewport keeper therefore observes a genuine per-frame height delta
- * through its ordinary observer loop, holding the group header and letting the
- * content below absorb the delta exactly as it does for the instant fold. The
- * settled states are untouched: plain block while `open` (identical to
- * rendering the body directly), nothing while `closed` (plus the tail slot
- * when this group is the flow terminal).
- *
- * ── Route-tail label slot ──
- * The collapsed label pill is out-of-flow chrome at the run's top edge. For a
- * folded group that ends the whole message flow, that seam IS the scroll end,
- * so the pill would paint into the scroll host's bottom padding and be clipped.
- * The route-tail group therefore reserves one minimal label slot (pill height +
- * a small safety gap) inside its own body area: the pill keeps its position at
- * the seam, stays fully inside the scrollport, and never reaches the previous
- * message or the composer. The reservation is also the closing animation's
- * end height, so the slot appears as part of the motion instead of as a jump.
- * Every non-tail fold keeps the zero-flow character (no slot, no row height).
+ * through its ordinary observer loop, holding the group header row and letting
+ * the content below absorb the delta exactly as it does for the instant fold.
+ * The settled states are untouched: plain block while `open` (identical to
+ * rendering the body directly), nothing while `closed`.
  */
 
 /**
- * Label pill height (24px) plus the clearance the composer's floating Layers
- * trigger needs: the portaled trigger sits 8px above the composer and is 24px
- * tall, so its band reaches 32px above the composer top. A 28px slot left the
- * pill's lower half inside that band (measured: pill 438–463 vs trigger
- * 456–480), so the slot carries one pill height plus that whole band and a
- * small safety gap. The slot is the closing animation's end height, so it
- * appears as part of the motion, never as a jump.
+ * Close: fade and shrink together on one time base. The fade is the SHORTER
+ * animation (it is essentially complete when the space motion lands), so the
+ * clip boundary crosses rows that are already most of the way transparent.
+ * The overlap is honest, not a guarantee: for part of the window a row is both
+ * partly visible and already being clipped, so a row can be cut while it is
+ * fading. That is a brief, low-contrast clip inside one gesture — the schedule
+ * ensures the cut never lands on fully opaque text and that the gesture never
+ * serialises into "fade, then a dead gap, then a size step".
  */
-const TAIL_SLOT_HEIGHT_PX = 44
-
-/**
- * Close: fade out, then shrink. The space motion starts exactly when the fade
- * ends, so no readable row is ever painted while the clip boundary moves.
- */
-const CLOSE_FADE_MS = 40
+const CLOSE_SPACE_MS = 200
+const CLOSE_FADE_MS = 140
 const CLOSE_FADE_DELAY_MS = 0
-const CLOSE_SPACE_DELAY_MS = CLOSE_FADE_MS
-const CLOSE_SPACE_MS = 190
+const CLOSE_SPACE_DELAY_MS = 0
 
 /**
- * Open: expand, then fade in. The fade starts exactly when the expansion ends,
- * so the text becomes visible only at its full natural height.
+ * Open: expand and fade in together. The fade joins the expansion one short
+ * step later and lands with it (it overlaps the whole opening rather than
+ * following an empty box), so the text appears while the body is opening.
  */
-const OPEN_SPACE_MS = 190
+const OPEN_SPACE_MS = 200
 const OPEN_SPACE_DELAY_MS = 0
-const OPEN_FADE_DELAY_MS = OPEN_SPACE_MS
-const OPEN_FADE_MS = 120
+const OPEN_FADE_DELAY_MS = 50
+const OPEN_FADE_MS = 150
+
+/**
+ * One shared motion window for the whole fold gesture: the body size/opacity
+ * motion above, and the group chrome (left rule, label tint) that leaves or
+ * returns with the body. Chrome takes part in the same window instead of
+ * switching ahead of it or lagging behind it.
+ */
+export const SEGMENT_FOLD_MOTION_MS = Math.max(CLOSE_SPACE_MS, OPEN_SPACE_MS)
 
 /**
  * Space (height) motion: symmetric ease-in-out. A front-loaded curve paints
@@ -114,8 +118,13 @@ const OPEN_FADE_MS = 120
  * not have), so the clip boundary accelerates and lands softly instead.
  */
 const FOLD_SPACE_EASING = 'cubic-bezier(0.65, 0, 0.35, 1)'
-/** Visibility (opacity) motion: symmetric, so a fade never lingers at the ends. */
-const FOLD_FADE_EASING = 'cubic-bezier(0.4, 0, 0.2, 1)'
+/**
+ * Visibility (opacity) motion: symmetric ease-in-out (mirror control points),
+ * NOT a front-loaded ease-out — the fade neither dumps its delta in the first
+ * frames nor outruns the clip boundary. Its shorter duration (see above) is
+ * what makes it land early; the curve only keeps the change smooth.
+ */
+const FOLD_FADE_EASING = 'cubic-bezier(0.3, 0, 0.7, 1)'
 
 const FOLD_HEIGHT_FROM_VAR = '--fold-height-from'
 const FOLD_HEIGHT_TO_VAR = '--fold-height-to'
@@ -290,12 +299,6 @@ interface SegmentFoldTransitionProps {
   /** Authority fold state of the group that owns this body. */
   folded: boolean
   /**
-   * The group ends the whole message flow on the current route: its collapsed
-   * label keeps the minimal tail slot instead of a zero-flow seam so the pill
-   * stays fully inside the scrollport. Exactly one group per flow has it.
-   */
-  tailSlot?: boolean
-  /**
    * Renders the group body for the current presentation. `includeFolded` is
    * true only while a motion needs the full body on screen (exit/enter); the
    * settled states always receive false, so a folded group's rows are never
@@ -304,16 +307,13 @@ interface SegmentFoldTransitionProps {
   renderBody: (presentation: FoldBodyPresentation) => ReactNode
 }
 
-const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, tailSlot = false, renderBody }) => {
+const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, renderBody }) => {
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const motionAvailableRef = useRef<boolean>(isFoldMotionAvailable())
   const [presentation, setPresentation] = useState<FoldPresentation>(() => settledPresentation(folded))
   // Last natural (unclipped) body height: the opening target when the exit
   // motion is being reversed and the rows are still mounted.
   const naturalHeightRef = useRef<number | null>(null)
-  // Closing target: the tail slot for the flow-terminal group, zero otherwise.
-  const closingTargetRef = useRef<number>(tailSlot ? TAIL_SLOT_HEIGHT_PX : 0)
-  closingTargetRef.current = tailSlot ? TAIL_SLOT_HEIGHT_PX : 0
 
   // The transition is derived in the render that observes the flip, never in a
   // following layout pass: this commit is exactly the one that would take the
@@ -330,15 +330,14 @@ const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, t
     } else if (folded) {
       // Already at (or below) the closing target: nothing to shrink, so settle
       // immediately.
-      const target = closingTargetRef.current
       setPresentation(
-        visible > target
+        visible > 0
           ? {
               kind: 'motion',
               phase: 'closing',
               from: visible,
               fadeFrom: readVisibleOpacity(bodyRef.current),
-              to: target
+              to: 0
             }
           : { kind: 'closed' }
       )
@@ -427,10 +426,10 @@ const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, t
   }, [presentation])
 
   if (presentation.kind === 'closed') {
-    // Route-tail group: keep the minimal label slot so the collapsed pill stays
-    // inside the scrollport. Everything else settles to no mounted box at all.
-    if (!tailSlot) return null
-    return <TailSlot ref={bodyRef} data-testid="fold-tail-slot" data-segment-fold-tail-slot aria-hidden="true" />
+    // The settled folded body mounts nothing at all: the group's header row is
+    // separate chrome and keeps its occupied row, so no body slot, seam band or
+    // flow-terminal exception is ever added here.
+    return null
   }
 
   const motion = presentation.kind === 'motion' ? presentation : null
@@ -469,15 +468,6 @@ const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, t
   )
 }
 
-/**
- * Zero-paint label slot reserved by the flow-terminal folded group: it occupies
- * exactly the collapsed pill's height plus a small safety gap and offers no hit
- * area of its own (the pill lives in the chrome host above it).
- */
-const TailSlot = styled.div`
-  height: ${TAIL_SLOT_HEIGHT_PX}px;
-  pointer-events: none;
-`
 const FoldBody = styled.div<{ $phase: FoldMotionPhase | null; $armed: boolean; $inert: boolean }>`
   ${(props) => {
     if (props.$phase === null || !props.$armed) return null

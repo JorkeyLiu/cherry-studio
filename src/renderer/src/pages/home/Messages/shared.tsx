@@ -1,10 +1,23 @@
 import Scrollbar from '@renderer/components/Scrollbar'
 import styled from 'styled-components'
 
+import { COMPOSER_FLOATING_CONTROL_BAND_PX } from './composerFloatingBand'
+
+/**
+ * Scroll content host.
+ *
+ * The bottom padding is the flow's tail clearance, not a cosmetic inset: the
+ * composer's floating control band paints over the last rows of this content
+ * (`#messages` is the band's sibling, so no flow row can clear it from inside),
+ * and reserving exactly that band keeps the tail — including the out-of-flow
+ * folded group label — inside the real scrollport instead of underneath the
+ * portaled control. The value comes from the control geometry itself
+ * (`composerFloatingBand`), never from a second hand-tuned number.
+ */
 export const ScrollContainer = styled.div`
   display: flex;
   flex-direction: column-reverse;
-  padding: 10px 10px 20px;
+  padding: 10px 10px ${COMPOSER_FLOATING_CONTROL_BAND_PX}px;
   .multi-select-mode & {
     padding-bottom: 60px;
   }

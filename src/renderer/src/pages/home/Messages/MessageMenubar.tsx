@@ -1,5 +1,6 @@
 // import { InfoCircleOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
+import ConfirmPopover from '@renderer/components/ConfirmPopover'
 import { CopyIcon, DeleteIcon, EditIcon, RefreshIcon } from '@renderer/components/Icons'
 import InspectMessagePopup from '@renderer/components/Popups/InspectMessagePopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
@@ -48,7 +49,7 @@ import {
 import { isNoModelError } from '@renderer/utils/noModelError'
 import { ERR_NOT_FOUND } from '@shared/chatDb'
 import type { MenuProps } from 'antd'
-import { Dropdown, Popconfirm, Tooltip } from 'antd'
+import { Dropdown, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import type { TFunction } from 'i18next'
 import {
@@ -971,7 +972,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     if (confirmRegenerateMessage) {
       return (
-        <Popconfirm
+        <ConfirmPopover
           title={t('message.regenerate.confirm')}
           okButtonProps={{ danger: true }}
           onConfirm={() => handleResendUserMessage()}
@@ -984,7 +985,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
-        </Popconfirm>
+        </ConfirmPopover>
       )
     }
 
@@ -1052,7 +1053,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     if (confirmRegenerateMessage) {
       return (
-        <Popconfirm
+        <ConfirmPopover
           title={t('message.regenerate.confirm')}
           okButtonProps={{ danger: true }}
           onConfirm={() => onRegenerate()}
@@ -1062,7 +1063,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
-        </Popconfirm>
+        </ConfirmPopover>
       )
     }
 
@@ -1384,7 +1385,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     if (confirmDeleteMessage) {
       return (
-        <Popconfirm
+        <ConfirmPopover
           title={t('message.message.delete.content')}
           okButtonProps={{ danger: true }}
           onConfirm={async () => await handleDeleteMessage()}
@@ -1395,7 +1396,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
             $softHoverBg={softHoverBg}>
             {deleteTooltip}
           </ActionButton>
-        </Popconfirm>
+        </ConfirmPopover>
       )
     }
 
