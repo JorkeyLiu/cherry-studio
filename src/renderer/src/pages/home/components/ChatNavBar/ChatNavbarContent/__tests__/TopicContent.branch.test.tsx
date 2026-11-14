@@ -1131,7 +1131,7 @@ describe('TopicContent unified branch selector', () => {
     expect(entryRule).not.toContain('--color-primary-mute')
   })
 
-  it('draws the path in its own dark rounded plate while the current segment keeps the green chip', async () => {
+  it('draws the path in its own dark rounded plate while the current segment has clean bold text without highlight', async () => {
     setTree([b1(), b3()], [b1(), b3()], 'b-3')
     renderTopicContent()
 
@@ -1146,9 +1146,10 @@ describe('TopicContent unified branch selector', () => {
     expect(css).toMatch(/border-radius:\s*8px/)
     // …that hugs its content instead of stretching across the row.
     expect(css).toMatch(/width:\s*max-content/)
-    // The current segment stays the translucent green chip.
-    expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*background:\s*var\(--color-primary-mute\)/)
-    expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*color:\s*var\(--color-primary\)/)
+    // The current segment has clean text without primary-mute background chip.
+    expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*color:\s*var\(--color-text-1\)/)
+    expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*font-weight:\s*600/)
+    expect(css).not.toMatch(/\[data-current='true'\][^{}]*\{[^{}]*background:\s*var\(--color-primary-mute\)/)
     // The plate wraps the path only: the tool group is outside it.
     expect(plate?.contains(screen.getByTestId('navbar-tools-right'))).toBe(false)
   })

@@ -246,69 +246,69 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
       {/* Model selector (retained) */}
       <SelectModelButton assistant={assistant} />
 
-      {/* The branch selector trigger: immediately left of the path it opens. */}
+      {/* The branch selector trigger and breadcrumb in a segmented pill group */}
       {hasBranches ? (
-        <Popover
-          ref={popoverRef}
-          content={content}
-          trigger="click"
-          // Anchored on the entry's left edge: content growth extends to the
-          // right instead of pushing the panel away from the entry.
-          placement="bottomLeft"
-          arrow={false}
-          // The popup's own align pass places it: it starts at the left edge
-          // this open reserved, and its horizontal self-correction is off, so
-          // a growing panel never flips or shifts away from that edge (the
-          // anchor, and the entry's click point, never move).
-          align={popoverAlign}
-          styles={{ body: { padding: 0 } }}
-          open={open}
-          afterOpenChange={(next) => setTreeVisible(next)}
-          onOpenChange={(next) => {
-            if (next) {
-              // Planned before the panel mounts, so the first frame it
-              // appears in already carries its final left edge.
-              planFit()
-              setOpenCount((count) => count + 1)
-              setOpen(true)
-              return
-            }
-            // A row's delete confirmation reports itself through this flag.
-            // It lives in its own popup layer, so the press that dismisses
-            // it arrives here as an outside press as well: that one press
-            // belongs to the confirmation and is spent on it. Closing the
-            // selector through any other path retires the flag with it, so
-            // it can never swallow a later press.
-            if (deleteConfirmRef.current) {
-              deleteConfirmRef.current = false
-              return
-            }
-            closeSelector()
-          }}
-          destroyOnHidden>
-          <Tooltip title={t('chat.topics.branch.tag')} mouseEnterDelay={0.8}>
-            <BranchIconButton
-              ref={entryRef}
-              data-testid="branch-selector-entry"
-              className="shrink-0"
-              type="text"
-              autoInsertSpace={false}
-              aria-label={t('chat.topics.branch.tag')}
-              aria-haspopup="dialog"
-              aria-expanded={open}>
-              <GitBranch size={18} />
-            </BranchIconButton>
-          </Tooltip>
-        </Popover>
-      ) : null}
+        <BranchSegmentedGroup data-testid="branch-segmented-group">
+          <Popover
+            ref={popoverRef}
+            content={content}
+            trigger="click"
+            // Anchored on the entry's left edge: content growth extends to the
+            // right instead of pushing the panel away from the entry.
+            placement="bottomLeft"
+            arrow={false}
+            // The popup's own align pass places it: it starts at the left edge
+            // this open reserved, and its horizontal self-correction is off, so
+            // a growing panel never flips or shifts away from that edge (the
+            // anchor, and the entry's click point, never move).
+            align={popoverAlign}
+            styles={{ body: { padding: 0 } }}
+            open={open}
+            afterOpenChange={(next) => setTreeVisible(next)}
+            onOpenChange={(next) => {
+              if (next) {
+                // Planned before the panel mounts, so the first frame it
+                // appears in already carries its final left edge.
+                planFit()
+                setOpenCount((count) => count + 1)
+                setOpen(true)
+                return
+              }
+              // A row's delete confirmation reports itself through this flag.
+              // It lives in its own popup layer, so the press that dismisses
+              // it arrives here as an outside press as well: that one press
+              // belongs to the confirmation and is spent on it. Closing the
+              // selector through any other path retires the flag with it, so
+              // it can never swallow a later press.
+              if (deleteConfirmRef.current) {
+                deleteConfirmRef.current = false
+                return
+              }
+              closeSelector()
+            }}
+            destroyOnHidden>
+            <Tooltip title={t('chat.topics.branch.tag')} mouseEnterDelay={0.8}>
+              <BranchIconButton
+                ref={entryRef}
+                data-testid="branch-selector-entry"
+                className="shrink-0"
+                type="text"
+                autoInsertSpace={false}
+                aria-label={t('chat.topics.branch.tag')}
+                aria-haspopup="dialog"
+                aria-expanded={open}>
+                <GitBranch size={16} />
+              </BranchIconButton>
+            </Tooltip>
+          </Popover>
 
-      {hasBranches ? (
-        <BranchBreadcrumb
-          segments={segments}
-          fullLabel={fullLabel}
-          segmentTestId={(branchId) => `branch-crumb-${branchId ?? 'main'}`}
-          onSelect={switchRoute}
-        />
+          <BranchBreadcrumb
+            segments={segments}
+            fullLabel={fullLabel}
+            segmentTestId={(branchId) => `branch-crumb-${branchId ?? 'main'}`}
+            onSelect={switchRoute}
+          />
+        </BranchSegmentedGroup>
       ) : null}
 
       {/* Edit / settings share one right-hand tool group. */}
@@ -320,30 +320,40 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
 }
 
 /**
- * The branch tool: icon only, on the same shape as the neighbouring navbar
- * icons (30px tall, 8px radius, icon colour from the navbar palette). While the
- * panel is open it takes the same active shape as the edit-mode toggle — the
- * accent surface with a light glyph — so the group shows which tool is active
- * without a text pill.
+ * Container uniting the branch button and the breadcrumb into a single segmented pill.
+ */
+const BranchSegmentedGroup = styled.div`
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 0;
+  max-width: 100%;
+`
+
+/**
+ * The branch tool: left segment of the branch pill group (26px tall, 8px left radius,
+ * shared soft background and seam border with the breadcrumb plate). While the
+ * panel is open it takes the active shape with the accent surface and light glyph.
  */
 const BranchIconButton = styled(Button)`
   &&& {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 30px;
+    height: 26px;
     padding: 0 7px;
-    border: 0;
-    border-radius: 8px;
-    background: transparent;
+    border: 1px solid var(--color-border-soft);
+    border-radius: 8px 0 0 8px;
+    background: var(--color-background-soft);
     color: var(--color-icon);
     box-shadow: none;
     transition:
       background-color 0.2s ease-in-out,
-      color 0.2s ease-in-out;
+      color 0.2s ease-in-out,
+      border-color 0.2s ease-in-out;
 
     &:hover {
-      background: var(--color-background-mute);
+      background: var(--color-hover);
       color: var(--color-text-1);
     }
 
@@ -351,6 +361,7 @@ const BranchIconButton = styled(Button)`
     &[aria-expanded='true']:hover {
       background: var(--color-primary);
       color: var(--color-icon-white);
+      border-color: var(--color-primary);
 
       /* The glyph carries its own colour in the app's icon layer (the same
          override the edit-mode toggle relies on). */

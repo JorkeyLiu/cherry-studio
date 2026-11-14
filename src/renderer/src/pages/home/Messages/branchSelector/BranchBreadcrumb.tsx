@@ -197,7 +197,8 @@ const Plate = styled.div`
   min-width: 0;
   padding: 0 6px;
   border: 1px solid var(--color-border-soft);
-  border-radius: 8px;
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
   background: var(--color-background-soft);
   overflow: hidden;
 `
@@ -235,8 +236,7 @@ const Segment = styled.button`
   &[data-current='true'] {
     flex: 0 1 auto;
     max-width: ${CURRENT_MAX_WIDTH}px;
-    color: var(--color-primary);
-    background: var(--color-primary-mute);
+    color: var(--color-text-1);
     font-weight: 600;
   }
 `
