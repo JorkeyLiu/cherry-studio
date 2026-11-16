@@ -11,7 +11,7 @@ import { Button, Dropdown, Input, type InputRef, type MenuProps, Popover, type P
 // keeps the rename popover on one theme source instead of a second token path.
 import antdTheme from 'antd/es/theme'
 import { Pencil, Trash2 } from 'lucide-react'
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { css, styled } from 'styled-components'
 
@@ -398,11 +398,29 @@ const SegmentRenameForm: React.FC<{
   const { t } = useTranslation()
   const [draft, setDraft] = useState(initialName)
   const inputRef = useRef<InputRef>(null)
+  const hasInteractedRef = useRef(false)
+
+  const focusAndSelect = useCallback(() => {
+    if (hasInteractedRef.current) return
+    const input = inputRef.current
+    if (!input) return
+    input.focus({ cursor: 'all' })
+    input.select()
+  }, [])
 
   useLayoutEffect(() => {
-    inputRef.current?.focus()
-    inputRef.current?.select()
-  }, [])
+    focusAndSelect()
+  }, [focusAndSelect])
+
+  useEffect(() => {
+    focusAndSelect()
+    const rafId = requestAnimationFrame(focusAndSelect)
+    const timerId = setTimeout(focusAndSelect, 50)
+    return () => {
+      cancelAnimationFrame(rafId)
+      clearTimeout(timerId)
+    }
+  }, [focusAndSelect])
 
   return (
     // Escape is owned by the surface, not by the input alone: the action
@@ -418,10 +436,25 @@ const SegmentRenameForm: React.FC<{
       }}>
       <Input
         ref={inputRef}
+        autoFocus
         size="small"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          hasInteractedRef.current = true
+          setDraft(e.target.value)
+        }}
+        onFocus={(e) => {
+          if (!hasInteractedRef.current) {
+            e.target.select()
+          }
+        }}
         onPressEnter={() => onConfirm(draft)}
+        onKeyDown={() => {
+          hasInteractedRef.current = true
+        }}
+        onMouseDown={() => {
+          hasInteractedRef.current = true
+        }}
         placeholder={t('topicSegment.create.namePlaceholder')}
         data-testid="topic-segment-rename-input"
       />
@@ -678,7 +711,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   // (the original inline editor only relied on `autoFocus`).
   useLayoutEffect(() => {
     if (!isEditing) return
-    inlineInputRef.current?.focus()
+    inlineInputRef.current?.focus({ cursor: 'all' })
     inlineInputRef.current?.select()
   }, [isEditing])
 
@@ -994,6 +1027,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
               // 两者都不触发折叠、不触发行导航、也不打开任何弹层。
               <TabInput
                 ref={inlineInputRef}
+                autoFocus
                 size="small"
                 value={editName}
                 onChange={(event) => setEditName(event.target.value)}

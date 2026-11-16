@@ -937,6 +937,9 @@ describe('TopicSegmentLine group boundary', () => {
         expect(popoverState.props!.open, 'the menu rename opens the same anchored surface').toBe(true)
         const input = screen.getByTestId('topic-segment-rename-input') as HTMLInputElement
         expect(input.value).toBe('Seg')
+        expect(document.activeElement).toBe(input)
+        expect(input.selectionStart).toBe(0)
+        expect(input.selectionEnd).toBe(3)
         await act(async () => {
           fireEvent.change(input, { target: { value: draft } })
         })
