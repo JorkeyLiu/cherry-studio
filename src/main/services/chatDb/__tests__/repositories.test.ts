@@ -110,6 +110,7 @@ function makeSegment(overrides?: Partial<TopicSegmentData>): TopicSegmentData {
     createdAt: new Date().toISOString(),
     updatedAt: null,
     sortOrder: 0,
+    headerMessageId: null,
     overflow: { color: '#FF0000' },
     ...overrides
   }

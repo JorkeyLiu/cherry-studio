@@ -65,10 +65,10 @@ function wrapper(store: ReturnType<typeof setupStore>) {
 }
 
 describe('segment authority UI badges', () => {
-  it('TopicSegmentLine badge renders the authority messageCount prop, not messageIds.length', () => {
+  it('TopicSegmentLine badge renders the route-qualified turnCount, never catalog membership', () => {
     const store = setupStore()
-    // Loaded membership has 2 ids but authority count is 5 (windowed projection):
-    // the badge must show 5.
+    // Catalog message count is 7 but the route projection carries 5 turns
+    // (user + same-askId answers = 1): the badge must show 5.
     const segment = {
       id: 'seg-1',
       topicId: 't1',
@@ -79,9 +79,9 @@ describe('segment authority UI badges', () => {
       sortOrder: 0,
       firstMessageId: 'm0',
       lastMessageId: 'm4',
-      messageCount: 5
+      messageCount: 7
     } as any
-    render(createElement(TopicSegmentLine, { segment, isFirst: true, isLast: false, messageCount: 5 }), {
+    render(createElement(TopicSegmentLine, { segment, isFirst: true, isLast: false, messageCount: 7, turnCount: 5 }), {
       wrapper: wrapper(store)
     })
     expect(screen.getByText('5')).toBeTruthy()
@@ -91,8 +91,15 @@ describe('segment authority UI badges', () => {
     const src = readFileSync(join(process.cwd(), 'src/renderer/src/pages/home/Messages/Messages.tsx'), 'utf8')
     // One invocation per mounted group carrying merged group facts — never a
     // per-run `isFirst ? …` branch, and never a loaded-membership length.
-    expect(src).toContain('renderSegmentChrome: ({ segment, firstMounted, lastMounted, messageCount })')
+    expect(src).toContain(
+      'renderSegmentChrome: ({ segment, routeSegment, firstMounted, lastMounted, messageCount, turnCount })'
+    )
     expect(src).toContain('messageCount={messageCount}')
+    expect(src).toContain('turnCount={turnCount}')
+    // Display/authority split: the elected header always mounts from the
+    // displayed route's structure, but mutation authority rides the
+    // co-commit flag — never a bare pass-through of the display entry.
+    expect(src).toContain('routeSegment={resolveChromeAuthoritySegment(routeSegment, isChromeAuthorityCurrent)}')
     expect(src).not.toContain('messageCount={isFirst ?')
     expect(src).not.toContain('segment.messageIds.length')
   })
@@ -108,6 +115,20 @@ describe('segment authority UI badges', () => {
     expect(src).not.toContain('seg.messageIds[seg.messageIds.length - 1]')
   })
 
+  it('TopicSegmentLine consumes the shared rail primitives, never private rail CSS', () => {
+    const src = readFileSync(join(process.cwd(), 'src/renderer/src/pages/home/Messages/TopicSegmentLine.tsx'), 'utf8')
+    // The group rail paints through the shared stroke/hit primitives (2px line,
+    // 8px hit, hover-only line brightening); only the positioned track geometry
+    // stays local to the group edge.
+    expect(src).toContain(`} from './GroupInteractionRail'`)
+    expect(src).toContain('INTERACTION_RAIL_LINE_WIDTH_PX')
+    expect(src).toContain('INTERACTION_RAIL_OUTSET_PX')
+    expect(src).toContain('<InteractionRailLine')
+    expect(src).toContain('<InteractionRailHitTarget')
+    expect(src).not.toContain('const RailLine = styled')
+    expect(src).not.toContain('const RailHitTarget = styled')
+    expect(src).not.toContain('$folded={false} $active')
+  })
   it('wrapper helper builds a store (keeps Provider path covered)', () => {
     expect(wrapper(setupStore())).toBeTruthy()
   })

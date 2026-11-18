@@ -4194,6 +4194,7 @@ export const updateMessage = async (
     // re-resolved; only an absent route falls back to the active route.
     const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
     await dbService.updateMessage(topicId, messageId, updates, resendAttemptId, route)
+    store.dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates }))
     logger.silly('Updated message via DbService', { topicId, messageId })
   } catch (error) {
     logger.error('Failed to update message:', { topicId, messageId, error })

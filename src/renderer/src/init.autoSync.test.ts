@@ -162,6 +162,12 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     vi.doMock('./services/topicDeletionSubscription', () => ({
       subscribeTopicDeletionEvents: mockSubscribeTopicDeletion
     }))
+    // topicMessageTimes is another dynamically imported bootstrap target; its
+    // static store/assistant chain reaches i18n.default.t, which this test's
+    // narrowed './i18n' mock does not provide.
+    vi.doMock('./services/topicMessageTimes', () => ({
+      subscribeTopicMessageTimeInvalidation: vi.fn()
+    }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: mockWebTraceInit } }))
     vi.doMock('@kangfenmao/keyv-storage', () => ({
       default: class {

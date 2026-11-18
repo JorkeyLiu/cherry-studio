@@ -108,6 +108,7 @@ function makeSegment(overrides?: Partial<TopicSegmentData>): TopicSegmentData {
     createdAt: '2020-01-01T00:00:00.000Z',
     updatedAt: null,
     sortOrder: 0,
+    headerMessageId: null,
     overflow: {},
     ...overrides
   }

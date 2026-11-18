@@ -6,12 +6,13 @@ import { dbService } from '@renderer/services/db/DbService'
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
-import { Button, Popover } from 'antd'
+import { Popover } from 'antd'
 import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { BoundaryLabel, BoundaryPill, BoundaryPillButton, BoundaryRow, BoundaryRule } from './BoundaryPill'
 import { forkMarkerLabel } from './forkPlacement'
 
 const logger = loggerService.withContext('BranchDividers')
@@ -20,21 +21,27 @@ const logger = loggerService.withContext('BranchDividers')
  * Fork-divider placement and menu helpers for topic-internal branches.
  *
  * `displayMessages` arrive oldest→newest; the render loop iterates groups
- * newest→oldest (column-reverse). Dividers are full-width centered rows (no
- * left-side absolute content), so they never overlap TopicSegmentLine's
+ * newest→oldest (column-reverse). A divider is a centered, rule-free flow row
+ * (no left-side absolute content), so it never overlaps TopicSegmentLine's
  * pointer region. A divider renders BEFORE its anchor group in DOM order
  * (visually directly below the anchor message).
  *
+ * The row shares the weak-boundary presentation used by the
+ * history-reference divider (`BoundaryPill`): one compact neutral pill with no
+ * left/right through-rules. The context-window boundary keeps its own strong
+ * rule and is not part of this family. The row keeps the same box model, the
+ * stable `dividerRowTestId` identity and the `data-divider-*` anchors, so the
+ * captured divider offsets keep measuring the same row.
+ *
  * Two forms per the UI contract:
  * - Untaken fork (main route, or a fork in the viewed route no child was
- * - Untaken fork (main route, or a fork in the viewed route no child was
- *   taken at): `── 此处有 x 条分支 ──` followed by the chevron icon that
- *   marks the row as expandable. The popup includes the current route plus
- *   the direct child branches at the anchor.
- * - Taken fork (the viewed route passes through `taken` at the anchor):
- *   `── <taken branch name> ──` followed by the same chevron icon. The popup
- *   switches among the original/parent route at that fork and the sibling
- *   branches, with the current one selected.
+ *   taken at): the branch-count label followed by the chevron icon that marks
+ *   the row as expandable. The popup includes the current route plus the
+ *   direct child branches at the anchor.
+ * - Taken fork (the viewed route passes through `taken` at the anchor): the
+ *   taken branch name followed by the same chevron icon. The popup switches
+ *   among the original/parent route at that fork and the sibling branches,
+ *   with the current one selected.
  *
  * Popup binding: reuse ONLY the top selector's visual primitives and popover
  * interaction (overlay container, option row styling/highlight, rename/delete
@@ -112,6 +119,25 @@ export const buildDividerKey = (anchorMessageId: string, parentBranchId: string 
 /** Test id for a logical divider row (stable across routes). */
 export const dividerRowTestId = (anchorMessageId: string, parentBranchId: string | null): string =>
   `branch-fork-divider-${anchorMessageId}-${parentBranchId ?? 'main'}`
+/**
+ * Cross-boundary decision for a fork divider: actual owner compares (topicId, branchId).
+ * Untaken (no taken child) keeps the same owner on both sides: pill with no rule.
+ * Taken (the viewed route passes through `taken`) owns a different branch on the
+ * far side: both sides paint themed dashed rules. Pure, no DOM.
+ */
+export const isForkDividerCrossOwner = (
+  topicId: string,
+  parentBranchId: string | null,
+  taken?: TopicBranchWire | null
+): boolean => {
+  if (!taken) return false
+  try {
+    if (typeof taken.topicId === 'string' && taken.topicId !== topicId) return true
+  } catch {
+    return true
+  }
+  return (taken.id ?? null) !== (parentBranchId ?? null)
+}
 
 /**
  * Divider switch context passed from the clicked divider row to Messages.
@@ -356,16 +382,18 @@ export const ForkDivider = ({
     }
   }
 
+  const crossOwner = isForkDividerCrossOwner(topicId, parentBranchId, taken ?? null)
   return (
     <ForkDividerRow
       data-testid={rowTestId}
       data-divider-key={dividerKey}
       data-divider-anchor={anchorMessageId}
       data-divider-parent={parentBranchId ?? 'main'}
-      data-divider-placement={placement}>
+      data-divider-placement={placement}
+      data-divider-cross={crossOwner ? 'true' : 'false'}>
       {/* Legacy anchor-only id retained as an alias for existing queries. */}
       <span data-testid={`branch-fork-divider-${anchorMessageId}`} style={{ display: 'none' }} aria-hidden />
-      <ForkDividerLine />
+      {crossOwner ? <BoundaryRule data-boundary-rule="dash" aria-hidden /> : null}
       <Popover
         content={content}
         trigger="click"
@@ -383,37 +411,21 @@ export const ForkDivider = ({
           autoInsertSpace={false}
           aria-expanded={open}
           aria-label={t(open ? 'chat.topics.branch.collapse' : 'chat.topics.branch.expand')}>
-          {dividerLabel}
-          <ChevronDown size={14} aria-hidden />
+          <BoundaryPill data-boundary-pill="surface">
+            <BoundaryLabel data-boundary-label>{dividerLabel}</BoundaryLabel>
+            <ChevronDown size={14} aria-hidden />
+          </BoundaryPill>
         </ForkDividerNameButton>
       </Popover>
-      <ForkDividerLine />
+      {crossOwner ? <BoundaryRule data-boundary-rule="dash" aria-hidden /> : null}
     </ForkDividerRow>
   )
 }
 
-const ForkDividerRow = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  margin: 4px 0;
+/** Flow row of a fork divider: shared weak-boundary row, same height as before. */
+const ForkDividerRow = styled(BoundaryRow)`
   min-height: 36px;
 `
 
-const ForkDividerLine = styled.div`
-  flex: 1;
-  height: 1px;
-  background: var(--color-border);
-`
-
-const ForkDividerNameButton = styled(Button)`
-  font-size: 12px;
-  color: var(--color-text-2);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-  height: auto;
-  padding: 0 8px;
-`
+/** The shared weak-boundary surface wrapped in its interactive shell. */
+const ForkDividerNameButton = BoundaryPillButton

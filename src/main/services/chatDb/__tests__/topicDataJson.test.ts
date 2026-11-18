@@ -669,23 +669,14 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
       ...clone(),
       segments: clone().segments.map((s) => ({ ...s, color: 42 as never }))
     }
-    // `folded` rides the same segment overflow and decides context
-    // participation, so a coerced non-boolean must reject the whole import.
-    const badFoldedString: TopicDataExportPayload = {
-      ...clone(),
-      segments: clone().segments.map((s) => ({ ...s, folded: 'true' as never }))
-    }
-    const badFoldedNumber: TopicDataExportPayload = {
-      ...clone(),
-      segments: clone().segments.map((s) => ({ ...s, folded: 1 as never }))
-    }
+    // The retired group-collapse marker is not validated any more: any stale
+    // `folded` value is dropped rather than coerced, so it never decides
+    // context participation (asserted at the end of this test).
     for (const [name, payload] of [
       ['pinned', badTopic],
       ['prompt', badPrompt],
       ['isNameManuallyEdited', badEdited],
-      ['color', badColor],
-      ['folded:string', badFoldedString],
-      ['folded:number', badFoldedNumber]
+      ['color', badColor]
     ] as const) {
       const before = tableCounts()
       const result = agg.importTopicData({ payload, assistantId: target() })
@@ -712,16 +703,30 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
     expect(newMessages.length).toBeGreaterThan(0)
     expect(newMessages[0].overflow.foldSelected).toBe(true)
 
-    // A legal boolean fold survives the round-trip: import writes the
-    // persisted presentation state, so the re-imported topic is already folded.
+    // The retired group-collapse marker never comes back: whatever an older
+    // payload carries (boolean, string, number) is dropped on import, the group
+    // keeps its other overflow keys, and the read wire reports no collapse.
     const withFold: TopicDataExportPayload = {
       ...clone(),
-      segments: clone().segments.map((s) => ({ ...s, folded: true }) as typeof s)
+      segments: clone().segments.map((s) => ({ ...s, folded: true, color: '#123456' }) as typeof s)
     }
     const foldedImport = okValue(agg.importTopicData({ payload: withFold, assistantId: target() }))
     const foldedList = okValue(agg.listSegments(foldedImport.topic.id))
     expect(foldedList).toHaveLength(1)
-    expect(foldedList[0].folded).toBe(true)
+    expect(foldedList[0]).not.toHaveProperty('folded')
+    expect(foldedList[0].color).toBe('#123456')
+    const storedSegments = repos.segments.listByTopic(foldedImport.topic.id)
+    expect(storedSegments).toHaveLength(1)
+    expect(storedSegments[0].overflow).not.toHaveProperty('folded')
+    expect(storedSegments[0].overflow.color).toBe('#123456')
+
+    const withStaleString: TopicDataExportPayload = {
+      ...clone(),
+      segments: clone().segments.map((s) => ({ ...s, folded: 'true' as never }) as typeof s)
+    }
+    const staleImport = okValue(agg.importTopicData({ payload: withStaleString, assistantId: target() }))
+    const staleList = okValue(agg.listSegments(staleImport.topic.id))
+    expect(staleList[0]).not.toHaveProperty('folded')
   })
 
   it('rejects duplicate ordering keys within one scope but preserves sparse gaps (F4)', () => {
@@ -1150,7 +1155,9 @@ describe('topic-data JSON exchange — referenced-history snapshot materializati
     append(target, t0, [makeBlockJson(t0.id as string, 'main_text', { content: 'text-t0' })])
     const t1 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 't1', role: 'assistant', askId: t0.id })
     append(target, t1, [makeBlockJson(t1.id as string, 'main_text', { content: 'text-t1' })])
-    const tb = okValue(agg.createBranch(target, null, t0.id as string, 'TB'))
+    // Fork anchored at t1 (the last own main row) so the target group below sits
+    // on one side of the fork point.
+    const tb = okValue(agg.createBranch(target, null, t1.id as string, 'TB'))
     const tbId = (tb.branch as { id: string }).id
     const tb0 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'tb0' })
     append(target, tb0, [makeBlockJson(tb0.id as string, 'main_text', { content: 'text-tb0' })], tbId)
@@ -1189,7 +1196,7 @@ describe('topic-data JSON exchange — referenced-history snapshot materializati
     // Target branch metadata references the remapped own anchor.
     const branch = repos.branches.listByTopic(newTopicId).find((b) => b.name === 'TB')!
     expect(branch.parentBranchId).toBeNull()
-    expect(branch.anchorMessageId).toBe(byContent.get('t0')!.id)
+    expect(branch.anchorMessageId).toBe(byContent.get('t1')!.id)
     // Segment membership remapped to fresh target ids.
     const segment = repos.segments.listByTopic(newTopicId)[0]
     expect(repos.segments.getMessageIds(segment.id)).toEqual([byContent.get('t0')!.id, byContent.get('t1')!.id])

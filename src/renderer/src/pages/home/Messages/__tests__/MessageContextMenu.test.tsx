@@ -75,6 +75,9 @@ vi.mock('@renderer/store/editMode', () => ({
 }))
 
 vi.mock('react-i18next', () => ({
+  // The context-menu chain reaches the real i18n bootstrap (through the message
+  // write thunk), so the plugin stub must exist as it does in the sibling tests.
+  initReactI18next: { type: '3rdParty', init: () => undefined },
   useTranslation: () => ({ t: (key: string) => key })
 }))
 
@@ -250,6 +253,7 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
         'cut',
         'paste',
         'delete',
+        'toggleFoldSelected',
         'createSegment',
         'moveToNewBranch',
         'selectAll',

@@ -2,10 +2,9 @@ import { loggerService } from '@logger'
 import { ConfirmPopover, getConfirmPopoverStyleParts } from '@renderer/components/ConfirmPopover'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { useAppSelector } from '@renderer/store'
-import { isSegmentFoldableThroughRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { Button, Dropdown, Input, type InputRef, type MenuProps, Popover, type PopoverProps } from 'antd'
 // The same design-token entry the shared popover standard uses: reading it here
 // keeps the rename popover on one theme source instead of a second token path.
@@ -13,16 +12,15 @@ import antdTheme from 'antd/es/theme'
 import { Pencil, Trash2 } from 'lucide-react'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { css, styled } from 'styled-components'
+import { styled } from 'styled-components'
 
 import {
-  captureInteractionIntent,
-  INTERACTION_REGION_SEGMENT_HEADER,
-  markInteractionLayoutDeferred,
-  settleInteractionLayoutDeferred,
-  useOptionalRouteViewportCommands
-} from './routeViewportContext'
-import { SEGMENT_FOLD_MOTION_MS } from './SegmentFoldTransition'
+  INTERACTION_RAIL_LINE_WIDTH_PX,
+  INTERACTION_RAIL_OUTSET_PX,
+  InteractionRailHitTarget,
+  InteractionRailLine
+} from './GroupInteractionRail'
+import { INTERACTION_REGION_SEGMENT_HEADER } from './routeViewportContext'
 import {
   SEGMENT_GROUP_HEADER_HEIGHT_PX,
   SEGMENT_GROUP_PILL_HEIGHT_PX,
@@ -471,15 +469,29 @@ const SegmentRenameForm: React.FC<{
 }
 
 interface TopicSegmentLineProps {
-  /** The one owning group of this mounted flow (presentation facts only). */
+  // The one owning group of this mounted flow (presentation facts only).
   segment: TopicSegment
-  /** The group's authority first message is inside the mounted window. */
+  // Main route-qualified entry for this group on the CURRENT route (same
+  // source the drawer lists): the ONLY mutation-authority input. Absent
+  // (unqualified/pending, or no reachable member) gates fail-closed to
+  // read-only. Never a raw catalog owner compare. Read and navigation stay
+  // available on every route (see canNavigateGroup); only mutation is gated.
+  routeSegment?: RouteScopedSegment | null
+  // The group's authority first message is inside the mounted window.
   isFirst: boolean
-  /** The group's authority last message is inside the mounted window. */
+  // The group's authority last message is inside the mounted window.
   isLast: boolean
+  // Legacy structural size (catalog message count). Kept for callers that
+  // still pass it; the header badge no longer reads it.
   messageCount?: number
+  // Display count for the header badge: the route-qualified TURN count from
+  // the route projection (user + same-askId answers = 1, folded and
+  // off-window members included). Kept separate from the authority entry so
+  // a pending/null routeSegment never falls back to the catalog message
+  // count — unknown stays hidden. Wired from the layout chrome's turnCount
+  // (the display route entry); Messages passes the display entry through.
+  turnCount?: number
 }
-
 /**
  * Topic-segment group boundary — the group's OWN presentation owner.
  *
@@ -548,9 +560,17 @@ interface TopicSegmentLineProps {
  * Folding is presentation-only state: membership, identity, order and the
  * context-window origin are untouched — expanding restores participation.
  */
-const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, isLast, messageCount }) => {
+const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegment, isFirst, isLast, turnCount }) => {
   const { t } = useTranslation()
-  const { updateSegmentName, deleteSegment, setSegmentFolded } = useTopicSegments(segment.topicId)
+  const { updateSegmentName, deleteSegment } = useTopicSegments(segment.topicId)
+  // Mutation authority comes ONLY from the Main route-qualified entry for this
+  // group on the CURRENT route (same source the drawer lists). Absent
+  // (unqualified/pending, or no reachable member) gates fail-closed to
+  // read-only. Never a raw catalog owner compare. Read and navigation stay
+  // available on every route (see canNavigateGroup); only mutation is gated.
+  const canMutateGroup = routeSegment?.headerOwnedByRoute === true
+  const headerId = routeSegment?.headerMessageId ?? segment.headerMessageId ?? segment.firstMessageId ?? null
+  const canNavigateGroup = headerId !== null && headerId.length > 0
   // One shared compact-popup standard for every group action surface: bounds,
   // inner padding, type metrics and wrapping come from
   // `getConfirmPopoverStyleParts` (theme-token driven), never from a local
@@ -567,28 +587,13 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   // visual anchor (the group body — never the header — is what enters or leaves
   // the flow), so the shared viewport owner holds that region stationary and
   // the content below absorbs the height delta. The hook is optional so
-  // standalone renders (tests, chrome previews) keep working with no viewport
-  // owner; the write path below then simply has no compensation arbiter.
-  const viewportCommands = useOptionalRouteViewportCommands()
-
-  // Owner-only write: a group whose fold cannot be authorized through the
-  // active route renders read-only (the header stays visible, the fold/expand
-  // write is not offered) while Main re-verifies the whole membership atomically.
-  const routeCapability = useAppSelector((state) => selectRouteCapability(state, segment.topicId))
-  const canFold = useMemo(
-    () => isSegmentFoldableThroughRoute(routeCapability, segment.topicId, segment.messageIds ?? []),
-    [routeCapability, segment.topicId, segment.messageIds]
-  )
   const color = segment.color || getSegmentColor(segment.id)
-  const isFolded = segment.folded === true
-  // Folded AND writable through the active route: the pill itself is the one
-  // expand target. Anything else (expanded, or an inherited/read-only group)
-  // keeps the pill as a plain label — no pointer promise, no tab stop, no write.
-  const isExpandable = isFolded && canFold
-  // A folded group is a whole: its header always shows the authority
-  // membership size, even when the authority first message lies outside the
-  // mounted window (or is fully hidden by the fold).
-  const badgeCount = isFolded ? segment.messageCount : messageCount
+  // Header badge: the route-qualified TURN count only. An explicit display
+  // prop wins (the layout chrome's turnCount, carried from the display route
+  // entry); otherwise the authority entry's own turnCount. A pending/null
+  // routeSegment on this route never falls back to the catalog message count
+  // — unknown stays hidden (existing `{x !== undefined &&}` badge behavior).
+  const displayTurnCount = turnCount ?? routeSegment?.turnCount
   // One groupwide hover: the header row and the continuous rail are one
   // boundary, so hovering either raises both the line and the header actions.
   const [hovered, setHovered] = useState(false)
@@ -662,6 +667,9 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   // unchanged draft writes nothing.
   const saveSegmentName = useCallback(
     async (draft: string): Promise<boolean> => {
+      // Owner-only write (fail-closed): a non-owner route never issues the
+      // metadata mutation, even if a surface were forced open.
+      if (!canMutateGroup) return false
       const trimmed = draft.trim()
       if (!trimmed || trimmed === segment.name) return false
       try {
@@ -674,18 +682,18 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
         return false
       }
     },
-    [segment.id, segment.name, updateSegmentName]
+    [canMutateGroup, segment.id, segment.name, updateSegmentName]
   )
 
   const startInlineRename = useCallback(() => {
+    if (!canMutateGroup) return
     inlineSettledRef.current = false
     setEditName(segment.name)
     setIsEditing(true)
     // The menu surface is the other rename entrance; only one is ever open.
     setRenameAnchor(null)
     setDissolveAnchor(null)
-  }, [segment.name])
-
+  }, [canMutateGroup, segment.name])
   // Escape closes the inline editor and writes nothing (the draft is dropped).
   const handleInlineKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== 'Escape') return
@@ -727,6 +735,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
 
   const startRenameFromMenu = useCallback(
     (info?: GroupMenuClickInfo) => {
+      if (!canMutateGroup) return
       const anchor = resolveMenuAnchor(menuBoxFor(info))
       if (!anchor) return
       // The pill's inline editor and the menu surface are one rename, never two.
@@ -734,7 +743,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
       setDissolveAnchor(null)
       setRenameAnchor(anchor)
     },
-    [resolveMenuAnchor]
+    [canMutateGroup, resolveMenuAnchor]
   )
 
   const cancelRename = useCallback(() => setRenameAnchor(null), [])
@@ -748,10 +757,10 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
     },
     [saveSegmentName]
   )
-
   const handleDissolve = useCallback(async () => {
+    if (!canMutateGroup) return
     await deleteSegment(segment.id)
-  }, [deleteSegment, segment.id])
+  }, [canMutateGroup, deleteSegment, segment.id])
 
   // Fold/expand is a same-route in-place geometry change, so it goes through
   // the ONE shared viewport arbiter instead of any per-control scroll write:
@@ -772,81 +781,14 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   //   scroll owner.
   // - Nothing here pins or pads the scroll position: at the newest edge the
   //   natural clamp wins and no artificial blank is introduced.
-  const runFoldWrite = useCallback(
-    async (folded: boolean) => {
-      const controller = viewportCommands?.controller
-      if (controller) {
-        captureInteractionIntent(controller, { kind: 'group', id: segment.id }, INTERACTION_REGION_SEGMENT_HEADER)
-      }
-      const deferred = markInteractionLayoutDeferred(
-        controller,
-        { kind: 'group', id: segment.id },
-        INTERACTION_REGION_SEGMENT_HEADER
-      )
-      let applied = false
-      try {
-        await setSegmentFolded(segment.id, folded)
-        applied = true
-      } catch (error) {
-        // Privacy-safe: the folded flag is stable identity, never content; a
-        // non-Error rejection is logged as its own message text.
-        logger.error(
-          folded ? 'Failed to fold segment' : 'Failed to expand segment',
-          error instanceof Error ? error : { reason: String(error) }
-        )
-      } finally {
-        // `failed` drops the gesture fail-closed (no adopt, no snapshot); a
-        // stale token never touches a newer gesture.
-        settleInteractionLayoutDeferred(controller, deferred, applied ? 'applied' : 'failed')
-      }
-    },
-    [segment.id, setSegmentFolded, viewportCommands]
-  )
-
-  const handleCollapse = useCallback(() => {
-    void runFoldWrite(true)
-  }, [runFoldWrite])
-
-  const handleExpand = useCallback(() => {
-    if (!isFolded) return
-    void runFoldWrite(false)
-  }, [isFolded, runFoldWrite])
-
-  // The folded pill's WHOLE label is ONE expand target: every part of it (the
-  // folded word, the count and the pill's own background) dispatches the same
-  // shared write. The handler lives on the PILL and its children own none, so a
-  // click anywhere inside it reaches `handleExpand` exactly once. Unfolded, the
-  // pill is a plain label: it only keeps row navigation out (the name and the
-  // hover actions own their own behavior).
-  const handlePillClick = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation()
-      if (isExpandable) handleExpand()
-    },
-    [handleExpand, isExpandable]
-  )
-
-  // Keyboard parity of the same target: the folded pill is the tab stop and
-  // Enter/Space expand through the same write. It is attached only while the
-  // pill really is interactive, so a read-only group keeps no tab stop rather
-  // than a disabled button.
-  const handlePillKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return
-      e.preventDefault()
-      e.stopPropagation()
-      handleExpand()
-    },
-    [handleExpand]
-  )
-
   const handleJumpToStart = useCallback(() => {
-    const firstMessageId = segment.firstMessageId
-    if (typeof firstMessageId !== 'string' || firstMessageId.length === 0) return
-    // Verbatim the drawer's navigation: same event, same payload, so a jump
-    // from the group edge and a jump from the drawer are one behaviour.
-    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstMessageId)
-  }, [segment.firstMessageId])
+    // Stable head first: the drawer's navigation target verbatim, so a jump
+    // from the group edge and a jump from the drawer are one behaviour. A
+    // header-less group offers no navigation entry.
+    const targetId = headerId ?? segment.firstMessageId
+    if (typeof targetId !== 'string' || targetId.length === 0) return
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, targetId)
+  }, [headerId, segment.firstMessageId])
 
   // Dissolve keeps the app's existing confusion-free confirmation content
   // (`topicSegment.dissolve.confirm`) and its own action wording, but renders it
@@ -876,35 +818,26 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   // row. Fold/expand keeps its owner-only
   // availability: a read-only (inherited) group offers no
   // fold write at all, exactly like the rail hit target and the folded pill
-  // (which then stays a plain label: no pointer, no underline, no tab stop).
   const menuItems = useMemo<MenuProps['items']>(() => {
     const items: NonNullable<MenuProps['items']> = []
-    items.push({ key: 'rename', label: t('topicSegment.rename'), onClick: startRenameFromMenu })
-    if (canFold) {
+    // Owner-only writes: a non-owner route may read and navigate the group but
+    // never renames, dissolves or changes its membership.
+    if (canMutateGroup) {
+      items.push({ key: 'rename', label: t('topicSegment.rename'), onClick: startRenameFromMenu })
+    }
+    if (canNavigateGroup) {
+      items.push({ key: 'jump-to-start', label: t('topicSegment.jumpToStart'), onClick: handleJumpToStart })
+    }
+    if (canMutateGroup) {
       items.push({
-        key: 'toggle-fold',
-        label: isFolded ? t('topicSegment.expand') : t('topicSegment.fold'),
-        onClick: () => (isFolded ? handleExpand() : handleCollapse())
+        key: 'dissolve',
+        label: t('topicSegment.dissolveAction'),
+        danger: true,
+        onClick: startDissolveFromMenu
       })
     }
-    items.push({ key: 'jump-to-start', label: t('topicSegment.jumpToStart'), onClick: handleJumpToStart })
-    items.push({
-      key: 'dissolve',
-      label: t('topicSegment.dissolveAction'),
-      danger: true,
-      onClick: startDissolveFromMenu
-    })
     return items
-  }, [
-    canFold,
-    handleCollapse,
-    handleExpand,
-    handleJumpToStart,
-    isFolded,
-    startDissolveFromMenu,
-    startRenameFromMenu,
-    t
-  ])
+  }, [canMutateGroup, canNavigateGroup, handleJumpToStart, startDissolveFromMenu, startRenameFromMenu, t])
 
   // The message list wraps the whole flow in its own right-click host (a
   // `contextMenu` Dropdown on the scroll container), and this group's own
@@ -930,6 +863,25 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
     // rail's line plus the captured whole-menu box (see `resolveMenuAnchor`).
     pointerAnchorRef.current = { x: e.clientX, y: e.clientY }
   }, [])
+
+  // The rail's transparent hit surface opens NOTHING on a pointer click: a
+  // left click on the group edge never opens the group menu (it only dismisses
+  // an open one through the capture dismiss below). The header row stays the
+  // menu's trigger host and keeps owning `contextmenu` (see
+  // `handleGroupContextMenu`), so a right click on the rail still opens exactly
+  // one menu, anchored at the pointer. The keyboard parity is the keyboard
+  // right-click only (the context-menu key / Shift+F10); Enter and Space are
+  // not menu gestures on this surface. Opening a whole group by folding is not
+  // part of this boundary's interaction model, so the rail performs no fold
+  // write either.
+  const handleRailKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const isMenuKey = e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')
+    if (!isMenuKey) return
+    e.preventDefault()
+    e.stopPropagation()
+    pointerAnchorRef.current = null
+    setMenuOpen(true)
+  }, [])
   // Dismissing the menu from the group's OWN edge is the one interaction the
   // popup library cannot do for us, for two independent reasons:
   // - rc-trigger treats its trigger child as part of the popup, so a click
@@ -954,17 +906,6 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
     [menuOpen]
   )
 
-  // Keyboard parity for the pointer-only rail menu: the context-menu key /
-  // Shift+F10 opens the same menu the right click opens. This path has no
-  // pointer, so it captures no fallback point: the opened menu's own box is the
-  // anchor, exactly like a pointer invocation.
-  const handleRailKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return
-    e.preventDefault()
-    e.stopPropagation()
-    pointerAnchorRef.current = null
-    setMenuOpen(true)
-  }, [])
   // Both menu actions derive their placement from the ONE captured anchor side:
   // the `right*` family keeps the arrow on the surface's left edge (pointing at
   // the rail), and the corner nearest the whole menu is the anchored one, so the
@@ -984,47 +925,28 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
         ref={headerRowRef}
         data-testid="topic-segment-group"
         data-segment-id={segment.id}
-        data-segment-folded={isFolded ? 'true' : 'false'}
+        data-segment-folded="false"
         data-segment-first={isFirst ? 'true' : 'false'}
         data-segment-last={isLast ? 'true' : 'false'}
+        data-segment-header={headerId ?? ''}
+        data-segment-owner-branch={segment.ownerBranchId ?? ''}
+        data-segment-can-mutate={canMutateGroup ? 'true' : 'false'}
         data-interaction-region={INTERACTION_REGION_SEGMENT_HEADER}
         onClickCapture={handleMenuDismissCapture}
         onContextMenu={handleGroupContextMenu}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}>
-        {/* 组头标签：唯一一个组头行，展开态在组首消息处，折叠态仍占同一行。
-            折叠态整个标签就是展开入口：点击/键盘都在这个 pill 上派发一次，
-            子节点（圆点、折叠词、计数）自身不带任何点击行为。 */}
+        {/* 组头标签：唯一一个组头行，位于组首消息处 */}
         <TabContainer
           $color={color}
-          $folded={isFolded}
+          $folded={false}
           $hovered={hovered}
-          $expandable={isExpandable}
-          role={isExpandable ? 'button' : undefined}
-          tabIndex={isExpandable ? 0 : undefined}
-          aria-label={isExpandable ? `${t('topicSegment.expand')} · ${segment.name}` : undefined}
-          onClick={handlePillClick}
-          onKeyDown={isExpandable ? handlePillKeyDown : undefined}
+          $expandable={false}
           data-testid="topic-segment-label"
-          data-segment-folded={isFolded ? 'true' : 'false'}>
+          data-segment-folded="false">
           <TabContent>
-            {/* The tint dot is the SAME node in both states: expanded it is the
-                  group's own segment color; folded it takes no layout at all
-                  (`display: none`, never a box left behind at `opacity: 0`), so
-                  the folded word starts at the pill's own inset (`6px` padding
-                  + the border) with no folded-only padding rule. */}
-            <ColorDot $color={color} $folded={isFolded} />
-            {isFolded ? (
-              <TabNameFolded
-                $readOnly={!canFold}
-                title={`${segment.name} · ${t('topicSegment.foldedHint')}`}
-                data-testid="topic-segment-expand">
-                {t('topicSegment.folded')}
-              </TabNameFolded>
-            ) : isEditing ? (
-              // 组内重命名就地发生：标签本身变成一个一行输入框，打开时聚焦并全选原名。
-              // Enter / 失焦提交（首尾空白裁剪，空白或未修改不写入），Escape 取消且不写，
-              // 两者都不触发折叠、不触发行导航、也不打开任何弹层。
+            <ColorDot $color={color} $folded={false} />
+            {isEditing ? (
               <TabInput
                 ref={inlineInputRef}
                 autoFocus
@@ -1038,82 +960,66 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
                 data-testid="topic-segment-rename-inline"
               />
             ) : (
-              <TabName onClick={startInlineRename} title={segment.name}>
+              <TabName onClick={canMutateGroup ? startInlineRename : stopRowNavigation} title={segment.name}>
                 {segment.name}
               </TabName>
             )}
-            {badgeCount !== undefined && (
+            {displayTurnCount !== undefined && (
               <TabCount data-testid="topic-segment-count">
-                {t('topicSegment.messages.count', { count: badgeCount })}
+                {t('topicSegment.turns.count', { count: displayTurnCount })}
               </TabCount>
             )}
           </TabContent>
-          {/* 折叠态不提供悬浮的重命名/解散动作；右键菜单在折叠态仍提供这两项
-                （两者都是锚定弹层，不依赖组体挂载）。 */}
-          {!isFolded && (
-            <TabActions $hovered={actionsVisible} data-testid="topic-segment-actions">
-              {/* 组名与铅笔是同一个组内重命名入口：都打开组头行内的行内输入，不弹层。 */}
-              <TabActionBtn
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  startInlineRename()
-                }}
-                title={t('topicSegment.rename')}
-                aria-label={t('topicSegment.rename')}>
-                <Pencil size={12} />
-              </TabActionBtn>
-              {/* 组头解散沿用 App 已有的锚定确认弹层标准（`ConfirmPopover`）：锚定在触发
-                  按钮本身、默认箭头指示方向、没有遮罩、也没有居中模态；文案与按钮仍走 App 自己
-                  的 i18n（缺省即 `common.confirm` / `common.cancel`），宽度按共享标准的紧凑
-                  最小值起步、内容驱动并受视口约束，长句在弹层内换行而不是拉成横幅。行为与
-                  原先的 Popconfirm 一致：未受控、由按钮触发。 */}
-              <ConfirmPopover
-                title={t('topicSegment.dissolve.confirm')}
-                okButtonProps={{ danger: true }}
-                onConfirm={handleDissolve}>
+          <TabActions $hovered={actionsVisible} data-testid="topic-segment-actions">
+            {canMutateGroup ? (
+              <>
                 <TabActionBtn
                   type="button"
-                  title={t('topicSegment.dissolveAction')}
-                  aria-label={t('topicSegment.dissolveAction')}
-                  onClick={stopRowNavigation}>
-                  <Trash2 size={12} />
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    startInlineRename()
+                  }}
+                  title={t('topicSegment.rename')}
+                  aria-label={t('topicSegment.rename')}>
+                  <Pencil size={12} />
                 </TabActionBtn>
-              </ConfirmPopover>
-            </TabActions>
-          )}
+                <ConfirmPopover
+                  title={t('topicSegment.dissolve.confirm')}
+                  okButtonProps={{ danger: true }}
+                  onConfirm={handleDissolve}>
+                  <TabActionBtn
+                    type="button"
+                    title={t('topicSegment.dissolveAction')}
+                    aria-label={t('topicSegment.dissolveAction')}
+                    onClick={stopRowNavigation}>
+                    <Trash2 size={12} />
+                  </TabActionBtn>
+                </ConfirmPopover>
+              </>
+            ) : null}
+          </TabActions>
         </TabContainer>
 
-        {/* 组边界：唯一一条连续竖线，覆盖本组已挂载的整段范围（含组内分隔线高度）。
-            透明命中热区覆盖边线本身 + 相邻 4px 沟槽，绝不覆盖组头标签；左键即折叠写入，
-            右键由组头行（组自己的 trigger host）认领并打开同一个组菜单，菜单动作的弹层
-            锚定在这条竖线上（箭头指向它）；继承/只读组不提供折叠写入入口（写入由 Main
-            再次校验）。 */}
+        {/* 组边界：唯一一条连续竖线 */}
         <GroupRail
           $height={railHeight}
           $top={railTop}
           data-testid="topic-segment-rail"
           data-segment-id={segment.id}
-          data-segment-folded={isFolded ? 'true' : 'false'}>
-          <RailLine
-            ref={railRef}
-            $color={color}
-            $folded={isFolded}
-            $active={hovered}
-            data-testid="topic-segment-rule"
+          data-segment-folded="false">
+          <InteractionRailLine ref={railRef} $color={color} $active={hovered} data-testid="topic-segment-rule" />
+          {/* 组边界命中面：竖线本身（4px）加上相邻 4px 沟槽，共 8px。左键/Enter/Space
+              在这里不打开菜单（左键只经捕获认领关闭已开菜单）；右键不在这里认领，
+              冒泡到组头行由它统一打开同一个菜单（箭头方向与锚点仍按竖线计算），
+              键盘右键（菜单键/Shift+F10）同理。 */}
+          <InteractionRailHitTarget
+            type="button"
+            onKeyDown={handleRailKeyDown}
+            title={t('topicSegment.groupMenu')}
+            aria-label={t('topicSegment.groupMenu')}
+            aria-haspopup="menu"
+            data-testid="topic-segment-rail-target"
           />
-          {!isFolded && (
-            <RailHitTarget
-              type="button"
-              onClick={canFold ? handleCollapse : undefined}
-              onKeyDown={handleRailKeyDown}
-              title={canFold ? t('topicSegment.fold') : segment.name}
-              aria-label={canFold ? t('topicSegment.fold') : segment.name}
-              aria-disabled={canFold ? undefined : true}
-              aria-haspopup="menu"
-              data-testid="topic-segment-fold"
-            />
-          )}
         </GroupRail>
 
         {/* 组菜单动作的两个紧凑锚定弹层：无遮罩、无居中模态，也不换用第二套弹层系统。
@@ -1199,74 +1105,16 @@ const GroupHeaderRow = styled.div`
  * surface — never one mark per run.
  */
 const GroupRail = styled.div<{ $top: number; $height: number }>`
-  position: absolute;
-  left: -12px;
-  top: ${(props) => props.$top}px;
-  height: ${(props) => props.$height}px;
-  width: 4px;
+   position: absolute;
+   // Rail base = the shared outset (ScrollContainer's own 10px left gutter):
+   // the 2px line spans [-10,-8] and the 8px hit [-10,-2], both inside the
+   // scrollport with overflow-x untouched and bodies unmoved.
+   left: -${INTERACTION_RAIL_OUTSET_PX}px;
+   top: ${(props) => props.$top}px;
+   height: ${(props) => props.$height}px;
+   width: ${INTERACTION_RAIL_LINE_WIDTH_PX}px;
   pointer-events: none;
   isolation: isolate;
-`
-
-/**
- * The rail's painted line. Hover/focus feedback brightens the RULE only: no
- * background band, no shadow, no glow — a hover must never paint a color
- * surface over the message column — and the color system itself is untouched
- * (brightness is the only filter; saturation is never shifted).
- */
-const RailLine = styled.div<{ $color: string; $folded: boolean; $active: boolean }>`
-  position: absolute;
-  inset: 0;
-  width: 4px;
-  background-color: ${(props) => props.$color};
-  // Fold/expand chrome joins the body's own motion window (one shared
-  // duration): the line leaves and returns WITH the content instead of
-  // switching a frame before it. At rest the collapsed group has only its
-  // header row left, and the settled folded opacity is zero either way.
-  opacity: ${(props) => (props.$folded ? 0 : 1)};
-  // One groupwide hover state (owned by this group boundary, never by an
-  // individual run): the whole line brightens as one object.
-  filter: ${(props) => (props.$active ? 'brightness(1.35)' : 'none')};
-  transition:
-    opacity ${SEGMENT_FOLD_MOTION_MS}ms cubic-bezier(0.3, 0, 0.7, 1),
-    filter 0.15s ease;
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
-`
-
-/**
- * Transparent collapse target laid exactly over the continuous rail (4px) plus
- * 4px of adjacent gutter. It stays inside the group's own column so it never
- * reaches the conversation-nav body, and it never covers the label pill (the
- * rail starts below the pill). Hover and keyboard focus are owned by this one
- * target: the whole line brightens, coherently, for the whole group.
- */
-const RailHitTarget = styled.button`
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  padding: 0;
-  margin: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  pointer-events: auto;
-  z-index: 1;
-
-  &:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 1px;
-  }
-
-  // The visible affordance of the collapsible gutter is the ONE line
-  // brightening (the group's single hover state, see RailLine); the 8px
-  // target paints NOTHING on hover — no background band, no shadow, no glow —
-  // so hover only sharpens the existing line and never introduces a color
-  // surface over the message column. Keyboard focus keeps its own outline.
 `
 
 const TabContainer = styled.div<{ $color: string; $folded: boolean; $hovered: boolean; $expandable: boolean }>`
@@ -1278,7 +1126,6 @@ const TabContainer = styled.div<{ $color: string; $folded: boolean; $hovered: bo
   gap: 4px;
   height: ${SEGMENT_GROUP_PILL_HEIGHT_PX}px;
   padding: 0 8px 0 6px;
-  // Folded: neutral, readable tint — no colored/purple group marker.
   background: ${(props) =>
     props.$folded
       ? 'var(--color-background-soft)'
@@ -1289,29 +1136,7 @@ const TabContainer = styled.div<{ $color: string; $folded: boolean; $hovered: bo
   pointer-events: auto;
   white-space: nowrap;
   max-width: 280px;
-  // Fold/expand chrome joins the body's shared motion window: the tint and the
-  // border follow the same time base while the tint dot fades, so the pill
-  // neither snaps to its neutral folded look in one frame nor arrives after
-  // the body. Only color/opacity participate — no size or name morph.
-  transition:
-    background-color ${SEGMENT_FOLD_MOTION_MS}ms ease,
-    border-color ${SEGMENT_FOLD_MOTION_MS}ms ease;
-  // Contained hit region: only this pill is interactive; the surrounding
-  // header row stays pointer-events:none so hover never leaks into the
-  // conversation-nav body beside it.
   isolation: isolate;
-  // Folded, the whole pill is the group's ONE expand target (the click and
-  // keyboard handlers live on it, see handlePillClick): the pointer says so
-  // over every part of it — tint dot, word, count and background. A read-only
-  // route stays a plain label and keeps the ordinary arrow, so the pointer
-  // never promises a write that cannot be made. Unfolded the pill declares no
-  // cursor at all: its name and hover actions own their own.
-  ${(props) =>
-    props.$folded
-      ? css`
-          cursor: ${props.$expandable ? 'pointer' : 'default'};
-        `
-      : null}
 
   @media (prefers-reduced-motion: reduce) {
     transition: none;
@@ -1386,41 +1211,6 @@ const TabInput = styled(Input)`
     font-size: 12px;
     padding: 0 4px;
     width: 120px;
-  }
-`
-
-/**
- * Folded label word: the group name's stand-in is ONE part of the pill's expand
- * target, never a target of its own — the pill owns the click and the keyboard
- * write, so clicking the word itself, the count or the background dispatches
- * exactly once. Neutral readable text (no group color), same type metrics as
- * the name so the pill keeps its existing shape.
- *
- * Hover feedback belongs to the PILL's hover, not to the word's: hovering ANY
- * part of the folded label — tint dot, word, count or the pill's own
- * background — raises the word and underlines it, because it is all one
- * promise of the same expand write. The pill's `focus-visible` does the same
- * for keyboard parity. A read-only group promises nothing: the word stays
- * quiet and carries no underline.
- */
-const TabNameFolded = styled.span<{ $readOnly?: boolean }>`
-  font-size: 12px;
-  font-weight: 500;
-  // Folded is a low-attention presentation state (the group is out of context):
-  // the word is dimmed to the secondary/subtle text tone, same size/weight as
-  // the name object it replaces. Pill size and count are unchanged; hover only
-  // raises attention back one step.
-  color: var(--color-text-3);
-  // Cursor is the pill's own inherited value (pointer only while the pill
-  // really expands), so the word declares none.
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-
-  ${TabContainer}:hover &,
-  ${TabContainer}:focus-visible & {
-    color: ${(p) => (p.$readOnly ? 'var(--color-text-3)' : 'var(--color-text-2)')};
-    text-decoration: ${(p) => (p.$readOnly ? 'none' : 'underline')};
   }
 `
 

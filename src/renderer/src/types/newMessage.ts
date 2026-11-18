@@ -219,6 +219,14 @@ export type Message = {
   // UI相关
   multiModelMessageStyle?: 'horizontal' | 'vertical' | 'fold' | 'grid'
   foldSelected?: boolean
+  /**
+   * Message-level fold (context participation, Main-authoritative).
+   *
+   * `true` = this row is excluded from request context; an absent key (never
+   * `false`) is the unfolded state. Written only through the atomic turn-level
+   * fold command, never per row by the renderer.
+   */
+  folded?: boolean | null
 
   // 块集合
   blocks: MessageBlock['id'][]

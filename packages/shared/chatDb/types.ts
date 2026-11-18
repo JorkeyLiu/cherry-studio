@@ -349,6 +349,57 @@ export interface SelectUsefulAnswerResponse {
   messageIds: string[]
 }
 
+/**
+ * @see IpcChannel.ChatDb_SetTurnFolds
+ *
+ * Atomic turn-level fold/unfold. The renderer supplies only STABLE group ids
+ * (a turn's user message id) and the target state; Main resolves every
+ * selected turn to its COMPLETE membership on the addressed effective route
+ * inside the same SQLite transaction — messages outside the loaded window
+ * included, so the resolved result never depends on what the renderer has on
+ * screen.
+ *
+ * The selection must be a set of whole turns on one route: an empty list, an
+ * unknown group id, a duplicate group id, or a range that crosses the route's
+ * fork boundary fails closed with zero writes. The write is all-or-nothing:
+ * `folded: true` persists `folded: true` on every member of every selected
+ * turn, `folded: false` removes the marker from every member (an absent key
+ * is the unfolded state; a `false` value is never persisted).
+ *
+ * Fold never changes membership, order, anchors or boundaries; it stays
+ * local-only (no sync frame/outbox change).
+ */
+export interface SetTurnFoldsRequest {
+  topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
+  /** Stable turn (group) ids: each is the turn's user message id. */
+  selectedGroupIds: string[]
+  /** Target fold state for every selected turn. */
+  folded: boolean
+}
+
+/** One resolved turn of a `SetTurnFolds` result, in route order. */
+export interface SetTurnFoldsTurn {
+  /** Stable group id (the turn's user message id, or its orphan `askId`). */
+  groupId: string
+  /** Complete turn membership Main resolved (route order). */
+  messageIds: string[]
+  /** Resulting fold state of this turn. */
+  folded: boolean
+}
+
+/** @see IpcChannel.ChatDb_SetTurnFolds */
+export interface SetTurnFoldsResponse {
+  topicId: string
+  /** The target state every selected turn now carries. */
+  folded: boolean
+  /** Resolved turns, in effective-route order. */
+  turns: SetTurnFoldsTurn[]
+  /** Union of every written message id, in effective-route order. */
+  affectedMessageIds: string[]
+}
+
 /** @see IpcChannel.ChatDb_DeleteMessage */
 export interface DeleteMessageRequest {
   topicId: string
@@ -600,9 +651,11 @@ export interface FetchContextClosureMeta {
    */
   boundaryMessageId: string | null
   /**
-   * Authority folded member message IDs of the read topic (topic-level segment
-   * catalog, de-duplicated). Ordering is not significant — callers treat the
-   * list as an exclusion set.
+   * Authority folded member message IDs of the read topic, expanded to whole
+   * turns: a turn with any folded row contributes every one of its rows, so a
+   * partially marked turn is never reported as a row-by-row split (the retired
+   * group-level collapse marker is not consulted at all). Ordering is not
+   * significant — callers treat the list as an exclusion set.
    * Request builders MUST use this list — never a renderer projection — to
    * exclude folded messages from the outgoing context. The list describes the
    * topic, not the returned window, so a folded member outside the window is
@@ -1165,6 +1218,48 @@ export type GetRawTopicResponse = { id: string; messages: JsonObject[] } | null
 /** @see IpcChannel.ChatDb_ListSegments */
 export interface ListSegmentsRequest {
   topicId: string
+  /**
+   * Optional route qualification. Absent/null = the unqualified topic-level
+   * catalog (every group of the topic, with full authoritative membership).
+   * Present = additionally qualify each group against that effective route
+   * (`route` on the wire), which is what a route-scoped caller — a branch
+   * drawer, a route-bound surface — must use instead of inferring route
+   * membership from its own loaded projection.
+   */
+  branchId?: BranchRouteId
+}
+
+/**
+ * Route-qualified metadata of one group against the route a
+ * {@link ListSegmentsRequest} addressed.
+ *
+ * The group's own `messageIds` stay the unqualified authoritative catalog
+ * (cache authority for the whole topic); this block is the route-qualified
+ * view and never rewrites the catalog.
+ */
+export interface SegmentRouteQualification {
+  topicId: string
+  /** Addressed route of the qualification: null = that topic's main route. */
+  branchId: string | null
+  /**
+   * The group head (`headerMessageId`) resolves inside the addressed route's
+   * effective sequence — the group is present, and therefore navigable, on
+   * this route.
+   */
+  headerInRoute: boolean
+  /**
+   * The group head is owned by the addressed route (owner equality compares
+   * topic id AND branch id). Only an owning route may change the group's
+   * metadata or membership; a non-owner route may still read and navigate.
+   */
+  headerOwnedByRoute: boolean
+  /**
+   * Members of this group that also occur on the addressed route's effective
+   * sequence, in ADDRESSED-ROUTE effective order (not catalog order). The
+   * group's own `messageIds` remain the full catalog, so a route projection
+   * can never masquerade as the cached authority.
+   */
+  routeMemberMessageIds: string[]
 }
 
 /** Wire shape for a segment with ordered messageIds. */
@@ -1173,13 +1268,37 @@ export interface SegmentWire {
   topicId: string
   name: string | null
   messageIds: string[]
+  /**
+   * Stable identity of the group head: the member that was first when the
+   * group was created. Persisted (`topic_segments.header_message_id`) and
+   * never re-derived from a renderer window; membership changes never move
+   * it, and only the head row leaving the group repairs it to the first
+   * surviving member.
+   *
+   * `null` only for the authority wire of a group that does not exist (never
+   * created with membership, or deleted because its membership became empty),
+   * mirroring `firstMessageId`/`lastMessageId`.
+   */
+  headerMessageId: string | null
+  /**
+   * Owner of the group head, resolved by Main from the head row: the logical
+   * topic the head message belongs to. Owner equality for group metadata and
+   * membership mutations is computed against this value, never against the
+   * caller's active route.
+   */
+  ownerTopicId: string
+  /** Owner route of the group head; null = that topic's main route. */
+  ownerBranchId: string | null
+  /** Route-qualified view; present only when the list request addressed a route. */
+  route?: SegmentRouteQualification
   /** Optional color bridged through SQLite extra overflow. */
   color?: string | null
   /**
-   * Folded (collapsed) presentation state, bridged through SQLite extra
-   * overflow. Absent/false = expanded. Folding never changes authority
-   * membership (messageIds/messageCount stay intact); folded members are
-   * excluded from request context, token estimation and context counts.
+   * RETIRED group-level collapse state. Message-group collapse no longer
+   * affects context, so Main never emits this field and never persists it;
+   * the declaration is kept only for wire-contract compatibility. Fold
+   * participation is turn-level and comes from the context closure's
+   * `foldedMessageIds`, never from a segment.
    */
   folded?: boolean
   createdAt: string | null
@@ -1241,6 +1360,12 @@ export type UpdateSegmentMetadataResponse = SegmentWire
 /** @see IpcChannel.ChatDb_DeleteSegment */
 export interface DeleteSegmentRequest {
   segmentId: string
+  /**
+   * Requester route (absent/null = main route). Main verifies it equals the
+   * group head's owner: a non-owner route may read and navigate the group but
+   * never delete it.
+   */
+  branchId?: BranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_ReplaceSegmentMembership */
@@ -2401,6 +2526,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }
   // Atomic group-level useful selection (Main-resolved full group)
   'chatdb:select-useful-answer': { request: SelectUsefulAnswerRequest; response: SelectUsefulAnswerResponse }
+  // Turn-level fold: one atomic multi-turn fold/unfold (group-level range command)
+  'chatdb:set-turn-folds': { request: SetTurnFoldsRequest; response: SetTurnFoldsResponse }
   'chatdb:delete-message': { request: DeleteMessageRequest; response: null }
   'chatdb:delete-messages': { request: DeleteMessagesRequest; response: null }
   'chatdb:update-blocks': { request: UpdateBlocksRequest; response: null }

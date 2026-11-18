@@ -76,6 +76,7 @@ import type {
   SelectUsefulAnswerResponse,
   SemanticModelSnapshot,
   SemanticResendResponse,
+  SetTurnFoldsResponse,
   StreamWriteDiagnostics,
   TopicBranchWire,
   TopicReferenceWire,
@@ -109,12 +110,14 @@ import type {
   MessageData,
   TopicBranchData,
   TopicData,
-  TopicReferenceData
+  TopicReferenceData,
+  TopicSegmentData
 } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import { MAX_BRANCH_DEPTH } from './repository'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
+import { isOwnedByRoute } from './repository/helpers'
 import { createImportWriter } from './repository/ImportWriter'
 import { SearchRepository } from './repository/SearchRepository'
 import * as schema from './schema'
@@ -1772,7 +1775,7 @@ export class ChatDbAggregateService {
         // exactly one definition. Folding never moves the window start: the
         // anchor is resolved above, before participation is applied, and the
         // raw window slice is preserved for the client.
-        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId, routeBranchId)
         const { totalTurnCount, selectedTurnCount, boundaryMessageId } = this.deriveParticipatingClosureCounts(
           turns,
           anchorTurnIdx,
@@ -1825,7 +1828,9 @@ export class ChatDbAggregateService {
    *   Missing source/target topic is NOT_FOUND.
    *
    * Existing empty target succeeds with null anchor and zero counts; missing
-   * topic is NOT_FOUND. Default index: null => 0, else max(0,total-max(1,floor(N))).
+   * topic is NOT_FOUND. Default selection: last-N-participating-turns of the
+   * effective route (null => first participating turn); all-folded/empty keep
+   * the existing degenerate positions.
    *
    * With `detail: 'anchor'` (every intent) Main returns the metadata-only
    * anchor response via point lookups + bounded scans: no listByTopic, no
@@ -1845,30 +1850,6 @@ export class ChatDbAggregateService {
         if (request.detail === 'anchor') {
           const currentKey: string | null =
             typeof request.currentAnchorGroupKey === 'string' ? request.currentAnchorGroupKey : null
-          const buildTurnKeys = (rows: MessageData[]): string[] => {
-            const keys: string[] = []
-            let cur: string | null = null
-            for (const msg of rows) {
-              const role = msg.role
-              const askId = (msg as unknown as { askId: string | null }).askId
-              if (role === 'system') {
-                cur = msg.id
-                keys.push(cur)
-              } else if (role === 'user') {
-                cur = msg.id
-                keys.push(cur)
-              } else if (role === 'assistant') {
-                if (askId && askId === cur) {
-                  continue
-                }
-                cur = askId ? askId : msg.id
-                keys.push(cur)
-              } else {
-                continue
-              }
-            }
-            return keys
-          }
           type AnchorTurn = { key: string; messages: MessageData[] }
           const buildAnchorTurns = (rows: MessageData[]): AnchorTurn[] => {
             const turns: AnchorTurn[] = []
@@ -1929,6 +1910,10 @@ export class ChatDbAggregateService {
               anchorRouteBranchId
             ).messages
             const anchorTurns = buildAnchorTurns(effectiveForAnchor)
+            // Default selection over the addressed effective route: the last N
+            // participating turns, anchored at the first of those turns. The
+            // folded membership expands the same in-memory route rows once.
+            const anchorFoldedMemberIds = this.expandFoldedTurns(effectiveForAnchor)
             const resolveEffectiveDefault = (
               contextCount: number | null | undefined,
               cur: string | null
@@ -1936,12 +1921,8 @@ export class ChatDbAggregateService {
               if (anchorTurns.length === 0) {
                 return { resolvedAnchorGroupKey: null, changed: cur !== null }
               }
-              if (contextCount === null || contextCount === undefined) {
-                const resolved = anchorTurns[0].key
-                return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
-              }
-              const n = Math.max(1, Math.floor(contextCount))
-              const resolved = anchorTurns[Math.max(0, anchorTurns.length - n)].key
+              const idx = this.resolveDefaultParticipatingIndex(anchorTurns, anchorFoldedMemberIds, contextCount)
+              const resolved = anchorTurns[Math.max(0, idx)].key
               return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
             }
             if (request.intent === 'establish') {
@@ -2016,9 +1997,11 @@ export class ChatDbAggregateService {
             }
             return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
           }
-          // Authority default position via bounded scans only:
-          // null => first turn (head scan); finite N => max(0,total-max(1,floor(N)))
-          // via tail expansion. Never listByTopic, never blocks.
+          // Authority default position via bounded scans only (message-row
+          // metadata, never blocks): null => first participating turn (head
+          // scan); finite N => first of the last N participating turns (tail
+          // expansion). Folded whole turns are skipped with the same
+          // participation policy as the closure counts. Never listByTopic.
           const resolveDefaultAnchor = (
             topicId: string,
             contextCount: number | null | undefined,
@@ -2032,14 +2015,28 @@ export class ChatDbAggregateService {
               const HEAD_CHUNK = 64
               let acc: MessageData[] = [first]
               for (;;) {
-                const keys = buildTurnKeys(acc)
-                if (keys.length > 0) {
-                  return { resolvedAnchorGroupKey: keys[0], changed: keys[0] !== cur }
+                const headTurns = buildAnchorTurns(acc)
+                const headFoldedIds = this.expandFoldedTurns(acc)
+                const headIdx = headTurns.findIndex((t) => this.turnParticipatesInContext(t, headFoldedIds))
+                if (headIdx !== -1) {
+                  // A turn holding a non-folded member stays participating as
+                  // later rows arrive, and every earlier turn is fully loaded
+                  // already, so the first participating turn of the head
+                  // prefix is already exact.
+                  return {
+                    resolvedAnchorGroupKey: headTurns[headIdx].key,
+                    changed: headTurns[headIdx].key !== cur
+                  }
                 }
                 const tail = acc[acc.length - 1]
                 const page = repos.messages.listAfter(topicId, tail.sortOrder, tail.id, HEAD_CHUNK)
                 if (page.length === 0) {
-                  return { resolvedAnchorGroupKey: null, changed: cur !== null }
+                  // Degenerate all-folded (or turn-less) history: keep the raw
+                  // first-turn position instead of inventing a null anchor.
+                  if (headTurns.length === 0) {
+                    return { resolvedAnchorGroupKey: null, changed: cur !== null }
+                  }
+                  return { resolvedAnchorGroupKey: headTurns[0].key, changed: headTurns[0].key !== cur }
                 }
                 acc = [...acc, ...page]
               }
@@ -2052,17 +2049,36 @@ export class ChatDbAggregateService {
             }
             let reachedStart = acc.length < TAIL_CHUNK
             for (;;) {
-              const keys = buildTurnKeys(acc)
-              if (keys.length >= n) {
-                const resolved = keys[keys.length - n]
-                return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
-              }
-              if (reachedStart) {
-                if (keys.length === 0) {
+              const tailTurns = buildAnchorTurns(acc)
+              if (tailTurns.length === 0) {
+                if (reachedStart) {
                   return { resolvedAnchorGroupKey: null, changed: cur !== null }
                 }
-                const resolved = keys[Math.max(0, keys.length - n)]
+              } else if (reachedStart) {
+                // Complete history: one unified participating selection; the
+                // all-folded degenerate falls back to the raw tail position.
+                const tailFoldedIds = this.expandFoldedTurns(acc)
+                const idx = this.resolveDefaultParticipatingIndex(tailTurns, tailFoldedIds, contextCount)
+                const resolved = tailTurns[Math.max(0, idx)].key
                 return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
+              } else {
+                // Suffix-only view: the head-most turn may still miss its
+                // earlier rows, so it stays out of the participating count
+                // until the start is reached. Suffix turn keys are stable.
+                const suffix = tailTurns.slice(1)
+                const suffixFoldedIds = this.expandFoldedTurns(acc)
+                let need = n
+                let suffixAnchor = -1
+                for (let i = suffix.length - 1; i >= 0 && need > 0; i--) {
+                  if (this.turnParticipatesInContext(suffix[i], suffixFoldedIds)) {
+                    suffixAnchor = i
+                    need--
+                  }
+                }
+                if (need === 0) {
+                  const resolved = suffix[suffixAnchor].key
+                  return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
+                }
               }
               const head = acc[0]
               const page = repos.messages.listBefore(topicId, head.sortOrder, head.id, TAIL_CHUNK)
@@ -2252,19 +2268,18 @@ export class ChatDbAggregateService {
           idx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
           return idx
         }
-        const resolveDefaultIndex = (total: number, contextCount: number | null | undefined): number => {
-          if (total <= 0) return -1
-          if (contextCount === null || contextCount === undefined) return 0
-          const n = Math.max(1, Math.floor(contextCount))
-          return Math.max(0, total - n)
-        }
-
         const closureBranchId = this.normalizeBranchId(request.branchId)
         const resolveEffectiveForClosure = (tid: string, bid: string | null): MessageData[] =>
           this.resolveRouteMessagesInTx(repos, tid, bid).messages
         const allMessages = resolveEffectiveForClosure(request.topicId, closureBranchId)
         const turns = buildTurns(allMessages)
         const total = turns.length
+        // Participation membership of the addressed effective route, expanded
+        // to whole turns once and shared by the default selection below and
+        // by the counts/divider: one route, one expansion, no second scan.
+        const closureFoldedMemberIds = this.expandFoldedTurns(allMessages)
+        const resolveDefaultParticipating = (contextCount: number | null | undefined): number =>
+          this.resolveDefaultParticipatingIndex(turns, closureFoldedMemberIds, contextCount)
         const currentKey: string | null =
           typeof request.currentAnchorGroupKey === 'string' ? request.currentAnchorGroupKey : null
 
@@ -2296,9 +2311,9 @@ export class ChatDbAggregateService {
         let resolvedIdx = -1
         if (request.intent === 'establish') {
           const currentIdx = currentKey !== null ? resolveAnchorIndex(turns, currentKey) : -1
-          resolvedIdx = currentIdx !== -1 ? currentIdx : resolveDefaultIndex(total, request.contextCount ?? null)
+          resolvedIdx = currentIdx !== -1 ? currentIdx : resolveDefaultParticipating(request.contextCount ?? null)
         } else if (request.intent === 'reanchor-default') {
-          resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
+          resolvedIdx = resolveDefaultParticipating(request.contextCount ?? null)
         } else if (request.intent === 'move') {
           if (typeof request.messageId === 'string') {
             const target = allMessages.find((m) => m.id === request.messageId)
@@ -2341,7 +2356,7 @@ export class ChatDbAggregateService {
           if (sourceIdx !== -1 && sourceIdx < total) {
             resolvedIdx = sourceIdx
           } else {
-            resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
+            resolvedIdx = resolveDefaultParticipating(request.contextCount ?? null)
           }
         }
 
@@ -2368,9 +2383,11 @@ export class ChatDbAggregateService {
         const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
         // Same participation definition as fetchContextClosure: counts and
         // divider derive from the shared helper against the same turn set, so
-        // a fold toggle can never make the two producers diverge. The raw
-        // anchor/window slice above is untouched.
-        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
+        // a fold toggle can never make the two producers diverge. The folded
+        // membership is the one already shared with the default selection
+        // above (same route rows, single expansion). The raw anchor/window
+        // slice above is untouched.
+        const foldedMemberIds = closureFoldedMemberIds
         const { totalTurnCount, selectedTurnCount, boundaryMessageId } = this.deriveParticipatingClosureCounts(
           turns,
           resolvedIdx,
@@ -2422,11 +2439,8 @@ export class ChatDbAggregateService {
         // Effective route for the addressed route (main route reads owned
         // rows; a branch route resolves the shared prefix through each
         // anchor plus the owned suffix). Stable IDs, deterministic order.
-        const allMessages = this.resolveRouteMessagesInTx(
-          repos,
-          request.topicId,
-          this.normalizeBranchId(request.branchId)
-        ).messages
+        const snapshotRoute = this.normalizeBranchId(request.branchId)
+        const allMessages = this.resolveRouteMessagesInTx(repos, request.topicId, snapshotRoute).messages
         const messageIds = allMessages.map((m) => m.id)
         const blockDataMap = repos.blocks.listByMessages(messageIds)
         const allBlocks: MessageBlockData[] = []
@@ -2441,7 +2455,7 @@ export class ChatDbAggregateService {
         // Authority folded membership of the read topic: the pre-anchor
         // request path filters against this list instead of the renderer
         // segment catalog, which may be unloaded or stale.
-        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId)
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId, snapshotRoute)
         return {
           messages: messagesWithBlocks,
           blocks: wireBlocks,
@@ -4377,6 +4391,14 @@ export class ChatDbAggregateService {
             const messagePre = existing.found
               ? ({ ...existing.data, overflow: { ...existing.data.overflow } } as MessageData)
               : null
+            // Turn-level fold inheritance: a NEW row that joins an already
+            // folded turn (a regenerated/added variant) is born folded, inside
+            // this same transaction, so the turn never becomes half-folded.
+            // Existing rows keep their stored state (this is not a repair of
+            // an explicit write; read expands partial markers instead).
+            if (!messageExistedBefore) {
+              this.inheritTurnFoldForNewMessageInTx(repos, topicId, messageData)
+            }
 
             if (existing.found) {
               // Authoritative ownership guard (sync F1): an existing message ID
@@ -5590,6 +5612,111 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Turn-level fold/unfold — one atomic Main transaction.
+   *
+   * Fold is a TURN-level presentation state that also decides request
+   * participation, so the renderer never writes single rows: it names stable
+   * group ids (a turn's user message id) and the target state, and Main does
+   * the rest in the same SQLite snapshot.
+   *
+   * 1. Validate the request shape fail-closed: a non-empty, duplicate-free
+   *    list of stable group ids and one boolean state. Nothing partial or
+   *    positional can be expressed.
+   * 2. Resolve the COMPLETE turn membership of every selected group on the
+   *    addressed effective route (`groupEffectiveTurnsInTx`), so messages
+   *    outside the loaded window resolve exactly like resident ones — the
+   *    renderer's projection never decides what a turn contains.
+   * 3. Require the whole range to be owned by the addressed route and to sit
+   *    at/after the route's fork boundary (shared group-level range guard):
+   *    a selection that crosses the fork — including a hole selection whose
+   *    endpoints are owned but whose span covers the boundary, and a turn
+   *    whose members straddle it — rejects with zero writes.
+   * 4. Patch `folded` on EVERY member of every selected turn: `true` writes
+   *    the marker, `false` removes the key (an absent key is the unfolded
+   *    state, so a `false` value is never persisted).
+   *
+   * Turn coherence: writing whole turns here, expanding a partially-marked
+   * turn on read, and inheriting the fold state on a newly appended variant
+   * are one mechanism, so "some rows folded" can never be observed as a
+   * Main-side exclusion that disagrees with the renderer's row display.
+   *
+   * Fold is local-only presentation: membership, order, anchors, boundaries
+   * and sync frames are untouched (no sync op is emitted).
+   */
+  setTurnFolds(
+    topicId: string,
+    selectedGroupIds: string[],
+    folded: boolean,
+    branchId?: string | null
+  ): ChatDbResult<SetTurnFoldsResponse> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('setTurnFolds')
+      const route = this.normalizeBranchId(branchId)
+      if (!Array.isArray(selectedGroupIds) || selectedGroupIds.length === 0) {
+        throw new ChatDbValidationError('setTurnFolds requires a non-empty selectedGroupIds list')
+      }
+      const seen = new Set<string>()
+      for (const groupId of selectedGroupIds) {
+        if (typeof groupId !== 'string' || groupId.length === 0) {
+          throw new ChatDbValidationError('setTurnFolds requires non-empty group IDs')
+        }
+        if (seen.has(groupId)) {
+          throw new ChatDbValidationError(`Duplicate group ID ${groupId} in setTurnFolds selection`)
+        }
+        seen.add(groupId)
+      }
+      if (typeof folded !== 'boolean') {
+        throw new ChatDbValidationError('setTurnFolds requires a boolean folded state')
+      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        if (route !== null) this.requireBranchInTx(repos, topicId, route)
+        const turns = this.groupEffectiveTurnsInTx(this.resolveRouteMessagesInTx(repos, topicId, route).messages)
+        const turnByGroupId = new Map<string, { askId: string; messageIds: string[] }>()
+        const turnOrder = new Map<string, number>()
+        turns.forEach((turn, index) => {
+          turnByGroupId.set(turn.askId, turn)
+          turnOrder.set(turn.askId, index)
+        })
+        const selected: Array<{ askId: string; messageIds: string[] }> = []
+        for (const groupId of selectedGroupIds) {
+          const turn = turnByGroupId.get(groupId)
+          if (!turn) {
+            throw new ChatDbValidationError(
+              `Group ${groupId} does not belong to the addressed route of topic ${topicId}`
+            )
+          }
+          selected.push(turn)
+        }
+        // Effective-route order keeps the response canonical regardless of the
+        // order the renderer listed its selection in.
+        selected.sort((a, b) => (turnOrder.get(a.askId) ?? 0) - (turnOrder.get(b.askId) ?? 0))
+        const memberIds = selected.flatMap((turn) => turn.messageIds)
+        this.assertGroupRangeOwnedInTx(repos, topicId, route, memberIds)
+        for (const messageId of memberIds) {
+          repos.messages.update(topicId, messageId, {
+            overflow: { folded: folded ? true : OVERFLOW_REMOVE }
+          })
+        }
+        return {
+          topicId,
+          folded,
+          turns: selected.map((turn) => ({
+            groupId: turn.askId,
+            messageIds: [...turn.messageIds],
+            folded
+          })),
+          affectedMessageIds: memberIds
+        }
+      })
+    }, `setTurnFolds(${topicId}, ${selectedGroupIds.length} turns)`)
+  }
+
+  /**
    * Delete a single message. Only deletes if owned by the specified topic.
    * Missing/foreign IDs: no-op. Delete intent commits atomically in the
    * same tx (known entities only — unknown ids never emit remotely).
@@ -5686,6 +5813,11 @@ export class ChatDbAggregateService {
             // batch leaves together, so predecessors skip every deleted id).
             this.advanceInheritanceBoundariesInTx(repos, topicId, ownedIds)
             repos.messages.deleteMany(ownedIds)
+            // Message deletes cascade membership rows away without touching
+            // the segment row: repair persisted heads that pointed at a
+            // deleted message (same tx, authority rows only). Segments are
+            // never dissolved here — that stays with membership writes.
+            repos.segments.repairHeadersForDeletedMessages(ownedIds)
             // Resend intent (SYNC-DATA-055): deleted messages carry no
             // unfinished attempt — clear in the same transaction.
             clearResendAttemptsInTx(stx, ownedIds)
@@ -6477,16 +6609,109 @@ export class ChatDbAggregateService {
   /**
    * List all segments for a topic with ordered messageIds.
    * Each segment's messageIds are reconstructed from topic_segment_messages sort_order.
+   *
+   * The catalog is topic-level and route-independent: membership stays the
+   * complete authoritative membership so it can be cached as authority.
+   * Every group always carries its persisted head identity and the owner Main
+   * resolves from that head row.
+   *
+   * `branchId` optionally adds a ROUTE QUALIFICATION without touching the
+   * catalog: absent = no qualification (an explicit `null` qualifies the main
+   * route). A route-scoped caller must ask for this instead of inferring route
+   * membership from its own loaded projection.
    */
-  listSegments(topicId: string): ChatDbResult<SegmentWire[]> {
+  listSegments(topicId: string, branchId?: string | null): ChatDbResult<SegmentWire[]> {
     return wrapResult(() => {
       const repos = this.repos()
+      const qualified = branchId !== undefined
+      const route = qualified ? this.normalizeBranchId(branchId) : null
+      const routeMessageIdsInOrder = qualified
+        ? this.resolveRouteMessagesInTx(repos, topicId, route).messages.map((message) => message.id)
+        : null
+      const routeMessageIds = routeMessageIdsInOrder ? new Set(routeMessageIdsInOrder) : null
       const segments = repos.segments.listByTopic(topicId)
-      return segments.map((seg) => {
-        const messageIds = repos.segments.getMessageIds(seg.id)
-        return segmentToWire(seg, messageIds)
+      return segments.map((segment) => {
+        const messageIds = repos.segments.getMessageIds(segment.id)
+        const header = this.resolveSegmentHeader(repos, segment, messageIds)
+        const wire = segmentToWire(segment, messageIds, header)
+        if (!routeMessageIds) return wire
+        const memberSet = new Set(messageIds)
+        return {
+          ...wire,
+          route: {
+            topicId,
+            branchId: route,
+            headerInRoute: header.headerMessageId !== null && routeMessageIds.has(header.headerMessageId),
+            headerOwnedByRoute:
+              header.headerMessageId !== null && header.ownerTopicId === topicId && header.ownerBranchId === route,
+            // Members on the addressed route in ROUTE-effective order (not
+            // catalog order): the window co-commit projection filters this
+            // same order and the hook intersects it, so acceptance is
+            // byte-identical and a residual group's stable start never moves.
+            routeMemberMessageIds: (routeMessageIdsInOrder ?? []).filter((id) => memberSet.has(id))
+          }
+        }
       })
     }, `listSegments(${topicId})`)
+  }
+
+  /**
+   * Effective head identity of one group, resolved from authority rows.
+   *
+   * The persisted `header_message_id` is the group's identity and stays put
+   * through every membership change. It is only replaced when the head row
+   * itself left the group (removed from membership, or deleted with its
+   * message): the head then repairs deterministically to the group's first
+   * surviving member in authoritative membership order. A group with no
+   * members has no head at all. Nothing here is derived from a renderer
+   * window, and a read never writes the repair back.
+   *
+   * The owner triple is resolved from the head ROW (never from the caller's
+   * route), because that is what group metadata authority is compared against.
+   */
+  private resolveSegmentHeader(
+    repos: ChatDbRepositories,
+    segment: TopicSegmentData,
+    messageIds: string[]
+  ): { headerMessageId: string | null; ownerTopicId: string; ownerBranchId: string | null } {
+    const persisted = segment.headerMessageId ?? null
+    const effective = persisted !== null && messageIds.includes(persisted) ? persisted : (messageIds[0] ?? null)
+    const row = effective === null ? null : repos.messages.getById(effective)
+    if (effective === null || !row || !row.found) {
+      // No resolvable head: either the group has no members (no identity yet)
+      // or the resolved member row is gone. Report the group's own topic so the
+      // wire stays typed and truthful instead of guessing an owner.
+      return { headerMessageId: null, ownerTopicId: segment.topicId, ownerBranchId: null }
+    }
+    return { headerMessageId: effective, ownerTopicId: row.data.topicId, ownerBranchId: row.data.branchId ?? null }
+  }
+
+  /**
+   * Group metadata/membership authority: a group belongs to the route that
+   * owns its head message (owner equality compares topic id AND branch id).
+   * Any other route may read and navigate the group, never rename, delete or
+   * re-member it — that is the same non-owner fail-closed rule every other
+   * mutation path applies, with zero writes.
+   *
+   * A group with no resolvable head fails closed too: without a head row
+   * there is no owner to compare, so the mutation must never pass by default.
+   * Missing groups keep their existing no-op/NOT_FOUND semantics at the call
+   * sites, and empty memberships dissolve on the membership-write paths.
+   */
+  private assertSegmentOwnerInTx(
+    repos: ChatDbRepositories,
+    segment: TopicSegmentData,
+    messageIds: string[],
+    branchId: string | null | undefined
+  ): void {
+    const header = this.resolveSegmentHeader(repos, segment, messageIds)
+    const route = this.normalizeBranchId(branchId)
+    if (header.headerMessageId === null) {
+      throw new ChatDbValidationError(`Message group ${segment.id} has no resolvable head and cannot be changed here`)
+    }
+    if (!isOwnedByRoute(header.ownerTopicId, header.ownerBranchId, segment.topicId, route)) {
+      throw new ChatDbValidationError(`Message group ${segment.id} belongs to another route and cannot be changed here`)
+    }
   }
 
   /**
@@ -6513,46 +6738,34 @@ export class ChatDbAggregateService {
         // Ensure topic exists
         repos.topics.ensure(topicId)
 
-        // BRANCH-4/11 route-scoped segments: every member must be owned by
-        // the addressed route (owner equality). Read-only ancestor
-        // references from another route reject (no copy-on-write); otherwise
-        // legacy validation applies. Owned rows stay segmentable even when
-        // referenced by live descendants (butterfly effect).
-        const routeMessageIds = new Set(this.resolveRouteMessagesInTx(repos, topicId, route).messages.map((m) => m.id))
-        for (const mid of messageIds) {
-          const ownerRow = repos.messages.getById(mid)
-          if (ownerRow.found && ownerRow.data.topicId === topicId && (ownerRow.data.branchId ?? null) === route) {
-            continue
-          }
-          if (!routeMessageIds.has(mid)) {
-            throw new ChatDbValidationError(
-              `Message ${mid} does not belong to the addressed route of topic ${topicId} and cannot join its segment`
-            )
-          }
-          throw new ChatDbValidationError(
-            `Message ${mid} is shared with another route and cannot join a segment of this route`
-          )
-        }
+        // Membership authority is the group-level RANGE guard below (owner
+        // equality over the addressed route): same-owner spans stay allowed
+        // across untaken forks, any foreign/inherited member rejects the whole
+        // command with zero writes — no per-row owner loop here.
+        this.assertGroupRangeOwnedInTx(repos, topicId, route, messageIds)
 
-        // Build segment data. `folded` is presentation state carried in extra
-        // overflow and must survive an upsert: undo/paste/create restores pass
-        // the snapshot's value, so true folds, null clears, absent keeps.
+        // Build segment data. Color is the only presentation state Main still
+        // stores in segment overflow: group-level collapse is retired, so the
+        // legacy `folded` key is never persisted here and any stale value is
+        // stripped. Referencing the argument is deliberate (a no-op) — it keeps
+        // the wire contract and existing call sites intact while this
+        // retirement lands.
+        void folded
         const overflow: Record<string, unknown> = {}
         if (color !== undefined && color !== null) {
           overflow.color = color
         }
-        if (folded === true) {
-          overflow.folded = true
-        }
         // The existing-row patch is a merge delta (mergeOverflow), so unrelated
         // overflow keys (foldSelected/useful) are never replaced.
         const overflowDelta: Record<string, unknown> = { ...overflow }
-        if (folded === null) {
-          overflowDelta.folded = OVERFLOW_REMOVE
-        }
+        overflowDelta.folded = OVERFLOW_REMOVE
 
         const existing = repos.segments.getById(segmentId)
         if (existing.found) {
+          // Group metadata AND membership are owned by the route that owns the
+          // head message: a non-owner route reads/navigates the group but its
+          // rename/re-member rejects here with zero writes.
+          this.assertSegmentOwnerInTx(repos, existing.data, repos.segments.getMessageIds(segmentId), route)
           // Update metadata
           const patch: Record<string, unknown> = {}
           if (name !== undefined) patch.name = name
@@ -6569,6 +6782,10 @@ export class ChatDbAggregateService {
               topicId,
               name: name ?? null,
               messageIds: [] as string[],
+              // A group that was never created has no head identity.
+              headerMessageId: null as string | null,
+              ownerTopicId: topicId,
+              ownerBranchId: route,
               createdAt: null as string | null,
               updatedAt: null as string | null,
               sortOrder: 0,
@@ -6620,6 +6837,7 @@ export class ChatDbAggregateService {
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
               sortOrder: targetIndex,
+              headerMessageId: messageIds[0] ?? null,
               overflow
             },
             targetIndex
@@ -6641,6 +6859,10 @@ export class ChatDbAggregateService {
             topicId,
             name: name ?? null,
             messageIds: [] as string[],
+            // Empty membership deleted the group, so it has no head anymore.
+            headerMessageId: null as string | null,
+            ownerTopicId: topicId,
+            ownerBranchId: route,
             createdAt: null as string | null,
             updatedAt: null as string | null,
             sortOrder: 0,
@@ -6655,16 +6877,25 @@ export class ChatDbAggregateService {
         }
 
         const finalMessageIds = repos.segments.getMessageIds(segmentId)
-        return segmentToWire(segment.data, finalMessageIds)
+        return segmentToWire(
+          segment.data,
+          finalMessageIds,
+          this.resolveSegmentHeader(repos, segment.data, finalMessageIds)
+        )
       })
     }, `upsertSegment(${segmentId}, ${topicId})`)
   }
 
   /**
-   * Update segment metadata (name, color, folded). No membership change.
-   * `folded` is presentation state bridged through extra overflow: a boolean
-   * sets it, `null` clears it, `undefined` leaves it untouched. Folding never
-   * touches authority membership, catalog order, or boundaries.
+   * Update segment metadata (name, color). No membership change and no
+   * collapse state: the group-level `folded` argument is accepted only for wire
+   * compatibility and is never persisted — a stale persisted marker is stripped
+   * on every write, so a retired group label can never come back.
+   *
+   * Group metadata authority: the requester route must be the group head's
+   * owner (absent/null = main route). Another route may read and navigate the
+   * group but never rename it; that mutation fails closed with no writes.
+   *
    * Missing segment: throws ChatDbNotFoundError → ERR_NOT_FOUND.
    * Returns the updated segment wire.
    */
@@ -6683,28 +6914,12 @@ export class ChatDbAggregateService {
         if (!existing.found) {
           throw new ChatDbNotFoundError(`Segment ${segmentId} does not exist`)
         }
-
-        // Folding changes request context, so it is an owner-only mutation
-        // (BRANCH-4/11 owner equality): every member of the group must be
-        // owned by the addressed route and therefore mutable through it.
-        // An inherited/read-only group rejects instead of silently folding
-        // ancestor rows. Name/color stay ordinary metadata (ungated).
-        if (folded !== undefined) {
-          const route = this.normalizeBranchId(branchId)
-          for (const mid of repos.segments.getMessageIds(segmentId)) {
-            const ownerRow = repos.messages.getById(mid)
-            if (!ownerRow.found || ownerRow.data.topicId !== existing.data.topicId) {
-              throw new ChatDbValidationError(
-                `Segment ${segmentId} carries message ${mid} that no longer belongs to topic ${existing.data.topicId}`
-              )
-            }
-            if ((ownerRow.data.branchId ?? null) !== route) {
-              throw new ChatDbValidationError(
-                `Segment ${segmentId} is read-only from the addressed route and its folded state cannot change here`
-              )
-            }
-          }
-        }
+        // Group collapse is retired, so `folded` is no longer a context gate;
+        // group identity/ownership still is: metadata belongs to the head's
+        // owner route. Referencing `folded` is deliberate (a no-op) and keeps
+        // the wire contract unchanged.
+        void folded
+        this.assertSegmentOwnerInTx(repos, existing.data, repos.segments.getMessageIds(segmentId), branchId)
 
         const patch: Record<string, unknown> = {}
         if (name !== undefined) patch.name = name
@@ -6712,7 +6927,9 @@ export class ChatDbAggregateService {
         // never replaces unrelated existing overflow keys.
         const overflowDelta: Record<string, unknown> = {}
         if (color !== undefined) overflowDelta.color = color
-        if (folded !== undefined) overflowDelta.folded = folded === null ? OVERFLOW_REMOVE : folded
+        // Retired marker: always stripped, never written back as a boolean.
+        overflowDelta.folded = OVERFLOW_REMOVE
+
         if (Object.keys(overflowDelta).length > 0) patch.overflow = overflowDelta
         if (Object.keys(patch).length > 0) {
           repos.segments.updateMetadata(segmentId, patch as any)
@@ -6726,20 +6943,30 @@ export class ChatDbAggregateService {
           throw new ChatDbNotFoundError(`Segment ${segmentId} was deleted during update`)
         }
         const messageIds = repos.segments.getMessageIds(segmentId)
-        return segmentToWire(updated.data, messageIds)
+        return segmentToWire(updated.data, messageIds, this.resolveSegmentHeader(repos, updated.data, messageIds))
       })
     }, `updateSegmentMetadata(${segmentId})`)
   }
 
   /**
    * Delete a segment. Missing: no-op.
+   *
+   * Group metadata authority: only the route that owns the group head may
+   * delete the group (`branchId` absent/null = main route). Another route may
+   * read and navigate it; its delete fails closed with no writes.
    */
-  deleteSegment(segmentId: string): ChatDbResult<null> {
+  deleteSegment(segmentId: string, branchId?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('deleteSegment')
-      const { segments } = this.repos()
-      segments.delete(segmentId)
-      return null
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const existing = repos.segments.getById(segmentId)
+        if (existing.found) {
+          this.assertSegmentOwnerInTx(repos, existing.data, repos.segments.getMessageIds(segmentId), branchId)
+          repos.segments.delete(segmentId)
+        }
+        return null
+      })
     }, `deleteSegment(${segmentId})`)
   }
 
@@ -6747,6 +6974,12 @@ export class ChatDbAggregateService {
    * Replace segment message IDs atomically.
    * Empty membership deletes the segment per repository semantics.
    * Returns the updated segment wire, or null if segment was deleted.
+   *
+   * Two authorities apply, in this order, before any write: the group's
+   * existing head owner must be the addressed route (a non-owner route may
+   * read and navigate the group but never re-member it), and every requested
+   * member must be owned by the addressed route. Membership changes never move
+   * the group head; only the head leaving the group repairs it.
    */
   replaceSegmentMembership(
     segmentId: string,
@@ -6759,32 +6992,14 @@ export class ChatDbAggregateService {
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const segment = repos.segments.getById(segmentId)
-        // BRANCH-4/11 route-scoped segments: every member must be owned by
-        // the addressed route of the segment's topic (owner equality).
-        // Read-only ancestor references reject (no copy-on-write); owned
-        // rows stay segmentable even when referenced by descendants.
+        // Membership authority is the head-owner check plus the group-level
+        // RANGE guard (owner equality over the addressed route): same-owner
+        // spans stay allowed across untaken forks, any foreign/inherited row
+        // rejects with zero writes — no per-row owner loop here. Empty
+        // membership keeps its delete semantics below.
         if (segment.found) {
-          const routeMessageIds = new Set(
-            this.resolveRouteMessagesInTx(repos, segment.data.topicId, route).messages.map((m) => m.id)
-          )
-          for (const mid of messageIds) {
-            const ownerRow = repos.messages.getById(mid)
-            if (
-              ownerRow.found &&
-              ownerRow.data.topicId === segment.data.topicId &&
-              (ownerRow.data.branchId ?? null) === route
-            ) {
-              continue
-            }
-            if (!routeMessageIds.has(mid)) {
-              throw new ChatDbValidationError(
-                `Message ${mid} does not belong to the addressed route of topic ${segment.data.topicId} and cannot join its segment`
-              )
-            }
-            throw new ChatDbValidationError(
-              `Message ${mid} is shared with another route and cannot join a segment of this route`
-            )
-          }
+          this.assertSegmentOwnerInTx(repos, segment.data, repos.segments.getMessageIds(segmentId), route)
+          this.assertGroupRangeOwnedInTx(repos, segment.data.topicId, route, messageIds)
         }
         repos.segments.replaceMessageIds(segmentId, messageIds)
 
@@ -6792,7 +7007,11 @@ export class ChatDbAggregateService {
         if (!updated.found) return null
 
         const finalMessageIds = repos.segments.getMessageIds(segmentId)
-        return segmentToWire(updated.data, finalMessageIds)
+        return segmentToWire(
+          updated.data,
+          finalMessageIds,
+          this.resolveSegmentHeader(repos, updated.data, finalMessageIds)
+        )
       })
     }, `replaceSegmentMembership(${segmentId})`)
   }
@@ -7680,21 +7899,166 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Authority membership of every folded (collapsed) topic segment, as one
-   * message-id set.
+   * Turn-level fold participation: the authority message-id set that a fold
+   * excludes from requests, token estimation, context counts and the boundary
+   * divider.
    *
-   * Folded state is presentation state carried in the segment row's `extra`
-   * overflow; membership itself stays in `topic_segment_messages`. This is
-   * therefore always resolved from authority rows, never inferred from a
-   * loaded/projected message window.
+   * Fold is TURN-level state stored on the message rows the turn contains
+   * (`messages.extra.overflow['folded']`). A turn is folded when ANY of its
+   * rows carries the marker, and folding it excludes every row of that turn.
+   * That single rule keeps the three consumers of this method consistent:
+   *
+   * - read: a partially marked turn (legacy write, or a variant that joined
+   *   before this rule existed) reads as one folded turn, never as a
+   *   row-by-row exclusion that disagrees with the renderer's row display;
+   * Resolution always comes from the authority rows of the ADDRESSED
+   * effective route, never from a loaded/projected window and never from a
+   * single topic's owned rows. A reference target's route begins with foreign
+   * reference-prefix rows (`row.topicId != topicId`), and those rows carry
+   * their own fold markers — reading only the target topic's own rows would
+   * silently re-enable context the source (and every route inheriting it) has
+   * excluded. Reading the effective route makes the folded membership agree
+   * with the same route's branch/reference chain closure, its counts and
+   * divider, its request filter and the whole-topic snapshot, because all of
+   * them are derived from that one route.
+   *
+   * The retired group-level marker (`topic_segments.extra.folded`) is
+   * deliberately NOT consulted: collapsing a message group is no longer a
+   * context mutation, so every member of such a group keeps its original
+   * participation. Legacy markers are inert data, cleaned by migration only.
    */
-  private resolveFoldedMemberMessageIdsInTx(repos: ChatDbRepositories, topicId: string): Set<string> {
+  private resolveFoldedMemberMessageIdsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null
+  ): Set<string> {
+    return this.expandFoldedTurns(this.resolveRouteMessagesInTx(repos, topicId, branchId).messages)
+  }
+
+  /**
+   * Fold key of one message row: the turn it belongs to.
+   *
+   * A user (or system) row starts its own turn, so its key is its own id; an
+   * assistant row belongs to the turn of its `askId` (an orphan answer with a
+   * dangling `askId` still forms that turn, mirroring `groupEffectiveTurnsInTx`).
+   */
+  private turnFoldKeyOf(message: MessageData): string {
+    if (message.role === 'assistant' && typeof message.askId === 'string' && message.askId.length > 0) {
+      return message.askId
+    }
+    return message.id
+  }
+
+  /**
+   * Expand row-level fold markers to whole-turn membership.
+   *
+   * Idempotent and monotone: if any row of a turn is folded, every row of that
+   * turn is in the returned set.
+   *
+   * A turn is keyed by its OWNER plus its turn key (`askId`, else the row's
+   * own id), not by the turn key alone: an effective route can carry rows of
+   * several owners (a reference prefix belongs to the source topic, the suffix
+   * to the target), so keying by `askId` across owners would let one owner's
+   * folded turn pull in, or hide, another owner's row that happens to share
+   * that key. Fold markers themselves are global per message row (stable id),
+   * so owner scoping never rewrites anything — it only decides which rows form
+   * one turn.
+   */
+  private expandFoldedTurns(rows: MessageData[]): Set<string> {
+    const ownerTurnKeyOf = (row: MessageData): string =>
+      `${row.topicId}\u0000${row.branchId ?? ''}\u0000${this.turnFoldKeyOf(row)}`
+    const foldedTurnKeys = new Set<string>()
+    const turnKeyByMessageId = new Map<string, string>()
+    for (const row of rows) {
+      const key = ownerTurnKeyOf(row)
+      turnKeyByMessageId.set(row.id, key)
+      if (row.overflow['folded'] === true) foldedTurnKeys.add(key)
+    }
     const foldedIds = new Set<string>()
-    for (const segment of repos.segments.listByTopic(topicId)) {
-      if (segment.overflow['folded'] !== true) continue
-      for (const messageId of repos.segments.getMessageIds(segment.id)) foldedIds.add(messageId)
+    for (const [messageId, key] of turnKeyByMessageId) {
+      if (foldedTurnKeys.has(key)) foldedIds.add(messageId)
     }
     return foldedIds
+  }
+
+  /**
+   * Turn-level fold inheritance for a NEW message row: when the turn it joins
+   * is already folded, the new row is born folded so the turn stays coherent
+   * (an added/regenerated variant never silently re-enables excluded context).
+   * Rows that start their own turn (user/system) inherit nothing.
+   */
+  private inheritTurnFoldForNewMessageInTx(repos: ChatDbRepositories, topicId: string, message: MessageData): void {
+    const key = this.turnFoldKeyOf(message)
+    if (key === message.id) return
+    // The source folded marker is resolved from the new row's own effective
+    // route — the same complete row set the closures, counts and snapshots
+    // read — never from the whole topic. A whole-topic scan would leak a
+    // same-key marker from a sibling branch or a foreign referenced prefix
+    // into a route that never folded that turn.
+    const turnFolded = this.resolveRouteMessagesInTx(repos, topicId, message.branchId ?? null).messages.some(
+      (row) => this.turnFoldKeyOf(row) === key && row.overflow['folded'] === true
+    )
+    if (!turnFolded) return
+    message.overflow = { ...message.overflow, folded: true }
+  }
+  /**
+   * Shared group-level RANGE guard: every command that acts on a set of turns
+   * or on a message group (create/update message group, multi-turn fold) runs
+   * this inside its transaction before any write.
+   *
+   * Two facts are enforced over the addressed effective route:
+   *
+   * 1. Route presence — every selected row must resolve on the addressed
+   *    route.
+   * 2. Ownership — every selected row must be owned by the addressed route:
+   *    owner equality compares `topicId` AND `branchId` (BRANCH-4). An
+   *    inherited/read-only row (ancestor prefix, cross-topic reference
+   *    prefix) rejects instead of being written, so a group-level command can
+   *    never mutate another owner's rows.
+   *
+   * Owner equality is the complete range authority. A fork divider is a
+   * presentation fact about where a route splits, not a mutation boundary: a
+   * range may span a fork whose child the addressed route never took, and a
+   * same-owner selection stays allowed even when a child fork sits inside its
+   * span, because every row such a command writes belongs to the addressed
+   * route. The guard therefore never consults renderer markers, fork indices
+   * or the route's own inherited-prefix index: ownership already rejects any
+   * range that starts in, or reaches into, another owner's rows, so those
+   * facts would be redundant and could only over-block.
+   *
+   * Single-message basics (`updateMessage`, `deleteMessage`,
+   * `reorderMessages`, `selectAnswerMessage`, `selectUsefulAnswer`) keep their
+   * own owner-equality behavior unchanged; only group-level range commands
+   * call this.
+   *
+   * Missing rows and out-of-route ids fail closed with zero writes.
+   */
+  private assertGroupRangeOwnedInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    route: string | null,
+    messageIds: string[]
+  ): void {
+    if (messageIds.length === 0) return
+    // One materialization of the addressed effective route serves both facts:
+    // presence in the route, then owner equality on the same preloaded rows.
+    // No per-row route resolution and no second owned-row query.
+    const byId = new Map(
+      this.resolveRouteMessagesInTx(repos, topicId, route).messages.map((message) => [message.id, message] as const)
+    )
+    for (const messageId of messageIds) {
+      const row = byId.get(messageId)
+      if (!row) {
+        throw new ChatDbValidationError(
+          `Message ${messageId} does not belong to the addressed route of topic ${topicId}`
+        )
+      }
+      if (!isOwnedByRoute(row.topicId, row.branchId, topicId, route)) {
+        throw new ChatDbValidationError(
+          `Message ${messageId} is shared with another route and cannot join a group-level change of this route`
+        )
+      }
+    }
   }
 
   /**
@@ -7716,7 +8080,7 @@ export class ChatDbAggregateService {
     foldedMemberIds: ReadonlySet<string>
   ): { totalTurnCount: number; selectedTurnCount: number; boundaryMessageId: string | null } {
     const participates = (turn: { messages: ReadonlyArray<{ id: string }> }): boolean =>
-      turn.messages.some((message) => !foldedMemberIds.has(message.id))
+      this.turnParticipatesInContext(turn, foldedMemberIds)
     const participatingTotal = turns.filter(participates).length
     const windowTurns = windowStartIdx >= 0 && windowStartIdx < turns.length ? turns.slice(windowStartIdx) : []
     const participatingWindow = windowTurns.filter(participates).length
@@ -7739,6 +8103,59 @@ export class ChatDbAggregateService {
       }
     }
     return { totalTurnCount, selectedTurnCount, boundaryMessageId }
+  }
+  /**
+   * One-turn participation predicate shared by every default-position
+   * selection and every participating count: a turn participates when at
+   * least one of its rows is not a folded member. Fold markers expand to
+   * whole turns on read, so a partially marked turn never participates.
+   */
+  private turnParticipatesInContext(
+    turn: { messages: ReadonlyArray<{ id: string }> },
+    foldedMemberIds: ReadonlySet<string>
+  ): boolean {
+    return turn.messages.some((message) => !foldedMemberIds.has(message.id))
+  }
+
+  /**
+   * Unified default window selection: the last N participating turns of the
+   * effective route, anchored at the first of those turns (stable group
+   * key). Counts and the request filter share the same participation
+   * predicate, so a default start can never land inside excluded history.
+   *
+   * - Empty route -> -1 (callers keep the empty degenerate: null anchor).
+   * - Null/undefined (unlimited) -> first participating turn; an all-folded
+   *   route falls back to the raw first turn.
+   * - Finite N -> first of the last N participating turns (N<=0 counts as 1,
+   *   mirroring the historical floor); fewer than N participating turns
+   *   anchor at the first participating one, and an all-folded route falls
+   *   back to the raw max(0, total-N) tail position.
+   *
+   * Only default computation (establish of a missing anchor,
+   * reanchor-default, inherit/branch fallbacks) uses this selector. A stored
+   * manual anchor is never recomputed when folds toggle.
+   */
+  private resolveDefaultParticipatingIndex(
+    turns: ReadonlyArray<{ key: string; messages: ReadonlyArray<{ id: string }> }>,
+    foldedMemberIds: ReadonlySet<string>,
+    contextCount: number | null | undefined
+  ): number {
+    if (turns.length === 0) return -1
+    if (contextCount === null || contextCount === undefined) {
+      const first = turns.findIndex((turn) => this.turnParticipatesInContext(turn, foldedMemberIds))
+      return first !== -1 ? first : 0
+    }
+    const n = Math.max(1, Math.floor(contextCount))
+    let anchor = -1
+    let need = n
+    for (let i = turns.length - 1; i >= 0 && need > 0; i--) {
+      if (this.turnParticipatesInContext(turns[i], foldedMemberIds)) {
+        anchor = i
+        need--
+      }
+    }
+    if (anchor !== -1) return anchor
+    return Math.max(0, turns.length - n)
   }
 
   /** Domain branch node → wire (exact TopicBranchWire keys, null-preserving). */
@@ -8608,7 +9025,7 @@ export class ChatDbAggregateService {
       }
       return false
     }
-    if ((row.branchId ?? null) !== route) {
+    if (!isOwnedByRoute(row.topicId, row.branchId, topicId, route)) {
       throw new ChatDbValidationError(
         `Message ${messageId} is shared with another route and is immutable through this route`
       )
@@ -8658,29 +9075,29 @@ export class ChatDbAggregateService {
    * non-owned member. Call inside the caller's root transaction.
    */
   private assertAnswerGroupMutableInTx(
-    repos: ChatDbRepositories,
+    _repos: ChatDbRepositories,
     _db: BetterSQLite3Database<typeof schema>,
     topicId: string,
     route: string | null,
     askId: string,
     routeMessages: MessageData[]
   ): string[] {
-    const groupIds = routeMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
-    if (groupIds.length === 0) {
+    const group = routeMessages.filter((m) => m.role === 'assistant' && m.askId === askId)
+    if (group.length === 0) {
       throw new ChatDbNotFoundError(`Answer group ${askId} has no actionable members in topic ${topicId}`)
     }
-    const ownedRows = repos.messages.listByTopic(topicId, route)
-    const ownedSet = new Set(ownedRows.map((m) => m.id))
-    for (const id of groupIds) {
-      if (!ownedSet.has(id)) {
+    // Owner equality runs on the same preloaded route rows the caller already
+    // resolved — no second owned-row query per group.
+    for (const member of group) {
+      if (!isOwnedByRoute(member.topicId, member.branchId, topicId, route)) {
         throw new ChatDbValidationError(
-          `Message ${id} is shared with another route and its answer group is immutable through this route`
+          `Message ${member.id} is shared with another route and its answer group is immutable through this route`
         )
       }
     }
     // BRANCH-4: reading the user root never requires mutability. Only rows
     // actually written/deleted/reordered are validated above.
-    return groupIds
+    return group.map((m) => m.id)
   }
 
   /**
@@ -10996,13 +11413,14 @@ export class ChatDbAggregateService {
               sortOrder: number
               overflow: Record<string, unknown>
             },
-            mids: string[]
-          ): SegmentWire => segmentToWire(seg, mids)
+            mids: string[],
+            header: { headerMessageId: string | null; ownerTopicId: string; ownerBranchId: string | null }
+          ): SegmentWire => segmentToWire(seg, mids, header)
           const segmentSnapshots: SegmentWire[] = []
           for (const seg of repos.segments.listByTopic(topicId)) {
             const mids = repos.segments.getMessageIds(seg.id)
             if (mids.some((id) => ownedSet.has(id))) {
-              segmentSnapshots.push(toSafeSegmentWire(seg, mids))
+              segmentSnapshots.push(toSafeSegmentWire(seg, mids, this.resolveSegmentHeader(repos, seg, mids)))
             }
           }
           // Contiguous restore groups in pre-delete authority order: maximal
@@ -11064,9 +11482,10 @@ export class ChatDbAggregateService {
           notify = notifyRef.value
           const remainingOrdered = repos.messages.listByTopic(topicId)
           const remainingUserMessageIds = remainingOrdered.filter((m) => m.role === 'user').map((m) => m.id)
-          const segments = repos.segments
-            .listByTopic(topicId)
-            .map((seg) => toSafeSegmentWire(seg, repos.segments.getMessageIds(seg.id)))
+          const segments = repos.segments.listByTopic(topicId).map((seg) => {
+            const postMids = repos.segments.getMessageIds(seg.id)
+            return toSafeSegmentWire(seg, postMids, this.resolveSegmentHeader(repos, seg, postMids))
+          })
           const cleanup = buildFileCleanupResult(repos, affectedFileIds)
           return {
             ...cleanup,

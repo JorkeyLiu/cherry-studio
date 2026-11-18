@@ -16,7 +16,7 @@ vi.mock('@renderer/services/db', () => ({
     updateSegmentMetadata: vi.fn(),
     replaceSegmentMembership: vi.fn(),
     deleteSegment: vi.fn(),
-    listSegments: vi.fn()
+    listSegments: vi.fn().mockResolvedValue([])
   }
 }))
 
@@ -32,7 +32,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { rootReducer } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
 
-import { useRouteScopedSegments } from '../useRouteScopedSegments'
+import { deriveRouteTurnMap, useRouteScopedSegments } from '../useRouteScopedSegments'
 
 type Any = any
 
@@ -163,6 +163,32 @@ describe('useRouteScopedSegments route scope and guards', () => {
 
     cDeferred.resolve(snapshot(ROUTE_C))
     await waitFor(() => expect(result.current.segments).toEqual([]))
+  })
+
+  it('exposes currency: false while the new route snapshot is pending, true once accepted', async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-main', 0, ['m29'])])
+    const cDeferred = deferred<Any>()
+    mockLoadSnapshot.mockImplementation(async (_t: string, branch: string | null) => {
+      if (branch === 'C') return cDeferred.promise
+      return snapshot(MAIN)
+    })
+
+    setBranch(store, TOPIC, null)
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(result.current.isCurrent).toBe(true))
+    expect(result.current.routeKey).toBe(`${TOPIC}::main`)
+
+    // Switch route: projection is pending, so currency drops while the
+    // drawer list stays intentionally empty (fail-closed navigation).
+    act(() => setBranch(store, TOPIC, 'C'))
+    expect(result.current.isCurrent).toBe(false)
+    expect(result.current.segments).toEqual([])
+    expect(result.current.routeKey).toBe(`${TOPIC}::C`)
+
+    cDeferred.resolve(snapshot(ROUTE_C))
+    await waitFor(() => expect(result.current.isCurrent).toBe(true))
+    expect(result.current.routeKey).toBe(`${TOPIC}::C`)
   })
 
   it('discards a stale async completion that resolves after a route switch (no backfill)', async () => {
@@ -385,5 +411,36 @@ describe('useRouteScopedSegments route scope and guards', () => {
       )
     })
     await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(2), { timeout: 5000 })
+  })
+})
+
+describe('deriveRouteTurnMap', () => {
+  const msg = (id: string, role: string, askId?: string) => ({ id, role, askId }) as Any
+
+  it('maps user + same-askId answers to one turn index', () => {
+    const map = deriveRouteTurnMap([
+      msg('u1', 'user'),
+      msg('a1', 'assistant', 'u1'),
+      msg('a2', 'assistant', 'u1'),
+      msg('u2', 'user'),
+      msg('a3', 'assistant', 'u2')
+    ])
+    expect(map.get('u1')).toBe(0)
+    expect(map.get('a1')).toBe(0)
+    expect(map.get('a2')).toBe(0)
+    expect(map.get('u2')).toBe(1)
+    expect(map.get('a3')).toBe(1)
+  })
+
+  it('gives system messages and dangling askId answers their own turn', () => {
+    const map = deriveRouteTurnMap([msg('s', 'system'), msg('dangling', 'assistant', 'missing-u')])
+    expect(map.get('s')).toBe(0)
+    expect(map.get('dangling')).toBe(1)
+  })
+
+  it('ignores assistant messages without askId', () => {
+    const map = deriveRouteTurnMap([msg('orphan', 'assistant'), msg('u1', 'user')])
+    expect(map.has('orphan')).toBe(false)
+    expect(map.get('u1')).toBe(0)
   })
 })

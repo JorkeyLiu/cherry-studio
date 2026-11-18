@@ -1,11 +1,12 @@
 /**
- * Folded (collapsed) message-group participation — one definition shared by the
- * actual request, the token-estimation list, the context count and the boundary
+ * Folded (collapsed) turn participation — one definition shared by the actual
+ * request, the token-estimation list, the context count and the boundary
  * divider.
  *
- * The exclusion source is the authority segment catalog the renderer already
- * holds (`topicSegments`), never a loaded/projected message window: a group
- * folded off-window is excluded exactly like one on screen. See
+ * Fold is a message-level fact: every member of a folded turn carries
+ * `folded: true`, so the exclusion source is the message rows themselves, never
+ * a loaded/projected window (a turn folded off-window is excluded exactly like
+ * one on screen) and never the group catalog. See
  * `docs/adr/context-window.md` (window continuity with folded participation).
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
@@ -13,11 +14,10 @@ import { computeContextInfo, deriveContextInfoFromClosure } from '@renderer/serv
 import {
   excludeFoldedMessages,
   foldedMessageIdsForTopic,
-  foldedSegmentsForTopic,
   isMessageFolded
 } from '@renderer/services/foldedSegmentService'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
-import topicSegmentReducer, { addSegment } from '@renderer/store/topicSegment'
+import { messagesSlice } from '@renderer/store/newMessage'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
@@ -26,7 +26,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const reducer = combineReducers({
   messageBlocks: messageBlocksSlice.reducer,
-  topicSegments: topicSegmentReducer
+  messages: messagesSlice.reducer
 })
 const createMockStore = () =>
   configureStore({ reducer, middleware: (getDefaultMiddleware) => getDefaultMiddleware({ serializableCheck: false }) })
@@ -80,25 +80,20 @@ const withBlocks = (messages: Message[]): Message[] =>
     return { ...m, blocks: [blockId] }
   })
 
-/** Authority catalog entry with the required authority fields. */
-function segmentEntity(topicId: string, id: string, messageIds: string[], folded: boolean) {
-  return {
-    id,
-    topicId,
-    name: `group-${id}`,
-    messageIds,
-    createdAt: TS,
-    updatedAt: TS,
-    sortOrder: 0,
-    firstMessageId: messageIds[0],
-    lastMessageId: messageIds[messageIds.length - 1],
-    messageCount: messageIds.length,
-    folded
-  } as any
-}
-
-function foldGroup(topicId: string, id: string, messageIds: string[], folded = true): void {
-  mockStore.dispatch(addSegment(segmentEntity(topicId, id, messageIds, folded)))
+/**
+ * Fold a set of loaded rows at the MESSAGE level — the only fold the product
+ * has. Each member is its own row and carries its own flag, which is exactly
+ * what the projection-level fallback reads.
+ */
+function foldMessages(topicId: string, messageIds: string[], folded = true): void {
+  for (const id of messageIds) {
+    mockStore.dispatch(
+      messagesSlice.actions.addMessage({
+        topicId,
+        message: { ...msg(id), folded: folded ? true : undefined } as Message
+      })
+    )
+  }
 }
 
 const makeClosure = (
@@ -153,30 +148,45 @@ describe('foldedSegmentService — authority exclusion list', () => {
     expect(excludeFoldedMessages(noList, undefined)).toBe(noList)
   })
 
-  it('never consults the renderer catalog: an empty/stale projection cannot re-enable a folded body', () => {
+  it('never consults the renderer projection: an empty/stale window cannot re-enable a folded body', () => {
     const messages = ['m0', 'm1'].map((id) => msg(id))
-    // Redux holds no segment catalog at all (unloaded window) while Main
-    // authority reports the fold — the exclusion still applies. Claiming "no
-    // fold" because the catalog is unloaded is exactly the leak this guards.
+    // The window holds no fold at all (unloaded) while Main authority reports
+    // one — the exclusion still applies. Claiming "no fold" because the window
+    // is unloaded is exactly the leak this guards.
     expect(foldedMessageIdsForTopic(TOPIC).size).toBe(0)
     expect(ids(excludeFoldedMessages(messages, ['m1']))).toEqual(['m0'])
     // Stale projection disagrees in both directions; the authority list wins.
-    foldGroup(TOPIC, 'seg-stale', ['m1'], false)
+    foldMessages(TOPIC, ['m0'], false)
     expect(ids(excludeFoldedMessages(messages, ['m1']))).toEqual(['m0'])
-    mockStore = createMockStore()
-    foldGroup(TOPIC, 'seg-stale-folded', ['m0'], true)
+    foldMessages(TOPIC, ['m1'], true)
     expect(ids(excludeFoldedMessages(messages, ['m1']))).toEqual(['m0'])
   })
 
-  it('keeps the catalog helpers as projection-only conveniences (UI/fallback)', () => {
-    foldGroup(TOPIC, 'seg-folded', ['m1', 'm2'])
-    foldGroup(TOPIC, 'seg-expanded', ['m3', 'm4'], false)
-    foldGroup('topic-2', 'seg-other', ['m5'])
+  it('reads the projection fallback from message rows only', () => {
+    foldMessages(TOPIC, ['m1', 'm2'])
+    foldMessages(TOPIC, ['m3', 'm4'], false)
+    foldMessages('topic-2', ['m5'])
 
-    expect(foldedSegmentsForTopic(TOPIC).map((s) => s.id)).toEqual(['seg-folded'])
     expect(foldedMessageIdsForTopic(TOPIC)).toEqual(new Set(['m1', 'm2']))
     expect(foldedMessageIdsForTopic('topic-2')).toEqual(new Set(['m5']))
     expect(foldedMessageIdsForTopic('topic-unknown').size).toBe(0)
+  })
+
+  it('collects message-level folded flags in foldedMessageIdsForTopic', () => {
+    mockStore.dispatch(
+      messagesSlice.actions.addMessage({
+        topicId: TOPIC,
+        message: { ...msg('m10'), folded: true }
+      })
+    )
+    mockStore.dispatch(
+      messagesSlice.actions.addMessage({
+        topicId: TOPIC,
+        message: { ...msg('m11'), folded: false }
+      })
+    )
+    expect(foldedMessageIdsForTopic(TOPIC).has('m10')).toBe(true)
+    expect(foldedMessageIdsForTopic(TOPIC).has('m11')).toBe(false)
   })
 })
 
@@ -232,7 +242,8 @@ describe('folded participation — context info consistency', () => {
     const expanded = computeContextInfo(all, assistant, TOPIC)
     expect(expanded.contextCount).toEqual({ current: 3, max: 3 })
 
-    foldGroup(TOPIC, 'seg-folded', ['u2', 'a2'])
+    // The fold is a message-level fact: every member row of the turn carries it.
+    foldMessages(TOPIC, ['u2', 'a2'])
     const folded = computeContextInfo(all, assistant, TOPIC)
     // The folded turn leaves the participating turn set that both numbers use.
     expect(folded.contextCount).toEqual({ current: 2, max: 2 })

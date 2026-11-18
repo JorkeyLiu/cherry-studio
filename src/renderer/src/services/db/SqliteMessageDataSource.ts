@@ -131,6 +131,8 @@ import type {
   SelectUsefulAnswerRequest,
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
+  SetTurnFoldsRequest,
+  SetTurnFoldsResponse,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
   TopicBranchWire,
@@ -225,6 +227,8 @@ export interface ChatDbApi {
   reorderMessages(request: ReorderMessagesRequest): Promise<ChatDbResult<null>>
   // Answer-group authority reorder (additive semantic command)
   reorderAnswerGroup(request: ReorderAnswerGroupRequest): Promise<ChatDbResult<ReorderAnswerGroupResponse>>
+  // Turn-level atomic fold/unfold (Main-resolved complete turn membership)
+  setTurnFolds?(request: SetTurnFoldsRequest): Promise<ChatDbResult<SetTurnFoldsResponse>>
   // Phase 5.1A: file reference queries (read-only)
   listFileRefsByFile(request: ListFileRefsByFileRequest): Promise<ChatDbResult<ListFileRefsByFileResponse>>
   countFileRefsByFile(request: CountFileRefsByFileRequest): Promise<ChatDbResult<CountFileRefsByFileResponse>>
@@ -698,8 +702,20 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   // ============ Segment Operations (Phase 5.1A) ============
 
-  async listSegments(topicId: string): Promise<ListSegmentsResponse> {
-    const request: ListSegmentsRequest = cloneForWire({ topicId })
+  /**
+   * Topic segment catalog read with an optional route qualification.
+   *
+   * `branchId` omitted/`undefined` = the unqualified topic-wide catalog (full
+   * authoritative membership, cached as authority). `null` qualifies the main
+   * route, a string qualifies that branch: Main then attaches a `route` block
+   * (headerInRoute/headerOwnedByRoute/routeMemberMessageIds) per group without
+   * touching the catalog membership. A route-scoped caller must ask for this
+   * instead of inferring route membership from its own loaded projection.
+   */
+  async listSegments(topicId: string, branchId?: string | null): Promise<ListSegmentsResponse> {
+    // cloneForWire strips `undefined` (unqualified catalog) and preserves an
+    // explicit `null` (main-route qualification): the distinction is the contract.
+    const request: ListSegmentsRequest = cloneForWire({ topicId, branchId })
     return unwrap(await this.api.listSegments(request))
   }
 
@@ -789,6 +805,36 @@ export class SqliteMessageDataSource implements MessageDataSource {
     })
     await prepareOrderingBaseline(topicId)
     const response = unwrap(await this.api.reorderAnswerGroup(request))
+    dispatchTopicUpdatedAt(topicId)
+    return response
+  }
+
+  /**
+   * Turn-level atomic fold/unfold.
+   *
+   * ONE named bridge call carrying only stable turn (group) ids — the renderer
+   * never enumerates rows to build the target set, so turns whose members lie
+   * outside the loaded window are addressed with the same authority as loaded
+   * ones. Main resolves every turn's complete membership and persists the fold
+   * flags atomically. Dispatches `updateTopicUpdatedAt` exactly once after
+   * success (the calling thunk must NOT dispatch it again).
+   */
+  async setTurnFolds(
+    topicId: string,
+    selectedGroupIds: string[],
+    folded: boolean,
+    branchId?: string | null
+  ): Promise<SetTurnFoldsResponse> {
+    if (!this.api.setTurnFolds) {
+      throw new Error('setTurnFolds is not available on this bridge')
+    }
+    const request: SetTurnFoldsRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      selectedGroupIds,
+      folded
+    })
+    const response = unwrap(await this.api.setTurnFolds(request))
     dispatchTopicUpdatedAt(topicId)
     return response
   }

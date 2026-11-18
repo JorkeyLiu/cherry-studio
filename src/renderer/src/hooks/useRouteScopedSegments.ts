@@ -3,11 +3,15 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppSelector } from '@renderer/store'
 import { selectHistoryReferenceForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
+import type { Message } from '@renderer/types/newMessage'
+import { fetchRouteChromeWires } from '@renderer/utils/routeCommittedChrome'
+import type { RouteAuthorityAddress, RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { projectSegmentsOntoRoute } from '@renderer/utils/topicSegmentRoute'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
+import type { SegmentRouteQualification } from '@shared/chatDb'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { getMessageGroups } from './useMessageGroup'
 import { useTopicSegments } from './useTopicSegments'
 
 const logger = loggerService.withContext('useRouteScopedSegments')
@@ -20,11 +24,38 @@ export interface RouteScopedSegmentsResult {
   segments: RouteScopedSegment[]
   /** Token identifying the route the projection is valid for (`topic::branch`). */
   routeKey: string
+  /**
+   * Whether `segments` is the accepted projection for `routeKey`
+   * (`snapshotKey === routeKey` with a catalog). While a route switch is
+   * pending this is false and `segments` is intentionally empty so
+   * navigation surfaces (drawer) hide rather than list the previous route.
+   * In-flow chrome MUST NOT blank on this signal: it must keep rendering
+   * the retained previous route's entries while the mounted window still
+   * belongs to that route, so the visible window and the group structure
+   * always belong to the same accepted route.
+   */
+  isCurrent: boolean
 }
 
 interface TopicWithUpdatedAt {
   id: string
   updatedAt?: string
+}
+/**
+ * Derive message id -> turn index from a whole-route snapshot through
+ * `getMessageGroups` length semantics (user + same-askId answers = one turn,
+ * a system message = one turn, a dangling askId group = one turn, assistant
+ * messages without askId are ignored and map to no turn). Runs over the
+ * route-ordered snapshot so group boundaries follow the effective route, and
+ * mirrors Main `groupEffectiveTurnsInTx` without a Main/shared change.
+ */
+export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<string, number> {
+  const groups = getMessageGroups([...messages])
+  const map = new Map<string, number>()
+  groups.forEach((group, index) => {
+    for (const msg of group.messages) map.set(msg.id, index)
+  })
+  return map
 }
 
 /**
@@ -88,6 +119,24 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
 
   const [routeMessageIds, setRouteMessageIds] = useState<readonly string[]>([])
   const [snapshotKey, setSnapshotKey] = useState<string>('')
+  /**
+   * Turn index per message id, derived from the SAME whole-route snapshot as
+   * `routeMessageIds` (keyed by `snapshotKey`, so it can never describe a
+   * route the ids do not). Drives `turnCount` on the projection; unknown
+   * until the snapshot lands, and cleared with the projection on switch.
+   */
+  const [routeTurnMap, setRouteTurnMap] = useState<ReadonlyMap<string, number> | undefined>(undefined)
+  /**
+   * Main-computed route qualification per group id, keyed by the route it was
+   * addressed to. A SEPARATE caller-local read (`listSegments(topic, branch)`)
+   * that never touches the topic-wide authority catalog: the catalog stays
+   * complete and route-independent, and this cache is keyed by routeKey so a
+   * cross-route backfill can never masquerade as the current route's authority.
+   */
+  const [routeBlocks, setRouteBlocks] = useState<ReadonlyMap<string, SegmentRouteQualification>>(
+    () => new Map<string, SegmentRouteQualification>()
+  )
+  const [routeBlocksKey, setRouteBlocksKey] = useState<string>('')
 
   const generationRef = useRef(0)
   const mountedRef = useRef(true)
@@ -125,14 +174,35 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   const fetchRouteSnapshot = useCallback(
     async (targetTopicId: string, targetBranchId: string | null, targetRouteKey: string, gen: number) => {
       try {
-        const snap = await loadWholeTopicSnapshot(targetTopicId, targetBranchId)
+        const [snap, wires] = await Promise.all([
+          loadWholeTopicSnapshot(targetTopicId, targetBranchId),
+          // Route qualification: the SAME wires the route-window pipelines bind
+          // at commit time (single-flight shared — one IPC for concurrent
+          // hook + commit reads, so both derive identical chrome fields).
+          // Caller-local only — never touches the topic-wide authority catalog.
+          fetchRouteChromeWires(targetTopicId, targetBranchId)
+        ])
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
         setRouteMessageIds(snap.messages.map((message) => message.id))
+        setRouteTurnMap(deriveRouteTurnMap(snap.messages))
         setSnapshotKey(targetRouteKey)
+        const blocks = new Map<string, SegmentRouteQualification>()
+        for (const wire of wires) {
+          // Only the block addressed to THIS route is authority; anything else
+          // is stale cache and the projection ignores it (see freshBlock).
+          if (wire.route && wire.route.topicId === targetTopicId) {
+            blocks.set(wire.id, wire.route)
+          }
+        }
+        setRouteBlocks(blocks)
+        setRouteBlocksKey(targetRouteKey)
       } catch (error) {
         // Fail-closed: the route-boundary guard has already hidden the old
         // list; a background refetch failure retains the last good projection.
+        // Route blocks keep their keyed cache: without a fresh read the
+        // projection derives authority from catalog metadata instead of
+        // pretending a failed fetch is current.
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
         logger.warn('Route-scoped segment snapshot read failed', error as Error)
@@ -174,7 +244,13 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     const gen = generationRef.current + 1
     generationRef.current = gen
     setRouteMessageIds([])
+    setRouteTurnMap(undefined)
     setSnapshotKey('')
+    // Drop the previous route's qualification with its projection: until the
+    // new route's read lands, authority derives from catalog metadata (the
+    // blocks key disagrees, so no stale block can masquerade as current).
+    setRouteBlocks(new Map<string, SegmentRouteQualification>())
+    setRouteBlocksKey('')
     if (!topicId || !hasCatalog) return
     void fetchRouteSnapshot(topicId, activeBranchId, `${topicId}::${activeBranchId ?? 'main'}`, gen)
   }, [topicId, activeBranchId, hasCatalog, fetchRouteSnapshot])
@@ -214,10 +290,22 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   }, [topicId, scheduleDebouncedRefetch])
 
   const isSnapshotCurrent = snapshotKey === activeRouteKey
+  // Blocks are currency-checked independently: a fresh snapshot with a stale
+  // (or failed) qualification read still projects — authority then derives
+  // from catalog metadata, and the next refresh baseline re-reads both.
+  const isBlocksCurrent = routeBlocksKey === activeRouteKey
+  const authority = useMemo<RouteAuthorityAddress>(
+    () => ({ topicId, branchId: activeBranchId, blocks: isBlocksCurrent ? routeBlocks : undefined }),
+    [topicId, activeBranchId, isBlocksCurrent, routeBlocks]
+  )
+  const isCurrent = isSnapshotCurrent && hasCatalog
+  // The turn map is derived from the same snapshot as the ids and shares its
+  // currency gate: without a fresh snapshot the projection carries no counts.
+  const turnMap = isSnapshotCurrent ? routeTurnMap : undefined
   const segments = useMemo(
-    () => (isSnapshotCurrent && hasCatalog ? projectSegmentsOntoRoute(routeMessageIds, orderedSegmentsForTopic) : []),
-    [isSnapshotCurrent, hasCatalog, routeMessageIds, orderedSegmentsForTopic]
+    () => (isCurrent ? projectSegmentsOntoRoute(routeMessageIds, orderedSegmentsForTopic, authority, turnMap) : []),
+    [isCurrent, routeMessageIds, orderedSegmentsForTopic, authority, turnMap]
   )
 
-  return useMemo(() => ({ segments, routeKey: activeRouteKey }), [segments, activeRouteKey])
+  return useMemo(() => ({ segments, routeKey: activeRouteKey, isCurrent }), [segments, activeRouteKey, isCurrent])
 }

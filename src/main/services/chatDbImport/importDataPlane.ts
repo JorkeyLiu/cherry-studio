@@ -1887,8 +1887,9 @@ export class ChatImportDataPlane {
    *   as skippedSegmentRowCount / skippedSegmentMembershipCount
    *   (committed-page semantics, LOCK-STAT-1).
    * - Segment sortOrder is neutral 0; membership sortOrder is array index.
-   * - color/unknown fields preserved in segment overflow; messageIds is
-   *   relationship data and is NOT stored in overflow.
+   * - color/unknown fields preserved in segment overflow (the retired
+   *   `folded` collapse marker is dropped); messageIds is relationship data
+   *   and is NOT stored in overflow.
    */
   private projectSegmentsPage(items: JsonObject[]): StagedPage {
     const staged = emptyStagedPage()
@@ -1958,10 +1959,11 @@ export class ChatImportDataPlane {
       }
 
       // Overflow: preserve color and every unknown field; exclude promoted
-      // columns and the relationship array (LOCK-D6).
+      // columns and the relationship array (LOCK-D6). The retired group-collapse
+      // marker is dropped so a L2 import can never resurrect it.
       const overflow: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(raw)) {
-        if (SEGMENT_FIELDS.has(key) || key === 'messageIds') continue
+        if (SEGMENT_FIELDS.has(key) || key === 'messageIds' || key === 'folded') continue
         overflow[key] = value
       }
 
@@ -1972,6 +1974,10 @@ export class ChatImportDataPlane {
         createdAt,
         updatedAt,
         sortOrder: 0, // neutral — do not infer collection order (LOCK-D6)
+        // The legacy source format carries no group-head identity: the head is
+        // derived from authority membership order on read/repair (never from a
+        // rendered window), so nothing is invented here.
+        headerMessageId: null,
         overflow
       }
       staged.segments.push(segmentData)

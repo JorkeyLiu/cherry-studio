@@ -569,52 +569,87 @@ export const resolveMessageNavigation = (
   const target = group?.messages[0]
   return target ? { kind: 'message', targetId: target.id, alignment: intent.alignment ?? 'start' } : null
 }
-
 // ---------------------------------------------------------------------------
-// Navigation presentation target (collapsed message groups)
+// Fold-marker grounding (message-level fold, marker-only navigation)
 // ---------------------------------------------------------------------------
-
 /**
- * Presentation that physically owns a resolved navigation message identity.
- *
- * A message row is the ordinary case: the stable `message-<id>` element is the
- * geometry and the anchor identity. A member of a COLLAPSED (folded) group has
- * no mounted row at all — the fold removes its bodies from the flow while the
- * group keeps one header label at the seam — so navigation positions the group
- * header and keeps the group folded. The target is therefore resolved once,
- * here, and every status/geometry/anchor read below uses the same answer.
+ * Collapsed-root contract a fold block provides for navigation grounding:
+ * the collapsed root carries `data-folded-message-ids` listing the hidden
+ * member message ids it stands in for (space-separated tokens, JSON array
+ * also accepted). Navigation queries `[data-folded-message-ids]`, parses the
+ * value and checks `includes(id)`.
+ * Current render wrapper members come from the layout's own flow entries;
+ * this DOM attribute is only the mounted marker identity, never a membership
+ * authority.
  */
-export type MessageNavigationPresentationTarget =
-  | { kind: 'message-row'; messageId: string }
-  | { kind: 'segment-header'; messageId: string; segmentId: string }
-
+export const FOLDED_MARKER_IDS_ATTR = 'data-folded-message-ids'
+export const FOLDED_MARKER_SELECTOR = `[${FOLDED_MARKER_IDS_ATTR}]`
 /**
- * Maps a navigation message identity to the presentation that owns it.
- *
- * `foldedSegmentIdForMessage` is the caller's AUTHORITY catalog lookup
- * (message → owning segment, folded segments only). It is injected rather than
- * read from the DOM on purpose: a closing fold keeps its body mounted for the
- * exit motion, and a collapsed group's membership can span runs that are not
- * all mounted, so only the authority catalog can say which messages have no
- * row. DOM-local membership inference is never an identity source.
- *
- * Pure: no DOM, no store, no side effects.
+ * Parse one `data-folded-message-ids` value into its hidden member ids.
+ * Accepts the collapsed root's space-separated token list (the
+ * `data-folded-group-ids` sibling convention) as well as a JSON string
+ * array, so marker grounding stays independent of the block's serializer.
+ * Returns the id list, or `null` when the value carries no usable id
+ * (fail-closed: the caller treats it as no marker).
  */
-export const resolveNavigationPresentationTarget = (
-  messageId: string,
-  foldedSegmentIdForMessage: (messageId: string) => string | null | undefined
-): MessageNavigationPresentationTarget => {
-  let segmentId: string | null | undefined = null
-  try {
-    segmentId = foldedSegmentIdForMessage(messageId)
-  } catch {
-    segmentId = null
+export const parseFoldedMessageIdsAttr = (value: string | null | undefined): string[] | null => {
+  if (typeof value !== 'string' || value.length === 0) return null
+  const text = value.trim()
+  if (text.length === 0) return null
+  if (text.startsWith('[') || text.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (!Array.isArray(parsed)) return null
+      const out: string[] = []
+      for (const entry of parsed) {
+        if (typeof entry !== 'string' || entry.length === 0) return null
+        out.push(entry)
+      }
+      return out.length > 0 ? out : null
+    } catch {
+      return null
+    }
   }
-  if (typeof segmentId === 'string' && segmentId.length > 0) {
-    return { kind: 'segment-header', messageId, segmentId }
-  }
-  return { kind: 'message-row', messageId }
+  const tokens = text.split(/\s+/).filter((token) => token.length > 0)
+  return tokens.length > 0 ? tokens : null
 }
+/**
+ * Locate the mounted collapsed marker that stands in for `messageId`.
+ * Scans `container` (defaults to `document`) for `[data-folded-message-ids]`,
+ * parses each value with {@link parseFoldedMessageIdsAttr} and returns the
+ * first connected element whose list includes the id — or `null` when no
+ * marker is mounted. Pure DOM read, no state writes, never expands.
+ */
+export const findFoldedMarkerElement = (
+  messageId: string,
+  container?: Pick<Document | HTMLElement, 'querySelectorAll'> | null
+): HTMLElement | null => {
+  if (!messageId) return null
+  try {
+    const root = container ?? (typeof document !== 'undefined' ? document : null)
+    if (!root) return null
+    const nodes = root.querySelectorAll(FOLDED_MARKER_SELECTOR)
+    for (const node of Array.from(nodes)) {
+      if (!(node instanceof HTMLElement)) continue
+      if (!node.isConnected) continue
+      const ids = parseFoldedMessageIdsAttr(node.getAttribute(FOLDED_MARKER_IDS_ATTR))
+      if (ids && ids.includes(messageId)) return node
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+/**
+ * Whether a collapsed marker for `messageId` is currently mounted. A mounted
+ * marker is a settled navigation target in its own right: focus navigation
+ * positions the marker and settles, never faking `not-found`/`cancelled` and
+ * never taking a parallel scroll owner.
+ */
+export const isFoldMarkerMounted = (
+  messageId: string,
+  container?: Pick<Document | HTMLElement, 'querySelectorAll'> | null
+): boolean => findFoldedMarkerElement(messageId, container) !== null
 
 export const chooseNavigationWindow = (
   messages: Message[],

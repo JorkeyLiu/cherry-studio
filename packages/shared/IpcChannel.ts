@@ -282,6 +282,8 @@ export enum IpcChannel {
   ChatDb_SelectAnswerMessage = 'chatdb:select-answer-message',
   // BRANCH-12: one atomic multi-model useful selection (group-level useful switch)
   ChatDb_SelectUsefulAnswer = 'chatdb:select-useful-answer',
+  // Turn-level fold: one atomic multi-turn fold/unfold (group-level range command)
+  ChatDb_SetTurnFolds = 'chatdb:set-turn-folds',
   ChatDb_DeleteMessage = 'chatdb:delete-message',
   ChatDb_DeleteMessages = 'chatdb:delete-messages',
   ChatDb_UpdateBlocks = 'chatdb:update-blocks',

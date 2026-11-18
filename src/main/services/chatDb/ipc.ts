@@ -79,6 +79,7 @@ import type {
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
   SelectUsefulAnswerRequest,
+  SetTurnFoldsRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -556,6 +557,14 @@ export function registerChatDbIpc(): () => void {
     return agg.selectUsefulAnswer(req.topicId, req.messageId, req.branchId)
   })
 
+  // 7d. set-turn-folds: turn-level atomic fold/unfold. Main resolves every
+  // selected stable group id to its COMPLETE turn membership on the addressed
+  // route (window-independent, before any write) and persists the whole scope
+  // in one transaction, so a turn can never be left partially folded.
+  handleCommand(IpcChannel.ChatDb_SetTurnFolds, (agg, req: SetTurnFoldsRequest) => {
+    return agg.setTurnFolds(req.topicId, req.selectedGroupIds, req.folded, req.branchId)
+  })
+
   // 8. delete-message
   handleCommand(IpcChannel.ChatDb_DeleteMessage, (agg, req: DeleteMessageRequest) => {
     return agg.deleteMessage(req.topicId, req.messageId, req.branchId)
@@ -600,7 +609,7 @@ export function registerChatDbIpc(): () => void {
 
   // 14. list-segments (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ListSegments, (agg, req: ListSegmentsRequest) => {
-    return agg.listSegments(req.topicId)
+    return agg.listSegments(req.topicId, req.branchId)
   })
 
   // 15. upsert-segment (Phase 5.1A)
@@ -615,7 +624,7 @@ export function registerChatDbIpc(): () => void {
 
   // 17. delete-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_DeleteSegment, (agg, req: DeleteSegmentRequest) => {
-    return agg.deleteSegment(req.segmentId)
+    return agg.deleteSegment(req.segmentId, req.branchId)
   })
 
   // 18. replace-segment-membership (Phase 5.1A)

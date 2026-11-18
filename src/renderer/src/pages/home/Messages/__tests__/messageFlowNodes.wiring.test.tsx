@@ -22,9 +22,11 @@
  * narrowest execution of the exact production mapping.
  */
 import type { TopicBranchWire } from '@renderer/services/db/types'
+import store from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
 import { render } from '@testing-library/react'
+import { Provider } from 'react-redux'
 import { describe, expect, it, vi } from 'vitest'
 
 import { buildDividerKey, dividerRowTestId } from '../BranchDividers'
@@ -307,5 +309,130 @@ describe('messageFlowNodes production wiring', () => {
       ).toBeNull()
     }
     expect(onTurnClick).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Folded members leave the mounted flow (their bodies render nothing), so a
+ * selected range that reaches ACROSS a folded block is composed as several
+ * outline chunks of ONE selected segment. This test runs the production
+ * pipeline end to end for that shape — real projection, real segment/layer
+ * builder, real flow builder, real composer — and pins the invariant that
+ * matters at the display window: one host per row, no edit presentation left
+ * behind after the selection ends.
+ */
+describe('messageFlowNodes wiring — selected range across a folded block', () => {
+  const foldedMessage = (
+    id: string,
+    role: Message['role'],
+    askId: string | undefined,
+    seq: string,
+    folded: boolean
+  ) => ({
+    ...message(id, role, askId, seq),
+    folded
+  })
+
+  // Chronological oldest→newest: older turn, two folded turns, then two
+  // ordinary turns. The fold is a message-level fact on every member row.
+  const FOLDED_MESSAGES: Message[] = [
+    foldedMessage('u-old', 'user', undefined, '01', false),
+    foldedMessage('a-old', 'assistant', 'u-old', '02', false),
+    foldedMessage('u-fold-a', 'user', undefined, '03', true),
+    foldedMessage('a-fold-a', 'assistant', 'u-fold-a', '04', true),
+    foldedMessage('u-fold-b', 'user', undefined, '05', true),
+    foldedMessage('a-fold-b', 'assistant', 'u-fold-b', '06', true),
+    foldedMessage('u-anchor', 'user', undefined, '07', false),
+    foldedMessage('a-anchor', 'assistant', 'u-anchor', '08', false),
+    foldedMessage('u-new', 'user', undefined, '09', false),
+    foldedMessage('a-new', 'assistant', 'u-new', '10', false)
+  ]
+
+  const buildFoldedFlow = (selectedGroupIds: string[], isEditMode: boolean) => {
+    const win = createLatestMessageWindow(FOLDED_MESSAGES, 20)
+    const grouped = projectMessageViewportGroups(win.displayMessages, win.displayGroups)
+    const segments = buildRenderSegments(grouped, isEditMode, selectedGroupIds)
+    const layers = buildRenderLayers(segments)
+    const nodes = buildMessageFlowNodes({
+      layerRuns: layers,
+      contextDividerGroupKey: null,
+      forkDividers: [],
+      branchPath: [],
+      branches: [],
+      topicDisplayName: 'Test Topic',
+      isMessageInSegment: none,
+      isMessageFirstInSegment: none,
+      isMessageLastInSegment: none,
+      renderBody: renderBodyProbe,
+      renderForkBoundary: renderForkProbe,
+      renderContextBoundary: renderContextProbe
+    })
+    return { nodes, segments }
+  }
+
+  // The whole range, with the folded turns strictly INSIDE it: the range reaches
+  // across the block, which is what splits its outline in two chunks.
+  const RENDERED_SELECTION = ['u-new', 'u-anchor', 'u-fold-b', 'u-fold-a', 'u-old']
+
+  it('keeps one host per row when the range crosses the block, then none after it ends', () => {
+    const selected = buildFoldedFlow(RENDERED_SELECTION, true)
+    // The four selected turns stay ONE atomic selected segment (the fold does
+    // not change selection semantics) ...
+    const selectedSegments = selected.segments.filter((seg) => seg.selected)
+    expect(selectedSegments.length).toBe(1)
+    const segmentId = selectedSegments[0].stableSegmentId
+
+    const selectedTurnAskIds = new Set(RENDERED_SELECTION)
+    const { container, rerender } = render(
+      <Provider store={store}>
+        {renderEditFlowNodes({ nodes: selected.nodes, isEditMode: true, selectedTurnAskIds })}
+      </Provider>
+    )
+    // ... while its RENDER is split in two outline chunks by the folded block,
+    // so both outlines carry the same segment identity.
+    const outlines = Array.from(container.querySelectorAll('[data-stable-segment-id]'))
+    expect(outlines.length).toBe(2)
+    expect(outlines.map((el) => el.getAttribute('data-stable-segment-id'))).toEqual([segmentId, segmentId])
+    // The folded members stay hidden and the block stays collapsed.
+    expect(container.querySelectorAll('[data-testid="folded-section-collapsed"]').length).toBe(1)
+    for (const id of ['body-u-fold-a', 'body-a-fold-a', 'body-u-fold-b', 'body-a-fold-b']) {
+      expect(container.querySelectorAll(`[data-testid="${id}"]`).length).toBe(0)
+    }
+
+    rerender(
+      <Provider store={store}>
+        {renderEditFlowNodes({ nodes: buildFoldedFlow([], false).nodes, isEditMode: false })}
+      </Provider>
+    )
+
+    const bodies = Array.from(container.querySelectorAll('[data-testid^="body-"]')).map((el) =>
+      el.getAttribute('data-testid')
+    )
+    const expectedBodies = ['body-u-new', 'body-a-new', 'body-u-anchor', 'body-a-anchor', 'body-u-old', 'body-a-old']
+    expect(bodies.sort()).toEqual([...expectedBodies].sort())
+    for (const testId of expectedBodies) {
+      expect(container.querySelectorAll(`[data-testid="${testId}"]`).length).toBe(1)
+    }
+    // One turn host per visible turn, no cover, no outline, and the block is
+    // still folded (a selection never expands it).
+    expect(container.querySelectorAll('[data-testid="edit-turn"]').length).toBe(3)
+    expect(container.querySelectorAll('[data-testid="edit-turn-cover"]').length).toBe(0)
+    expect(container.querySelectorAll('[data-stable-segment-id]').length).toBe(0)
+    expect(container.querySelectorAll('[data-testid="folded-section-collapsed"]').length).toBe(1)
+  })
+
+  it('keeps the folded turns part of the selection without expanding the block', () => {
+    const { nodes } = buildFoldedFlow(RENDERED_SELECTION, true)
+    const { container } = render(
+      <Provider store={store}>
+        {renderEditFlowNodes({ nodes, isEditMode: true, selectedTurnAskIds: new Set(RENDERED_SELECTION) })}
+      </Provider>
+    )
+    // The block reads the whole-turn selection and paints the selected shell.
+    const block = container.querySelector('[data-testid="folded-section-collapsed"]') as Element
+    expect(block.getAttribute('data-folded-section-selected')).toBe('true')
+    expect(block.getAttribute('data-folded-section-partial')).toBe('false')
+    expect(block.getAttribute('data-expanded')).toBe('false')
+    expect(container.querySelectorAll('[data-testid="folded-section-expanded"]').length).toBe(0)
   })
 })

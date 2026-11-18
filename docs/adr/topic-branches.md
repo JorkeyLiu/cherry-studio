@@ -69,7 +69,7 @@ BRANCH-1…BRANCH-13 为本文档 durable decision IDs，全部 **Locked**。下
 | **BRANCH-9** | **Main 权威与 Renderer fail-closed**：Main SQLite（含 `mutableMessageIds` 发布者）为唯一权威；Renderer capability 仅预检，unknown/stale/route mismatch fail-closed；loaded-only 投影永不用作完备权威 | §4.1、§4.8 |
 | **BRANCH-10** | **Local-only 与复制区分**：话题内分支、迁移与跨话题引用均 local-only、不进 sync（main 行保持 syncable）；`branchMessagesToTopic` fresh-ID 复制不是话题内分支（“复制”语义不变） | §7 |
 | **BRANCH-11** | **有效路由递归算法**：anchor-inclusive 递归合成、稳定 ID、无复制，每层确定性 `sort_order ASC, id ASC`；有效路由基座为「前缀 + main 自有行」，普通话题前缀为空、引用目标前缀为其引用前缀；每层边界取「锚点存活即锚点，否则其之前最近存活消息，否则空继承」 | §4.3、§6 |
-| **BRANCH-12** | **复合变更实际写目标与原子性**：answer-group、segment、批量/语义删除、resend/regenerate、reset-core 一律只验证实际写/删/重排目标的 owner；多目标须全体 owner match，先验证后写，失败零部分写（同一根事务）；回答组选择/重排/useful/append 组级原子，retry-all/批量重生成逐项、首败停止 | §4.6 |
+| **BRANCH-12** | **复合变更实际写目标与原子性**：answer-group、segment、批量/语义删除、resend/regenerate、reset-core、组级范围命令（创建/替换 message group、多 turn 折叠）一律只验证实际写/删/重排目标的 owner；多目标须全体 owner match，先验证后写，失败零部分写（同一根事务）；同一 owner 的范围即使跨越该路由未 taken 的子分支分叉点也允许；回答组选择/重排/useful/append 组级原子，retry-all/批量重生成逐项、首败停止 | §4.6 |
 | **BRANCH-13** | **跨话题引用（“引用”子菜单，bounded 扩展）**：目标逻辑话题新建一条引用源关系；引用前缀只读、目标自有后缀可写；复用既有路由/capability/权限机制，不建第二子系统；源删除/分支删除 → 前缀缺席但目标与后缀保留；端点删除 → 前缀按同一继承边界缩短；引用 local-only | §6 |
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：BRANCH-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
@@ -127,6 +127,8 @@ effective(topic, branch):
 
 owner 完整控制：后代是否引用、引用数量、是否位于后代有效前缀，都不得收缩 owner 的变更权限——内容编辑、blocks、删除、批量删除、重排、回答组字段、segment 关系、resend/regenerate 等一律只按实际变更目标的 owner 判权，不得因 live descendants 拒绝 owner；非 owner 仍 fail-closed。跨实体命令只允许写/删/重排当前路由 owned 的实际目标；读取祖先引用本身不构成变更，但祖先引用永不构成插入/分支锚点授权（本段分叉边界例外与 §5.1 owner-only 除外）。事务原子性保留（§4.6）。
 
+**组级范围（range）操作**：以一组 turn/消息为写目标的组级命令（创建或整体替换 message group 成员、多 turn 折叠）只按实际写目标的 owner 判权：全体成员 `owner == addressed route` 则允许，任一非 owner 整批拒绝、零部分写。同一 owner 的范围即使跨越该路由未 taken 的子分支分叉点也允许——分叉点（含分流分隔线/大纲分叉标记的视觉位置）永不构成范围操作的阻断条件；范围整体位于该路由的继承/外来源前缀内时仍 fail-closed（前缀只读）。单消息基础操作（内容编辑、单条删除/重排、回答组选择/useful、单条折叠）保持原有 owner 相等性与分叉边界例外语义不变。上下文窗口锚点（§4.7）**不是**变更边界，永不阻断任何范围操作。引用层的前缀可见性呈现（逐层的弱 pill 等）只是各层视觉，不改变消息的权威身份与导航（稳定路由 + 稳定消息 ID），因此也不改变本节的 owner 判权。
+
 ### 4.5 蝴蝶效应与继承边界前移
 
 （BRANCH-5）owner 对唯一实体的内容/blocks 修改被所有引用路由以同稳定 ID 立即看到；删除前缀行使后代有效路由自然缩短，不级联删后代分支行；重排 owner 序列使所有引用该序列的后代有效路由自然变化。若 owner 删除某分支锚点（单条删除、批量删除或分支 subtree 删除同样适用），Main 在同一根事务内把该分支的边界前移到父有效路由中该锚点之前的最近存活消息，因此依赖该锚点的后代路由保持分支元数据并继续解析为缩短后的历史；若其前没有任何存活消息，则该层继承历史为空，分支与其自有消息仍可读写。批量删除时前驱计算跳过本批所有待删行，连续删除逐次前移；同一规则同样用于引用端点（§6）。
@@ -157,6 +159,7 @@ owner 完整控制：后代是否引用、引用数量、是否位于后代有�
 | `insertMessagesAfterAnchor`（含 append） | 新行（owned 后缀）+ 被 patch 的既有行 | 新行按 route stamping 落后缀；既有行按单行 owner 判权；genuinely new suffix 永不要求既有组可变；自有锚点走组尾，分叉边界（§4.4 唯一例外：分支 `anchorMessageId` 或引用端点）允许并落自有后缀起始，更老祖先/外来源引用以 `VALIDATION_ERROR` 拒绝零写 |
 | `cloneMessagesToTopic` / `pasteMessagesToTopic` | 新行 + 被 patch 的既有行 | 新行落目标 route；既有行 owner 判权；跨话题冲突 fail-closed |
 | `upsertSegment` / `replaceSegmentMembership` | segment 行（成员为引用） | 每成员 `owner == addressed route`（non-owner 拒绝，含祖先引用）；owned 行即使被后代引用仍可 segment；原子替换 |
+| `setTurnFolds`（整 turn 折叠/展开，可多 turn） | 所选 turn 的**完整**成员行（Main 按有效路由解析，与加载窗口/视口无关） | 全体成员 `owner == addressed route`；同一 message group 内只折叠部分 turn 允许（组不是上下文单位）；任一非 owner 整批拒绝、零部分写；同一 owner 的范围跨越未 taken 子分支分叉点仍允许；折叠是 local-only 表现状态，不改 owner、顺序与边界 |
 | `resendUserMessages` | 实际 reset 的 assistants + 新建成员 | user root 仅要求在有效路由可读（不要求可变）；每个实际 reset 的 assistant 须 owned；非 owned 整批拒绝；新建落 owned 后缀 |
 | `regenerateAssistantMessage` | 选中的 assistant | 选中须 owned；user root 仅要求存在可读 |
 | `resetMessagesCoreInTx`（共享 core） | reset entries + 待删 blocks | candidate messages owner match（missing = 新后缀，允许）；blocks 经父 owner 判权 |
@@ -179,7 +182,7 @@ owner 完整控制：后代是否引用、引用数量、是否位于后代有�
 
 （BRANCH-8）上下文算法 branch-neutral：只关注当前路由的 effective message sequence 与稳定 IDs，按整 turn 选取 anchor-to-end，不判定 ownership/permission。每路由可有独立 context-window anchor/state：`routeKey = topicId`（main）与 `topicId:branchId`（分支）严格隔离、互不写入，不同分支可有不同窗口。分支锚点（fork 消息）与 context-window anchor（起始 turn 的 group key）严格区分：前者定义路由构成，后者定义窗口起点。
 
-分支继承映射（父锚点索引 → 新分支；范围内按索引，clone 重映射 ID 但保留索引）仅在范围内不使用 `contextCount` 重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 点击同位，`null` → 首 turn），永不钳制到末尾；空分支无锚点；`contextCount` 变更永不移动既有锚点。上下文锚点的有效性/默认/继承/修复策略由 Context window governance 治理（链接见 §9），本文档只定义分支与上下文的关系；context capability（`context-closure` 等）永不作为变更权限。
+分支继承映射（父锚点索引 → 新分支；范围内按索引，clone 重映射 ID 但保留索引）仅在范围内不使用 `contextCount` 重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 点击同位，`null` → 首 turn），永不钳制到末尾；空分支无锚点；`contextCount` 变更永不移动既有锚点。上下文锚点的有效性/默认/继承/修复策略由 Context window governance 治理（链接见 §9），本文档只定义分支与上下文的关系；context capability（`context-closure` 等）永不作为变更权限。整 turn 折叠是表现状态而非窗口结构变更（CW-10）：不移动本路由锚点、不改变 `contextCount`、不移动边界分隔线；反向，上下文窗口锚点语义也永不阻断范围操作（§4.4）。
 
 **视口归属**：聊天视口定位由 Chat Viewport Position 治理（VIEWPORT-1…VIEWPORT-16，链接见 §9）；路由切换永不改变话题身份，视口快照按路由键隔离。§5.3 新分支沿用既有“分支继承映射 + 路由键隔离”规则，本文档不重定义视口语义。
 

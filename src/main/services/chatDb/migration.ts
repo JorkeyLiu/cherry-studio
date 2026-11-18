@@ -1264,6 +1264,35 @@ export const MIGRATIONS: MigrationEntry[] = [
       )`,
       `CREATE INDEX IF NOT EXISTS topic_references_source_topic_id_idx ON topic_references(source_topic_id)`
     ]
+  },
+  {
+    key: '019_retire_segment_fold',
+    description:
+      'Retire the group-level collapse marker: a collapsed message group is no longer a context mutation, so `topic_segments.extra.folded` is inert data and is removed here. Only that one segment overflow key is touched — every other segment extra key (color, foldSelected, useful, unknown) and every membership row survive byte-semantics-preserved, and `messages.extra` is never rewritten, so message-level fold markers are untouched. Idempotent: a re-run matches no rows (the key is gone) and rewriting a row without the key would be a no-op; NULL/non-JSON extra is skipped. Groups therefore reappear expanded on the next read.',
+    sql: [
+      `UPDATE topic_segments
+         SET extra = json_remove(extra, '$.folded')
+       WHERE extra IS NOT NULL
+         AND json_valid(extra)
+         AND json_type(extra, '$.folded') IS NOT NULL`
+    ]
+  },
+  {
+    key: '020_topic_segment_header_identity',
+    description:
+      'Give a message group a persisted, stable head identity: `topic_segments.header_message_id` is the group member that was first at creation, and it is never re-derived from a rendered window or recomputed when membership changes. Additive nullable column (no table rebuild); existing groups are backfilled deterministically from authority membership order (`sort_order ASC, message_id ASC` first member). A group whose head row later leaves the group is repaired to its first surviving member by Main, so a NULL head only ever means "this group has no resolvable member" (empty membership), never a silently different identity. Membership rows, segment overflow keys and messages are untouched.',
+    sql: [
+      `ALTER TABLE topic_segments ADD COLUMN header_message_id TEXT`,
+      `UPDATE topic_segments
+          SET header_message_id = (
+                SELECT m.message_id
+                  FROM topic_segment_messages m
+                 WHERE m.segment_id = topic_segments.id
+                 ORDER BY m.sort_order ASC, m.message_id ASC
+                 LIMIT 1
+              )
+        WHERE header_message_id IS NULL`
+    ]
   }
 ]
 

@@ -141,7 +141,19 @@ function stripKeys(wire: JsonObject, keys: ReadonlySet<string>): JsonObject {
 
 const TOPIC_STRIP_KEYS = new Set(['id', 'assistantId', 'deletedAt'])
 const MESSAGE_STRIP_KEYS = new Set(['topicId', 'assistantId'])
-const SEGMENT_STRIP_KEYS = new Set(['topicId', 'firstMessageId', 'lastMessageId', 'messageCount'])
+const SEGMENT_STRIP_KEYS = new Set([
+  'topicId',
+  'firstMessageId',
+  'lastMessageId',
+  'messageCount',
+  // The topic-data format carries no group-head identity: the head and its
+  // owner are Main-resolved authority, re-derived on import from membership
+  // order, never shipped or trusted from a payload.
+  'headerMessageId',
+  'ownerTopicId',
+  'ownerBranchId',
+  'route'
+])
 
 /**
  * Build the versioned export payload from authoritative domain rows.
@@ -220,10 +232,23 @@ export function buildTopicDataExport(input: TopicDataExportInput): TopicDataExpo
     return wire
   })
 
+  // Owner rows for head resolution come from the export's own authoritative
+  // message rows (no I/O, no renderer projection).
+  const ownerByMessageId = new Map(input.messages.map((m) => [m.id, m]))
   const segments = input.segments.map(({ segment, messageIds }) => {
-    const wire = segmentToWire(segment, messageIds) as SegmentWire & JsonObject
+    const persisted = segment.headerMessageId ?? null
+    const effective = persisted !== null && messageIds.includes(persisted) ? persisted : (messageIds[0] ?? null)
+    const ownerRow = effective === null ? undefined : ownerByMessageId.get(effective)
+    // Head identity is Main-resolved authority, but the format carries none
+    // of it: every head/owner/route key is stripped below, so the payload can
+    // neither ship nor smuggle an identity the importer would trust.
+    const wire = segmentToWire(segment, messageIds, {
+      headerMessageId: effective,
+      ownerTopicId: ownerRow?.topicId ?? segment.topicId,
+      ownerBranchId: ownerRow?.branchId ?? null
+    }) as SegmentWire & JsonObject
     return {
-      ...segment.overflow,
+      ...stripRetiredSegmentFold(segment.overflow),
       ...stripKeys(wire, SEGMENT_STRIP_KEYS)
     } as TopicDataExportSegment
   })
@@ -333,6 +358,21 @@ function splitOverflow(
     overflow[key] = value
   }
   return overflow
+}
+
+/**
+ * Segment overflow minus the retired group-collapse marker.
+ *
+ * Collapsing a message group is no longer a context mutation, so `folded` is
+ * dropped on both sides of topic-data exchange: an export never carries it and
+ * an import never persists it. That is what keeps a stale marker from being
+ * resurrected by a JSON/ZIP round trip. Every other overflow key is preserved.
+ */
+function stripRetiredSegmentFold(overflow: Record<string, unknown>): Record<string, unknown> {
+  if (!('folded' in overflow)) return overflow
+  const rest = { ...overflow }
+  delete rest.folded
+  return rest
 }
 
 const TOPIC_KNOWN_KEYS = new Set(['name', 'createdAt', 'updatedAt'])
@@ -544,14 +584,9 @@ export function validateTopicDataImport(payload: unknown): ValidatedTopicDataImp
         fail(`payload.segments[${index}]`, 'expected string|null for "color"')
       }
     }
-    // Folded presentation state rides the segment overflow like `color`; a
-    // non-boolean value would be silently coerced and flip context participation.
-    if ('folded' in overflow) {
-      const value = overflow.folded
-      if (value !== null && value !== undefined && typeof value !== 'boolean') {
-        fail(`payload.segments[${index}]`, 'expected boolean|null for "folded"')
-      }
-    }
+    // The retired group-collapse marker is deliberately not validated: a stale
+    // `folded` in an imported payload is dropped in planTopicDataImport, so its
+    // shape never decides anything here.
   }
 
   // F1: every non-null message owner must resolve to an exported branch.
@@ -842,7 +877,11 @@ export function planTopicDataImport(
       createdAt: (record.createdAt as string | null) ?? null,
       updatedAt: (record.updatedAt as string | null) ?? null,
       sortOrder: record.sortOrder as number,
-      overflow: splitOverflow(record, SEGMENT_KNOWN_KEYS, 'payload.segments')
+      // The topic-data format carries no group-head identity: the head is
+      // derived from authority membership order on read/repair, never from a
+      // rendered window, so nothing is invented here.
+      headerMessageId: null,
+      overflow: stripRetiredSegmentFold(splitOverflow(record, SEGMENT_KNOWN_KEYS, 'payload.segments'))
     })
     memberships.push({
       segmentId: freshId,

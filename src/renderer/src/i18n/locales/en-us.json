@@ -979,6 +979,9 @@
         "placeholder": "Search"
       }
     },
+    "click_to_collapse_rail": "Click rail to collapse",
+    "click_to_expand": "Click the folded block",
+    "collapse_view": "Collapse view",
     "context_window_start": "Context Start",
     "deeply_thought": "Deeply thought ({{seconds}} seconds)",
     "default": {
@@ -1008,6 +1011,15 @@
       "undoAction": "Undo",
       "undone": "Undone"
     },
+    "expand_view": "Expand view",
+    "fold_failed": "Failed to fold — please retry",
+    "fold_selected_turns": "Fold Selected Turns",
+    "folded_not_in_context": "Excluded from context",
+    "folded_partial_selection": "{{selected}} of {{total}} turns selected",
+    "folded_preview_hint": "The following {{count}} turns are folded · Excluded from context",
+    "folded_success": "Selected turns folded",
+    "folded_turns_summary": "{{count}} conversation folded",
+    "folded_turns_summary_other": "{{count}} conversations folded",
     "input": {
       "auto_resize": "Auto resize height",
       "context_count": {
@@ -1394,7 +1406,10 @@
       },
       "unpin": "Unpin Topic"
     },
-    "translate": "Translate"
+    "translate": "Translate",
+    "unfold_failed": "Failed to unfold — please retry",
+    "unfold_selected_turns": "Unfold",
+    "unfolded_success": "Unfolded (restored to context)"
   },
   "code": {
     "auto_update_to_latest": "Automatically update to latest version",
@@ -5093,6 +5108,7 @@
     "fold": "Collapse group",
     "folded": "Collapsed",
     "foldedHint": "Expand to restore context",
+    "groupMenu": "Message group menu",
     "jumpToStart": "Jump to start",
     "merge": {
       "success": "Group merged successfully"
@@ -5109,7 +5125,11 @@
       "success": "Removed from group"
     },
     "removeFromSegment": "Remove from Group",
-    "rename": "Rename"
+    "rename": "Rename",
+    "turns": {
+      "count": "{{count}} turn",
+      "count_other": "{{count}} turns"
+    }
   },
   "trace": {
     "backList": "Back To List",

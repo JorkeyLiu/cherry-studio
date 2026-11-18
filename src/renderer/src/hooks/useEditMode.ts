@@ -161,7 +161,7 @@ export function useCreateEditMode(
    * 现状；端点缺失或读取失败则保持旧选择，不发布任何部分范围。
    */
   const requestCompleteRange = useCallback(
-    (targetAskId: string, anchorId: string, isCtrl: boolean) => {
+    (targetAskIds: readonly string[], anchorId: string, isCtrl: boolean) => {
       const token = rangeRequestTokenRef.current + 1
       rangeRequestTokenRef.current = token
       const requestedTopicId = liveRef.current.topicId
@@ -197,18 +197,29 @@ export function useCreateEditMode(
 
         const completeGroups = getMessageGroups(snapshot.messages)
         const anchorIndex = getGroupIndex(completeGroups, anchorId)
-        const targetIndex = getGroupIndex(completeGroups, targetAskId)
-        if (anchorIndex < 0 || targetIndex < 0) {
+        // A batch target (a folded block spanning several whole turns) resolves
+        // its range against the endpoint NEAREST the anchor, then carries the
+        // whole batch: a range that only reached the far end of the block would
+        // silently drop the block's other turns from the selection.
+        const targetIndices = targetAskIds
+          .map((askId) => getGroupIndex(completeGroups, askId))
+          .filter((index) => index >= 0)
+        if (anchorIndex < 0 || targetIndices.length === 0) {
           logger.warn(
             `[handleGroupClick] Shift range endpoints missing from route ${requestedRouteKey}; selection unchanged`
           )
           return
         }
+        const targetIndex = targetIndices.reduce((nearest, index) =>
+          Math.abs(index - anchorIndex) < Math.abs(nearest - anchorIndex) ? index : nearest
+        )
 
         const start = Math.min(anchorIndex, targetIndex)
         const end = Math.max(anchorIndex, targetIndex)
-        const rangeGroups = completeGroups.slice(start, end + 1)
-        const rangeAskIds = rangeGroups.map((group) => group.askId)
+        const rangeAskIds = [
+          ...new Set([...completeGroups.slice(start, end + 1).map((group) => group.askId), ...targetAskIds])
+        ]
+        const rangeGroups = completeGroups.filter((group) => rangeAskIds.includes(group.askId))
         const nextSelection = isCtrl ? [...new Set([...baselineSelection, ...rangeAskIds])] : rangeAskIds
 
         setRangeOverlay((previous) => {
@@ -238,7 +249,7 @@ export function useCreateEditMode(
         const anchorGroupIndex = getGroupIndex(groups, anchorGroupId)
         const targetGroupIndex = getGroupIndex(groups, askId)
         if (anchorGroupIndex < 0 || targetGroupIndex < 0) {
-          requestCompleteRange(askId, anchorGroupId, isCtrl)
+          requestCompleteRange([askId], anchorGroupId, isCtrl)
           return
         }
 
@@ -286,6 +297,105 @@ export function useCreateEditMode(
       dispatch(setFocusedIndex(groupIndex))
       dispatch(setAnchorGroupId(askId))
       dispatch(setFocusedGroupId(askId))
+    },
+    [
+      dispatch,
+      groups,
+      selectedGroupIds,
+      anchorGroupId,
+      focusedGroupId,
+      isEnabled,
+      requestCompleteRange,
+      noteSelectionIntent
+    ]
+  )
+
+  /**
+   * Batch selection gesture: the SAME edit-selection semantics as one turn
+   * click, applied to a group of whole turns that compose ONE selection object
+   * (a folded block).
+   *
+   * It is a member of this hook, not a caller-side composition, because the
+   * selection state it must keep coherent — anchor, focus, last index and the
+   * selection-intent generation — is owned here. Selecting a block with the bare
+   * `setSelectedGroupIds` action and no anchor/focus/index update left Shift
+   * extending from a stale anchor, so the exact same bookkeeping as
+   * `handleGroupClick` runs here, in the same order (`setLastSelectedIndex` /
+   * `setFocusedIndex` reset the paired id, so ids are dispatched after them).
+   *
+   * Turning the block into a selection must never depend on how much of the
+   * route is currently rendered: the ids are stable whole-turn ids supplied by
+   * the block's authority data, and an endpoint outside the rendered window is
+   * resolved through the same complete-route snapshot the single-turn Shift path
+   * uses.
+   */
+  const handleBlockSelect = useCallback(
+    (askIds: readonly string[], modifiers: { isCtrl?: boolean; isShift?: boolean } = {}) => {
+      if (!isEnabled) return
+      const blockIds = [...new Set(askIds.filter((id) => id !== ''))]
+      if (blockIds.length === 0) return
+      const isCtrl = modifiers.isCtrl === true
+      const isShift = modifiers.isShift === true
+      // One gesture, one intent: an in-flight cross-window range request can no
+      // longer land on top of this selection.
+      noteSelectionIntent()
+
+      if (isShift) {
+        // Shift (with or without Ctrl) extends from the existing anchor. A plain
+        // Shift REPLACES with the range, Ctrl+Shift UNIONS it — exactly the
+        // single-turn rules. No anchor means no range: the gesture is ignored
+        // rather than inventing an anchor.
+        if (!anchorGroupId) return
+        const anchorGroupIndex = getGroupIndex(groups, anchorGroupId)
+        const blockIndices = blockIds.map((askId) => getGroupIndex(groups, askId)).filter((index) => index >= 0)
+        if (anchorGroupIndex < 0 || blockIndices.length === 0) {
+          requestCompleteRange(blockIds, anchorGroupId, isCtrl)
+          return
+        }
+        // Range to the endpoint nearest the anchor, then carry the whole block:
+        // reaching only the far end would silently drop the block's other turns.
+        const nearestIndex = blockIndices.reduce((nearest, index) =>
+          Math.abs(index - anchorGroupIndex) < Math.abs(nearest - anchorGroupIndex) ? index : nearest
+        )
+        const start = Math.min(anchorGroupIndex, nearestIndex)
+        const end = Math.max(anchorGroupIndex, nearestIndex)
+        const rangeAskIds = [...new Set([...groups.slice(start, end + 1).map((g) => g.askId), ...blockIds])]
+        dispatch(setSelectedGroupIds(isCtrl ? [...new Set([...selectedGroupIds, ...rangeAskIds])] : rangeAskIds))
+        return
+      }
+
+      const blockIndex = getGroupIndex(groups, blockIds[0])
+      if (isCtrl) {
+        // Toggle the whole block: selected in full → remove it in full, so a
+        // partially selected block becomes fully selected, never inverted into a
+        // half state by a single click.
+        const allSelected = blockIds.every((id) => selectedGroupIds.includes(id))
+        if (allSelected) {
+          const next = selectedGroupIds.filter((id) => !blockIds.includes(id))
+          dispatch(setSelectedGroupIds(next))
+          // The anchor/focus ids are re-armed below exactly like the single-turn
+          // Ctrl toggle does, so no explicit clearing is dispatched here.
+        } else {
+          dispatch(setSelectedGroupIds([...new Set([...selectedGroupIds, ...blockIds])]))
+        }
+      } else {
+        // Plain click: replace with the block. Clicking the block when it is
+        // already the WHOLE selection clears it, mirroring the single-turn rule.
+        const isExactlyTheSelection =
+          selectedGroupIds.length === blockIds.length && blockIds.every((id) => selectedGroupIds.includes(id))
+        if (isExactlyTheSelection) {
+          dispatch(clearSelection())
+        } else {
+          dispatch(setSelectedGroupIds(blockIds))
+        }
+      }
+
+      if (blockIndex >= 0) {
+        dispatch(setLastSelectedIndex(blockIndex))
+        dispatch(setFocusedIndex(blockIndex))
+      }
+      dispatch(setAnchorGroupId(blockIds[0]))
+      dispatch(setFocusedGroupId(blockIds[0]))
     },
     [
       dispatch,
@@ -569,6 +679,7 @@ export function useCreateEditMode(
       // Actions
       toggleEditMode,
       handleGroupClick,
+      handleBlockSelect,
       handleCopy,
       handleCut,
       handlePaste,
@@ -591,6 +702,7 @@ export function useCreateEditMode(
       isSelectionMutable,
       toggleEditMode,
       handleGroupClick,
+      handleBlockSelect,
       handleCopy,
       handleCut,
       handlePaste,

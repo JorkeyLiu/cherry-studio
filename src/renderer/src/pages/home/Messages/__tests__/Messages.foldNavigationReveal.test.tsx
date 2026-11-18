@@ -1,25 +1,26 @@
 /**
- * Folded-segment navigation — mounted Messages integration (production
+ * Message-fold navigation reveal — mounted Messages integration (production
  * component, real navigation transaction, real viewport reducer).
  *
- * Claim under test: navigating to a member of a FOLDED (collapsed) segment
- * positions the viewport on the collapsed segment header label — the only
- * painted box the fold has — without expanding the group, selecting an answer,
- * or writing fold metadata. The authority path stays first-message-id based:
- * resident targets resolve straight through, non-resident targets still load
- * their around window first, and an expanded target keeps the unchanged row
- * path. A group whose closing animation still has its body mounted still
- * navigates its LABEL (presentation wins over the disappearing body).
+ * Claim under test: a navigation target whose loaded row carries its own
+ * message-level fold flag and whose block is COLLAPSED is presentation-hidden,
+ * not missing. The transaction answers it MARKER-ONLY: it positions the
+ * viewport on the block's mounted collapsed marker — the `[data-folded-
+ * message-ids]` root listing the hidden id — and settles. It never writes
+ * `expandedFoldSectionIds`, never expands, never selects, never writes fold
+ * state. Only a manual expand gesture (the block's own expand control) opens
+ * a block; selection ranges and keyboard moves passing through hidden members
+ * never expand either.
  *
- * The mocked `MessageGroup`/`TopicSegmentLine` render no rows, so geometry
- * fixtures (rows and the real chrome DOM contract: the group's in-flow 32px
- * `topic-segment-group` header row holding a 24px `topic-segment-label`) are
- * grafted into the live `#messages` host — the same technique the
- * reading-anchor and selection-follow suites use. The header row is a real
- * normal-flow row in both states; navigation still measures the LABEL, the only
- * painted box, never the row band.
+ * The mocked `MessageGroup` renders one real row per message it receives, so
+ * "the row is gone while collapsed and stays gone after a navigation" is a
+ * DOM fact of this suite, exactly as the production body-visibility decision
+ * produces it. Geometry is supplied through a prototype-level rect stub keyed
+ * by row id (and by the collapsed marker test id), the technique the
+ * reading-anchor and selection-follow suites use.
  */
 import { configureStore } from '@reduxjs/toolkit'
+import { dbService } from '@renderer/services/db'
 import clipboardReducer from '@renderer/store/clipboard'
 import editModeReducer from '@renderer/store/editMode'
 import type { Assistant, Topic } from '@renderer/types'
@@ -27,10 +28,6 @@ import { AssistantMessageStatus, type Message, UserMessageStatus } from '@render
 import { act, render } from '@testing-library/react'
 import { Provider } from 'react-redux'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
-import { resolveNavigationPresentationTarget } from '../messageNavigation'
-
-const FOLDED_SEGMENT_ID = 'seg-folded'
 
 const defaultSharedContextInfo = {
   uiMessages: [] as Message[],
@@ -142,15 +139,14 @@ vi.mock('@renderer/hooks/useTimer', () => ({
   useTimer: () => ({ setTimeoutTimer: mocks.setTimeoutTimer, clearTimeoutTimer: mocks.clearTimeoutTimer })
 }))
 vi.mock('@renderer/hooks/useTopic', () => ({ autoRenameTopic: vi.fn() }))
-// `MessagesContent` reads the segment catalog here for its own display
-// projection; the navigation claim under test reads the AUTHORITY catalog
-// through the store selectors, so this mock stays empty.
+// Group presentation is structural chrome, not the claim under test.
 vi.mock('@renderer/hooks/useTopicSegments', () => ({
   useTopicSegments: () => ({
     isMessageFirstInSegment: vi.fn(() => false),
     isMessageLastInSegment: vi.fn(() => false),
     isMessageInSegment: vi.fn(() => undefined),
-    segmentsForTopic: []
+    segmentsForTopic: [],
+    orderedSegmentsForTopic: []
   })
 }))
 vi.mock('@renderer/services/EventService', () => ({
@@ -202,14 +198,16 @@ vi.mock('@renderer/services/AssistantService', () => ({
 vi.mock('@renderer/services/db/DbService', () => ({
   dbService: {
     resolveContextClosure: vi.fn(async () => ({ resolvedAnchorGroupKey: null }) as any),
-    fetchMessagesWindow: vi.fn()
+    fetchMessagesWindow: vi.fn(),
+    setTurnFolds: vi.fn()
   },
   DbService: vi.fn()
 }))
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     resolveContextClosure: vi.fn(async () => ({ resolvedAnchorGroupKey: null }) as any),
-    fetchMessagesWindow: vi.fn()
+    fetchMessagesWindow: vi.fn(),
+    setTurnFolds: vi.fn()
   }
 }))
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
@@ -224,7 +222,10 @@ vi.mock('@renderer/utils', () => ({
 vi.mock('@renderer/utils/dom', () => ({ scrollIntoView: vi.fn() }))
 vi.mock('@renderer/utils/markdown', () => ({ updateCodeBlock: vi.fn() }))
 vi.mock('@renderer/utils/messageUtils/find', () => ({ getMainTextContent: vi.fn(() => '') }))
-vi.mock('@renderer/utils/messageUtils/is', () => ({ isTextLikeBlock: vi.fn(() => false) }))
+vi.mock('@renderer/utils/messageUtils/is', () => ({
+  isTextLikeBlock: vi.fn(() => false),
+  isMessageProcessing: vi.fn(() => false)
+}))
 vi.mock('@renderer/pages/home/Messages/domVisibility', async () => {
   const actual = await vi.importActual('@renderer/pages/home/Messages/domVisibility')
   return {
@@ -235,19 +236,25 @@ vi.mock('@renderer/pages/home/Messages/domVisibility', async () => {
 })
 vi.mock('@renderer/pages/home/Messages/messageBranch', () => ({ branchFromMessage: vi.fn() }))
 // The navigation transaction stays REAL: this suite proves the production
-// runner positions the label, so the runner and its deps must be untouched.
+// runner positions a fold-hidden target on its collapsed marker and settles,
+// so the runner and its deps must be untouched.
 vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', () => ({
   ensureMessageLoaded: (...args: any[]) => (mocks.ensureMock as (...args: any[]) => unknown)(...args),
   buildNavigationAroundRequest: vi.fn(),
   NAVIGATION_LOADER_BEFORE: 10,
   NAVIGATION_LOADER_AFTER: 19
 }))
-vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
-  projectMessageViewportGroups: vi.fn(() => []),
-  createViewportProjectionCache: () => ({ project: () => [], clear: () => {}, size: () => 0 })
-}))
+// Every message of a mounted group publishes its own stable row id. When the
+// flow hides the turn bodies (a collapsed fold block), these rows are not
+// rendered at all — exactly the production body-visibility decision.
 vi.mock('@renderer/pages/home/Messages/MessageGroup', () => ({
-  default: vi.fn(() => <div data-testid="message-group" />)
+  default: ({ messages }: { messages: Message[] }) => (
+    <div data-testid="message-group">
+      {messages.map((message) => (
+        <div key={message.id} id={`message-${message.id}`} data-testid={`message-row-${message.id}`} />
+      ))}
+    </div>
+  )
 }))
 vi.mock('@renderer/pages/home/Messages/Prompt', () => ({
   default: vi.fn(() => <div data-testid="prompt" />)
@@ -289,27 +296,7 @@ const makeTopic = (id: string): Topic => ({ id, name: `Topic ${id}`, assistantId
 const makeAssistant = (id = 'assistant-1'): Assistant =>
   ({ id, name: 'Test Assistant', prompt: '' }) as unknown as Assistant
 
-const foldedSegmentCatalog = (folded: boolean, topicId = 'topic-1') =>
-  folded
-    ? {
-        segments: {
-          entities: {
-            [FOLDED_SEGMENT_ID]: {
-              id: FOLDED_SEGMENT_ID,
-              topicId,
-              name: 'Folded group',
-              messageIds: ['a0', 'a1', 'a2'],
-              folded: true,
-              sortOrder: 0
-            }
-          },
-          ids: [FOLDED_SEGMENT_ID]
-        },
-        segmentsByTopic: { [topicId]: [FOLDED_SEGMENT_ID] }
-      }
-    : { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }
-
-function makeStore(folded: boolean) {
+function makeStore() {
   const residentEntry = { chatData: true, segments: true, residentTopic: true, applicabilityGeneration: 1 }
   return configureStore({
     reducer: {
@@ -347,7 +334,7 @@ function makeStore(folded: boolean) {
         currentTopicId: 'topic-1'
       },
       messageBlocks: { entities: {} },
-      topicSegments: foldedSegmentCatalog(folded),
+      topicSegments: { segments: { entities: {}, ids: [] }, segmentsByTopic: {} },
       residentRegistry: { entries: { 'topic-1': residentEntry } }
     } as any
   })
@@ -356,28 +343,45 @@ function makeStore(folded: boolean) {
 const rect = (top: number, height: number): DOMRect =>
   ({ top, bottom: top + height, left: 0, right: 800, width: 800, height, x: 0, y: top }) as DOMRect
 
-const makeTurns = (turns: number, topicId = 'topic-1'): Message[] =>
-  Array.from({ length: turns }, (_, index) => index).flatMap((index) => [
-    {
-      id: `u${index}`,
-      topicId,
-      role: 'user',
-      assistantId: 'assistant-1',
-      createdAt: `2026-01-01T00:0${index}:00.000Z`,
-      status: UserMessageStatus.SUCCESS,
-      blocks: []
-    },
-    {
-      id: `a${index}`,
-      topicId,
-      askId: `u${index}`,
-      role: 'assistant',
-      assistantId: 'assistant-1',
-      createdAt: `2026-01-01T00:0${index}:01.000Z`,
-      status: AssistantMessageStatus.SUCCESS,
-      blocks: []
-    }
-  ]) as unknown as Message[]
+/** Row geometry, keyed by message id, for the current test. */
+let rowTops: Record<string, number> = {}
+/** Collapsed-marker geometry for the current test (the marker has no row id). */
+let markerTop = 0
+
+/**
+ * Build `turns` Q&A turns. Ids in `foldedIds` carry the message-level fold flag,
+ * which is the only fold input the flow consumes.
+ */
+const makeTurns = (turns: number, foldedIds: string[] = [], topicId = 'topic-1'): Message[] => {
+  const folded = new Set(foldedIds)
+  return Array.from({ length: turns }, (_, index) => index).flatMap((index) => {
+    const userId = `u${index}`
+    const assistantId = `a${index}`
+    return [
+      {
+        id: userId,
+        topicId,
+        role: 'user',
+        assistantId: 'assistant-1',
+        createdAt: `2026-01-01T00:0${index}:00.000Z`,
+        status: UserMessageStatus.SUCCESS,
+        blocks: [],
+        ...(folded.has(userId) ? { folded: true } : {})
+      },
+      {
+        id: assistantId,
+        topicId,
+        askId: userId,
+        role: 'assistant',
+        assistantId: 'assistant-1',
+        createdAt: `2026-01-01T00:0${index}:01.000Z`,
+        status: AssistantMessageStatus.SUCCESS,
+        blocks: [],
+        ...(folded.has(assistantId) ? { folded: true } : {})
+      }
+    ]
+  }) as unknown as Message[]
+}
 
 let rafQueue: FrameRequestCallback[] = []
 const installManualRaf = (): void => {
@@ -410,20 +414,13 @@ const flushRaf = async (rounds = 8): Promise<void> => {
   }
 }
 
-const cleanupRows = (): void => {
-  for (const el of Array.from(document.querySelectorAll('[id^="message-"]'))) {
-    try {
-      el.remove()
-    } catch {}
-  }
-  for (const el of Array.from(document.querySelectorAll('[data-testid="topic-segment-group"]'))) {
-    try {
-      el.remove()
-    } catch {}
-  }
+const cleanupDom = (): void => {
   mocks.scrollContainerRef.current = null
+  rowTops = {}
+  markerTop = 0
 }
 
+/** Real scroll host of the mounted component, with a measurable box. */
 const graftContainer = (): HTMLElement => {
   const host = document.getElementById('messages') as HTMLElement
   Object.defineProperty(host, 'scrollHeight', { value: 6000, configurable: true })
@@ -432,40 +429,6 @@ const graftContainer = (): HTMLElement => {
   host.getBoundingClientRect = () => rect(0, 800)
   mocks.scrollContainerRef.current = host
   return host
-}
-
-/** Grafts a resident message row (gives the row container a real box). */
-const graftRow = (host: HTMLElement, id: string, top: number, height = 100): HTMLElement => {
-  const el = document.createElement('div')
-  el.id = `message-${id}`
-  el.getBoundingClientRect = () => rect(top, height)
-  host.appendChild(el)
-  return el
-}
-/**
- * Grafts the production collapsed-chrome DOM contract: the group's one in-flow
- * header row (`topic-segment-group`, 32px occupancy in both states) holding the
- * `topic-segment-label` pill that carries the real painted box. The label pill
- * is the geometry; the row only carries the stable `data-segment-id`.
- */
-const graftSegmentChrome = (
-  host: HTMLElement,
-  options: { segmentId: string; folded: boolean; labelTop: number; labelHeight?: number }
-): { chrome: HTMLElement; label: HTMLElement } => {
-  const chrome = document.createElement('div')
-  chrome.setAttribute('data-testid', 'topic-segment-group')
-  chrome.setAttribute('data-segment-id', options.segmentId)
-  chrome.setAttribute('data-segment-folded', options.folded ? 'true' : 'false')
-  // The header row occupies its normal-flow 32px row in both states; the label
-  // pill inside it is what navigation measures.
-  chrome.getBoundingClientRect = () => rect(options.labelTop, 32)
-  const label = document.createElement('div')
-  label.setAttribute('data-testid', 'topic-segment-label')
-  label.setAttribute('data-segment-folded', options.folded ? 'true' : 'false')
-  label.getBoundingClientRect = () => rect(options.labelTop, options.labelHeight ?? 24)
-  chrome.appendChild(label)
-  host.appendChild(chrome)
-  return { chrome, label }
 }
 
 const renderMessages = (store: ReturnType<typeof makeStore>) =>
@@ -501,7 +464,11 @@ const fireNavigation = async (messageId: string, rounds = 8): Promise<void> => {
   await flushRaf(rounds)
 }
 
-describe('Folded-segment navigation (mounted Messages)', () => {
+const collapsedBlock = (): HTMLElement | null => document.querySelector('[data-testid="folded-section-collapsed"]')
+const expandedBlock = (): HTMLElement | null => document.querySelector('[data-testid="folded-section-expanded"]')
+const rowFor = (messageId: string): HTMLElement | null => document.getElementById(`message-${messageId}`)
+
+describe('Message-fold navigation reveal (mounted Messages)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.topicMessages = [] as any
@@ -510,96 +477,125 @@ describe('Folded-segment navigation (mounted Messages)', () => {
     mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
     ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
     installManualRaf()
-    cleanupRows()
-  })
-
-  it('positions a resident folded member on its collapsed label without expanding or selecting', async () => {
-    mocks.topicMessages = makeTurns(2)
-    const store = makeStore(true)
-    renderMessages(store)
-    await act(async () => {})
-
-    const host = graftContainer()
-    const scrollTo = vi.fn()
-    ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    // No body row for the folded members: only the collapsed label is painted.
-    const { label } = graftSegmentChrome(host, {
-      segmentId: FOLDED_SEGMENT_ID,
-      folded: true,
-      labelTop: -1200
+    cleanupDom()
+    // Row geometry comes from this stub; everything else keeps jsdom's box.
+    // The collapsed marker carries no row id, so its geometry is keyed by its
+    // test id through the per-test `markerTop`.
+    const original = HTMLElement.prototype.getBoundingClientRect
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const id = this.id
+      if (id.startsWith('message-')) {
+        const messageId = id.slice('message-'.length)
+        return rect(rowTops[messageId] ?? 0, 100)
+      }
+      if (this.getAttribute?.('data-testid') === 'folded-section-collapsed') {
+        return rect(markerTop, 60)
+      }
+      return original.call(this)
     })
-    Object.defineProperty(host, 'scrollTop', { value: 0, writable: true, configurable: true })
-
-    await fireNavigation('a1')
-
-    // The written geometry is the label's box (start alignment, clamped range).
-    expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1200 })
-    expect(label.isConnected).toBe(true)
-    // Folding is presentation: no expand/select mutation is issued by a scroll.
-    expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
   })
 
-  it('keeps the expanded row path unchanged', async () => {
-    mocks.topicMessages = makeTurns(2)
-    const store = makeStore(false)
+  it('positions a fold-hidden target on its collapsed marker and never expands the block', async () => {
+    // Turn 2 (u1/a1) is folded: its rows are not mounted while the block is closed.
+    mocks.topicMessages = makeTurns(2, ['u1', 'a1'])
+    const store = makeStore()
     renderMessages(store)
     await act(async () => {})
 
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    graftRow(host, 'a1', -1000)
-    // An expanded segment paints a label too: it must NOT be the target.
-    graftSegmentChrome(host, { segmentId: 'seg-expanded', folded: false, labelTop: -1400 })
+    rowTops = { a1: -1000, u1: -1100 }
+    markerTop = -900
+
+    // Collapsed: the block is closed and the target row genuinely has no element.
+    const marker = collapsedBlock()
+    expect(marker).not.toBeNull()
+    // The marker stands in for exactly the hidden members of its block.
+    expect(marker?.getAttribute('data-folded-message-ids')).toContain('u1')
+    expect(marker?.getAttribute('data-folded-message-ids')).toContain('a1')
+    expect(rowFor('a1')).toBeNull()
 
     await fireNavigation('a1')
 
+    // Marker-only: the block stays collapsed (never auto-expanded), the hidden
+    // row stays unmounted, and the single scroll write lands on the marker.
+    expect(collapsedBlock()).not.toBeNull()
+    expect(expandedBlock()).toBeNull()
+    expect(rowFor('a1')).toBeNull()
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1000 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: -900 })
+    // A reveal is presentation: nothing is selected and nothing is written —
+    // no fold write either, since only a manual expand may open the block.
+    expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
+    expect(dbService.setTurnFolds).not.toHaveBeenCalled()
   })
 
-  it('prefers the label while a folded body is still mounted by the closing animation', async () => {
+  it('keeps the unchanged row path for an unfolded target', async () => {
     mocks.topicMessages = makeTurns(2)
-    const store = makeStore(true)
+    const store = makeStore()
     renderMessages(store)
     await act(async () => {})
 
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    // Closing animation: the body is still mounted (and still measurable) while
-    // the collapsed label already paints at the seam. Presentation-only rows
-    // must never own the navigation geometry.
-    graftRow(host, 'a1', -1000)
-    graftSegmentChrome(host, { segmentId: FOLDED_SEGMENT_ID, folded: true, labelTop: -1200 })
+    rowTops = { a1: -400 }
+
+    expect(collapsedBlock()).toBeNull()
+    expect(rowFor('a1')).not.toBeNull()
 
     await fireNavigation('a1')
 
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1200 })
-    expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
+    expect(scrollTo).toHaveBeenCalledWith({ top: -400 })
+    expect(expandedBlock()).toBeNull()
   })
 
-  it('locates the collapsed label after the around window load for a non-resident folded member', async () => {
-    const tail = makeTurns(2)
-    mocks.topicMessages = tail as any
-    const loaded = [...tail, ...makeTurns(3).slice(4, 6)] as Message[]
-    const target = loaded[loaded.length - 1]
+  it('never toggles the block on a second navigation to the same hidden target', async () => {
+    mocks.topicMessages = makeTurns(2, ['u1', 'a1'])
+    const store = makeStore()
+    renderMessages(store)
+    await act(async () => {})
+
+    const host = graftContainer()
+    const scrollTo = vi.fn()
+    ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
+    markerTop = -900
+
+    await fireNavigation('a1')
+    expect(collapsedBlock()).not.toBeNull()
+    expect(expandedBlock()).toBeNull()
+
+    await fireNavigation('a1')
+
+    // Still collapsed (navigating inside it never opens it) and positioned
+    // on the marker again.
+    expect(collapsedBlock()).not.toBeNull()
+    expect(expandedBlock()).toBeNull()
+    expect(rowFor('a1')).toBeNull()
+    expect(scrollTo).toHaveBeenCalledTimes(2)
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: -900 })
+    expect(dbService.setTurnFolds).not.toHaveBeenCalled()
+  })
+
+  it('loads the around window for a non-resident folded target, then positions its marker', async () => {
+    const loaded = makeTurns(3, ['u2', 'a2'])
+    mocks.topicMessages = loaded.slice(0, 4) as any
     mocks.ensureMock.mockImplementation(async () => ({ status: 'loaded', messages: loaded, blocks: [] }) as any)
-    const store = makeStore(true)
+    const store = makeStore()
     const view = renderMessages(store)
     await act(async () => {})
 
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    graftSegmentChrome(host, { segmentId: FOLDED_SEGMENT_ID, folded: true, labelTop: -1200 })
+    markerTop = -1600
 
     const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
     expect(typeof handler).toBe('function')
     await act(async () => {
-      void handler(target.id)
+      void handler('a2')
     })
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -617,28 +613,13 @@ describe('Folded-segment navigation (mounted Messages)', () => {
     await flushRaf(10)
 
     expect(mocks.ensureMock).toHaveBeenCalledTimes(1)
+    // The loaded block stays collapsed: the window load mounts the marker, and
+    // the transaction positions that marker — it never expands the block.
+    expect(collapsedBlock()).not.toBeNull()
+    expect(expandedBlock()).toBeNull()
+    expect(collapsedBlock()?.getAttribute('data-folded-message-ids')).toContain('a2')
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1200 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: -1600 })
     expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
-  })
-})
-
-describe('navigation presentation target resolution (pure)', () => {
-  it('maps a folded member to its segment header and keeps the message identity', () => {
-    const target = resolveNavigationPresentationTarget('a1', () => FOLDED_SEGMENT_ID)
-    expect(target).toEqual({ kind: 'segment-header', messageId: 'a1', segmentId: FOLDED_SEGMENT_ID })
-  })
-
-  it('keeps an unfolded member on its own row', () => {
-    expect(resolveNavigationPresentationTarget('a1', () => null)).toEqual({ kind: 'message-row', messageId: 'a1' })
-    expect(resolveNavigationPresentationTarget('a1', () => undefined)).toEqual({ kind: 'message-row', messageId: 'a1' })
-    expect(resolveNavigationPresentationTarget('a1', () => '')).toEqual({ kind: 'message-row', messageId: 'a1' })
-  })
-
-  it('fails open to the row when the catalog lookup throws', () => {
-    const target = resolveNavigationPresentationTarget('a1', () => {
-      throw new Error('catalog unavailable')
-    })
-    expect(target).toEqual({ kind: 'message-row', messageId: 'a1' })
   })
 })

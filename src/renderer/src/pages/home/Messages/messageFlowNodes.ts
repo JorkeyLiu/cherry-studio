@@ -416,15 +416,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         const lastMsg = groupMessages[groupMessages.length - 1]
         const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
         const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
-        // A group whose authority membership is entirely presentation-hidden
-        // (folded) paints no message row at rest. Its run therefore contributes
-        // zero flow height even though the motion wrapper stays mounted to own
-        // the exit/enter animation — the cascade below must see the collapsed
-        // run, not the (always present) wrapper.
-        const collapsedWhole =
-          segment?.folded === true &&
-          segment.messageIds.length > 0 &&
-          groupMessages.every((message) => segment.messageIds.includes((message as Message).id))
+        // Fold is a MESSAGE-LEVEL fact: a turn whose every member row carries
+        // its own `folded` flag is presentation-hidden, and a leftover group
+        // `folded` flag contributes nothing (group fold is retired).
         // Fork-divider placement (DOM order is newest→oldest under
         // column-reverse): the divider renders BEFORE the anchor group
         // (visually directly below the anchor). One divider per
@@ -504,10 +498,11 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             segment,
             segmentIsFirst: isFirst,
             segmentIsLast: isLast,
-            // Content-only classification: the group's HEADER ROW always
-            // occupies its own flow row, so this flag only says the body
-            // content is hidden, never that the run host is zero-height.
-            contentZeroFlow: collapsedWhole,
+            // Content-only classification is not needed: no group-level fold
+            // exists, so a run's body visibility is decided per member row
+            // (`isFolded`) and never by a zero-flow shortcut.
+            isFolded: groupMessages.length > 0 && groupMessages.every((m) => m.folded === true),
+            messageIds: groupMessages.map((m) => (m as Message).id),
             bodyNode
           }
         })

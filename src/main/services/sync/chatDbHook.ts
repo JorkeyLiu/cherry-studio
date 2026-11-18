@@ -1115,6 +1115,7 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
       case IpcChannel.ChatDb_InsertMessagesAfterAnchor:
       case IpcChannel.ChatDb_SelectAnswerMessage:
       case IpcChannel.ChatDb_SelectUsefulAnswer:
+      case IpcChannel.ChatDb_SetTurnFolds:
         // Compound/multi-message mutations + reorder: not in supported sync
         // scope. Reorder is unsupported until an atomic ordering semantic
         // exists — no per-message sortOrder snapshots are emitted.

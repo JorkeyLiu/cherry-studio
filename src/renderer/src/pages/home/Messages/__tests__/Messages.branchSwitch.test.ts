@@ -79,7 +79,10 @@ describe('true branch incremental switch (windowed)', () => {
     expect(slice).toMatch(/publishDeferredProjection/)
     expect(slice).toMatch(/rebaseRouteMessages/)
     expect(slice).toMatch(/commitDividerVisibleAtomic|commitRouteWindowAtomic/)
-    expect(slice).toMatch(/wantOffset/)
+    // The clicked divider's screen offset is captured synchronously and threaded
+    // as the fetch-hold intent (captureDividerOffset → clickOffset); `wantOffset`
+    // now names the downstream viewport-commit field outside this handler.
+    expect(slice).toMatch(/clickOffset|captureDividerOffset/)
     expect(slice).toMatch(/dividerVisualAnchorOffset|dividerKey/)
     expect(slice).toMatch(/findViewportTopAnchorWithOffset/)
     // Double failure rolls back to the previous route (never new-active +

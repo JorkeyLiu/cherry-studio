@@ -95,6 +95,12 @@ export const topicSegments = sqliteTable(
     createdAt: text('created_at'),
     updatedAt: text('updated_at'),
     sortOrder: integer('sort_order').notNull().default(0),
+    /**
+     * Stable group head identity (migration 020). Nullable so an upgraded
+     * database never needs a table rebuild: a null head is repaired
+     * deterministically to the group's first member on read/write.
+     */
+    headerMessageId: text('header_message_id'),
     extra: text('extra')
   },
   (table) => [index('topic_segments_topic_id_sort_order_idx').on(table.topicId, table.sortOrder)]

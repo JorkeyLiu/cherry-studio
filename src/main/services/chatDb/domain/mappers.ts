@@ -140,7 +140,8 @@ const TOPIC_SEGMENT_FIELDS: ReadonlyArray<[string, string]> = [
   ['name', 'name'],
   ['createdAt', 'created_at'],
   ['updatedAt', 'updated_at'],
-  ['sortOrder', 'sort_order']
+  ['sortOrder', 'sort_order'],
+  ['headerMessageId', 'header_message_id']
 ]
 
 const FILE_REFERENCE_FIELDS: ReadonlyArray<[string, string]> = [

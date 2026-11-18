@@ -459,10 +459,54 @@ async function isToggleInViewport(page: Page): Promise<boolean> {
   })
 }
 
+/**
+ * A point inside the part of the row that is CURRENTLY painted inside the
+ * scrollport, or null when the row paints nothing there.
+ *
+ * Deliberately in-page geometry: Playwright's own `hover()` runs actionability
+ * checks that scroll the element into view, which would move `#messages`
+ * behind this helper's back. The wheel steps own the reading position, so the
+ * toggle-reveal hover must not scroll at all.
+ */
+async function visibleRowPoint(page: Page, messageId: string): Promise<{ x: number; y: number } | null> {
+  return page.evaluate(
+    (sel: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!container) return null
+      const row = document.querySelector(sel) as HTMLElement | null
+      if (!row) return null
+      const c = container.getBoundingClientRect()
+      const r = row.getBoundingClientRect()
+      const x0 = Math.max(r.left, c.left)
+      const y0 = Math.max(r.top, c.top)
+      const x1 = Math.min(r.right, c.right)
+      const y1 = Math.min(r.bottom, c.bottom)
+      if (x1 - x0 < 8 || y1 - y0 < 8) return null
+      return { x: x0 + (x1 - x0) / 2, y: y0 + (y1 - y0) / 2 }
+    },
+    `#message-${escId(messageId)}`
+  )
+}
+
+/**
+ * Reveals the group menu bar (and its fold toggle) with a REAL pointer move
+ * over the row's currently painted area — never a Playwright actionability
+ * scroll. When the row paints nothing inside the scrollport yet, the pointer
+ * just enters the scrollport so the next wheel step keeps driving `#messages`.
+ */
+async function hoverGroupRow(page: Page, messageId: string): Promise<void> {
+  const point = await visibleRowPoint(page, messageId)
+  if (point) {
+    await page.mouse.move(point.x, point.y)
+    return
+  }
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+}
+
 async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Promise<void> {
   await wheelToReadingPosition(page)
-  const row = page.locator(`#message-${escId(firstAssistantId)}[data-message-id="${escId(firstAssistantId)}"]`).first()
-  await row.hover().catch(() => {})
+  await hoverGroupRow(page, firstAssistantId)
   if (await isToggleInViewport(page)) {
     const fresh = await readScroll(page)
     expect(Math.abs(fresh.scrollTop), 'fold target must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
@@ -475,7 +519,7 @@ async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Pr
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
     if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
-    await row.hover().catch(() => {})
+    await hoverGroupRow(page, firstAssistantId)
     if (await isToggleInViewport(page)) {
       const fresh = await readScroll(page)
       expect(Math.abs(fresh.scrollTop), 'nudge to reveal toggle must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
@@ -488,7 +532,7 @@ async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Pr
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
     if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
-    await row.hover().catch(() => {})
+    await hoverGroupRow(page, firstAssistantId)
     if (await isToggleInViewport(page)) {
       const fresh = await readScroll(page)
       expect(Math.abs(fresh.scrollTop), 'nudge to reveal toggle must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)

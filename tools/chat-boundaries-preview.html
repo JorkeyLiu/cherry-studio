@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-mode="proposed" data-scenario="reading">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>聊天边界与折叠 · 设计预览</title>
+<style>
+/* ---------- 1. 设计令牌：取自应用现有 color.css / font.css 的中性与 primary 值 ---------- */
+:root {
+  --font-family: Ubuntu, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'PingFang SC',
+    'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  --code-font-family: 'Cascadia Code', 'Fira Code', Consolas, Menlo, Courier, monospace;
+  --radius: 10px;
+}
+html[data-theme='dark'] {
+  color-scheme: dark;
+  --color-background: #181818;
+  --color-background-soft: #222222;
+  --color-background-mute: #333333;
+  --color-text-1: rgba(255, 255, 245, 0.9);
+  --color-text-2: rgba(235, 235, 245, 0.6);
+  --color-text-3: rgba(235, 235, 245, 0.38);
+  --color-border: #ffffff19;
+  --color-border-soft: #ffffff10;
+  --color-border-mute: #ffffff05;
+  --color-primary: #00b96b;
+  --color-primary-soft: #00b96b99;
+  --color-primary-mute: #00b96b33;
+  --color-hover: rgba(40, 40, 40, 1);
+  --color-active: rgba(55, 55, 55, 1);
+  --color-code-background: #323232;
+  --color-inline-code-background: #323232;
+  --color-link: #338cff;
+  --chat-background-user: rgba(255, 255, 255, 0.08);
+  --navbar-background: #1f1f1f;
+  --shadow-menu: 0 10px 28px rgba(0, 0, 0, 0.42);
+  /* 仅“现状示意”用来标记语义的极低饱和色点 */
+  --sem-branch: rgba(127, 156, 245, 0.75);
+  --sem-quote: rgba(192, 140, 240, 0.75);
+  --sem-context: rgba(77, 189, 143, 0.75);
+}
+html[data-theme='light'] {
+  color-scheme: light;
+  --color-background: #ffffff;
+  --color-background-soft: rgba(0, 0, 0, 0.04);
+  --color-background-mute: #eee;
+  --color-text-1: rgba(0, 0, 0, 1);
+  --color-text-2: rgba(0, 0, 0, 0.6);
+  --color-text-3: rgba(0, 0, 0, 0.38);
+  --color-border: #00000019;
+  --color-border-soft: #00000010;
+  --color-border-mute: #00000005;
+  --color-primary: #00b96b;
+  --color-primary-soft: #00b96b99;
+  --color-primary-mute: #00b96b33;
+  --color-hover: #eee;
+  --color-active: rgba(0, 0, 0, 0.04);
+  --color-code-background: #e3e3e3;
+  --color-inline-code-background: rgba(0, 0, 0, 0.06);
+  --color-link: #1677ff;
+  --chat-background-user: rgba(0, 0, 0, 0.045);
+  --navbar-background: rgba(244, 244, 244);
+  --shadow-menu: 0 10px 28px rgba(0, 0, 0, 0.14);
+  --sem-branch: rgba(90, 120, 220, 0.7);
+  --sem-quote: rgba(160, 105, 210, 0.7);
+  --sem-context: rgba(40, 160, 110, 0.7);
+}
+
+/* ---------- 2. 基础 ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--color-background);
+  color: var(--color-text-1);
+  font-family: var(--font-family);
+  font-size: 13px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button { font-family: inherit; }
+code {
+  font-family: var(--code-font-family);
+  background: var(--color-inline-code-background);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---------- 3. 预览顶栏（明确标注：设计预览） ---------- */
+.preview-bar {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 8px 14px; padding: 7px 14px;
+  background: var(--color-background-soft);
+  border-bottom: 1px solid var(--color-border-soft);
+}
+.pb-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pb-title { font-size: 12.5px; font-weight: 500; color: var(--color-text-1); white-space: nowrap; }
+.pb-badge {
+  font-size: 10.5px; line-height: 1.6; padding: 1px 6px; border-radius: 4px;
+  color: var(--color-primary); background: var(--color-primary-mute);
+  border: 1px solid var(--color-primary-mute); white-space: nowrap;
+}
+.pb-note { font-size: 11px; color: var(--color-text-3); white-space: nowrap; }
+.pb-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.seg {
+  display: inline-flex; padding: 2px; gap: 2px;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-background);
+}
+.seg-btn {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--color-text-2); font-size: 11.5px; line-height: 1.6;
+  padding: 2px 9px; border-radius: 6px;
+}
+.seg-btn:hover { background: var(--color-hover); color: var(--color-text-1); }
+.seg-btn[aria-pressed='true'] { background: var(--color-primary-mute); color: var(--color-primary); }
+.pb-theme {
+  border: 1px solid var(--color-border); background: var(--color-background);
+  color: var(--color-text-2); border-radius: 8px; font-size: 11.5px;
+  padding: 3px 10px; cursor: pointer;
+}
+.pb-theme:hover { background: var(--color-hover); color: var(--color-text-1); }
+
+/* ---------- 4. 聊天外壳 ---------- */
+.app { display: block; min-height: 0; }
+.chat-wrap { display: flex; flex-direction: column; height: 100%; position: relative; }
+.chat-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 28px 8px; border-bottom: 1px solid var(--color-border-soft);
+  flex: 0 0 auto;
+}
+.ct-name { font-size: 13px; font-weight: 500; color: var(--color-text-1); }
+.ct-sub { font-size: 10.5px; color: var(--color-text-3); line-height: 1.5; }
+.chat-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tool-hint {
+  font-size: 10.5px; color: var(--color-text-3);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ghost-btn {
+  border: 1px solid var(--color-border); background: transparent; border-radius: 7px;
+  color: var(--color-text-2); font-size: 11.5px; padding: 2px 9px; cursor: pointer; white-space: nowrap;
+}
+.ghost-btn:hover { background: var(--color-hover); color: var(--color-text-1); }
+.ghost-btn[aria-pressed='true'] { color: var(--color-primary); border-color: var(--color-primary-mute); background: var(--color-primary-mute); }
+.ghost-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.chat-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.stream {
+  max-width: 748px; margin: 0 auto;
+  padding: 20px 28px 64px 52px;
+}
+
+/* ---------- 5. 正文（用户气泡 / 助手正文） ---------- */
+.round { position: relative; margin: 0 0 20px; scroll-margin-top: 12px; border-radius: 8px; }
+.round-user { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.bubble {
+  max-width: 78%; padding: 8px 12px; border-radius: 12px;
+  background: var(--chat-background-user); color: var(--color-text-1);
+  white-space: pre-wrap; word-break: break-word;
+}
+.round-ai {
+  color: var(--color-text-1); white-space: pre-wrap; word-break: break-word;
+  font-size: 13.5px; line-height: 1.78;
+}
+.round.flash { animation: flash 1s ease-out; }
+@keyframes flash {
+  0% { box-shadow: 0 0 0 1px var(--color-primary-soft); background: var(--color-primary-mute); }
+  100% { box-shadow: 0 0 0 1px transparent; background: transparent; }
+}
+
+/* ---------- 6. 建议方案：统一紧凑的边界语言 ---------- */
+.bd-list { display: flex; flex-direction: column; margin: 0 0 4px; }
+.bd {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin-left: -6px; padding: 1px 6px; min-height: 22px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-2); font-size: 12px; line-height: 1.5;
+  text-align: left; cursor: pointer;
+}
+.bd:hover { background: var(--color-hover); }
+.bd-icon { flex: 0 0 13px; height: 13px; display: grid; place-items: center; color: var(--color-text-3); }
+.bd-icon svg { display: block; }
+.bd-key { flex: 0 0 auto; color: var(--color-text-3); font-size: 11px; letter-spacing: 0.02em; }
+.bd-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-target { flex: 0 0 auto; color: var(--color-text-3); font-size: 10.5px; }
+.bd--layer {
+  position: relative; align-items: flex-start; padding-top: 3px; padding-bottom: 3px;
+  padding-left: calc(6px + var(--depth, 0) * 15px);
+}
+.bd--layer::before {
+  content: ''; position: absolute; top: 2px; bottom: 2px; width: 1px;
+  left: calc(6px + (var(--depth, 1) - 1) * 15px);
+  background: var(--color-border-soft);
+}
+.bd-idx {
+  flex: 0 0 13px; text-align: center; color: var(--color-text-3);
+  font-size: 10px; font-variant-numeric: tabular-nums; line-height: 16px;
+}
+.bd--layer .bd-text { white-space: normal; overflow: visible; line-height: 1.55; }
+.bd-src { color: var(--color-text-3); }
+.bd-src::after { content: '：'; }
+
+/* ---------- 7. 建议方案：消息组（组名 + 极轻范围 rail，宽命中） ---------- */
+.group { position: relative; margin: 0 0 20px; }
+.group-head {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 6px; min-height: 20px; font-size: 11.5px; color: var(--color-text-3);
+}
+.group-icon { display: grid; place-items: center; color: var(--color-text-3); }
+.group-name {
+  border: 0; background: transparent; padding: 0; border-radius: 4px;
+  color: var(--color-text-2); font-size: 11.5px; font-weight: 500;
+  cursor: pointer; text-align: left; max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-name:hover { color: var(--color-text-1); text-decoration: underline dotted; }
+.group-count { color: var(--color-text-3); }
+.group-check { margin-left: auto; }
+.group-more {
+  margin-left: auto; width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: 5px; background: transparent;
+  color: var(--color-text-3); display: grid; place-items: center; cursor: pointer;
+}
+.group-check + .group-more { margin-left: 4px; }
+.group-more:hover { background: var(--color-hover); color: var(--color-text-2); }
+.group-rail {
+  position: absolute; left: -30px; top: -4px; bottom: -4px; width: 26px;
+  padding: 0; border: 0; background: transparent; border-radius: 5px; cursor: pointer;
+}
+.group-rail::before {
+  content: ''; position: absolute; left: 10px; top: 3px; bottom: 3px; width: 1px;
+  background: var(--color-border); border-radius: 1px;
+  transition: background 0.15s ease, width 0.15s ease;
+}
+.group-rail:hover::before { background: var(--color-text-3); width: 2px; left: 9.5px; }
+.group-rail:focus-visible { outline: none; }
+.group-rail:focus-visible::before { background: var(--color-primary); width: 2px; left: 9.5px; }
+.group-body { padding-left: 10px; }
+.group-body .round:last-child { margin-bottom: 0; }
+.group.is-target .group-name { color: var(--color-primary); }
+
+/* ---------- 8. 建议方案：折叠块 ---------- */
+.fold { position: relative; margin: 0 0 20px; }
+.fold-row { display: flex; align-items: center; gap: 8px; }
+.fold-summary {
+  display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0;
+  margin-left: -6px; padding: 1px 6px; min-height: 22px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-2); font-size: 12px; text-align: left; cursor: pointer;
+}
+.fold-summary:hover { background: var(--color-hover); }
+.fold-chev { display: grid; place-items: center; color: var(--color-text-3); transition: transform 0.15s ease; }
+.fold-summary[aria-expanded='true'] .fold-chev { transform: rotate(90deg); }
+.fold-label { color: var(--color-text-2); }
+.fold-label b { font-weight: 500; color: var(--color-text-1); }
+.fold-sep { color: var(--color-text-3); }
+.fold-state { color: var(--color-text-3); }
+.fold-row > .sel-check { margin-left: auto; }
+.fold-body { position: relative; padding: 10px 0 0 10px; }
+.fold-body::before {
+  content: ''; position: absolute; left: -20px; top: 2px; bottom: 0; width: 1px;
+  background: var(--color-border-soft);
+}
+.fold-body .round:last-child { margin-bottom: 12px; }
+.fold-hint {
+  margin: 0 0 2px 0; padding: 0 0 0 0; font-size: 10.5px; color: var(--color-text-3);
+}
+.notice { margin: -4px 0 16px; font-size: 11px; color: var(--color-text-3); }
+
+/* ---------- 9. 选择（primary 选框 / 选择条） ---------- */
+.sel-check {
+  appearance: none; -webkit-appearance: none; accent-color: var(--color-primary);
+  width: 14px; height: 14px; margin: 0; flex: 0 0 auto; position: relative;
+  border: 1.5px solid var(--color-text-3); border-radius: 4px;
+  background: transparent; cursor: pointer;
+}
+.sel-check:hover { border-color: var(--color-text-2); }
+.sel-check:checked { background: var(--color-primary); border-color: var(--color-primary); }
+.sel-check:checked::after {
+  content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 7px;
+  border: solid var(--color-background); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.round-check { position: absolute; left: -32px; top: 6px; }
+.sel-bar {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; z-index: 30;
+  padding: 7px 11px; border-radius: 10px;
+  background: var(--color-background-soft); border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-menu); font-size: 11.5px; color: var(--color-text-2);
+  max-width: calc(100% - 32px);
+}
+.sel-count { white-space: nowrap; }
+.sel-count b { color: var(--color-text-1); font-weight: 500; }
+.sel-reason { color: var(--color-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.primary-btn {
+  border: 0; border-radius: 7px; padding: 3px 10px; cursor: pointer;
+  background: var(--color-primary); color: #ffffff; font-size: 11.5px; white-space: nowrap;
+}
+.primary-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.group-rename {
+  border: 1px solid var(--color-primary-soft); background: var(--color-background);
+  color: var(--color-text-1); border-radius: 5px; font-size: 11.5px;
+  font-family: inherit; padding: 1px 6px; max-width: 60%; min-width: 90px;
+}
+
+/* ---------- 10. 现状示意（同一样本，按当前实现的样子平静复现） ---------- */
+.rule { border: 0; border-top: 1px solid var(--color-border); margin: 0 -28px 14px; }
+.cur-banner {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 -8px 14px; padding: 6px 10px;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-background-soft);
+  font-size: 11.5px; color: var(--color-text-2);
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.dot-branch { background: var(--sem-branch); }
+.dot-quote { background: var(--sem-quote); }
+.dot-context { background: var(--sem-context); }
+.cur-bd-stack { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+.cur-bd-card {
+  display: flex; align-items: center; gap: 7px; padding: 6px 10px;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-background-soft);
+  font-size: 11.5px; color: var(--color-text-2); cursor: pointer;
+}
+.cur-bd-card:hover { background: var(--color-hover); }
+.cur-bd-key { color: var(--color-text-3); flex: 0 0 auto; }
+.cur-fold-wrap { margin: 0 0 18px; }
+.cur-fold-summary {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin: 0; padding: 4px 0; border: 0; background: transparent;
+  font-size: 11.5px; color: var(--color-text-2); text-align: left; cursor: pointer;
+}
+.cur-fold-summary:hover { color: var(--color-text-1); }
+.cur-fold {
+  margin: 6px -12px 0; padding: 8px 12px;
+  border-left: 1px dashed var(--color-border);
+  border-right: 1px dashed var(--color-border);
+}
+.cur-fold .rule { margin: 0 -12px 12px; }
+.cur-fold .cur-banner { margin: 0 -12px 12px; }
+.cur-group { position: relative; margin: 0 -12px 16px; padding: 8px 12px 4px 14px; }
+.cur-group::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--color-text-3); opacity: 0.5; border-radius: 2px;
+}
+.cur-chip {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0 0 10px;
+  padding: 2px 9px; border: 1px solid var(--color-border); border-radius: 999px;
+  background: var(--color-background-soft); font-size: 11px; color: var(--color-text-2);
+  cursor: pointer;
+}
+.cur-chip:hover { color: var(--color-text-1); }
+
+/* ---------- 11. 单一浮层菜单（分组操作也复用这一份） ---------- */
+.menu {
+  position: fixed; z-index: 200; min-width: 184px; padding: 5px;
+  border-radius: 9px; border: 1px solid var(--color-border);
+  background: var(--color-background-soft); box-shadow: var(--shadow-menu);
+}
+html[data-theme='light'] .menu { background: var(--color-background); }
+.menu[hidden] { display: none; }
+.menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  width: 100%; padding: 6px 9px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--color-text-1);
+  font-size: 12px; text-align: left; cursor: pointer;
+}
+.menu-item:hover, .menu-item:focus-visible, .menu-item.is-active {
+  background: var(--color-hover); outline: none;
+}
+.menu-item[disabled] { color: var(--color-text-3); cursor: not-allowed; background: transparent; }
+.menu-item .kbd { font-size: 10px; color: var(--color-text-3); font-family: var(--code-font-family); }
+.menu-sep { height: 1px; margin: 4px 6px; background: var(--color-border-soft); }
+
+/* ---------- 12. 页脚图例 ---------- */
+.legend {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 5px 16px; border-top: 1px solid var(--color-border-soft);
+  font-size: 10.5px; color: var(--color-text-3);
+  background: var(--color-background-soft);
+}
+.legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend-item svg { display: block; }
+.legend-rail {
+  display: inline-block; width: 12px; height: 12px; border-left: 1px solid var(--color-text-3);
+  margin-left: 2px;
+}
+.legend-hint { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 760px) {
+  .stream { padding: 16px 16px 56px 44px; }
+  .chat-head { padding: 8px 16px; flex-wrap: wrap; }
+  .tool-hint { display: none; }
+  .rule { margin-left: -16px; margin-right: -16px; }
+  .pb-note { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="preview-bar">
+  <div class="pb-brand">
+    <span class="pb-title">聊天边界与折叠</span>
+    <span class="pb-badge">设计预览</span>
+    <span class="pb-note">静态本地模拟 · 不是真实应用 · 不写入任何数据</span>
+  </div>
+  <div class="pb-controls">
+    <div class="seg" role="group" aria-label="视图对照">
+      <button type="button" class="seg-btn" data-mode="proposed" aria-pressed="true">建议方案</button>
+      <button type="button" class="seg-btn" data-mode="current" aria-pressed="false">现状示意</button>
+    </div>
+    <div class="seg" role="group" aria-label="场景">
+      <button type="button" class="seg-btn" data-scenario="reading" aria-pressed="true">普通阅读</button>
+      <button type="button" class="seg-btn" data-scenario="stacked" aria-pressed="false">多边界同位置</button>
+      <button type="button" class="seg-btn" data-scenario="layers" aria-pressed="false">多层引用</button>
+      <button type="button" class="seg-btn" data-scenario="fold" aria-pressed="false">折叠与编辑选中</button>
+    </div>
+    <button type="button" class="pb-theme" id="themeBtn" aria-pressed="false" aria-label="切换亮色或暗色主题">暗色</button>
+  </div>
+</header>
+
+<main class="app">
+  <div class="chat-wrap">
+    <div class="chat-head">
+      <div>
+        <div class="ct-name" id="chatTitle">导出方案讨论</div>
+        <div class="ct-sub" id="chatSub">3 轮 · 本地模拟会话</div>
+      </div>
+      <div class="chat-tools">
+        <span class="tool-hint" id="toolHint">点击边界条目跳到指向位置；右键消息组或折叠块打开菜单</span>
+        <button type="button" class="ghost-btn" id="selToggle" aria-pressed="false">选择消息</button>
+      </div>
+    </div>
+    <div class="chat-scroll" id="chatScroll" role="region" aria-label="模拟聊天视图">
+      <div class="stream" id="stream"></div>
+    </div>
+    <div class="sel-bar" id="selBar" role="region" aria-label="选择操作" hidden>
+      <span class="sel-count">已选 <b id="selCount">0</b> 项</span>
+      <button type="button" class="primary-btn" id="foldSelected">折叠所选</button>
+      <span class="sel-reason" id="selReason"></span>
+      <button type="button" class="ghost-btn" id="clearSel">取消选择</button>
+    </div>
+  </div>
+</main>
+
+<footer class="legend">
+  <span class="legend-item"><span id="lgBranch"></span>分支</span>
+  <span class="legend-item"><span id="lgQuote"></span>引用</span>
+  <span class="legend-item"><span id="lgContext"></span>上下文</span>
+  <span class="legend-item"><span class="legend-rail"></span>消息组</span>
+  <span class="legend-item"><span id="lgChevron"></span>折叠块</span>
+  <span class="legend-hint" id="legendHint"></span>
+</footer>
+
+<div class="menu" id="menu" role="menu" aria-label="操作菜单" hidden></div>
+<div class="sr-only" id="live" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var ICON = {
+    branch: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.2v4.3a3 3 0 0 0 3 3h4"/><circle cx="4" cy="2.6" r="1.25"/><path d="M4 11.5v1.4"/><circle cx="12.6" cy="11.5" r="1.25"/><circle cx="4" cy="13.6" r="1.25"/></svg>',
+    quote: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 3.4v9.2"/><path d="M7.6 5.2h4.4"/><path d="M7.6 8h4.4"/><path d="M7.6 10.8h2.8"/></svg>',
+    layers: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2.6 4.8 2.7L8 8 3.2 5.3z"/><path d="m3.2 8.3 4.8 2.7 4.8-2.7"/></svg>',
+    group: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.6" cy="6.2" r="2"/><path d="M2.7 12.6c0-1.5 1.3-2.7 2.9-2.7s2.9 1.2 2.9 2.7"/><path d="M10.3 4.9a1.8 1.8 0 0 1 0 3.5"/><path d="M10.6 10.2c1.3.3 2.2 1.4 2.2 2.6"/></svg>',
+    chevron: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>',
+    dots: '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><circle cx="3.6" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12.4" cy="8" r="1.1"/></svg>'
+  };
+
+  /* ---------- 3-4 轮中文样例；四个场景复用同一批措辞 ---------- */
+  var S = {
+    reading: {
+      label: '普通阅读',
+      hint: '没有边界标记：只有用户气泡、助手正文和轮次间距。',
+      title: '导出方案讨论',
+      nodes: [
+        {
+          kind: 'round', id: 'r1',
+          user: '先把会话导出成 Markdown，落到本地目录，能跑通就行。',
+          ai: '可以。先定两条规则：文件名用 `会话标题-YYYYMMDD-ID前6位.md`，正文按角色分节，引用块用 `>` 保留原文，导出结果可以直接进 Git。'
+        },
+        {
+          kind: 'round', id: 'r2',
+          user: '标题太长的话，文件名会超长吧？',
+          ai: '会。标题截到 20 个字符，去掉 `/ \\ : * ? " < > |` 这些非法字符，再把 ID 片段补在后面，基本不会撞名。'
+        },
+        {
+          kind: 'round', id: 'r3',
+          user: '已折叠的轮次导出吗？',
+          ai: '默认不导出。折叠表示「不计入上下文」，但导出时保留一行占位，说明这里折叠了 N 轮，读文件的人不会以为会话断了。'
+        }
+      ]
+    },
+    stacked: {
+      label: '多边界同位置',
+      hint: '分支、引用、上下文和消息组同时出现在同一位置，四种语义各占一行、共享垂直节奏。',
+      title: '导出方案讨论（分支对话）',
+      nodes: [
+        {
+          kind: 'round', id: 'r1',
+          user: '先把会话导出成 Markdown，落到本地目录，能跑通就行。',
+          ai: '可以。先定两条规则：文件名 `会话标题-YYYYMMDD-ID前6位.md`，正文按角色分节，引用块用 `>` 保留原文。'
+        },
+        {
+          kind: 'round', id: 'r2',
+          user: '标题太长的话，文件名会超长吧？',
+          ai: '会。标题截到 20 个字符，去掉非法字符，再补 ID 片段。'
+        },
+        {
+          kind: 'group', id: 'g1', name: '消息组 · 导出规则',
+          boundaries: [
+            { t: 'branch', text: '从「第 2 轮」分出', target: 'r2', targetLabel: '第 2 轮' },
+            { t: 'quote', text: '引用 1 条 ·「标题太长的话，文件名会超长吧？」', target: 'r2', targetLabel: '第 2 轮' },
+            { t: 'context', text: '含 4 轮 · 边界 3 项', target: null, targetLabel: '本次请求' }
+          ],
+          members: [
+            { id: 'r3', user: '已折叠的轮次导出吗？', ai: '默认不导出，导出时留一行占位说明折叠了 N 轮。' },
+            { id: 'r4', user: '行，先按这个写。', ai: '好，我先补目录选择和空目录校验。' }
+          ]
+        }
+      ]
+    },
+    layers: {
+      label: '多层引用',
+      hint: '三层引用逐层展开、逐层可点，各自标明来源与指向，不合并、不隐藏。',
+      title: '导出方案讨论（多层引用）',
+      nodes: [
+        {
+          kind: 'round', id: 'r1',
+          user: '先把会话导出成 Markdown，落到本地目录，能跑通就行。',
+          ai: '可以。先定命名规则：文件名用 `会话标题-YYYYMMDD-ID前6位.md`，正文按角色分节。'
+        },
+        {
+          kind: 'round', id: 'r2',
+          user: '标题太长的话，文件名会超长吧？',
+          ai: '会。标题截到 20 个字符，去掉非法字符，再补 ID 片段。'
+        },
+        {
+          kind: 'round', id: 'r3',
+          boundaries: [
+            {
+              t: 'quote',
+              layers: [
+                { source: '引用层 1 · 第 2 轮（你）', text: '「标题太长的话，文件名会超长吧？」', target: 'r2', targetLabel: '第 2 轮' },
+                { source: '引用层 2 · 第 1 轮（Cherry）', text: '「文件名用 `会话标题-YYYYMMDD-ID前6位.md`」', target: 'r1', targetLabel: '第 1 轮' },
+                { source: '引用层 3 · 会话外需求文档', text: '「导出文件名需要可读、可排序、可去重。」', target: null, targetLabel: '非本会话' }
+              ]
+            }
+          ],
+          user: '那按这个命名规则落到代码里？',
+          ai: '可以。截断、清洗、去重做成一个纯函数，导出时调用，单测覆盖标题里带斜杠和引号的情况。'
+        }
+      ]
+    },
+    fold: {
+      label: '折叠与编辑选中',
+      hint: '折叠块、消息组与选择模式同时在场；选区包含消息组成员时，折叠按钮禁用并说明原因。',
+      title: '导出方案讨论（折叠与选择）',
+      nodes: [
+        {
+          kind: 'round', id: 'r1',
+          user: '先把会话导出成 Markdown，落到本地目录，能跑通就行。',
+          ai: '可以。先定命名规则：文件名 `会话标题-YYYYMMDD-ID前6位.md`，正文按角色分节。'
+        },
+        {
+          kind: 'fold', id: 'f1',
+          rounds: [
+            { id: 'r2', user: '标题太长的话，文件名会超长吧？', ai: '会。标题截到 20 个字符，去掉非法字符，再补 ID 片段。' },
+            { id: 'r3', user: '已折叠的轮次导出吗？', ai: '默认不导出，导出时留一行占位说明折叠了 N 轮。' }
+          ]
+        },
+        {
+          kind: 'group', id: 'g2', name: '消息组 · 文件命名',
+          members: [
+            { id: 'r4', user: '行，先按这个写。', ai: '好，我先补目录选择和空目录校验，导出逻辑不动。' }
+          ]
+        }
+      ]
+    }
+  };
+
+  var state = {
+    mode: 'proposed',
+    scenario: 'reading',
+    theme: 'dark',
+    selectionMode: false,
+    selected: [],
+    expanded: {},
+    unfolded: {},
+    dissolved: {},
+    names: {},
+    userFolds: [],
+    focusAfter: null
+  };
+
+  var idx = { rounds: {}, roundNo: {}, groups: {}, roundGroup: {}, topRounds: [] };
+  var foldSeq = 0;
+  var menuState = { anchor: null, items: [] };
+
+  var el = {
+    stream: document.getElementById('stream'),
+    menu: document.getElementById('menu'),
+    live: document.getElementById('live'),
+    title: document.getElementById('chatTitle'),
+    sub: document.getElementById('chatSub'),
+    hint: document.getElementById('toolHint'),
+    legendHint: document.getElementById('legendHint'),
+    selBar: document.getElementById('selBar'),
+    selCount: document.getElementById('selCount'),
+    selReason: document.getElementById('selReason'),
+    foldSelected: document.getElementById('foldSelected'),
+    clearSel: document.getElementById('clearSel'),
+    selToggle: document.getElementById('selToggle'),
+    themeBtn: document.getElementById('themeBtn')
+  };
+
+  /* ---------- 工具 ---------- */
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function md(s) {
+    return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+  }
+  function announce(text) {
+    el.live.textContent = '';
+    window.setTimeout(function () { el.live.textContent = text; }, 30);
+  }
+  function has(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+  /* ---------- 索引 ---------- */
+  function buildIndex() {
+    idx = { rounds: {}, roundNo: {}, groups: {}, roundGroup: {}, topRounds: [] };
+    var n = 0;
+    var sc = S[state.scenario];
+    sc.nodes.forEach(function (node) {
+      if (node.kind === 'round') {
+        n += 1;
+        idx.rounds[node.id] = node;
+        idx.roundNo[node.id] = n;
+        idx.topRounds.push(node.id);
+      } else if (node.kind === 'group') {
+        idx.groups[node.id] = node;
+        node.members.forEach(function (m) {
+          n += 1;
+          idx.rounds[m.id] = m;
+          idx.roundNo[m.id] = n;
+          idx.roundGroup[m.id] = node.id;
+        });
+      } else if (node.kind === 'fold') {
+        node.rounds.forEach(function (r) {
+          n += 1;
+          idx.rounds[r.id] = r;
+          idx.roundNo[r.id] = n;
+        });
+      }
+    });
+    var folded = {};
+    state.userFolds.forEach(function (f) {
+      f.roundIds.forEach(function (id) { folded[id] = true; });
+    });
+    idx.topRounds = idx.topRounds.filter(function (id) { return !folded[id]; });
+    idx.totalRounds = n;
+  }
+
+  function groupName(id) {
+    if (has(state.names, id)) return state.names[id];
+    var g = idx.groups[id];
+    return g ? g.name : '消息组';
+  }
+
+  function rule() {
+    return state.mode === 'current' ? '<hr class="rule">' : '';
+  }
+
+  /* ---------- 建议方案：边界条目 ---------- */
+  function bdKey(t) {
+    return t === 'branch' ? '分支' : t === 'quote' ? '引用' : '上下文';
+  }
+  function bdIcon(t) {
+    return t === 'branch' ? ICON.branch : t === 'quote' ? ICON.quote : ICON.layers;
+  }
+
+  function boundariesProposed(list) {
+    var out = [];
+    list.forEach(function (b) {
+      if (b.t === 'quote' && b.layers) {
+        b.layers.forEach(function (layer, i) {
+          var target = layer.target
+            ? ' data-jump="' + layer.target + '"'
+            : ' data-jump-none="1"';
+          out.push(
+            '<button type="button" class="bd bd--layer" style="--depth:' + (i + 1) + '" data-bd="quote"' + target +
+            ' title="跳到 ' + esc(layer.targetLabel || '来源') + '">' +
+            '<span class="bd-idx">' + (i + 1) + '</span>' +
+            '<span class="bd-key">引用</span>' +
+            '<span class="bd-text"><span class="bd-src">' + esc(layer.source) + '</span>' + md(layer.text) + '</span>' +
+            '<span class="bd-target">→ ' + esc(layer.targetLabel || '') + '</span>' +
+            '</button>'
+          );
+        });
+        return;
+      }
+      var targetAttr = b.target ? ' data-jump="' + b.target + '"' : ' data-jump-none="1"';
+      out.push(
+        '<button type="button" class="bd" data-bd="' + b.t + '"' + targetAttr +
+        ' title="跳到 ' + esc(b.targetLabel || '来源') + '">' +
+        '<span class="bd-icon">' + bdIcon(b.t) + '</span>' +
+        '<span class="bd-key">' + bdKey(b.t) + '</span>' +
+        '<span class="bd-text">' + md(b.text) + '</span>' +
+        '<span class="bd-target">→ ' + esc(b.targetLabel || '') + '</span>' +
+        '</button>'
+      );
+    });
+    return '<div class="bd-list">' + out.join('') + '</div>';
+  }
+
+  /* ---------- 现状示意：同语义的堆叠卡片 ---------- */
+  function boundariesCurrent(list) {
+    var cards = list.map(function (b) {
+      if (b.t === 'quote' && b.layers) {
+        return '<div class="cur-bd-card" data-jump-none="1" data-bd="quote">' +
+          '<span class="dot dot-quote"></span>' +
+          '<span class="cur-bd-key">引用</span>' +
+          '<span class="bd-text">' + b.layers.length + ' 层引用已合并为 1 条</span>' +
+          '<span class="bd-target">→ ' + esc(b.layers[0].targetLabel || '') + '</span>' +
+          '</div>';
+      }
+      var targetAttr = b.target ? ' data-jump="' + b.target + '"' : ' data-jump-none="1"';
+      return '<div class="cur-bd-card" data-bd="' + b.t + '"' + targetAttr + '>' +
+        '<span class="dot dot-' + b.t + '"></span>' +
+        '<span class="cur-bd-key">' + bdKey(b.t) + '</span>' +
+        '<span class="bd-text">' + md(b.text) + '</span>' +
+        '<span class="bd-target">→ ' + esc(b.targetLabel || '') + '</span>' +
+        '</div>';
+    });
+    return '<div class="cur-bd-stack">' + cards.join('') + '</div>';
+  }
+
+  function boundaries(list) {
+    if (!list || !list.length) return '';
+    return state.mode === 'current' ? boundariesCurrent(list) : boundariesProposed(list);
+  }
+
+  /* ---------- 正文 ---------- */
+  function renderRound(round, opts) {
+    opts = opts || {};
+    var no = idx.roundNo[round.id] || '';
+    var check = '';
+    if (state.selectionMode && state.mode === 'proposed' && opts.selectable) {
+      var checked = state.selected.indexOf('round:' + round.id) >= 0 ? ' checked' : '';
+      check = '<input type="checkbox" class="sel-check round-check" data-sel="round:' + round.id + '"' +
+        checked + ' aria-label="选择第 ' + no + ' 轮">';
+    }
+    return '<div class="round" id="msg-' + round.id + '" data-round="' + round.id + '" tabindex="-1">' +
+      check +
+      '<div class="round-user"><div class="bubble">' + md(round.user) + '</div></div>' +
+      '<div class="round-ai">' + md(round.ai) + '</div>' +
+      '</div>';
+  }
+
+  /* ---------- 消息组 ---------- */
+  function renderGroup(node) {
+    if (state.dissolved[node.id]) {
+      var plain = node.members.map(function (m) {
+        return renderRound(m, { selectable: true });
+      }).join(rule());
+      return plain + '<div class="notice">已解散消息组，成员回到普通轮次</div>';
+    }
+    var name = groupName(node.id);
+    var check = '';
+    if (state.selectionMode && state.mode === 'proposed') {
+      var checked = state.selected.indexOf('group:' + node.id) >= 0 ? ' checked' : '';
+      check = '<input type="checkbox" class="sel-check group-check" data-sel="group:' + node.id + '"' +
+        checked + ' aria-label="选择整个消息组 ' + esc(name) + '（选区含组成员，不可折叠）">';
+    }
+    if (state.mode === 'current') {
+      return '<div class="cur-group" data-group-wrap="' + node.id + '">' +
+        '<div class="cur-chip" data-group-menu="' + node.id + '" role="button" tabindex="0" aria-haspopup="menu">' +
+        ICON.group + '<span>' + esc(name) + '</span><span class="group-count">' + node.members.length + ' 条</span>' +
+        '</div>' +
+        node.members.map(function (m, i) {
+          return (i > 0 ? rule() : '') + renderRound(m, { selectable: false });
+        }).join('') +
+        '</div>';
+    }
+    return '<div class="group" data-group-wrap="' + node.id + '">' +
+      '<div class="group-head">' +
+      '<span class="group-icon">' + ICON.group + '</span>' +
+      '<button type="button" class="group-name" data-group-menu="' + node.id + '" aria-haspopup="menu" title="右键或回车打开消息组菜单">' +
+      esc(name) + '</button>' +
+      '<span class="group-count">' + node.members.length + ' 条</span>' +
+      check +
+      '<button type="button" class="group-more" data-group-menu="' + node.id + '" aria-haspopup="menu" aria-label="消息组操作：' + esc(name) + '">' + ICON.dots + '</button>' +
+      '</div>' +
+      '<div class="group-body">' +
+      '<button type="button" class="group-rail" data-group-menu="' + node.id + '" aria-haspopup="menu" aria-label="消息组「' + esc(name) + '」，点击或右键打开操作菜单"></button>' +
+      node.members.map(function (m, i) {
+        return (i > 0 ? rule() : '') + renderRound(m, { selectable: false });
+      }).join('') +
+      '</div>' +
+      '</div>';
+  }
+
+  /* ---------- 折叠块 ---------- */
+  function renderFold(node, opts) {
+    opts = opts || {};
+    var n = node.rounds.length;
+    var expanded = !!state.expanded[node.id];
+    var bodyId = 'fold-body-' + node.id;
+    var check = '';
+    if (state.selectionMode && state.mode === 'proposed') {
+      var checked = state.selected.indexOf('fold:' + node.id) >= 0 ? ' checked' : '';
+      check = '<input type="checkbox" class="sel-check fold-check" data-sel="fold:' + node.id + '"' +
+        checked + ' aria-label="选择折叠块（' + n + ' 轮）">';
+    }
+
+    if (state.mode === 'current') {
+      var inner = node.rounds.map(function (r, i) {
+        return (i > 0 ? '<hr class="rule">' : '') +
+          '<div class="cur-banner" style="margin:0 -12px 10px"><span class="dot dot-context"></span>不计入上下文</div>' +
+          renderRound(r, { selectable: false });
+      }).join('');
+      return '<div class="cur-fold-wrap" data-fold-wrap="' + node.id + '">' +
+        '<button type="button" class="cur-fold-summary" data-fold-toggle="' + node.id + '" aria-expanded="' + expanded + '" aria-controls="' + bodyId + '">' +
+        '<span class="dot dot-context"></span><span class="fold-label">已折叠 ' + n + ' 轮</span>' +
+        '<span class="fold-sep">·</span><span class="fold-state">不计入上下文</span>' +
+        '</button>' +
+        '<div id="' + bodyId + '"' + (expanded ? '' : ' hidden') + '>' +
+        (expanded ? '<div class="cur-fold"><div class="cur-banner"><span class="dot dot-context"></span>已折叠 ' + n + ' 轮 · 不计入上下文</div>' + inner + '</div>' : '') +
+        '</div>' +
+        '</div>';
+    }
+
+    return '<div class="fold" data-fold-wrap="' + node.id + '">' +
+      '<div class="fold-row">' +
+      '<button type="button" class="fold-summary" data-fold-toggle="' + node.id + '" aria-expanded="' + expanded + '" aria-controls="' + bodyId + '">' +
+      '<span class="fold-chev">' + ICON.chevron + '</span>' +
+      '<span class="fold-label">已折叠 <b>' + n + '</b> 轮</span>' +
+      '<span class="fold-sep">·</span>' +
+      '<span class="fold-state">不计入上下文</span>' +
+      '</button>' +
+      check +
+      '</div>' +
+      '<div class="fold-body" id="' + bodyId + '"' + (expanded ? '' : ' hidden') + '>' +
+      node.rounds.map(function (r) {
+        return renderRound(r, { selectable: false });
+      }).join('') +
+      '<div class="fold-hint">点击折叠区块收起</div>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function renderNode(node) {
+    if (node.kind === 'round') {
+      return boundaries(node.boundaries) + renderRound(node, { selectable: true });
+    }
+    if (node.kind === 'group') {
+      return boundaries(node.boundaries) + renderGroup(node);
+    }
+    if (node.kind === 'fold') {
+      if (state.unfolded[node.id]) {
+        return node.rounds.map(function (r) { return renderRound(r, { selectable: true }); }).join(rule()) +
+          '<div class="notice">已取消折叠，' + node.rounds.length + ' 轮已恢复计入上下文</div>';
+      }
+      return renderFold(node);
+    }
+    return '';
+  }
+
+  function renderChat() {
+    buildIndex();
+    var sc = S[state.scenario];
+    var chunks = [];
+    var hasFold = sc.nodes.some(function (n) { return n.kind === 'fold'; }) || state.userFolds.length > 0;
+
+    if (state.mode === 'current' && hasFold) {
+      chunks.push('<div class="cur-banner"><span class="dot dot-context"></span>已折叠 2 轮 · 不计入上下文</div>');
+    }
+
+    var userFoldOf = {};
+    state.userFolds.forEach(function (f) {
+      f.roundIds.forEach(function (id) { userFoldOf[id] = f.id; });
+    });
+    var emitted = {};
+
+    sc.nodes.forEach(function (node) {
+      if (node.kind === 'round' && has(userFoldOf, node.id)) {
+        var fid = userFoldOf[node.id];
+        if (emitted[fid]) return;
+        emitted[fid] = true;
+        var fold = null;
+        state.userFolds.forEach(function (f) { if (f.id === fid) fold = f; });
+        if (!fold) return;
+        var rounds = fold.roundIds.map(function (id) { return idx.rounds[id]; }).filter(Boolean);
+        if (state.unfolded[fid]) {
+          chunks.push(rounds.map(function (r) { return renderRound(r, { selectable: true }); }).join(rule()) +
+            '<div class="notice">已取消折叠，' + rounds.length + ' 轮已恢复计入上下文</div>');
+        } else {
+          chunks.push(renderFold({ id: fid, rounds: rounds }));
+        }
+        return;
+      }
+      chunks.push(renderNode(node));
+    });
+
+    el.stream.innerHTML = chunks.join(state.mode === 'current' ? '<hr class="rule">' : '');
+    syncChrome();
+    if (state.focusAfter) {
+      var target = null;
+      try { target = el.stream.querySelector(state.focusAfter); } catch (e) { target = null; }
+      state.focusAfter = null;
+      if (target) target.focus({ preventScroll: true });
+    }
+  }
+
+  /* ---------- 选择 ---------- */
+  function selectionInfo() {
+    var units = state.selected.map(function (key) {
+      var parts = key.split(':');
+      return { t: parts[0], id: parts[1] };
+    });
+    var hasGroup = units.some(function (u) { return u.t === 'group'; });
+    var hasFoldUnit = units.some(function (u) { return u.t === 'fold'; });
+    var roundIds = units.filter(function (u) { return u.t === 'round'; }).map(function (u) { return u.id; });
+    var positions = roundIds.map(function (id) { return idx.topRounds.indexOf(id); }).filter(function (p) { return p >= 0; });
+    var contiguous = positions.length <= 1 ||
+      (Math.max.apply(null, positions) - Math.min.apply(null, positions) + 1 === positions.length);
+    var canFold = units.length > 0 && !hasGroup && !hasFoldUnit && contiguous && positions.length > 0;
+    var reason = '';
+    if (hasGroup) reason = '选区包含消息组成员，不可折叠';
+    else if (hasFoldUnit) reason = '选区包含折叠块，需先取消折叠';
+    else if (!contiguous) reason = '只能折叠连续的消息';
+    return { count: units.length, canFold: canFold, reason: reason, roundIds: roundIds };
+  }
+
+  function syncChrome() {
+    var sc = S[state.scenario];
+    var info = selectionInfo();
+    el.title.textContent = sc.title;
+    el.sub.textContent = idx.totalRounds + ' 轮 · 本地模拟会话 · 场景：' + sc.label +
+      (state.mode === 'current' ? ' · 现状示意（静态对照）' : '');
+    el.hint.textContent = state.mode === 'current'
+      ? '现状示意为静态对照，交互以「建议方案」为准'
+      : '点边界条目跳到指向位置；点/右键消息组或折叠块打开菜单';
+    el.legendHint.textContent = '场景要点：' + sc.hint;
+    el.selBar.hidden = !state.selectionMode || state.mode === 'current';
+    el.selCount.textContent = String(info.count);
+    el.selReason.textContent = info.count
+      ? (info.canFold ? '' : info.reason)
+      : '勾选消息或折叠块';
+    el.foldSelected.disabled = !info.canFold;
+    el.foldSelected.title = info.canFold ? '把所选的连续轮次折叠为一个折叠块' : (info.reason || '先选择要折叠的消息');
+    el.selToggle.setAttribute('aria-pressed', state.selectionMode ? 'true' : 'false');
+    el.selToggle.disabled = state.mode === 'current';
+    el.selToggle.title = state.mode === 'current' ? '现状示意不提供选择操作' : '显示消息选框';
+  }
+
+  function toggleSelect(key, on) {
+    var i = state.selected.indexOf(key);
+    if (on && i < 0) state.selected.push(key);
+    if (!on && i >= 0) state.selected.splice(i, 1);
+    state.focusAfter = '[data-sel="' + key + '"]';
+    renderChat();
+  }
+
+  /* ---------- 交互动作 ---------- */
+  function jumpTo(id) {
+    var target = document.getElementById('msg-' + id);
+    if (!target) {
+      announce('来源不在当前会话，无法定位');
+      return;
+    }
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    target.classList.remove('flash');
+    void target.offsetWidth;
+    target.classList.add('flash');
+    window.setTimeout(function () { target.classList.remove('flash'); }, 1100);
+    announce('已定位到第 ' + (idx.roundNo[id] || '') + ' 轮');
+  }
+
+  function jumpToGroupStart(id) {
+    var wrap = el.stream.querySelector('[data-group-wrap="' + id + '"]');
+    if (!wrap) return;
+    var head = wrap.querySelector('.group-head, .cur-chip');
+    if (head) head.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    wrap.classList.add('is-target');
+    window.setTimeout(function () { wrap.classList.remove('is-target'); }, 1200);
+    announce('已跳到消息组开头：' + groupName(id));
+  }
+
+  function dissolveGroup(id) {
+    state.dissolved[id] = true;
+    state.selected = state.selected.filter(function (k) { return k !== 'group:' + id; });
+    renderChat();
+    announce('已解散消息组：' + groupName(id));
+  }
+
+  function toggleFold(id) {
+    state.expanded[id] = !state.expanded[id];
+    state.focusAfter = '[data-fold-toggle="' + id + '"]';
+    renderChat();
+    announce(state.expanded[id] ? '已展开折叠块' : '已收起折叠块');
+  }
+
+  function cancelFold(id) {
+    state.unfolded[id] = true;
+    state.selected = state.selected.filter(function (k) { return k !== 'fold:' + id; });
+    state.focusAfter = null;
+    renderChat();
+    announce('已取消折叠，恢复计入上下文');
+  }
+
+  function startRename(id) {
+    var nameEl = el.stream.querySelector('.group-name[data-group-menu="' + id + '"]');
+    if (!nameEl) return;
+    var input = document.createElement('input');
+    input.className = 'group-rename';
+    input.type = 'text';
+    input.value = groupName(id);
+    input.setAttribute('aria-label', '重命名消息组');
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    var done = false;
+    function finish(commit) {
+      if (done) return;
+      done = true;
+      var value = input.value.trim();
+      if (commit && value) state.names[id] = value;
+      state.focusAfter = '.group-name[data-group-menu="' + id + '"]';
+      renderChat();
+      announce(commit && value ? '已重命名为 ' + value : '已取消重命名');
+    }
+    input.addEventListener('keydown', function (e) {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', function () { finish(true); });
+  }
+
+  function foldSelection() {
+    var info = selectionInfo();
+    if (!info.canFold) return;
+    var ordered = info.roundIds.slice().sort(function (a, b) {
+      return idx.topRounds.indexOf(a) - idx.topRounds.indexOf(b);
+    });
+    foldSeq += 1;
+    var id = 'uf' + foldSeq;
+    state.userFolds.push({ id: id, roundIds: ordered });
+    state.selected = [];
+    state.focusAfter = '[data-fold-toggle="' + id + '"]';
+    renderChat();
+    announce('已折叠 ' + ordered.length + ' 轮');
+  }
+
+  /* ---------- 单一菜单 ---------- */
+  function closeMenu(restoreFocus) {
+    if (el.menu.hidden) return;
+    el.menu.hidden = true;
+    el.menu.innerHTML = '';
+    if (menuState.anchor && menuState.anchor.setAttribute) {
+      menuState.anchor.setAttribute('aria-expanded', 'false');
+    }
+    var anchor = menuState.anchor;
+    menuState = { anchor: null, items: [] };
+    if (restoreFocus && anchor && document.contains(anchor)) anchor.focus({ preventScroll: true });
+  }
+
+  function openMenu(anchor, items) {
+    closeMenu(false);
+    var html = items.map(function (item, i) {
+      if (item.sep) return '<div class="menu-sep" role="separator"></div>';
+      return '<button type="button" class="menu-item" role="menuitem" tabindex="-1" data-i="' + i + '"' +
+        (item.disabled ? ' disabled' : '') + '>' + esc(item.label) +
+        (item.hint ? '<span class="kbd">' + esc(item.hint) + '</span>' : '') +
+        '</button>';
+    }).join('');
+    el.menu.innerHTML = html;
+    el.menu.hidden = false;
+    menuState = { anchor: anchor, items: items };
+    if (anchor && anchor.setAttribute) anchor.setAttribute('aria-expanded', 'true');
+
+    var rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 24, top: 24, bottom: 44, right: 44 };
+    var mw = el.menu.offsetWidth;
+    var mh = el.menu.offsetHeight;
+    var x = Math.min(rect.left, window.innerWidth - mw - 8);
+    var y = rect.bottom + 4;
+    if (y + mh > window.innerHeight - 8) y = Math.max(8, rect.top - mh - 4);
+    el.menu.style.left = Math.max(8, x) + 'px';
+    el.menu.style.top = Math.max(8, y) + 'px';
+
+    var first = el.menu.querySelector('.menu-item:not([disabled])');
+    if (first) first.focus();
+  }
+
+  function openGroupMenu(id, anchor) {
+    openMenu(anchor, [
+      { label: '重命名消息组', action: function () { startRename(id); } },
+      { label: '跳到开头', action: function () { jumpToGroupStart(id); } },
+      { label: '解散消息组', action: function () { dissolveGroup(id); } }
+    ]);
+  }
+
+  function openFoldMenu(id, anchor) {
+    var expanded = !!state.expanded[id];
+    var items = [
+      { label: expanded ? '收起折叠块' : '展开折叠块', action: function () { toggleFold(id); } },
+      { label: '取消折叠', hint: '恢复计入上下文', action: function () { cancelFold(id); } }
+    ];
+    if (state.selectionMode) {
+      items.push({ label: '选择此折叠块', action: function () { toggleSelect('fold:' + id, true); } });
+    }
+    openMenu(anchor, items);
+  }
+
+  function openBoundaryMenu(anchor) {
+    var jump = anchor.getAttribute('data-jump');
+    var none = anchor.getAttribute('data-jump-none');
+    openMenu(anchor, [
+      {
+        label: '跳到指向的位置', hint: '⏎', disabled: !jump,
+        action: function () { if (jump) jumpTo(jump); else announce('来源不在当前会话，无法定位'); }
+      },
+      {
+        label: '复制边界文本', action: function () {
+          var text = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              announce('已复制边界文本');
+            }).catch(function () { announce('复制不可用'); });
+          } else {
+            announce('复制不可用');
+          }
+        }
+      }
+    ]);
+    if (none && !jump) announce('该来源不在当前会话');
+  }
+
+  /* ---------- 事件 ---------- */
+  el.stream.addEventListener('click', function (e) {
+    var chk = e.target.closest('input[data-sel]');
+    if (chk) { toggleSelect(chk.getAttribute('data-sel'), chk.checked); return; }
+    var toggle = e.target.closest('[data-fold-toggle]');
+    if (toggle) { toggleFold(toggle.getAttribute('data-fold-toggle')); return; }
+    var groupTrigger = e.target.closest('[data-group-menu]');
+    if (groupTrigger) { openGroupMenu(groupTrigger.getAttribute('data-group-menu'), groupTrigger); return; }
+    var jump = e.target.closest('[data-jump]');
+    if (jump) { jumpTo(jump.getAttribute('data-jump')); return; }
+    var none = e.target.closest('[data-jump-none]');
+    if (none) { announce('来源不在当前会话，无法定位'); }
+  });
+
+  el.stream.addEventListener('contextmenu', function (e) {
+    var groupTrigger = e.target.closest('[data-group-menu]');
+    if (groupTrigger) {
+      e.preventDefault();
+      openGroupMenu(groupTrigger.getAttribute('data-group-menu'), groupTrigger);
+      return;
+    }
+    var foldWrap = e.target.closest('[data-fold-wrap]');
+    if (foldWrap) {
+      e.preventDefault();
+      openFoldMenu(foldWrap.getAttribute('data-fold-wrap'), foldWrap.querySelector('.fold-summary, .cur-fold-summary') || foldWrap);
+      return;
+    }
+    var bd = e.target.closest('[data-bd]');
+    if (bd) {
+      e.preventDefault();
+      openBoundaryMenu(bd);
+    }
+  });
+
+  el.stream.addEventListener('keydown', function (e) {
+    var isMenuKey = e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10');
+    if (!isMenuKey) return;
+    var groupTrigger = e.target.closest('[data-group-menu]');
+    if (groupTrigger) {
+      e.preventDefault();
+      openGroupMenu(groupTrigger.getAttribute('data-group-menu'), groupTrigger);
+      return;
+    }
+    var foldWrap = e.target.closest('[data-fold-wrap]');
+    if (foldWrap) {
+      e.preventDefault();
+      openFoldMenu(foldWrap.getAttribute('data-fold-wrap'), foldWrap.querySelector('.fold-summary, .cur-fold-summary') || foldWrap);
+      return;
+    }
+    var bd = e.target.closest('[data-bd]');
+    if (bd) {
+      e.preventDefault();
+      openBoundaryMenu(bd);
+    }
+  });
+
+  el.menu.addEventListener('click', function (e) {
+    var item = e.target.closest('.menu-item');
+    if (!item || item.disabled) return;
+    var i = Number(item.getAttribute('data-i'));
+    var entries = menuState.items;
+    closeMenu(false);
+    if (entries[i] && entries[i].action) entries[i].action();
+  });
+
+  el.menu.addEventListener('keydown', function (e) {
+    var items = Array.prototype.slice.call(el.menu.querySelectorAll('.menu-item:not([disabled])'));
+    var current = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!items.length) return;
+      var step = e.key === 'ArrowDown' ? 1 : -1;
+      var next = current < 0 ? 0 : (current + step + items.length) % items.length;
+      items[next].focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      if (items.length) items[e.key === 'Home' ? 0 : items.length - 1].focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMenu(true);
+    } else if (e.key === 'Tab') {
+      closeMenu(true);
+    }
+  });
+
+  document.addEventListener('pointerdown', function (e) {
+    if (el.menu.hidden) return;
+    if (el.menu.contains(e.target)) return;
+    closeMenu(false);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !el.menu.hidden) {
+      e.preventDefault();
+      closeMenu(true);
+    }
+  });
+
+  /* ---------- 顶栏控件 ---------- */
+  function setMode(mode) {
+    state.mode = mode;
+    if (mode === 'current' && state.selectionMode) {
+      state.selectionMode = false;
+      state.selected = [];
+    }
+    document.documentElement.setAttribute('data-mode', mode);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mode]'), function (btn) {
+      if (btn.classList.contains('seg-btn')) {
+        btn.setAttribute('aria-pressed', btn.getAttribute('data-mode') === mode ? 'true' : 'false');
+      }
+    });
+    renderChat();
+  }
+
+  function setScenario(key) {
+    state.scenario = key;
+    state.expanded = {};
+    state.unfolded = {};
+    state.dissolved = {};
+    state.names = {};
+    state.userFolds = [];
+    state.selected = [];
+    foldSeq = 0;
+    state.selectionMode = key === 'fold';
+    document.documentElement.setAttribute('data-scenario', key);
+    Array.prototype.forEach.call(document.querySelectorAll('.seg-btn[data-scenario]'), function (btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-scenario') === key ? 'true' : 'false');
+    });
+    state.focusAfter = null;
+    renderChat();
+  }
+
+  function setTheme(theme) {
+    state.theme = theme;
+    document.documentElement.setAttribute('data-theme', theme);
+    el.themeBtn.textContent = theme === 'dark' ? '暗色' : '亮色';
+    el.themeBtn.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
+    el.themeBtn.setAttribute('aria-label', theme === 'dark' ? '当前暗色，切换到亮色' : '当前亮色，切换到暗色');
+  }
+
+  el.themeBtn.addEventListener('click', function () {
+    setTheme(state.theme === 'dark' ? 'light' : 'dark');
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.seg-btn[data-mode]'), function (btn) {
+    btn.addEventListener('click', function () { setMode(btn.getAttribute('data-mode')); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.seg-btn[data-scenario]'), function (btn) {
+    btn.addEventListener('click', function () { setScenario(btn.getAttribute('data-scenario')); });
+  });
+
+  el.selToggle.addEventListener('click', function () {
+    state.selectionMode = !state.selectionMode;
+    if (!state.selectionMode) state.selected = [];
+    renderChat();
+    announce(state.selectionMode ? '已进入选择模式' : '已退出选择模式');
+  });
+
+  el.clearSel.addEventListener('click', function () {
+    state.selected = [];
+    renderChat();
+    announce('已取消选择');
+  });
+
+  el.foldSelected.addEventListener('click', foldSelection);
+
+  /* ---------- 图标图例 & 初始化 ---------- */
+  document.getElementById('lgBranch').innerHTML = ICON.branch;
+  document.getElementById('lgQuote').innerHTML = ICON.quote;
+  document.getElementById('lgContext').innerHTML = ICON.layers;
+  document.getElementById('lgChevron').innerHTML = ICON.chevron;
+
+  setTheme('dark');
+  setMode('proposed');
+  setScenario('reading');
+})();
+</script>
+</body>
+</html>

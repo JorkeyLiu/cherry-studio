@@ -8,6 +8,8 @@ import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
+import { resolveChromeAuthoritySegment, useRetainedRouteSegments } from '@renderer/hooks/useRetainedRouteSegments'
+import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import useScrollPosition, { commitSnapshotForRoute, routeScrollKey } from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -39,15 +41,14 @@ import {
   chooseNavigationWindow,
   computeColumnReverseMessageScrollTop,
   computeRestoreMessageScrollTop,
+  findFoldedMarkerElement,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
-  type MessageNavigationPresentationTarget,
   type MessageNavigationResult,
   type MessageNavigationScrollOutcome,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
-  resolveNavigationPresentationTarget,
   runMessageNavigationTransaction,
   shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
@@ -73,7 +74,7 @@ import {
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
-import { ensureTopicAnchorEstablished } from '@renderer/services/anchorService'
+import { anchorKeyForRoute, ensureTopicAnchorEstablished } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import type { computeContextInfo } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db/DbService'
@@ -117,6 +118,7 @@ import {
   selectLoadedMessagesForTopic,
   selectReferenceSourceNames
 } from '@renderer/store/newMessage'
+import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import {
   activeBranchSet,
@@ -133,8 +135,19 @@ import { saveExportImage } from '@renderer/utils/exportFile'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
+import {
+  type CommittedChromeProjection,
+  fetchRouteChromeWires,
+  projectCommittedChromeSegments,
+  selectOrderedSegmentsForTopic
+} from '@renderer/utils/routeCommittedChrome'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
-import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse, HistoryReferenceMeta } from '@shared/chatDb'
+import type {
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
+  HistoryReferenceMeta,
+  ListSegmentsResponse
+} from '@shared/chatDb'
 import { last } from 'lodash'
 import {
   use,
@@ -151,6 +164,7 @@ import { useTranslation } from 'react-i18next'
 import { UNSAFE_NavigationContext } from 'react-router-dom'
 import styled from 'styled-components'
 
+import { displayFrameKey, useAcceptedDisplayFrame, useRouteLocalFoldBrowse } from './acceptedDisplayFrame'
 import { AnchorGroupProvider } from './anchorGroupContext'
 import {
   buildDividerKey,
@@ -235,6 +249,7 @@ import {
   resolveRetainedViewportMessageId,
   useOptionalRouteViewport,
   useStableVisualAnchor,
+  type ViewportLayoutSettler,
   viewportPhaseAttrFor
 } from './routeViewportContext'
 import {
@@ -243,7 +258,6 @@ import {
   RouteViewportController,
   type RouteViewportSnapshot
 } from './routeViewportController'
-import SegmentFoldTransition, { presentationOnlyMessageElementRegistrar } from './SegmentFoldTransition'
 import { SegmentGroupPresentationProvider } from './SegmentGroupPresentation'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import { hasActiveStreamingReply, shouldPauseStreamingOnPrimaryMouseDown } from './streamingPause'
@@ -352,37 +366,6 @@ const measureRect = (element: Element | null | undefined): MeasuredRect | null =
   } catch {
     return null
   }
-}
-
-/**
- * Painted target of one topic-segment group: the collapsed/expanded label pill
- * inside the group's single header row.
- *
- * The header row is the group's ONE in-flow chrome row (same 32px occupancy in
- * both presentation states), but its own band is not the geometry: the label
- * pill is the only painted, hit-testable element and the only thing navigation
- * may land on. The row is matched by its stable `data-segment-id`, never by
- * selector-interpolated ids. Returns the connected label, or `null` when this
- * group paints no header in the mounted flow.
- */
-const findSegmentHeaderLabelElement = (
-  container: HTMLElement | null | undefined,
-  segmentId: string
-): HTMLElement | null => {
-  if (!container || !segmentId) return null
-  try {
-    const hosts = container.querySelectorAll('[data-testid="topic-segment-group"]')
-    for (const host of hosts) {
-      if (!(host instanceof HTMLElement)) continue
-      if (host.getAttribute('data-segment-id') !== segmentId) continue
-      if (!host.isConnected || !container.contains(host)) continue
-      const label = host.querySelector('[data-testid="topic-segment-label"]')
-      if (label instanceof HTMLElement && label.isConnected && container.contains(label)) return label
-    }
-  } catch {
-    return null
-  }
-  return null
 }
 
 /**
@@ -707,7 +690,31 @@ interface MessagesContentProps {
    * projected entities; window trims evict through the bounded sweep.
    */
   viewportRouteKey: string
+  /**
+   * Displayed-route key (`topicId::route`) from the viewport controller: the
+   * route the committed DOM belongs to. Group chrome co-commits with it
+   * (never with the selected key alone). Optional: falls back to
+   * `viewportRouteKey` on isolated mounts without a controller.
+   */
+  displayedRouteKey?: string
+  /**
+   * Displayed route (`controller.displayedRoute.route`, null = main) for the
+   * committed window above. Fork-chrome relation inputs (children filter,
+   * active path, taken) follow this, never the selected intent alone, so the
+   * old window keeps its old dividers while a switch is pending. Optional:
+   * falls back to the selected route on isolated mounts without a
+   * controller. `activeBranchId` below stays the selected intent (target
+   * loads, qualification, user actions).
+   */
+  displayedBranchId?: string | null
+  /**
+   * Window-commit co-committed target structure (same batch as its window).
+   * Owned by the outer route pipeline; this projection only reads it.
+   */
+  committedChrome?: CommittedChromeProjection | null
   contextBoundaryMessageId: string | null
+  /** Explicit pending vs ready-none: true while the displayed route's closure is not accepted yet (no boundary shown, distinct from an authoritative ready null). */
+  isContextBoundaryPending?: boolean
   isLoadingMore: boolean
   isLoadingNewer: boolean
   registerMessageElement: (messageId: string, element: HTMLElement | null) => void
@@ -746,6 +753,13 @@ interface MessagesContentProps {
    * or authority state is introduced.
    */
   historyHeadLoaded?: boolean
+  /**
+   * Route-local fold browse entries owned by the conversation surface: a block
+   * key (the user opened that summary) or a member message id (navigation asked
+   * to reveal that row). Read-only here — the block reports toggles upward.
+   */
+  expandedFoldSectionIds: ReadonlySet<string>
+  onToggleExpandFoldSection: (sectionId: string) => void
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -756,7 +770,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   displayMessages,
   displayGroups,
   viewportRouteKey,
+  displayedRouteKey,
+  displayedBranchId,
+  committedChrome,
   contextBoundaryMessageId,
+  isContextBoundaryPending,
   isLoadingMore,
   isLoadingNewer,
   registerMessageElement,
@@ -767,7 +785,9 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   viewportPhase,
   onScrollToBottom,
   hasMoreNewer,
-  historyHeadLoaded
+  historyHeadLoaded,
+  expandedFoldSectionIds,
+  onToggleExpandFoldSection
 }) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
@@ -787,21 +807,82 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // layer's refreshed authoritative name as fallback.
   const referenceSourceNames = useAppSelector((state) => selectReferenceSourceNames(state, topic.id))
 
-  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
-  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment, segmentsForTopic } = useTopicSegments(
-    topic.id
+  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick, handleBlockSelect } = useEditMode()
+  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
+  // Main route-qualified group entries for the DISPLAYED route (same source the
+  // drawer lists): the ONLY mutation-authority input for flow chrome. A group
+  // with no entry here gates fail-closed to read-only in TopicSegmentLine.
+  // Display follows the committed window's route, never the selected key
+  // alone: while a route switch is pending the accepted list is intentionally
+  // empty for navigation surfaces, and the accepted projection can also land
+  // before the window commits. In either skew direction the old window keeps
+  // its old structure (never blanked, never the other route's), and the new
+  // structure appears in the same transaction as its window. Mutation
+  // authority additionally requires `isChromeAuthorityCurrent`: a retained
+  // entry qualifies its own (displayed) route and must never back a write
+  // affordance for the selected route.
+  const {
+    segments: routeScopedSegments,
+    routeKey: routeProjectionKey,
+    isCurrent: isRouteProjectionCurrent
+  } = useRouteScopedSegments(topic.id)
+  // Window-commit co-commit (Goal A): the target route's structure published in
+  // the SAME sync batch as its window commit (see publishCommittedChrome). The
+  // first visible frame of a route switch already hosts the target structure;
+  // the scoped hook later accepts the identical projection with no visible
+  // change. Never cleared per switch: keys carry topic+route, so a stale entry
+  // can never match another route's displayed key.
+  const { segments: chromeSegments, isDisplayCurrent: isChromeAuthorityCurrent } = useRetainedRouteSegments(
+    topic.id,
+    routeProjectionKey,
+    routeScopedSegments,
+    isRouteProjectionCurrent,
+    displayedRouteKey ?? viewportRouteKey,
+    committedChrome ?? null
   )
-  // Folded (collapsed) group membership, from authority catalog membership
-  // only (never the loaded window): a folded group's bodies leave the flow
-  // while its chrome slot keeps the label.
-  const foldedMessageIds = useMemo(() => {
-    const ids = new Set<string>()
-    for (const segment of segmentsForTopic) {
-      if (segment.folded !== true) continue
-      for (const messageId of segment.messageIds) ids.add(messageId)
-    }
-    return ids
-  }, [segmentsForTopic])
+  const routeSegmentsById = useMemo(
+    () => new Map(chromeSegments.map((entry) => [entry.id, entry] as const)),
+    [chromeSegments]
+  )
+
+  // Folded-block browse state is owned by the conversation surface (`Messages`)
+  // so navigation reveal and the block itself read the SAME route-local state;
+  // this component only consumes it.
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+  /**
+   * Folded-block selection gesture (edit mode).
+   *
+   * A folded block is ONE selectable object made of whole turns, and it is
+   * selected through the edit-mode hook's OWN batch gesture, so the selection
+   * bookkeeping that makes Shift work — anchor, focus, last index and the
+   * selection-intent generation — is updated by the code that owns it. Plain /
+   * Ctrl-toggle / Shift / Ctrl+Shift and the keyboard path all take this route.
+   */
+  const handleFoldSectionSelect = useCallback(
+    (askIds: string[], modifiers: { isCtrl: boolean; isShift: boolean }) => {
+      handleBlockSelect(askIds, modifiers)
+    },
+    [handleBlockSelect]
+  )
+  // Stable lookup for the folded blocks: which whole turns are selected now.
+  const selectedTurnAskIds = useMemo(() => new Set(selectedGroupIds), [selectedGroupIds])
+  // Unfold-write capability for folded blocks: every block member must be
+  // mutable through the active route (per actual message id — never per
+  // segment owner). Fail-closed with zero IPC calls; the Main guard stays
+  // authoritative for the atomic turn-fold write.
+  const routeCapability = useAppSelector((state) => selectRouteCapability(state, topic.id))
+  const isUnfoldAllowedForMessageIds = useCallback(
+    (messageIds: readonly string[]) => {
+      if (messageIds.length === 0) return false
+      try {
+        requireIdsMutableForRoute(routeCapability, topic.id, [...messageIds])
+        return true
+      } catch {
+        return false
+      }
+    },
+    [routeCapability, topic.id]
+  )
   useClipboardKeyboard()
   // Boundary-aware native selection: ordinary within-message selection is
   // preserved; cross-message native ranges are cleared. Edit-mode native
@@ -811,12 +892,20 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // ordinary controls keep native selection).
   useCrossMessageSelectionGuard()
 
-  // Branch fork dividers for the active route: catalog for the logical
+  // Displayed route for fork chrome: the committed window's route, never the
+  // selected intent alone. `displayedBranchId` (the controller displayed
+  // route) is null on main; only `undefined` (isolated mounts without a
+  // controller) falls back to the selected route. While a route switch is
+  // pending the selected key already advanced but the window — and its
+  // dividers — still belong here, so every relation input below (children
+  // filter, active path, taken) follows this. `activeBranchId` stays the
+  // selected intent for target loads, qualification, and user actions.
+  const displayBranchId = displayedBranchId !== undefined ? displayedBranchId : activeBranchId
+  // Branch fork dividers for the displayed route: catalog for the logical
   // topic, breadcrumb path, and direct children across the addressed route
   // grouped by anchor. Sidebar stays flat logical topics.
-  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
-  const branchTree = useBranchTree(topic.id, activeBranchId)
-  // Fork dividers of the active route, placed on the Main-authoritative
+  const displayBranchTree = useBranchTree(topic.id, displayBranchId)
+  // Fork dividers of the displayed route, placed on the Main-authoritative
   // inheritance boundary (a resident message, or the history head of the
   // route whose fork inherits nothing). Pagination never promotes a divider
   // to the head: a boundary that is not loaded stays offscreen.
@@ -824,12 +913,12 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     () =>
       resolveForkDividers({
         displayMessageIds: new Set(displayMessages.map((m) => m.id)),
-        childrenByAnchor: branchTree.childrenByAnchor,
-        activeBranchId,
-        activeRoutePath: branchTree.path.map((b) => b.id),
+        childrenByAnchor: displayBranchTree.childrenByAnchor,
+        activeBranchId: displayBranchId,
+        activeRoutePath: displayBranchTree.path.map((b) => b.id),
         historyHeadLoaded
       }),
-    [displayMessages, branchTree.childrenByAnchor, branchTree.path, activeBranchId, historyHeadLoaded]
+    [displayMessages, displayBranchTree.childrenByAnchor, displayBranchTree.path, displayBranchId, historyHeadLoaded]
   )
   const topicDisplayName = topic.name && topic.name.length > 0 ? topic.name : topic.id
 
@@ -922,8 +1011,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       contextDividerGroupKey,
       referenceDividers,
       forkDividers,
-      branchPath: branchTree.path,
-      branches: branchTree.branches,
+      branchPath: displayBranchTree.path,
+      branches: displayBranchTree.branches,
       topicDisplayName,
       isMessageInSegment,
       isMessageFirstInSegment,
@@ -969,28 +1058,19 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         // simply settles its BODY content to zero height below that row. The
         // collapsed label therefore always stays inside the scrollport without
         // opening a blank band, and no flow-order/window fact is needed here.
-        const visibleMessages =
-          foldedMessageIds.size > 0
-            ? groupMessages.filter((message) => !foldedMessageIds.has(message.id))
-            : groupMessages
-        if (visibleMessages.length === 0 && groupMessages.length === 0) return null
+        if (groupMessages.length === 0) return null
         return (
           <div
             style={{ position: 'relative' }}
             data-layer-kind={kind}
             data-stable-group-id={stableGroupId}
             data-layer-run-id={layerRunId}>
-            <SegmentFoldTransition
-              folded={visibleMessages.length === 0}
-              renderBody={({ includeFolded, inert }) => (
-                <MessageGroup
-                  messages={includeFolded ? groupMessages : visibleMessages}
-                  topic={topic}
-                  registerMessageElement={inert ? presentationOnlyMessageElementRegistrar : registerMessageElement}
-                  isEditMode={inert ? false : isEditMode}
-                  onGroupClick={inert ? undefined : handleGroupClick}
-                />
-              )}
+            <MessageGroup
+              messages={groupMessages}
+              topic={topic}
+              registerMessageElement={registerMessageElement}
+              isEditMode={isEditMode}
+              onGroupClick={handleGroupClick}
             />
           </div>
         )
@@ -1030,14 +1110,28 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           onTurnClick: handleGroupClick,
           // ONE invocation per mounted group: the group's own boundary/rail
           // owner, rendered inside its elected header run host.
-          renderSegmentChrome: ({ segment, firstMounted, lastMounted, messageCount }) => (
+          // Display/authority split: the elected header row always mounts from
+          // the displayed route's structure, but the header's mutation affordance
+          // is live only when that structure is the selected route's accepted
+          // projection. Otherwise the header renders read-only (fail-closed) —
+          // a retained entry qualifies its own route, never the selected one.
+          renderSegmentChrome: ({ segment, routeSegment, firstMounted, lastMounted, messageCount, turnCount }) => (
             <TopicSegmentLine
               segment={segment}
+              routeSegment={resolveChromeAuthoritySegment(routeSegment, isChromeAuthorityCurrent)}
               isFirst={firstMounted}
               isLast={lastMounted}
               messageCount={messageCount}
+              turnCount={turnCount}
             />
-          )
+          ),
+          routeSegmentsById,
+          topicId: topic.id,
+          expandedFoldSectionIds,
+          onToggleExpandFoldSection,
+          selectedTurnAskIds,
+          onSelectFoldSection: handleFoldSectionSelect,
+          isUnfoldAllowedForMessageIds
         })}
       </SegmentGroupPresentationProvider>
     )
@@ -1049,6 +1143,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       <MessagesContainer
         id="messages"
         className="messages-container"
+        data-context-pending={isContextBoundaryPending ? 'true' : undefined}
         data-viewport-phase={viewportPhase}
         // Keyboard-focusable scroll host in normal mode: ordinary click/tab navigation reaches
         // the container so native PageUp/PageDown page #messages directly. Edit mode keeps it
@@ -1129,6 +1224,7 @@ const Messages = ({
   // Declared before the scroll hook so the route-keyed snapshot key can
   // include it.
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+
   // One-shot deletion-fallback intent (branch subtree removal with active
   // fallback). Consumed exactly once by the deletion effect below with an
   // explicit `latest` reload; never the generic snapshot-around path.
@@ -1204,6 +1300,64 @@ const Messages = ({
   // beyond-fetch-hold + stable-clean guards return). Ordinary controller
   // progress notifies (version) only re-render visuals/keeper, never restore.
   const viewportConnectionGeneration = viewportCtx?.connectionGeneration ?? localConnectionGeneration
+  // Displayed-route key for group-chrome co-commit: the route the committed DOM
+  // belongs to (`controller.displayedRoute`), read live per render like
+  // `viewportPhaseAttr` above. Same `topicId::route` shape as
+  // `viewportRouteKey` (selected intent). Falls back to the selected key when
+  // the controller is unavailable (isolated mounts), which preserves the
+  // previous selected-key behavior there.
+  let displayedRouteKeyForChrome = `${topic.id}::${activeBranchId ?? 'main'}`
+  try {
+    const displayed = controller.displayedRoute
+    if (displayed && typeof displayed.topicId === 'string' && displayed.topicId.length > 0) {
+      displayedRouteKeyForChrome = `${displayed.topicId}::${displayed.route ?? 'main'}`
+    }
+  } catch {
+    // Fallback above stands: fail-closed, never an invented route.
+  }
+  // Displayed route for fork chrome: the same `controller.displayedRoute`
+  // provenance as the key above, as a branch id (null = main). Fork-divider
+  // relation inputs follow this, never the selected intent alone, so the old
+  // window keeps its old dividers while a switch is pending. Topic-guarded:
+  // a displayed route of another topic never addresses this topic's tree.
+  let displayedBranchIdForChrome: string | null = activeBranchId
+  try {
+    const displayed = controller.displayedRoute
+    if (displayed && displayed.topicId === topic.id) {
+      displayedBranchIdForChrome = displayed.route ?? null
+    }
+  } catch {
+    // Fallback above stands: fail-closed, never an invented route.
+  }
+  // Accepted display frame: the single visual truth for the committed route.
+  // `selectedFrameKey` is the Redux intent (target while a switch is in
+  // flight); `displayedRouteKeyForChrome` above is the committed DOM's route.
+  // The frame resolves the context visual (boundary/anchor/pending) for the
+  // displayed route and retains it while the target loads, so the old window
+  // never blanks or borrows the target's boundary. The persisted anchor of
+  // the displayed route rejects stale retained visuals (deletion transfer,
+  // branch inheritance, A→B→A revisits). Requests, token counts and
+  // permissions keep using the selected authority and never read this frame.
+  const selectedFrameKey = displayFrameKey(topic.id, activeBranchId ?? null)
+  let persistedAnchorForDisplayedFrame: string | null = null
+  try {
+    const displayed = controller.displayedRoute
+    if (displayed && displayed.topicId === topic.id) {
+      const anchorRouteKey = anchorKeyForRoute(displayed.topicId, displayed.route ?? null)
+      const persisted = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey] as
+        | { kind?: unknown; groupKey?: unknown }
+        | undefined
+      persistedAnchorForDisplayedFrame =
+        persisted?.kind === 'active' && typeof persisted.groupKey === 'string' ? persisted.groupKey : null
+    }
+  } catch {
+    persistedAnchorForDisplayedFrame = null
+  }
+  // Route-local fold browse state: owned by the conversation surface, reset on
+  // the ACCEPTED display route change (never the selected intent alone), so an
+  // expansion is never cleared from under the still-visible old window.
+  const { expandedFoldSectionIds, toggleExpandFoldSection: handleToggleExpandFoldSection } =
+    useRouteLocalFoldBrowse(displayedRouteKeyForChrome)
   // Route-keyed scroll snapshots: each branch route keeps its own browsing
   // position under `topic-<id>::<branch|main>`. User scrolls are adopted
   // SOLELY via the atomic `controller.userTakeover()` in `handleScroll`
@@ -1334,6 +1488,31 @@ const Messages = ({
   const anchorMaintainerRef = useRef(anchorMaintainer)
   anchorMaintainerRef.current = anchorMaintainer
 
+  // Layout-settlement bridge for JS-driven same-route space changes (fold
+  // browse motion): the provider exposes a stable `settleLayout` command and
+  // this component — the keeper's owner — registers the only settler, which
+  // forwards to the maintainer's own `requestHold`. Same-holder/same-owner
+  // wiring as the capturer above: no notify, no version, no snapshot, no
+  // phase. Unregisters on unmount; the provider keeps the last registration
+  // across Activity hide/show (the closure only forwards to the live hold).
+  useEffect(() => {
+    const register = viewportCtxRef.current?.registerLayoutSettler
+    if (typeof register !== 'function') return undefined
+    const settler: ViewportLayoutSettler = (reason) => {
+      try {
+        anchorMaintainerRef.current.requestHold(reason)
+      } catch {}
+    }
+    register(settler)
+    return () => {
+      try {
+        register(null)
+      } catch {}
+    }
+    // Register once per mount, like the capturer above: the settler reads the
+    // live maintainer at call time, so context version bumps must not
+    // re-register (stable identity).
+  }, [scrollContainerRef])
   // Transactional anchor-sample bridge (F1): the keeper's layout-space hold needs
   // a TRUE pair — the row's viewport offset and the container's scrollTop from the
   // SAME instant. Only this component measures such a pair when it publishes a
@@ -1586,6 +1765,7 @@ const Messages = ({
     anchorMessageId: string
     wantOffset: number
     isAtBottom: boolean
+    chromeWires: ListSegmentsResponse | null
   } | null>(null)
   const topVisibleRafRef = useRef<number | null>(null)
   const cancelTopVisibleQuiet = useCallback(() => {
@@ -2348,8 +2528,26 @@ const Messages = ({
   // prepare messages for the model.
   // Phase 2B: This is now the shared projection computed once at Chat level.
   const contextInfo = sharedContextInfo
-  const contextBoundaryMessageId = contextInfo.boundaryMessageId
-  const anchorGroupKey = contextInfo.anchorGroupKey
+  // Accepted display frame: the live SELECTED visual is adopted only when the
+  // displayed route is settled; in flight the old window keeps its retained
+  // visual (never blanks, never borrows the target's boundary). Same-route
+  // anchor/fold/contextCount updates adopt on settle (no frozen display).
+  const liveContextVisual = useMemo(
+    () => ({
+      boundaryMessageId: contextInfo.boundaryMessageId,
+      anchorGroupKey: contextInfo.anchorGroupKey,
+      pending: contextInfo.isAuthoritativePending === true
+    }),
+    [contextInfo.boundaryMessageId, contextInfo.anchorGroupKey, contextInfo.isAuthoritativePending]
+  )
+  const acceptedContextVisual = useAcceptedDisplayFrame({
+    displayedKey: displayedRouteKeyForChrome,
+    selectedKey: selectedFrameKey,
+    live: liveContextVisual,
+    persistedAnchorForDisplayed: persistedAnchorForDisplayedFrame
+  })
+  const contextBoundaryMessageId = acceptedContextVisual.boundaryMessageId
+  const anchorGroupKey = acceptedContextVisual.anchorGroupKey
 
   const waitForNavigationCommit = useCallback((token: MessageViewportNavigationToken, generation: number) => {
     return viewportCommitWaiterRef.current.wait(viewportStateRef.current, (committedState) => {
@@ -2853,37 +3051,19 @@ const Messages = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, displayCount])
 
-  // Authoritative message → folded segment id, used ONLY to choose the
-  // navigated PRESENTATION (the collapsed header label instead of an
-  // unmounted body). Target identity stays the authority message id; fold
-  // state is presentation, never a navigation target of its own.
-  //
-  // Read from the authority catalog (Main-published segments), never from the
-  // loaded window: a member missing from the DOM is either folded or merely
-  // outside the display window, and only the catalog distinguishes them.
-  const topicSegmentIds = useAppSelector((state) => state.topicSegments?.segmentsByTopic?.[topic.id])
-  const topicSegmentEntities = useAppSelector((state) => state.topicSegments?.segments?.entities)
-  const foldedSegmentIdByMessage = useMemo(() => {
-    const map = new Map<string, string>()
-    if (!topicSegmentIds || !topicSegmentEntities) return map
-    for (const segmentId of topicSegmentIds) {
-      const segment = topicSegmentEntities[segmentId]
-      if (!segment || segment.folded !== true) continue
-      for (const messageId of segment.messageIds) map.set(messageId, segment.id)
-    }
-    return map
-  }, [topicSegmentEntities, topicSegmentIds])
-  // Long-lived navigation callbacks read the catalog through a ref so their
-  // identity (and the transaction dependency graph) does not churn on every
-  // catalog publication; the ref always holds the current commit's catalog.
-  const foldedSegmentIdByMessageRef = useRef(foldedSegmentIdByMessage)
-  foldedSegmentIdByMessageRef.current = foldedSegmentIdByMessage
+  // Fold-marker grounding for navigation: marker-only, never auto-expand.
+  // A folded row has no mounted `message-<id>` row; its collapsed block stands
+  // in with `[data-folded-message-ids]` (token list including the hidden id).
+  // Status/element below read that mounted marker from the DOM. No projection
+  // refs are needed here; opening a block is manual-only via
+  // `expandedFoldSectionIds` owned by the conversation surface.
 
   /**
    * Check the DOM status of a message element.
    * - 'visible': element exists and is displayed
-   * - 'hidden': element exists but is hidden (e.g. by fold)
-   * - 'missing': element not in DOM (needs loading)
+   * - 'hidden': element exists but is hidden
+   * - 'missing': element not in DOM (needs loading, or fold-hidden — see
+   *   `navigationTargetStatus`)
    */
   const checkElement = useCallback((messageId: string): 'visible' | 'hidden' | 'missing' => {
     const el = document.getElementById(`message-${messageId}`)
@@ -2892,82 +3072,59 @@ const Messages = ({
     return 'visible'
   }, [])
 
-  /**
-   * Authority input of the navigation presentation seam: which COLLAPSED group
-   * owns this message, from the topic's authority catalog only. A closing fold
-   * keeps its body mounted for the exit motion and the DOM cannot tell a
-   * presentation-only body from a live row, so the catalog is the only source.
-   */
-  const foldedSegmentIdForMessage = useCallback(
-    (messageId: string): string | null => foldedSegmentIdByMessageRef.current.get(messageId) ?? null,
-    []
-  )
-
-  /**
-   * What a navigation target is positioned on: its own row, or — for a folded
-   * segment member whose body is unmounted — the collapsed segment header
-   * label. Folding never changes the target identity, only its presentation.
-   */
-  const resolveNavigationPresentation = useCallback(
-    (targetId: string): MessageNavigationPresentationTarget =>
-      resolveNavigationPresentationTarget(targetId, foldedSegmentIdForMessage),
-    [foldedSegmentIdForMessage]
-  )
-
-  /**
-   * Physical element of one navigation presentation target.
-   * - message row: the ordinary stable `message-<id>` row path, unchanged.
-   * - segment header: the collapsed group's label pill. A folded member has no
-   *   mounted row, and a closing fold's still-mounted body is presentation-only,
-   *   so the label is the only admissible geometry and scroll target.
-   */
-  const resolveNavigationTargetElement = useCallback(
-    (target: MessageNavigationPresentationTarget): HTMLElement | null => {
-      if (target.kind === 'message-row') return getMessageRowById(target.messageId)
-      return findSegmentHeaderLabelElement(scrollContainerRef.current, target.segmentId)
+  // Marker-only fold grounding: a hidden message is positioned on its mounted
+  // collapsed marker, never by expanding. Selection ranges and keyboard moves
+  // passing through a hidden member never expand it; only a manual expand
+  // gesture (the block's own expand control) changes browse state. `settle`
+  // below allows the mounted marker to settle; the transaction never fakes
+  // `not-found`/`cancelled` for a mounted marker and never takes a parallel
+  // scroll owner — the single navigation scroll remains the only writer.
+  const resolveFoldMarkerInScope = useCallback(
+    (messageId: string): HTMLElement | null => {
+      try {
+        const scope = scrollContainerRef.current ?? (typeof document !== 'undefined' ? document : null)
+        if (!scope) return null
+        return findFoldedMarkerElement(messageId, scope as unknown as Document)
+      } catch {
+        return null
+      }
     },
     [scrollContainerRef]
   )
-
+  /**
+   * Physical element one navigation target is positioned on.
+   * An existing `message-<id>` row wins; otherwise the mounted collapsed
+   * marker standing in for that hidden id (if any). No second presentation
+   * object is ever fabricated.
+   */
+  const resolveNavigationTargetElement = useCallback(
+    (messageId: string): HTMLElement | null => getMessageRowById(messageId) ?? resolveFoldMarkerInScope(messageId),
+    [resolveFoldMarkerInScope]
+  )
   /**
    * Fold-aware navigation target status.
-   *
-   * The collapsed group's chrome host is an out-of-flow track whose own box is
-   * zero, so visibility is proven on the label pill's own rect — never on the
-   * host. `missing`/`hidden` stay truthful (the transaction then fails instead
-   * of pretending a target is on screen), and an ordinary message row keeps the
-   * existing `#message-<id>` status semantics exactly.
+   * An existing row keeps exactly the existing `#message-<id>` semantics. A
+   * row with no mounted element is `visible` when its collapsed marker is
+   * mounted (the marker is the settled target), else `missing` (a genuinely
+   * unloaded target the window has to load). There is no `hidden` answer on
+   * this path: navigation never expands, so a hidden member is located via
+   * its marker instead of being revealed.
    */
   const navigationTargetStatus = useCallback(
     (targetId: string): 'visible' | 'hidden' | 'missing' => {
-      const target = resolveNavigationPresentation(targetId)
-      if (target.kind === 'message-row') return checkElement(target.messageId)
-      const label = resolveNavigationTargetElement(target)
-      if (!label) return 'missing'
-      try {
-        if (window.getComputedStyle(label).display === 'none') return 'hidden'
-        return label.getBoundingClientRect().height > 0 ? 'visible' : 'hidden'
-      } catch {
-        return 'hidden'
-      }
+      const status = checkElement(targetId)
+      if (status !== 'missing') return status
+      return resolveFoldMarkerInScope(targetId) ? 'visible' : 'missing'
     },
-    [checkElement, resolveNavigationPresentation, resolveNavigationTargetElement]
+    [checkElement, resolveFoldMarkerInScope]
   )
-
   /**
-   * Fold-aware reveal. A collapsed group is a product presentation decision,
-   * not a hidden row: answering it with the row-reveal path (answer selection)
-   * would expand the group and change request context. There is nothing to
-   * reveal for a group header, so this is a no-op for those targets.
+   * Fold reveal is intentionally a no-op: navigation only locates the mounted
+   * collapsed marker and never writes `expandedFoldSectionIds`. Only a manual
+   * expand (the block's own control) opens a block; selection ranges and
+   * keyboard moves through hidden members never expand.
    */
-  const revealNavigationTarget = useCallback(
-    async (targetId: string) => {
-      const target = resolveNavigationPresentation(targetId)
-      if (target.kind === 'segment-header') return
-      await selectMessageForFold(target.messageId)
-    },
-    [resolveNavigationPresentation, selectMessageForFold]
-  )
+  const revealNavigationTarget = useCallback(async (_targetId: string) => {}, [])
 
   const settleNavigationDom = useCallback(
     () =>
@@ -3273,15 +3430,15 @@ const Messages = ({
           // (owned/dirty/route/epoch/phase) adopts nothing and commits
           // nothing — never a false success. No new scroll
           // owner/controller/lifecycle/state.
-          // `target` is the resolved PRESENTATION: a folded member's collapsed
-          // segment label, never its unmounted body. The adopted anchor
-          // identity stays `target.messageId` (the authority message), so the
-          // route keeps a stable reading row; the fold body is never measured,
-          // held or persisted, and any later restore re-resolves through this
-          // same seam.
-          const adoptRowAnchor = (target: MessageNavigationPresentationTarget): MessageNavigationScrollOutcome => {
+          // `messageId` is the navigated message identity itself: fold is
+          // message-level, so the anchor is always that stable row and the
+          // route keeps a stable reading row. A row still hidden by a
+          // collapsed block is never measured or adopted — the reveal above is
+          // the only reason it could exist, and a missing/unmeasurable element
+          // fails closed here.
+          const adoptRowAnchor = (messageId: string): MessageNavigationScrollOutcome => {
             try {
-              const targetEl = resolveNavigationTargetElement(target)
+              const targetEl = resolveNavigationTargetElement(messageId)
               if (!targetEl) return 'not-found' as const
               if (!targetEl.isConnected) return 'not-found' as const
               try {
@@ -3329,7 +3486,7 @@ const Messages = ({
               const out = controller.adoptInteractionViewport(
                 { topicId: topicAtStart, route: routeAtStart },
                 {
-                  messageId: target.messageId,
+                  messageId,
                   intraRowOffset,
                   scrollTop: postScrollTop,
                   isAtBottom: atBottom
@@ -3396,7 +3553,7 @@ const Messages = ({
                 // With the row adopted, the keeper's hold is layout-only
                 // (displacement 0 for a pure scroll), so the movement survives;
                 // the adoption is repeated on the settled position below.
-                if (adoptRowAnchor(resolveNavigationPresentation(resolved.targetId)) !== 'success') {
+                if (adoptRowAnchor(resolved.targetId) !== 'success') {
                   return 'cancelled' as const
                 }
                 return (async () => {
@@ -3407,7 +3564,7 @@ const Messages = ({
                   // hand the viewport to the keeper.
                   if (!isCurrentNavigation(token)) return 'cancelled' as const
                   if (!stillCurrent()) return 'cancelled' as const
-                  return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
+                  return adoptRowAnchor(resolved.targetId)
                 })()
               }
               try {
@@ -3418,16 +3575,13 @@ const Messages = ({
             }
             // Already clearly visible (or a short instant write): adopt the
             // resulting position without a journey.
-            return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
+            return adoptRowAnchor(resolved.targetId)
           }
           const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
-            // Element lookup goes through the presentation seam: a folded
-            // member resolves to its collapsed segment label (the only painted
-            // box it has), so the arithmetic below positions the label — a
-            // status check that called the body "visible" while the write still
-            // targeted an unmounted row would be a lie. No scrollTop is written
-            // outside this single arbiter.
-            const target = resolveNavigationTargetElement(resolveNavigationPresentation(targetId))
+            // Element lookup is the navigated row itself (fold is message-level,
+            // so a reveal has already mounted it): the arithmetic below positions
+            // that row. No scrollTop is written outside this single arbiter.
+            const target = resolveNavigationTargetElement(targetId)
             if (!target) return 'not-found' as const
             let containerRect: { top: number }
             let elRect: { top: number; height: number }
@@ -3480,7 +3634,7 @@ const Messages = ({
           // Message paths install the navigated row as the reading anchor; the
           // explicit top/bottom/scrollTop kinds keep their existing semantics
           // (explicit bottom suspends via beginSendBottom elsewhere).
-          if (resolved.kind === 'message') return adoptRowAnchor(resolveNavigationPresentation(resolved.targetId))
+          if (resolved.kind === 'message') return adoptRowAnchor(resolved.targetId)
           // Explicit top/bottom/scrollTop canonical: success when written above.
           return 'success' as const
         },
@@ -3500,7 +3654,6 @@ const Messages = ({
       isCurrentNavigation,
       navigationTargetStatus,
       notifyViewport,
-      resolveNavigationPresentation,
       resolveNavigationTargetElement,
       revealNavigationTarget,
       scrollContainerRef,
@@ -5919,6 +6072,41 @@ const Messages = ({
     },
     []
   )
+  // Window-commit co-committed target structure (Goal A): owned by the outer
+  // route pipelines (published inside the atomic window commits below) and
+  // read by the inner projection as the displayed route's structure. Keys
+  // carry topic+route, so a stale entry can never match another route.
+  const [committedChrome, setCommittedChrome] = useState<CommittedChromeProjection | null>(null)
+  // Window-commit chrome co-commit (Goal A): publish the target route's group
+  // structure in the SAME synchronous batch as its window commit. Every
+  // route-window pipeline fetches the lightweight qualification
+  // (`fetchRouteChromeWires`: segment metadata + Main-computed per-group route
+  // blocks — no message bodies, no full preload, single-flight shared with the
+  // scoped-chrome hook so both derive identical fields) alongside its window
+  // fetch, then calls this inside the commit's own `onPublish` (which runs
+  // synchronously inside the atomic commit, before `window/apply`). React
+  // batches both updates into one render: the first visible frame already
+  // hosts the target route's headers, and the hook's later acceptance changes
+  // nothing visible. Fail-closed: a null/failed fetch or a projection miss
+  // publishes nothing and the commit proceeds with the retained/hook behavior.
+  const publishCommittedChrome = useCallback(
+    (targetTopicId: string, targetBranchId: string | null, wires: ListSegmentsResponse | null): void => {
+      if (!wires) return
+      try {
+        const catalog = selectOrderedSegmentsForTopic(store.getState(), targetTopicId)
+        const projected = projectCommittedChromeSegments({
+          topicId: targetTopicId,
+          branchId: targetBranchId,
+          catalog,
+          wires
+        })
+        if (projected) setCommittedChrome(projected)
+      } catch {
+        // fail-closed: retain the pre-existing retained/hook behavior
+      }
+    },
+    []
+  )
   // Single route-window entry (provenance-bound atomic commit).
   // Records session epoch + target route + window identity as rendered,
   // dispatches the window, and stores the first-position plan in the SAME
@@ -6074,7 +6262,8 @@ const Messages = ({
       topicIdAtStart: string,
       routeAtStart: string | null,
       window: MessageWindow,
-      visible: { anchorMessageId: string; wantOffset: number }
+      visible: { anchorMessageId: string; wantOffset: number },
+      onPublish?: () => void
     ): number | null => {
       if (!controller.isSessionCurrent(fetchEpoch)) return null
       const intent = controller.currentIntent
@@ -6087,6 +6276,11 @@ const Messages = ({
       const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
       const ok = controller.applyVisibleRebaseWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
       if (!ok) return null
+      if (onPublish) {
+        if (topicIdRef.current !== topicIdAtStart || routeRef.current !== routeAtStart) return null
+        if (!controller.isSessionCurrent(fetchEpoch)) return null
+        onPublish()
+      }
       cancelTopVisibleQuiet()
       viewportDispatch({ type: 'window/apply', window })
       topVisibleRef.current = {
@@ -6827,7 +7021,9 @@ const Messages = ({
         failVisibleTransition(epoch)
         return
       }
-      const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan)
+      const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan, () =>
+        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeWires)
+      )
       if (hiddenEpoch === null) {
         topHiddenFallbackRef.current = null
         failVisibleTransition(epoch)
@@ -7072,6 +7268,18 @@ const Messages = ({
       let deferredMessages: Message[] = []
       let deferredMutable: string[] = []
       let deferredReference: HistoryReferenceMeta | null = null
+      // Chrome co-commit: target route qualification alongside the window
+      // fetch (single-flight shared with the scoped-chrome hook — no second
+      // IPC, no bodies). Joined below before any commit so the commit batch
+      // carries both window and structure; failure publishes nothing.
+      const chromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
+        topicIdAtStart,
+        branchId
+      ).then(
+        (wires) => wires,
+        () => null
+      )
+      let chromeWires: ListSegmentsResponse | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
         const loadLatestWindow = async (): Promise<FetchMessagesWindowResponse> => {
@@ -7117,6 +7325,10 @@ const Messages = ({
           ? ((routeWindow as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
           : []
         deferredReference = (routeWindow as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
+        // Join the co-commit qualification: already in flight since before the
+        // window fetch (typically resolved first — it carries no bodies), so
+        // the commit below publishes window and structure atomically.
+        chromeWires = await chromeWiresPromise
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -7144,6 +7356,9 @@ const Messages = ({
       const publishDeferredProjection = (): void => {
         if (deferredPublished) return
         deferredPublished = true
+        // Chrome co-commit: target structure in the SAME sync batch as the
+        // window commit (the commit entry calls this before window/apply).
+        publishCommittedChrome(topicIdAtStart, branchId, chromeWires)
         // Read-only deferred route-window hydration: must not invalidate the semantic closure.
         if (deferredBlocks.length > 0) {
           dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart)))
@@ -7523,6 +7738,16 @@ const Messages = ({
     } catch {
       // fail-closed: latest read below still ignores snapshots
     }
+    // Chrome co-commit: fallback-route qualification alongside the latest
+    // fetch (single-flight shared — no second IPC, no bodies). Joined after
+    // the staleness gate; a null join keeps prior behavior.
+    const deletionChromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
+      topicIdAtEffect,
+      routeAtEffect
+    ).then(
+      (wires) => wires,
+      () => null
+    )
     void (async () => {
       let routeWindow: FetchMessagesWindowResponse | void
       try {
@@ -7554,6 +7779,9 @@ const Messages = ({
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
         return
       }
+      // Join the co-commit qualification: already in flight since the fetch
+      // above, so the fallback commit below carries window and structure.
+      const deletionChromeWires = await deletionChromeWiresPromise
       // `deletionEpoch` is assigned exactly when the transition arms; the
       // catch below only fails that same epoch visible (never a newer owner).
       let deletionEpoch: number | null = null
@@ -7573,9 +7801,16 @@ const Messages = ({
         // stale completions refuse with no dispatch, never disturbing a
         // superseding session. No navigation transaction: the window above
         // already is the tail and the plan already pins bottom.
-        deletionEpoch = commitRouteWindowAtomic(deletionFetchEpoch, topicIdAtEffect, routeAtEffect, latestWindow, {
-          kind: 'bottom'
-        })
+        deletionEpoch = commitRouteWindowAtomic(
+          deletionFetchEpoch,
+          topicIdAtEffect,
+          routeAtEffect,
+          latestWindow,
+          {
+            kind: 'bottom'
+          },
+          () => publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)
+        )
         if (deletionEpoch === null) {
           failVisibleTransition(deletionFetchEpoch)
           return
@@ -8372,6 +8607,17 @@ const Messages = ({
       const canonicalAnchor = canonicalSavedAnchorId(saved)
       let routeWindow: FetchMessagesWindowResponse | void
       let snapshotInvalidForRoute = false
+      // Chrome co-commit: target route qualification alongside the window
+      // fetch (single-flight shared with the scoped-chrome hook — no second
+      // IPC, no bodies). Joined after the staleness gate; failure publishes
+      // nothing and every commit below proceeds unchanged.
+      const topChromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
+        topicIdAtEffect,
+        routeAtEffect
+      ).then(
+        (wires) => wires,
+        () => null
+      )
       try {
         const choice = chooseRouteWindowRequest(saved)
         if (choice.kind === 'latest') {
@@ -8450,6 +8696,19 @@ const Messages = ({
       if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
         failVisibleTransition(fetchEpoch)
         return
+      }
+      // Join the co-commit qualification before any commit below: the visible
+      // fast path, the hidden atomic path and the single-use hidden fallback
+      // all publish window and structure in one batch. Already in flight
+      // since before the window fetch; a null join keeps prior behavior.
+      const topChromeWires = await topChromeWiresPromise
+      // Idempotent per-pipeline publish: the first commit wins, later
+      // attempts (fallback retries) republish the identical projection.
+      let topChromePublished = false
+      const publishTopCommittedChrome = (): void => {
+        if (topChromePublished) return
+        topChromePublished = true
+        publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeWires)
       }
       try {
         // Superseded/void reads never publish: fail visible, keep snapshot.
@@ -8603,7 +8862,8 @@ const Messages = ({
                         topicIdAtEffect,
                         routeAtEffect,
                         unionWindow,
-                        { anchorMessageId: routeSavedRowAnchor, wantOffset: savedOffset }
+                        { anchorMessageId: routeSavedRowAnchor, wantOffset: savedOffset },
+                        publishTopCommittedChrome
                       )
                       if (visibleEpoch !== null) {
                         // Visible path armed: stash the already-materialized
@@ -8622,7 +8882,8 @@ const Messages = ({
                           firstPlan,
                           anchorMessageId: routeSavedRowAnchor,
                           wantOffset: savedOffset,
-                          isAtBottom: !!saved?.isAtBottom
+                          isAtBottom: !!saved?.isAtBottom,
+                          chromeWires: topChromeWires
                         }
                         // Visible path armed: the layout effect applies the
                         // first compensation, then the bounded quiet sequence
@@ -8663,7 +8924,8 @@ const Messages = ({
             topicIdAtEffect,
             routeAtEffect,
             targetWindow,
-            firstPlan
+            firstPlan,
+            publishTopCommittedChrome
           )
           if (topRestoreEpoch === null) {
             failVisibleTransition(fetchEpoch)
@@ -8961,7 +9223,11 @@ const Messages = ({
           displayMessages={displayMessages}
           displayGroups={displayGroups}
           viewportRouteKey={`${topic.id}::${activeBranchId ?? 'main'}`}
+          displayedRouteKey={displayedRouteKeyForChrome}
+          displayedBranchId={displayedBranchIdForChrome}
+          committedChrome={committedChrome}
           contextBoundaryMessageId={contextBoundaryMessageId}
+          isContextBoundaryPending={acceptedContextVisual.pending}
           isLoadingMore={isLoadingMore}
           isLoadingNewer={isLoadingNewer}
           registerMessageElement={registerMessageElement}
@@ -8973,6 +9239,8 @@ const Messages = ({
           onScrollToBottom={scrollToBottom}
           hasMoreNewer={hasMoreNewer}
           historyHeadLoaded={historyHeadLoaded}
+          expandedFoldSectionIds={expandedFoldSectionIds}
+          onToggleExpandFoldSection={handleToggleExpandFoldSection}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

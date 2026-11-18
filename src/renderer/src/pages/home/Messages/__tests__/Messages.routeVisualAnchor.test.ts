@@ -71,7 +71,10 @@ describe('route-switch scroll + footer contract', () => {
     expect(handler).toMatch(/publishDeferredProjection/)
     expect(handler).toMatch(/rebaseRouteMessages/)
     expect(handler).toMatch(/commitDividerVisibleAtomic|commitRouteWindowAtomic/)
-    expect(handler).toMatch(/wantOffset/)
+    // The clicked divider's screen offset is captured synchronously and threaded
+    // as the fetch-hold intent (captureDividerOffset → clickOffset); `wantOffset`
+    // now names the downstream viewport-commit field outside this handler.
+    expect(handler).toMatch(/clickOffset|captureDividerOffset/)
     expect(handler).not.toMatch(/setPendingAnchorNavigate/)
     expect(handler).not.toMatch(/NAVIGATE_TO_MESSAGE/)
     // Divider preserves visual fork anchor, never a bottom/history jump

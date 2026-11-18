@@ -473,7 +473,9 @@ describe('branch mutation guard matrix', () => {
       ]).ok
     ).toBe(true)
     expect(agg.appendMessage(t, msgJson('m2', t) as never, [blockJson('bm2', 'm2') as never]).ok).toBe(true)
-    const b1 = (okValue(agg.createBranch(t, null, 'u1', 'B1')).branch as { id: string }).id
+    // Fork anchored at a1 so the main-route group below sits on ONE side of it
+    // (a group-level range never spans a fork point).
+    const b1 = (okValue(agg.createBranch(t, null, 'a1', 'B1')).branch as { id: string }).id
     seedSuffix(agg, t, b1, ['c0'])
     // Non-owner batch rejects atomically: main-owned m2 + branch-owned c0 through main.
     const del = agg.deleteMessagesWithDependents(t, ['m2', 'c0'], null)

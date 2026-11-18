@@ -78,8 +78,10 @@ describe('layout-space hold metric (the keeper hold coordinate, split from scrol
     expect(resolveLayoutHold({ viewportOffset: -60, scrollTop: -20 }, { viewportOffset: -260, scrollTop: -20 })).toBe(
       -200
     )
-    // The tolerance is a real gate (a 1px wobble is not a hold).
-    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 1, scrollTop: 0 })).toBeNull()
+    // The no-correction threshold is half a native quantum: exactly 0.5 never
+    // writes (a rounded write could reverse direction next frame); above it holds.
+    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 0.5, scrollTop: 0 })).toBeNull()
+    expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 1, scrollTop: 0 })).toBe(1)
     expect(resolveLayoutHold({ viewportOffset: 0, scrollTop: 0 }, { viewportOffset: 1.5, scrollTop: 0 })).toBe(1.5)
   })
 
@@ -143,11 +145,12 @@ describe('compensation write truth (realized vs clamped)', () => {
     expect(rebaseAfterCompensation(sample, 500, { scrollTop: 0, viewportOffset: null })).toBeNull()
     expect(rebaseAfterCompensation(sample, 500, { scrollTop: NaN, viewportOffset: 10 })).toBeNull()
     expect(rebaseAfterCompensation(sample, 500, { scrollTop: 0, viewportOffset: NaN })).toBeNull()
-    // A negligible clamp (sub-pixel) still counts as a realized write: the
-    // analytic pair stays valid inside the shared tolerance.
+    // A negligible clamp (sub-pixel rounding) still counts as a realized write:
+    // the baseline pins the ACTUAL scrollTop and keeps the owed residual
+    // measurable instead of baking the requested fraction.
     expect(rebaseAfterCompensation(sample, 500, { scrollTop: 499.6, viewportOffset: null })).toEqual({
       viewportOffset: 120 - 500,
-      scrollTop: 500
+      scrollTop: 499.6
     })
   })
 })

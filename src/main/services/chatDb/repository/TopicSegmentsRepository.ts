@@ -32,7 +32,8 @@ const COLUMN_MAP = buildColumnMap([
   ['name', 'name'],
   ['createdAt', 'created_at'],
   ['updatedAt', 'updated_at'],
-  ['sortOrder', 'sort_order']
+  ['sortOrder', 'sort_order'],
+  ['headerMessageId', 'header_message_id']
 ])
 
 export class TopicSegmentsRepository {
@@ -85,6 +86,42 @@ export class TopicSegmentsRepository {
   private normalizeSiblingOrdersInTx(tx: any, topicId: string): void {
     const ids = loadOrderedIds(tx, topicSegments, topicSegments.topicId, topicId)
     assignDenseOrders(tx, topicSegments, ids)
+  }
+  /**
+   * Keep a group's persisted head consistent with its membership.
+   *
+   * The invariants are exactly two: the head stays the same while it is still
+   * a member (membership order changes never move it), and a head that left
+   * the group repairs to the group's first surviving member in authoritative
+   * membership order. A group with no members has no head. This runs inside
+   * the caller's transaction, from authority rows only.
+   */
+  private repairHeaderInTx(tx: any, segmentId: string): void {
+    const current = (
+      tx
+        .select({ headerMessageId: topicSegments.headerMessageId })
+        .from(topicSegments)
+        .where(eq(topicSegments.id, segmentId))
+        .get() as { headerMessageId: string | null } | undefined
+    )?.headerMessageId
+    const persisted = current ?? null
+    if (persisted !== null) {
+      const stillMember = tx
+        .select({ messageId: topicSegmentMessages.messageId })
+        .from(topicSegmentMessages)
+        .where(and(eq(topicSegmentMessages.segmentId, segmentId), eq(topicSegmentMessages.messageId, persisted)))
+        .get()
+      if (stillMember) return
+    }
+    const first = tx
+      .select({ messageId: topicSegmentMessages.messageId })
+      .from(topicSegmentMessages)
+      .where(eq(topicSegmentMessages.segmentId, segmentId))
+      .orderBy(asc(topicSegmentMessages.sortOrder), asc(topicSegmentMessages.messageId))
+      .get() as { messageId: string } | undefined
+    const next = first?.messageId ?? null
+    if (next === persisted) return
+    tx.update(topicSegments).set({ headerMessageId: next }).where(eq(topicSegments.id, segmentId)).run()
   }
 
   getById(id: string): GetResult<TopicSegmentData> {
@@ -152,6 +189,33 @@ export class TopicSegmentsRepository {
       .orderBy(asc(topicSegmentMessages.sortOrder), asc(topicSegmentMessages.messageId))
       .all()
       .map((r) => r.messageId)
+  }
+
+  /**
+   * Persisted group head identity, or null when the row carries none yet
+   * (pre-020 row, or a head that has not been resolved/backfilled).
+   */
+  getHeaderMessageId(segmentId: string): string | null {
+    const row = this.db
+      .select({ headerMessageId: topicSegments.headerMessageId })
+      .from(topicSegments)
+      .where(eq(topicSegments.id, segmentId))
+      .get()
+    return (row?.headerMessageId ?? null) || null
+  }
+
+  /**
+   * Write the group head identity. Callers derive the value from authority
+   * (the first ordered member at creation, or the first surviving member when
+   * the previous head left the group) — never from a renderer window.
+   */
+  setHeaderMessageId(segmentId: string, messageId: string | null): AffectedCount {
+    const result = this.db
+      .update(topicSegments)
+      .set({ headerMessageId: messageId })
+      .where(eq(topicSegments.id, segmentId))
+      .run()
+    return { affected: result.changes }
   }
 
   /**
@@ -402,6 +466,7 @@ export class TopicSegmentsRepository {
         }
       }
       this.normalizeMembershipOrdersInTx(tx, segmentId)
+      this.repairHeaderInTx(tx, segmentId)
       return { affected }
     })
   }
@@ -436,6 +501,9 @@ export class TopicSegmentsRepository {
         tx.delete(topicSegments).where(eq(topicSegments.id, segmentId)).run()
         // Normalize sibling segment orders after empty-segment deletion
         if (seg) this.normalizeSiblingOrdersInTx(tx, seg.topicId)
+      } else {
+        // A removed head row repairs the head to the first surviving member.
+        this.repairHeaderInTx(tx, segmentId)
       }
       return { affected }
     })
@@ -484,7 +552,34 @@ export class TopicSegmentsRepository {
       for (let i = 0; i < messageIds.length; i++) {
         tx.insert(topicSegmentMessages).values({ segmentId, messageId: messageIds[i], sortOrder: i }).run()
       }
+      // Membership was replaced wholesale: a head that is still a member keeps
+      // its identity, a head that left repairs to the new first member.
+      this.repairHeaderInTx(tx, segmentId)
       return { affected: messageIds.length }
+    })
+  }
+
+  /**
+   * Repair persisted heads after message rows leave outside segment
+   * membership writes. Message deletes cascade membership rows away without
+   * touching the segment row, so a head that pointed at a deleted message
+   * would dangle. Only segments whose persisted head is in `messageIds` are
+   * touched, and the repair is the same deterministic rule as every other
+   * path: first surviving member in authority order, NULL when empty.
+   * Segments are never deleted here — empty-group dissolution stays with the
+   * membership-write paths.
+   */
+  repairHeadersForDeletedMessages(messageIds: string[]): void {
+    if (messageIds.length === 0) return
+    return this.db.transaction((tx) => {
+      const candidates = tx
+        .select({ id: topicSegments.id })
+        .from(topicSegments)
+        .where(sql`${topicSegments.headerMessageId} IN ${messageIds}`)
+        .all()
+      for (const row of candidates) {
+        this.repairHeaderInTx(tx, row.id)
+      }
     })
   }
 }

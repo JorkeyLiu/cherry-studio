@@ -84,6 +84,7 @@ export interface TopicSegmentRow {
   created_at: string | null
   updated_at: string | null
   sort_order: number
+  header_message_id: string | null
   extra: string | null
 }
 
@@ -209,6 +210,15 @@ export interface TopicSegmentData {
   createdAt: string | null
   updatedAt: string | null
   sortOrder: number
+  /**
+   * Stable identity of the group head: the member that was first when the
+   * group was created. Membership changes never move it; if the head row
+   * itself leaves the group (deleted or removed from membership) the head is
+   * repaired deterministically to the group's first surviving member. The
+   * head is the group's persisted identity and the owner anchor for group
+   * metadata mutations; it is never re-derived from a renderer window.
+   */
+  headerMessageId: string | null
   overflow: Record<string, unknown>
 }
 

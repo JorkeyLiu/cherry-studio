@@ -1,4 +1,5 @@
 import { EVENT_NAMES } from '@renderer/services/EventService'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -16,7 +17,15 @@ const { emitMock, state } = vi.hoisted(() => ({
         sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
+        // Route-qualified TURN count: 3 reachable messages form 2 turns —
+        // kept distinct from messageCount so the badge source is visible.
+        turnCount: 2,
         firstMessageId: 'msg-offscreen',
+        // Stable head from Main: NOT the first reachable member, so navigation
+        // must target the head, never the first member.
+        headerMessageId: 'msg-2',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
         folded: false
       },
       {
@@ -26,10 +35,14 @@ const { emitMock, state } = vi.hoisted(() => ({
         sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
+        turnCount: 1,
         firstMessageId: 'msg-4',
+        headerMessageId: 'msg-4',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
         folded: false
       }
-    ]
+    ] as Array<RouteScopedSegment & { folded: boolean }>
   }
 }))
 
@@ -42,7 +55,9 @@ vi.mock('@renderer/services/EventService', () => ({
   EventEmitter: { emit: (...args: unknown[]) => emitMock(...args) }
 }))
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key })
+  useTranslation: () => ({
+    t: (key: string, opts?: { count?: number }) => (opts && 'count' in opts ? String(opts.count) : key)
+  })
 }))
 
 vi.mock('antd', () => ({
@@ -68,7 +83,12 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
+        turnCount: 2,
         firstMessageId: 'msg-offscreen',
+        headerMessageId: 'msg-2',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-2',
         folded: false
       },
       {
@@ -78,24 +98,83 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
+        turnCount: 1,
         firstMessageId: 'msg-4',
+        headerMessageId: 'msg-4',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-4',
         folded: false
       }
     ]
   })
 
-  it('navigates to the projected route-reachable first member (no window-local fallback)', () => {
+  it('navigates to the stable head, never the first reachable member', () => {
     render(<TopicSegmentDrawer topicId="topic-1" />)
-    fireEvent.click(screen.getByText('Segment One'))
+    const row = screen.getByText('Segment One')
+    // The row carries the stable head id for testability.
+    const item = row.closest('[data-testid="topic-segment-drawer-row"]') as HTMLElement | null
+    expect(item?.getAttribute('data-segment-header')).toBe('msg-2')
+    fireEvent.click(row)
     expect(emitMock).toHaveBeenCalledTimes(1)
-    expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-offscreen')
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-2')
   })
 
-  it('shows the projected intersection count, not the topic-wide authority count', () => {
+  it('navigates to an unloaded head (window complement stays out of the target)', () => {
+    state.segments = [
+      {
+        id: 'seg-9',
+        name: 'Segment Nine',
+        color: '#fff',
+        sortOrder: 0,
+        memberIds: ['msg-2', 'msg-3'],
+        messageCount: 2,
+        firstMessageId: 'msg-2',
+        // The stable head is outside the loaded window: the unified path loads
+        // its window and settles on the fold marker.
+        headerMessageId: 'msg-head-unloaded',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-head-unloaded',
+        folded: false
+      }
+    ]
     render(<TopicSegmentDrawer topicId="topic-1" />)
-    // The projection carries the reachable-intersection counts.
-    expect(screen.getByText('3')).toBeTruthy()
+    fireEvent.click(screen.getByText('Segment Nine'))
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-head-unloaded')
+  })
+
+  it('hides groups whose stable head resolves outside the current route', () => {
+    state.segments = [
+      {
+        id: 'seg-1',
+        name: 'Segment One',
+        color: '#fff',
+        sortOrder: 1,
+        memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
+        messageCount: 3,
+        firstMessageId: 'msg-offscreen',
+        headerMessageId: 'msg-2',
+        headerInRoute: false,
+        headerOwnedByRoute: false,
+        presentationStartMessageId: 'msg-offscreen',
+        folded: false
+      }
+    ]
+    const { container } = render(<TopicSegmentDrawer topicId="topic-1" />)
+    // A headless residual keeps its members naturally rendered in the rail but
+    // gets no navigation entry: the drawer lists nothing.
+    expect(screen.queryByText('Segment One')).toBeNull()
+    expect(container.querySelector('[data-testid="drawer-trigger"]')).toBeNull()
+  })
+
+  it('shows the route-qualified turn count, never the catalog message count', () => {
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    // The projection carries turn counts: 3 reachable messages form 2 turns.
+    expect(screen.getByText('2')).toBeTruthy()
     expect(screen.getByText('1')).toBeTruthy()
+    // The catalog message count (3) must not appear anywhere.
+    expect(screen.queryByText('3')).toBeNull()
   })
 
   it('renders the projected route order, never re-sorting by catalog sortOrder', () => {
@@ -133,7 +212,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
     expect(screen.getByText('topicSegment.navigation.title')).toBeTruthy()
   })
 
-  it('shows a folded group by its fold state instead of the hidden name, keeping the count', () => {
+  it('lists a group that still carries the legacy fold flag by its own name, keeping the count', () => {
     state.segments = [
       {
         id: 'seg-1',
@@ -142,7 +221,12 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 1,
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
+        turnCount: 2,
         firstMessageId: 'msg-offscreen',
+        headerMessageId: 'msg-2',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-2',
         folded: true
       },
       {
@@ -152,27 +236,32 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         sortOrder: 0,
         memberIds: ['msg-4'],
         messageCount: 1,
+        turnCount: 1,
         firstMessageId: 'msg-4',
+        headerMessageId: 'msg-4',
+        headerInRoute: true,
+        headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-4',
         folded: false
       }
     ]
     render(<TopicSegmentDrawer topicId="topic-1" />)
 
-    // Folded row: i18n fold label, no original name in the row text, the
-    // original name preserved as the hover title, and the count unchanged.
-    const foldedRow = screen.getByText('topicSegment.folded')
-    expect(foldedRow.textContent).not.toContain('Segment One')
-    const foldedItem = foldedRow.closest('[title]') as HTMLElement | null
-    expect(foldedItem?.getAttribute('title')).toBe('Segment One')
-    expect(screen.queryByText('Segment One')).toBeNull()
-    expect(screen.getByText('3')).toBeTruthy()
+    // The legacy per-group fold flag is cancelled: it is no longer a
+    // presentation state of the navigation row, so a group that still carries
+    // it is listed by its own name — the count is unchanged either way.
+    const row = screen.getByText('Segment One')
+    const item = row.closest('[data-testid="topic-segment-drawer-row"]') as HTMLElement | null
+    expect(item?.getAttribute('title')).toBe('Segment One')
+    expect(screen.queryByText('topicSegment.folded')).toBeNull()
+    expect(screen.getByText('2')).toBeTruthy()
 
     // Expanded row keeps its original name and count.
     expect(screen.getByText('Segment Two')).toBeTruthy()
     expect(screen.getByText('1')).toBeTruthy()
   })
 
-  it('keeps navigation by the folded row on the projected first member', () => {
+  it('falls back to the first member when the projection predates the head contract', () => {
     state.segments = [
       {
         id: 'seg-1',
@@ -182,11 +271,18 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         memberIds: ['msg-offscreen', 'msg-2', 'msg-3'],
         messageCount: 3,
         firstMessageId: 'msg-offscreen',
+        // The projection predates the head contract: no stable head, so the
+        // row falls back to the first member. Reachable but ownership
+        // unprovable (read + navigate only).
+        headerMessageId: null,
+        headerInRoute: true,
+        headerOwnedByRoute: false,
+        presentationStartMessageId: 'msg-offscreen',
         folded: true
       }
     ]
     render(<TopicSegmentDrawer topicId="topic-1" />)
-    fireEvent.click(screen.getByText('topicSegment.folded'))
+    fireEvent.click(screen.getByText('Segment One'))
     expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-offscreen')
   })
 

@@ -406,6 +406,16 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
 // Segment wire adapters (Phase 5.1A)
 // ---------------------------------------------------------------------------
 
+/** Head identity + owner of one group, resolved by Main from authority rows. */
+export interface SegmentHeaderIdentity {
+  /** Persisted group-head message id; null only when the group has no member. */
+  headerMessageId: string | null
+  /** Logical topic the head message belongs to. */
+  ownerTopicId: string
+  /** Owner route of the head message; null = that topic's main route. */
+  ownerBranchId: string | null
+}
+
 /**
  * Convert a TopicSegmentData + ordered messageIds to a SegmentWire.
  * Color is bridged from/to overflow. Authority catalog derivation:
@@ -413,6 +423,11 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
  * derived from the ordered complete membership (messageIds[0], last,
  * length). Empty membership (deleted-before-cleanup readback) yields
  * null/null/0 consistently and should not normally survive.
+ *
+ * `header` carries the group's persisted head identity plus the owner Main
+ * resolved from that head row. It is a required argument on purpose: every
+ * producer must supply the authority value instead of letting an adapter
+ * guess a head from membership order or from the caller's active route.
  *
  * JSON-safety: the optional `color` own property is emitted ONLY when
  * overflow carries a legal string. When absent/null/non-string it is fully
@@ -431,7 +446,8 @@ export function segmentToWire(
     sortOrder: number
     overflow: Record<string, unknown>
   },
-  messageIds: string[]
+  messageIds: string[],
+  header: SegmentHeaderIdentity
 ): SegmentWire {
   const firstMessageId = messageIds.length > 0 ? messageIds[0] : null
   const lastMessageId = messageIds.length > 0 ? messageIds[messageIds.length - 1] : null
@@ -440,6 +456,9 @@ export function segmentToWire(
     topicId: segment.topicId,
     name: segment.name,
     messageIds,
+    headerMessageId: header.headerMessageId,
+    ownerTopicId: header.ownerTopicId,
+    ownerBranchId: header.ownerBranchId,
     createdAt: segment.createdAt,
     updatedAt: segment.updatedAt,
     sortOrder: segment.sortOrder,
@@ -455,13 +474,11 @@ export function segmentToWire(
   if (typeof color === 'string') {
     wire = { ...wire, color }
   }
-  const folded = segment.overflow.folded
-  if (typeof folded === 'boolean') {
-    wire = { ...wire, folded }
-  }
+  // Group-level collapse is retired: whatever a legacy `folded` marker still
+  // says, the read wire never emits it, so every restored group renders and
+  // participates normally instead of coming back collapsed.
   return wire
 }
-
 // ---------------------------------------------------------------------------
 // File reference wire adapters (Phase 5.1A)
 // ---------------------------------------------------------------------------

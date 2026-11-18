@@ -448,6 +448,9 @@ describe('SqliteMessageDataSource', () => {
         sortOrder: 0,
         firstMessageId: 'm1',
         lastMessageId: 'm1',
+        headerMessageId: 'm1',
+        ownerTopicId: 't1',
+        ownerBranchId: null,
         messageCount: 1
       }
       api.upsertSegment.mockResolvedValue(successResult(segWire))
@@ -476,6 +479,9 @@ describe('SqliteMessageDataSource', () => {
         sortOrder: 0,
         firstMessageId: null,
         lastMessageId: null,
+        headerMessageId: null,
+        ownerTopicId: 't1',
+        ownerBranchId: null,
         messageCount: 0
       }
       api.updateSegmentMetadata.mockResolvedValue(successResult(segWire))
@@ -505,6 +511,9 @@ describe('SqliteMessageDataSource', () => {
         sortOrder: 0,
         firstMessageId: 'm1',
         lastMessageId: 'm2',
+        headerMessageId: 'm1',
+        ownerTopicId: 't1',
+        ownerBranchId: null,
         messageCount: 2
       }
       api.replaceSegmentMembership.mockResolvedValue(successResult(segWire))

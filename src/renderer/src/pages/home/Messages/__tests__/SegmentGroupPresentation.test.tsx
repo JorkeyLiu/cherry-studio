@@ -109,22 +109,43 @@ describe('segment group layout manager', () => {
     manager.suspend()
   })
 
-  it('measures a partially mounted group from its elected topmost run (authority first member outside the window)', () => {
+  it('anchors a headed group at its stable header run (start mounted in-window)', () => {
     const manager = createSegmentGroupLayoutManager()
-    // A windowed group has no authority-first member: the composition elects
-    // the LAST carrying run in render order as its header, i.e. the group's
-    // mounted visual top. That run is the only anchor the rail may use.
-    const topmost = makeHost()
+    // The run mounting the route-stable start registers `isHeader: true` and
+    // is the anchor the rail is measured from; the other carrier only widens
+    // the span.
+    const header = makeHost()
     const lower = makeHost()
-    stubRect(topmost, { top: 100, bottom: 132 })
+    stubRect(header, { top: 100, bottom: 132 })
     stubRect(lower, { top: 200, bottom: 380 })
-    manager.registerRun('seg-partial', topmost, { isHeader: true, endsGroup: false })
+    manager.registerRun('seg-partial', header, { isHeader: true, endsGroup: false })
     manager.registerRun('seg-partial', lower, { isHeader: false, endsGroup: false })
     manager.measure()
 
     // One span, no tail trim (the group's authority last member is outside the
     // mounted window), and the anchor is the header run itself.
     expect(manager.getGeometry('seg-partial')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX
+    })
+    manager.suspend()
+  })
+
+  it('measures a headless group from its continuation carriers (rail geometry, zero header occupancy)', () => {
+    const manager = createSegmentGroupLayoutManager()
+    // No run mounts the route-stable start: BOTH carriers register
+    // `isHeader: false`. The manager still publishes the full span anchored
+    // at the topmost carrier — the rail-only continuation geometry — while no
+    // header run exists to occupy a 32px row.
+    const topCarrier = makeHost()
+    const lowerCarrier = makeHost()
+    stubRect(topCarrier, { top: 100, bottom: 160 })
+    stubRect(lowerCarrier, { top: 200, bottom: 380 })
+    manager.registerRun('seg-headless', topCarrier, { isHeader: false, endsGroup: false })
+    manager.registerRun('seg-headless', lowerCarrier, { isHeader: false, endsGroup: false })
+    manager.measure()
+
+    expect(manager.getGeometry('seg-headless')).toEqual({
       top: SEGMENT_GROUP_RAIL_TOP_PX,
       height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX
     })
@@ -179,6 +200,85 @@ describe('segment group layout manager', () => {
     const manager = createSegmentGroupLayoutManager()
     manager.measure()
     expect(manager.getGeometry('seg-missing')).toBeNull()
+    manager.suspend()
+  })
+
+  /**
+   * A collapsed fold block carries a group whose body rows are gone (the run
+   * hosts keep their place in flow but contribute no height), so the group's
+   * mounted extent is the block's summary row ABOVE the header. The summary
+   * registers as a range member: it widens the measured span, it never becomes
+   * the header and never ends the group. Without it the rail measured a
+   * zero-length line inside the header row.
+   */
+  it('measures a collapsed block from the range member above the header, not a zero-length rail', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const summary = makeHost()
+    const header = makeHost()
+    const emptyBodyHost = makeHost()
+    stubRect(summary, { top: 309.55, bottom: 335.55 })
+    stubRect(header, { top: 341.55, bottom: 373.55 })
+    stubRect(emptyBodyHost, { top: 341.55, bottom: 341.55 })
+    manager.registerRangeMember('seg-folded', summary)
+    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: false })
+    manager.registerRun('seg-folded', emptyBodyHost, { isHeader: false, endsGroup: true })
+    manager.measure()
+
+    const geometry = manager.getGeometry('seg-folded')!
+    // The rail starts at the summary (negative relative to the header row) and
+    // covers the summary plus the header row, trimmed above the group's end.
+    expect(geometry.top).toBeCloseTo(309.55 - 341.55, 5)
+    expect(geometry.height).toBeCloseTo(373.55 - 309.55 - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX, 5)
+    expect(geometry.height).toBeGreaterThan(0)
+    manager.suspend()
+  })
+
+  it('re-measures the span from live rects, so the rail follows a growing range member', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const summary = makeHost()
+    const header = makeHost()
+    stubRect(summary, { top: 320, bottom: 340 })
+    stubRect(header, { top: 350, bottom: 382 })
+    manager.registerRangeMember('seg-folded', summary)
+    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: false })
+    manager.measure()
+    expect(manager.getGeometry('seg-folded')!.top).toBeCloseTo(-30, 5)
+
+    // Nothing static: the range member's own new geometry is what the next
+    // pass reads (its ResizeObserver entry or the commit-time pass).
+    stubRect(summary, { top: 280, bottom: 340 })
+    manager.measure()
+    expect(manager.getGeometry('seg-folded')!.top).toBeCloseTo(-70, 5)
+    expect(manager.getGeometry('seg-folded')!.height).toBeCloseTo(382 - 280, 5)
+    manager.suspend()
+  })
+
+  it('restores the run-only span when the range member leaves (the block expanded)', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const summary = makeHost()
+    const header = makeHost()
+    stubRect(summary, { top: 309.55, bottom: 335.55 })
+    stubRect(header, { top: 341.55, bottom: 373.55 })
+    const unregister = manager.registerRangeMember('seg-folded', summary)
+    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: true })
+    manager.measure()
+    expect(manager.getGeometry('seg-folded')!.top).toBeLessThan(0)
+
+    unregister()
+    manager.measure()
+    expect(manager.getGeometry('seg-folded')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 0 })
+    // The group itself is untouched: its run still owns the chrome and geometry.
+    expect(manager.getGeometry('seg-folded')).not.toBeNull()
+    manager.suspend()
+  })
+
+  it('never lets a range member own a group: no carrying run, no header, no menu anchor', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const summary = makeHost()
+    stubRect(summary, { top: 100, bottom: 140 })
+    manager.registerRangeMember('seg-bodyless', summary)
+    manager.measure()
+    expect(manager.getGeometry('seg-bodyless')).toBeNull()
     manager.suspend()
   })
 })

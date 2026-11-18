@@ -139,7 +139,10 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
     isMessageInSegment: vi.fn(() => undefined),
     // Folded-membership projection comes from authority catalog membership; this
     // suite exercises reading-anchor reporting only, so no folded group.
-    segmentsForTopic: []
+    // Route-scoped projection reads the authority catalog order
+    // (orderedSegmentsForTopic); empty catalog here, so it stays fail-closed.
+    segmentsForTopic: [],
+    orderedSegmentsForTopic: []
   })
 }))
 vi.mock('@renderer/context/EditModeContext', () => ({
@@ -200,14 +203,20 @@ vi.mock('@renderer/services/AssistantService', () => ({
 vi.mock('@renderer/services/db/DbService', () => ({
   dbService: {
     resolveContextClosure: (...args: unknown[]) => (mocks as any).resolveContextClosure(...args),
-    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args)
+    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args),
+    // Route chrome co-commit reads lightweight qualification (listSegments);
+    // empty wires here: this suite carries no segments.
+    listSegments: vi.fn(async () => [])
   },
   DbService: vi.fn()
 }))
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     resolveContextClosure: (...args: unknown[]) => (mocks as any).resolveContextClosure(...args),
-    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args)
+    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args),
+    // Route chrome co-commit reads lightweight qualification (listSegments);
+    // empty wires here: this suite carries no segments.
+    listSegments: vi.fn(async () => [])
   }
 }))
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({

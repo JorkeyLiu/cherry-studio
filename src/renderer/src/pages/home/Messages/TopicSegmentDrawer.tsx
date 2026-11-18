@@ -39,21 +39,29 @@ const ZIndexPopover = Popover as unknown as React.FC<PopoverWithZIndexProps>
 
 const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
   // Route-scoped projection of the topic-wide catalog: only the active route's
-  // reachable members/counts, with 0-intersection (other-route) segments hidden.
-  // The projected `firstMessageId` is always reachable on the current route, so
-  // the Messages unified navigate path only needs its window complement.
+  // reachable members/counts. A row is listed ONLY when the group's stable head
+  // resolves inside the full current route history (`headerInRoute`): a
+  // headless residual keeps its members naturally rendered in the rail but gets
+  // no navigation entry. (`!== false` keeps legacy callers that predate the
+  // authority overlay pass-through instead of blanking them.)
+  // The navigation target is the stable head (`headerMessageId`), never the
+  // first reachable member: head presence alone navigates even when the head
+  // is not loaded (the unified path loads its window, settling on the fold
+  // marker when the head is folded). The projected `firstMessageId` stays the
+  // window complement only.
   const { segments, routeKey } = useRouteScopedSegments(topicId)
+  const listedSegments = useMemo(() => segments.filter((segment) => segment.headerInRoute !== false), [segments])
   const { t } = useTranslation()
 
   // Live route key: a queued click whose row was rendered under a previous
-  // route must not navigate the new route to an off-route member.
+  // route must not navigate the new route to an off-route head.
   const liveRouteKeyRef = useRef(routeKey)
   liveRouteKeyRef.current = routeKey
 
-  const scrollToSegment = useCallback((firstMessageId: string | null, itemRouteKey: string) => {
-    if (!firstMessageId) return
+  const scrollToSegmentHead = useCallback((headerMessageId: string | null, itemRouteKey: string) => {
+    if (!headerMessageId) return
     if (liveRouteKeyRef.current !== itemRouteKey) return
-    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstMessageId)
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, headerMessageId)
   }, [])
 
   // In-flow measurement anchor: the floating trigger is portaled out of the
@@ -90,38 +98,44 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
       observer?.disconnect()
       window.removeEventListener('resize', update)
     }
-  }, [segments.length])
+  }, [listedSegments.length])
 
   const popoverContent = useMemo(() => {
-    if (segments.length === 0) return null
+    if (listedSegments.length === 0) return null
 
     return (
       <PopoverList>
         <PopoverTitle>{t('topicSegment.navigation.title')}</PopoverTitle>
-        {segments.map((segment) => {
-          // Folded groups are listed by their presentation state, never by the
-          // hidden group name: the row is a navigation target, not a second
-          // naming surface. The authority count stays visible either way.
-          const label = segment.folded ? t('topicSegment.folded') : segment.name
+        {listedSegments.map((segment) => {
+          // Groups are listed by name: the row is a navigation target, not a
+          // second naming surface. The authority count stays visible either
+          // way. The click targets the stable head, never the first reachable
+          // member, and carries the head id for testability.
+          const label = segment.name
+          const headId = segment.headerMessageId ?? segment.firstMessageId
+          // Display count: the route-qualified TURN count from the projection
+          // (user + same-askId answers = 1, folded and off-window included).
+          // Never the catalog message count; unknown stays hidden.
+          const turnCount = segment.turnCount
           return (
             <PopoverItem
               key={segment.id}
-              $folded={segment.folded}
               data-testid="topic-segment-drawer-row"
-              data-segment-folded={segment.folded ? 'true' : 'false'}
-              title={segment.folded ? segment.name : label}
-              onClick={() => scrollToSegment(segment.firstMessageId, routeKey)}>
-              <Dot $folded={segment.folded} $color={segment.color || getSegmentColor(segment.id)} />
-              <SegmentName $folded={segment.folded}>{label}</SegmentName>
-              <MessageCount>{segment.messageCount}</MessageCount>
+              data-segment-folded="false"
+              data-segment-header={segment.headerMessageId ?? ''}
+              title={label}
+              onClick={() => scrollToSegmentHead(headId, routeKey)}>
+              <Dot $color={segment.color || getSegmentColor(segment.id)} />
+              <SegmentName>{label}</SegmentName>
+              {turnCount !== undefined ? <MessageCount>{turnCount}</MessageCount> : null}
             </PopoverItem>
           )
         })}
       </PopoverList>
     )
-  }, [segments, routeKey, scrollToSegment, t])
+  }, [listedSegments, routeKey, scrollToSegmentHead, t])
 
-  if (segments.length === 0) return null
+  if (listedSegments.length === 0) return null
 
   return (
     <>

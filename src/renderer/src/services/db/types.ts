@@ -33,6 +33,7 @@ import type {
   SelectAnswerMessageResponse,
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
+  SetTurnFoldsResponse,
   StreamWriteDiagnostics,
   TopicBranchWire,
   TopicDataExportPayload,
@@ -192,6 +193,25 @@ export interface MessageDataSource {
     orderedMessageIds: string[],
     branchId?: BranchRoute
   ): Promise<ReorderAnswerGroupResponse>
+
+  /**
+   * Turn-level atomic fold/unfold in one route.
+   *
+   * The renderer supplies ONLY stable turn (group) ids — never an enumeration
+   * of the rows it happens to have loaded. Main resolves each selected turn's
+   * complete membership (window-outside members included), verifies the whole
+   * selection against the route and its fork boundary, and persists the fold
+   * flags atomically. Returns the resolved turns (with their full membership)
+   * for a loaded-projection intersection commit, so the renderer never has to
+   * reconstruct a turn. Dispatches `updateTopicUpdatedAt` exactly once after
+   * success.
+   */
+  setTurnFolds(
+    topicId: string,
+    selectedGroupIds: string[],
+    folded: boolean,
+    branchId?: BranchRoute
+  ): Promise<SetTurnFoldsResponse>
 
   /**
    * Semantic plural deletion with Main-resolved dependents in one route.

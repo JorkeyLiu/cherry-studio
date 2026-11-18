@@ -322,33 +322,39 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
     expect(v.closure.returnedCount).toBe(v.messages.length)
   })
 
+  /** Message-level fold of one message (the live participation authority). */
+  function foldMessage(topicId: string, messageId: string, folded = true, branchId?: string | null): void {
+    okValue(agg.updateMessage(topicId, messageId, { folded } as any, branchId ? { branchId } : undefined))
+  }
+
   it('fold parity: the resolver closure and the fetch closure derive the same participating counts and divider', () => {
     const topicId = `t-${uid()}`
     seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4'])
-    // The whole third turn is folded: it stops participating, while the raw
-    // window and the anchor resolution stay untouched.
-    okValue(agg.upsertSegment('seg-fold-3', topicId, 'G3', ['u3', 'a-u3'], null, undefined, true))
+    // The whole third turn is folded at message level: it stops participating,
+    // and the default selection skips it instead of landing on it.
+    foldMessage(topicId, 'u3')
+    foldMessage(topicId, 'a-u3')
 
     const resolved = okValue(
       agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
     ) as unknown as ResolveContextClosureResponse
-    // Reanchor-default default index = max(0, total - 2) over the RAW turns.
-    expect(resolved.resolvedAnchorGroupKey).toBe('u3')
-    expect(resolved.closure.firstMessageId).toBe('u3')
-    expect(resolved.closure.anchorGroupKey).toBe('u3')
-    // Participating turns: 3 (turns 1, 2 and 4). Window = turns 3..4 → 1.
+    // Participating turns are u1, u2 and u4: the last-2 default starts at u2.
+    expect(resolved.resolvedAnchorGroupKey).toBe('u2')
+    expect(resolved.closure.firstMessageId).toBe('u2')
+    expect(resolved.closure.anchorGroupKey).toBe('u2')
+    // Participating turns: 3 (turns 1, 2 and 4). Window = turns 2..4 → 2.
     expect(resolved.closure.totalTurnCount).toBe(3)
-    expect(resolved.closure.selectedTurnCount).toBe(1)
-    // Divider names the first PARTICIPATING row of the window (u4): turn 3 is
+    expect(resolved.closure.selectedTurnCount).toBe(2)
+    // Divider names the first PARTICIPATING row of the window (u2): turn 3 is
     // fully folded, so its hidden rows can never carry the divider.
-    expect(resolved.closure.boundaryMessageId).toBe('u4')
+    expect(resolved.closure.boundaryMessageId).toBe('u2')
     expect(resolved.closure.foldedMessageIds.sort()).toEqual(['a-u3', 'u3'])
     expect(() =>
       validateChatDbResult('chatdb:resolve-context-closure', { ok: true, value: resolved } as any)
     ).not.toThrow()
 
-    // Same anchor through the other producer → identical participation shape.
-    const fetched = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u3' }))
+    // Same anchor through the other producer → identical participating shape.
+    const fetched = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u2' }))
     expect(fetched.closure.totalTurnCount).toBe(resolved.closure.totalTurnCount)
     expect(fetched.closure.selectedTurnCount).toBe(resolved.closure.selectedTurnCount)
     expect(fetched.closure.boundaryMessageId).toBe(resolved.closure.boundaryMessageId)
@@ -358,27 +364,198 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: fetched } as any)
     ).not.toThrow()
 
-    // Expanding restores the pre-fold participation (context restored in place).
-    okValue(agg.updateSegmentMetadata('seg-fold-3', undefined, undefined, false))
-    const expanded = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u3' }))
+    // Unfolding restores the pre-fold participation (context restored in place).
+    foldMessage(topicId, 'u3', false)
+    foldMessage(topicId, 'a-u3', false)
+    const expanded = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u2' }))
     expect(expanded.closure.totalTurnCount).toBe(4)
-    expect(expanded.closure.selectedTurnCount).toBe(2)
-    expect(expanded.closure.boundaryMessageId).toBe('u3')
+    expect(expanded.closure.selectedTurnCount).toBe(3)
+    expect(expanded.closure.boundaryMessageId).toBe('u2')
     expect(expanded.closure.foldedMessageIds).toEqual([])
+  })
+
+  it('default selection skips a folded middle turn: five raw turns resolve 3/4', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4', 'u5'])
+    foldMessage(topicId, 'u3')
+    foldMessage(topicId, 'a-u3')
+    const resolved = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 3, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    // Participating turns are u1, u2, u4, u5: the last-3 default starts at u2.
+    expect(resolved.resolvedAnchorGroupKey).toBe('u2')
+    expect(resolved.closure.anchorGroupKey).toBe('u2')
+    expect(resolved.closure.firstMessageId).toBe('u2')
+    expect(resolved.closure.totalTurnCount).toBe(4)
+    expect(resolved.closure.selectedTurnCount).toBe(3)
+    expect(resolved.closure.boundaryMessageId).toBe('u2')
+    expect(() =>
+      validateChatDbResult('chatdb:resolve-context-closure', { ok: true, value: resolved } as any)
+    ).not.toThrow()
+  })
+
+  it('default selection skips multiple and trailing folds; one flagged row folds its whole turn', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4'])
+    // Only the assistant row is flagged: read normalizes to the whole turn.
+    foldMessage(topicId, 'a-u2')
+    // Trailing fold.
+    foldMessage(topicId, 'u4')
+    foldMessage(topicId, 'a-u4')
+    const resolved = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    // Participating turns are u1, u3: the last-2 default starts at u1.
+    expect(resolved.resolvedAnchorGroupKey).toBe('u1')
+    expect(resolved.closure.foldedMessageIds.sort()).toEqual(['a-u2', 'a-u4', 'u2', 'u4'])
+    expect(resolved.closure.totalTurnCount).toBe(2)
+    expect(resolved.closure.selectedTurnCount).toBe(2)
+    // Window covers all participating history: folding alone adds no divider.
+    expect(resolved.closure.boundaryMessageId).toBeNull()
+  })
+
+  it('default selection with N beyond the participating count starts at the first participating turn', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3'])
+    foldMessage(topicId, 'u1')
+    foldMessage(topicId, 'a-u1')
+    const resolved = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 10, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(resolved.resolvedAnchorGroupKey).toBe('u2')
+    expect(resolved.closure.totalTurnCount).toBe(2)
+    expect(resolved.closure.selectedTurnCount).toBe(2)
+    expect(resolved.closure.boundaryMessageId).toBeNull()
+  })
+
+  it('all-folded and empty routes keep the degenerate default contract', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4'])
+    for (const id of ['u1', 'u2', 'u3', 'u4']) {
+      foldMessage(topicId, id)
+      foldMessage(topicId, `a-${id}`)
+    }
+    const resolved = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    // No participating turn: the raw tail position is kept, and the window
+    // still reports a coherent non-zero participation count.
+    expect(resolved.resolvedAnchorGroupKey).toBe('u3')
+    expect(resolved.closure.anchorGroupKey).toBe('u3')
+    expect(resolved.closure.totalTurnCount).toBe(1)
+    expect(resolved.closure.selectedTurnCount).toBe(1)
+    expect(resolved.closure.boundaryMessageId).toBeNull()
+    expect(resolved.closure.foldedMessageIds).toHaveLength(8)
+
+    const emptyId = `t-${uid()}`
+    agg.ensureTopic(emptyId, 'asst-1', 'empty')
+    const empty = okValue(
+      agg.resolveContextClosure({ topicId: emptyId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(empty.resolvedAnchorGroupKey).toBeNull()
+    expect(empty.changed).toBe(false)
+    expect(empty.closure.totalTurnCount).toBe(0)
+  })
+
+  it('anchor-only default and closure default agree on folded history; manual anchors are never recomputed', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4'])
+    foldMessage(topicId, 'u3')
+    foldMessage(topicId, 'a-u3')
+
+    const anchorOnly = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'anchor' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(anchorOnly.resolvedAnchorGroupKey).toBe('u2')
+    const closure = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: 2, detail: 'closure' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(closure.resolvedAnchorGroupKey).toBe(anchorOnly.resolvedAnchorGroupKey)
+
+    // Establish without an anchor lands on the same participating default.
+    const est = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'establish', contextCount: 2, detail: 'anchor' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(est.resolvedAnchorGroupKey).toBe('u2')
+    // Unlimited context starts at the first participating turn.
+    const all = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'reanchor-default', contextCount: null, detail: 'anchor' })
+    ) as unknown as ResolveContextClosureResponse
+    expect(all.resolvedAnchorGroupKey).toBe('u1')
+    // A stored manual anchor is preserved even when its turn is folded.
+    const kept = okValue(
+      agg.resolveContextClosure({
+        topicId,
+        intent: 'establish',
+        contextCount: 2,
+        currentAnchorGroupKey: 'u3',
+        detail: 'anchor'
+      })
+    ) as unknown as ResolveContextClosureResponse
+    expect(kept.resolvedAnchorGroupKey).toBe('u3')
+    expect(kept.changed).toBe(false)
+  })
+
+  it('branch-route default skips folds on the effective route in anchor-only and closure detail', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2'])
+    const b1 = okValue(agg.createBranch(topicId, null, 'a-u2', 'B1')).branch.id
+    agg.appendMessage(topicId, makeMsg(topicId, 'bu', 'user') as any, [makeBlock('bu') as any], undefined, undefined, {
+      branchId: b1
+    })
+    agg.appendMessage(
+      topicId,
+      makeMsg(topicId, 'ba', 'assistant', 'bu') as any,
+      [makeBlock('ba') as any],
+      undefined,
+      undefined,
+      { branchId: b1 }
+    )
+    // Fold the branch-owned trailing turn: the effective route (u1, u2, bu)
+    // has two participating turns, so the last-2 default starts at u1.
+    foldMessage(topicId, 'bu', true, b1)
+    foldMessage(topicId, 'ba', true, b1)
+
+    const closure = okValue(
+      agg.resolveContextClosure({
+        topicId,
+        branchId: b1,
+        intent: 'reanchor-default',
+        contextCount: 2,
+        detail: 'closure'
+      })
+    ) as unknown as ResolveContextClosureResponse
+    expect(closure.resolvedAnchorGroupKey).toBe('u1')
+    expect(closure.closure.totalTurnCount).toBe(2)
+    expect(closure.closure.selectedTurnCount).toBe(2)
+    expect(closure.closure.boundaryMessageId).toBeNull()
+
+    const anchorOnly = okValue(
+      agg.resolveContextClosure({
+        topicId,
+        branchId: b1,
+        intent: 'reanchor-default',
+        contextCount: 2,
+        detail: 'anchor'
+      })
+    ) as unknown as ResolveContextClosureResponse
+    expect(anchorOnly.resolvedAnchorGroupKey).toBe(closure.resolvedAnchorGroupKey)
   })
 
   it('whole-topic snapshot carries the authority folded exclusion set', () => {
     const topicId = `t-${uid()}`
     seedTurns(agg, topicId, ['u1', 'u2'])
-    okValue(agg.upsertSegment('seg-snap', topicId, 'G', ['u2', 'a-u2'], null, undefined, true))
+    foldMessage(topicId, 'u2')
+    foldMessage(topicId, 'a-u2')
     const snapshot = okValue(agg.fetchWholeTopicSnapshot({ topicId }))
     expect(snapshot.snapshot.completeness).toBe('whole-topic')
     expect(snapshot.snapshot.foldedMessageIds.slice().sort()).toEqual(['a-u2', 'u2'])
     expect(() =>
       validateChatDbResult('chatdb:fetch-whole-topic-snapshot', { ok: true, value: snapshot } as any)
     ).not.toThrow()
-    // Expanding clears it again: the same read path reports no exclusions.
-    okValue(agg.updateSegmentMetadata('seg-snap', undefined, undefined, false))
+    // Unfolding clears it again: the same read path reports no exclusions.
+    foldMessage(topicId, 'u2', false)
+    foldMessage(topicId, 'a-u2', false)
     expect(okValue(agg.fetchWholeTopicSnapshot({ topicId })).snapshot.foldedMessageIds).toEqual([])
   })
 })

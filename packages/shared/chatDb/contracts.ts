@@ -68,6 +68,7 @@ import type {
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
   SelectUsefulAnswerRequest,
+  SetTurnFoldsRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -613,6 +614,10 @@ const selectAnswerMessageContract: ChatDbContract = {
  */
 const SELECT_USEFUL_VALUE_KEYS = new Set(['topicId', 'askId', 'usefulMessageId', 'messageIds'])
 
+const SET_TURN_FOLDS_VALUE_KEYS = new Set(['topicId', 'folded', 'turns', 'affectedMessageIds'])
+
+const SET_TURN_FOLDS_TURN_KEYS = new Set(['groupId', 'messageIds', 'folded'])
+
 const selectUsefulAnswerContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'branchId', 'messageId'),
   validate(value: unknown): void {
@@ -690,6 +695,135 @@ const selectUsefulAnswerContract: ChatDbContract = {
         throw new ValidationError(
           'result.value.usefulMessageId',
           '[chatdb:select-useful-answer] usefulMessageId must appear in messageIds exactly once'
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Turn-level fold contract: stable group ids + one target boolean.
+ *
+ * The request can express only WHICH turns and WHAT state — never a partial
+ * turn and never an ordering/membership intent, so no shape here can bypass
+ * the Main-side whole-turn resolution and range guards.
+ */
+const setTurnFoldsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId', 'selectedGroupIds', 'folded'),
+  validate(value: unknown): void {
+    validateRequest(value, setTurnFoldsContract.allowedKeys)
+    const req = value as SetTurnFoldsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateStringArray(req.selectedGroupIds, 'request.selectedGroupIds')
+    if (req.selectedGroupIds.length === 0) {
+      throw new ValidationError('request.selectedGroupIds', '[chatdb:set-turn-folds] Expected non-empty group IDs')
+    }
+    for (let i = 0; i < req.selectedGroupIds.length; i++) {
+      validateNonEmptyString(req.selectedGroupIds[i], `request.selectedGroupIds[${i}]`)
+    }
+    if (typeof req.folded !== 'boolean') {
+      throw new ValidationError('request.folded', '[chatdb:set-turn-folds] Expected boolean folded')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:set-turn-folds')
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true) return
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', '[chatdb:set-turn-folds] Expected SetTurnFoldsResponse object')
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', '[chatdb:set-turn-folds] Success value must be a plain object')
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!SET_TURN_FOLDS_VALUE_KEYS.has(key)) {
+        throw new ValidationError(
+          `result.value.${key}`,
+          `[chatdb:set-turn-folds] Unknown key in success value: "${key}"`
+        )
+      }
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (typeof v.folded !== 'boolean') {
+      throw new ValidationError('result.value.folded', '[chatdb:set-turn-folds] Expected boolean folded')
+    }
+    const turns = v.turns
+    if (!Array.isArray(turns) || turns.length === 0) {
+      throw new ValidationError('result.value.turns', '[chatdb:set-turn-folds] Expected non-empty turns array')
+    }
+    const groupIds = new Set<string>()
+    const writtenIds = new Set<string>()
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i]
+      if (turn === null || typeof turn !== 'object' || Array.isArray(turn)) {
+        throw new ValidationError(`result.value.turns[${i}]`, '[chatdb:set-turn-folds] Expected turn object')
+      }
+      const t = turn as Record<string, unknown>
+      for (const key of Object.keys(t)) {
+        if (!SET_TURN_FOLDS_TURN_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.turns[${i}].${key}`,
+            `[chatdb:set-turn-folds] Unknown key in turn: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(t.groupId, `result.value.turns[${i}].groupId`)
+      if (groupIds.has(t.groupId as string)) {
+        throw new ValidationError(`result.value.turns[${i}].groupId`, '[chatdb:set-turn-folds] Duplicate turn groupId')
+      }
+      groupIds.add(t.groupId as string)
+      if (typeof t.folded !== 'boolean' || t.folded !== v.folded) {
+        throw new ValidationError(
+          `result.value.turns[${i}].folded`,
+          '[chatdb:set-turn-folds] Turn folded must equal the requested state'
+        )
+      }
+      const messageIds = t.messageIds
+      if (!Array.isArray(messageIds) || messageIds.length === 0) {
+        throw new ValidationError(`result.value.turns[${i}].messageIds`, 'Expected non-empty messageIds array')
+      }
+      for (let j = 0; j < messageIds.length; j++) {
+        const id = messageIds[j]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(`result.value.turns[${i}].messageIds[${j}]`, 'Expected a non-empty string')
+        }
+        if (writtenIds.has(id)) {
+          throw new ValidationError(
+            `result.value.turns[${i}].messageIds[${j}]`,
+            '[chatdb:set-turn-folds] A message may belong to only one resolved turn'
+          )
+        }
+        writtenIds.add(id)
+      }
+    }
+    const affected = v.affectedMessageIds
+    if (!Array.isArray(affected) || affected.length === 0) {
+      throw new ValidationError('result.value.affectedMessageIds', 'Expected non-empty affectedMessageIds array')
+    }
+    if (affected.length !== writtenIds.size) {
+      throw new ValidationError(
+        'result.value.affectedMessageIds',
+        '[chatdb:set-turn-folds] affectedMessageIds must equal the written turn membership'
+      )
+    }
+    const seenAffected = new Set<string>()
+    for (let i = 0; i < affected.length; i++) {
+      const id = affected[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`result.value.affectedMessageIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seenAffected.has(id)) {
+        throw new ValidationError(`result.value.affectedMessageIds[${i}]`, 'Duplicate affected messageId')
+      }
+      seenAffected.add(id)
+      if (!writtenIds.has(id)) {
+        throw new ValidationError(
+          `result.value.affectedMessageIds[${i}]`,
+          '[chatdb:set-turn-folds] affectedMessageIds must be resolved turn members'
         )
       }
     }
@@ -876,11 +1010,12 @@ const deleteBlocksContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const listSegmentsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, listSegmentsContract.allowedKeys)
     const req = value as ListSegmentsRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:list-segments')
@@ -901,12 +1036,15 @@ const listSegmentsContract: ChatDbContract = {
     }
   }
 }
-
 const SEGMENT_VALUE_KEYS = new Set([
   'id',
   'topicId',
   'name',
   'messageIds',
+  'headerMessageId',
+  'ownerTopicId',
+  'ownerBranchId',
+  'route',
   'folded',
   'color',
   'createdAt',
@@ -916,6 +1054,58 @@ const SEGMENT_VALUE_KEYS = new Set([
   'lastMessageId',
   'messageCount'
 ])
+
+/**
+ * Strict SegmentRouteQualification validator (route-qualified view).
+ *
+ * Exact keys, boolean presence flags, and routeMemberMessageIds as a
+ * duplicate-free subset of the group's authoritative messageIds — the
+ * qualification is a projection and can never invent members.
+ */
+function validateSegmentRouteQualification(route: unknown, path: string, channel: string, mids: string[]): void {
+  if (route === null || typeof route !== 'object' || Array.isArray(route)) {
+    throw new ValidationError(path, `[${channel}] Expected route qualification object`)
+  }
+  const rec = route as Record<string, unknown>
+  const ROUTE_KEYS = new Set(['topicId', 'branchId', 'headerInRoute', 'headerOwnedByRoute', 'routeMemberMessageIds'])
+  for (const key of Object.keys(rec)) {
+    if (!ROUTE_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in route qualification: "${key}"`)
+    }
+  }
+  validateNonEmptyString(rec.topicId, `${path}.topicId`)
+  if (rec.branchId !== null && (typeof rec.branchId !== 'string' || rec.branchId.length === 0)) {
+    throw new ValidationError(`${path}.branchId`, `[${channel}] Expected string|null for branchId`)
+  }
+  if (typeof rec.headerInRoute !== 'boolean') {
+    throw new ValidationError(`${path}.headerInRoute`, `[${channel}] Expected boolean for headerInRoute`)
+  }
+  if (typeof rec.headerOwnedByRoute !== 'boolean') {
+    throw new ValidationError(`${path}.headerOwnedByRoute`, `[${channel}] Expected boolean for headerOwnedByRoute`)
+  }
+  if (!Array.isArray(rec.routeMemberMessageIds)) {
+    throw new ValidationError(`${path}.routeMemberMessageIds`, `[${channel}] Expected routeMemberMessageIds array`)
+  }
+  const members = new Set(mids)
+  const seen = new Set<string>()
+  const ids = rec.routeMemberMessageIds as unknown[]
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i]
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new ValidationError(`${path}.routeMemberMessageIds[${i}]`, 'Expected a non-empty string')
+    }
+    if (seen.has(id)) {
+      throw new ValidationError(`${path}.routeMemberMessageIds[${i}]`, `[${channel}] Duplicate route member`)
+    }
+    seen.add(id)
+    if (!members.has(id)) {
+      throw new ValidationError(
+        `${path}.routeMemberMessageIds[${i}]`,
+        `[${channel}] Route member must occur in the group messageIds catalog`
+      )
+    }
+  }
+}
 
 /**
  * Strict SegmentWire body validator (authority catalog).
@@ -981,7 +1171,33 @@ function validateSegmentWireBody(
   }
   validateNonNegativeInteger(rec.sortOrder, `${path}.sortOrder`)
   validateNonNegativeInteger(rec.messageCount, `${path}.messageCount`)
+  validateNonEmptyString(rec.ownerTopicId, `${path}.ownerTopicId`)
+  if (rec.ownerBranchId !== null && (typeof rec.ownerBranchId !== 'string' || rec.ownerBranchId.length === 0)) {
+    throw new ValidationError(`${path}.ownerBranchId`, `[${channel}] Expected string|null for ownerBranchId`)
+  }
   const mids = rec.messageIds as string[]
+  const header = rec.headerMessageId
+  if (mids.length === 0) {
+    if (header !== null) {
+      throw new ValidationError(`${path}.headerMessageId`, `[${channel}] Expected null header for empty membership`)
+    }
+  } else {
+    if (typeof header !== 'string' || header.length === 0) {
+      throw new ValidationError(
+        `${path}.headerMessageId`,
+        `[${channel}] Expected non-empty headerMessageId for non-empty membership`
+      )
+    }
+    if (!mids.includes(header)) {
+      throw new ValidationError(
+        `${path}.headerMessageId`,
+        `[${channel}] headerMessageId must be a member of messageIds`
+      )
+    }
+  }
+  if (rec.route !== undefined) {
+    validateSegmentRouteQualification(rec.route, `${path}.route`, channel, mids)
+  }
   const count = rec.messageCount as number
   if (count !== mids.length) {
     throw new ValidationError(
@@ -2609,6 +2825,10 @@ const DELETE_WITH_DEPENDENTS_SEGMENT_KEYS = new Set([
   'topicId',
   'name',
   'messageIds',
+  'headerMessageId',
+  'ownerTopicId',
+  'ownerBranchId',
+  'route',
   'folded',
   'color',
   'createdAt',
@@ -5698,6 +5918,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:select-answer-message': selectAnswerMessageContract,
   // BRANCH-12: one atomic multi-model useful selection (group-level useful switch)
   'chatdb:select-useful-answer': selectUsefulAnswerContract,
+  // Turn-level fold: one atomic multi-turn fold/unfold (group-level range command)
+  'chatdb:set-turn-folds': setTurnFoldsContract,
   'chatdb:delete-message': deleteMessageContract,
   'chatdb:delete-messages': deleteMessagesContract,
   'chatdb:update-blocks': updateBlocksContract,

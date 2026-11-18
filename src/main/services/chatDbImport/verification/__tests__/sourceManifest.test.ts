@@ -16,6 +16,7 @@ vi.unmock('node:crypto')
 
 import type { MessageBlockData, MessageData, TopicData, TopicSegmentData } from '../../../chatDb/domain/types'
 import { canonicalDigest } from '../canonicalJson'
+import { frameSegmentRecord } from '../entityFraming'
 import type { StagedPageEvidence } from '../sourceManifest'
 import { SourceManifestError, SourceVerificationManifestBuilder } from '../sourceManifest'
 
@@ -70,6 +71,7 @@ function segmentDto(id: string, topicId: string): TopicSegmentData {
     createdAt: '2020-01-02T00:00:00.000Z',
     updatedAt: '2020-01-02T00:00:00.000Z',
     sortOrder: 0,
+    headerMessageId: null,
     overflow: {}
   }
 }
@@ -162,7 +164,11 @@ describe('SourceVerificationManifestBuilder', () => {
     )
     expect(manifest.messages.entries['m-1'].digest).toBe(canonicalDigest({ ...msg }))
     expect(manifest.blocks.entries['b-1'].digest).toBe(canonicalDigest({ ...blk }))
-    expect(manifest.segments.entries['s-1'].digest).toBe(canonicalDigest({ ...seg }))
+    // Segments digest through the canonical verification frame (the same
+    // frameSegmentRecord both verification sides share): the DTO carries the
+    // required headerMessageId column, but the head is derived from
+    // membership — membership evidence below, not the record digest, proves it.
+    expect(manifest.segments.entries['s-1'].digest).toBe(canonicalDigest(frameSegmentRecord(seg)))
 
     // Ownership / order evidence.
     expect(manifest.messages.entries['m-1']).toMatchObject({ topicId: 't-1', sortOrder: 3 })

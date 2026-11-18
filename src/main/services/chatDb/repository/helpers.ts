@@ -152,7 +152,10 @@ export const IDENTITY_FIELDS: Record<string, ReadonlySet<string>> = {
   // immutable afterwards (same identity class as topicId).
   messages: new Set(['id', 'topicId', 'branchId']),
   messageBlocks: new Set(['id', 'messageId']),
-  topicSegments: new Set(['id', 'topicId']),
+  // The group head is identity, not a patchable attribute: it is written only
+  // by the head-identity writer/repair, so a generic metadata patch can never
+  // silently swap a group's identity.
+  topicSegments: new Set(['id', 'topicId', 'headerMessageId']),
   topicBranches: new Set(['id', 'topicId', 'parentBranchId', 'anchorMessageId']),
   fileReferences: new Set(['id', 'blockId', 'fileId'])
 }
@@ -330,6 +333,21 @@ export function ownerPredicate(_table: any, topicCol: any, branchCol: any, topic
   return branchId === null
     ? and(eq(topicCol, topicId), isNull(branchCol))
     : and(eq(topicCol, topicId), eq(branchCol, branchId))
+}
+
+/**
+ * Row-level owner equality: one logical topic plus one route owner
+ * (`branchId = null` = main route, otherwise that branch). Pure — no I/O —
+ * so single-message, answer-group, range-fold and head-metadata guards share
+ * the exact same (topicId, branchId) comparison instead of hand-writing it.
+ */
+export function isOwnedByRoute(
+  rowTopicId: string,
+  rowBranchId: string | null | undefined,
+  topicId: string,
+  route: string | null
+): boolean {
+  return rowTopicId === topicId && (rowBranchId ?? null) === route
 }
 
 /**

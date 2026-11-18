@@ -1,4 +1,7 @@
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import { findStableStartRunIndex, resolveGroupSlotHost } from '@renderer/utils/routeGroupPresentation'
+import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import {
   Fragment,
   memo,
@@ -11,7 +14,13 @@ import {
 } from 'react'
 import styled from 'styled-components'
 
-import { type SegmentGroupPresentation, useSegmentGroupLayoutManager } from './SegmentGroupPresentation'
+import { FoldedSection } from './FoldedSection'
+import {
+  GroupRailContinuation,
+  GroupSlotContinuation,
+  type SegmentGroupPresentation,
+  useSegmentGroupLayoutManager
+} from './SegmentGroupPresentation'
 
 /**
  * Segment/group chrome host: the positioned wrapper that owns ONLY the
@@ -38,7 +47,13 @@ export const RunHost = styled.div`
  */
 const SegmentRunHost: React.FC<{
   groupId?: string
-  /** This run is the group's elected header host (one per group). */
+  /**
+   * This run hosts the group's ONE route-stable normal-flow slot: the in-flow
+   * header row when the group's stable head resolves on this route, otherwise
+   * the equal-height continuation row. It is also the group's measured
+   * geometry anchor (the rail starts below the slot), so exactly one
+   * registration per group carries it.
+   */
   isHeader: boolean
   /** This run carries the group's authority last mounted member. */
   endsGroup: boolean
@@ -326,20 +341,10 @@ export interface FlowBodyEntry {
   segmentIsFirst?: boolean
   /** This group's last message is the owning segment's authority last message. */
   segmentIsLast?: boolean
-  /**
-   * This group's CONTENT settles to zero flow height because every member is
-   * presentation-hidden (the group is folded as a whole). The motion wrapper
-   * still mounts to own the exit/enter animation, so the run's content height
-   * at rest cannot be inferred from `bodyNode` alone.
-   *
-   * Content-only by contract: it never describes the whole run host. A group's
-   * header row always occupies its own normal-flow row (`32px`) whether the
-   * body is folded or not, so no composition decision may treat a collapsed
-   * run host as zero-height (that was the old coincident-label cascade).
-   * Undefined = not reported by the flow builder (probes/fixtures), which falls
-   * back to `bodyNode` presence.
-   */
-  contentZeroFlow?: boolean
+  /** Whether every member in this turn body is folded (excluded from context). */
+  isFolded?: boolean
+  /** All message IDs in this turn body. */
+  messageIds?: string[]
   /** The group wrapper (group div only — never a divider). */
   bodyNode: ReactNode
 }
@@ -441,6 +446,12 @@ export function deriveTurnKey(run: readonly FlowBodyEntry[]): string {
  * ranges (not expected from production's maximally merged segments, but
  * possible in tests) derive a collision-safe combination of member segment
  * ids + turn keys so the id stays unique and stable.
+ *
+ * `segmentId` is the identity of the selected SEGMENT, not of one rendered
+ * outline: a folded block is composed as its own shell and therefore splits
+ * one selected segment into several outline chunks that are siblings in the
+ * same flow. Those siblings need `deriveSelectionChunkKey` — never this id —
+ * as their React key. See that function for why.
  */
 export function deriveSelectionRangeKey(runs: readonly FlowBodyEntry[][]): string {
   const flat = runs.flat()
@@ -450,22 +461,80 @@ export function deriveSelectionRangeKey(runs: readonly FlowBodyEntry[][]): strin
   return `range:${segmentIds.join('+')}:${turnKeys.length}:${turnKeys}`
 }
 
-interface RenderEditFlowNodesOptions {
+/**
+ * React key of ONE rendered selection outline (one chunk of a selected
+ * segment). The key is derived from the chunk's own turns only, because the
+ * chunk — not the segment — is the React child: a selected segment reaching
+ * across a folded block renders as more than one chunk, and siblings with the
+ * same key make React's reconciler keep a single child per key in its match
+ * map. The unmatched sibling is then never deleted, so it keeps its committed
+ * edit-mode presentation (cover, selected class, rows) after the selection
+ * ends and duplicates those rows in the display window on every following
+ * range selection.
+ *
+ * Turn keys are entity-derived and unchanged by hover/mode/selection, so a
+ * chunk keeps its key — and its host nodes — while its own turns stay the
+ * same, and differs from every other chunk of the same segment because chunks
+ * partition the range's runs. The `range:` namespace keeps the key disjoint
+ * from the standalone run keys (`deriveTurnKey`) and block keys
+ * (`folded-section:…`) in the same flow.
+ */
+export function deriveSelectionChunkKey(runs: readonly FlowBodyEntry[][]): string {
+  return `range:${runs.map((run) => deriveTurnKey(run)).join('|')}`
+}
+
+export interface RenderEditFlowNodesOptions {
   /** Mounted message flow in newest→oldest render order. */
   nodes: FlowNode[]
   isEditMode: boolean
   onTurnClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
   /**
    * Renders the owning topic-segment group boundary, exactly ONCE per mounted
-   * group. It is invoked inside the group's elected header run host — a
-   * sibling of the interactive turn, outside its `inert` content and its
-   * click-capture cover — so group controls stay independently hit-testable
-   * while turn selection is unaffected. The payload is group-level
-   * presentation (never per-run): the group owns one in-flow header row, one
+   * group. It is invoked inside the group's route-stable slot run host (the run
+   * mounting the group's first member in effective-route order) — a sibling of
+   * the interactive turn, outside its `inert` content and its click-capture
+   * cover — so group controls stay independently hit-testable while turn
+   * selection is unaffected. The payload is group-level presentation (never
+   * per-run): the group owns one in-flow `32px` row (the header when its head
+   * resolves on this route, the equal-height continuation otherwise), one
    * continuous rail overlay, one menu and one hover state no matter how many
    * runs carry it. Omit to render no chrome (tests/probes).
    */
   renderSegmentChrome?: (chrome: SegmentGroupChrome) => ReactNode
+  topicId?: string
+  expandedFoldSectionIds?: ReadonlySet<string>
+  onToggleExpandFoldSection?: (sectionId: string) => void
+  /**
+   * Stable whole-turn selection IDs currently selected in edit mode. A folded
+   * block reads it to know whether its own turns are part of the selection
+   * (the block then paints the same outline a selected range paints).
+   */
+  selectedTurnAskIds?: ReadonlySet<string>
+  /**
+   * The folded block's own selection gesture. It only decides WHAT is selected
+   * (the block's whole turns) — the caller applies the existing edit-selection
+   * semantics, so the composition of ranges and boundaries is untouched.
+   */
+  onSelectFoldSection?: (askIds: string[], modifiers: { isCtrl: boolean; isShift: boolean }) => void
+  /**
+   * Per-block unfold-WRITE capability: true when every block member message is
+   * mutable through the active route (Main remains the final validator of the
+   * atomic turn-fold write). The check is per actual message id — never per
+   * segment owner, since a group's head owner can differ from a member's
+   * route. Omit to keep the default-true behavior (probes/fixtures without a
+   * capability snapshot); browse expand is never gated by this.
+   */
+  isUnfoldAllowedForMessageIds?: (messageIds: readonly string[]) => boolean
+  /**
+   * Main route-qualified projection of the topic catalog for the CURRENT
+   * route (same source the drawer lists), keyed by segment id. The chrome
+   * resolves each group's mutation authority from its qualified entry
+   * (`headerOwnedByRoute`) — never from a raw catalog owner compare. Absent
+   * entries (unqualified/pending, or groups with no reachable member on this
+   * route) gate fail-closed to read-only; the qualification fetch's own
+   * refetch/invalidation recovers the owner verdict when it lands.
+   */
+  routeSegmentsById?: ReadonlyMap<string, RouteScopedSegment>
 }
 
 /**
@@ -479,15 +548,24 @@ export interface RunSegmentChromeBase {
   messageCount?: number
 }
 
-/**
- * Group-level presentation payload handed to the group boundary renderer. It is
- * resolved ABOVE the run/selection composition: one entry per mounted group,
- * merged from every carrying run, so the chrome never depends on how the flow
- * split the group or on which selection range wraps which run.
- */
+// Group-level presentation payload handed to the group boundary renderer. It
+// is resolved ABOVE the run/selection composition: one entry per mounted
+// group, merged from every carrying run, so the chrome never depends on how
+// the flow split the group or on which selection range wraps which run.
 export interface SegmentGroupChrome extends SegmentGroupPresentation {
-  /** The group's authority membership size (header badge). */
+  // The group's authority membership size (header badge).
   messageCount: number
+  // Display count for the header badge: the route-qualified TURN count from
+  // the route projection (user + same-askId answers = 1, folded and
+  // off-window members included). Optional so old callers without a route map
+  // stay valid — and NEVER backfilled from messageCount: unknown stays
+  // hidden instead of mislabeling messages as turns.
+  turnCount?: number
+  // Main route-qualified entry for this group on the current route (same
+  // source the drawer lists). Null when the map was provided but the group
+  // has no qualified entry (or no reachable member); undefined when the
+  // caller provided no map at all (probes/fixtures). Both gate fail-closed.
+  routeSegment?: RouteScopedSegment | null
 }
 
 /**
@@ -552,10 +630,21 @@ export function renderEditFlowNodes({
   nodes,
   isEditMode,
   onTurnClick,
-  renderSegmentChrome
+  renderSegmentChrome,
+  topicId,
+  expandedFoldSectionIds,
+  onToggleExpandFoldSection,
+  selectedTurnAskIds,
+  onSelectFoldSection,
+  isUnfoldAllowedForMessageIds,
+  routeSegmentsById
 }: RenderEditFlowNodesOptions): ReactNode[] {
   const ordered = buildOrderedFlowItems(nodes)
   const out: ReactNode[] = []
+
+  const isRunFolded = (run: FlowBodyEntry[]): boolean => {
+    return run.length > 0 && run.every((e) => e.isFolded === true)
+  }
 
   // Group-level chrome composition over the ordered flow, resolved ABOVE the
   // run/selection composition (so it never depends on selection chunking):
@@ -566,25 +655,64 @@ export function renderEditFlowNodes({
   //   row, continuous rail, menu, hover) is owned once and every carrying run
   //   host only registers itself with that owner for measurement. No run paints
   //   a chrome of its own.
-  // - ONE elected header host per group: the run holding the group's authority
-  //   first mounted member (the group's visual top row in newest→oldest order).
-  //   A partially mounted group whose own first member is outside the window
-  //   elects the LAST carrying run in render order — still the group's mounted
-  //   visual top — so a windowed group never paints its header below its own
-  //   content. Election never depends on the folded/expanded presentation: React
-  //   reconciles the SAME header node across the fold (a replaced node could
-  //   only be committed already faded) and the interaction scope rides that run.
+  // - ONE route-stable normal-flow slot per group: the run mounting the
+  //   group's presentation start — its FIRST member in effective-route order,
+  //   the member every route that still reaches the group also reaches at the
+  //   same place (see routeGroupPresentation). The slot is a route-structure
+  //   boundary rendered where that message appears; it is never elected from
+  //   mounted fragments, so pagination/window changes cannot migrate it, and
+  //   crossing a fork INSIDE the group cannot move it either. WHAT the slot
+  //   shows is the route qualification's decision: the real header row when the
+  //   group's stable head resolves on this route, otherwise an equal-height
+  //   continuation row (same size and position, no head identity invented).
+  //   Only a window without the slot hosts no row at all: its visual-top
+  //   carrying run keeps the rail-only continuation (geometry carrier, zero
+  //   in-flow occupancy). Header identity never depends on the folded/expanded
+  //   presentation: React reconciles the SAME header node across the fold (a
+  //   replaced node could only be committed already faded) and the interaction
+  //   scope rides that run.
   const baseByRun = new Map<readonly FlowBodyEntry[], RunSegmentChromeBase>()
   const chromeByRun = new Map<readonly FlowBodyEntry[], SegmentGroupChrome>()
+  /**
+   * How many mounted turn runs carry each group in the CURRENT window. A folded
+   * block whose runs cover that count completely is the whole group's mounted
+   * extent, so its collapsed summary row is the group's stand-in for
+   * measurement (see FoldedSection `rangeScopeIds`). A partially folded group
+   * keeps the count larger than the block and is measured from its runs alone.
+   */
+  const runCountBySegment = new Map<string, number>()
+  /**
+   * Rail-only continuation hosts: one per group whose route-stable slot is
+   * outside the CURRENT window. The visual-top carrying run keeps the group's
+   * continuous rail (geometry carrier, zero in-flow occupancy) but never slot
+   * occupancy, menus or hover.
+   */
+  const continuationByRun = new Map<readonly FlowBodyEntry[], { segmentId: string; color: string }>()
+  /**
+   * Equal-height continuation slots: one per group whose route-stable slot is
+   * mounted but whose stable head resolves on ANOTHER route (a route-truncated
+   * residual). The slot run hosts the same `32px` row the header would occupy —
+   * so switching between such routes leaves the row, and every shared row
+   * around it, in place — but paints only the group's rail: no pill, no hit
+   * target, no menu, no invented head identity, and the reachable members stay
+   * rendered.
+   */
+  const slotContinuationByRun = new Map<readonly FlowBodyEntry[], { segmentId: string; color: string }>()
   if (renderSegmentChrome) {
+    // A provided route map is the production path: group chrome resolves from
+    // the route-stable presentation start only. An omitted map (probes and
+    // fixtures without route qualification) keeps the legacy window-relative
+    // host so non-route tests stay meaningful.
+    const routeMapProvided = routeSegmentsById !== undefined
     const groupBySegment = new Map<string, SegmentGroupChrome>()
+    const carryingRunsBySegment = new Map<string, FlowBodyEntry[][]>()
     const firstMemberRunBySegment = new Map<string, readonly FlowBodyEntry[]>()
-    const lastCarryingRunBySegment = new Map<string, readonly FlowBodyEntry[]>()
     for (const item of ordered) {
       if (item.kind !== 'turn-run') continue
       const base = deriveRunSegmentChrome(item.run)
       if (!base) continue
       baseByRun.set(item.run, base)
+      runCountBySegment.set(base.segment.id, (runCountBySegment.get(base.segment.id) ?? 0) + 1)
       const existing = groupBySegment.get(base.segment.id)
       if (existing) {
         existing.firstMounted = existing.firstMounted || base.isFirst
@@ -594,45 +722,121 @@ export function renderEditFlowNodes({
           segment: base.segment,
           firstMounted: base.isFirst,
           lastMounted: base.isLast,
-          messageCount: base.segment.messageCount
+          messageCount: base.segment.messageCount,
+          turnCount: routeSegmentsById?.get(base.segment.id)?.turnCount,
+          routeSegment: routeSegmentsById?.get(base.segment.id)
         })
       }
-      lastCarryingRunBySegment.set(base.segment.id, item.run)
+      let carrying = carryingRunsBySegment.get(base.segment.id)
+      if (!carrying) {
+        carrying = []
+        carryingRunsBySegment.set(base.segment.id, carrying)
+      }
+      carrying.push(item.run)
       if (base.isFirst) firstMemberRunBySegment.set(base.segment.id, item.run)
     }
     for (const [segmentId, group] of groupBySegment) {
-      const headerRun = firstMemberRunBySegment.get(segmentId) ?? lastCarryingRunBySegment.get(segmentId)
-      if (headerRun) chromeByRun.set(headerRun, group)
+      const carrying = carryingRunsBySegment.get(segmentId) ?? []
+      if (!routeMapProvided) {
+        const headerRun = firstMemberRunBySegment.get(segmentId) ?? carrying[carrying.length - 1]
+        if (headerRun) chromeByRun.set(headerRun, group)
+        continue
+      }
+      // Production: the map entry IS the route qualification for this group on
+      // the CURRENT route (the same source the drawer lists). No entry means
+      // pending or unreachable on this route: fail closed with NO temporary
+      // header from catalog or mounted fragments — the new route's group
+      // structure appears together with its message window in the same
+      // accepted snapshot, never as a provisional header that a later
+      // qualification would have to move.
+      const routeSegment = group.routeSegment
+      if (!routeSegment) continue
+      // Fail-closed coverage: the entry must actually cover this window. A
+      // stale route's entry (none of its members in any mounted run) hosts
+      // nothing, so a stale qualification can never render a header here.
+      const memberSet = new Set(routeSegment.memberIds)
+      const coversWindow = carrying.some((run) =>
+        run.some((entry) => entry.messageIds?.some((id) => memberSet.has(id)) === true)
+      )
+      if (!coversWindow) continue
+      // The ONE route-stable slot host: the run mounting the group's
+      // presentation start. Window/pagination changes never re-elect it.
+      const slotIndex = findStableStartRunIndex(carrying, routeSegment.presentationStartMessageId)
+      const color = group.segment.color ?? getSegmentColor(group.segment.id)
+      switch (
+        resolveGroupSlotHost({
+          hasMountedMember: true,
+          slotInWindow: slotIndex >= 0,
+          headerInRoute: routeSegment.headerInRoute
+        })
+      ) {
+        case 'header':
+          chromeByRun.set(carrying[slotIndex], group)
+          break
+        case 'continuation':
+          slotContinuationByRun.set(carrying[slotIndex], { segmentId, color })
+          break
+        case 'rail-only': {
+          // Slot outside the mounted window: no row at all, never a temporary
+          // one. The last carrying run in render order (the group's mounted
+          // visual top — the same run the layout manager anchors headless
+          // geometry to) carries the rail-only continuation.
+          const carrier = carrying[carrying.length - 1]
+          if (carrier) continuationByRun.set(carrier, { segmentId, color })
+          break
+        }
+        default:
+          break
+      }
     }
   }
 
-  const renderTurnRun = (run: FlowBodyEntry[], isSelected: boolean) => {
+  /**
+   * One carrying run of the flow.
+   *
+   * `hideBodies` is the ONLY thing a collapsed fold block removes: the run host
+   * (its chrome, its group rail registration, its turn identity) stays exactly
+   * as in the expanded state and only the message bodies disappear. A collapsed
+   * block therefore never unmounts a group's single header row or interrupts
+   * its rail — the fold is a body-visibility decision, not a chrome one.
+   */
+  const renderTurnRun = (run: FlowBodyEntry[], isSelected: boolean, hideBodies = false) => {
     const chrome = chromeByRun.get(run)
     const base = baseByRun.get(run)
-    // The elected header run is the group's structural scope owner for
-    // same-route in-place geometry: it spans the header row AND the turn bodies,
-    // so it survives the fold (a collapsed run keeps its entries and loses only
-    // its body content height) and re-resolves to the same owner after the
-    // mutation. Only the header run carries the identity — every other carrying
-    // run must never compete for it (one stable scope per group).
+    // The slot run is the group's structural scope owner for same-route
+    // in-place geometry: it spans the slot row AND the turn bodies, so it
+    // survives the fold (a collapsed run keeps its entries and loses only its
+    // body content height) and re-resolves to the same owner after the
+    // mutation. Only the slot run carries the identity — every other carrying
+    // run must never compete for it (one stable scope per group). A rail-only
+    // continuation carrier registers as a rail-geometry carrier only
+    // (`isHeader` false): the rail without slot occupancy.
     const scopeId = chrome ? chrome.segment.id : undefined
+    const continuation = chrome ? undefined : continuationByRun.get(run)
+    const slotContinuation = chrome || continuation ? undefined : slotContinuationByRun.get(run)
     return (
       <SegmentRunHost
         key={deriveTurnKey(run)}
         groupId={base?.segment.id}
-        isHeader={!!chrome}
+        isHeader={!!chrome || !!slotContinuation}
         endsGroup={base?.isLast === true}
         scopeId={scopeId}>
         {chrome && renderSegmentChrome ? renderSegmentChrome(chrome) : null}
-        <EditTurn
-          turnAskId={run[0]?.turnAskId ?? ''}
-          isEditMode={isEditMode}
-          isSelected={isSelected}
-          onTurnClick={onTurnClick}>
-          {run.map((g) => (
-            <Fragment key={g.groupKey}>{g.bodyNode}</Fragment>
-          ))}
-        </EditTurn>
+        {slotContinuation ? (
+          <GroupSlotContinuation groupId={slotContinuation.segmentId} color={slotContinuation.color} />
+        ) : null}
+        {continuation ? <GroupRailContinuation groupId={continuation.segmentId} color={continuation.color} /> : null}
+        {hideBodies ? null : (
+          <EditTurn
+            turnAskId={run[0]?.turnAskId ?? ''}
+            isEditMode={isEditMode}
+            isSelected={isSelected}
+            onTurnClick={onTurnClick}>
+            {run.map((g) => (
+              <Fragment key={g.groupKey}>{g.bodyNode}</Fragment>
+            ))}
+          </EditTurn>
+        )}
       </SegmentRunHost>
     )
   }
@@ -640,6 +844,89 @@ export function renderEditFlowNodes({
   let index = 0
   while (index < ordered.length) {
     const item = ordered[index]
+    if (item.kind === 'turn-run' && isRunFolded(item.run)) {
+      const foldedRuns: FlowBodyEntry[][] = []
+      const messageIds: string[] = []
+      while (index < ordered.length) {
+        const next = ordered[index]
+        if (next.kind !== 'turn-run' || !isRunFolded(next.run)) break
+        foldedRuns.push(next.run)
+        for (const entry of next.run) {
+          if (entry.messageIds) {
+            messageIds.push(...entry.messageIds)
+          }
+        }
+        index += 1
+      }
+      // Block identity = the FIRST folded turn it contains, never the joined
+      // list of its turns: a block grows at its open end when pagination adds
+      // turns, and a key that changes with the window would silently drop the
+      // user's own "I opened this block" state.
+      const sectionKey = `folded-section:${deriveTurnKey(foldedRuns[0])}`
+      // A navigation reveal addresses a MEMBER message id, so it opens whichever
+      // block currently contains that row — stable however the block grew.
+      const isExpanded =
+        (expandedFoldSectionIds?.has(sectionKey) ?? false) ||
+        (expandedFoldSectionIds ? messageIds.some((id) => expandedFoldSectionIds.has(id)) : false)
+      // The block's stable whole-turn selection identity: the same askIds the
+      // turn click uses, in flow order, de-duplicated (one turn may be carried
+      // by more than one visual group of this block).
+      const turnAskIds = [...new Set(foldedRuns.map((run) => run[0]?.turnAskId ?? '').filter((id) => id !== ''))]
+      const selectedTurnCount = turnAskIds.filter((id) => selectedTurnAskIds?.has(id) === true).length
+      const isSelected = turnAskIds.length > 0 && selectedTurnCount === turnAskIds.length
+      // A block can be PART of the selection (Shift/Ctrl reaching only some of its
+      // turns). It must say so instead of impersonating a fully selected block.
+      const isPartiallySelected = selectedTurnCount > 0 && !isSelected
+      // The groups this block carries, in flow order. They are the block's
+      // viewport interaction scopes (a group's stable header host is the
+      // same-route layout owner) and the anchors for its measured extent.
+      const scopeIds = [
+        ...new Set(foldedRuns.map((run) => baseByRun.get(run)?.segment.id ?? '').filter((id) => id !== ''))
+      ]
+      const blockRunCount = new Map<string, number>()
+      for (const run of foldedRuns) {
+        const segmentId = baseByRun.get(run)?.segment.id
+        if (!segmentId) continue
+        blockRunCount.set(segmentId, (blockRunCount.get(segmentId) ?? 0) + 1)
+      }
+      // Groups whose ENTIRE mounted extent is inside this block: their collapsed
+      // summary row is what the group shows, so the block registers it as the
+      // group's measured range member (never a static height, never for a group
+      // that still has runs of its own outside the block).
+      const rangeScopeIds = scopeIds.filter((id) => blockRunCount.get(id) === runCountBySegment.get(id))
+      // Unfold-write capability for this block: every member message must be
+      // mutable through the active route (per actual message id — never per
+      // segment owner). An omitted capability keeps the prop default (true,
+      // for probes/fixtures); an empty block never unfolds. Main remains the
+      // final validator of the atomic write.
+      const isUnfoldAllowed =
+        isUnfoldAllowedForMessageIds !== undefined && messageIds.length > 0
+          ? isUnfoldAllowedForMessageIds(messageIds)
+          : isUnfoldAllowedForMessageIds === undefined
+      out.push(
+        <FoldedSection
+          key={sectionKey}
+          turnCount={foldedRuns.length}
+          groupIds={turnAskIds}
+          messageIds={messageIds}
+          topicId={topicId ?? ''}
+          scopeIds={scopeIds}
+          rangeScopeIds={rangeScopeIds}
+          isExpanded={isExpanded}
+          onToggleExpand={() => onToggleExpandFoldSection?.(sectionKey)}
+          isSelected={isSelected}
+          isPartiallySelected={isPartiallySelected}
+          selectedTurnCount={selectedTurnCount}
+          isEditMode={isEditMode}
+          isUnfoldAllowed={isUnfoldAllowed}
+          onSectionSelect={(modifiers) => onSelectFoldSection?.(turnAskIds, modifiers)}>
+          {/* Every folded run keeps its host and its group chrome; only the
+              bodies leave the flow while the block is collapsed. */}
+          {foldedRuns.map((run) => renderTurnRun(run, run[0]?.selected ?? false, !isExpanded))}
+        </FoldedSection>
+      )
+      continue
+    }
     if (item.kind === 'turn-run' && !item.run[0]?.selected) {
       out.push(renderTurnRun(item.run, false))
       index += 1
@@ -655,12 +942,15 @@ export function renderEditFlowNodes({
       index += 1
       continue
     }
-    // Contiguous selected chunk: consume selected turn-runs and boundaries
-    // until the next unselected turn-run (barrier) or the end.
+    // Contiguous selected chunk: consume selected UNFOLDED turn-runs and
+    // boundaries until the next barrier or the end. A barrier is an unselected
+    // turn-run or a folded turn-run: a folded run keeps its own collapsed
+    // shell (selected or not) instead of being absorbed into the outline, so
+    // the loop lands on it and the folded branch above renders it.
     const chunk: OrderedFlowItem[] = []
     while (index < ordered.length) {
       const next = ordered[index]
-      if (next.kind === 'turn-run' && !next.run[0]?.selected) break
+      if (next.kind === 'turn-run' && (!next.run[0]?.selected || isRunFolded(next.run))) break
       chunk.push(next)
       index += 1
     }
@@ -695,7 +985,7 @@ export function renderEditFlowNodes({
     const blockLayerRunId = head?.layerRunId ?? ''
     out.push(
       <SelectionBlock
-        key={rangeKey}
+        key={deriveSelectionChunkKey(selectedRuns)}
         data-layer-kind={blockKind}
         data-stable-segment-id={rangeKey}
         data-layer-run-id={blockLayerRunId}>

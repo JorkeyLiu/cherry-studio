@@ -27,6 +27,8 @@ describe('chatDbContracts', () => {
     'chatdb:select-answer-message',
     // BRANCH-12: one atomic multi-model useful selection
     'chatdb:select-useful-answer',
+    // One atomic whole-turn fold/unfold (stable group ids, Main-resolved turns)
+    'chatdb:set-turn-folds',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',
@@ -866,6 +868,108 @@ describe('validateChatDbRequest — invalid payloads', () => {
       validateChatDbResult('chatdb:select-useful-answer', {
         ok: true,
         value: { topicId: 't1', askId: 'u1', usefulMessageId: 'a-1', messageIds: ['a-1', 'a-1'] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  // Turn-level fold: stable group ids + one boolean; Main resolves whole turns
+  it('set-turn-folds: accepts a group-id selection with one boolean state', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', {
+        topicId: 't1',
+        selectedGroupIds: ['u1', 'u2'],
+        folded: true
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', {
+        topicId: 't1',
+        branchId: 'b1',
+        selectedGroupIds: ['u1'],
+        folded: false
+      })
+    ).not.toThrow()
+  })
+
+  it('set-turn-folds: rejects empty IDs, empty selection, non-boolean state and unknown keys', () => {
+    expect(() => validateChatDbRequest('chatdb:set-turn-folds', { selectedGroupIds: ['u1'], folded: true })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', { topicId: '', selectedGroupIds: ['u1'], folded: true })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', { topicId: 't1', selectedGroupIds: [], folded: true })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', { topicId: 't1', selectedGroupIds: [''], folded: true })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', { topicId: 't1', selectedGroupIds: ['u1'], folded: 'yes' })
+    ).toThrow(ValidationError)
+    // No per-message/positional form can express a partial turn.
+    expect(() =>
+      validateChatDbRequest('chatdb:set-turn-folds', {
+        topicId: 't1',
+        selectedGroupIds: ['u1'],
+        folded: true,
+        messageIds: ['u1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('set-turn-folds: accepts a whole-turn result and rejects partial or inconsistent ones', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:set-turn-folds', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          folded: true,
+          turns: [
+            { groupId: 'u1', messageIds: ['u1', 'a1'], folded: true },
+            { groupId: 'u2', messageIds: ['u2', 'a2'], folded: true }
+          ],
+          affectedMessageIds: ['u1', 'a1', 'u2', 'a2']
+        }
+      })
+    ).not.toThrow()
+    // A turn's state must equal the requested state.
+    expect(() =>
+      validateChatDbResult('chatdb:set-turn-folds', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          folded: true,
+          turns: [{ groupId: 'u1', messageIds: ['u1', 'a1'], folded: false }],
+          affectedMessageIds: ['u1', 'a1']
+        }
+      })
+    ).toThrow(ValidationError)
+    // affectedMessageIds must equal the written turn membership.
+    expect(() =>
+      validateChatDbResult('chatdb:set-turn-folds', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          folded: true,
+          turns: [{ groupId: 'u1', messageIds: ['u1', 'a1'], folded: true }],
+          affectedMessageIds: ['u1']
+        }
+      })
+    ).toThrow(ValidationError)
+    // One message may belong to only one resolved turn.
+    expect(() =>
+      validateChatDbResult('chatdb:set-turn-folds', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          folded: true,
+          turns: [
+            { groupId: 'u1', messageIds: ['u1', 'a1'], folded: true },
+            { groupId: 'u2', messageIds: ['a1', 'u2'], folded: true }
+          ],
+          affectedMessageIds: ['u1', 'a1', 'u2']
+        }
       })
     ).toThrow(ValidationError)
   })
@@ -1868,6 +1972,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
               topicId: 't1',
               name: null,
               messageIds: ['u1', 'u2'],
+              headerMessageId: 'u1',
+              ownerTopicId: 't1',
+              ownerBranchId: null,
               createdAt: null,
               updatedAt: null,
               sortOrder: 0,
@@ -2182,6 +2289,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
             topicId: 't1',
             name: 'Seg',
             messageIds: ['m1', 'm2'],
+            headerMessageId: 'm1',
+            ownerTopicId: 't1',
+            ownerBranchId: null,
             createdAt: null,
             updatedAt: null,
             sortOrder: 0,
@@ -2200,6 +2310,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
       topicId: 't1',
       name: 'Seg',
       messageIds: ['m1', 'm2'],
+      headerMessageId: 'm1',
+      ownerTopicId: 't1',
+      ownerBranchId: null,
       createdAt: null,
       updatedAt: null,
       sortOrder: 0,
@@ -2231,6 +2344,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
           topicId: 't1',
           name: 'Seg',
           messageIds: ['m1'],
+          headerMessageId: 'm1',
+          ownerTopicId: 't1',
+          ownerBranchId: null,
           color: '#ff0000',
           createdAt: null,
           updatedAt: null,
@@ -2252,6 +2368,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
           topicId: 't1',
           name: 'Updated',
           messageIds: [],
+          headerMessageId: null,
+          ownerTopicId: 't1',
+          ownerBranchId: null,
           createdAt: null,
           updatedAt: null,
           sortOrder: 0,
@@ -2276,6 +2395,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
           topicId: 't1',
           name: 'Seg',
           messageIds: ['m1'],
+          headerMessageId: 'm1',
+          ownerTopicId: 't1',
+          ownerBranchId: null,
           createdAt: null,
           updatedAt: null,
           sortOrder: 0,
@@ -2297,6 +2419,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
       topicId: 't1',
       name: null,
       messageIds: [],
+      headerMessageId: null,
+      ownerTopicId: 't1',
+      ownerBranchId: null,
       createdAt: null,
       updatedAt: null,
       sortOrder: 0,
@@ -4286,6 +4411,8 @@ describe('coverage consistency', () => {
     'chatdb:select-answer-message',
     // BRANCH-12: one atomic multi-model useful selection
     'chatdb:select-useful-answer',
+    // One atomic whole-turn fold/unfold (stable group ids, Main-resolved turns)
+    'chatdb:set-turn-folds',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',

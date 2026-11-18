@@ -162,7 +162,7 @@ describe('branch migration 016 registration', () => {
 
   it('registers 016 after 015 and applies idempotently', () => {
     const keys = MIGRATIONS.map((m) => m.key)
-    expect(keys[keys.length - 1]).toBe('018_topic_references')
+    expect(keys[keys.length - 1]).toBe('020_topic_segment_header_identity')
     expect(keys).toContain('016_topic_branches')
     const first = runMigrations(db, sqlite)
     expect(first).toBe(MIGRATIONS.length)

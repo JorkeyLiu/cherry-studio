@@ -23,10 +23,12 @@ import {
   COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
   didRealizeCompensation,
   isAtBottom,
-  LAYOUT_HOLD_TOLERANCE_PX,
+  LAYOUT_HOLD_THRESHOLD_PX,
   type LayoutHoldSample,
   rebaseAfterCompensation,
-  resolveLayoutHold
+  resolveDroppedHoldBaseline,
+  resolveLayoutHoldThresholdForDpr,
+  stepLayoutHold
 } from '@renderer/pages/home/Messages/columnReverseGeometry'
 import { handleScrollSnapshotRead, handleScrollSnapshotSaved } from '@renderer/services/scrollSnapshotCache'
 import { isScrollSnapshotInvalidated } from '@renderer/services/scrollSnapshotCache'
@@ -142,8 +144,31 @@ export interface RouteViewportContextValue {
   requestTopRoute: (topicId: string, targetRoute: RouteId) => { epoch: number; fresh: boolean }
   /** Message list registers its live container capturer (scoped, unregistered on unmount). */
   registerCapturer: (capturer: SnapshotCapturer | null) => void
+  /**
+   * Message list registers the layout-settlement callback the fold browse
+   * motion calls synchronously after every JS-driven height write (scoped,
+   * unregistered on unmount). Optional so standalone surfaces without the
+   * message list keep working (their motions settle through a no-op).
+   */
+  registerLayoutSettler?: (settler: ViewportLayoutSettler | null) => void
+  /**
+   * Synchronously settle the current layout through the registered settler
+   * (the message list's keeper hold). Layout compensation only: never
+   * notifies, never snapshots, never touches phase or generations. No-op
+   * when nothing is registered. Optional for the same standalone reason.
+   */
+  settleLayout?: ViewportLayoutSettler
   viewportPhaseAttr: ViewportPhaseAttr
 }
+
+/**
+ * Synchronous layout-settlement callback: absorb one already-committed
+ * layout delta (the fold browse driver calls it after every height write).
+ * The sole implementation is the message list wiring it to its keeper's
+ * `requestHold` — the original holder calls the original owner, nothing is
+ * exposed beyond this reason string.
+ */
+export type ViewportLayoutSettler = (reason: string) => void
 
 const RouteViewportContext = createContext<RouteViewportContextValue | null>(null)
 
@@ -167,7 +192,14 @@ const RouteViewportContext = createContext<RouteViewportContextValue | null>(nul
  */
 export type RouteViewportCommands = Pick<
   RouteViewportContextValue,
-  'controller' | 'notifyChanged' | 'freezeDisplayed' | 'readSnapshot' | 'requestTopRoute' | 'registerCapturer'
+  | 'controller'
+  | 'notifyChanged'
+  | 'freezeDisplayed'
+  | 'readSnapshot'
+  | 'requestTopRoute'
+  | 'registerCapturer'
+  | 'registerLayoutSettler'
+  | 'settleLayout'
 >
 
 const RouteViewportCommandsContext = createContext<RouteViewportCommands | null>(null)
@@ -284,6 +316,12 @@ export function RouteViewportProvider({
   // but never touches this signal, so it can never (re)open restoration.
   const [connectionGeneration, setConnectionGeneration] = useState(0)
   const capturerRef = useRef<SnapshotCapturer | null>(null)
+  // Fold browse layout-settlement target (registered by the message list,
+  // unregistered on its unmount). Deliberately NOT cleared on Activity
+  // detach: the closure only forwards to the live keeper hold, so a hidden
+  // interval simply settles nothing, and the wiring survives reactivation
+  // without depending on re-registration ordering.
+  const layoutSettlerRef = useRef<ViewportLayoutSettler | null>(null)
   const lastTopicRef = useRef(topicId)
   if (lastTopicRef.current !== topicId) {
     lastTopicRef.current = topicId
@@ -349,6 +387,18 @@ export function RouteViewportProvider({
 
   const registerCapturer = useCallback((capturer: SnapshotCapturer | null) => {
     capturerRef.current = capturer
+  }, [])
+  const registerLayoutSettler = useCallback((settler: ViewportLayoutSettler | null) => {
+    layoutSettlerRef.current = settler
+  }, [])
+  // Synchronous layout settlement for JS-driven same-route space changes
+  // (fold browse motion): calls ONLY the holder-registered settler — the
+  // message list's keeper hold. Never notifies, never snapshots, never
+  // touches phase, generations, or ownership.
+  const settleLayout = useCallback((reason: string): void => {
+    try {
+      layoutSettlerRef.current?.(reason)
+    } catch {}
   }, [])
 
   // Detach / attach (Activity hidden boundary, single controller owner):
@@ -433,6 +483,8 @@ export function RouteViewportProvider({
       readSnapshot,
       requestTopRoute,
       registerCapturer,
+      registerLayoutSettler,
+      settleLayout,
       viewportPhaseAttr
     }),
     [
@@ -444,6 +496,8 @@ export function RouteViewportProvider({
       readSnapshot,
       requestTopRoute,
       registerCapturer,
+      registerLayoutSettler,
+      settleLayout,
       viewportPhaseAttr
     ]
   )
@@ -453,8 +507,26 @@ export function RouteViewportProvider({
   // `value` above. Rows subscribe to this, the phase/version readers stay on
   // the full context (Messages/TopicContent).
   const commands = useMemo<RouteViewportCommands>(
-    () => ({ controller, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer }),
-    [controller, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer]
+    () => ({
+      controller,
+      notifyChanged,
+      freezeDisplayed,
+      readSnapshot,
+      requestTopRoute,
+      registerCapturer,
+      registerLayoutSettler,
+      settleLayout
+    }),
+    [
+      controller,
+      notifyChanged,
+      freezeDisplayed,
+      readSnapshot,
+      requestTopRoute,
+      registerCapturer,
+      registerLayoutSettler,
+      settleLayout
+    ]
   )
 
   void topicId
@@ -528,6 +600,30 @@ export const syncMessagesPixelQuantum = (content: Element | null, dpr?: unknown)
     return true
   } catch {
     return false
+  }
+}
+/**
+ * Keeper hold threshold from the SAME DPR source as the layout quantum sync.
+ * Returns half the live layout scroll quantum (`1/dpr / 2`): DPR1 -> 0.5,
+ * DPR2 -> 0.25. Invalid DPR (non-finite/<=0/non-number, missing window)
+ * falls back to the DPR1 default. No new listeners/state: the keeper calls
+ * this on every hold observation, so DPR/window-resize convergence rides the
+ * existing observer/layout fires that already re-sync the quantum var.
+ * Pure except for the default `window.devicePixelRatio` read.
+ */
+export const resolveKeeperLayoutHoldThreshold = (dpr?: unknown): number => {
+  try {
+    let ratio: unknown = dpr
+    if (ratio === undefined) {
+      try {
+        ratio = window.devicePixelRatio
+      } catch {
+        return LAYOUT_HOLD_THRESHOLD_PX
+      }
+    }
+    return resolveLayoutHoldThresholdForDpr(ratio)
+  } catch {
+    return LAYOUT_HOLD_THRESHOLD_PX
   }
 }
 
@@ -2910,7 +3006,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       }
       // A live user gesture no longer vetoes the anchor hold. The hold below
       // measures the row's LAYOUT displacement (content growth) with the
-      // container's own scrolling removed (`resolveLayoutHold`), so it can never
+      // container's own scrolling removed (`stepLayoutHold`), so it can never
       // cancel the user's movement — the only reason the previous gate refused
       // every non-armed observation. Continuous paging across fetch flight and
       // any later row growth during the same browse session therefore hold on
@@ -3172,21 +3268,18 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         published !== null && published.routeKey === routeKey && published.anchorKey === anchorKey
       const dropped = droppedLayoutHoldRef.current
       // A pair remembered from a frame whose row geometry was unreadable is
-      // admissible only for the SAME route + row and only while the container's
-      // own scroll position still matches the one it was measured with: that
-      // unchanged position is the witness that no input moved the viewport in
-      // between, so the offset difference is layout and nothing else.
-      const droppedUsable =
-        dropped !== null &&
-        dropped.routeKey === routeKey &&
-        dropped.anchorKey === anchorKey &&
-        Math.abs(sample.scrollTop - dropped.scrollTop) <= LAYOUT_HOLD_TOLERANCE_PX
+      // admissible only as the WHOLE true pair it was recorded as (offset and
+      // scrollTop from the same synchronous read): the scroll-stillness
+      // witness below only bounds how stale it may be, it never enters the
+      // geometry. Pairing the remembered offset with the live scrollTop would
+      // charge genuine user scrolling to layout and write it back.
+      const droppedBaseline = resolveDroppedHoldBaseline(dropped, sample, routeKey, anchorKey)
       // Baseline resolution — only TRUE pairs are admissible:
       // 1. the keeper's own last observation of this route + row (offset and
       //    scrollTop measured together, re-based by the write it authorized);
       // 2. else the pair the anchor owner published at its measurement instant;
-      // 3. else the pair remembered from an unreadable-geometry frame while its
-      //    scroll position witness still holds (see `droppedLayoutHoldRef`);
+      // 3. else the remembered whole true pair while its scroll position
+      //    witness still holds (see `droppedLayoutHoldRef`);
       // 4. else NOTHING is provable, so this observation holds nothing and only
       //    seeds the baseline. Pairing the published `anchor.offset` with a
       //    later `scrollTop` would charge every pixel the user scrolled in
@@ -3195,15 +3288,25 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         ? { viewportOffset: base.viewportOffset, scrollTop: base.scrollTop }
         : publishedMatches
           ? { viewportOffset: published.viewportOffset, scrollTop: published.scrollTop }
-          : droppedUsable
-            ? { viewportOffset: dropped.viewportOffset, scrollTop: sample.scrollTop }
-            : null
-      const displacement = baseline === null ? null : resolveLayoutHold(baseline, sample)
+          : droppedBaseline
+      // Unified precision step: echo re-seeds, small-but-real layout RETAINS
+      // the old baseline so consecutive sub-pixel steps accumulate toward the
+      // quantum half instead of being discarded (the old null-branch re-seed
+      // dropped every slow small step). Only an above-threshold displacement
+      // compensates; its baseline update is owned by `rebaseAfterCompensation`
+      // (actual-linked) below. Threshold is half the live layout scroll
+      // quantum from the same DPR source as the quantum var sync above.
+      const step = stepLayoutHold(baseline, sample, resolveKeeperLayoutHoldThreshold())
+      const displacement = step.displacement
       // The remembered pair is a one-shot recovery: this observation — held or
       // merely seeding — concludes it.
       droppedLayoutHoldRef.current = null
       if (displacement === null) {
-        layoutHoldRef.current = { routeKey, anchorKey, ...sample }
+        if (step.baseline !== null) {
+          layoutHoldRef.current = { routeKey, anchorKey, ...step.baseline }
+        } else {
+          layoutHoldRef.current = null
+        }
         return
       }
       // Ordinary layout hold converges here: no snapshot write, no pending

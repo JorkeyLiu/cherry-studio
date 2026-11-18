@@ -29,6 +29,7 @@ import type {
   SelectAnswerMessageResponse,
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
+  SetTurnFoldsResponse,
   StreamWriteDiagnostics,
   TopicDataExportPayload,
   UpdateMessageUsageSource
@@ -299,8 +300,14 @@ class DbService implements MessageDataSource {
   resetAssistantTopics(assistantId: string, replacementTopicId: string) {
     return this.ordinarySource.resetAssistantTopics(assistantId, replacementTopicId)
   }
-  listSegments(topicId: string) {
-    return this.ordinarySource.listSegments(topicId)
+  /**
+   * See `SqliteMessageDataSource.listSegments`: omitted `branchId` reads the
+   * unqualified topic-wide authority catalog; `null`/branch id reads the same
+   * catalog with a Main-computed route-qualification block per group. Route
+   * blocks never enter the catalog slice — qualified reads stay caller-local.
+   */
+  listSegments(topicId: string, branchId?: string | null) {
+    return this.ordinarySource.listSegments(topicId, branchId)
   }
   upsertSegment(
     segmentId: string,
@@ -329,6 +336,14 @@ class DbService implements MessageDataSource {
     branchId?: string | null
   ): Promise<ReorderAnswerGroupResponse> {
     return this.ordinarySource.reorderAnswerGroup(topicId, anchorMessageId, orderedMessageIds, branchId)
+  }
+  setTurnFolds(
+    topicId: string,
+    selectedGroupIds: string[],
+    folded: boolean,
+    branchId?: string | null
+  ): Promise<SetTurnFoldsResponse> {
+    return this.ordinarySource.setTurnFolds(topicId, selectedGroupIds, folded, branchId)
   }
   listBlocksByFile(fileId: string) {
     return this.ordinarySource.listBlocksByFile(fileId)

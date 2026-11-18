@@ -3,6 +3,7 @@ import { useEditMode } from '@renderer/context/EditModeContext'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { clearSelection, setSelectedGroupIds } from '@renderer/store/editMode'
+import { setTurnFoldsThunk } from '@renderer/store/thunk/turnFold'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import type { MenuProps } from 'antd'
@@ -119,6 +120,48 @@ export function useEditModeContextMenuItems(topicId: string) {
     createSegment,
     dispatch
   ])
+
+  const areAllSelectedFolded = useMemo(() => {
+    if (selectedGroupIds.length === 0) return false
+    let sawMemberRow = false
+    for (const askId of selectedGroupIds) {
+      const group = groups.find((g) => g.askId === askId)
+      // A selected turn with no loaded member row cannot be proven folded, so
+      // the action folds (never claims a state it cannot see).
+      if (!group || group.messages.length === 0) return false
+      for (const message of group.messages) {
+        sawMemberRow = true
+        if (message.folded !== true) return false
+      }
+    }
+    return sawMemberRow
+  }, [selectedGroupIds, groups])
+
+  /**
+   * Fold/unfold the selected turns.
+   *
+   * ONE atomic turn-level command carrying only stable turn (group) ids: Main
+   * resolves every selected turn's complete membership (window-outside members
+   * included) and writes the fold flags in one transaction, so a selection
+   * whose turns are only partly loaded is never addressed by the rows the
+   * renderer happens to have. A rejected write throws — the selection is then
+   * KEPT and the error names the operation the user asked for (folding never
+   * reports a failure to unfold).
+   */
+  const handleToggleFoldSelected = useCallback(async () => {
+    if (!isSelectionMutable) return
+    if (selectedGroupIds.length === 0) return
+    const targetFolded = !areAllSelectedFolded
+    try {
+      await dispatch(setTurnFoldsThunk(topicId, selectedGroupIds, targetFolded, activeRoute))
+    } catch (error) {
+      menuLogger.error('[handleToggleFoldSelected] Failed to write the turn fold state', error as Error)
+      window.toast?.error?.(targetFolded ? t('chat.fold_failed') : t('chat.unfold_failed'))
+      return
+    }
+    dispatch(clearSelection())
+    window.toast?.success?.(targetFolded ? t('chat.folded_success') : t('chat.unfolded_success'))
+  }, [isSelectionMutable, selectedGroupIds, areAllSelectedFolded, topicId, activeRoute, dispatch, t])
 
   const getMergeDirections = useCallback(
     (msgIds: string[]): { upSegment?: TopicSegment; downSegment?: TopicSegment } | null => {
@@ -357,6 +400,13 @@ export function useEditModeContextMenuItems(topicId: string) {
       },
       { type: 'divider' },
       {
+        key: 'toggleFoldSelected',
+        label: areAllSelectedFolded ? t('chat.unfold_selected_turns') : t('chat.fold_selected_turns'),
+        disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
+        onClick: () => void handleToggleFoldSelected()
+      },
+      { type: 'divider' },
+      {
         key: 'createSegment',
         label: t('topicSegment.createAction'),
         disabled: !canCreateSegment,
@@ -444,7 +494,9 @@ export function useEditModeContextMenuItems(topicId: string) {
     mergeInfo,
     removeFromSegmentInfo,
     canCreateSegment,
-    canMoveToNewBranch
+    canMoveToNewBranch,
+    areAllSelectedFolded,
+    handleToggleFoldSelected
   ])
 
   return { items, canMoveToNewBranch }

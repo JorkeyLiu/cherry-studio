@@ -56,6 +56,7 @@ import type {
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
   SelectUsefulAnswerRequest,
+  SetTurnFoldsRequest,
   SoftDeleteTopicRequest,
   TopicDeletionEvent,
   TopicExistsRequest,
@@ -637,6 +638,8 @@ const api = {
     // BRANCH-12: one atomic multi-model useful selection (group-level)
     selectUsefulAnswer: (request: SelectUsefulAnswerRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_SelectUsefulAnswer, request),
+    // Turn-level fold: one atomic multi-turn fold/unfold (group-level range command)
+    setTurnFolds: (request: SetTurnFoldsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_SetTurnFolds, request),
     deleteMessage: (request: DeleteMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessage, request),
     deleteMessages: (request: DeleteMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessages, request),
     updateBlocks: (request: UpdateBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateBlocks, request),

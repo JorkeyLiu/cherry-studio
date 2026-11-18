@@ -8,7 +8,6 @@
  * interaction surface, exactly one group menu and one groupwide hover.
  */
 import { configureStore } from '@reduxjs/toolkit'
-import type * as EventServiceModule from '@renderer/services/EventService'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createElement, Fragment } from 'react'
 import type * as ReactI18nextModule from 'react-i18next'
@@ -70,13 +69,10 @@ vi.mock('@renderer/services/db', () => ({
 // Navigation is the drawer's own channel: the group menu emits the SAME event
 // with the SAME payload, so the test spies on the one emitter rather than
 // asserting a second navigation mechanism.
-vi.mock('@renderer/services/EventService', async (importOriginal) => {
-  const actual = await importOriginal<typeof EventServiceModule>()
-  // `emit` is shadowed by the spy.
-  const emitter = Object.create(actual.EventEmitter)
-  emitter.emit = (...args: any[]) => emitMock(...args)
-  return { ...actual, EventEmitter: emitter }
-})
+vi.mock('@renderer/services/EventService', () => ({
+  EVENT_NAMES: { NAVIGATE_TO_MESSAGE: 'NAVIGATE_TO_MESSAGE' },
+  EventEmitter: { emit: (...args: any[]) => emitMock(...args), on: vi.fn(), off: vi.fn() }
+}))
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof ReactI18nextModule>()
@@ -210,7 +206,6 @@ import topicSegmentReducer from '@renderer/store/topicSegment'
 
 import type { FlowNode } from '../messageEditSelectionLayout'
 import { renderEditFlowNodes } from '../messageEditSelectionLayout'
-import { SEGMENT_FOLD_MOTION_MS } from '../SegmentFoldTransition'
 import { SEGMENT_GROUP_HEADER_HEIGHT_PX } from '../SegmentGroupPresentation'
 import TopicSegmentLine from '../TopicSegmentLine'
 
@@ -247,6 +242,12 @@ function makeSegment(overrides: Record<string, unknown> = {}) {
     id: 'seg-1',
     topicId: 't1',
     name: 'Seg',
+    // Stable head owner from Main: kept for the store/projection paths that
+    // still read catalog metadata. The flow-chrome mutation gate does NOT read
+    // these fields — it reads ONLY the route-qualified entry (see
+    // ownedRouteEntry): omitting them here changes nothing about mutability.
+    ownerTopicId: 't1',
+    ownerBranchId: null,
     // Loaded membership is windowed (2 ids) while authority count is 7.
     messageIds: ['m1', 'm2'],
     createdAt: TS,
@@ -255,6 +256,26 @@ function makeSegment(overrides: Record<string, unknown> = {}) {
     firstMessageId: 'm0',
     lastMessageId: 'm6',
     messageCount: 7,
+    ...overrides
+  } as any
+}
+// Main route-qualified entry for the CURRENT route (same source the drawer
+// lists): the ONLY mutation-authority input the flow chrome consumes. Present
+// with headerOwnedByRoute true = owning route (rename/dissolve/inline rename
+// available); false = foreign head (read + navigate only); absent (null) =
+// unqualified/pending, fail-closed to read-only. Never a raw catalog compare.
+function ownedRouteEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'seg-1',
+    name: 'Seg',
+    headerMessageId: 'm0',
+    headerInRoute: true,
+    headerOwnedByRoute: true,
+    memberIds: ['m1', 'm2'],
+    messageCount: 7,
+    // Route-qualified TURN count (user + same-askId answers = 1): kept
+    // distinct from the catalog message count so the badge source is visible.
+    turnCount: 4,
     ...overrides
   } as any
 }
@@ -289,19 +310,6 @@ function ownRules(element: HTMLElement): string[] {
     .replace(/\s+/g, '')
   return (css.match(/[^{}]+\{[^}]*\}/g) ?? []).filter((rule) =>
     Array.from(element.classList).some((name) => rule.includes(`.${name}`))
-  )
-}
-
-/** A folded group of the given route capability. */
-function renderFolded(capability: 'owner' | 'readonly' | 'unknown' = 'owner') {
-  return render(
-    createElement(TopicSegmentLine, {
-      segment: makeSegment({ folded: true }),
-      isFirst: true,
-      isLast: true,
-      messageCount: 7
-    }),
-    { wrapper: wrapper(setupStore(capability)) }
   )
 }
 
@@ -363,12 +371,21 @@ describe('TopicSegmentLine group boundary', () => {
     return { key: 'action', keyPath: ['action'], item: null, domEvent: { currentTarget: item, target: item } }
   }
 
-  it('expanded: one in-flow header row owns the label, the rail and the fold target', async () => {
+  it('expanded: one in-flow header row owns the label and the rail', async () => {
     const store = setupStore()
     const segment = makeSegment()
-    const view = render(createElement(TopicSegmentLine, { segment, isFirst: true, isLast: false, messageCount: 7 }), {
-      wrapper: wrapper(store)
-    })
+    const view = render(
+      createElement(TopicSegmentLine, {
+        segment,
+        routeSegment: ownedRouteEntry(),
+        isFirst: true,
+        isLast: false,
+        messageCount: 7
+      }),
+      {
+        wrapper: wrapper(store)
+      }
+    )
 
     const header = screen.getByTestId('topic-segment-group')
     expect(header.getAttribute('data-segment-id')).toBe('seg-1')
@@ -380,19 +397,11 @@ describe('TopicSegmentLine group boundary', () => {
     expectNoFlowSpacing(header)
     expectNoOuterSpacing(screen.getByTestId('topic-segment-label'))
 
-    // One pill, one continuous rail (with its one rule), one fold target.
+    // One pill, one continuous rail (with its one rule).
     expect(screen.queryAllByTestId('topic-segment-label')).toHaveLength(1)
     expect(view.container.querySelectorAll('[data-testid="topic-segment-rail"]')).toHaveLength(1)
     expect(view.container.querySelectorAll('[data-testid="topic-segment-rule"]')).toHaveLength(1)
-    expect(view.container.querySelectorAll('[data-testid="topic-segment-fold"]')).toHaveLength(1)
     expect(screen.getByTestId('topic-segment-actions')).toBeTruthy()
-    expect(screen.queryByTestId('topic-segment-expand')).toBeNull()
-
-    // The rail's transparent hit target collapses through the one authority
-    // write (DB-first, route-scoped).
-    fireEvent.click(screen.getByTestId('topic-segment-fold'))
-    await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-    expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, true, null)
 
     // The group name is an INLINE rename entrance: the pill's own label becomes
     // a one-line editor in place (no popup, no write from opening).
@@ -400,161 +409,24 @@ describe('TopicSegmentLine group boundary', () => {
     expect(popoverState.props?.open ?? false, 'the pill rename opens no popover').toBe(false)
     const inline = screen.getByTestId('topic-segment-rename-inline') as HTMLInputElement
     expect(inline.value).toBe('Seg')
-    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1)
+    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(0)
 
     // The count never gains a click behavior of its own.
     fireEvent.click(screen.getByTestId('topic-segment-count'))
-    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1)
+    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(0)
 
-    // Expanded, the pill is a plain label: neither its background nor its count
-    // is a fold target (the rail is the group's only collapse gesture).
+    // Expanded, the pill is a plain label.
     fireEvent.click(screen.getByTestId('topic-segment-label'))
     expect(screen.getByTestId('topic-segment-label').getAttribute('role')).toBeNull()
-    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1)
+    expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(0)
     view.unmount()
   })
 
-  it('folded: the same occupied header row stays, the body owns no slot and the rail fades out', async () => {
+  it('renders color dot and 24px pill box', () => {
     const store = setupStore()
-    const segment = makeSegment({ folded: true })
-    const view = render(createElement(TopicSegmentLine, { segment, isFirst: true, isLast: true, messageCount: 7 }), {
-      wrapper: wrapper(store)
-    })
-
-    const header = screen.getByTestId('topic-segment-group')
-    expect(header.getAttribute('data-segment-folded')).toBe('true')
-    // Fixed header occupancy: identical row height in both states, so a
-    // collapsed group never leaves a seam or a blank band behind.
-    expect(window.getComputedStyle(header).height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
-
-    // i18n replacement word stands in for the group name (the name itself is
-    // still persisted and only surfaces in the hover hint).
-    const expand = screen.getByTestId('topic-segment-expand')
-    expect(expand.textContent).toBe('topicSegment.folded')
-    expect(expand.getAttribute('title')).toBe('Seg · topicSegment.foldedHint')
-    expect(screen.getByTestId('topic-segment-count').textContent).toBe('7')
-
-    // The rail keeps its place but fades on the shared window (chrome never
-    // switches a frame before the content it belongs to), so a folded group
-    // offers no fold hit target and no hover rename/dissolve actions.
-    expect(window.getComputedStyle(screen.getByTestId('topic-segment-rule')).opacity).toBe('0')
-    expect(screen.queryByTestId('topic-segment-fold')).toBeNull()
-    expect(screen.queryByTestId('topic-segment-actions')).toBeNull()
-
-    fireEvent.click(expand)
-    await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-    expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, false, null)
-    view.unmount()
-  })
-
-  it('folded: the WHOLE label pill is one expand target — word, count and background dispatch a single write', async () => {
-    // Every part of the folded label is clicked on its own mount, so a second
-    // dispatch from a child (the word used to own the click) would show up as
-    // a second authority write.
-    // The folded dot takes no layout (see the inset test below), so the folded
-    // label's clickable regions are its visible parts: the word, the count and
-    // the pill's own background.
-    const parts: Array<[string, () => HTMLElement]> = [
-      ['pill background', () => screen.getByTestId('topic-segment-label')],
-      ['folded word', () => screen.getByTestId('topic-segment-expand')],
-      ['count', () => screen.getByTestId('topic-segment-count')]
-    ]
-    for (const [label, partOf] of parts) {
-      updateSegmentMetadataMock.mockClear()
-      const view = renderFolded()
-      fireEvent.click(partOf())
-      await waitFor(() => expect(updateSegmentMetadataMock, `${label} expands once`).toHaveBeenCalledTimes(1))
-      expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, false, null)
-      view.unmount()
-    }
-  })
-
-  it('folded: the pill is the single tab stop and Enter/Space expand through the same write', async () => {
-    const view = renderFolded()
-    const pill = screen.getByTestId('topic-segment-label')
-    // The tab stop and the semantics live on the pill, never on the word (that
-    // would be a second, nested target) and never on the count.
-    expect(pill.getAttribute('role')).toBe('button')
-    expect(pill.getAttribute('tabindex')).toBe('0')
-    expect(pill.getAttribute('aria-label')).toBe('topicSegment.expand · Seg')
-    expect(screen.getByTestId('topic-segment-expand').getAttribute('role')).toBeNull()
-    expect(screen.getByTestId('topic-segment-count').getAttribute('role')).toBeNull()
-
-    pill.focus()
-    expect(document.activeElement).toBe(pill)
-    fireEvent.keyDown(pill, { key: 'Enter' })
-    await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-    expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, false, null)
-    // Space is the same one dispatch from the same target.
-    fireEvent.keyDown(pill, { key: ' ' })
-    await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(2))
-    view.unmount()
-  })
-
-  it('folded: pill hover promises the expand — pointer over the whole pill and an underline on the word — and a read-only pill promises neither', () => {
-    const writableView = renderFolded()
-    const pill = screen.getByTestId('topic-segment-label')
-    const word = screen.getByTestId('topic-segment-expand')
-    expect(window.getComputedStyle(pill).cursor).toBe('pointer')
-    // so hovering the count, the word or the pill's own background underlines
-    // the same word; it is not a rule of the word's own hover.
-    const underlineRule = ownRules(word).find((rule) => rule.includes('text-decoration:underline'))
-    expect(underlineRule, 'the folded word underlines').toBeDefined()
-    const pillClasses = Array.from(pill.classList)
-    expect(pillClasses.some((name) => underlineRule!.includes(`.${name}:hover`))).toBe(true)
-    expect(pillClasses.some((name) => underlineRule!.includes(`.${name}:focus-visible`))).toBe(true)
-    writableView.unmount()
-
-    const readOnlyView = renderFolded('readonly')
-    const readOnlyPill = screen.getByTestId('topic-segment-label')
-    const readOnlyWord = screen.getByTestId('topic-segment-expand')
-    // No write means no promise: the plain arrow cursor and no underline rule.
-    expect(window.getComputedStyle(readOnlyPill).cursor).toBe('default')
-    expect(ownRules(readOnlyWord).some((rule) => rule.includes('text-decoration:underline'))).toBe(false)
-    const readOnlyUnderline = ownRules(readOnlyWord).find((rule) => rule.includes('text-decoration:none'))
-    expect(readOnlyUnderline, 'the read-only word declares no underline').toBeDefined()
-    readOnlyView.unmount()
-  })
-
-  it('folded: the tint dot leaves the layout, so the folded label is dotless and the word starts at the pill inset', () => {
-    const foldedView = renderFolded()
-    const pill = screen.getByTestId('topic-segment-label')
-    const content = pill.firstElementChild as HTMLElement
-    const dot = content.firstElementChild as HTMLElement
-    const word = screen.getByTestId('topic-segment-expand')
-    // The dot NODE is the same object in both states (the chrome is never
-    // replaced on fold), but folded it takes no layout at all: `display: none`,
-    // never a box left in the row at `opacity: 0` (which would keep the `6px`
-    // dot plus the `6px` content gap and push the word right by `12px`).
-    expect(dot).toBeTruthy()
-    expect(dot.nextElementSibling).toBe(word)
-    expect(window.getComputedStyle(dot).display).toBe('none')
-    const dotRules = ownRules(dot)
-    expect(
-      dotRules.some((rule) => rule.includes('display:none')),
-      'the folded dot leaves the layout'
-    ).toBe(true)
-    expect(
-      dotRules.some((rule) => rule.includes('opacity:0')),
-      'the folded dot is never merely hidden at opacity 0'
-    ).toBe(false)
-    expect(
-      dotRules.some((rule) => rule.includes('background:var(--color-text-3)')),
-      'the folded dot carries no visible neutral mark'
-    ).toBe(false)
-    // The dot takes no layout and the pill keeps its intended `24px` box, so the
-    // folded and expanded labels are the same height (a height regression is its
-    // own class of bug: the pill must never shrink with its content).
-    expect(window.getComputedStyle(pill).height).toBe('24px')
-    // The folded word therefore starts at the pill's own inset: `6px` padding +
-    // the `1px` border, with no folded-only padding rule.
-    expect(ownRules(pill).some((rule) => rule.includes('padding:08px06px'))).toBe(true)
-    expect(ownRules(content).some((rule) => rule.includes('gap:6px'))).toBe(true)
-    foldedView.unmount()
-
     const expandedView = render(
       createElement(TopicSegmentLine, { segment: makeSegment(), isFirst: true, isLast: true, messageCount: 7 }),
-      { wrapper: wrapper(setupStore()) }
+      { wrapper: wrapper(store) }
     )
     const expandedContent = screen.getByTestId('topic-segment-label').firstElementChild as HTMLElement
     const expandedDot = expandedContent.firstElementChild as HTMLElement
@@ -576,8 +448,10 @@ describe('TopicSegmentLine group boundary', () => {
     const store = setupStore()
     // isFirst === false: the mounted window does not contain the group's first
     // message. The group identity is the header's identity, so the one header
-    // row still paints the one label, the one continuous rail and the authority
-    // count — and it keeps its single fold/menu interaction surface.
+    // row still paints the one label and the one continuous rail — but NO
+    // badge: without a route-qualified turn count the badge stays hidden
+    // instead of falling back to the catalog message count (pending authority
+    // never mislabels messages).
     const segment = makeSegment()
     const view = render(createElement(TopicSegmentLine, { segment, isFirst: false, isLast: true, messageCount: 7 }), {
       wrapper: wrapper(store)
@@ -585,55 +459,13 @@ describe('TopicSegmentLine group boundary', () => {
     expect(screen.getByTestId('topic-segment-group').getAttribute('data-segment-first')).toBe('false')
     expect(screen.getByTestId('topic-segment-group').getAttribute('data-segment-last')).toBe('true')
     expect(screen.getByTestId('topic-segment-label')).toBeTruthy()
-    expect(screen.getByTestId('topic-segment-count').textContent).toBe('7')
+    expect(screen.queryByTestId('topic-segment-count')).toBeNull()
     expect(view.container.querySelectorAll('[data-testid="topic-segment-rail"]')).toHaveLength(1)
     expect(view.container.querySelectorAll('[data-testid="topic-segment-rule"]')).toHaveLength(1)
-    expect(view.container.querySelectorAll('[data-testid="topic-segment-fold"]')).toHaveLength(1)
-    // The one rail interaction surface is still the group's menu trigger host.
-    expect(fireEvent.contextMenu(screen.getByTestId('topic-segment-fold'), { clientX: 120, clientY: 200 })).toBe(false)
+    // The group header row is the menu trigger host.
+    expect(fireEvent.contextMenu(screen.getByTestId('topic-segment-group'), { clientX: 120, clientY: 200 })).toBe(false)
     expect(dropdownState.pointer).toEqual({ x: 120, y: 200 })
     view.unmount()
-  })
-
-  it('an inherited/read-only group renders the label but offers no fold write', async () => {
-    for (const capability of ['readonly', 'unknown'] as const) {
-      const store = setupStore(capability)
-      const segment = makeSegment()
-      const view = render(createElement(TopicSegmentLine, { segment, isFirst: true, isLast: false, messageCount: 7 }), {
-        wrapper: wrapper(store)
-      })
-      // The one interaction surface stays present so keyboard parity (Shift+F10
-      // on the rail opens the same group menu) does not depend on write
-      // capability, but the fold write itself is owner-only: a read-only route
-      // gets no click write at all (zero IPC).
-      const foldSurface = screen.getByTestId('topic-segment-fold')
-      expect(foldSurface.getAttribute('aria-disabled')).toBe('true')
-      fireEvent.click(foldSurface)
-      expect(updateSegmentMetadataMock).not.toHaveBeenCalled()
-      expect(screen.getByTestId('topic-segment-rule')).toBeTruthy()
-      view.unmount()
-
-      const foldedView = render(
-        createElement(TopicSegmentLine, {
-          segment: makeSegment({ folded: true }),
-          isFirst: true,
-          isLast: false,
-          messageCount: 7
-        }),
-        { wrapper: wrapper(setupStore(capability)) }
-      )
-      const foldedPill = screen.getByTestId('topic-segment-label')
-      // No write means no promise: the folded pill stays a plain label (no
-      // button role, no tab stop) and no part of it expands.
-      expect(foldedPill.getAttribute('role')).toBeNull()
-      expect(foldedPill.getAttribute('tabindex')).toBeNull()
-      fireEvent.click(screen.getByTestId('topic-segment-expand'))
-      fireEvent.click(foldedPill)
-      fireEvent.click(screen.getByTestId('topic-segment-count'))
-      fireEvent.keyDown(foldedPill, { key: 'Enter' })
-      expect(updateSegmentMetadataMock).not.toHaveBeenCalled()
-      foldedView.unmount()
-    }
   })
 
   it('the header row carries the segment-header interaction region in both states', () => {
@@ -663,41 +495,13 @@ describe('TopicSegmentLine group boundary', () => {
     const actions = screen.getByTestId('topic-segment-actions')
     expect(window.getComputedStyle(actions).opacity).toBe('0')
 
-    // Hovering the rail (a point of the group boundary far below the header
-    // text) is the SAME hover as hovering the header: one own state, one line,
-    // one set of actions — never a per-run mark.
-    fireEvent.mouseOver(screen.getByTestId('topic-segment-fold'))
+    // Hovering the header row raises the actions together
+    const header = screen.getByTestId('topic-segment-group')
+    fireEvent.mouseEnter(header)
     expect(window.getComputedStyle(actions).opacity).toBe('1')
 
-    fireEvent.mouseOut(screen.getByTestId('topic-segment-fold'), { relatedTarget: document.body })
+    fireEvent.mouseLeave(header)
     expect(window.getComputedStyle(actions).opacity).toBe('0')
-  })
-
-  it('chrome color/opacity continuity rides the shared fold window', () => {
-    const store = setupStore()
-    const view = render(
-      createElement(TopicSegmentLine, { segment: makeSegment(), isFirst: true, isLast: false, messageCount: 7 }),
-      { wrapper: wrapper(store) }
-    )
-    // The rule and the pill tint/border animate in place instead of switching on
-    // the first fold frame, and each uses the one shared window constant. The
-    // dot carries no paint change (folded it takes no layout, expanded it is the
-    // segment color), so it declares no transition of its own.
-    const dotTransition = getComputedStyle(
-      screen.getByTestId('topic-segment-label').firstElementChild!.firstElementChild as Element
-    ).transition
-    expect(dotTransition, 'the dot has no repaint to animate').toBe('')
-    const ruleTransition = getComputedStyle(screen.getByTestId('topic-segment-rule')).transition
-    expect(ruleTransition).toContain('opacity')
-    expect(ruleTransition).toContain(`${SEGMENT_FOLD_MOTION_MS}ms`)
-    const pillTransition = getComputedStyle(screen.getByTestId('topic-segment-label')).transition
-    expect(pillTransition, 'pill tint transitions instead of snapping').toContain('background-color')
-    expect(pillTransition, 'pill border transitions instead of snapping').toContain('border-color')
-    expect(
-      getComputedStyle(screen.getByTestId('topic-segment-label').firstElementChild!.firstElementChild as Element)
-        .display
-    ).toBe('inline-block')
-    view.unmount()
   })
 
   it('the group edge right click claims the gesture so the message menu never opens', () => {
@@ -786,10 +590,18 @@ describe('TopicSegmentLine group boundary', () => {
   })
 
   describe('group menu', () => {
-    const renderExpanded = (capability: 'owner' | 'readonly' | 'unknown' = 'owner', overrides = {}) =>
+    const renderExpanded = (capability: 'owner' | 'readonly' | 'unknown' = 'owner', overrides = {}, routeEntry?: any) =>
       render(
         createElement(TopicSegmentLine, {
           segment: makeSegment(overrides),
+          routeSegment:
+            routeEntry !== undefined
+              ? routeEntry
+              : capability === 'owner'
+                ? ownedRouteEntry()
+                : capability === 'readonly'
+                  ? ownedRouteEntry({ headerOwnedByRoute: false })
+                  : null,
           isFirst: true,
           isLast: false,
           messageCount: 7
@@ -797,54 +609,56 @@ describe('TopicSegmentLine group boundary', () => {
         { wrapper: wrapper(setupStore(capability)) }
       )
 
-    it('offers the group actions in the user-facing order on an owned, expanded group', () => {
+    it('offers the group actions in the user-facing order on an owned group', () => {
       renderExpanded()
       expect(dropdownState.opens).toBe(1)
-      expect(menuKeys()).toEqual(['rename', 'toggle-fold', 'jump-to-start', 'dissolve'])
+      expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
       expect(dropdownState.items.map((item) => item.label)).toEqual([
         'topicSegment.rename',
-        'topicSegment.fold',
         'topicSegment.jumpToStart',
         'topicSegment.dissolveAction'
       ])
       // Dissolve is the only destructive item, so it keeps the danger style.
-      expect(dropdownState.items[3].danger).toBe(true)
+      expect(dropdownState.items[2].danger).toBe(true)
+    })
+    it('offers only navigation when the route entry is missing (fail-closed, never mutable)', () => {
+      // No Main route-qualified entry on the current route (unqualified or
+      // pending, never a raw catalog compare): the route cannot prove
+      // ownership, so rename/dissolve stay unavailable while read and
+      // navigation keep working.
+      renderExpanded('owner', {}, null)
+      expect(menuKeys()).toEqual(['jump-to-start'])
+      expect(screen.getByTestId('topic-segment-group')).toHaveAttribute('data-segment-can-mutate', 'false')
+      expect(screen.queryByTitle('topicSegment.rename')).toBeNull()
+      expect(screen.queryByTitle('topicSegment.dissolveAction')).toBeNull()
+      // The pill never becomes an editor on a non-owned route.
+      fireEvent.click(screen.getByText('Seg'))
+      expect(screen.queryByTestId('topic-segment-rename-inline')).toBeNull()
     })
 
-    it('offers rename, expand, jump and dissolve on a folded group', () => {
-      renderExpanded('owner', { folded: true })
-      // Both action surfaces are anchored popovers with no dependency on the
-      // body, so the folded menu keeps both.
-      expect(menuKeys()).toEqual(['rename', 'toggle-fold', 'jump-to-start', 'dissolve'])
-      expect(dropdownState.items[1].label).toBe('topicSegment.expand')
+    it('treats a branch-owned group entry as mutable on its owning route', () => {
+      // Ownership is route-relative, never main-topic-relative: an entry whose
+      // head lives on the active branch qualifies the same three entrances.
+      renderExpanded('owner', {}, ownedRouteEntry({ headerMessageId: 'm-branch-1' }))
+      expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
+      expect(screen.getByTitle('topicSegment.rename')).toBeTruthy()
+      expect(screen.getByTitle('topicSegment.dissolveAction')).toBeTruthy()
+      fireEvent.click(screen.getByText('Seg'))
+      expect(screen.getByTestId('topic-segment-rename-inline')).toBeTruthy()
     })
-
-    it('withholds the fold write on an inherited/read-only group but keeps the rest', () => {
-      for (const capability of ['readonly', 'unknown'] as const) {
-        const view = renderExpanded(capability)
-        expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
-        view.unmount()
-      }
+    it('hides every mutation entrance on a foreign-header entry while navigation stays', () => {
+      // Explicit foreign head (present entry, owned elsewhere): same read-only
+      // surface as a missing entry, but the head still navigates.
+      renderExpanded('owner', {}, ownedRouteEntry({ headerOwnedByRoute: false, headerInRoute: true }))
+      expect(menuKeys()).toEqual(['jump-to-start'])
+      expect(screen.getByTestId('topic-segment-group')).toHaveAttribute('data-segment-can-mutate', 'false')
+      expect(screen.queryByTitle('topicSegment.rename')).toBeNull()
+      expect(screen.queryByTitle('topicSegment.dissolveAction')).toBeNull()
+      fireEvent.click(screen.getByText('Seg'))
+      expect(screen.queryByTestId('topic-segment-rename-inline')).toBeNull()
+      dropdownState.items[0].onClick()
+      expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'm0')
     })
-
-    it('folds from the menu through the same authority write the rail uses', async () => {
-      renderExpanded()
-      await act(async () => {
-        dropdownState.items[1].onClick()
-      })
-      await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-      expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, true, null)
-    })
-
-    it('expands from the menu on a folded group (route-aware)', async () => {
-      renderExpanded('owner', { folded: true })
-      await act(async () => {
-        dropdownState.items[1].onClick()
-      })
-      await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-      expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, false, null)
-    })
-
     it('renames INLINE in the pill from both header entrances, with no anchored surface', async () => {
       const view = renderExpanded()
       fireEvent.click(screen.getByText('Seg'))
@@ -1011,7 +825,7 @@ describe('TopicSegmentLine group boundary', () => {
       expect(fireEvent.contextMenu(rail, { clientX: 300, clientY: 240 })).toBe(false)
       expect(dropdownState.pointer).toEqual({ x: 300, y: 240 })
       await act(async () => {
-        dropdownState.items[3].onClick(
+        dropdownState.items[2].onClick(
           menuActionClick(
             { left: 80, right: 280, top: 196, bottom: 356 },
             { left: 80, right: 280, top: 328, bottom: 356 }
@@ -1226,16 +1040,71 @@ describe('TopicSegmentLine group boundary', () => {
     })
     it('jumps to the group start through the drawer navigation event', () => {
       renderExpanded()
-      dropdownState.items[2].onClick()
+      dropdownState.items[1].onClick()
       // Verbatim the drawer's navigation: one event, one payload, so a jump from
       // the group edge and a jump from the drawer are the same behaviour.
       expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'm0')
     })
 
-    it('opens the same menu from the keyboard (context-menu key / Shift+F10)', () => {
+    it('never opens the group menu from a left click or Enter/Space on the rail; keyboard right-click still does', () => {
       renderExpanded()
-      fireEvent.keyDown(screen.getByTestId('topic-segment-fold'), { key: 'F10', shiftKey: true })
-      expect(menuKeys()).toEqual(['rename', 'toggle-fold', 'jump-to-start', 'dissolve'])
+      const railTarget = screen.getByTestId('topic-segment-rail-target')
+
+      // The restored hit surface: a real button spanning the 4px rail plus 4px of
+      // gutter, focusable, and the only rail control.
+      expect(railTarget.tagName).toBe('BUTTON')
+      expect(railTarget).toHaveStyle({ width: '8px', left: '0' })
+      expect(railTarget).not.toBeDisabled()
+      expect(railTarget.getAttribute('aria-haspopup')).toBe('menu')
+      // The accessible name comes from i18n (this file's `t` returns the key);
+      // the title carries the same string.
+      const railLabel = railTarget.getAttribute('aria-label')
+      expect(railLabel).toBeTruthy()
+      expect(railTarget.getAttribute('title')).toBe(railLabel)
+      expect(screen.getAllByTestId('topic-segment-rail-target')).toHaveLength(1)
+
+      // The menu it belongs to is the SAME single group menu: still no fold entry.
+      expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
+      expect(dropdownState.open).toBe(false)
+
+      // A left click opens nothing (it only dismisses through the capture
+      // handler when a menu is already open).
+      fireEvent.click(railTarget)
+      expect(dropdownState.open).toBe(false)
+
+      fireEvent.click(railTarget)
+      expect(dropdownState.open).toBe(false)
+      expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
+
+      // Enter / Space open nothing either.
+      for (const keyEvent of [{ key: 'Enter' }, { key: ' ' }]) {
+        dropdownState.open = false
+        fireEvent.keyDown(railTarget, keyEvent)
+        expect(dropdownState.open, `key ${keyEvent.key} never opens the group menu`).toBe(false)
+      }
+
+      // Keyboard right-click (the context-menu key / Shift+F10) still opens it.
+      for (const keyEvent of [{ key: 'ContextMenu' }, { key: 'F10', shiftKey: true }]) {
+        dropdownState.open = false
+        fireEvent.keyDown(railTarget, keyEvent)
+        expect(dropdownState.open, `key ${keyEvent.key} opens the one group menu`).toBe(true)
+      }
+
+      // No other key opens it.
+      dropdownState.open = false
+      fireEvent.keyDown(railTarget, { key: 'a' })
+      expect(dropdownState.open).toBe(false)
+    })
+
+    it('does not claim the right click on the rail, so the row still owns one menu', () => {
+      renderExpanded()
+      const railTarget = screen.getByTestId('topic-segment-rail-target')
+      // The gesture bubbles to the header row, which is the menu's trigger host.
+      expect(fireEvent.contextMenu(railTarget, { clientX: 250, clientY: 180 })).toBe(false)
+      expect(dropdownState.open).toBe(true)
+      expect(dropdownState.pointer).toEqual({ x: 250, y: 180 })
+      // Exactly one menu was opened by the gesture (the row's trigger host).
+      expect(menuKeys()).toEqual(['rename', 'jump-to-start', 'dissolve'])
     })
 
     /**
@@ -1252,6 +1121,7 @@ describe('TopicSegmentLine group boundary', () => {
           { onContextMenu: ancestorContextMenu },
           createElement(TopicSegmentLine, {
             segment: makeSegment(folded ? { folded: true } : {}),
+            routeSegment: ownedRouteEntry(),
             isFirst: true,
             isLast: false,
             messageCount: 7
@@ -1260,36 +1130,7 @@ describe('TopicSegmentLine group boundary', () => {
         { wrapper: wrapper(setupStore()) }
       )
 
-    it('dismisses the open group menu from any part of the same folded pill, and still expands once', async () => {
-      const parts: Array<[string, () => HTMLElement]> = [
-        ['folded word', () => screen.getByTestId('topic-segment-expand')],
-        ['count', () => screen.getByTestId('topic-segment-count')],
-        ['pill background', () => screen.getByTestId('topic-segment-label')]
-      ]
-      for (const [label, partOf] of parts) {
-        updateSegmentMetadataMock.mockClear()
-        const ancestorContextMenu = vi.fn()
-        const view = renderWithAncestorMenu(true, ancestorContextMenu)
-        // The menu is opened on the group's own edge, exactly like a right click
-        // on the continuous rail.
-        expect(fireEvent.contextMenu(screen.getByTestId('topic-segment-rule'), { clientX: 210, clientY: 180 })).toBe(
-          false
-        )
-        expect(dropdownState.open, 'the group menu is open').toBe(true)
-
-        // Clicking any part of the SAME group's pill closes that controlled menu
-        // (rc-trigger alone never sees it as an outside click).
-        fireEvent.click(partOf())
-        expect(dropdownState.open, `${label} dismisses the open group menu`).toBe(false)
-        // ...and the pill's own expand action still dispatches exactly once.
-        await waitFor(() => expect(updateSegmentMetadataMock, `${label} expands once`).toHaveBeenCalledTimes(1))
-        expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, false, null)
-        expect(ancestorContextMenu, 'a left click opens no message menu').not.toHaveBeenCalled()
-        view.unmount()
-      }
-    })
-
-    it('dismisses the open group menu from an unfolded group and keeps each edge action', async () => {
+    it('dismisses the open group menu and keeps each edge action', async () => {
       // The name: dismiss + the pill's INLINE rename editor, with no write and no
       // anchored surface.
       const nameAncestor = vi.fn()
@@ -1307,7 +1148,7 @@ describe('TopicSegmentLine group boundary', () => {
       expect(nameAncestor).not.toHaveBeenCalled()
       nameView.unmount()
 
-      // The unfolded pill's own background: dismiss only, it is no fold target.
+      // The pill's own background: dismiss only.
       updateSegmentMetadataMock.mockClear()
       const backgroundView = renderWithAncestorMenu(false, vi.fn())
       expect(fireEvent.contextMenu(screen.getByTestId('topic-segment-rule'), { clientX: 210, clientY: 180 })).toBe(
@@ -1316,23 +1157,7 @@ describe('TopicSegmentLine group boundary', () => {
       expect(dropdownState.open).toBe(true)
       fireEvent.click(screen.getByTestId('topic-segment-label'))
       expect(dropdownState.open, 'the pill background dismisses the open menu').toBe(false)
-      expect(updateSegmentMetadataMock, 'an unfolded pill background collapses nothing').not.toHaveBeenCalled()
       backgroundView.unmount()
-
-      // The rail: dismiss + the group's own collapse write, once.
-      updateSegmentMetadataMock.mockClear()
-      const railAncestor = vi.fn()
-      const railView = renderWithAncestorMenu(false, railAncestor)
-      expect(fireEvent.contextMenu(screen.getByTestId('topic-segment-rule'), { clientX: 210, clientY: 180 })).toBe(
-        false
-      )
-      expect(dropdownState.open).toBe(true)
-      fireEvent.click(screen.getByTestId('topic-segment-fold'))
-      expect(dropdownState.open, 'the rail target dismisses the open menu').toBe(false)
-      await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-      expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', undefined, undefined, true, null)
-      expect(railAncestor).not.toHaveBeenCalled()
-      railView.unmount()
     })
 
     it('reopens on a right click after a dismissal and keeps its pointer anchor and menu actions', async () => {
@@ -1345,10 +1170,9 @@ describe('TopicSegmentLine group boundary', () => {
       expect(dropdownState.pointer, 'the menu keeps the pointer it was anchored at').toEqual({ x: 300, y: 240 })
       expect(ancestorContextMenu, 'the message list menu never opens').not.toHaveBeenCalled()
 
-      // The same group's rail target dismisses the menu through the same write.
-      fireEvent.click(screen.getByTestId('topic-segment-fold'))
+      // Clicking the label dismisses the menu.
+      fireEvent.click(screen.getByTestId('topic-segment-label'))
       expect(dropdownState.open).toBe(false)
-      await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
 
       // A fresh right click on the same edge reopens it, still at the pointer.
       expect(fireEvent.contextMenu(rail, { clientX: 280, clientY: 260 })).toBe(false)
@@ -1425,12 +1249,13 @@ describe('TopicSegmentLine group boundary', () => {
       ]
     }
 
-    const renderChrome = ({ segment, firstMounted, lastMounted, messageCount }: any) =>
+    const renderChrome = ({ segment, firstMounted, lastMounted, messageCount, turnCount }: any) =>
       createElement(TopicSegmentLine, {
         segment,
         isFirst: firstMounted,
         isLast: lastMounted,
-        messageCount
+        messageCount,
+        turnCount
       })
 
     const renderSplit = (segment: any, folded: boolean) =>
@@ -1445,14 +1270,11 @@ describe('TopicSegmentLine group boundary', () => {
       labels: container.querySelectorAll('[data-testid="topic-segment-label"]').length,
       rails: container.querySelectorAll('[data-testid="topic-segment-rail"]').length,
       rules: container.querySelectorAll('[data-testid="topic-segment-rule"]').length,
-      foldTargets: container.querySelectorAll('[data-testid="topic-segment-fold"]').length,
-      // The old per-run contract must be gone entirely: no per-run rail, no
-      // per-run fold target, no per-run continuation host.
       continuationRails: container.querySelectorAll('[data-segment-continuation-id]').length,
       continuationTargets: container.querySelectorAll('[data-testid="topic-segment-fold-continuation"]').length
     })
 
-    it('expanded: two runs, ONE header row, ONE rail, ONE fold target, no per-run marks', () => {
+    it('expanded: two runs, ONE header row, ONE rail, no per-run marks', () => {
       const store = setupStore()
       const segment = makeSegment()
       const view = render(createElement(Fragment, null, ...renderSplit(segment, false)), {
@@ -1463,7 +1285,6 @@ describe('TopicSegmentLine group boundary', () => {
         labels: 1,
         rails: 1,
         rules: 1,
-        foldTargets: 1,
         continuationRails: 0,
         continuationTargets: 0
       })
@@ -1484,59 +1305,6 @@ describe('TopicSegmentLine group boundary', () => {
       expect((runs.find((r) => r.contains(header)) as HTMLElement).getAttribute('data-interaction-scope-id')).toBe(
         'seg-1'
       )
-    })
-
-    it('collapsed: the same single owner and the same single rail, no duplicate seam label', () => {
-      const store = setupStore()
-      const segment = makeSegment({ folded: true })
-      const view = render(createElement(Fragment, null, ...renderSplit(segment, true)), {
-        wrapper: wrapper(store)
-      })
-      expect(splitMarkers(view.container)).toEqual({
-        groups: 1,
-        labels: 1,
-        rails: 1,
-        rules: 1,
-        foldTargets: 0,
-        continuationRails: 0,
-        continuationTargets: 0
-      })
-      expect(getComputedStyle(view.container.querySelector('[data-testid="topic-segment-rule"]')!).opacity).toBe('0')
-      expect(view.container.querySelectorAll('[data-testid="topic-segment-expand"]')).toHaveLength(1)
-      expect(screen.getByTestId('topic-segment-count').textContent).toBe('7')
-    })
-
-    it('keeps the same header row and rail DOM nodes across the fold (chrome animates in place)', () => {
-      const store = setupStore()
-      const view = render(createElement(Fragment, null, ...renderSplit(makeSegment(), false)), {
-        wrapper: wrapper(store)
-      })
-      const headerBefore = view.container.querySelector('[data-testid="topic-segment-group"]') as HTMLElement
-      const ruleBefore = headerBefore.querySelector('[data-testid="topic-segment-rule"]') as HTMLElement
-      expect(ruleBefore).not.toBeNull()
-
-      // One commit-level flip, exactly as production: the authority fold flag
-      // changes and the composition re-runs for the same mounted flow.
-      view.rerender(createElement(Fragment, null, ...renderSplit(makeSegment({ folded: true }), true)))
-
-      const headerAfter = view.container.querySelector('[data-testid="topic-segment-group"]') as HTMLElement
-      const ruleAfter = headerAfter.querySelector('[data-testid="topic-segment-rule"]') as HTMLElement
-      // Same nodes: a replaced chrome node can only be committed already faded,
-      // so the declared opacity transition would never run.
-      expect(headerAfter).toBe(headerBefore)
-      expect(ruleAfter).toBe(ruleBefore)
-      expect(getComputedStyle(ruleAfter).opacity).toBe('0')
-      // The pill keeps the group's tint dot NODE (same element), so the chrome
-      // cross-fades in place instead of a node being replaced on the fold.
-      const dotBefore = headerBefore.querySelector('[data-testid="topic-segment-label"] > div > span') as HTMLElement
-      const dot = headerAfter.querySelector('[data-testid="topic-segment-label"] > div > span') as HTMLElement
-      expect(dot).not.toBeNull()
-      expect(dot, 'the same dot node survives the fold').toBe(dotBefore)
-      expect(getComputedStyle(dot).display).toBe('none')
-      expect(
-        ownRules(dot).some((rule) => rule.includes('background:var(--color-text-3)')),
-        'the folded dot carries no visible neutral mark'
-      ).toBe(false)
     })
 
     it('a divider-split group still owns exactly one header row and one rail', () => {
@@ -1581,8 +1349,7 @@ describe('TopicSegmentLine group boundary', () => {
         groups: 1,
         labels: 1,
         rails: 1,
-        rules: 1,
-        foldTargets: 1
+        rules: 1
       })
       // The owner is the group's visual top (the older run, rendered last in
       // newest→oldest order), i.e. its rail runs down across the divider.
@@ -1596,9 +1363,9 @@ describe('TopicSegmentLine group boundary', () => {
       expect(header.closest('[data-testid="edit-turn"]')).toBeNull()
     })
 
-    it('adjacent groups each keep their own occupied header row (folded next to expanded)', () => {
+    it('adjacent groups each keep their own occupied header row', () => {
       const store = setupStore()
-      const segA = makeSegment({ id: 'seg-a', name: 'A', folded: true })
+      const segA = makeSegment({ id: 'seg-a', name: 'A', folded: false })
       const segB = makeSegment({ id: 'seg-b', name: 'B', folded: false })
       const entry = (groupKey: string, segment: any, extra: Record<string, unknown>) => ({
         groupKey,
@@ -1636,15 +1403,11 @@ describe('TopicSegmentLine group boundary', () => {
       const headers = Array.from(
         view.container.querySelectorAll('[data-testid="topic-segment-group"]')
       ) as HTMLElement[]
-      // Fixed header occupancy in both states, so the collapsed group's row and
-      // its neighbour's row are separate normal-flow rows.
+      // Fixed header occupancy in both states.
       for (const header of headers) {
         expect(window.getComputedStyle(header).height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
       }
       expect(headers[0].parentElement).not.toBe(headers[1].parentElement)
-      // The collapsed group paints no fold target; the expanded one keeps its own.
-      expect(view.container.querySelectorAll('[data-testid="topic-segment-fold"]')).toHaveLength(1)
-      expect(view.container.querySelectorAll('[data-testid="topic-segment-expand"]')).toHaveLength(1)
     })
   })
 })

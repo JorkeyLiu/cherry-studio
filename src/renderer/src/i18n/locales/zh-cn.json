@@ -979,6 +979,9 @@
         "placeholder": "搜索"
       }
     },
+    "click_to_collapse_rail": "点击折叠边线",
+    "click_to_expand": "点击折叠区块",
+    "collapse_view": "收起浏览",
     "context_window_start": "上下文起始位置",
     "deeply_thought": "已深度思考（用时 {{seconds}} 秒）",
     "default": {
@@ -1008,6 +1011,15 @@
       "undoAction": "撤销",
       "undone": "已撤销"
     },
+    "expand_view": "展开查看",
+    "fold_failed": "折叠失败，请重试",
+    "fold_selected_turns": "折叠所选轮次",
+    "folded_not_in_context": "不计入上下文",
+    "folded_partial_selection": "已选 {{selected}}/{{total}} 轮",
+    "folded_preview_hint": "以下 {{count}} 轮对话已折叠 · 未计入上下文",
+    "folded_success": "已折叠所选轮次",
+    "folded_turns_summary": "已折叠 {{count}} 轮对话",
+    "folded_turns_summary_other": "已折叠 {{count}} 轮对话",
     "input": {
       "auto_resize": "自动调整高度",
       "context_count": {
@@ -1394,7 +1406,10 @@
       },
       "unpin": "取消固定"
     },
-    "translate": "翻译"
+    "translate": "翻译",
+    "unfold_failed": "取消折叠失败，请重试",
+    "unfold_selected_turns": "取消折叠",
+    "unfolded_success": "已取消折叠（恢复上下文）"
   },
   "code": {
     "auto_update_to_latest": "检查更新并安装最新版本",
@@ -5093,6 +5108,7 @@
     "fold": "折叠消息组",
     "folded": "已折叠",
     "foldedHint": "展开以恢复上下文",
+    "groupMenu": "消息组菜单",
     "jumpToStart": "跳转至起点",
     "merge": {
       "success": "消息组合并成功"
@@ -5109,7 +5125,11 @@
       "success": "已从消息组移除"
     },
     "removeFromSegment": "从消息组移除",
-    "rename": "重命名"
+    "rename": "重命名",
+    "turns": {
+      "count": "{{count}} 轮对话",
+      "count_other": "{{count}} 轮对话"
+    }
   },
   "trace": {
     "backList": "返回列表",

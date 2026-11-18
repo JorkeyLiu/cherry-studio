@@ -87,7 +87,16 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
         sortOrder: segment.sortOrder,
         firstMessageId: segment.firstMessageId,
         lastMessageId: segment.lastMessageId,
-        messageCount: segment.messageCount
+        messageCount: segment.messageCount,
+        // Stable head identity + head owner from Main (never re-derived from a
+        // renderer window). The head identity falls back to the authority
+        // first member so old databases keep loading, but owner fields NEVER
+        // default: the catalog read is unqualified, so no route block is ever
+        // stored here and missing owner metadata stays missing (downstream
+        // gates fail closed, never owned).
+        headerMessageId: segment.headerMessageId ?? segment.firstMessageId ?? null,
+        ...(typeof segment.ownerTopicId === 'string' ? { ownerTopicId: segment.ownerTopicId } : null),
+        ...('ownerBranchId' in segment ? { ownerBranchId: segment.ownerBranchId ?? null } : null)
       }
       if (typeof segment.folded === 'boolean') {
         mapped.folded = segment.folded

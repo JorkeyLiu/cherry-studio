@@ -1,5 +1,8 @@
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { createContext, type ReactNode, use, useLayoutEffect, useRef, useState } from 'react'
+import styled from 'styled-components'
+
+import { INTERACTION_RAIL_LINE_WIDTH_PX, INTERACTION_RAIL_OUTSET_PX, InteractionRailLine } from './GroupInteractionRail'
 
 /**
  * Group-level presentation owner for topic-segment chrome.
@@ -13,14 +16,25 @@ import { createContext, type ReactNode, use, useLayoutEffect, useRef, useState }
  * already spans dividers and segments), so the group's presentation is
  * anchored instead of wrapped:
  *
- * - the GROUP HEADER ROW is in normal flow inside the group's elected header
- *   run — the stable host that already survives fold, expand and edit-mode
- *   changes — and occupies the same row height in both presentation states;
- * - the CONTINUOUS RAIL is ONE absolutely positioned overlay element inside
- *   that header row, spanning from the header down to the group's last mounted
- *   run. It covers the group's internal divider heights, so the boundary is a
- *   single unbroken line with a single interaction surface (one hit target,
- *   one group menu, one hover state) instead of one mark per run.
+ * - the group's NORMAL-FLOW SLOT is one real in-flow row inside the group's
+ *   slot host run — the one mounted run containing the group's route-stable
+ *   presentation start (its first member in effective-route order, the member
+ *   every route that still reaches the group also reaches at the same place) —
+ *   the stable host that already survives fold, expand and edit-mode changes.
+ *   The slot always occupies the same row height: the GROUP HEADER ROW (pill,
+ *   hit target, menu, mutation authority) when the group's stable head resolves
+ *   on the current route, otherwise the equal-height continuation row (rail
+ *   only, no head identity). A mounted window without the slot hosts NO row: no
+ *   temporary one is ever elected from mounted fragments;
+ * - the CONTINUOUS RAIL is ONE absolutely positioned overlay element. It lives
+ *   inside the slot row (header or continuation), spanning from the slot down to
+ *   the group's last mounted run; when the slot itself is outside the mounted
+ *   window it lives as a rail-only continuation inside the group's visual-top
+ *   carrying run, with zero in-flow occupancy. Either way it covers the group's
+ *   internal divider heights, so the boundary is a single unbroken line instead
+ *   of one mark per run. Only the header variant carries the interaction
+ *   surface (hit target, group menu, hover); both continuations are visual
+ *   only.
  *
  * The span is measured, never inferred: every carrying run host registers itself
  * here, and this one manager owns a single shared ResizeObserver plus one
@@ -30,7 +44,11 @@ import { createContext, type ReactNode, use, useLayoutEffect, useRef, useState }
  * with the existing shared viewport controller.
  */
 
-/** Row height every group header occupies in flow, in both states. */
+/**
+ * Row height every group's normal-flow slot occupies: the header row in both
+ * presentation states, and the equal-height continuation row of a route-
+ * truncated residual. One constant, so the two presentations can never drift.
+ */
 export const SEGMENT_GROUP_HEADER_HEIGHT_PX = 32
 /** Label pill height (unchanged group-header shape). */
 export const SEGMENT_GROUP_PILL_HEIGHT_PX = 24
@@ -50,6 +68,15 @@ export interface SegmentGroupGeometry {
 }
 
 interface RunRegistration {
+  /**
+   * This run mounts the group's route-stable presentation slot and hosts its
+   * ONE in-flow `32px` row — the header row when the group's stable head
+   * resolves on this route, the equal-height continuation row otherwise (at most
+   * one per group per commit). Either way it is the group's measured geometry
+   * anchor. A carrying run without the slot registers `false`: it is a
+   * rail-geometry carrier (and may host the rail-only continuation) but never
+   * slot occupancy.
+   */
   isHeader: boolean
   /** This run carries the group's authority last mounted member. */
   endsGroup: boolean
@@ -67,6 +94,18 @@ const rectOf = (element: HTMLElement): DOMRect | null => {
 
 export interface SegmentGroupLayoutManager {
   registerRun(groupId: string, element: HTMLElement, registration: RunRegistration): () => void
+  /**
+   * Register a node that occupies part of the group's mounted extent without
+   * being one of its carrying run hosts: a collapsed fold block's summary row
+   * stands in for the whole turns it hides and sits ABOVE the group's header
+   * run. Range members widen the measured span (top and bottom) only — they
+   * never elect a header and never end a group, because the group's chrome
+   * still belongs to its runs. Without them a fully folded group measures a
+   * zero-length rail: its run hosts keep their place in flow but contribute no
+   * body height. Same lifecycle as `registerRun` (observed, cleared by
+   * `suspend`, so a hidden route holds no node).
+   */
+  registerRangeMember(groupId: string, element: HTMLElement): () => void
   subscribe(groupId: string, listener: () => void): () => void
   getGeometry(groupId: string): SegmentGroupGeometry | null
   /** Synchronous pass; used before paint by the provider's layout effect. */
@@ -91,6 +130,12 @@ export interface SegmentGroupLayoutManager {
  */
 export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
   const runs = new Map<string, Map<HTMLElement, RunRegistration>>()
+  /**
+   * Nodes that occupy part of a group's extent without being a carrying run
+   * (see `registerRangeMember`). Kept separate from `runs` so measurement can
+   * widen the span without ever electing a header or ending a group from them.
+   */
+  const rangeMembers = new Map<string, Set<HTMLElement>>()
   const geometries = new Map<string, SegmentGroupGeometry>()
   const listeners = new Map<string, Set<() => void>>()
   let resizeObserver: ResizeObserver | null = null
@@ -168,40 +213,65 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
 
   function measure(): void {
     if (!active) return
-    for (const groupId of [...runs.keys()]) {
+    const groupIds = new Set<string>([...runs.keys(), ...rangeMembers.keys()])
+    for (const groupId of groupIds) {
       const registrations = runs.get(groupId)
-      if (!registrations || registrations.size === 0) continue
+      const members = rangeMembers.get(groupId)
+      if ((!registrations || registrations.size === 0) && (!members || members.size === 0)) continue
       let header: HTMLElement | null = null
       let topmost: { element: HTMLElement; top: number } | null = null
+      /** Topmost RANGE member: the span's upper bound, never a header. */
+      let rangeTop = Infinity
       let bottom = -Infinity
       let endsGroup = false
-      for (const [element, registration] of registrations) {
-        if (!element.isConnected) continue
-        if (registration.isHeader) header = element
-        if (registration.endsGroup) endsGroup = true
-        const rect = rectOf(element)
-        if (!rect) continue
-        bottom = Math.max(bottom, rect.bottom)
-        if (!topmost || rect.top < topmost.top) topmost = { element, top: rect.top }
+      if (registrations) {
+        for (const [element, registration] of registrations) {
+          if (!element.isConnected) continue
+          if (registration.isHeader) header = element
+          if (registration.endsGroup) endsGroup = true
+          const rect = rectOf(element)
+          if (!rect) continue
+          bottom = Math.max(bottom, rect.bottom)
+          if (!topmost || rect.top < topmost.top) topmost = { element, top: rect.top }
+        }
       }
-      // A partial mounted group whose own first member is outside the window
-      // still has exactly one anchor: its elected header run renders last
-      // in newest→oldest order, i.e. at the group's mounted visual top.
+      if (members) {
+        for (const element of members) {
+          if (!element.isConnected) continue
+          const rect = rectOf(element)
+          if (!rect) continue
+          rangeTop = Math.min(rangeTop, rect.top)
+          bottom = Math.max(bottom, rect.bottom)
+        }
+      }
+      // A mounted group whose route-stable slot is outside the window has no
+      // slot run at all: the anchor is the topmost carrying run by rect (the
+      // composition hosts the rail-only continuation there, in newest→oldest
+      // render order, i.e. at the group's mounted visual top). Geometry is still
+      // published for that carrier — a rail with no slot occupancy — so the
+      // visible group range keeps one continuous line without a temporary `32px`
+      // row.
       const anchor = header ?? topmost?.element ?? null
       if (!anchor) continue
       const anchorRect = rectOf(anchor)
+      // The rail starts just below the slot row's pill band (the slot row is the
+      // header row, or its equal-height continuation). When a range member sits
+      // ABOVE the anchor (a collapsed fold block's summary standing in for the
+      // group's bodies), the span starts there instead, so the published `top`
+      // becomes negative relative to the slot row and the ONE rail still covers
+      // everything the group shows.
+      const railTopAbs = anchorRect ? Math.min(anchorRect.top + SEGMENT_GROUP_RAIL_TOP_PX, rangeTop) : rangeTop
       const next: SegmentGroupGeometry = {
-        top: SEGMENT_GROUP_RAIL_TOP_PX,
+        top: anchorRect && Number.isFinite(railTopAbs) ? railTopAbs - anchorRect.top : SEGMENT_GROUP_RAIL_TOP_PX,
         height:
-          !anchorRect || !Number.isFinite(bottom)
+          !Number.isFinite(railTopAbs) || !Number.isFinite(bottom)
             ? 0
-            : Math.max(
-                0,
-                bottom - anchorRect.top - SEGMENT_GROUP_RAIL_TOP_PX - (endsGroup ? SEGMENT_GROUP_RAIL_TAIL_TRIM_PX : 0)
-              )
+            : Math.max(0, bottom - railTopAbs - (endsGroup ? SEGMENT_GROUP_RAIL_TAIL_TRIM_PX : 0))
       }
       const previous = geometries.get(groupId)
-      if (previous && previous.top === next.top && Math.abs(previous.height - next.height) < 0.5) continue
+      if (previous && Math.abs(previous.top - next.top) < 0.5 && Math.abs(previous.height - next.height) < 0.5) {
+        continue
+      }
       geometries.set(groupId, next)
       notify(groupId)
     }
@@ -224,6 +294,32 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
         unobserve(element)
         if (current.size === 0) {
           runs.delete(groupId)
+          geometries.delete(groupId)
+          notify(groupId)
+          return
+        }
+        schedule()
+      }
+    },
+    registerRangeMember(groupId, element) {
+      let set = rangeMembers.get(groupId)
+      if (!set) {
+        set = new Set()
+        rangeMembers.set(groupId, set)
+      }
+      set.add(element)
+      observe(element)
+      schedule()
+      return () => {
+        const current = rangeMembers.get(groupId)
+        if (!current) return
+        current.delete(element)
+        unobserve(element)
+        if (current.size === 0) rangeMembers.delete(groupId)
+        // The group's runs still own its chrome: dropping the last range member
+        // narrows the span back to the runs instead of erasing the group.
+        const registered = runs.get(groupId)
+        if (!registered || registered.size === 0) {
           geometries.delete(groupId)
           notify(groupId)
           return
@@ -261,6 +357,9 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       for (const registered of runs.values()) {
         for (const element of registered.keys()) observe(element)
       }
+      for (const members of rangeMembers.values()) {
+        for (const element of members) observe(element)
+      }
       schedule()
     },
     suspend() {
@@ -277,6 +376,7 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       // own layout effects, while a hidden one holds no DOM node, listener or
       // pending frame.
       runs.clear()
+      rangeMembers.clear()
       geometries.clear()
       listeners.clear()
     }
@@ -351,4 +451,81 @@ export interface SegmentGroupPresentation {
   firstMounted: boolean
   /** The group's authority last message is inside the mounted window. */
   lastMounted: boolean
+}
+
+/**
+ * Rail-only continuation carrier: the absolutely positioned overlay a group
+ * paints when its route-stable slot is OUTSIDE the mounted window. It is hosted
+ * by the group's visual-top carrying run (the same run the manager anchors
+ * headless geometry to) and contributes ZERO in-flow height — the group keeps
+ * one continuous rail across its mounted extent but never a temporary `32px`
+ * row. Visual only: no hit target, no group menu, no hover state.
+ */
+const ContinuationRail = styled.div<{ $top: number; $height: number }>`
+   position: absolute;
+   // Same base as the group rail: the shared outset, fully inside the gutter.
+   left: -${INTERACTION_RAIL_OUTSET_PX}px;
+   top: ${(props) => props.$top}px;
+   height: ${(props) => props.$height}px;
+   width: ${INTERACTION_RAIL_LINE_WIDTH_PX}px;
+  pointer-events: none;
+  isolation: isolate;
+`
+
+export const GroupRailContinuation: React.FC<{ groupId: string; color: string }> = ({ groupId, color }) => {
+  const geometry = useSegmentGroupGeometry(groupId)
+  if (!geometry || geometry.height <= 0) return null
+  return (
+    <ContinuationRail
+      $top={geometry.top}
+      $height={geometry.height}
+      data-testid="topic-segment-rail-continuation"
+      data-segment-id={groupId}>
+      <InteractionRailLine $color={color} $active={false} />
+    </ContinuationRail>
+  )
+}
+
+/**
+ * The group's normal-flow slot when its stable head resolves on ANOTHER route
+ * (a route-truncated residual): the same occupied row the header row takes, so
+ * a route switch that crosses a fork inside the group leaves the slot — and
+ * every shared row around it — exactly where it was.
+ *
+ * It is ONE real in-flow row of the shared header height (`32px`), holding only
+ * the group's continuous rail: no pill, no hit target, no group menu, no hover,
+ * and no head identity invented for this route (the head stays a fact of its
+ * owning route; `headerMessageId`/`headerOwnedByRoute` never leak across). The
+ * residual group is never hidden: its reachable members render below the slot
+ * and its rail keeps the group's boundary.
+ *
+ * The slot row is the group's measured geometry anchor (its carrying run
+ * registers as the slot host), so the rail keeps the header variant's offset
+ * from the row top (`SEGMENT_GROUP_RAIL_TOP_PX`) and the two presentations are
+ * geometrically interchangeable.
+ */
+const SlotContinuationRow = styled.div`
+  position: relative;
+  height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
+  pointer-events: none;
+  // Out-of-flow rail paint must not be clipped: the rail spans the group's rows
+  // below this one, so no overflow/contain clipping may be introduced here.
+  isolation: isolate;
+`
+
+export const GroupSlotContinuation: React.FC<{ groupId: string; color: string }> = ({ groupId, color }) => {
+  const geometry = useSegmentGroupGeometry(groupId)
+  return (
+    <SlotContinuationRow data-testid="topic-segment-slot-continuation" data-segment-id={groupId}>
+      {geometry && geometry.height > 0 ? (
+        <ContinuationRail
+          $top={geometry.top}
+          $height={geometry.height}
+          data-testid="topic-segment-rail-continuation"
+          data-segment-id={groupId}>
+          <InteractionRailLine $color={color} $active={false} />
+        </ContinuationRail>
+      ) : null}
+    </SlotContinuationRow>
+  )
 }

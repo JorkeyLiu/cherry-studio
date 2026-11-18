@@ -116,6 +116,7 @@ function segment(overrides: Partial<TopicSegmentData> = {}): TopicSegmentData {
     createdAt: '2020-01-02T00:00:00.000Z',
     updatedAt: '2020-01-02T00:00:00.000Z',
     sortOrder: 0,
+    headerMessageId: null,
     overflow: { color: '#ff0000' },
     ...overrides
   }

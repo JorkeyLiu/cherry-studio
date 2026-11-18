@@ -73,6 +73,7 @@ export function EditModeProvider({
       isSelectionMutable: false,
       toggleEditMode,
       handleGroupClick: () => {},
+      handleBlockSelect: () => {},
       handleCopy: () => {},
       handleCut: () => {},
       handlePaste: async () => {},

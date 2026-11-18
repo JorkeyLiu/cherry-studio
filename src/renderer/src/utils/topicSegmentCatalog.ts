@@ -25,16 +25,27 @@ export function mapSegmentWireToTopicSegment(wire: SegmentWire): TopicSegment {
     sortOrder: wire.sortOrder,
     firstMessageId: wire.firstMessageId,
     lastMessageId: wire.lastMessageId,
-    messageCount: wire.messageCount
+    messageCount: wire.messageCount,
+    // Stable head identity + head owner from Main (never re-derived from a
+    // renderer window). The head identity falls back to the authority first
+    // member so old databases keep loading, but owner fields NEVER default:
+    // a wire without owner metadata stays without it, and downstream
+    // capability gates fail closed (never owned). Faking a main-route owner
+    // here would make branch-owned groups writable-or-read-only wrongly.
+    headerMessageId: (wire as { headerMessageId?: string | null }).headerMessageId ?? wire.firstMessageId ?? null,
+    ...(typeof (wire as { ownerTopicId?: unknown }).ownerTopicId === 'string'
+      ? { ownerTopicId: (wire as { ownerTopicId?: string }).ownerTopicId as string }
+      : null),
+    ...('ownerBranchId' in wire
+      ? { ownerBranchId: (wire as { ownerBranchId?: string | null }).ownerBranchId ?? null }
+      : null)
   }
-  // Persisted folded state travels through extra overflow: keep the own
-  // property only for a legal boolean so the entity stays JSON-safe.
-  if (typeof wire.folded === 'boolean') {
-    segment.folded = wire.folded
-  }
-
   if (typeof wire.color === 'string') {
     segment.color = wire.color
+  }
+  const route = (wire as { route?: TopicSegment['route'] }).route
+  if (route && typeof route === 'object') {
+    segment.route = route
   }
   return segment
 }

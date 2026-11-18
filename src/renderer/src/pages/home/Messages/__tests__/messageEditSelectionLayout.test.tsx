@@ -18,10 +18,14 @@
  *   membership — no leading/interior hoisting). Edge boundaries stay
  *   outside.
  */
-import { fireEvent, render } from '@testing-library/react'
-import { useEffect } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import store from '@renderer/store'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { type ReactNode, useEffect } from 'react'
+import { Provider } from 'react-redux'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type * as FoldedSectionModule from '../FoldedSection'
 import {
   buildOrderedFlowItems,
   deriveRunSegmentChrome,
@@ -34,7 +38,24 @@ import {
   renderEditFlowNodes,
   SelectionBlock
 } from '../messageEditSelectionLayout'
+import { SEGMENT_GROUP_HEADER_HEIGHT_PX, SegmentGroupPresentationProvider } from '../SegmentGroupPresentation'
 
+const { capturedFoldedSectionProps } = vi.hoisted(() => ({
+  capturedFoldedSectionProps: [] as Array<{ isUnfoldAllowed?: boolean }>
+}))
+
+// Pass-through capture for the unfold-write prop only: the real section still
+// renders (all existing DOM assertions hold), while the new capability tests
+// observe the verdict the layout forwards per block.
+vi.mock('../FoldedSection', async (importOriginal) => {
+  const actual = await importOriginal<typeof FoldedSectionModule>()
+  const ActualFoldedSection = actual.FoldedSection
+  const CapturingFoldedSection = ((props: Parameters<typeof ActualFoldedSection>[0]) => {
+    capturedFoldedSectionProps.push({ isUnfoldAllowed: props.isUnfoldAllowed })
+    return <ActualFoldedSection {...props} />
+  }) as typeof ActualFoldedSection
+  return { ...actual, FoldedSection: CapturingFoldedSection }
+})
 const bodyDiv = (groupKey: string, opts?: Partial<FlowBodyEntry>) => (
   <div
     data-layer-kind={opts?.kind ?? 'history'}
@@ -62,7 +83,9 @@ function turnNode(
       segmentIsLive: rest.segmentIsLive ?? false,
       kind: rest.kind ?? 'history',
       layerRunId: rest.layerRunId ?? 'layer:x',
-      bodyNode: rest.bodyNode ?? bodyDiv(groupKey, rest)
+      bodyNode: rest.bodyNode ?? bodyDiv(groupKey, rest),
+      isFolded: rest.isFolded,
+      messageIds: rest.messageIds
     }
   }
 }
@@ -1415,6 +1438,384 @@ describe('segment-homogeneous run invariant', () => {
   })
 })
 
+describe('route-stable group header placement', () => {
+  // Route-qualified layout contract: the header is a route-structure boundary
+  // rendered where the route-stable presentation start appears — never elected
+  // from mounted fragments. These tests execute the production
+  // `renderEditFlowNodes` composition (not a re-implementation) with a real
+  // `SegmentGroupPresentationProvider`, so header hosting, continuation
+  // carriers and rail geometry follow the production wiring.
+  const routeSeg = (id: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id,
+      topicId: 't1',
+      name: id,
+      messageIds: ['m-head', 'm-a', 'm-b'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-head',
+      lastMessageId: 'm-b',
+      messageCount: 3,
+      headerMessageId: 'm-head',
+      ...extra
+    }) as any
+
+  const routeEntry = (segmentId: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id: segmentId,
+      name: segmentId,
+      sortOrder: 0,
+      memberIds: ['m-head', 'm-a', 'm-b'],
+      messageCount: 3,
+      firstMessageId: 'm-head',
+      headerMessageId: 'm-head',
+      headerInRoute: true,
+      headerOwnedByRoute: true,
+      presentationStartMessageId: 'm-head',
+      ...extra
+    }) as RouteScopedSegment
+
+  const routeTurn = (
+    groupKey: string,
+    messageId: string,
+    segment: any,
+    opts?: { turnAskId?: string; isFirst?: boolean; isLast?: boolean; folded?: boolean }
+  ): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? `ask-${messageId}`,
+      selected: false,
+      segmentId: 'seg:route',
+      segmentIsLive: false,
+      kind: 'history',
+      layerRunId: 'layer:x',
+      segment,
+      segmentIsFirst: opts?.isFirst,
+      segmentIsLast: opts?.isLast,
+      isFolded: opts?.folded,
+      messageIds: [messageId],
+      bodyNode: (
+        <div
+          data-layer-kind="history"
+          data-layer-run-id="layer:x"
+          data-stable-group-id={groupKey}
+          data-testid={`body-${messageId}`}>
+          {groupKey}
+        </div>
+      )
+    }
+  })
+
+  const renderRouteFlow = (
+    nodes: FlowNode[],
+    routeSegmentsById: Map<string, RouteScopedSegment> | undefined,
+    probe: () => ReactNode
+  ) =>
+    render(
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            renderSegmentChrome: probe,
+            routeSegmentsById
+          })}
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+
+  // Rects keyed by the body a run host carries: the manager measures from
+  // these, so the continuation overlay can paint in jsdom. Newest→oldest
+  // render order means the LAST run is the mounted visual top.
+  const stubHostRects = (rectByBodyTestId: Record<string, { top: number; bottom: number }>) =>
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const body = this.querySelector('[data-testid^="body-"]')
+      const key = body?.getAttribute('data-testid') ?? ''
+      const rect = rectByBodyTestId[key] ?? { top: 0, bottom: 0 }
+      return {
+        x: 0,
+        y: rect.top,
+        left: 0,
+        right: 100,
+        top: rect.top,
+        bottom: rect.bottom,
+        width: 100,
+        height: rect.bottom - rect.top,
+        toJSON: () => ({})
+      } as DOMRect
+    })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('keeps one header at the stable start across window expand/shrink/overlap', () => {
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    // Newest→oldest: m-b, m-a, m-head. The stable start (m-head) rides last.
+    const wide: FlowNode[] = [
+      routeTurn('g-b', 'm-b', seg, { isLast: true }),
+      routeTurn('g-a', 'm-a', seg),
+      routeTurn('g-head', 'm-head', seg, { isFirst: true })
+    ]
+    const view = renderRouteFlow(wide, routeMap, chromeProbe)
+    expect(chromeProbe).toHaveBeenCalledTimes(1)
+    const chrome = view.container.querySelector('[data-testid="route-chrome"]') as HTMLElement
+    expect(chrome.parentElement?.querySelector('[data-testid="body-m-head"]')).not.toBeNull()
+    view.unmount()
+
+    // Shrunk window: same route map, stable start still mounted → the header
+    // stays on the m-head run, never re-elected to a mounted fragment.
+    chromeProbe.mockClear()
+    const overlap: FlowNode[] = [routeTurn('g-a', 'm-a', seg), routeTurn('g-head', 'm-head', seg, { isFirst: true })]
+    const view2 = renderRouteFlow(overlap, routeMap, chromeProbe)
+    expect(chromeProbe).toHaveBeenCalledTimes(1)
+    const chrome2 = view2.container.querySelector('[data-testid="route-chrome"]') as HTMLElement
+    expect(chrome2.parentElement?.querySelector('[data-testid="body-m-head"]')).not.toBeNull()
+    view2.unmount()
+  })
+
+  it('renders no temporary header when the stable start leaves the window (continuation only)', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    // m-head (the stable start) is NOT mounted: no 32px header placeholder may
+    // be elected from m-a/m-b. The visual-top run (m-a, last in render order)
+    // carries the rail-only continuation with zero in-flow occupancy.
+    const { container } = renderRouteFlow(
+      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
+      routeMap,
+      chromeProbe
+    )
+    expect(chromeProbe).not.toHaveBeenCalled()
+    const continuation = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(continuation.getAttribute('data-segment-id')).toBe('seg-route')
+    // Hosted by the group's mounted visual-top run, never as a header row.
+    expect(continuation.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    expect(continuation.parentElement?.querySelector('[data-testid="route-chrome"]')).toBeNull()
+    expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(1)
+    // A window-first member never takes the slot: no `32px` row is elected.
+    expect(container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+  })
+
+  it('hosts the route-stable slot, replacing the header with an equal-height continuation row', () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    // Same catalog group, addressed from a route without the head: the head
+    // resolves on ANOTHER route, while the slot (the group's first member in
+    // effective-route order) is still m-a.
+    const seg = routeSeg('seg-residual')
+    const residualMap = new Map([
+      [
+        'seg-residual',
+        routeEntry('seg-residual', {
+          memberIds: ['m-a', 'm-b'],
+          messageCount: 2,
+          firstMessageId: 'm-a',
+          headerInRoute: false,
+          headerOwnedByRoute: false,
+          presentationStartMessageId: 'm-a'
+        })
+      ]
+    ])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const view = renderRouteFlow(
+      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg, { isFirst: true })],
+      residualMap,
+      chromeProbe
+    )
+    // No head identity is invented for a route that cannot reach it: the slot
+    // is painted by the continuation row instead of the header row.
+    expect(chromeProbe).not.toHaveBeenCalled()
+    const slots = view.container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]')
+    expect(slots.length).toBe(1)
+    // In the SAME run the header would occupy (the slot message's run).
+    expect(slots[0].parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    // The residual group is never hidden: its reachable members still render.
+    expect(view.container.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-testid="body-m-b"]')).not.toBeNull()
+    view.unmount()
+
+    // The SAME mounted window under the headed route (slot message m-head,
+    // unmounted here) hosts no row at all: a slot outside the window is
+    // cropped, never re-elected onto a mounted fragment.
+    chromeProbe.mockClear()
+    const headedMap = new Map([['seg-residual', routeEntry('seg-residual')]])
+    const view2 = renderRouteFlow(
+      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg, { isFirst: true })],
+      headedMap,
+      chromeProbe
+    )
+    expect(chromeProbe).not.toHaveBeenCalled()
+    expect(view2.container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+    view2.unmount()
+  })
+
+  it('hosts ONE slot on both sides of a fork: header in the slot, continuation in the same slot', () => {
+    // The group straddles a fork point: m-head sits after it, so only the
+    // parent route reaches the head, while both routes reach m-a/m-b in the same
+    // order. The slot is the route-first member (m-a) on BOTH routes, so the
+    // switch leaves the row — and every shared row around it — in place.
+    const seg = routeSeg('seg-cross')
+    const mountedWindow: FlowNode[] = [
+      routeTurn('g-b', 'm-b', seg, { isLast: true }),
+      routeTurn('g-a', 'm-a', seg, { isFirst: true })
+    ]
+    const headedMap = new Map([
+      [
+        'seg-cross',
+        routeEntry('seg-cross', {
+          memberIds: ['m-a', 'm-b', 'm-head'],
+          firstMessageId: 'm-a',
+          headerMessageId: 'm-head',
+          headerInRoute: true,
+          headerOwnedByRoute: true,
+          presentationStartMessageId: 'm-a'
+        })
+      ]
+    ])
+    const headedProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const onHeaded = renderRouteFlow(mountedWindow, headedMap, headedProbe)
+    expect(headedProbe).toHaveBeenCalledTimes(1)
+    const headerRow = onHeaded.container.querySelector('[data-testid="route-chrome"]') as HTMLElement
+    // The real header row renders INTO the slot run, never at the head's own
+    // (later, unmounted) position.
+    expect(headerRow.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    expect(onHeaded.container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+    onHeaded.unmount()
+
+    // Residual route: the same slot message, the head resolving elsewhere.
+    const residualMap = new Map([
+      [
+        'seg-cross',
+        routeEntry('seg-cross', {
+          memberIds: ['m-a', 'm-b'],
+          messageCount: 2,
+          firstMessageId: 'm-a',
+          headerInRoute: false,
+          headerOwnedByRoute: false,
+          presentationStartMessageId: 'm-a'
+        })
+      ]
+    ])
+    const residualProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const onResidual = renderRouteFlow(mountedWindow, residualMap, residualProbe)
+    expect(residualProbe).not.toHaveBeenCalled()
+    const slotRows = onResidual.container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]')
+    expect(slotRows.length).toBe(1)
+    expect(slotRows[0].parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    onResidual.unmount()
+  })
+
+  it('gives the continuation slot the header row height, so routes cannot drift', () => {
+    // The header row's own height is asserted independently where it renders
+    // (`TopicSegmentLine.folded`), and both rows are built from
+    // `SEGMENT_GROUP_HEADER_HEIGHT_PX`; asserting the continuation here pins
+    // that the two presentations occupy the same normal-flow height.
+    const seg = routeSeg('seg-height')
+    const residualMap = new Map([
+      [
+        'seg-height',
+        routeEntry('seg-height', {
+          memberIds: ['m-a'],
+          messageCount: 1,
+          firstMessageId: 'm-a',
+          headerInRoute: false,
+          headerOwnedByRoute: false,
+          presentationStartMessageId: 'm-a'
+        })
+      ]
+    ])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const { container } = renderRouteFlow(
+      [routeTurn('g-a', 'm-a', seg, { isLast: true, isFirst: true })],
+      residualMap,
+      chromeProbe
+    )
+    const row = container.querySelector('[data-testid="topic-segment-slot-continuation"]') as HTMLElement
+    expect(row).not.toBeNull()
+    const cs = window.getComputedStyle(row)
+    expect(cs.position).toBe('relative')
+    expect(cs.height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    // Slot occupancy only: no pill, no group menu, no invented head identity.
+    expect(container.querySelectorAll('[data-testid="topic-segment-label"]').length).toBe(0)
+    expect(container.querySelectorAll('[data-testid="topic-segment-actions"]').length).toBe(0)
+  })
+
+  it('a stale qualification never renders a header here (fail-closed coverage)', () => {
+    const seg = routeSeg('seg-route')
+    // Entry addressed to another route: none of its members are mounted.
+    const staleMap = new Map([
+      [
+        'seg-route',
+        routeEntry('seg-route', {
+          memberIds: ['m-elsewhere'],
+          messageCount: 1,
+          firstMessageId: 'm-elsewhere',
+          presentationStartMessageId: 'm-elsewhere'
+        })
+      ]
+    ])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const { container } = renderRouteFlow(
+      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
+      staleMap,
+      chromeProbe
+    )
+    expect(chromeProbe).not.toHaveBeenCalled()
+    expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(0)
+    // Fail-closed means NO slot occupancy either — not even a continuation row.
+    expect(container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+  })
+
+  it('keeps the single header on the stable-start run inside one collapsed fold block', () => {
+    const seg = routeSeg('seg-fold')
+    const routeMap = new Map([['seg-fold', routeEntry('seg-fold', { id: 'seg-fold', name: 'seg-fold', turnCount: 2 })]])
+    // A collapsed block hides bodies by design, so host identity is asserted
+    // through the chrome payload (the route-stable start), not the body DOM.
+    // A box (never a narrowed `let`) so closure assignment stays visible.
+    const seen: {
+      chrome: { routeSegment?: { presentationStartMessageId?: string | null }; turnCount?: number } | null
+    } = {
+      chrome: null
+    }
+    const probe = (chrome: unknown) => {
+      seen.chrome = chrome as { routeSegment?: { presentationStartMessageId?: string | null }; turnCount?: number }
+      return <div data-testid="route-chrome" />
+    }
+    // Whole group folded: both runs (including the stable start) sit inside
+    // ONE collapsed FoldedSection. The header is not swallowed and no second
+    // continuation appears beside it.
+    const { container } = render(
+      <Provider store={store}>
+        <SegmentGroupPresentationProvider>
+          <>
+            {renderEditFlowNodes({
+              nodes: [
+                routeTurn('g-a', 'm-a', seg, { turnAskId: 'u1', folded: true }),
+                routeTurn('g-head', 'm-head', seg, { turnAskId: 'u1', isFirst: true, folded: true })
+              ],
+              isEditMode: true,
+              renderSegmentChrome: probe,
+              routeSegmentsById: routeMap,
+              expandedFoldSectionIds: new Set<string>()
+            })}
+          </>
+        </SegmentGroupPresentationProvider>
+      </Provider>
+    )
+    const sections = container.querySelectorAll('[data-testid="folded-section-collapsed"]')
+    expect(sections.length).toBe(1)
+    expect(sections[0].querySelector('[data-testid="route-chrome"]')).not.toBeNull()
+    expect(seen.chrome?.routeSegment?.presentationStartMessageId).toBe('m-head')
+    // The display turn count rides the group chrome from the route projection.
+    expect(seen.chrome?.turnCount).toBe(2)
+    expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(0)
+  })
+})
 describe('edit-mode native selection suppression owned by the turn', () => {
   // One segmented run (renders sibling chrome) + one plain turn. The chrome
   // sits beside the turn inside RunHost, never inside it.
@@ -1555,21 +1956,199 @@ describe('edit-mode native selection suppression owned by the turn', () => {
     expect(fireEvent.mouseDown(bodyBefore, { button: 0 })).toBe(true)
   })
 
-  it('attaches the turn selectstart listener in edit mode and detaches it on unmount', () => {
-    const addSpy = vi.spyOn(HTMLElement.prototype, 'addEventListener')
-    const removeSpy = vi.spyOn(HTMLElement.prototype, 'removeEventListener')
-    try {
-      const { unmount } = render(
-        <>{renderEditFlowNodes({ nodes: suppressionNodes(), isEditMode: true, onTurnClick: vi.fn() })}</>
+  describe('folded turns grouping', () => {
+    it('groups contiguous folded turns into a single FoldedSection', () => {
+      const nodes: FlowNode[] = [
+        turnNode('g1', 'ask-1', { isFolded: true, messageIds: ['m1', 'm2'] }),
+        turnNode('g2', 'ask-2', { isFolded: true, messageIds: ['m3', 'm4'] }),
+        turnNode('g3', 'ask-3', { isFolded: false, messageIds: ['m5'] })
+      ]
+
+      const { container } = render(
+        <Provider store={store}>{renderEditFlowNodes({ nodes, isEditMode: true, onTurnClick: vi.fn() })}</Provider>
       )
-      const added = addSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
-      expect(added).toBeGreaterThan(0)
-      unmount()
-      const removed = removeSpy.mock.calls.filter((c) => c[0] === 'selectstart').length
-      expect(removed).toBeGreaterThanOrEqual(added)
-    } finally {
-      addSpy.mockRestore()
-      removeSpy.mockRestore()
-    }
+
+      // The two folded turns are wrapped in one collapsed section
+      const collapsedSections = container.querySelectorAll('[data-testid="folded-section-collapsed"]')
+      expect(collapsedSections.length).toBe(1)
+      // The block forwards every member id of the current segment groups so a
+      // navigation companion can query the collapsed marker without expanding.
+      expect(collapsedSections[0].getAttribute('data-folded-message-ids')).toBe('m1 m2 m3 m4')
+      expect(collapsedSections[0]).toHaveTextContent('2')
+      expect(collapsedSections[0].getAttribute('data-folded-group-ids')).toBe('ask-1 ask-2')
+
+      // The non-folded turn is rendered as a normal edit-turn
+      const editTurns = container.querySelectorAll('[data-testid="edit-turn"]')
+      expect(editTurns.length).toBe(1)
+      expect(editTurns[0]).toHaveTextContent('g3')
+    })
+
+    it('renders expanded preview when sectionId is in expandedFoldSectionIds', () => {
+      const node1 = turnNode('g1', 'ask-1', { isFolded: true, messageIds: ['m1', 'm2'] })
+      const node2 = turnNode('g2', 'ask-2', { isFolded: false, messageIds: ['m3'] })
+      const nodes: FlowNode[] = [node1, node2]
+
+      const sectionKey = `folded-section:${deriveTurnKey([node1.entry as FlowBodyEntry])}`
+      const expandedFoldSectionIds = new Set([sectionKey])
+      const { container } = render(
+        <Provider store={store}>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            onTurnClick: vi.fn(),
+            expandedFoldSectionIds
+          })}
+        </Provider>
+      )
+
+      // Shows expanded preview
+      expect(container.querySelector('[data-testid="folded-section-expanded"]')).toBeInTheDocument()
+      expect(container.querySelector('[data-testid="folded-section-gutter-rail"]')).toBeInTheDocument()
+      // Children of folded section are rendered inside
+      expect(container.querySelectorAll('[data-testid="edit-turn"]').length).toBe(2)
+    })
+  })
+  describe('folded block unfold capability', () => {
+    const foldedPair = (): FlowNode[] => [
+      turnNode('g1', 'ask-1', { isFolded: true, messageIds: ['m1', 'm2'] }),
+      turnNode('g2', 'ask-2', { isFolded: true, messageIds: ['m3', 'm4'] })
+    ]
+
+    const lastVerdict = (): boolean | undefined =>
+      capturedFoldedSectionProps[capturedFoldedSectionProps.length - 1]?.isUnfoldAllowed
+
+    it('asks the capability with the block member ids (per message, never per segment owner)', () => {
+      capturedFoldedSectionProps.length = 0
+      const isUnfoldAllowedForMessageIds = vi.fn(() => true)
+      render(
+        <Provider store={store}>
+          {renderEditFlowNodes({
+            nodes: foldedPair(),
+            isEditMode: true,
+            onTurnClick: vi.fn(),
+            isUnfoldAllowedForMessageIds
+          })}
+        </Provider>
+      )
+      expect(isUnfoldAllowedForMessageIds).toHaveBeenCalledTimes(1)
+      expect(isUnfoldAllowedForMessageIds).toHaveBeenCalledWith(['m1', 'm2', 'm3', 'm4'])
+    })
+
+    it('passes an allowed verdict through to the section', () => {
+      capturedFoldedSectionProps.length = 0
+      render(
+        <Provider store={store}>
+          {renderEditFlowNodes({
+            nodes: foldedPair(),
+            isEditMode: true,
+            onTurnClick: vi.fn(),
+            isUnfoldAllowedForMessageIds: () => true
+          })}
+        </Provider>
+      )
+      expect(capturedFoldedSectionProps.length).toBe(1)
+      expect(lastVerdict()).toBe(true)
+    })
+
+    it('passes a refused verdict through to the section', () => {
+      capturedFoldedSectionProps.length = 0
+      render(
+        <Provider store={store}>
+          {renderEditFlowNodes({
+            nodes: foldedPair(),
+            isEditMode: true,
+            onTurnClick: vi.fn(),
+            isUnfoldAllowedForMessageIds: () => false
+          })}
+        </Provider>
+      )
+      expect(capturedFoldedSectionProps.length).toBe(1)
+      expect(lastVerdict()).toBe(false)
+    })
+
+    it('defaults to allowed when the capability is omitted (probes/fixtures)', () => {
+      capturedFoldedSectionProps.length = 0
+      render(
+        <Provider store={store}>
+          {renderEditFlowNodes({ nodes: foldedPair(), isEditMode: true, onTurnClick: vi.fn() })}
+        </Provider>
+      )
+      expect(capturedFoldedSectionProps.length).toBe(1)
+      expect(lastVerdict()).toBe(true)
+    })
+  })
+  /**
+   * A folded block is a barrier: a selection range that reaches ACROSS it is
+   * composed as several selection chunks of ONE selected segment (the segment
+   * is atomic, the fold cuts its render into pieces). Those sibling chunks must
+   * stay distinguishable React children — a shared key makes the reconciler
+   * drop one of the old subtrees from its match map, so that subtree is never
+   * deleted and keeps its committed edit-mode presentation (cover, selected
+   * class, rows) forever.
+   */
+  describe('range chunks split by a folded block', () => {
+    const rangeNodes = (selected: boolean): FlowNode[] => [
+      turnNode('g-tail', 'ask-tail', { selected, segmentId: 'seg:range' }),
+      turnNode('g-fold-newer', 'ask-fold-newer', {
+        selected,
+        segmentId: 'seg:range',
+        isFolded: true,
+        messageIds: ['m3', 'm4']
+      }),
+      turnNode('g-fold-older', 'ask-fold-older', {
+        selected,
+        segmentId: 'seg:range',
+        isFolded: true,
+        messageIds: ['m1', 'm2']
+      }),
+      turnNode('g-anchor', 'ask-anchor', { selected, segmentId: 'seg:range' }),
+      turnNode('g-older', 'ask-older', { selected: false, segmentId: 'seg:older' })
+    ]
+
+    const renderRange = (selected: boolean, isEditMode: boolean) => (
+      <Provider store={store}>
+        {renderEditFlowNodes({ nodes: rangeNodes(selected), isEditMode, onTurnClick: vi.fn() })}
+      </Provider>
+    )
+
+    it('renders one outline per chunk, both from the same segment', () => {
+      const { container } = render(renderRange(true, true))
+      const outlines = Array.from(container.querySelectorAll('[data-stable-segment-id]'))
+      expect(outlines.length).toBe(2)
+      expect(new Set(outlines.map((el) => el.getAttribute('data-stable-segment-id')))).toEqual(new Set(['seg:range']))
+      // The folded block keeps its own shell; its members stay hidden.
+      expect(container.querySelectorAll('[data-testid="folded-section-collapsed"]').length).toBe(1)
+    })
+
+    it('leaves no stale turn host after the selection ends', () => {
+      const { container, rerender } = render(renderRange(true, true))
+      // Two selected chunks plus the unselected older turn, one host each.
+      expect(container.querySelectorAll('[data-testid="edit-turn"]').length).toBe(3)
+
+      rerender(renderRange(false, false))
+
+      // Every display window row/turn has exactly one host, and no edit
+      // presentation survives the mode exit. The folded members stay hidden,
+      // so the three visible turns own one host each.
+      expect(container.querySelectorAll('[data-testid="edit-turn"]').length).toBe(3)
+      expect(container.querySelectorAll('[data-testid="edit-turn-cover"]').length).toBe(0)
+      expect(container.querySelectorAll('[data-stable-segment-id]').length).toBe(0)
+      for (const groupKey of ['g-tail', 'g-anchor', 'g-older']) {
+        expect(container.querySelectorAll(`[data-testid="body-${groupKey}"]`).length).toBe(1)
+      }
+      // The block itself is untouched by the selection ending: still folded.
+      expect(container.querySelectorAll('[data-testid="folded-section-collapsed"]').length).toBe(1)
+    })
+
+    it('keeps the same host node for a chunk that is part of two chunks of one range', () => {
+      // Selecting only the tail chunk first, then extending across the block,
+      // must not leave the earlier chunk host behind as a second copy.
+      const { container, rerender } = render(renderRange(true, true))
+      const tailTurn = container.querySelector('[data-testid="body-g-tail"]') as HTMLElement
+      expect(tailTurn).not.toBeNull()
+      rerender(renderRange(false, true))
+      expect(container.querySelectorAll('[data-testid="edit-turn-cover"]').length).toBe(3)
+      expect(container.querySelectorAll('[data-testid="body-g-tail"]').length).toBe(1)
+    })
   })
 })
