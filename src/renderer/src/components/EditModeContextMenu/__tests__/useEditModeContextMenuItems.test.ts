@@ -132,7 +132,7 @@ describe('useEditModeContextMenuItems - folding', () => {
     const item = toggleFoldItem(result.current.items)
     expect(item).toBeDefined()
     expect(item.disabled).toBe(true)
-    expect(item.label).toBe('折叠所选轮次')
+    expect(item.label).toBe('折叠消息')
   })
 
   it('shows fold option and updates messages with folded: true when turns are not folded', async () => {
@@ -149,7 +149,7 @@ describe('useEditModeContextMenuItems - folding', () => {
     const item = toggleFoldItem(result.current.items)
     expect(item).toBeDefined()
     expect(item.disabled).toBe(false)
-    expect(item.label).toBe('折叠所选轮次')
+    expect(item.label).toBe('折叠消息')
 
     await runClick(item)
 

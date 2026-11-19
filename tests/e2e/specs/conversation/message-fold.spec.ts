@@ -719,7 +719,7 @@ const expandedBlock = (page: Page) => page.locator('[data-testid="folded-section
 
 /** The edit-mode fold menu item (fold only exists in the edit selection menu). */
 function foldMenuItem(page: Page) {
-  return page.getByRole('menuitem', { name: /折叠所选轮次|Fold Selected Turns/ })
+  return page.getByRole('menuitem', { name: /折叠消息|Fold Selected Turns/ })
 }
 
 /** The folded block's own unfold item. */

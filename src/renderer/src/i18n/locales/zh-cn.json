@@ -1013,7 +1013,7 @@
     },
     "expand_view": "展开查看",
     "fold_failed": "折叠失败，请重试",
-    "fold_selected_turns": "折叠所选轮次",
+    "fold_selected_turns": "折叠消息",
     "folded_not_in_context": "不计入上下文",
     "folded_partial_selection": "已选 {{selected}}/{{total}} 轮",
     "folded_preview_hint": "以下 {{count}} 轮对话已折叠 · 未计入上下文",
