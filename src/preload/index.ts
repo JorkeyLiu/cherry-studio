@@ -48,6 +48,7 @@ import type {
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ReplayBranchOperationRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -699,6 +700,8 @@ const api = {
     deleteBranch: (request: DeleteBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBranch, request),
     moveSelectedTurnsToNewBranch: (request: MoveSelectedTurnsToNewBranchRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch, request),
+    replayBranchOperation: (request: ReplayBranchOperationRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ReplayBranchOperation, request),
     // S6.2c-2: insert after stable anchor (additive, keeps old append intact)
     insertMessagesAfterAnchor: (request: InsertMessagesAfterAnchorRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessagesAfterAnchor, request),

@@ -72,6 +72,37 @@ function stateWith(overrides: Record<string, unknown> = {}): Parameters<typeof r
 
 const rootWith = (s: Parameters<typeof reducer>[0]): never => ({ topicBranch: s }) as never
 
+/**
+ * Delete result as Main reports it: the branch delete returns its own authority
+ * snapshot alongside the removed IDs (branch undo/redo replay payload).
+ */
+const deleteResult = (deletedBranchIds: string[]) => ({
+  affectedFileIds: [] as string[],
+  remainingReferenceCounts: {} as Record<string, number>,
+  deletedBranchIds,
+  deletedMessageIds: [] as string[],
+  deletedBlockIds: [] as string[],
+  historySnapshot: {
+    kind: 'delete' as const,
+    rootBranchId: deletedBranchIds[0],
+    branches: deletedBranchIds.map((id, index) => ({
+      id,
+      parentBranchId: index === 0 ? null : deletedBranchIds[0],
+      anchorMessageId: `m-${id}`,
+      name: null,
+      createdAt: null,
+      updatedAt: null,
+      overflow: {}
+    })),
+    messages: [],
+    blocks: [],
+    fileReferences: [],
+    segments: [],
+    segmentOrder: [],
+    boundaries: []
+  }
+})
+
 describe('deletion fallback latest intent (branch subtree removal)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -89,7 +120,7 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
   })
 
   it('active-deleted subtree emits one latest intent with the fallback route and drops deleted snapshots', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-1', 'b-2'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1', 'b-2']))
     const result = await deleteBranchSubtree('t-1', 'b-1', 'b-2')
     expect(result.fallbackBranchId).toBeNull()
     expect(dispatchMock).toHaveBeenCalledWith(
@@ -107,7 +138,7 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
   })
 
   it('surviving active route emits no fallback intent (no reload needed)', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-9'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-9']))
     const result = await deleteBranchSubtree('t-1', 'b-9', 'b-2')
     expect(result.fallbackBranchId).toBe('b-2')
     expect(dispatchMock).not.toHaveBeenCalledWith(
@@ -188,7 +219,7 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
   })
 
   it('deleting the last branch restores a full never-branched latest window (displayCount-complete)', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-1'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1']))
     const result = await deleteBranchSubtree('t-1', 'b-1', 'b-1')
     expect(result.fallbackBranchId).toBeNull()
     // Intent carries the empty-branch fallback (main) so Messages rebuilds a

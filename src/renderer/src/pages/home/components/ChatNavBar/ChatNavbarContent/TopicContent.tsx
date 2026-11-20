@@ -13,8 +13,8 @@ import {
 import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
+import { renameBranchWithHistory } from '@renderer/services/branchOperationHistory'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
-import { dbService } from '@renderer/services/db/DbService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
@@ -185,7 +185,15 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
    */
   const commitRename = async (branchId: string, next: string): Promise<void> => {
     try {
-      await dbService.renameBranch(activeTopic.id, branchId, next)
+      // Rename records one history action (undo/redo swap the two names). The
+      // name the row was showing is the value the rename moves away from.
+      await renameBranchWithHistory(
+        dispatch,
+        activeTopic.id,
+        branchId,
+        branches.find((branch) => branch.id === branchId)?.name ?? null,
+        next
+      )
       requestTopicBranches(dispatch, activeTopic.id)
     } catch (error) {
       logger.error('[TopicContent] Failed to rename branch:', error as Error)

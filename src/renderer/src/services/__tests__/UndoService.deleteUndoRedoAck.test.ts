@@ -177,7 +177,7 @@ describe('delete → undo → redo with batch insertion ack (real store, real gu
 
     const { executeUndo, executeRedo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
-    expect(undone?.type).toBe('delete')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('delete')
     // Undo restored rows AND installed Main capability atomically.
     expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual(['u1', 'a1'])
     const stateAfterUndo = store.getState() as any
@@ -202,7 +202,7 @@ describe('delete → undo → redo with batch insertion ack (real store, real gu
     mocks.deleteMessagesWithDependents.mockClear()
     mocks.deleteMessagesWithDependents.mockResolvedValue(deleteResponse)
     const redone = await executeRedo(store.dispatch as any, store.getState as any)
-    expect(redone?.type).toBe('delete')
+    expect(redone.status === 'success' ? redone.action.type : null).toBe('delete')
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledTimes(1)
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledWith(topicId, ['u1'], null)
     expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual([])

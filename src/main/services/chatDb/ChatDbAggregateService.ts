@@ -24,7 +24,19 @@ import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
   AppendMessageResponse,
+  BranchCreateSnapshot,
+  BranchDeleteSnapshot,
+  BranchHistoryBlockRow,
+  BranchHistoryFileReferenceRow,
+  BranchHistoryMessageRow,
+  BranchHistoryRow,
+  BranchHistorySegmentRow,
+  BranchHistorySegmentStateRow,
   BranchInheritedBoundary,
+  BranchMoveSnapshot,
+  BranchOperationDirection,
+  BranchOperationSnapshot,
+  BranchRenameSnapshot,
   CreateReferencedTopicResponse,
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
@@ -66,6 +78,7 @@ import type {
   MoveSourceContextAnchorTransfer,
   PurgeExpiredTopicsResponse,
   ReorderAnswerGroupResponse,
+  ReplayBranchOperationResponse,
   ResendAttemptMapping,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
@@ -354,6 +367,96 @@ function resolveContextAnchorDefaultIndex(total: number, contextCount: number | 
   if (contextCount === null || contextCount === undefined) return 0
   const n = Math.max(1, Math.floor(contextCount))
   return Math.max(0, total - n)
+}
+/**
+ * Project one branch domain row onto the replayable history row shape.
+ *
+ * History rows are the persisted authority columns plus decoded overflow, so a
+ * replay can restore a branch verbatim (identity, ancestry, anchor, metadata)
+ * without a journal, a schema change, or a generic write capability.
+ */
+function toBranchHistoryRow(branch: TopicBranchData): BranchHistoryRow {
+  return {
+    id: branch.id,
+    parentBranchId: branch.parentBranchId ?? null,
+    anchorMessageId: branch.anchorMessageId,
+    name: branch.name ?? null,
+    createdAt: branch.createdAt ?? null,
+    updatedAt: branch.updatedAt ?? null,
+    // Domain overflow is decoded JSON by construction (decodeJson); the wire
+    // contract types it as a JSON object because it round-trips over IPC.
+    overflow: (branch.overflow ?? {}) as JsonObject
+  }
+}
+
+/**
+ * Project a persisted message row onto the replay row shape.
+ *
+ * The repository mapper decodes `messages.extra` into `overflow` and also
+ * spreads those same keys inline, so a raw row carries both real columns and
+ * arbitrary extra keys. Picking the known columns keeps a history snapshot
+ * canonical — the wire contract validates that exact field set, and the restore
+ * writes real columns only, with extra keys round-tripping inside `overflow`.
+ */
+function toMessageHistoryRow(message: MessageData): BranchHistoryMessageRow {
+  return {
+    id: message.id,
+    topicId: message.topicId,
+    branchId: message.branchId ?? null,
+    role: message.role ?? null,
+    content: message.content ?? null,
+    status: message.status ?? null,
+    askId: message.askId ?? null,
+    model: message.model ?? null,
+    modelId: message.modelId ?? null,
+    assistantId: message.assistantId ?? null,
+    createdAt: message.createdAt ?? null,
+    updatedAt: message.updatedAt ?? null,
+    sortOrder: message.sortOrder,
+    overflow: (message.overflow ?? {}) as JsonObject
+  }
+}
+
+/** Project a persisted block row onto the replay row shape (same rationale). */
+function toBlockHistoryRow(block: MessageBlockData): BranchHistoryBlockRow {
+  return {
+    id: block.id,
+    messageId: block.messageId,
+    type: block.type ?? null,
+    content: block.content ?? null,
+    status: block.status ?? null,
+    createdAt: block.createdAt ?? null,
+    updatedAt: block.updatedAt ?? null,
+    sortOrder: block.sortOrder,
+    overflow: (block.overflow ?? {}) as JsonObject
+  }
+}
+
+/** Project a persisted file-reference row onto the replay row shape. */
+function toFileReferenceHistoryRow(reference: FileReferenceData): BranchHistoryFileReferenceRow {
+  return {
+    id: reference.id,
+    blockId: reference.blockId,
+    fileId: reference.fileId,
+    fileName: reference.fileName ?? null,
+    filePath: reference.filePath ?? null,
+    fileType: reference.fileType ?? null,
+    count: reference.count ?? null,
+    overflow: (reference.overflow ?? {}) as JsonObject
+  }
+}
+
+/** Row identities a branch replay wrote (removed or restored). */
+type ReplayBranchRows = {
+  branchIds: string[]
+  messageIds: string[]
+}
+
+/** Ordered-owner executor used for the few writes no repository exposes (owner/segment order). */
+type RawRowExecutor = {
+  update: (table: unknown) => {
+    set: (values: unknown) => { where: (cond: unknown) => { run: () => void } }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -9667,54 +9770,139 @@ export class ChatDbAggregateService {
     deletedBranchIds: string[]
     deletedMessageIds: string[]
     deletedBlockIds: string[]
+    historySnapshot: BranchDeleteSnapshot
   }> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('deleteBranch')
       if (!topicId || !branchId) {
         throw new ChatDbValidationError('deleteBranch requires topicId and branchId')
       }
-      const result = this.db.transaction((tx) => {
+      return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const topic = repos.topics.getById(topicId)
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         }
-        const root = this.requireBranchInTx(repos, topicId, branchId)
-        void root
-        const subtreeIds = [branchId, ...repos.branches.collectSubtreeIds(branchId)]
-        // Owned rows only (main route + sibling subtrees untouched).
-        const ownedMessages = subtreeIds.flatMap((bid) => repos.messages.listByTopic(topicId, bid))
-        const ownedMessageIds = ownedMessages.map((m) => m.id)
-        const blockMap = repos.blocks.listByMessages(ownedMessageIds)
-        const ownedBlockIds: string[] = []
-        for (const id of ownedMessageIds) {
-          for (const b of blockMap.get(id) ?? []) ownedBlockIds.push(b.id)
-        }
-        const refsBeforeDelete = repos.fileRefs.listByMessages(ownedMessageIds)
-        const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
-        // Delete owned messages (FK cascade removes blocks → file refs;
-        // per-owner order normalization keeps surviving owners dense).
-        if (ownedMessageIds.length > 0) {
-          // Subtree rows leave together: boundaries of any branch/reference
-          // anchored here advance to the nearest surviving predecessor before
-          // the rows disappear (subtree cascades are unchanged).
-          this.advanceInheritanceBoundariesInTx(repos, topicId, ownedMessageIds)
-          repos.messages.deleteMany(ownedMessageIds)
-        }
-        // Delete the branch rows subtree-root first (self-CASCADE backstop;
-        // explicit for determinism and pre-016 tolerance).
-        repos.branches.deleteSubtreeRows(subtreeIds)
-        const cleanup = buildFileCleanupResult(repos, affectedFileIds)
-        return {
-          affectedFileIds: cleanup.affectedFileIds,
-          remainingReferenceCounts: cleanup.remainingReferenceCounts,
-          deletedBranchIds: subtreeIds,
-          deletedMessageIds: ownedMessageIds,
-          deletedBlockIds: ownedBlockIds
-        }
+        return this.deleteBranchSubtreeInTx(repos, topicId, branchId)
       })
-      return result
     }, `deleteBranch(${topicId}, ${branchId})`)
+  }
+
+  /**
+   * Deterministic subtree delete inside the caller's transaction.
+   *
+   * Removes ONLY the rows the deleted branches own and returns the complete
+   * pre-delete authority snapshot of what left, so the caller can undo it
+   * exactly: branch rows (subtree-root first), owned messages/blocks/file
+   * references, the segments this write touched (with their ordered
+   * membership) plus the topic segment order, and the inheritance boundaries
+   * the delete advanced.
+   */
+  private deleteBranchSubtreeInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string
+  ): {
+    affectedFileIds: string[]
+    remainingReferenceCounts: Record<string, number>
+    deletedBranchIds: string[]
+    deletedMessageIds: string[]
+    deletedBlockIds: string[]
+    historySnapshot: BranchDeleteSnapshot
+  } {
+    const root = this.requireBranchInTx(repos, topicId, branchId)
+    void root
+    const subtreeIds = [branchId, ...repos.branches.collectSubtreeIds(branchId)]
+    // Owned rows only (main route + sibling subtrees untouched).
+    const ownedMessages = subtreeIds.flatMap((bid) => repos.messages.listByTopic(topicId, bid))
+    const ownedMessageIds = ownedMessages.map((m) => m.id)
+    const blockMap = repos.blocks.listByMessages(ownedMessageIds)
+    const ownedBlockIds: string[] = []
+    const ownedBlocks: MessageBlockData[] = []
+    for (const id of ownedMessageIds) {
+      for (const b of blockMap.get(id) ?? []) {
+        ownedBlockIds.push(b.id)
+        ownedBlocks.push(b)
+      }
+    }
+    const refsBeforeDelete = repos.fileRefs.listByMessages(ownedMessageIds)
+    const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+    // Pre-delete authority snapshot (authority rows only — no renderer state).
+    const deletedMessageSet = new Set(ownedMessageIds)
+    const segmentsBefore = repos.segments.listByTopic(topicId)
+    const touchedSegments: BranchHistorySegmentRow[] = []
+    for (const segment of segmentsBefore) {
+      const memberIds = repos.segments.getMessageIds(segment.id)
+      if (!memberIds.some((id) => deletedMessageSet.has(id))) continue
+      touchedSegments.push({
+        id: segment.id,
+        name: segment.name ?? null,
+        createdAt: segment.createdAt ?? null,
+        updatedAt: segment.updatedAt ?? null,
+        sortOrder: segment.sortOrder,
+        headerMessageId: segment.headerMessageId ?? null,
+        overflow: (segment.overflow ?? {}) as JsonObject,
+        memberIds
+      })
+    }
+    const historySnapshot: BranchDeleteSnapshot = {
+      kind: 'delete',
+      rootBranchId: branchId,
+      // Subtree-root first: the walk is breadth-first, so a parent always
+      // precedes its children and a restore can insert rows in order.
+      branches: subtreeIds.map((id) => {
+        const row = repos.branches.getById(id)
+        if (!row.found) throw new ChatDbNotFoundError(`Branch ${id} does not exist in topic ${topicId}`)
+        return toBranchHistoryRow(row.data)
+      }),
+      messages: ownedMessages.map(toMessageHistoryRow),
+      blocks: ownedBlocks.map(toBlockHistoryRow),
+      fileReferences: refsBeforeDelete.map(toFileReferenceHistoryRow),
+      segments: touchedSegments,
+      // Filled in after the deletes below: the state this transaction actually
+      // leaves behind, which undo must still find in place.
+      segmentsAfter: [],
+      segmentOrder: segmentsBefore.map((s) => s.id),
+      boundaries: []
+    }
+    // Delete owned messages (FK cascade removes blocks → file refs;
+    // per-owner order normalization keeps surviving owners dense).
+    if (ownedMessageIds.length > 0) {
+      // Subtree rows leave together: boundaries of any branch/reference
+      // anchored here advance to the nearest surviving predecessor before
+      // the rows disappear (subtree cascades are unchanged).
+      this.advanceInheritanceBoundariesInTx(repos, topicId, ownedMessageIds, historySnapshot.boundaries)
+      repos.messages.deleteMany(ownedMessageIds)
+    }
+    // Bind the post-delete segment state Main just emitted (not a renderer
+    // guess): emptied segments are gone, surviving ones keep their normalized
+    // membership, head, metadata and catalog position.
+    historySnapshot.segmentsAfter = touchedSegments.map((segment): BranchHistorySegmentStateRow => {
+      const live = repos.segments.getById(segment.id)
+      if (!live.found) {
+        return { id: segment.id, exists: false, name: null, sortOrder: null, headerMessageId: null, memberIds: [] }
+      }
+      return {
+        id: segment.id,
+        exists: true,
+        name: live.data.name ?? null,
+        sortOrder: live.data.sortOrder,
+        headerMessageId: live.data.headerMessageId ?? null,
+        memberIds: repos.segments.getMessageIds(segment.id)
+      }
+    })
+    // Delete the branch rows subtree-root first (self-CASCADE backstop;
+    // explicit for determinism and pre-016 tolerance).
+    repos.branches.deleteSubtreeRows(subtreeIds)
+    const cleanup = buildFileCleanupResult(repos, affectedFileIds)
+    return {
+      affectedFileIds: cleanup.affectedFileIds,
+      remainingReferenceCounts: cleanup.remainingReferenceCounts,
+      deletedBranchIds: subtreeIds,
+      deletedMessageIds: ownedMessageIds,
+      deletedBlockIds: ownedBlockIds,
+      historySnapshot
+    }
   }
 
   /**
@@ -9803,6 +9991,7 @@ export class ChatDbAggregateService {
     blocks: JsonObject[]
     resolvedContextAnchorGroupKey?: string | null
     sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
+    historySnapshot: BranchMoveSnapshot
   }> {
     return wrapResult(
       () => {
@@ -10009,6 +10198,13 @@ export class ChatDbAggregateService {
               )
             }
           }
+          // Replay facts captured BEFORE any write: the complete pre-move
+          // source-owner order (undo restores it, redo re-splits it) and the
+          // ancestry each anchored child had before it followed its anchor.
+          const sourceOrderBefore = effective.filter((m) => (m.branchId ?? null) === sourceRoute).map((m) => m.id)
+          const reparentParentBefore = new Map<string, string | null>(
+            reparentTargets.map((target) => [target.id, target.parentBranchId ?? null])
+          )
           const now = new Date().toISOString()
           const newBranchId = randomUUID()
           const created = repos.branches.create({
@@ -10156,13 +10352,772 @@ export class ChatDbAggregateService {
             messages: reconstructMessageBlockRelations(childWireMessages, childWireBlocks),
             blocks: childWireBlocks,
             ...(contextAnchorInheritance ? { resolvedContextAnchorGroupKey } : {}),
-            ...(sourceContextAnchorTransfer ? { sourceContextAnchorTransfer } : {})
+            ...(sourceContextAnchorTransfer ? { sourceContextAnchorTransfer } : {}),
+            historySnapshot: {
+              kind: 'move' as const,
+              branch: toBranchHistoryRow(created),
+              sourceBranchId: sourceRoute,
+              movedMessageIds: [...movedIds],
+              sourceOrderBefore,
+              reparented: reparentTargets.map((target) => ({
+                branchId: target.id,
+                parentBefore: reparentParentBefore.get(target.id) ?? null,
+                parentAfter: newBranchId
+              }))
+            }
           }
         })
         return result
       },
       `moveSelectedTurnsToNewBranch(${topicId}, source=${this.normalizeBranchId(sourceBranchId) ?? 'main'}, groups=${Array.isArray(selectedGroupIds) ? selectedGroupIds.length : 0})`
     )
+  }
+
+  /**
+   * Replay one recorded branch operation in the requested direction.
+   *
+   * Main owns every write; the renderer only keeps the in-memory session
+   * history. A snapshot is the exact authority payload the original mutation
+   * returned, so a replay is a bounded, operation-scoped reversible contract —
+   * never a generic write capability. Every direction is guarded against the
+   * current authority state inside ONE transaction and fails closed with zero
+   * writes when anything it depends on has changed, so concurrent or unrelated
+   * edits are never overwritten. Identities, ordering, ownership, ancestry,
+   * segments and inheritance boundaries round-trip verbatim: no new IDs, no
+   * re-derivation from renderer windows, no schema change.
+   */
+  replayBranchOperation(
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchOperationSnapshot
+  ): ChatDbResult<ReplayBranchOperationResponse> {
+    return wrapResult(
+      () => {
+        syncService.throwIfPublishBarrierHeld('replayBranchOperation')
+        if (!topicId) {
+          throw new ChatDbValidationError('replayBranchOperation requires topicId')
+        }
+        if (direction !== 'undo' && direction !== 'redo') {
+          throw new ChatDbValidationError(`Unsupported branch replay direction: ${String(direction)}`)
+        }
+        if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+          throw new ChatDbValidationError('replayBranchOperation requires a branch operation snapshot')
+        }
+        const kind = snapshot.kind
+        return this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          let replayed: ReplayBranchRows
+          switch (kind) {
+            case 'create':
+              replayed = this.replayBranchCreateInTx(repos, topicId, direction, snapshot)
+              break
+            case 'rename':
+              replayed = this.replayBranchRenameInTx(repos, topicId, direction, snapshot)
+              break
+            case 'move':
+              replayed = this.replayBranchMoveInTx(repos, tx, topicId, direction, snapshot)
+              break
+            case 'delete':
+              replayed = this.replayBranchDeleteInTx(repos, tx, topicId, direction, snapshot)
+              break
+            default:
+              throw new ChatDbValidationError(
+                `Unsupported branch operation kind: ${String((snapshot as { kind?: unknown }).kind)}`
+              )
+          }
+          return {
+            topicId,
+            kind,
+            direction,
+            branchIds: replayed.branchIds,
+            messageIds: replayed.messageIds
+          }
+        })
+      },
+      `replayBranchOperation(${topicId}, ${String(direction)}, ${String(
+        (snapshot as { kind?: unknown } | null | undefined)?.kind
+      )})`
+    )
+  }
+
+  /**
+   * Owner of one message row.
+   *
+   * Ownership is identity-class and no repository exposes an owner change, so
+   * the replay writes that column directly inside its own transaction. The
+   * recorded dense order is always re-applied through
+   * `MessagesRepository.replaceOrder` afterwards, never trusted row by row.
+   */
+  private setMessageOwnerInTx(tx: unknown, messageId: string, branchId: string | null): void {
+    const executor = tx as RawRowExecutor
+    executor
+      .update(schema.messages)
+      // deno-lint-ignore no-explicit-any
+      .set({ branchId } as any)
+      // deno-lint-ignore no-explicit-any
+      .where(eq(schema.messages.id, messageId) as any)
+      .run()
+  }
+
+  /** Re-pin the dense topic segment catalog order exactly as recorded. */
+  private assignSegmentOrdersInTx(tx: unknown, orderedIds: string[]): void {
+    const executor = tx as RawRowExecutor
+    for (let i = 0; i < orderedIds.length; i++) {
+      executor
+        .update(schema.topicSegments)
+        // deno-lint-ignore no-explicit-any
+        .set({ sortOrder: i } as any)
+        // deno-lint-ignore no-explicit-any
+        .where(eq(schema.topicSegments.id, orderedIds[i]) as any)
+        .run()
+    }
+  }
+
+  /** Guard: two ID collections must name exactly the same rows. */
+  private assertSameIdSet(actual: string[], expected: string[], what: string): void {
+    const actualSet = new Set(actual)
+    const expectedSet = new Set(expected)
+    let same = actualSet.size === expectedSet.size
+    if (same) {
+      for (const id of expectedSet) {
+        if (!actualSet.has(id)) {
+          same = false
+          break
+        }
+      }
+    }
+    if (!same) {
+      throw new ChatDbValidationError(`Branch replay guard failed: ${what} changed since the operation`)
+    }
+  }
+
+  /**
+   * Operation-scoped closure check for a delete snapshot.
+   *
+   * The wire contract validates field shapes only; this is the authority-side
+   * check that the payload is ONE coherent operation over the addressed topic,
+   * so the replay command can never write rows outside it: messages owned by a
+   * captured subtree branch of this topic, blocks owned by captured messages,
+   * file references on captured blocks, and segment membership/heads/order
+   * confined to captured rows or live rows of this topic. Every replay variant
+   * (undo and redo) runs it before any write, so a malformed relationship fails
+   * closed with zero writes instead of inserting a foreign row.
+   */
+  private assertDeleteSnapshotClosedInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    snapshot: BranchDeleteSnapshot
+  ): void {
+    const branches = snapshot.branches ?? []
+    const messages = snapshot.messages ?? []
+    const blocks = snapshot.blocks ?? []
+    const fileReferences = snapshot.fileReferences ?? []
+    const segments = snapshot.segments ?? []
+    const segmentsAfter = snapshot.segmentsAfter ?? []
+    const capturedBranchIds = new Set<string>()
+    for (const row of branches) {
+      if (capturedBranchIds.has(row.id)) {
+        throw new ChatDbValidationError(`Branch ${row.id} appears twice in the delete snapshot`)
+      }
+      if (row.id === snapshot.rootBranchId) {
+        // The deleted subtree may hang off a surviving parent; it must never be
+        // its own ancestor.
+        if (row.parentBranchId === row.id) {
+          throw new ChatDbValidationError(`Root branch ${row.id} in the delete snapshot is its own parent`)
+        }
+      } else if (row.parentBranchId === null || !capturedBranchIds.has(row.parentBranchId)) {
+        // Rows are subtree-root first, so a non-root row must join the captured
+        // tree: a parent outside the set would import a foreign branch.
+        throw new ChatDbValidationError(`Branch ${row.id} in the delete snapshot is not part of the captured subtree`)
+      }
+      capturedBranchIds.add(row.id)
+    }
+    const capturedMessageIds = new Set<string>()
+    for (const row of messages) {
+      if (capturedMessageIds.has(row.id)) {
+        throw new ChatDbValidationError(`Message ${row.id} appears twice in the delete snapshot`)
+      }
+      if (row.topicId !== topicId) {
+        throw new ChatDbValidationError(`Message ${row.id} in the delete snapshot belongs to another topic`)
+      }
+      if (row.branchId === null || !capturedBranchIds.has(row.branchId)) {
+        throw new ChatDbValidationError(`Message ${row.id} in the delete snapshot is not owned by a deleted branch`)
+      }
+      capturedMessageIds.add(row.id)
+    }
+    const capturedBlockIds = new Set<string>()
+    for (const row of blocks) {
+      if (capturedBlockIds.has(row.id)) {
+        throw new ChatDbValidationError(`Block ${row.id} appears twice in the delete snapshot`)
+      }
+      if (!capturedMessageIds.has(row.messageId)) {
+        throw new ChatDbValidationError(
+          `Block ${row.id} in the delete snapshot belongs to a message this delete did not remove`
+        )
+      }
+      capturedBlockIds.add(row.id)
+    }
+    const seenFileReferenceIds = new Set<string>()
+    for (const row of fileReferences) {
+      if (seenFileReferenceIds.has(row.id)) {
+        throw new ChatDbValidationError(`File reference ${row.id} appears twice in the delete snapshot`)
+      }
+      if (!capturedBlockIds.has(row.blockId)) {
+        throw new ChatDbValidationError(
+          `File reference ${row.id} in the delete snapshot belongs to a block this delete did not remove`
+        )
+      }
+      seenFileReferenceIds.add(row.id)
+    }
+    const liveMessageIds = new Set(repos.messages.listAllByTopic(topicId).map((row) => row.id))
+    const isTopicMessage = (messageId: string): boolean =>
+      capturedMessageIds.has(messageId) || liveMessageIds.has(messageId)
+    const capturedSegmentIds = new Set<string>()
+    for (const row of segments) {
+      if (capturedSegmentIds.has(row.id)) {
+        throw new ChatDbValidationError(`Segment ${row.id} appears twice in the delete snapshot`)
+      }
+      for (const memberId of row.memberIds ?? []) {
+        if (!isTopicMessage(memberId)) {
+          throw new ChatDbValidationError(
+            `Segment ${row.id} in the delete snapshot lists message ${memberId} outside topic ${topicId}`
+          )
+        }
+      }
+      if (row.headerMessageId !== null && !isTopicMessage(row.headerMessageId)) {
+        throw new ChatDbValidationError(
+          `Segment ${row.id} in the delete snapshot heads at message ${row.headerMessageId} outside topic ${topicId}`
+        )
+      }
+      capturedSegmentIds.add(row.id)
+    }
+    if (segmentsAfter.length !== segments.length) {
+      throw new ChatDbValidationError('Delete snapshot must carry the post-delete state of every touched segment')
+    }
+    for (const row of segmentsAfter) {
+      if (!capturedSegmentIds.has(row.id)) {
+        throw new ChatDbValidationError(`Post-delete state for segment ${row.id} is not part of the delete snapshot`)
+      }
+      for (const memberId of row.memberIds ?? []) {
+        if (!isTopicMessage(memberId)) {
+          throw new ChatDbValidationError(
+            `Post-delete segment ${row.id} lists message ${memberId} outside topic ${topicId}`
+          )
+        }
+      }
+    }
+    const recordedOrder = snapshot.segmentOrder ?? []
+    if (new Set(recordedOrder).size !== recordedOrder.length) {
+      throw new ChatDbValidationError('Delete snapshot segment order repeats a segment')
+    }
+    const liveSegmentIds = new Set(repos.segments.listByTopic(topicId).map((row) => row.id))
+    for (const id of recordedOrder) {
+      if (!capturedSegmentIds.has(id) && !liveSegmentIds.has(id)) {
+        throw new ChatDbValidationError(`Segment ${id} in the delete snapshot order is outside topic ${topicId}`)
+      }
+    }
+    for (const boundary of snapshot.boundaries ?? []) {
+      if (boundary.kind === 'branch') {
+        const branch = repos.branches.getById(boundary.id)
+        if (branch.found && branch.data.topicId !== topicId) {
+          throw new ChatDbValidationError(
+            `Boundary branch ${boundary.id} in the delete snapshot belongs to another topic`
+          )
+        }
+      }
+      for (const anchor of [boundary.anchorMessageId, boundary.expectedAnchorMessageId]) {
+        if (!isTopicMessage(anchor)) {
+          throw new ChatDbValidationError(
+            `Boundary ${boundary.kind} ${boundary.id} anchors at message ${anchor} outside topic ${topicId}`
+          )
+        }
+      }
+    }
+  }
+
+  /**
+   * Undo may restore a touched segment's pre-delete membership/head only while
+   * the live segment still holds exactly the state the delete left behind.
+   *
+   * Anything else — a member removed or added, a changed head, name or catalog
+   * position, or the segment deleted again — is newer user state: the replay
+   * fails closed with zero writes (and stays retryable) instead of overwriting
+   * it. Only the segments this delete touched are compared.
+   */
+  private assertSegmentPostDeleteStateInTx(
+    repos: ChatDbRepositories,
+    segmentsAfter: BranchHistorySegmentStateRow[]
+  ): void {
+    for (const row of segmentsAfter) {
+      const live = repos.segments.getById(row.id)
+      if (!row.exists) {
+        if (live.found) {
+          throw new ChatDbValidationError(`Segment ${row.id} exists again; the delete can no longer be undone`)
+        }
+        continue
+      }
+      if (!live.found) {
+        throw new ChatDbValidationError(`Segment ${row.id} no longer exists; the delete can no longer be undone`)
+      }
+      const recordedMembers = row.memberIds ?? []
+      const liveMembers = repos.segments.getMessageIds(row.id)
+      const sameMembers =
+        liveMembers.length === recordedMembers.length && liveMembers.every((id, i) => id === recordedMembers[i])
+      if (
+        (live.data.name ?? null) !== row.name ||
+        live.data.sortOrder !== row.sortOrder ||
+        (live.data.headerMessageId ?? null) !== row.headerMessageId ||
+        !sameMembers
+      ) {
+        throw new ChatDbValidationError(
+          `Segment ${row.id} changed after the delete; the delete can no longer be undone`
+        )
+      }
+    }
+  }
+
+  /** Replay a branch-creation snapshot (undo removes it, redo re-inserts it). */
+  private replayBranchCreateInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchCreateSnapshot
+  ): ReplayBranchRows {
+    const target = snapshot.branch
+    if (!target?.id || !target.anchorMessageId) {
+      throw new ChatDbValidationError('Create snapshot is missing the branch identity')
+    }
+    const current = repos.branches.getById(target.id)
+    if (direction === 'redo') {
+      if (current.found) {
+        throw new ChatDbValidationError(`Branch ${target.id} already exists; the creation can no longer be redone`)
+      }
+      if (target.parentBranchId !== null) {
+        this.requireBranchInTx(repos, topicId, target.parentBranchId)
+      }
+      if (!repos.messages.getInTopic(target.anchorMessageId, topicId).found) {
+        throw new ChatDbNotFoundError(
+          `Anchor message ${target.anchorMessageId} does not exist in topic ${topicId}; the creation can no longer be redone`
+        )
+      }
+      repos.branches.create({
+        id: target.id,
+        topicId,
+        parentBranchId: target.parentBranchId ?? null,
+        anchorMessageId: target.anchorMessageId,
+        name: target.name ?? null,
+        createdAt: target.createdAt ?? null,
+        updatedAt: target.updatedAt ?? null,
+        overflow: target.overflow ?? {}
+      })
+      return { branchIds: [target.id], messageIds: [] }
+    }
+    if (!current.found) {
+      throw new ChatDbValidationError(`Branch ${target.id} no longer exists; the creation can no longer be undone`)
+    }
+    if (current.data.topicId !== topicId) {
+      throw new ChatDbValidationError(`Branch ${target.id} does not belong to topic ${topicId}`)
+    }
+    if (
+      (current.data.parentBranchId ?? null) !== (target.parentBranchId ?? null) ||
+      current.data.anchorMessageId !== target.anchorMessageId ||
+      (current.data.name ?? null) !== (target.name ?? null)
+    ) {
+      throw new ChatDbValidationError(
+        `Branch ${target.id} changed since it was created; the creation can no longer be undone`
+      )
+    }
+    // Only an empty leaf is still "the branch this action created": owned
+    // messages or child branches are user work this action never produced.
+    if (repos.messages.listByTopic(topicId, target.id).length > 0) {
+      throw new ChatDbValidationError(`Branch ${target.id} owns messages; the creation can no longer be undone`)
+    }
+    if (repos.branches.listChildrenOf(target.id).length > 0) {
+      throw new ChatDbValidationError(`Branch ${target.id} has child branches; the creation can no longer be undone`)
+    }
+    const removed = repos.branches.deleteSubtreeRows([target.id])
+    if (removed.affected !== 1) {
+      throw new ChatDbValidationError(`Branch ${target.id} could not be removed`)
+    }
+    return { branchIds: [target.id], messageIds: [] }
+  }
+
+  /** Replay a branch-rename snapshot: compare-and-set on the recorded names. */
+  private replayBranchRenameInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchRenameSnapshot
+  ): ReplayBranchRows {
+    if (!snapshot.branchId) {
+      throw new ChatDbValidationError('Rename snapshot is missing the branch identity')
+    }
+    const current = repos.branches.getById(snapshot.branchId)
+    if (!current.found) {
+      throw new ChatDbNotFoundError(`Branch ${snapshot.branchId} does not exist in topic ${topicId}`)
+    }
+    if (current.data.topicId !== topicId) {
+      throw new ChatDbValidationError(`Branch ${snapshot.branchId} does not belong to topic ${topicId}`)
+    }
+    const expected = (direction === 'undo' ? snapshot.afterName : snapshot.beforeName) ?? null
+    const next = (direction === 'undo' ? snapshot.beforeName : snapshot.afterName) ?? null
+    if ((current.data.name ?? null) !== expected) {
+      throw new ChatDbValidationError(
+        `Branch ${snapshot.branchId} was renamed again since this rename; the rename can no longer be replayed`
+      )
+    }
+    repos.branches.rename(snapshot.branchId, next)
+    return { branchIds: [snapshot.branchId], messageIds: [] }
+  }
+
+  /**
+   * Replay a move-to-new-branch snapshot.
+   *
+   * Undo puts the moved rows back where they came from (source ownership and
+   * recorded order, anchored children re-parented back, the created branch
+   * removed). Redo re-creates the same branch identity, re-splits the source
+   * route deterministically and re-points the anchored children. Both
+   * directions require the moved set and the source rows to still be exactly
+   * what the move left behind.
+   */
+  private replayBranchMoveInTx(
+    repos: ChatDbRepositories,
+    tx: unknown,
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchMoveSnapshot
+  ): ReplayBranchRows {
+    const created = snapshot.branch
+    if (!created?.id || !created.anchorMessageId) {
+      throw new ChatDbValidationError('Move snapshot is missing the created branch identity')
+    }
+    const movedMessageIds = snapshot.movedMessageIds ?? []
+    if (movedMessageIds.length === 0) {
+      throw new ChatDbValidationError('Move snapshot carries no moved messages')
+    }
+    const sourceBranchId = snapshot.sourceBranchId ?? null
+    const movedSet = new Set(movedMessageIds)
+    const current = repos.branches.getById(created.id)
+    if (direction === 'undo') {
+      if (!current.found) {
+        throw new ChatDbValidationError(`Branch ${created.id} no longer exists; the move can no longer be undone`)
+      }
+      if (current.data.topicId !== topicId) {
+        throw new ChatDbValidationError(`Branch ${created.id} does not belong to topic ${topicId}`)
+      }
+      if (
+        (current.data.parentBranchId ?? null) !== sourceBranchId ||
+        current.data.anchorMessageId !== created.anchorMessageId
+      ) {
+        throw new ChatDbValidationError(`Branch ${created.id} changed since the move; the move can no longer be undone`)
+      }
+      if (sourceBranchId !== null) {
+        this.requireBranchInTx(repos, topicId, sourceBranchId)
+      }
+      const ownedNow = repos.messages.listByTopic(topicId, created.id).map((m) => m.id)
+      if (ownedNow.length !== movedMessageIds.length || ownedNow.some((id, index) => id !== movedMessageIds[index])) {
+        throw new ChatDbValidationError(
+          `Branch ${created.id} no longer holds exactly the moved messages; the move can no longer be undone`
+        )
+      }
+      const reparentedIds = new Set((snapshot.reparented ?? []).map((entry) => entry.branchId))
+      for (const child of repos.branches.listChildrenOf(created.id)) {
+        if (!reparentedIds.has(child.id)) {
+          throw new ChatDbValidationError(
+            `Branch ${child.id} was created under ${created.id}; the move can no longer be undone`
+          )
+        }
+      }
+      for (const entry of snapshot.reparented ?? []) {
+        const child = repos.branches.getById(entry.branchId)
+        if (!child.found) {
+          throw new ChatDbValidationError(`Branch ${entry.branchId} no longer exists; the move can no longer be undone`)
+        }
+        if ((child.data.parentBranchId ?? null) !== entry.parentAfter) {
+          throw new ChatDbValidationError(
+            `Branch ${entry.branchId} ancestry changed since the move; the move can no longer be undone`
+          )
+        }
+      }
+      for (const id of snapshot.sourceOrderBefore ?? []) {
+        const row = repos.messages.getInTopic(id, topicId)
+        if (!row.found) {
+          throw new ChatDbValidationError(`Message ${id} was deleted since the move; the move can no longer be undone`)
+        }
+        const owner = row.data.branchId ?? null
+        if (owner !== sourceBranchId && owner !== created.id) {
+          throw new ChatDbValidationError(
+            `Message ${id} changed route owner since the move; the move can no longer be undone`
+          )
+        }
+      }
+      // 1. Ownership back to the source route, then the recorded dense order.
+      for (const id of movedMessageIds) this.setMessageOwnerInTx(tx, id, sourceBranchId)
+      const sourceIdsNow = repos.messages.listByTopic(topicId, sourceBranchId).map((m) => m.id)
+      const sourceIdsNowSet = new Set(sourceIdsNow)
+      const recordedSourceIds = new Set(snapshot.sourceOrderBefore ?? [])
+      // Recorded order first (moved rows return to their old positions), then
+      // any row appended to the source route after the move.
+      const restoredOrder = [
+        ...(snapshot.sourceOrderBefore ?? []).filter((id) => sourceIdsNowSet.has(id)),
+        ...sourceIdsNow.filter((id) => !recordedSourceIds.has(id))
+      ]
+      if (restoredOrder.length !== sourceIdsNow.length) {
+        throw new ChatDbValidationError('Source route rows changed since the move; the move can no longer be undone')
+      }
+      repos.messages.replaceOrder(topicId, restoredOrder, sourceBranchId)
+      // 2. Ancestry back to the recorded parents.
+      for (const entry of snapshot.reparented ?? []) {
+        repos.branches.setParent(entry.branchId, entry.parentBefore ?? null)
+      }
+      // 3. The created branch row leaves; nothing owns it any more.
+      const removed = repos.branches.deleteSubtreeRows([created.id])
+      if (removed.affected !== 1) {
+        throw new ChatDbValidationError(`Branch ${created.id} could not be removed`)
+      }
+      return { branchIds: [created.id], messageIds: movedMessageIds }
+    }
+    if (current.found) {
+      throw new ChatDbValidationError(`Branch ${created.id} already exists; the move can no longer be redone`)
+    }
+    if (sourceBranchId !== null) {
+      this.requireBranchInTx(repos, topicId, sourceBranchId)
+    }
+    const anchor = repos.messages.getInTopic(created.anchorMessageId, topicId)
+    if (!anchor.found) {
+      throw new ChatDbNotFoundError(
+        `Anchor message ${created.anchorMessageId} does not exist in topic ${topicId}; the move can no longer be redone`
+      )
+    }
+    if ((anchor.data.branchId ?? null) !== sourceBranchId) {
+      throw new ChatDbValidationError(
+        `Anchor message ${created.anchorMessageId} no longer belongs to the source route; the move can no longer be redone`
+      )
+    }
+    const sourceIdsBefore = repos.messages.listByTopic(topicId, sourceBranchId).map((m) => m.id)
+    const sourceIdsBeforeSet = new Set(sourceIdsBefore)
+    for (const id of [...movedMessageIds, ...(snapshot.sourceOrderBefore ?? [])]) {
+      if (!sourceIdsBeforeSet.has(id)) {
+        throw new ChatDbValidationError(`Message ${id} is not on the source route; the move can no longer be redone`)
+      }
+    }
+    for (const entry of snapshot.reparented ?? []) {
+      const child = repos.branches.getById(entry.branchId)
+      if (!child.found) {
+        throw new ChatDbValidationError(`Branch ${entry.branchId} no longer exists; the move can no longer be redone`)
+      }
+      if ((child.data.parentBranchId ?? null) !== (entry.parentBefore ?? null)) {
+        throw new ChatDbValidationError(
+          `Branch ${entry.branchId} ancestry changed since the move; the move can no longer be redone`
+        )
+      }
+    }
+    repos.branches.create({
+      id: created.id,
+      topicId,
+      parentBranchId: sourceBranchId,
+      anchorMessageId: created.anchorMessageId,
+      name: created.name ?? null,
+      createdAt: created.createdAt ?? null,
+      updatedAt: created.updatedAt ?? null,
+      overflow: created.overflow ?? {}
+    })
+    for (const id of movedMessageIds) this.setMessageOwnerInTx(tx, id, created.id)
+    // The moved rows re-own densely from zero, exactly as the original move
+    // left them, so the destination route's per-owner order is never sparse.
+    repos.messages.replaceOrder(topicId, movedMessageIds, created.id)
+    for (const entry of snapshot.reparented ?? []) {
+      repos.branches.setParent(entry.branchId, entry.parentAfter)
+    }
+    repos.messages.replaceOrder(
+      topicId,
+      sourceIdsBefore.filter((id) => !movedSet.has(id)),
+      sourceBranchId
+    )
+    return { branchIds: [created.id], messageIds: movedMessageIds }
+  }
+
+  /**
+   * Replay a subtree-delete snapshot.
+   *
+   * Undo restores every removed row in one transaction (branch rows
+   * subtree-root first, owned messages/blocks/file references verbatim, the
+   * touched segments with their ordered membership plus the catalog order, and
+   * the inheritance boundaries the delete advanced). Redo re-runs the same
+   * deterministic subtree delete, but only while the subtree still holds
+   * exactly the rows this snapshot recorded.
+   */
+  private replayBranchDeleteInTx(
+    repos: ChatDbRepositories,
+    tx: unknown,
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchDeleteSnapshot
+  ): ReplayBranchRows {
+    const branches = snapshot.branches ?? []
+    if (branches.length === 0 || branches[0]?.id !== snapshot.rootBranchId) {
+      throw new ChatDbValidationError('Delete snapshot must carry the deleted branch rows subtree-root first')
+    }
+    const messages = snapshot.messages ?? []
+    const blocks = snapshot.blocks ?? []
+    const fileReferences = snapshot.fileReferences ?? []
+    const segments = snapshot.segments ?? []
+    const segmentsAfter = snapshot.segmentsAfter ?? []
+    // Closed-set + ownership check for the whole operation, both directions,
+    // before any guard reads or any write happens.
+    this.assertDeleteSnapshotClosedInTx(repos, topicId, snapshot)
+    if (direction === 'redo') {
+      const root = repos.branches.getById(snapshot.rootBranchId)
+      if (!root.found) {
+        throw new ChatDbNotFoundError(`Branch ${snapshot.rootBranchId} does not exist in topic ${topicId}`)
+      }
+      if (root.data.topicId !== topicId) {
+        throw new ChatDbValidationError(`Branch ${snapshot.rootBranchId} does not belong to topic ${topicId}`)
+      }
+      const subtreeIds = [snapshot.rootBranchId, ...repos.branches.collectSubtreeIds(snapshot.rootBranchId)]
+      this.assertSameIdSet(
+        subtreeIds,
+        branches.map((row) => row.id),
+        'the deleted branch subtree'
+      )
+      const ownedMessageIds = subtreeIds.flatMap((bid) => repos.messages.listByTopic(topicId, bid)).map((m) => m.id)
+      this.assertSameIdSet(
+        ownedMessageIds,
+        messages.map((row) => row.id),
+        'the deleted messages'
+      )
+      const blockMap = repos.blocks.listByMessages(ownedMessageIds)
+      const ownedBlockIds: string[] = []
+      for (const id of ownedMessageIds) {
+        for (const block of blockMap.get(id) ?? []) ownedBlockIds.push(block.id)
+      }
+      this.assertSameIdSet(
+        ownedBlockIds,
+        blocks.map((row) => row.id),
+        'the deleted blocks'
+      )
+      this.assertSameIdSet(
+        repos.fileRefs.listByMessages(ownedMessageIds).map((row) => row.id),
+        fileReferences.map((row) => row.id),
+        'the deleted file references'
+      )
+      this.deleteBranchSubtreeInTx(repos, topicId, snapshot.rootBranchId)
+      return { branchIds: subtreeIds, messageIds: ownedMessageIds }
+    }
+    // Undo: every row must be gone, so a restore never overwrites live work.
+    const restoredBranchIds = branches.map((row) => row.id)
+    const restoredBranchIdSet = new Set(restoredBranchIds)
+    for (const row of branches) {
+      if (repos.branches.exists(row.id)) {
+        throw new ChatDbValidationError(`Branch ${row.id} already exists; the delete can no longer be undone`)
+      }
+    }
+    for (const row of branches) {
+      if (
+        row.parentBranchId !== null &&
+        !restoredBranchIdSet.has(row.parentBranchId) &&
+        !repos.branches.exists(row.parentBranchId)
+      ) {
+        throw new ChatDbValidationError(
+          `Parent branch ${row.parentBranchId} of ${row.id} no longer exists; the delete can no longer be undone`
+        )
+      }
+    }
+    for (const row of messages) {
+      if (repos.messages.getById(row.id).found) {
+        throw new ChatDbValidationError(`Message ${row.id} already exists; the delete can no longer be undone`)
+      }
+    }
+    for (const row of blocks) {
+      if (repos.blocks.getById(row.id).found) {
+        throw new ChatDbValidationError(`Block ${row.id} already exists; the delete can no longer be undone`)
+      }
+    }
+    for (const row of fileReferences) {
+      if (repos.fileRefs.getById(row.id).found) {
+        throw new ChatDbValidationError(`File reference ${row.id} already exists; the delete can no longer be undone`)
+      }
+    }
+    // Touched segments must still hold the state this delete left (nothing for
+    // a redo: there the delete has not been re-applied yet).
+    this.assertSegmentPostDeleteStateInTx(repos, segmentsAfter)
+    // 1. Branch rows, subtree-root first (a parent is always restored before
+    //    its children, so ancestry and anchors re-compose exactly as before).
+    for (const row of branches) {
+      repos.branches.create({
+        id: row.id,
+        topicId,
+        parentBranchId: row.parentBranchId ?? null,
+        anchorMessageId: row.anchorMessageId,
+        name: row.name ?? null,
+        createdAt: row.createdAt ?? null,
+        updatedAt: row.updatedAt ?? null,
+        overflow: row.overflow ?? {}
+      })
+    }
+    // 2. Owned rows verbatim: recorded dense orders are complete per owner, so
+    //    no surviving row can collide with a restored one.
+    if (messages.length > 0) {
+      repos.messages.createMany(messages.map((row) => ({ ...row })))
+    }
+    if (blocks.length > 0) {
+      repos.blocks.createMany(blocks.map((row) => ({ ...row })))
+    }
+    if (fileReferences.length > 0) {
+      repos.fileRefs.createMany(fileReferences.map((row) => ({ ...row })))
+    }
+    // 3. Segments: a segment the delete emptied is re-created, every touched
+    //    segment gets its recorded membership and head back, and the catalog
+    //    order is re-pinned (an emptied segment's removal had renumbered it).
+    for (const segment of segments) {
+      if (!repos.segments.getById(segment.id).found) {
+        repos.segments.create({
+          id: segment.id,
+          topicId,
+          name: segment.name ?? null,
+          createdAt: segment.createdAt ?? null,
+          updatedAt: segment.updatedAt ?? null,
+          sortOrder: segment.sortOrder,
+          headerMessageId: segment.headerMessageId ?? null,
+          overflow: segment.overflow ?? {}
+        })
+      }
+      repos.segments.replaceMessageIds(segment.id, segment.memberIds ?? [])
+      repos.segments.setHeaderMessageId(segment.id, segment.headerMessageId ?? null)
+    }
+    if (segments.length > 0) {
+      // Re-pin the catalog by inserting the segments this delete emptied back
+      // into their recorded slots, keeping every live segment in its CURRENT
+      // relative order: a concurrent reorder of unrelated segments survives.
+      const liveSegmentIds = repos.segments.listByTopic(topicId).map((row) => row.id)
+      const recordedIndex = new Map((snapshot.segmentOrder ?? []).map((id, index) => [id, index]))
+      const orderOf = (id: string): number => recordedIndex.get(id) ?? Number.MAX_SAFE_INTEGER
+      const recreatedSegmentIds = segmentsAfter.filter((row) => !row.exists).map((row) => row.id)
+      const recreatedSegmentIdSet = new Set(recreatedSegmentIds)
+      const orderedSegmentIds = liveSegmentIds.filter((id) => !recreatedSegmentIdSet.has(id))
+      for (const id of recreatedSegmentIds) {
+        const insertAt = orderedSegmentIds.findIndex((live) => orderOf(live) > orderOf(id))
+        orderedSegmentIds.splice(insertAt === -1 ? orderedSegmentIds.length : insertAt, 0, id)
+      }
+      const changed =
+        orderedSegmentIds.length !== liveSegmentIds.length ||
+        orderedSegmentIds.some((id, index) => id !== liveSegmentIds[index])
+      if (changed) this.assignSegmentOrdersInTx(tx, orderedSegmentIds)
+    }
+    // 4. Inheritance boundaries this delete advanced, restored compare-and-set
+    //    against the restored route only.
+    this.restoreInheritanceBoundariesInTx(
+      repos,
+      topicId,
+      snapshot.boundaries ?? [],
+      new Set(messages.map((row) => row.id)),
+      snapshot.rootBranchId
+    )
+    return { branchIds: restoredBranchIds, messageIds: messages.map((row) => row.id) }
   }
 
   // =========================================================================

@@ -7,6 +7,9 @@
  * same-profile relaunch persistence. Negative cases assert the menu item
  * stays visible but disabled when the selection has no owned preceding
  * anchor; a selection holding a branch anchor now migrates and re-parents it.
+ * The nested-fork scenario additionally covers the branch-operation history:
+ * move into a nested child+grandchild tree, copy→paste on the root route,
+ * subtree delete from the fork divider, and the undo/redo replay of all three.
  *
  * Uses the standard shared fixture, a unique disposable profile, and mocked
  * external providers. Not run by the implementation lane; executed by
@@ -476,6 +479,233 @@ async function uiSendMessage(page: Page, text: string): Promise<void> {
   await textarea.press('Enter')
 }
 
+// ---------------------------------------------------------------------------
+// Branch-operation history (create/move/delete) helpers
+//
+// Undo/redo of branch operations replays a Main-produced per-operation
+// snapshot through Main authority; the renderer only keeps the session history.
+// These helpers drive the real edit-mode controls and read Main back as the
+// oracle (branch rows, message ownership, effective route order, block
+// content), so no assertion depends on the renderer's own projection.
+// ---------------------------------------------------------------------------
+
+function undoButton(page: Page) {
+  return page.locator('[data-testid="edit-undo-btn"]').first()
+}
+
+function redoButton(page: Page) {
+  return page.locator('[data-testid="edit-redo-btn"]').first()
+}
+
+/** Enter edit mode only when the app is not already in it (route switches keep it). */
+async function ensureEditMode(page: Page): Promise<void> {
+  const enabled = await page.evaluate(
+    () => (window as unknown as { store: { getState: () => any } }).store.getState().editMode?.enabled === true
+  )
+  if (!enabled) await enableEditMode(page)
+}
+
+/** Real whole-turn range selection on the edit-mode covers (stable user ids). */
+async function selectTurns(page: Page, groupIds: readonly string[]): Promise<void> {
+  if (groupIds.length === 0) throw new Error('[E2E] selectTurns requires at least one group id')
+  await clickGroup(page, groupIds[0])
+  for (const groupId of groupIds.slice(1)) {
+    await clickGroup(page, groupId, { shift: true })
+  }
+  await page.waitForFunction(
+    (want: string[]) => {
+      const sel = (window as unknown as { store: { getState: () => any } }).store.getState().editMode
+        ?.selectedGroupIds as string[]
+      return Array.isArray(sel) && want.every((id) => sel.includes(id))
+    },
+    [...groupIds],
+    { timeout: 15000 }
+  )
+}
+
+/** Real context-menu gesture: Move to New Branch for the current selection. */
+async function moveSelectedToNewBranch(page: Page, anchorGroupId: string): Promise<void> {
+  await openEditMenu(page, anchorGroupId)
+  const item = moveMenuItem(page)
+  await expect(item).toBeVisible({ timeout: 15000 })
+  await expect(item).toBeEnabled({ timeout: 15000 })
+  try {
+    await item.click({ timeout: 10000 })
+  } catch {
+    await item.evaluate((el: HTMLElement) => el.click())
+  }
+}
+
+interface CatalogRow {
+  id: string
+  parentBranchId: string | null
+  anchorMessageId: string
+}
+
+/** Main's branch catalog for the topic (authoritative rows, stable order by creation). */
+async function branchCatalog(page: Page, topicId: string): Promise<CatalogRow[]> {
+  return page.evaluate(async (tid: string) => {
+    const win = window as unknown as { api: { chatDb: { listBranches: (req: unknown) => Promise<any> } } }
+    const res = await win.api.chatDb.listBranches({ topicId: tid })
+    if (!res || res.ok !== true || !res.value || !Array.isArray(res.value.branches)) {
+      throw new Error('[E2E] listBranches failed')
+    }
+    return res.value.branches.map((b: any) => ({
+      id: b.id as string,
+      parentBranchId: (b.parentBranchId ?? null) as string | null,
+      anchorMessageId: b.anchorMessageId as string
+    }))
+  }, topicId)
+}
+
+/** Poll Main's catalog until it reports `size` rows, then return that catalog. */
+async function expectCatalog(page: Page, topicId: string, size: number): Promise<CatalogRow[]> {
+  await expect.poll(async () => (await branchCatalog(page, topicId)).length, { timeout: 60000 }).toBe(size)
+  return branchCatalog(page, topicId)
+}
+
+/** Main's message→branch ownership map for the topic. */
+async function ownershipByMessageId(page: Page, topicId: string): Promise<Record<string, string | null>> {
+  const dbPath = getChatDbPath()
+  expect(dbPath, 'runtime chat.db path must exist').toBeTruthy()
+  const outcome = await queryChatDbViaElectronWithRetry(
+    dbPath!,
+    `SELECT id, branch_id AS branchId FROM messages WHERE topic_id='${esc(topicId)}'`
+  )
+  const map: Record<string, string | null> = {}
+  for (const row of requireRows(outcome, 'ownership query')) {
+    map[String(row.id)] = (row.branchId ?? null) as string | null
+  }
+  return map
+}
+
+/** Poll Main ownership until the named messages report exactly the expected owners. */
+async function expectOwnership(page: Page, topicId: string, expected: Record<string, string | null>): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const actual = await ownershipByMessageId(page, topicId)
+        const subset: Record<string, string | null> = {}
+        for (const id of Object.keys(expected)) subset[id] = actual[id] ?? null
+        return subset
+      },
+      { timeout: 60000 }
+    )
+    .toEqual(expected)
+}
+
+/** Block contents owned by the given messages (authority snapshot content). */
+async function blockContents(page: Page, topicId: string, messageIds: readonly string[]): Promise<string[]> {
+  const dbPath = getChatDbPath()
+  expect(dbPath, 'runtime chat.db path must exist').toBeTruthy()
+  const list = messageIds.map((id) => `'${esc(id)}'`).join(',')
+  const outcome = await queryChatDbViaElectronWithRetry(
+    dbPath!,
+    `SELECT message_id AS messageId, content FROM message_blocks WHERE message_id IN (${list}) ORDER BY message_id ASC`
+  )
+  return requireRows(outcome, 'block content query').map((row) => String(row.content ?? ''))
+}
+
+/** The rendered rows of the active route, in document order. */
+async function renderedMessageIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const el of nodes) {
+      const id = el.getAttribute('data-message-id') ?? ''
+      if (!id || seen.has(id) || !el.id.startsWith('message-')) continue
+      seen.add(id)
+      out.push(id)
+    }
+    return out
+  })
+}
+
+/** History replay is serialized and gated on `isProcessing`; wait for idle. */
+async function waitHistoryIdle(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            (window as unknown as { store: { getState: () => any } }).store.getState().editMode?.isProcessing === true
+        ),
+      { timeout: 60000 }
+    )
+    .toBe(false)
+}
+
+/** Real control gesture: click the toolbar undo/redo button once the stack is armed. */
+async function clickHistory(page: Page, which: 'undo' | 'redo'): Promise<void> {
+  await waitHistoryIdle(page)
+  const button = which === 'undo' ? undoButton(page) : redoButton(page)
+  await expect(button).toBeEnabled({ timeout: 30000 })
+  await button.click()
+  await waitHistoryIdle(page)
+}
+
+/**
+ * Failure diagnostics: the live history stacks, the visible toasts, and the
+ * app's own log tail. Diagnostics only (never evidence) — attached to the test
+ * output so a failed replay names its real cause instead of guessing.
+ */
+async function dumpHistoryDiagnostics(page: Page, label: string): Promise<void> {
+  const state = await page.evaluate(() => {
+    const store = (window as unknown as { store: { getState: () => any } }).store
+    const s = store.getState()
+    const summarize = (action: any): unknown =>
+      action
+        ? {
+            id: action.id,
+            type: action.type,
+            root: action.rootBranchId ?? null,
+            snapshotKind: action.snapshot?.kind ?? null,
+            branches: action.snapshot?.branches?.length ?? null,
+            messages: action.snapshot?.messages?.length ?? null,
+            processing: s.editMode?.isProcessing === true
+          }
+        : null
+    return {
+      undo: (s.undoStack?.undoStack ?? []).map(summarize),
+      redo: (s.undoStack?.redoStack ?? []).map(summarize),
+      toasts: Array.from(document.querySelectorAll('.ant-message-notice-content')).map((el) => el.textContent ?? '')
+    }
+  })
+  console.log(`[E2E] ${label} history state: ${JSON.stringify(state)}`)
+  const logsDir = `${getUserDataDir()}/logs`
+  try {
+    const files = fs.readdirSync(logsDir).filter((file) => file.startsWith('app'))
+    for (const file of files) {
+      const text = fs.readFileSync(`${logsDir}/${file}`, 'utf8')
+      console.log(`[E2E] ${label} ${file} tail:
+${text.slice(-8000)}`)
+    }
+  } catch (error) {
+    console.log(`[E2E] ${label} logs unavailable (${logsDir}): ${String(error)}`)
+  }
+}
+
+/** Delete one branch through its fork divider popover (real UI confirmation). */
+async function deleteBranchFromFork(page: Page, anchorMessageId: string, branchId: string): Promise<void> {
+  const row = page.locator(`[data-testid="branch-fork-divider-${anchorMessageId}-main"]`).first()
+  await expect(row, 'fork divider for the deleted branch must render on the root route').toBeVisible({
+    timeout: 30000
+  })
+  const opener = row
+    .locator(
+      `[data-testid="branch-fork-toggle-${anchorMessageId}"],[data-testid="branch-fork-selected-${anchorMessageId}"]`
+    )
+    .first()
+  await opener.click()
+  const deleteButton = page.locator(`[data-testid="branch-fork-delete-btn-${branchId}"]`).first()
+  await expect(deleteButton).toBeVisible({ timeout: 15000 })
+  await deleteButton.click()
+  const confirm = page.locator('.ant-popconfirm button.ant-btn-primary').first()
+  await expect(confirm).toBeVisible({ timeout: 15000 })
+  await confirm.click()
+}
+
 test.describe('Move selected turns to new branch (focused)', () => {
   test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
   test('actual edit selection + right-click menu moves B,C to a new branch with stable IDs and relaunch persistence', async ({
@@ -941,5 +1171,267 @@ test.describe('Move selected turns to new branch (focused)', () => {
     expect(await readRouteAnchor(page, topicId, branchId)).toBe(sourceAnchorGroupKey)
     const destinationTurns = selectionEnd + 1
     await expectTokenCount(page, destinationTurns - anchorTurnIndex, destinationTurns)
+  })
+
+  /**
+   * Branch-operation history across a nested fork — INTEGRATED E2E.
+   *
+   * Reported defect: a multi-turn move reported only the first selected turn as
+   * moved, the child branch of that range silently disappeared from the UI, and
+   * the branch operations around it could not be undone (undo removed an older
+   * paste instead, and the following redo did nothing while staying enabled).
+   *
+   * Real UI, real IPC, real SQLite; every claim is asserted against Main
+   * authority (`listBranches`, ownership columns, effective route order, block
+   * content), never against renderer bookkeeping alone:
+   *
+   *  1. turns T4..T5 move from the root route to B1 (B1 = child of the root route);
+   *  2. T5 moves from B1 to B2 (B2 = B1's child, i.e. the grandchild here);
+   *  3. T3 moves from the root route to B3 — the moved set now contains B1's
+   *     anchor, so B1 (and its descendant B2) must re-parent under B3 with every
+   *     moved message and every descendant route intact;
+   *  4. a turn copied from the deepest route is pasted onto the root route;
+   *  5. the nested B3 subtree is deleted from its fork divider;
+   *  6. undo restores that whole subtree (with the older paste still applied),
+   *     the next undo undoes the paste, redo re-applies paste then delete, and
+   *     the last undo restores the subtree again.
+   */
+  test('nested branch move keeps every moved turn and its descendant route, and subtree delete / paste replay through undo and redo', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(900000)
+    const page = mainWindow
+    await waitForAppReady(page)
+    const assistantId = await prepareAssistant(page, 20)
+    const topicId = `branch-undo-e2e-${Date.now()}`
+    const ids = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: 'Branch Operation History E2E',
+      total: 16,
+      messageIdForIndex: (i: number) => `${topicId}-msg-${pad(i, 5)}`,
+      contentPrefix: 'bundo-'
+    })
+    // Turns T0..T7; ids[2k] is the turn's user message (the selection group key).
+    const turn = (k: number): string => ids[2 * k]
+    const slice = (from: number, to: number): string[] => ids.slice(from, to + 1)
+    await activateTopic(page, topicId, 16)
+    await ensureEditMode(page)
+    // Fresh session history: nothing to replay in either direction.
+    await expect(undoButton(page)).toBeDisabled()
+    await expect(redoButton(page)).toBeDisabled()
+
+    // --- 1. move #1: turns T4..T5 leave the root route for B1 ---------------
+    await selectTurns(page, [turn(4), turn(5)])
+    await moveSelectedToNewBranch(page, turn(4))
+    const catalog1 = await expectCatalog(page, topicId, 1)
+    const b1 = catalog1[0].id
+    expect(catalog1[0].parentBranchId).toBeNull()
+    expect(catalog1[0].anchorMessageId).toBe(ids[7])
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual([...slice(0, 7), ...slice(12, 15)])
+    expect(await messageIdsOnRoute(page, topicId, b1)).toEqual(slice(0, 11))
+    await expectOwnership(page, topicId, {
+      [ids[8]]: b1,
+      [ids[9]]: b1,
+      [ids[10]]: b1,
+      [ids[11]]: b1,
+      [ids[6]]: null,
+      [ids[7]]: null
+    })
+    await expect(undoButton(page)).toBeEnabled()
+    await expect(redoButton(page)).toBeDisabled()
+
+    // --- 2. move #2: T5 leaves B1 for B2 (B1's child, the grandchild) ------
+    await setActiveRoute(page, topicId, b1)
+    await ensureEditMode(page)
+    await selectTurns(page, [turn(5)])
+    await moveSelectedToNewBranch(page, turn(5))
+    const catalog2 = await expectCatalog(page, topicId, 2)
+    const b2 = catalog2.find((row) => row.id !== b1)?.id as string
+    expect(b2).toBeTruthy()
+    expect(catalog2.find((row) => row.id === b1)).toEqual({
+      id: b1,
+      parentBranchId: null,
+      anchorMessageId: ids[7]
+    })
+    expect(catalog2.find((row) => row.id === b2)).toEqual({
+      id: b2,
+      parentBranchId: b1,
+      anchorMessageId: ids[9]
+    })
+    expect(await messageIdsOnRoute(page, topicId, b1)).toEqual(slice(0, 9))
+    expect(await messageIdsOnRoute(page, topicId, b2)).toEqual(slice(0, 11))
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual([...slice(0, 7), ...slice(12, 15)])
+
+    // --- 3. move #3: T3 leaves the root route for B3; B1+B2 re-parent -----
+    await setActiveRoute(page, topicId, null)
+    await ensureEditMode(page)
+    await selectTurns(page, [turn(3)])
+    await moveSelectedToNewBranch(page, turn(3))
+    const catalog3 = await expectCatalog(page, topicId, 3)
+    const b3 = catalog3.find((row) => row.id !== b1 && row.id !== b2)?.id as string
+    expect(b3).toBeTruthy()
+    expect(catalog3.find((row) => row.id === b3)).toEqual({
+      id: b3,
+      parentBranchId: null,
+      anchorMessageId: ids[5]
+    })
+    // The moved range held B1's anchor: B1 re-parents under B3, B2 keeps its parent.
+    expect(catalog3.find((row) => row.id === b1)).toEqual({
+      id: b1,
+      parentBranchId: b3,
+      anchorMessageId: ids[7]
+    })
+    expect(catalog3.find((row) => row.id === b2)).toEqual({
+      id: b2,
+      parentBranchId: b1,
+      anchorMessageId: ids[9]
+    })
+    const rootRoute = [...slice(0, 5), ...slice(12, 15)]
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual(rootRoute)
+    expect(await messageIdsOnRoute(page, topicId, b3)).toEqual(slice(0, 7))
+    expect(await messageIdsOnRoute(page, topicId, b1)).toEqual(slice(0, 9))
+    expect(await messageIdsOnRoute(page, topicId, b2)).toEqual(slice(0, 11))
+    // Every moved message keeps its owner, its content, and its place in the
+    // effective route of the branch that now holds it.
+    await expectOwnership(page, topicId, {
+      [ids[6]]: b3,
+      [ids[7]]: b3,
+      [ids[8]]: b1,
+      [ids[9]]: b1,
+      [ids[10]]: b2,
+      [ids[11]]: b2,
+      [ids[5]]: null,
+      [ids[12]]: null
+    })
+    expect(await blockContents(page, topicId, [ids[6], ids[7], ids[8], ids[9], ids[10], ids[11]])).toEqual([
+      'bundo-00006',
+      'bundo-00007',
+      'bundo-00008',
+      'bundo-00009',
+      'bundo-00010',
+      'bundo-00011'
+    ])
+    // Nested navigation renders the complete deepest route: no lost child.
+    await setActiveRoute(page, topicId, b2)
+    await expect.poll(async () => (await renderedMessageIds(page)).length, { timeout: 30000 }).toBe(slice(0, 11).length)
+    expect(await renderedMessageIds(page)).toEqual(slice(0, 11))
+
+    // --- 4. copy a turn from the deepest route, paste it onto the root route
+    await ensureEditMode(page)
+    await selectTurns(page, [turn(5)])
+    await page.locator('[data-testid="edit-copy-btn"]').first().click()
+    await page.waitForFunction(
+      () => {
+        const clipboard = (window as unknown as { store: { getState: () => any } }).store.getState().clipboard
+        return Array.isArray(clipboard?.items) && clipboard.items.length > 0
+      },
+      undefined,
+      { timeout: 30000 }
+    )
+    await setActiveRoute(page, topicId, null)
+    await ensureEditMode(page)
+    await selectTurns(page, [turn(6)])
+    await page.locator('[data-testid="edit-paste-btn"]').first().click()
+    await expect
+      .poll(async () => (await messageIdsOnRoute(page, topicId, null)).length, { timeout: 60000 })
+      .toBe(rootRoute.length + 2)
+    const rootAfterPaste = await messageIdsOnRoute(page, topicId, null)
+    const pastedIds = rootAfterPaste.filter((id) => !ids.includes(id))
+    expect(pastedIds, 'a pasted turn inserts exactly two new messages').toHaveLength(2)
+    expect(rootAfterPaste.filter((id) => ids.includes(id))).toEqual(rootRoute)
+    // The pasted turn carries the copied content, on the root route.
+    expect((await blockContents(page, topicId, pastedIds)).sort()).toEqual(['bundo-00010', 'bundo-00011'])
+    await expectOwnership(page, topicId, { [pastedIds[0]]: null, [pastedIds[1]]: null })
+
+    // --- 5. delete the nested B3 subtree (B3 + B1 + B2) via its fork divider
+    await expect(undoButton(page)).toBeEnabled()
+    await expect(redoButton(page)).toBeDisabled()
+    await deleteBranchFromFork(page, ids[5], b3)
+    await expectCatalog(page, topicId, 0)
+    // Deleting the subtree leaves the root route and its pasted turn intact.
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual(rootAfterPaste)
+
+    // --- 6. undo restores the subtree while the older paste is still applied
+    await clickHistory(page, 'undo')
+    try {
+      await expectCatalog(page, topicId, 3)
+    } catch (error) {
+      await dumpHistoryDiagnostics(page, 'undo-delete')
+      throw error
+    }
+    const restored = await branchCatalog(page, topicId)
+    expect(restored.find((row) => row.id === b3)).toEqual({
+      id: b3,
+      parentBranchId: null,
+      anchorMessageId: ids[5]
+    })
+    expect(restored.find((row) => row.id === b1)).toEqual({
+      id: b1,
+      parentBranchId: b3,
+      anchorMessageId: ids[7]
+    })
+    expect(restored.find((row) => row.id === b2)).toEqual({
+      id: b2,
+      parentBranchId: b1,
+      anchorMessageId: ids[9]
+    })
+    expect(await messageIdsOnRoute(page, topicId, b2)).toEqual(slice(0, 11))
+    await expectOwnership(page, topicId, {
+      [ids[6]]: b3,
+      [ids[7]]: b3,
+      [ids[8]]: b1,
+      [ids[9]]: b1,
+      [ids[10]]: b2,
+      [ids[11]]: b2,
+      [ids[5]]: null,
+      [pastedIds[0]]: null,
+      [pastedIds[1]]: null
+    })
+    expect(await blockContents(page, topicId, [ids[6], ids[9], ids[10]])).toEqual([
+      'bundo-00006',
+      'bundo-00009',
+      'bundo-00010'
+    ])
+    // The restored subtree renders again (nested navigation is back).
+    await setActiveRoute(page, topicId, b2)
+    expect(await renderedMessageIds(page)).toEqual(slice(0, 11))
+    await expect(redoButton(page)).toBeEnabled()
+
+    // --- 7. the next undo undoes the older paste (history is ordered) ------
+    await clickHistory(page, 'undo')
+    await expect
+      .poll(async () => (await messageIdsOnRoute(page, topicId, null)).length, { timeout: 60000 })
+      .toBe(rootRoute.length)
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual(rootRoute)
+    expect(await ownershipByMessageId(page, topicId)).not.toHaveProperty(pastedIds[0])
+    // The branch tree created by the moves is untouched by the paste undo.
+    expect((await branchCatalog(page, topicId)).map((row) => row.id)).toEqual(expect.arrayContaining([b1, b2, b3]))
+
+    // --- 8. redo re-applies the paste, then the subtree delete ------------
+    await clickHistory(page, 'redo')
+    await expect
+      .poll(async () => (await messageIdsOnRoute(page, topicId, null)).length, { timeout: 60000 })
+      .toBe(rootAfterPaste.length)
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual(rootAfterPaste)
+    expect((await blockContents(page, topicId, pastedIds)).sort()).toEqual(['bundo-00010', 'bundo-00011'])
+    await expect(redoButton(page)).toBeEnabled()
+    await clickHistory(page, 'redo')
+    await expectCatalog(page, topicId, 0)
+    expect(await messageIdsOnRoute(page, topicId, null)).toEqual(rootAfterPaste)
+
+    // --- 9. and the last undo restores the subtree once more --------------
+    await clickHistory(page, 'undo')
+    const restoredAgain = await expectCatalog(page, topicId, 3)
+    expect(restoredAgain.map((row) => [row.id, row.parentBranchId, row.anchorMessageId])).toEqual(
+      expect.arrayContaining([
+        [b3, null, ids[5]],
+        [b1, b3, ids[7]],
+        [b2, b1, ids[9]]
+      ])
+    )
+    expect(await messageIdsOnRoute(page, topicId, b2)).toEqual(slice(0, 11))
+    await expectOwnership(page, topicId, { [ids[10]]: b2, [ids[11]]: b2, [pastedIds[0]]: null })
+    expect(assistantId).toBeTruthy()
   })
 })

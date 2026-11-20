@@ -70,6 +70,7 @@ export function EditModeProvider({
       hasClipboard: false,
       canUndo: false,
       canRedo: false,
+      isProcessing: false,
       isSelectionMutable: false,
       toggleEditMode,
       handleGroupClick: () => {},

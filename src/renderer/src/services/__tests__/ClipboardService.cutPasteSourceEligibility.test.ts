@@ -256,7 +256,7 @@ describe('cut-paste source eligibility (real reducers, real services)', () => {
 
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch, store.getState)
-    expect(undone?.type).toBe('cut_paste')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('cut_paste')
     const afterUndo: string[] = (store.getState() as any).messages.messageIdsByTopic[topicId]
     // Immediate visibility: originals are in the ACTIVE main projection now.
     expect(afterUndo).toEqual(expect.arrayContaining(['uA', 'aA']))
@@ -275,7 +275,7 @@ describe('cut-paste source eligibility (real reducers, real services)', () => {
     const { executeRedo } = await import('../UndoService')
     mocks.deleteMessagesWithDependents.mockClear()
     const redone = await executeRedo(store.dispatch, store.getState)
-    expect(redone?.type).toBe('cut_paste')
+    expect(redone.status === 'success' ? redone.action.type : null).toBe('cut_paste')
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledTimes(1)
     // Staged re-delete still addresses the SOURCE route (null), never live B.
     expect(mocks.deleteMessagesWithDependents.mock.calls[0][2]).toBe(null)

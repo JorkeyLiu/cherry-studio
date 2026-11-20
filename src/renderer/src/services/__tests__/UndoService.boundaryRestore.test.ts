@@ -132,7 +132,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
 
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
-    expect(undone?.type).toBe('delete')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('delete')
 
     // Exactly one insertion transaction, carrying the boundary restores.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
@@ -307,7 +307,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
 
     // Projection failure is never promoted to a transaction failure: Main
     // already deleted the rows, so history stays advanced.
-    expect(redone?.type).toBe('delete')
+    expect(redone.status === 'success' ? redone.action.type : null).toBe('delete')
     expect(mocks.listBranches).toHaveBeenCalledWith('t1')
   })
 
@@ -338,7 +338,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
-    expect(undone?.type).toBe('delete')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('delete')
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null, [BOUNDARY])
   })
@@ -369,7 +369,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
-    expect(undone?.type).toBe('delete')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('delete')
     // No restored boundary permission travels: the plain three-argument wire.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null)

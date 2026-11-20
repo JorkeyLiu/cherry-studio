@@ -28,6 +28,8 @@ import type {
   AppendMessageResponse,
   BranchMessagesToTopicRequest,
   BranchMessagesToTopicResponse,
+  BranchOperationDirection,
+  BranchOperationSnapshot,
   BulkAddBlocksRequest,
   ChatDbError,
   ChatDbResult,
@@ -114,6 +116,8 @@ import type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ReplayBranchOperationRequest,
+  ReplayBranchOperationResponse,
   ResendUserMessagesRequest,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
@@ -192,6 +196,7 @@ export interface ChatDbApi {
   moveSelectedTurnsToNewBranch?(
     request: MoveSelectedTurnsToNewBranchRequest
   ): Promise<ChatDbResult<MoveSelectedTurnsToNewBranchResponse>>
+  replayBranchOperation?(request: ReplayBranchOperationRequest): Promise<ChatDbResult<ReplayBranchOperationResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
   ): Promise<ChatDbResult<InsertMessagesAfterAnchorResponse>>
@@ -1107,6 +1112,27 @@ export class SqliteMessageDataSource implements MessageDataSource {
     })
     await prepareOrderingBaseline(topicId)
     const result = unwrap(await this.api.moveSelectedTurnsToNewBranch(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  /**
+   * Replay one recorded branch operation in the requested direction.
+   *
+   * One Main-authoritative transaction; the renderer sends the exact snapshot
+   * the original mutation returned and never writes chat data itself.
+   */
+  async replayBranchOperation(
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchOperationSnapshot
+  ): Promise<ReplayBranchOperationResponse> {
+    if (!this.api.replayBranchOperation) {
+      throw new Error('ChatDb API unavailable: replayBranchOperation not exposed')
+    }
+    const request: ReplayBranchOperationRequest = cloneForWire({ topicId, direction, snapshot })
+    await prepareOrderingBaseline(topicId)
+    const result = unwrap(await this.api.replayBranchOperation(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }

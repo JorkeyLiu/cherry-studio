@@ -1761,6 +1761,12 @@ export interface DeleteBranchResponse extends FileCleanupResult {
   deletedMessageIds: string[]
   /** Deleted owned block IDs. */
   deletedBlockIds: string[]
+  /**
+   * Operation-scoped history snapshot: every row this delete removed plus the
+   * inheritance boundaries it advanced. Replay it back to Main (undo) to
+   * restore the whole subtree atomically.
+   */
+  historySnapshot: BranchDeleteSnapshot
 }
 
 /**
@@ -1867,6 +1873,13 @@ export interface MoveSelectedTurnsToNewBranchResponse {
    * route. Callers must NOT rebuild or rewrite the source anchor in that case.
    */
   sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
+  /**
+   * Operation-scoped history snapshot of this move (created branch row, moved
+   * message IDs, the complete pre-move source owner order, and the
+   * anchor-following ancestry change). Replay it back to Main to undo/redo the
+   * move with the same identities.
+   */
+  historySnapshot: BranchMoveSnapshot
 }
 
 /** Deterministic source-route anchor transfer produced by a move. */
@@ -1878,6 +1891,202 @@ export interface MoveSourceContextAnchorTransfer {
    * empty after the move (no anchor).
    */
   toGroupKey: string | null
+}
+/**
+ * Operation-scoped branch history snapshot.
+ *
+ * A branch mutation returns the exact rows it changed; the same payload is
+ * replayed back to Main in the opposite direction (undo → restore the before
+ * state, redo → re-apply the after state). Rows are the persisted authority
+ * shape (camelCase columns + decoded `overflow`), so a restore is verbatim and
+ * needs no schema migration, no persisted journal, and no generic recovery
+ * subsystem: history lives in the renderer's in-memory session stack.
+ *
+ * Every replay is guarded inside one Main transaction: the current state must
+ * still match the side the direction starts from, otherwise the command fails
+ * closed with zero writes (concurrent, unrelated edits are never overwritten).
+ */
+export interface BranchHistoryRow {
+  id: string
+  parentBranchId: string | null
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  /** Overflow columns decoded from `extra` (round-tripped verbatim). */
+  overflow: JsonObject
+}
+
+/** One persisted message row captured for a branch history replay. */
+export interface BranchHistoryMessageRow {
+  id: string
+  topicId: string
+  branchId: string | null
+  role: string | null
+  content: string | null
+  status: string | null
+  askId: string | null
+  model: string | null
+  modelId: string | null
+  assistantId: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+  overflow: JsonObject
+}
+
+/** One persisted message-block row captured for a branch history replay. */
+export interface BranchHistoryBlockRow {
+  id: string
+  messageId: string
+  type: string | null
+  content: string | null
+  status: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+  overflow: JsonObject
+}
+
+/** One persisted file-reference row captured for a branch history replay. */
+export interface BranchHistoryFileReferenceRow {
+  id: string
+  blockId: string
+  fileId: string
+  fileName: string | null
+  filePath: string | null
+  fileType: string | null
+  count: number | null
+  overflow: JsonObject
+}
+
+/**
+ * One persisted segment row plus its ordered membership, captured only when a
+ * branch delete actually touched the segment (membership is topic-scoped, so a
+ * deleted branch message can shrink or empty a surviving segment).
+ */
+export interface BranchHistorySegmentRow {
+  id: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+  headerMessageId: string | null
+  overflow: JsonObject
+  memberIds: string[]
+}
+
+/**
+ * Post-delete state of one touched segment, captured by Main inside the delete
+ * transaction.
+ *
+ * Undo restores the recorded pre-delete membership only while the live segment
+ * still looks exactly like the delete left it: a segment the user has since
+ * re-membered, re-headed, renamed, reordered, or deleted is newer state, so the
+ * replay fails closed with zero writes instead of overwriting it. `exists:
+ * false` records the segments the delete emptied (and therefore removed).
+ */
+export interface BranchHistorySegmentStateRow {
+  id: string
+  exists: boolean
+  name: string | null
+  sortOrder: number | null
+  headerMessageId: string | null
+  memberIds: string[]
+}
+
+export type BranchOperationKind = 'create' | 'rename' | 'move' | 'delete'
+
+/** Direction of a replay: `undo` restores the before state, `redo` the after state. */
+export type BranchOperationDirection = 'undo' | 'redo'
+
+/** Create one branch row: undo removes it, redo re-inserts it verbatim. */
+export interface BranchCreateSnapshot {
+  kind: 'create'
+  branch: BranchHistoryRow
+}
+
+/** Rename one branch row: undo/redo swap the recorded names. */
+export interface BranchRenameSnapshot {
+  kind: 'rename'
+  branchId: string
+  beforeName: string | null
+  afterName: string | null
+}
+
+/**
+ * Move whole turns into a newly created child branch.
+ *
+ * `sourceOrderBefore` is the complete source-route owner order before the move
+ * (moved rows included), which is exactly what undo restores and redo re-splits
+ * deterministically. `reparented` carries the anchor-following ancestry change
+ * of every branch whose anchor message took part in the move.
+ */
+export interface BranchMoveSnapshot {
+  kind: 'move'
+  branch: BranchHistoryRow
+  sourceBranchId: string | null
+  movedMessageIds: string[]
+  sourceOrderBefore: string[]
+  reparented: Array<{ branchId: string; parentBefore: string | null; parentAfter: string }>
+}
+
+/**
+ * Delete one branch subtree.
+ *
+ * Carries every row the delete removed (branch rows root-first, owned
+ * messages/blocks/file references, touched segments plus the topic segment
+ * order), the post-delete state of each touched segment, and the inheritance
+ * boundaries the delete advanced. Undo restores all of it in one transaction,
+ * but only while the touched segments still hold the state the delete left;
+ * redo re-runs the deterministic subtree delete.
+ */
+export interface BranchDeleteSnapshot {
+  kind: 'delete'
+  rootBranchId: string
+  branches: BranchHistoryRow[]
+  messages: BranchHistoryMessageRow[]
+  blocks: BranchHistoryBlockRow[]
+  fileReferences: BranchHistoryFileReferenceRow[]
+  segments: BranchHistorySegmentRow[]
+  /**
+   * Main-captured post-delete state of every segment in `segments`, in the same
+   * order: the undo guard that keeps a newer membership/head/name/order edit (or
+   * a later segment delete) from being overwritten.
+   */
+  segmentsAfter: BranchHistorySegmentStateRow[]
+  segmentOrder: string[]
+  boundaries: InheritanceBoundarySnapshot[]
+}
+
+export type BranchOperationSnapshot =
+  | BranchCreateSnapshot
+  | BranchRenameSnapshot
+  | BranchMoveSnapshot
+  | BranchDeleteSnapshot
+
+/**
+ * @see IpcChannel.ChatDb_ReplayBranchOperation
+ *
+ * Replay one recorded branch operation in the requested direction. The
+ * `topicId` is the logical topic the snapshot belongs to; the snapshot is the
+ * exact Main-produced payload from the original mutation.
+ */
+export interface ReplayBranchOperationRequest {
+  topicId: string
+  direction: BranchOperationDirection
+  snapshot: BranchOperationSnapshot
+}
+
+/** @see IpcChannel.ChatDb_ReplayBranchOperation */
+export interface ReplayBranchOperationResponse {
+  topicId: string
+  kind: BranchOperationKind
+  direction: BranchOperationDirection
+  /** Branch rows removed by this replay (empty when none). */
+  branchIds: string[]
+  /** Message rows removed by this replay (empty when none). */
+  messageIds: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -2589,6 +2798,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:move-selected-turns-to-new-branch': {
     request: MoveSelectedTurnsToNewBranchRequest
     response: MoveSelectedTurnsToNewBranchResponse
+  }
+  'chatdb:replay-branch-operation': {
+    request: ReplayBranchOperationRequest
+    response: ReplayBranchOperationResponse
   }
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': {

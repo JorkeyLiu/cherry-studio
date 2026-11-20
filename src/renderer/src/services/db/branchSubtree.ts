@@ -8,6 +8,7 @@ import {
   deletionFallbackRequested
 } from '@renderer/store/topicBranch'
 
+import { pushBranchDeleteAction } from '../branchOperationHistory'
 import { dbService } from './DbService'
 
 const logger = loggerService.withContext('branchSubtree')
@@ -75,6 +76,10 @@ export async function deleteBranchSubtree(
   const beforeById = new Map(before.map((b) => [b.id, b]))
   const result = await dbService.deleteBranch(topicId, branchId)
   const deleted = new Set(result.deletedBranchIds)
+  // The delete is Main's committed authority result: its snapshot carries every
+  // row the subtree removed plus the boundaries it advanced, so undo restores
+  // the whole subtree and redo re-runs the same deterministic delete.
+  pushBranchDeleteAction(store.dispatch, topicId, result.historySnapshot)
   // Refresh the Main-authoritative catalog first (it prunes a stale active
   // branch automatically when it no longer exists).
   try {

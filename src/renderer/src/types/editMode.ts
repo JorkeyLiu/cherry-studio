@@ -1,4 +1,10 @@
-import type { InheritanceBoundarySnapshot, InsertMessageGroupIntent } from '@shared/chatDb'
+import type {
+  BranchDeleteSnapshot,
+  BranchHistoryRow,
+  BranchMoveSnapshot,
+  InheritanceBoundarySnapshot,
+  InsertMessageGroupIntent
+} from '@shared/chatDb'
 
 import type { Message, MessageBlock } from './newMessage'
 import type { TopicSegment } from './topicSegment'
@@ -132,14 +138,30 @@ export interface GroupAnchor {
 }
 
 // 撤销操作类型
-export type UndoActionType = 'paste' | 'delete' | 'cut_paste'
+export type UndoActionType =
+  | 'paste'
+  | 'delete'
+  | 'cut_paste'
+  | 'branch_create'
+  | 'branch_rename'
+  | 'branch_move'
+  | 'branch_delete'
 
+/**
+ * Fields every history action carries: identity, kind, time, and the topic
+ * whose authority the operation affects. Kind-specific payloads live on the
+ * concrete members, so a branch action never has to satisfy paste-only fields.
+ */
 interface BaseUndoAction {
   id: string
   type: UndoActionType
   timestamp: number
   /** Topic where the operation's primary effect occurs */
   targetTopicId: string
+}
+
+/** History fields shared by message-content operations (paste/delete/cut). */
+interface MessageContentUndoAction extends BaseUndoAction {
   /** IDs of messages inserted by this operation (for undo removal / redo re-insert) */
   insertedMessageIds: string[]
   /** Snapshot of inserted messages and blocks (for redo) */
@@ -148,7 +170,7 @@ interface BaseUndoAction {
   fileReferenceDeltas: Array<{ fileId: string; delta: number }>
 }
 
-export interface DeleteUndoAction extends BaseUndoAction {
+export interface DeleteUndoAction extends MessageContentUndoAction {
   type: 'delete'
   /**
    * Original stable root IDs supplied to the semantic delete command.
@@ -177,8 +199,16 @@ export interface DeleteUndoAction extends BaseUndoAction {
   boundarySnapshots?: InheritanceBoundarySnapshot[]
 }
 
-export interface PasteUndoAction extends BaseUndoAction {
+export interface PasteUndoAction extends MessageContentUndoAction {
   type: 'paste'
+  /**
+   * Route the paste actually wrote into (`null` = main route), captured from
+   * the authority execution. Undo/redo address that route instead of whatever
+   * route happens to be active later, so a branch switch between paste and
+   * undo can never retarget the removal or the re-insertion. Absent = legacy
+   * in-memory action without the fact (previous live-route behavior).
+   */
+  targetBranchId?: string | null
   /** Anchor message after the paste region (for redo positioning) */
   targetAnchorMessageId: string | null
   /** Fallback position index for redo */
@@ -189,7 +219,7 @@ export interface PasteUndoAction extends BaseUndoAction {
   targetSegmentSnapshots: TopicSegment[]
 }
 
-export interface CutPasteUndoAction extends BaseUndoAction {
+export interface CutPasteUndoAction extends MessageContentUndoAction {
   type: 'cut_paste'
   /** Anchor message after the paste region in target topic (for redo paste positioning) */
   targetAnchorMessageId: string | null
@@ -237,7 +267,59 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   targetSegmentSnapshots: TopicSegment[]
 }
 
-export type UndoAction = DeleteUndoAction | PasteUndoAction | CutPasteUndoAction
+/**
+ * One recorded branch-creation: undo removes the created branch (only while it
+ * is still the empty leaf this action produced), redo re-inserts the same row.
+ */
+export interface BranchCreateUndoAction extends BaseUndoAction {
+  type: 'branch_create'
+  /** The persisted branch row Main created, replayed back verbatim. */
+  branch: BranchHistoryRow
+}
+
+/** One recorded branch rename: undo/redo swap the recorded names. */
+export interface BranchRenameUndoAction extends BaseUndoAction {
+  type: 'branch_rename'
+  branchId: string
+  beforeName: string | null
+  afterName: string | null
+}
+
+/**
+ * One recorded move of whole turns to a new child branch. The snapshot is
+ * Main's own pre/post authority payload (source order before the move, moved
+ * message IDs, ancestry that followed its anchor, created branch row).
+ */
+export interface BranchMoveUndoAction extends BaseUndoAction {
+  type: 'branch_move'
+  snapshot: BranchMoveSnapshot
+}
+
+/**
+ * One recorded subtree delete. The snapshot carries every row the delete
+ * removed plus the inheritance boundaries it advanced, so undo restores the
+ * whole subtree and redo re-runs the same deterministic delete.
+ */
+export interface BranchDeleteUndoAction extends BaseUndoAction {
+  type: 'branch_delete'
+  rootBranchId: string
+  snapshot: BranchDeleteSnapshot
+}
+
+export type BranchUndoAction =
+  | BranchCreateUndoAction
+  | BranchRenameUndoAction
+  | BranchMoveUndoAction
+  | BranchDeleteUndoAction
+
+export type UndoAction =
+  | DeleteUndoAction
+  | PasteUndoAction
+  | CutPasteUndoAction
+  | BranchCreateUndoAction
+  | BranchRenameUndoAction
+  | BranchMoveUndoAction
+  | BranchDeleteUndoAction
 
 // 撤销栈 state
 export interface UndoStackState {

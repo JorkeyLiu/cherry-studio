@@ -1,6 +1,8 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   AppendMessageResponse,
+  BranchOperationDirection,
+  BranchOperationSnapshot,
   DeleteBranchResponse,
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
@@ -27,6 +29,7 @@ import type {
   RegenerateAssistantMessageRequest,
   RenameBranchResponse,
   ReorderAnswerGroupResponse,
+  ReplayBranchOperationResponse,
   ResendUserMessagesRequest,
   ResolveContextClosureRequest,
   ResolveContextClosureResult,
@@ -400,6 +403,18 @@ export interface MessageDataSource {
     expectedSelectedMessageIds?: string[],
     contextAnchorInheritance?: MoveContextAnchorInheritanceInput
   ): Promise<MoveSelectedTurnsToNewBranchResponse>
+
+  /**
+   * Replay one recorded branch operation (create/rename/move/delete) in the
+   * requested direction. Main owns the write, guards it against current
+   * authority state inside one transaction and fails closed with zero writes,
+   * so an operation-scoped undo/redo never overwrites unrelated edits.
+   */
+  replayBranchOperation?(
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchOperationSnapshot
+  ): Promise<ReplayBranchOperationResponse>
 
   // ============ Insert after stable anchor (S6.2c-2) ============
   /**

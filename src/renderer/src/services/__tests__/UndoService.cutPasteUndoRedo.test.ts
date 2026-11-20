@@ -40,6 +40,8 @@ const { mocks } = vi.hoisted(() => ({
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
+    commitUndoAction: vi.fn((id: string) => ({ type: 'commitUndoAction', payload: id })),
+    commitRedoAction: vi.fn((id: string) => ({ type: 'commitRedoAction', payload: id })),
     restoreSegmentsAfterUndo: vi.fn().mockResolvedValue(undefined),
     restoreTargetSegments: vi.fn().mockResolvedValue(undefined),
     syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined),
@@ -80,7 +82,11 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 
 vi.mock('@renderer/store/undoStack', () => ({
   prepareUndo: mocks.prepareUndo,
-  prepareRedo: mocks.prepareRedo
+  prepareRedo: mocks.prepareRedo,
+  commitUndoAction: mocks.commitUndoAction,
+  commitRedoAction: mocks.commitRedoAction,
+  beginHistoryReplay: vi.fn(),
+  endHistoryReplay: vi.fn()
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -233,8 +239,8 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
     // Complete success: history advances (action returned).
-    expect(result).not.toBeNull()
-    expect(result?.type).toBe('cut_paste')
+    expect(result.status).toBe('success')
+    expect(result.status === 'success' ? result.action.type : null).toBe('cut_paste')
     // Source restore ran FIRST while the anchoring copy still existed.
     expect(callOrder).toEqual(['source-restore', 'paste-delete'])
     // Source restore used the stable anchor referencing the inserted copy.
@@ -289,7 +295,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
     // Failure: history does not advance.
-    expect(result).toBeNull()
+    expect(result.status).toBe('failed')
     // Paste copies were never touched after the failed source restore.
     expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
     expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
@@ -354,7 +360,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Staged-cut authority helper with the stored route and complete member
     // roots in authority order (outside-loaded a2 included).
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
@@ -421,7 +427,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1'], null)
   })
@@ -467,7 +473,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Source restore addressed the staged source branch explicitly.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups.mock.calls[0][0]).toBe('topic-1')
@@ -512,7 +518,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
@@ -577,7 +583,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Target copy removal stays on the pinned original route.
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1'], 'branch-orig')
     expect(mocks.syncSegmentsAfterMessageDeletion).toHaveBeenCalledTimes(1)
@@ -637,7 +643,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Message phase still addressed at the staged routes.
     expect(mocks.insertMessageGroups.mock.calls[0][2]).toBe('branch-staged')
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1'], null)
@@ -699,7 +705,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Explicit main (null) is a pinned address, not an omission.
     expect(mocks.restoreSegmentsAfterUndo).toHaveBeenCalledTimes(1)
     expect(mocks.restoreSegmentsAfterUndo.mock.calls[0][3]).toBe(null)
@@ -756,7 +762,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
@@ -809,7 +815,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     expect(mocks.restoreSegmentsAfterUndo).toHaveBeenCalledTimes(1)
     // Omitted (undefined) preserves the legacy live-route path in the helper.
     expect(mocks.restoreSegmentsAfterUndo.mock.calls[0][3]).toBe(undefined)
@@ -856,7 +862,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result).not.toBeNull()
+    expect(result.status).toBe('success')
     // Source restore (boundary reverted) then target copy removal (a Main
     // delete that maintains its own boundaries without reporting them): both
     // directly affected topics are re-read, and no other topic is touched.

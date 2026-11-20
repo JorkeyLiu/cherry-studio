@@ -2,6 +2,8 @@ import db from '@renderer/databases'
 import type { Usage } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  BranchOperationDirection,
+  BranchOperationSnapshot,
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -22,6 +24,7 @@ import type {
   MoveContextAnchorInheritanceInput,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
+  ReplayBranchOperationResponse,
   ResendUserMessagesRequest,
   ResetMessagesForResendResponse,
   ResolveContextClosureRequest,
@@ -430,6 +433,14 @@ class DbService implements MessageDataSource {
       expectedSelectedMessageIds,
       contextAnchorInheritance
     )
+  }
+  replayBranchOperation(
+    topicId: string,
+    direction: BranchOperationDirection,
+    snapshot: BranchOperationSnapshot
+  ): Promise<ReplayBranchOperationResponse> {
+    if (!this.ordinarySource.replayBranchOperation) throw new Error('replayBranchOperation unavailable')
+    return this.ordinarySource.replayBranchOperation(topicId, direction, snapshot)
   }
   insertMessagesAfterAnchor(
     topicId: string,

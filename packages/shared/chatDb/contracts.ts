@@ -60,6 +60,7 @@ import type {
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ReplayBranchOperationRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -82,6 +83,7 @@ import type {
 } from './types'
 import {
   BLOCK_JSON_PROFILE,
+  MAX_ARRAY_LENGTH,
   validateIdField,
   validateIndex,
   validateIso8601Timestamp,
@@ -2277,7 +2279,8 @@ const DELETE_BRANCH_VALUE_KEYS = new Set([
   'remainingReferenceCounts',
   'deletedBranchIds',
   'deletedMessageIds',
-  'deletedBlockIds'
+  'deletedBlockIds',
+  'historySnapshot'
 ])
 
 const deleteBranchContract: ChatDbContract = {
@@ -2312,6 +2315,7 @@ const deleteBranchContract: ChatDbContract = {
       validateStringArray(v.deletedBranchIds, 'result.value.deletedBranchIds')
       validateStringArray(v.deletedMessageIds, 'result.value.deletedMessageIds')
       validateStringArray(v.deletedBlockIds, 'result.value.deletedBlockIds')
+      validateBranchDeleteHistorySnapshot(v.historySnapshot, 'result.value.historySnapshot')
     }
   }
 }
@@ -2325,7 +2329,8 @@ const MOVE_SELECTED_TURNS_VALUE_KEYS = new Set([
   'messages',
   'blocks',
   'resolvedContextAnchorGroupKey',
-  'sourceContextAnchorTransfer'
+  'sourceContextAnchorTransfer',
+  'historySnapshot'
 ])
 const MOVE_CONTEXT_ANCHOR_INHERITANCE_KEYS = new Set(['sourceAnchorGroupKey', 'contextCount'])
 const MOVE_SOURCE_ANCHOR_TRANSFER_KEYS = new Set(['fromGroupKey', 'toGroupKey'])
@@ -2458,6 +2463,7 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
       validateJsonObjectArrayBlock(v.parentBlocks, 'result.value.parentBlocks', BLOCK_JSON_PROFILE)
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      validateBranchMoveHistorySnapshot(v.historySnapshot, 'result.value.historySnapshot')
       // Optional, explicitly nullable: absent means Main produced no fact.
       const anchor = v.resolvedContextAnchorGroupKey
       if (anchor !== undefined) {
@@ -2515,6 +2521,391 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
         }
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Operation-scoped branch history replay
+//
+// The row shapes below are the persisted authority rows a branch mutation
+// returns and accepts back for undo/redo. Validation is explicit per field so
+// the replay command can never be used as a generic write capability.
+// ---------------------------------------------------------------------------
+
+type SnapshotFieldKind =
+  | 'string'
+  | 'nullable-string'
+  | 'integer'
+  | 'nullable-integer'
+  | 'boolean'
+  | 'json'
+  | 'string-array'
+
+function validateSnapshotField(value: unknown, path: string, kind: SnapshotFieldKind, channel: string): void {
+  switch (kind) {
+    case 'string':
+      validateNonEmptyString(value, path)
+      return
+    case 'nullable-string':
+      if (value === null) return
+      if (typeof value !== 'string') {
+        throw new ValidationError(path, `[${channel}] Expected string or null`)
+      }
+      return
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+        throw new ValidationError(path, `[${channel}] Expected a non-negative integer`)
+      }
+      return
+    case 'nullable-integer':
+      if (value === null) return
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        throw new ValidationError(path, `[${channel}] Expected an integer or null`)
+      }
+      return
+    case 'boolean':
+      if (typeof value !== 'boolean') {
+        throw new ValidationError(path, `[${channel}] Expected boolean`)
+      }
+      return
+    case 'json':
+      validateJsonObject(value, path)
+      return
+    case 'string-array':
+      validateStringArray(value, path)
+      return
+  }
+}
+
+function validateSnapshotRows(
+  value: unknown,
+  path: string,
+  channel: string,
+  fields: Record<string, SnapshotFieldKind>
+): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected an array of snapshot rows`)
+  }
+  if (value.length > MAX_ARRAY_LENGTH) {
+    throw new ValidationError(path, `[${channel}] Array length ${value.length} exceeds maximum (${MAX_ARRAY_LENGTH})`)
+  }
+  const allowed = new Set(Object.keys(fields))
+  const out: Record<string, unknown>[] = []
+  for (let i = 0; i < value.length; i++) {
+    const rowPath = `${path}[${i}]`
+    const row = value[i]
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      throw new ValidationError(rowPath, `[${channel}] Expected a plain snapshot row object`)
+    }
+    const proto = Object.getPrototypeOf(row)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError(rowPath, `[${channel}] Snapshot row must be a plain object`)
+    }
+    const rec = row as Record<string, unknown>
+    for (const key of Object.keys(rec)) {
+      if (!allowed.has(key)) {
+        throw new ValidationError(`${rowPath}.${key}`, `[${channel}] Unknown key in snapshot row: "${key}"`)
+      }
+    }
+    for (const [key, kind] of Object.entries(fields)) {
+      if (!(key in rec)) {
+        throw new ValidationError(`${rowPath}.${key}`, `[${channel}] Missing key in snapshot row: "${key}"`)
+      }
+      validateSnapshotField(rec[key], `${rowPath}.${key}`, kind, channel)
+    }
+    out.push(rec)
+  }
+  return out
+}
+
+const BRANCH_HISTORY_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  parentBranchId: 'nullable-string',
+  anchorMessageId: 'string',
+  name: 'nullable-string',
+  createdAt: 'nullable-string',
+  updatedAt: 'nullable-string',
+  overflow: 'json'
+}
+
+const BRANCH_HISTORY_MESSAGE_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  topicId: 'string',
+  branchId: 'nullable-string',
+  role: 'nullable-string',
+  content: 'nullable-string',
+  status: 'nullable-string',
+  askId: 'nullable-string',
+  model: 'nullable-string',
+  modelId: 'nullable-string',
+  assistantId: 'nullable-string',
+  createdAt: 'nullable-string',
+  updatedAt: 'nullable-string',
+  sortOrder: 'integer',
+  overflow: 'json'
+}
+
+const BRANCH_HISTORY_BLOCK_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  messageId: 'string',
+  type: 'nullable-string',
+  content: 'nullable-string',
+  status: 'nullable-string',
+  createdAt: 'nullable-string',
+  updatedAt: 'nullable-string',
+  sortOrder: 'integer',
+  overflow: 'json'
+}
+
+const BRANCH_HISTORY_FILE_REFERENCE_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  blockId: 'string',
+  fileId: 'string',
+  fileName: 'nullable-string',
+  filePath: 'nullable-string',
+  fileType: 'nullable-string',
+  count: 'nullable-integer',
+  overflow: 'json'
+}
+
+const BRANCH_HISTORY_SEGMENT_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  name: 'nullable-string',
+  createdAt: 'nullable-string',
+  updatedAt: 'nullable-string',
+  sortOrder: 'integer',
+  headerMessageId: 'nullable-string',
+  overflow: 'json',
+  memberIds: 'string-array'
+}
+
+const BRANCH_HISTORY_SEGMENT_STATE_ROW_FIELDS: Record<string, SnapshotFieldKind> = {
+  id: 'string',
+  exists: 'boolean',
+  name: 'nullable-string',
+  sortOrder: 'nullable-integer',
+  headerMessageId: 'nullable-string',
+  memberIds: 'string-array'
+}
+
+const BRANCH_MOVE_REPARENT_FIELDS: Record<string, SnapshotFieldKind> = {
+  branchId: 'string',
+  parentBefore: 'nullable-string',
+  parentAfter: 'string'
+}
+
+function validateSnapshotRow(
+  value: unknown,
+  path: string,
+  channel: string,
+  fields: Record<string, SnapshotFieldKind>
+): Record<string, unknown> {
+  const rows = validateSnapshotRows([value], path, channel, fields)
+  return rows[0]
+}
+
+/** Validate the branch-row payload of a create snapshot. */
+function validateBranchHistoryRow(value: unknown, path: string, channel: string): void {
+  validateSnapshotRow(value, path, channel, BRANCH_HISTORY_ROW_FIELDS)
+}
+
+/** Validate the move history snapshot returned by / replayed into Main. */
+/** Validate a plain snapshot object and reject unknown keys. */
+function validateSnapshotObject(
+  value: unknown,
+  path: string,
+  channel: string,
+  allowed: readonly string[]
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected a snapshot object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] Snapshot must be a plain object`)
+  }
+  const rec = value as Record<string, unknown>
+  const allowedKeys = new Set(allowed)
+  for (const key of Object.keys(rec)) {
+    if (!allowedKeys.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in snapshot: "${key}"`)
+    }
+  }
+  return rec
+}
+
+/** Validate the move history snapshot returned by / replayed into Main. */
+export function validateBranchMoveHistorySnapshot(value: unknown, path: string): void {
+  const channel = 'chatdb:move-selected-turns-to-new-branch'
+  const rec = validateSnapshotObject(value, path, channel, [
+    'kind',
+    'branch',
+    'sourceBranchId',
+    'movedMessageIds',
+    'sourceOrderBefore',
+    'reparented'
+  ])
+  if (rec.kind !== 'move') {
+    throw new ValidationError(`${path}.kind`, `[${channel}] Expected snapshot kind "move"`)
+  }
+  validateBranchHistoryRow(rec.branch, `${path}.branch`, channel)
+  validateOptionalBranchId(rec.sourceBranchId, `${path}.sourceBranchId`)
+  validateStringArray(rec.movedMessageIds, `${path}.movedMessageIds`)
+  if ((rec.movedMessageIds as string[]).length === 0) {
+    throw new ValidationError(`${path}.movedMessageIds`, `[${channel}] Expected at least one moved message`)
+  }
+  validateStringArray(rec.sourceOrderBefore, `${path}.sourceOrderBefore`)
+  if ((rec.sourceOrderBefore as string[]).length === 0) {
+    throw new ValidationError(`${path}.sourceOrderBefore`, `[${channel}] Expected a non-empty source order`)
+  }
+  validateSnapshotRows(rec.reparented, `${path}.reparented`, channel, BRANCH_MOVE_REPARENT_FIELDS)
+}
+
+/** Validate the delete history snapshot returned by / replayed into Main. */
+export function validateBranchDeleteHistorySnapshot(value: unknown, path: string): void {
+  const channel = 'chatdb:delete-branch'
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected a delete history snapshot object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] Delete history snapshot must be a plain object`)
+  }
+  const rec = value as Record<string, unknown>
+  const allowed = new Set([
+    'kind',
+    'rootBranchId',
+    'branches',
+    'messages',
+    'blocks',
+    'fileReferences',
+    'segments',
+    'segmentsAfter',
+    'segmentOrder',
+    'boundaries'
+  ])
+  for (const key of Object.keys(rec)) {
+    if (!allowed.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in delete history snapshot: "${key}"`)
+    }
+  }
+  if (rec.kind !== 'delete') {
+    throw new ValidationError(`${path}.kind`, `[${channel}] Expected snapshot kind "delete"`)
+  }
+  validateNonEmptyString(rec.rootBranchId, `${path}.rootBranchId`)
+  const branches = validateSnapshotRows(rec.branches, `${path}.branches`, channel, BRANCH_HISTORY_ROW_FIELDS)
+  if (branches.length === 0) {
+    throw new ValidationError(`${path}.branches`, `[${channel}] Expected at least the deleted root branch row`)
+  }
+  if (branches[0].id !== rec.rootBranchId) {
+    throw new ValidationError(`${path}.branches[0].id`, `[${channel}] Branch rows must be subtree-root first`)
+  }
+  validateSnapshotRows(rec.messages, `${path}.messages`, channel, BRANCH_HISTORY_MESSAGE_ROW_FIELDS)
+  validateSnapshotRows(rec.blocks, `${path}.blocks`, channel, BRANCH_HISTORY_BLOCK_ROW_FIELDS)
+  validateSnapshotRows(rec.fileReferences, `${path}.fileReferences`, channel, BRANCH_HISTORY_FILE_REFERENCE_ROW_FIELDS)
+  validateSnapshotRows(rec.segments, `${path}.segments`, channel, BRANCH_HISTORY_SEGMENT_ROW_FIELDS)
+  const segmentsAfter = validateSnapshotRows(
+    rec.segmentsAfter,
+    `${path}.segmentsAfter`,
+    channel,
+    BRANCH_HISTORY_SEGMENT_STATE_ROW_FIELDS
+  )
+  if (segmentsAfter.length !== (rec.segments as unknown[]).length) {
+    throw new ValidationError(
+      `${path}.segmentsAfter`,
+      `[${channel}] Post-delete segment state must cover every touched segment`
+    )
+  }
+  validateStringArray(rec.segmentOrder, `${path}.segmentOrder`)
+  validateInheritanceBoundarySnapshots(rec.boundaries, `${path}.boundaries`, channel)
+}
+
+/** Validate any branch operation snapshot carried by a replay request. */
+export function validateBranchOperationSnapshot(value: unknown, path: string): void {
+  const channel = 'chatdb:replay-branch-operation'
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected a branch operation snapshot object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] Snapshot must be a plain object`)
+  }
+  const kind = (value as Record<string, unknown>).kind
+  switch (kind) {
+    case 'create': {
+      const row = validateSnapshotRow(value, path, channel, { kind: 'string', branch: 'json' } as unknown as Record<
+        string,
+        SnapshotFieldKind
+      >)
+      validateBranchHistoryRow(row.branch, `${path}.branch`, channel)
+      return
+    }
+    case 'rename': {
+      const row = validateSnapshotRow(value, path, channel, {
+        kind: 'string',
+        branchId: 'string',
+        beforeName: 'nullable-string',
+        afterName: 'nullable-string'
+      } as unknown as Record<string, SnapshotFieldKind>)
+      if (row.beforeName === row.afterName) {
+        throw new ValidationError(`${path}.afterName`, `[${channel}] Rename snapshot must change the name`)
+      }
+      return
+    }
+    case 'move':
+      validateBranchMoveHistorySnapshot(value, path)
+      return
+    case 'delete':
+      validateBranchDeleteHistorySnapshot(value, path)
+      return
+    default:
+      throw new ValidationError(`${path}.kind`, `[${channel}] Unknown branch operation kind: ${String(kind)}`)
+  }
+}
+
+const REPLAY_BRANCH_OPERATION_VALUE_KEYS = new Set(['topicId', 'kind', 'direction', 'branchIds', 'messageIds'])
+
+const replayBranchOperationContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'direction', 'snapshot'),
+  validate(value: unknown): void {
+    validateRequest(value, replayBranchOperationContract.allowedKeys)
+    const req = value as ReplayBranchOperationRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (req.direction !== 'undo' && req.direction !== 'redo') {
+      throw new ValidationError('request.direction', '[chatdb:replay-branch-operation] Expected "undo" or "redo"')
+    }
+    validateBranchOperationSnapshot(req.snapshot, 'request.snapshot')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:replay-branch-operation', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true) return
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', '[chatdb:replay-branch-operation] Expected an object result')
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', '[chatdb:replay-branch-operation] Success value must be a plain object')
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!REPLAY_BRANCH_OPERATION_VALUE_KEYS.has(key)) {
+        throw new ValidationError(
+          `result.value.${key}`,
+          `[chatdb:replay-branch-operation] Unknown key in success value: "${key}"`
+        )
+      }
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (v.kind !== 'create' && v.kind !== 'rename' && v.kind !== 'move' && v.kind !== 'delete') {
+      throw new ValidationError('result.value.kind', '[chatdb:replay-branch-operation] Unknown operation kind')
+    }
+    if (v.direction !== 'undo' && v.direction !== 'redo') {
+      throw new ValidationError('result.value.direction', '[chatdb:replay-branch-operation] Unknown direction')
+    }
+    validateStringArray(v.branchIds, 'result.value.branchIds')
+    validateStringArray(v.messageIds, 'result.value.messageIds')
   }
 }
 
@@ -5959,6 +6350,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:rename-branch': renameBranchContract,
   'chatdb:delete-branch': deleteBranchContract,
   'chatdb:move-selected-turns-to-new-branch': moveSelectedTurnsToNewBranchContract,
+  'chatdb:replay-branch-operation': replayBranchOperationContract,
   // Cross-topic history references (local-only; Reference/Copy = Reference)
   'chatdb:create-referenced-topic': createReferencedTopicContract,
   // Phase 5.1B: compound mutations

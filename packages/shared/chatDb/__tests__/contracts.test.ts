@@ -99,7 +99,10 @@ describe('chatDbContracts', () => {
     'chatdb:export-topic-data',
     'chatdb:import-topic-data',
     // Cross-topic history references (local-only live shared prefix)
-    'chatdb:create-referenced-topic'
+    // Cross-topic history references (local-only live shared prefix)
+    'chatdb:create-referenced-topic',
+    // Operation-scoped branch undo/redo replay (branch create/move/delete/rename)
+    'chatdb:replay-branch-operation'
   ]
 
   it('has entries for all expected channels', () => {
@@ -3703,7 +3706,29 @@ describe('delete-branch contract (topic-internal branches)', () => {
           remainingReferenceCounts: {},
           deletedBranchIds: ['b-1'],
           deletedMessageIds: [],
-          deletedBlockIds: []
+          deletedBlockIds: [],
+          historySnapshot: {
+            kind: 'delete',
+            rootBranchId: 'b-1',
+            branches: [
+              {
+                id: 'b-1',
+                parentBranchId: null,
+                anchorMessageId: 'm-0',
+                name: null,
+                createdAt: null,
+                updatedAt: null,
+                overflow: {}
+              }
+            ],
+            messages: [],
+            blocks: [],
+            fileReferences: [],
+            segments: [],
+            segmentsAfter: [],
+            segmentOrder: [],
+            boundaries: []
+          }
         }
       })
     ).not.toThrow()
@@ -4485,7 +4510,10 @@ describe('coverage consistency', () => {
     'chatdb:export-topic-data',
     'chatdb:import-topic-data',
     // Cross-topic history references (local-only live shared prefix)
-    'chatdb:create-referenced-topic'
+    // Cross-topic history references (local-only live shared prefix)
+    'chatdb:create-referenced-topic',
+    // Operation-scoped branch undo/redo replay (branch create/move/delete/rename)
+    'chatdb:replay-branch-operation'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

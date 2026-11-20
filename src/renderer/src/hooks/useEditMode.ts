@@ -527,9 +527,13 @@ export function useCreateEditMode(
     if (isProcessing) return
     dispatch(startProcessing())
     try {
-      const action = await executeUndo(dispatch, store.getState)
-      if (action) {
+      const outcome = await executeUndo(dispatch, store.getState)
+      if (outcome.status === 'success') {
         window.toast.success(i18n.t('chat.edit.undone'))
+      } else if (outcome.status === 'failed') {
+        // Explicit, localized failure: the action stays on the stack so the
+        // user can retry, and nothing claims the undo happened.
+        window.toast.error(i18n.t('chat.edit.undo_failed'))
       }
     } finally {
       dispatch(finishProcessing())
@@ -541,9 +545,11 @@ export function useCreateEditMode(
     if (isProcessing) return
     dispatch(startProcessing())
     try {
-      const action = await executeRedo(dispatch, store.getState)
-      if (action) {
+      const outcome = await executeRedo(dispatch, store.getState)
+      if (outcome.status === 'success') {
         window.toast.success(i18n.t('chat.edit.redone'))
+      } else if (outcome.status === 'failed') {
+        window.toast.error(i18n.t('chat.edit.redo_failed'))
       }
     } finally {
       dispatch(finishProcessing())
@@ -672,6 +678,9 @@ export function useCreateEditMode(
       hasClipboard: clipboard.items.length > 0,
       canUndo: undoStack.undoStack.length > 0,
       canRedo: undoStack.redoStack.length > 0,
+      // In-flight history replay: undo/redo controls stay disabled until the
+      // authority command and its projection convergence settled.
+      isProcessing,
       // BRANCH-12: 选集写能力 — Cut/Delete/segment 写操作 disabled 门禁；
       // Copy/Paste 意图不受此门禁限制（paste 源删除由 Main 最终校验）。
       isSelectionMutable,
@@ -699,6 +708,7 @@ export function useCreateEditMode(
       clipboard.items.length,
       undoStack.undoStack.length,
       undoStack.redoStack.length,
+      isProcessing,
       isSelectionMutable,
       toggleEditMode,
       handleGroupClick,

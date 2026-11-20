@@ -2,6 +2,25 @@ import { describe, expect, it } from 'vitest'
 
 import { getContract } from '../contracts'
 
+// Minimal well-formed move snapshot: replaying a move needs the created branch
+// row plus the pre-move source ordering Main itself reported.
+const MOVE_HISTORY_SNAPSHOT = {
+  kind: 'move',
+  branch: {
+    id: 'b1',
+    parentBranchId: null,
+    anchorMessageId: 'aA',
+    name: 'Moved',
+    createdAt: null,
+    updatedAt: null,
+    overflow: {}
+  },
+  sourceBranchId: null,
+  movedMessageIds: ['uB'],
+  sourceOrderBefore: ['uB', 'aB'],
+  reparented: []
+}
+
 describe('move-selected-turns-to-new-branch contract', () => {
   it('accepts a minimal valid request', () => {
     const contract = getContract('chatdb:move-selected-turns-to-new-branch')
@@ -63,7 +82,8 @@ describe('move-selected-turns-to-new-branch contract', () => {
           parentMessages: [],
           parentBlocks: [],
           messages: [],
-          blocks: []
+          blocks: [],
+          historySnapshot: MOVE_HISTORY_SNAPSHOT
         }
       })
     ).not.toThrow()
@@ -122,7 +142,8 @@ describe('move-selected-turns-to-new-branch contract', () => {
       parentMessages: [],
       parentBlocks: [],
       messages: [],
-      blocks: []
+      blocks: [],
+      historySnapshot: MOVE_HISTORY_SNAPSHOT
     }
     expect(() => contract.validateResult({ ok: true, value: { ...value } })).not.toThrow()
     expect(() =>
@@ -156,6 +177,7 @@ describe('move-selected-turns-to-new-branch contract', () => {
       parentBlocks: [],
       messages: [],
       blocks: [],
+      historySnapshot: MOVE_HISTORY_SNAPSHOT,
       resolvedContextAnchorGroupKey: 'uB'
     }
     expect(() =>

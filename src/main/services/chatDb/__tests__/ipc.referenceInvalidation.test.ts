@@ -60,7 +60,36 @@ const {
   mockAggregateRestore: vi.fn(() => ({ ok: true as const, value: null })),
   mockAggregateDeleteBranch: vi.fn(() => ({
     ok: true as const,
-    value: { deletedBranchIds: ['branch-1'], deletedMessageIds: [], deletedBlockIds: [] }
+    value: {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedBranchIds: ['branch-1'],
+      deletedMessageIds: [],
+      deletedBlockIds: [],
+      // The delete reports its own authority snapshot (branch undo/redo replay).
+      historySnapshot: {
+        kind: 'delete',
+        rootBranchId: 'branch-1',
+        branches: [
+          {
+            id: 'branch-1',
+            parentBranchId: null,
+            anchorMessageId: 'msg-1',
+            name: null,
+            createdAt: null,
+            updatedAt: null,
+            overflow: {}
+          }
+        ],
+        messages: [],
+        blocks: [],
+        fileReferences: [],
+        segments: [],
+        segmentsAfter: [],
+        segmentOrder: [],
+        boundaries: []
+      }
+    }
   })),
   mockAggregateHardDelete: vi.fn(() => ({
     ok: true as const,

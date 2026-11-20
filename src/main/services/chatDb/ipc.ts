@@ -71,6 +71,7 @@ import type {
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ReplayBranchOperationRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -235,7 +236,10 @@ const REFERENCE_SOURCE_INVALIDATION_CHANNELS: ReadonlySet<string> = new Set<stri
   // Branch removal changes a source route: a target whose captured source
   // branch (or an ancestor of it) is removed stales to 'missing', so the
   // source topic's targets re-read.
-  IpcChannel.ChatDb_DeleteBranch
+  IpcChannel.ChatDb_DeleteBranch,
+  // A replay restores or removes branch rows and the messages anchored to
+  // them, so a source route can change in either direction.
+  IpcChannel.ChatDb_ReplayBranchOperation
 ])
 
 function broadcastHistoryReferenceInvalidation(sourceTopicId: string, targetTopicIds: string[]): void {
@@ -732,6 +736,13 @@ export function registerChatDbIpc(): () => void {
       req.expectedSelectedMessageIds,
       req.contextAnchorInheritance
     )
+  })
+
+  // Operation-scoped branch history replay (undo/redo of a recorded branch
+  // create/rename/move/delete). Guarded in Main; the renderer only holds the
+  // session history and the exact payload the original mutation returned.
+  handleCommand(IpcChannel.ChatDb_ReplayBranchOperation, (agg, req: ReplayBranchOperationRequest) => {
+    return agg.replayBranchOperation(req.topicId, req.direction, req.snapshot)
   })
 
   // 29d. cross-topic history references (Reference/Copy = Reference): atomic

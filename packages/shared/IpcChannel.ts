@@ -325,6 +325,8 @@ export enum IpcChannel {
   ChatDb_RenameBranch = 'chatdb:rename-branch',
   ChatDb_DeleteBranch = 'chatdb:delete-branch',
   ChatDb_MoveSelectedTurnsToNewBranch = 'chatdb:move-selected-turns-to-new-branch',
+  // Operation-scoped branch history replay (undo/redo of create/move/delete/rename)
+  ChatDb_ReplayBranchOperation = 'chatdb:replay-branch-operation',
 
   // Cross-topic history references — local-only live shared prefix (Reference)
   ChatDb_CreateReferencedTopic = 'chatdb:create-referenced-topic',

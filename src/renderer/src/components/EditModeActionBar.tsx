@@ -11,6 +11,7 @@ const EditModeActionBar = () => {
     hasClipboard,
     canUndo,
     canRedo,
+    isProcessing,
     isSelectionMutable,
     handleCopy,
     handleCut,
@@ -93,7 +94,8 @@ const EditModeActionBar = () => {
               color="default"
               variant="text"
               icon={<Undo2 size={16} />}
-              disabled={!canUndo}
+              data-testid="edit-undo-btn"
+              disabled={!canUndo || isProcessing}
               onClick={() => void handleUndo()}
             />
           </Tooltip>
@@ -103,7 +105,8 @@ const EditModeActionBar = () => {
               color="default"
               variant="text"
               icon={<Redo2 size={16} />}
-              disabled={!canRedo}
+              data-testid="edit-redo-btn"
+              disabled={!canRedo || isProcessing}
               onClick={() => void handleRedo()}
             />
           </Tooltip>

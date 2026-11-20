@@ -215,7 +215,8 @@ function isBranchLocalRequest(channel: string, request: any): boolean {
     channel === IpcChannel.ChatDb_CreateBranch ||
     channel === IpcChannel.ChatDb_ListBranches ||
     channel === IpcChannel.ChatDb_RenameBranch ||
-    channel === IpcChannel.ChatDb_DeleteBranch
+    channel === IpcChannel.ChatDb_DeleteBranch ||
+    channel === IpcChannel.ChatDb_ReplayBranchOperation
   ) {
     return true
   }
@@ -1112,6 +1113,7 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
       case IpcChannel.ChatDb_ListBranches:
       case IpcChannel.ChatDb_RenameBranch:
       case IpcChannel.ChatDb_DeleteBranch:
+      case IpcChannel.ChatDb_ReplayBranchOperation:
       case IpcChannel.ChatDb_InsertMessagesAfterAnchor:
       case IpcChannel.ChatDb_SelectAnswerMessage:
       case IpcChannel.ChatDb_SelectUsefulAnswer:

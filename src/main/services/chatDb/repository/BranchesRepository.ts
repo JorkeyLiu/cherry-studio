@@ -173,8 +173,12 @@ export class BranchesRepository {
 
   /**
    * Rename a branch (name-only mutation; identity columns rejected).
+   *
+   * `null` clears the name back to "unnamed branch", which is a state a branch
+   * can legitimately be created with, so a rename replay must be able to
+   * restore it.
    */
-  rename(id: string, name: string): AffectedCount {
+  rename(id: string, name: string | null): AffectedCount {
     const current = this.db.select().from(topicBranches).where(eq(topicBranches.id, id)).get()
     if (!current) return { affected: 0 }
     const patch: EntityPatchInput<TopicBranchData> = { name, updatedAt: new Date().toISOString() }
@@ -220,9 +224,11 @@ export class BranchesRepository {
    * otherwise it would resolve through the missing-anchor degradation and
    * silently lose the history it inherited. Ancestry is re-pointed only;
    * `anchorMessageId` and `name` stay untouched. Callers own the cycle and depth
-   * guards; unknown ids are a no-op.
+   * `anchorMessageId` and `name` stay untouched; `null` re-parents to the main
+   * route, which is the state an anchor-following re-parent moved away from.
+   * Callers own the cycle and depth guards; unknown ids are a no-op.
    */
-  setParent(id: string, parentBranchId: string): AffectedCount {
+  setParent(id: string, parentBranchId: string | null): AffectedCount {
     const current = this.db.select().from(topicBranches).where(eq(topicBranches.id, id)).get()
     if (!current) return { affected: 0 }
     const rowPatch = topicBranchToRowPatch({ parentBranchId, updatedAt: new Date().toISOString() })

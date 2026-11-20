@@ -42,6 +42,37 @@ vi.mock('../DbService', () => ({
 
 import { deleteBranchSubtree } from '../branchSubtree'
 
+/**
+ * Delete result as Main reports it: the branch delete returns its own authority
+ * snapshot alongside the removed IDs (branch undo/redo replay payload).
+ */
+const deleteResult = (deletedBranchIds: string[]) => ({
+  affectedFileIds: [] as string[],
+  remainingReferenceCounts: {} as Record<string, number>,
+  deletedBranchIds,
+  deletedMessageIds: [] as string[],
+  deletedBlockIds: [] as string[],
+  historySnapshot: {
+    kind: 'delete' as const,
+    rootBranchId: deletedBranchIds[0],
+    branches: deletedBranchIds.map((id, index) => ({
+      id,
+      parentBranchId: index === 0 ? null : deletedBranchIds[0],
+      anchorMessageId: `m-${id}`,
+      name: null,
+      createdAt: null,
+      updatedAt: null,
+      overflow: {}
+    })),
+    messages: [],
+    blocks: [],
+    fileReferences: [],
+    segments: [],
+    segmentOrder: [],
+    boundaries: []
+  }
+})
+
 describe('deleteBranchSubtree', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -49,7 +80,7 @@ describe('deleteBranchSubtree', () => {
   })
 
   it('deletes one branch subtree in Main, refreshes the catalog, and falls back to the nearest surviving ancestor', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-1', 'b-2'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1', 'b-2']))
     const result = await deleteBranchSubtree('t-1', 'b-1', 'b-2')
     expect(deleteBranchMock).toHaveBeenCalledWith('t-1', 'b-1')
     expect(result.deletedBranchIds).toEqual(['b-1', 'b-2'])
@@ -61,14 +92,14 @@ describe('deleteBranchSubtree', () => {
   })
 
   it('keeps the active route when it survives outside the deleted subtree', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-9'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-9']))
     const result = await deleteBranchSubtree('t-1', 'b-9', 'b-2')
     expect(result.fallbackBranchId).toBe('b-2')
     expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'topicBranch/activeBranchReset' }))
   })
 
   it('deleting the last branch restores the never-branched state (fallback main)', async () => {
-    deleteBranchMock.mockResolvedValue({ deletedBranchIds: ['b-1'] })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1']))
     const result = await deleteBranchSubtree('t-1', 'b-1', 'b-1')
     expect(result.fallbackBranchId).toBeNull()
     expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: 'topicBranch/activeBranchReset' }))

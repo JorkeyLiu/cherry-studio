@@ -106,7 +106,9 @@ vi.mock('@renderer/store/topicSegment', () => ({
 }))
 
 vi.mock('@renderer/store/undoStack', () => ({
-  pushUndoAction: vi.fn((p: unknown) => ({ type: 'undoStack/pushUndoAction', payload: p }))
+  pushUndoAction: vi.fn((p: unknown) => ({ type: 'undoStack/pushUndoAction', payload: p })),
+  recordUndoAction: (dispatch: (action: unknown) => unknown, action: unknown) =>
+    dispatch({ type: 'undoStack/pushUndoAction', payload: action })
 }))
 
 // ── Fixtures ───────────────────────────────────────────────────────────────

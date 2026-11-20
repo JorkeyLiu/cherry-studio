@@ -1002,10 +1002,12 @@
       "pasteAction": "[to be translated]:Paste",
       "pasted": "[to be translated]:Pasted {{count}} message(s)",
       "redoAction": "[to be translated]:Redo",
+      "redo_failed": "[to be translated]:Redo failed",
       "redone": "[to be translated]:Redone",
       "selectFirst": "[to be translated]:Please select messages first",
       "selected": "[to be translated]:{{count}} selected",
       "undoAction": "[to be translated]:Undo",
+      "undo_failed": "[to be translated]:Undo failed",
       "undone": "[to be translated]:Undone"
     },
     "input": {
@@ -1268,7 +1270,7 @@
         "current": "[to be translated]:Current",
         "default_name": "[to be translated]:New Branch",
         "delete": "[to be translated]:Delete Branch",
-        "delete_confirm": "[to be translated]:Delete this branch and all its descendant branches? This cannot be undone.",
+        "delete_confirm": "[to be translated]:Delete this branch and all its descendant branches?",
         "deleted": "[to be translated]:Branch deleted",
         "expand": "[to be translated]:Expand branch",
         "rename": "[to be translated]:Rename Branch",

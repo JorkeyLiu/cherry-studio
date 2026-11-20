@@ -74,7 +74,8 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/undoStack', () => ({
-  pushUndoAction: mocks.pushUndoAction
+  pushUndoAction: mocks.pushUndoAction,
+  recordUndoAction: (dispatch: (action: unknown) => unknown, action: unknown) => dispatch(mocks.pushUndoAction(action))
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({

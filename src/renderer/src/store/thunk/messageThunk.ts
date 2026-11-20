@@ -25,6 +25,7 @@ import {
 } from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { pushBranchCreateAction, pushBranchMoveAction } from '@renderer/services/branchOperationHistory'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
@@ -2814,6 +2815,9 @@ export const createBranchThunk =
       } catch {
         // Best-effort inheritance; never break branch creation.
       }
+      // The created node is Main's own committed result: record the branch row
+      // so a later undo can remove exactly this empty leaf and redo restore it.
+      pushBranchCreateAction(dispatch, topicId, result.branch)
       return { branchId: newBranchId, anchorMessageId: result.branch.anchorMessageId }
     } catch (error) {
       logger.error(`[createBranchThunk] Failed to create branch:`, error as Error)
@@ -3141,6 +3145,10 @@ export const moveSelectedTurnsToNewBranchThunk =
       anchorMessageId: result.anchorMessageId,
       movedMessageIds: result.movedMessageIds
     }
+    // The move is Main's committed authority result: record its own snapshot so
+    // undo restores the source ownership/order and redo re-splits it, with the
+    // same branch and message identities.
+    pushBranchMoveAction(dispatch, topicId, result.historySnapshot)
     // Write the committed destination anchor (and the deterministic source
     // transfer, when Main reported one) BEFORE this thunk's own
     // activeBranchSet and before any await gap: the commit is durable, so the

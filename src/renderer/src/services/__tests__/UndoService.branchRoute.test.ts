@@ -30,6 +30,8 @@ const { mocks } = vi.hoisted(() => ({
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
+    commitUndoAction: vi.fn((id: string) => ({ type: 'commitUndoAction', payload: id })),
+    commitRedoAction: vi.fn((id: string) => ({ type: 'commitRedoAction', payload: id })),
     restoreSegmentsAfterUndo: vi.fn(),
     syncSegmentsAfterMessageDeletion: vi.fn(),
     deleteSegmentsBySnapshots: vi.fn()
@@ -71,7 +73,11 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 
 vi.mock('@renderer/store/undoStack', () => ({
   prepareUndo: mocks.prepareUndo,
-  prepareRedo: mocks.prepareRedo
+  prepareRedo: mocks.prepareRedo,
+  commitUndoAction: mocks.commitUndoAction,
+  commitRedoAction: mocks.commitRedoAction,
+  beginHistoryReplay: vi.fn(),
+  endHistoryReplay: vi.fn()
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -198,7 +204,7 @@ describe('UndoService branch route (016)', () => {
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result?.type).toBe('delete')
+    expect(result.status === 'success' ? result.action.type : null).toBe('delete')
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['u1'], 'branch-7')
   })
 
@@ -209,7 +215,7 @@ describe('UndoService branch route (016)', () => {
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result?.type).toBe('delete')
+    expect(result.status === 'success' ? result.action.type : null).toBe('delete')
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['u1'], null)
   })
 
@@ -221,7 +227,7 @@ describe('UndoService branch route (016)', () => {
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result?.type).toBe('paste')
+    expect(result.status === 'success' ? result.action.type : null).toBe('paste')
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['p1'], 'branch-7')
   })
 
@@ -233,7 +239,7 @@ describe('UndoService branch route (016)', () => {
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
-    expect(result?.type).toBe('paste')
+    expect(result.status === 'success' ? result.action.type : null).toBe('paste')
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['p1'], null)
   })
 })

@@ -15,7 +15,7 @@ import {
 } from '@renderer/store/thunk/messageThunk'
 import { deleteSegmentsBySnapshots, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import { pushUndoAction } from '@renderer/store/undoStack'
+import { recordUndoAction } from '@renderer/store/undoStack'
 import type {
   ClipboardItem,
   ClipboardSegmentSnapshot,
@@ -770,7 +770,7 @@ export async function pasteMessages(
       pastedBlocksSnapshot: allInsertedBlocks,
       fileReferenceDeltas
     }
-    dispatch(pushUndoAction(undoAction))
+    recordUndoAction(dispatch, undoAction)
   } else {
     const undoAction: PasteUndoAction = {
       id: uuidv4(),
@@ -781,12 +781,15 @@ export async function pasteMessages(
       targetInsertPositionIndex: legacyPositionIndex,
       targetAnchorMessageId: anchorMessageId,
       targetInsertIntent: stableIntent,
+      // The route this paste actually wrote into: undo/redo address it instead
+      // of whatever route happens to be active later.
+      targetBranchId,
       targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
       fileReferenceDeltas
     }
-    dispatch(pushUndoAction(undoAction))
+    recordUndoAction(dispatch, undoAction)
   }
 
   // Committed convergence failure surfaces AFTER real cut bookkeeping above
@@ -880,7 +883,7 @@ export async function deleteSelectedMessages(
     boundarySnapshots: result.undoParts.boundarySnapshots
   }
 
-  dispatch(pushUndoAction(undoAction))
+  recordUndoAction(dispatch, undoAction)
 
   logger.info(
     `[deleteSelectedMessages] Deleted ${result.response.deletedMessageIds.length} messages from ${rootIds.length} groups`
@@ -943,7 +946,7 @@ export async function deleteSingleMessage(
     boundarySnapshots: result.undoParts.boundarySnapshots
   }
 
-  dispatch(pushUndoAction(undoAction))
+  recordUndoAction(dispatch, undoAction)
 
   logger.info(
     `[deleteSingleMessage] Deleted ${result.response.deletedMessageIds.length} messages from topic ${topicId}`

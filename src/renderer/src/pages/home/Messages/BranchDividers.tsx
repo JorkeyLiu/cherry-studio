@@ -1,8 +1,8 @@
 import { loggerService } from '@logger'
 import { BranchRouteOptionRow } from '@renderer/pages/home/Messages/branchRouteOption'
 import { requestTopicBranches } from '@renderer/pages/home/Messages/useBranchTree'
+import { renameBranchWithHistory } from '@renderer/services/branchOperationHistory'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
-import { dbService } from '@renderer/services/db/DbService'
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
@@ -263,7 +263,9 @@ export const ForkDivider = ({
       return
     }
     try {
-      await dbService.renameBranch(topicId, branchId, next)
+      // Rename records one history action (undo/redo swap the two names). The
+      // name the row was showing is the value the rename moves away from.
+      await renameBranchWithHistory(dispatch, topicId, branchId, byId.get(branchId)?.name ?? null, next)
       requestTopicBranches(dispatch, topicId)
       setRenamingId(null)
     } catch (error) {

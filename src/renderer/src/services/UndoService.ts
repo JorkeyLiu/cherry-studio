@@ -12,6 +12,7 @@ import {
   executeDeleteMessagesWithDependents,
   executeStagedCutSourceDelete,
   fetchTopicBranchesThunk,
+  loadRouteMessagesThunk,
   publishDeleteAuthorityCatalog
 } from '@renderer/store/thunk/messageThunk'
 import {
@@ -20,9 +21,15 @@ import {
   restoreTargetSegments,
   syncSegmentsAfterMessageDeletion
 } from '@renderer/store/thunk/topicSegmentThunk'
-import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
+import {
+  activeBranchReset,
+  activeBranchSet,
+  selectActiveBranchId,
+  selectTopicBranches
+} from '@renderer/store/topicBranch'
+import { beginHistoryReplay, commitRedoAction, commitUndoAction, endHistoryReplay } from '@renderer/store/undoStack'
 import type {
+  BranchUndoAction,
   CutPasteUndoAction,
   DeleteUndoAction,
   GroupAnchor,
@@ -32,6 +39,7 @@ import type {
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { isSegmentCatalogConvergenceError } from '@renderer/utils/topicSegmentCatalog'
 import type {
+  BranchOperationSnapshot,
   InheritanceBoundarySnapshot,
   InsertMessageGroup,
   InsertMessageGroupIntent,
@@ -180,109 +188,254 @@ async function restoreGroupsByStableAnchors(
 }
 
 /**
- * Execute undo operation based on the top action in undoStack.
- * Returns the undone action for toast display, or null if nothing to undo.
+ * Outcome of one undo/redo attempt.
+ *
+ * `empty` means the addressed stack had nothing to replay: a no-op that is
+ * neither a success toast nor a failure. `success` means Main authority
+ * advanced and the history cursor moved. `failed` means the action is still on
+ * its stack, ready to retry, and the caller must report an explicit error.
  */
-export async function executeUndo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoAction | null> {
-  const state = getState()
-  const { undoStack } = state.undoStack
+export type UndoOutcome =
+  | { status: 'empty' }
+  | { status: 'success'; action: UndoAction }
+  | { status: 'failed'; action: UndoAction; error: unknown }
 
-  if (undoStack.length === 0) {
-    logger.info('[undo] Stack is empty')
-    return null
+/**
+ * Serialize history replay across every caller (shortcut, toolbar, menu).
+ *
+ * Two attempts must never read the same stack cursor and replay the same
+ * authority command twice, so all entrypoints funnel through this one chain. A
+ * failing task never poisons the chain for the next caller.
+ */
+let historyReplayQueue: Promise<unknown> = Promise.resolve()
+
+function enqueueHistoryReplay<T>(task: () => Promise<T>): Promise<T> {
+  const run = historyReplayQueue.then(task, task)
+  historyReplayQueue = run.catch(() => undefined)
+  return run
+}
+
+/** The Main replay payload for one recorded branch action. */
+function branchOperationSnapshot(action: BranchUndoAction): BranchOperationSnapshot {
+  switch (action.type) {
+    case 'branch_create':
+      return { kind: 'create', branch: action.branch }
+    case 'branch_rename':
+      return { kind: 'rename', branchId: action.branchId, beforeName: action.beforeName, afterName: action.afterName }
+    case 'branch_move':
+      return action.snapshot
+    case 'branch_delete':
+      return action.snapshot
   }
-
-  const action = undoStack[undoStack.length - 1]
-
-  // Move from undo to redo stack
-  dispatch(prepareUndo())
-
-  try {
-    switch (action.type) {
-      case 'delete':
-        await undoDelete(dispatch, getState, action)
-        break
-      case 'paste':
-        await undoPaste(dispatch, getState, action)
-        break
-      case 'cut_paste':
-        await undoCutPaste(dispatch, getState, action)
-        break
-      default: {
-        const _exhaustive: never = action
-        throw new Error(`[executeUndo] Unknown action type: ${(_exhaustive as any).type}`)
-      }
-    }
-  } catch (error) {
-    // Committed convergence: Main authority stands (messages restored or
-    // copies deleted) but the segment catalog read failed. History stays
-    // advanced — rolling back would retry the already-committed insert and
-    // hit CONFLICT. Log the committed distinction truthfully and return the
-    // action (authority success); never fabricate a catalog.
-    if (isCommittedConvergenceError(error)) {
-      logger.error(
-        '[undo] Authority committed but segment convergence failed; history advanced, projection invalidated',
-        error as Error
-      )
-      return action
-    }
-    logger.error('[undo] Failed:', error as Error)
-    // Move back from redo to undo on failure
-    dispatch(prepareRedo())
-    return null
-  }
-
-  return action
 }
 
 /**
- * Execute redo operation.
- * Returns the redone action for toast display, or null if nothing to redo.
+ * Re-read the addressed topic's branch catalog, fall back to the nearest
+ * surviving ancestor when the replay removed the active route, and reload that
+ * route's window.
+ *
+ * Everything here is projection of a Main write that already committed: no
+ * step may turn a committed authority change into a failed history entry.
  */
-export async function executeRedo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoAction | null> {
-  const state = getState()
-  const { redoStack } = state.undoStack
-
-  if (redoStack.length === 0) {
-    return null
+async function convergeAfterBranchReplay(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  reason: string
+): Promise<void> {
+  const before = getState()
+  const activeBefore = selectActiveBranchId(before, topicId)
+  const beforeById = new Map(selectTopicBranches(before, topicId).map((branch) => [branch.id, branch]))
+  await refreshBranchCatalogAfterAuthorityWrite(dispatch, topicId, reason)
+  let route = activeBefore
+  const surviving = new Set(selectTopicBranches(getState(), topicId).map((branch) => branch.id))
+  if (activeBefore !== null && !surviving.has(activeBefore)) {
+    // Walk up from the vanished active route to the nearest survivor (parent
+    // first, else main — main always holds every anchor).
+    let candidate = beforeById.get(activeBefore)?.parentBranchId ?? null
+    while (candidate !== null && !surviving.has(candidate)) {
+      candidate = beforeById.get(candidate)?.parentBranchId ?? null
+    }
+    route = candidate
+    if (candidate === null) {
+      dispatch(activeBranchReset({ topicId }))
+    } else {
+      dispatch(activeBranchSet({ topicId, branchId: candidate }))
+    }
   }
-
-  const action = redoStack[redoStack.length - 1]
-
-  // Move from redo to undo stack
-  dispatch(prepareRedo())
-
   try {
-    switch (action.type) {
-      case 'delete':
-        await redoDelete(dispatch, getState, action)
-        break
-      case 'paste':
-        await redoPaste(dispatch, getState, action)
-        break
-      case 'cut_paste':
-        await redoCutPaste(dispatch, getState, action)
-        break
-      default: {
-        const _exhaustive: never = action
-        throw new Error(`[executeRedo] Unknown action type: ${(_exhaustive as any).type}`)
-      }
-    }
-  } catch (error) {
-    if (isCommittedConvergenceError(error)) {
-      logger.error(
-        '[redo] Authority committed but segment convergence failed; history advanced, projection invalidated',
-        error as Error
-      )
-      return action
-    }
-    logger.error('[redo] Failed:', error as Error)
-    // Move back from undo to redo on failure
-    dispatch(prepareUndo())
-    return null
+    dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
+  } catch {
+    // best-effort invalidation; the route load below republishes capability
   }
+  try {
+    await dispatch(loadRouteMessagesThunk(topicId, route, { kind: 'latest' }))
+  } catch (error) {
+    logger.warn(`[${reason}] Branch authority committed but route reload failed`, error as Error)
+  }
+}
 
-  return action
+/**
+ * Replay one recorded branch operation through Main authority, then converge
+ * the renderer projection of the topic the operation belongs to.
+ *
+ * Main validates the snapshot against current state inside one transaction and
+ * rejects with zero writes when reality moved on, so this never overwrites an
+ * unrelated concurrent edit and never leaves a partial operation behind.
+ */
+async function replayBranchOperation(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  direction: 'undo' | 'redo',
+  snapshot: BranchOperationSnapshot,
+  reason: string
+): Promise<void> {
+  await dbService.replayBranchOperation(topicId, direction, snapshot)
+  await convergeAfterBranchReplay(dispatch, getState, topicId, reason)
+}
+
+async function applyUndoAction(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+  switch (action.type) {
+    case 'delete':
+      await undoDelete(dispatch, getState, action)
+      return
+    case 'paste':
+      await undoPaste(dispatch, getState, action)
+      return
+    case 'cut_paste':
+      await undoCutPaste(dispatch, getState, action)
+      return
+    case 'branch_create':
+    case 'branch_rename':
+    case 'branch_move':
+    case 'branch_delete':
+      await replayBranchOperation(
+        dispatch,
+        getState,
+        action.targetTopicId,
+        'undo',
+        branchOperationSnapshot(action),
+        `undo:${action.type}`
+      )
+      return
+    default: {
+      const _exhaustive: never = action
+      throw new Error(`[executeUndo] Unknown action type: ${(_exhaustive as any).type}`)
+    }
+  }
+}
+
+async function applyRedoAction(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+  switch (action.type) {
+    case 'delete':
+      await redoDelete(dispatch, getState, action)
+      return
+    case 'paste':
+      await redoPaste(dispatch, getState, action)
+      return
+    case 'cut_paste':
+      await redoCutPaste(dispatch, getState, action)
+      return
+    case 'branch_create':
+    case 'branch_rename':
+    case 'branch_move':
+    case 'branch_delete':
+      await replayBranchOperation(
+        dispatch,
+        getState,
+        action.targetTopicId,
+        'redo',
+        branchOperationSnapshot(action),
+        `redo:${action.type}`
+      )
+      return
+    default: {
+      const _exhaustive: never = action
+      throw new Error(`[executeRedo] Unknown action type: ${(_exhaustive as any).type}`)
+    }
+  }
+}
+
+/**
+ * Execute the newest undo action.
+ *
+ * The cursor advances only after the authority mutation succeeded (or Main
+ * committed and only projection convergence failed); a rejected operation keeps
+ * its action on the stack so the user can retry, and reports `failed` instead of
+ * silently doing nothing.
+ */
+async function runUndo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoOutcome> {
+  // Holding the history gate for the whole round-trip keeps a concurrent
+  // operation's push from interleaving with this replay's cursor commit.
+  beginHistoryReplay()
+  try {
+    const action = getState().undoStack.undoStack.at(-1)
+    if (!action) {
+      logger.info('[undo] Stack is empty')
+      return { status: 'empty' }
+    }
+    try {
+      await applyUndoAction(dispatch, getState, action)
+    } catch (error) {
+      if (isCommittedConvergenceError(error)) {
+        // Main authority stands; history must advance so the already-committed
+        // operation is never retried into a conflict.
+        logger.error(
+          '[undo] Authority committed but convergence failed; history advanced, projection invalidated',
+          error as Error
+        )
+        dispatch(commitUndoAction(action.id))
+        return { status: 'success', action }
+      }
+      logger.error('[undo] Failed; action retained for retry', error as Error)
+      return { status: 'failed', action, error }
+    }
+    dispatch(commitUndoAction(action.id))
+    return { status: 'success', action }
+  } finally {
+    endHistoryReplay(dispatch)
+  }
+}
+
+/** Execute the newest redo action (same contract as `runUndo`). */
+async function runRedo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoOutcome> {
+  beginHistoryReplay()
+  try {
+    const action = getState().undoStack.redoStack.at(-1)
+    if (!action) {
+      logger.info('[redo] Stack is empty')
+      return { status: 'empty' }
+    }
+    try {
+      await applyRedoAction(dispatch, getState, action)
+    } catch (error) {
+      if (isCommittedConvergenceError(error)) {
+        logger.error(
+          '[redo] Authority committed but convergence failed; history advanced, projection invalidated',
+          error as Error
+        )
+        dispatch(commitRedoAction(action.id))
+        return { status: 'success', action }
+      }
+      logger.error('[redo] Failed; action retained for retry', error as Error)
+      return { status: 'failed', action, error }
+    }
+    dispatch(commitRedoAction(action.id))
+    return { status: 'success', action }
+  } finally {
+    endHistoryReplay(dispatch)
+  }
+}
+
+/** Undo the newest history action (serialized across all callers). */
+export function executeUndo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoOutcome> {
+  return enqueueHistoryReplay(() => runUndo(dispatch, getState))
+}
+
+/** Redo the newest undone action (serialized across all callers). */
+export function executeRedo(dispatch: AppDispatch, getState: () => RootState): Promise<UndoOutcome> {
+  return enqueueHistoryReplay(() => runRedo(dispatch, getState))
 }
 
 // ==================== Undo Implementations ====================
@@ -367,12 +520,12 @@ async function undoPaste(
     }
   }
 
-  // DB-first: delete from DB before dispatching to Redux (LOCK-001).
-  // Branch-aware: ordinary paste uses the live active route; cut_paste callers
-  // pass the staged target route explicitly (no silent live fallback for new
-  // staged actions).
-  const targetRoute =
-    typeof addressedTargetRoute === 'undefined' ? selectActiveBranchId(getState(), targetTopicId) : addressedTargetRoute
+  // Route provenance: the caller's explicit staged route (cut_paste) wins; a
+  // plain paste addresses the route it recorded at paste time; only a legacy
+  // action without any recorded route falls back to the live active route.
+  const recordedTargetBranchId = typeof action.targetBranchId === 'undefined' ? undefined : action.targetBranchId
+  const pinnedRoute = typeof addressedTargetRoute === 'undefined' ? recordedTargetBranchId : addressedTargetRoute
+  const targetRoute = typeof pinnedRoute === 'undefined' ? selectActiveBranchId(getState(), targetTopicId) : pinnedRoute
   let cleanup
   try {
     cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds, targetRoute)
@@ -423,11 +576,12 @@ async function undoPaste(
   }
 
   // Sync segments after message deletion (only non-target segments remain).
-  // Cut_paste callers pass the staged target route explicitly so a live route
-  // switch mid-cleanup cannot retarget the membership write; ordinary paste
-  // omits the route and retains the existing live-route behavior.
+  // A pinned route (staged cut target, or the route the paste recorded) is
+  // passed explicitly so a live route switch mid-cleanup cannot retarget the
+  // membership write; a legacy action without any recorded route keeps the
+  // previous live-route behavior.
   try {
-    if (typeof addressedTargetRoute === 'undefined') {
+    if (typeof pinnedRoute === 'undefined') {
       await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
     } else {
       await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds, targetRoute)
@@ -696,7 +850,12 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   // DB-first: one atomic stable re-insert before any Redux commit. Main
   // publishes canonical wires+capability; the shared ack installs them with
   // the stored stable placement (nonresident anchors inject nothing).
-  const redoRoute = selectActiveBranchId(getState(), targetTopicId)
+  // Route provenance: redo writes back into the route the paste recorded, so a
+  // branch switch between paste and redo never retargets the copies; a legacy
+  // action without the fact keeps the live-route behavior.
+  const recordedTargetRoute = typeof action.targetBranchId === 'undefined' ? undefined : action.targetBranchId
+  const redoRoute =
+    typeof recordedTargetRoute === 'undefined' ? selectActiveBranchId(getState(), targetTopicId) : recordedTargetRoute
   let redoAck: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
   try {
     redoAck = await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }], redoRoute)
@@ -717,7 +876,7 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   // fail-closed.
   if (targetSegmentSnapshots.length > 0) {
     try {
-      await restoreTargetSegments(dispatch, targetSegmentSnapshots, undefined, getState)
+      await restoreTargetSegments(dispatch, targetSegmentSnapshots, recordedTargetRoute, getState)
     } catch (error) {
       if (isSegmentCatalogConvergenceError(error)) {
         logger.error('[redoPaste] Copies re-inserted but catalog convergence failed; authority stands', error as Error)

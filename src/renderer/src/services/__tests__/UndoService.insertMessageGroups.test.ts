@@ -25,6 +25,8 @@ const { mocks } = vi.hoisted(() => ({
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
+    commitUndoAction: vi.fn((id: string) => ({ type: 'commitUndoAction', payload: id })),
+    commitRedoAction: vi.fn((id: string) => ({ type: 'commitRedoAction', payload: id })),
     restoreSegmentsAfterUndo: vi.fn().mockResolvedValue(undefined),
     restoreTargetSegments: vi.fn().mockResolvedValue(undefined),
     syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined),
@@ -63,7 +65,11 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 
 vi.mock('@renderer/store/undoStack', () => ({
   prepareUndo: mocks.prepareUndo,
-  prepareRedo: mocks.prepareRedo
+  prepareRedo: mocks.prepareRedo,
+  commitUndoAction: mocks.commitUndoAction,
+  commitRedoAction: mocks.commitRedoAction,
+  beginHistoryReplay: vi.fn(),
+  endHistoryReplay: vi.fn()
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({

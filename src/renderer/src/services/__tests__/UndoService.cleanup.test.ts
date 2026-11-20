@@ -38,6 +38,8 @@ const { mocks } = vi.hoisted(() => ({
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
+    commitUndoAction: vi.fn((id: string) => ({ type: 'commitUndoAction', payload: id })),
+    commitRedoAction: vi.fn((id: string) => ({ type: 'commitRedoAction', payload: id })),
     restoreGroupsByAnchors: vi.fn(),
     restoreSegmentsAfterUndo: vi.fn(),
     restoreTargetSegments: vi.fn(),
@@ -93,7 +95,11 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 
 vi.mock('@renderer/store/undoStack', () => ({
   prepareUndo: mocks.prepareUndo,
-  prepareRedo: mocks.prepareRedo
+  prepareRedo: mocks.prepareRedo,
+  commitUndoAction: mocks.commitUndoAction,
+  commitRedoAction: mocks.commitRedoAction,
+  beginHistoryReplay: vi.fn(),
+  endHistoryReplay: vi.fn()
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -359,7 +365,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       const result = await executeRedo(dispatch, () => storeState)
 
-      expect(result).toBeNull()
+      expect(result.status).toBe('failed')
       expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
     })
   })
@@ -461,7 +467,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       const result = await executeRedo(dispatch, () => storeState)
 
-      expect(result).toBeNull()
+      expect(result.status).toBe('failed')
       expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
       expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
     })

@@ -227,7 +227,7 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
     // Authority success: history stays advanced (never rolled back to CONFLICT).
-    expect(undone?.type).toBe('delete')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('delete')
     expect((store.getState() as any).undoStack.undoStack.length).toBe(0)
     expect((store.getState() as any).undoStack.redoStack.length).toBe(1)
     // Main phases ran exactly once: message restore + segment Main write + list.
@@ -320,7 +320,7 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
-    expect(undone?.type).toBe('cut_paste')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('cut_paste')
     expect((store.getState() as any).undoStack.undoStack.length).toBe(0)
     expect((store.getState() as any).undoStack.redoStack.length).toBe(1)
     // REQUIRED Main phases both ran: source restore insert + target copy delete.
@@ -391,7 +391,7 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
-    expect(undone?.type).toBe('paste')
+    expect(undone.status === 'success' ? undone.action.type : null).toBe('paste')
     expect((store.getState() as any).undoStack.undoStack.length).toBe(0)
     expect((store.getState() as any).undoStack.redoStack.length).toBe(1)
     expect(mocks.deleteMessagesWithSegments).toHaveBeenCalledTimes(1)
@@ -448,7 +448,7 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     const { executeRedo } = await import('../UndoService')
     const redone = await executeRedo(store.dispatch as any, store.getState as any)
 
-    expect(redone?.type).toBe('paste')
+    expect(redone.status === 'success' ? redone.action.type : null).toBe('paste')
     expect((store.getState() as any).undoStack.redoStack.length).toBe(0)
     expect((store.getState() as any).undoStack.undoStack.length).toBe(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
@@ -485,7 +485,7 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     const { executeUndo } = await import('../UndoService')
     const undone = await executeUndo(store.dispatch as any, store.getState as any)
 
-    expect(undone).toBeNull()
+    expect(undone.status).toBe('failed')
     // History rolled back for precommit failure (safe to retry, no commit).
     expect((store.getState() as any).undoStack.undoStack.length).toBe(1)
     expect((store.getState() as any).undoStack.redoStack.length).toBe(0)
