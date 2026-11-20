@@ -415,4 +415,51 @@ describe('ChatDbAggregateService — around group boundaries on main, branch, an
       hasMoreAfter: false
     })
   })
+  it('branch latest boundary: exact-fit returns whole effective route, overflow keeps tail groups whole', () => {
+    const askA = `askA-${uid()}`
+    const askB = `askB-${uid()}`
+    const topic = `t-branch-latest-${uid()}`
+    const u1 = append(topic, `u1-${uid()}`, 'user')
+    const a1 = append(topic, `a1-${uid()}`, 'assistant', askA)
+    const a2 = append(topic, `a2-${uid()}`, 'assistant', askA)
+    const branchId = okValue(agg.createBranch(topic, null, a2, 'fork')).branch.id
+    const b1 = append(topic, `b1-${uid()}`, 'assistant', askB, branchId)
+    const b2 = append(topic, `b2-${uid()}`, 'assistant', askB, branchId)
+    const u3 = append(topic, `u3-${uid()}`, 'user', undefined, branchId)
+    // Effective branch route groups: [u1] [a1,a2] [b1,b2] [u3] — 4 groups, 6 messages.
+    const latest = (limit: number): any =>
+      okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: topic, branchId, limit }))
+
+    // Case 1: limit covers the whole effective route (== and > group count) — complete, nothing more before.
+    const full = latest(4)
+    expect(full.window.kind, 'latest exact-fit kind').toBe('latest')
+    expect(
+      full.messages.map((m: any) => m.id),
+      'latest exact-fit order'
+    ).toEqual([u1, a1, a2, b1, b2, u3])
+    expect(full.window.returnedCount, 'latest exact-fit returnedCount').toBe(6)
+    expect(full.window.hasMoreBefore, 'latest exact-fit hasMoreBefore').toBe(false)
+    expect(full.window.hasMoreAfter, 'latest exact-fit hasMoreAfter').toBe(false)
+    // The shared prefix counts toward the group limit but stays read-only: only the owned suffix is mutable.
+    expectMutable(full, 'latest exact-fit', [b1, b2, u3])
+    const over = latest(10)
+    expect(
+      over.messages.map((m: any) => m.id),
+      'latest over-limit order'
+    ).toEqual([u1, a1, a2, b1, b2, u3])
+    expect(over.window.hasMoreBefore, 'latest over-limit hasMoreBefore').toBe(false)
+    expect(over.window.hasMoreAfter, 'latest over-limit hasMoreAfter').toBe(false)
+
+    // Case 2: limit below group count — tail whole groups only, the owned askId tail group never split.
+    const tail = latest(2)
+    expect(tail.window.kind, 'latest overflow kind').toBe('latest')
+    expect(
+      tail.messages.map((m: any) => m.id),
+      'latest overflow order'
+    ).toEqual([b1, b2, u3])
+    expect(tail.window.returnedCount, 'latest overflow returnedCount').toBe(3)
+    expect(tail.window.hasMoreBefore, 'latest overflow hasMoreBefore').toBe(true)
+    expect(tail.window.hasMoreAfter, 'latest overflow hasMoreAfter').toBe(false)
+    expectMutable(tail, 'latest overflow', [b1, b2, u3])
+  })
 })

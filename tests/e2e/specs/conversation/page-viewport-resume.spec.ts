@@ -19,7 +19,7 @@
  *
  * Coverage (single seeded topic, ordinary wheel-established positions):
  * - top leg (verifies TRUE top), middle leg (verifies TRUE middle, not an
- *   incidental position), true-bottom leg (column-reverse scrollTop 0).
+ *   incidental position), true-bottom leg (normal-flow scrollTop max(0, sh-ch)).
  * - Repeated + rapid Settings↔Chat while the intermediate predecessor never
  *   settled/saved (newest stable snapshot still wins).
  * - Missing/invalid retained anchor fallback (victim authority delete +
@@ -585,7 +585,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
 
     const isTrueBottom = async (): Promise<boolean> => {
       const st = await readScrollState()
-      if (Math.abs(st.scrollTop) > BOTTOM_TOL) return false
+      const distBottom = st.scrollHeight - st.clientHeight - st.scrollTop
+      if (distBottom > BOTTOM_TOL) return false
       return await page.evaluate((id: string) => {
         const container = document.querySelector('#messages') as HTMLElement | null
         const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
@@ -599,8 +600,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
 
     const isTrueTop = async (): Promise<boolean> => {
       const st = await readScrollState()
-      const topExtreme = -(st.scrollHeight - st.clientHeight)
-      if (Math.abs(st.scrollTop - topExtreme) > TOP_TOL) return false
+      if (Math.abs(st.scrollTop) > TOP_TOL) return false
       return await page.evaluate((id: string) => {
         const container = document.querySelector('#messages') as HTMLElement | null
         const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
@@ -616,16 +616,16 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       const idx = ids.indexOf(anchorId)
       if (idx < Math.floor(TOTAL / 3) || idx > Math.floor((TOTAL * 2) / 3)) return false
       const st = await readScrollState()
-      const topExtreme = -(st.scrollHeight - st.clientHeight)
-      if (Math.abs(st.scrollTop) < 200) return false
-      if (Math.abs(st.scrollTop - topExtreme) < 200) return false
+      const bottomExtreme = st.scrollHeight - st.clientHeight
+      if (st.scrollTop < 200) return false
+      if (Math.abs(st.scrollTop - bottomExtreme) < 200) return false
       if (await isTrueTop()) return false
       if (await isTrueBottom()) return false
       return true
     }
 
     // Ordinary wheel to a verified extreme/middle. Both wheel signs are tried
-    // so no column-reverse sign assumption is baked in; direct scrollTop writes
+    // so no flow-direction sign assumption is baked in; direct scrollTop writes
     // are never used to establish the saved position.
     const wheelToBottom = async (): Promise<Anchor> => {
       for (let i = 0; i < 30; i++) {
@@ -638,7 +638,10 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
           await wheel(-560)
         }
       }
-      expect(await isTrueBottom(), 'bottom leg must reach TRUE bottom (scrollTop~0 + last row visible)').toBe(true)
+      expect(
+        await isTrueBottom(),
+        'bottom leg must reach TRUE bottom (scrollTop~max(0,sh-ch) + last row visible)'
+      ).toBe(true)
       const s = await settledOrThrow()
       await waitViewportVisible(page)
       await waitSnapMatchesLive(ids)
@@ -656,7 +659,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
           await wheel(560)
         }
       }
-      expect(await isTrueTop(), 'top leg must reach TRUE top (top extreme + first row visible)').toBe(true)
+      expect(await isTrueTop(), 'top leg must reach TRUE top (scrollTop~0 + first row visible)').toBe(true)
       const s = await settledOrThrow()
       await waitViewportVisible(page)
       await waitSnapMatchesLive(ids)
@@ -913,10 +916,10 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       if (homeVisibleFrames.length > 0) {
         const firstHome = homeVisibleFrames[0]
         if (expectedBottom) {
-          expect(
-            Math.abs(firstHome.scrollTop),
-            `${label}: first home-visible frame must already be true bottom`
-          ).toBeLessThanOrEqual(BOTTOM_TOL)
+          const firstBottomDist = firstHome.scrollHeight - firstHome.clientHeight - firstHome.scrollTop
+          expect(firstBottomDist, `${label}: first home-visible frame must already be true bottom`).toBeLessThanOrEqual(
+            BOTTOM_TOL
+          )
         } else {
           expect(firstHome.anchorId, `${label}: first home-visible frame anchor identity`).toBe(expected.id)
           expect(
@@ -943,7 +946,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       for (let i = 0; i < visible.length; i++) {
         const f = visible[i]
         if (expectedBottom) {
-          if (Math.abs(f.scrollTop) > BOTTOM_TOL) {
+          const frameBottomDist = f.scrollHeight - f.clientHeight - f.scrollTop
+          if (frameBottomDist > BOTTOM_TOL) {
             firstBad = i
             break
           }
@@ -1189,7 +1193,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     expect(topSnap.id, 'top snapshot must confirm the wheel-established anchor').toBe(top.id)
     await roundtripWithProbe('top', top, false, topSnap, [top.id, firstId])
 
-    // --- TRUE-BOTTOM leg (column-reverse scrollTop 0) ---
+    // --- TRUE-BOTTOM leg (normal-flow scrollTop max(0, sh-ch)) ---
     await wheelToBottom()
     const bottomSnap = await readSnap()
     await waitViewportVisible(page)
@@ -1263,7 +1267,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'PAGE VIEWPORT FALLBACK: Main deleteMessage plus validated renderer removeMessages/removeManyBlocks removes the settled live anchor from authority and loaded/DOM while the retained snapshot stays stale on the victim; the disposable loaded projection is then cleared while Chat is hidden (seed rows remain SQLite) so no valid in-place window survives; the return must take the fresh-window fallback branch (>0 canonical route-thunk request loading false->true) and land on the explicit-bottom default with a legal surviving anchor/snapshot (every visible frame |scrollTop| within BOTTOM_TOL, no inherited scroll) with the victim absent and no stale overlay.'
+        'PAGE VIEWPORT FALLBACK: Main deleteMessage plus validated renderer removeMessages/removeManyBlocks removes the settled live anchor from authority and loaded/DOM while the retained snapshot stays stale on the victim; the disposable loaded projection is then cleared while Chat is hidden (seed rows remain SQLite) so no valid in-place window survives; the return must take the fresh-window fallback branch (>0 canonical route-thunk request loading false->true) and land on the explicit-bottom default with a legal surviving anchor/snapshot (every visible frame distance-from-bottom within BOTTOM_TOL, no inherited scroll) with the victim absent and no stale overlay.'
     })
     const page: Page = mainWindow
     await waitForAppReady(page)
@@ -1487,7 +1491,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     // Bounded fallback prep: ordinary wheel-established TRUE middle (never a
     // fixed same-direction sweep from the bottom-clamped start). Causal root
     // of the prior fbWaitSnapMatchesLive timeout: 6x wheel(420) from the
-    // fresh-activation bottom (column-reverse scrollTop~0) produced no actual
+    // fresh-activation bottom (normal-flow scrollTop~max(0,sh-ch)) produced no actual
     // scroll event toward the already-bottom edge, so controller.userTakeover
     // (Messages.tsx: requires declareUserIntent via wheel capture + stable/
     // clean phase) never committed a snapshot and both keyv keys stayed
@@ -1505,22 +1509,21 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       })
     const fbIsBottom = async (): Promise<boolean> => {
       const st = await fbReadScroll()
-      if (Math.abs(st.scrollTop) > 100) return false
+      if (st.scrollHeight - st.clientHeight - st.scrollTop > 100) return false
       return true
     }
     const fbIsTop = async (): Promise<boolean> => {
       const st = await fbReadScroll()
-      const extreme = -(st.scrollHeight - st.clientHeight)
-      if (Math.abs(st.scrollTop - extreme) > 120) return false
+      if (Math.abs(st.scrollTop) > 120) return false
       return true
     }
     const fbIsMiddle = async (anchorId: string): Promise<boolean> => {
       const idx = ids.indexOf(anchorId)
       if (idx < Math.floor(ids.length / 3) || idx > Math.floor((ids.length * 2) / 3)) return false
       const st = await fbReadScroll()
-      const extreme = -(st.scrollHeight - st.clientHeight)
-      if (Math.abs(st.scrollTop) < 200) return false
-      if (Math.abs(st.scrollTop - extreme) < 200) return false
+      const bottomExtreme = st.scrollHeight - st.clientHeight
+      if (st.scrollTop < 200) return false
+      if (Math.abs(st.scrollTop - bottomExtreme) < 200) return false
       if (await fbIsTop()) return false
       if (await fbIsBottom()) return false
       return true
@@ -1532,7 +1535,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       const startSt = (await fbReadScroll()).scrollTop
       const startAnchor = await fbReadAnchor()
       // Seeded-index middle-third + not-at-bottom/top + settled + snapshot
-      // match. Both wheel signs are tried so no column-reverse sign
+      // match. Both wheel signs are tried so no flow-direction sign
       // assumption is baked in; exact bounded trial limits (30+30), no
       // random retries, no time-SLA asserts.
       for (let round = 0; round < 30; round++) {
@@ -1806,6 +1809,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       anchorId: string
       anchorOffset: number
       scrollTop: number
+      scrollHeight: number
+      clientHeight: number
       phase: string
       homeVisible: boolean
       messagesVisible: boolean
@@ -1834,6 +1839,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         anchorId: string
         anchorOffset: number
         scrollTop: number
+        scrollHeight: number
+        clientHeight: number
         phase: string
         homeVisible: boolean
         messagesVisible: boolean
@@ -1862,6 +1869,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
           let anchorId = ''
           let anchorOffset = 0
           let scrollTop = NaN
+          let scrollHeight = NaN
+          let clientHeight = NaN
           let phase = ''
           if (container) {
             const cs = getComputedStyle(container)
@@ -1869,6 +1878,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
             const r = container.getBoundingClientRect()
             messagesVisible = cs.display !== 'none' && r.width > 0 && r.height > 0
             scrollTop = container.scrollTop
+            scrollHeight = container.scrollHeight
+            clientHeight = container.clientHeight
             phase = container.getAttribute('data-viewport-phase') ?? ''
             const c = container.getBoundingClientRect()
             const rows = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
@@ -1891,6 +1902,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
             anchorId,
             anchorOffset,
             scrollTop: Math.round(scrollTop * 10) / 10,
+            scrollHeight: Math.round(scrollHeight * 10) / 10,
+            clientHeight: Math.round(clientHeight * 10) / 10,
             phase,
             homeVisible,
             messagesVisible,
@@ -1986,10 +1999,12 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       // never an inherited scrolled position. The invalid-snapshot path takes
       // the deterministic route-local default `bottom` (messageWindow
       // chooseTopFirstPositionPlan: typed NOT_FOUND on the latest window
-      // places scrollTop 0 prepaint; guarded stable replaces the stale
-      // snapshot), so |scrollTop| within BOTTOM_TOL (100, same as the core
-      // bottom leg) on every visible frame proves no inherited scroll
-      // survived. Early wrong frames are kept (no trimming); any
+      // the deterministic route-local default `bottom` (messageWindow
+      // chooseTopFirstPositionPlan: typed NOT_FOUND on the latest window
+      // places scrollTop max(0, sh-ch) prepaint; guarded stable replaces the
+      // stale snapshot), so distance-from-bottom within BOTTOM_TOL (100, same
+      // as the core bottom leg) on every visible frame proves no inherited
+      // scroll survived. Early wrong frames are kept (no trimming); any
       // victim/non-bottom frame fails.
       let fbFirstBad = -1
       for (let i = 0; i < fbVisible.length; i++) {
@@ -1998,7 +2013,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
           fbFirstBad = i
           break
         }
-        if (!Number.isFinite(f.scrollTop) || Math.abs(f.scrollTop) > BOTTOM_TOL) {
+        if (!Number.isFinite(f.scrollTop) || f.scrollHeight - f.clientHeight - f.scrollTop > BOTTOM_TOL) {
           fbFirstBad = i
           break
         }
@@ -2006,12 +2021,12 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       if (fbFirstBad !== -1) {
         test.info().annotations.push({
           type: 'fallback-first-bad',
-          description: `firstBad=${fbFirstBad} fb=${fbDescribe(fbVisible[fbFirstBad])} victim=${victim!.id} expectBottom st<=${BOTTOM_TOL}`
+          description: `firstBad=${fbFirstBad} fb=${fbDescribe(fbVisible[fbFirstBad])} victim=${victim!.id} expectBottom distBottom<=${BOTTOM_TOL}`
         })
       }
       expect(
         fbFirstBad,
-        'fallback first and every visible frame must be explicit bottom with a legal survivor (never the victim, |scrollTop| within BOTTOM_TOL)'
+        'fallback first and every visible frame must be explicit bottom with a legal survivor (never the victim, distance-from-bottom within BOTTOM_TOL)'
       ).toBe(-1)
       const fbWc = await readRouteLoadProbe(page, FB_LOAD_KEY)
       test.info().annotations.push({
@@ -2088,7 +2103,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       // Explicit-bottom default proof: the invalid snapshot path takes the
       // deterministic route-local default `bottom` (messageWindow
       // chooseTopFirstPositionPlan: typed NOT_FOUND on the latest window
-      // places scrollTop 0 prepaint; guarded stable replaces the stale
+      // places scrollTop max(0, sh-ch) prepaint; guarded stable replaces the stale
       // snapshot). The persisted snapshot must therefore carry bottom
       // semantics, the live state must be true bottom, and the live anchor
       // must match the persisted snapshot (no inherited scroll, no stale id).
@@ -2124,8 +2139,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       ).toBe(true)
       const fbLiveScroll = await fbReadScroll()
       expect(
-        Math.abs(fbLiveScroll.scrollTop),
-        'fallback live state must be true bottom (|scrollTop| within BOTTOM_TOL)'
+        fbLiveScroll.scrollHeight - fbLiveScroll.clientHeight - fbLiveScroll.scrollTop,
+        'fallback live state must be true bottom (distance-from-bottom within BOTTOM_TOL)'
       ).toBeLessThanOrEqual(BOTTOM_TOL)
       expect(
         after!.id,

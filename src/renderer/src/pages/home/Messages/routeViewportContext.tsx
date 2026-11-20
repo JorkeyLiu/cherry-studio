@@ -20,16 +20,21 @@
  */
 
 import {
-  COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
   didRealizeCompensation,
+  distanceFromBottom,
+  distanceFromOldest,
+  FLOW_BOTTOM_THRESHOLD_PX,
+  FLOW_COORDINATE_SPACE,
   isAtBottom,
   LAYOUT_HOLD_THRESHOLD_PX,
   type LayoutHoldSample,
+  maxScrollTop,
+  readScrollMetrics,
   rebaseAfterCompensation,
   resolveDroppedHoldBaseline,
   resolveLayoutHoldThresholdForDpr,
   stepLayoutHold
-} from '@renderer/pages/home/Messages/columnReverseGeometry'
+} from '@renderer/pages/home/Messages/flowScrollGeometry'
 import { handleScrollSnapshotRead, handleScrollSnapshotSaved } from '@renderer/services/scrollSnapshotCache'
 import { isScrollSnapshotInvalidated } from '@renderer/services/scrollSnapshotCache'
 import { useAppDispatch } from '@renderer/store'
@@ -50,6 +55,7 @@ import { findViewportTopAnchorWithOffset } from './domVisibility'
 import {
   declareUserIntentSession,
   displayedRouteKey,
+  type MeasuredRouteViewportSnapshot,
   type RouteId,
   type RouteRef,
   RouteViewportController,
@@ -60,12 +66,12 @@ import {
 
 export type ViewportPhaseAttr = 'idle' | 'positioning' | 'revealed'
 
-export type SnapshotCapturer = () => RouteViewportSnapshot | null
+export type SnapshotCapturer = () => MeasuredRouteViewportSnapshot | null
 
 const toStorageKey = (routeKey: string): string => (routeKey.startsWith('scroll:') ? routeKey : `scroll:${routeKey}`)
 
 const normalizeSnapshot = (saved: unknown): RouteViewportSnapshot | null => {
-  if (saved && typeof saved === 'object' && 'scrollTop' in (saved as Record<string, unknown>)) {
+  if (saved && typeof saved === 'object') {
     const rec = saved as Record<string, unknown>
     const messageId =
       typeof rec.messageId === 'string' && rec.messageId.length > 0
@@ -75,12 +81,22 @@ const normalizeSnapshot = (saved: unknown): RouteViewportSnapshot | null => {
           : null
     const intraRaw = rec.intraRowOffset
     const intraRowOffset = typeof intraRaw === 'number' && Number.isFinite(intraRaw) ? intraRaw : null
-    const scrollTop = typeof rec.scrollTop === 'number' && Number.isFinite(rec.scrollTop) ? rec.scrollTop : 0
-    return { scrollTop, messageId, intraRowOffset, isAtBottom: rec.isAtBottom === true }
+    const isAtBottom = rec.isAtBottom === true
+    // Coordinate-space gate (same rule as the scroll hook's own reader): only a
+    // record tagged with the normal-flow space contributes a numeric offset. A
+    // record written before the conversion stores reversed-space numbers, so its
+    // offset is dropped rather than reinterpreted — the identity anchor
+    // (messageId/anchorId + intraRowOffset) and the bottom classification are
+    // convention-independent and survive.
+    if (rec.coordinateSpace !== FLOW_COORDINATE_SPACE) {
+      if (!messageId && !isAtBottom) return null
+      return { messageId, intraRowOffset, isAtBottom }
+    }
+    const scrollTop = typeof rec.scrollTop === 'number' && Number.isFinite(rec.scrollTop) ? rec.scrollTop : undefined
+    if (scrollTop === undefined && !messageId && !isAtBottom) return null
+    return { scrollTop, messageId, intraRowOffset, isAtBottom }
   }
-  if (typeof saved === 'number' && Number.isFinite(saved)) {
-    return { scrollTop: saved, messageId: null, intraRowOffset: null, isAtBottom: false }
-  }
+  // A bare number is a pre-flow offset with no identity: unusable.
   return null
 }
 
@@ -119,7 +135,7 @@ const writeRouteSnapshot = (routeKey: string, snapshot: RouteViewportSnapshot): 
     return false
   }
   try {
-    window.keyv.set(storageKey, snapshot)
+    window.keyv.set(storageKey, { ...snapshot, coordinateSpace: FLOW_COORDINATE_SPACE })
   } catch {
     return false
   }
@@ -537,71 +553,6 @@ export function RouteViewportProvider({
   )
 }
 
-// --- Keeper device-pixel geometry unit (fractional-zoom pause hold) ---------
-//
-// The paused-stream wrapper uses native
-// `height: calc-size(auto, round(up, size, var(--messages-pixel-size, 1px)))`
-// so its TRUE intrinsic height rounds up to the live device-pixel quantum
-// instead of a fixed 1 CSS px (which leaves up to ~0.6px fractional root
-// start at 125% zoom). The keeper synchronizes the var to
-// `1/window.devicePixelRatio` on the existing firstElementChild wrapper via
-// the existing observer/layout path only: no new business state, hooks,
-// observers, lifecycle owners, persisted settings, placeholders, transforms,
-// timers, or global DPR systems. Geometry-only: never touches controller
-// anchor/snapshot/generations, never alters column-reverse/bottom/snapshots.
-
-/** CSS variable carrying the live device-pixel quantum for the messages wrapper. */
-export const MESSAGES_PIXEL_VAR = '--messages-pixel-size' as const
-
-/**
- * Sanitize an effective DPR into a finite positive CSS quantum string
- * (`1/dpr` px), or null when the input is unusable. Pure, no DOM work.
- */
-export const resolveMessagesPixelQuantum = (dpr: unknown): string | null => {
-  if (typeof dpr !== 'number' || !Number.isFinite(dpr) || dpr <= 0) return null
-  const quantum = 1 / dpr
-  if (!Number.isFinite(quantum) || quantum <= 0) return null
-  return `${quantum}px`
-}
-
-/**
- * Synchronize the live quantum onto the existing content wrapper's inline
- * style. Write-only on change (prior-property compare) so the existing
- * ResizeObserver never loops: the var write may resize once, the next
- * observer fire sees the same value and writes nothing. Never alters
- * controller anchor/snapshot/generations. Returns true only when a write
- * landed.
- */
-export const syncMessagesPixelQuantum = (content: Element | null, dpr?: unknown): boolean => {
-  try {
-    if (!content || !(content instanceof HTMLElement)) return false
-    let ratio: unknown = dpr
-    if (ratio === undefined) {
-      try {
-        ratio = window.devicePixelRatio
-      } catch {
-        return false
-      }
-    }
-    const next = resolveMessagesPixelQuantum(ratio)
-    if (!next) return false
-    let prev = ''
-    try {
-      prev = content.style.getPropertyValue(MESSAGES_PIXEL_VAR)
-    } catch {
-      prev = ''
-    }
-    if (prev === next) return false
-    try {
-      content.style.setProperty(MESSAGES_PIXEL_VAR, next)
-    } catch {
-      return false
-    }
-    return true
-  } catch {
-    return false
-  }
-}
 /**
  * Keeper hold threshold from the SAME DPR source as the layout quantum sync.
  * Returns half the live layout scroll quantum (`1/dpr / 2`): DPR1 -> 0.5,
@@ -690,7 +641,7 @@ export const buildContainerCapturer = (
       scrollTop,
       messageId: anchor?.messageId ?? null,
       intraRowOffset: anchor ? anchor.intraRowOffset : null,
-      isAtBottom: isAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+      isAtBottom: isAtBottom(readScrollMetrics(container), FLOW_BOTTOM_THRESHOLD_PX)
     }
   }
 }
@@ -748,9 +699,10 @@ export interface StableVisualAnchorMaintainer {
  * - no-intent scroll: a scroll with no live user session holds once (visual
  *   compensation only); self compensation echoes are swallowed via the
  *   expected guard so they never recurse.
- * - bottom semantic (no row anchor): pins column-reverse bottom (scrollTop 0)
- *   through layout/insertion so an explicit send bottom survives new rows
- *   and stream growth; never fights a live genuine session (gated above).
+ * - bottom semantic (no row anchor): pins the normal-flow bottom (the
+ *   container's own scroll travel) through layout/insertion so an explicit
+ *   send bottom survives new rows and stream growth; never fights a live
+ *   genuine session (gated above).
  * - fold replacement: a hidden/collapsed answer row is never measured; when
  *   the held anchor is the replaced hidden answer, it is reconciled to the
  *   visible same-group sibling (offset preserved) via the controller, then
@@ -2369,15 +2321,6 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       }
     }
     const rebindContent = (): void => {
-      // Geometry-only quantum sync on the live wrapper (existing node, no
-      // anchor/snapshot/generation touch). Write-only on change so the RO
-      // never loops. Runs even when the node identity is unchanged so a DPR
-      // change without DOM replacement still converges via the existing
-      // RO/layout fires; no new matchMedia/window listeners or React state.
-      try {
-        const live = container.firstElementChild
-        if (live instanceof Element) syncMessagesPixelQuantum(live)
-      } catch {}
       let content: Element | null = null
       try {
         const first = container.firstElementChild
@@ -2389,10 +2332,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       try {
         if (observedContent && ro) ro.unobserve(observedContent)
       } catch {}
-      // The previous wrapper keeps its inline quantum (logically the same
-      // wrapper retains the live coordinate; a detached node discards its
-      // local geometry on unmount, so no leak and no per-teardown removal
-      // that would flash transient layout on the next stream generation).
+      // The previous wrapper is simply unobserved: no inline geometry is
+      // maintained on it any more, and a detached node discards its local
+      // geometry on unmount, so no leak and no per-teardown write that would
+      // flash transient layout on the next stream generation.
       observedContent = content
       if (observedContent) {
         try {
@@ -2771,22 +2714,20 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
               : false
         const provenForHandoff = survivorRow === undefined ? (crossRow ? structuralProven : proven) : true
         if (Math.abs(drift) > 1) {
-          // Honest boundary clamp: at the true scroll limit the region
-          // cannot be held further. Early-fit short viewports sit at this
-          // limit (scrollTop 0, no overflow), so passive stream growth
-          // displacing a static footer would previously fall through and
-          // hand off with a vicinity-follow clear — undoing the pointerdown
-          // pause. Require structural proof + quiet here too: passive
-          // displacement alone re-arms (preserving the ORIGINAL pause
-          // anchor) until sustained stillness drops it with no adopt and no
-          // snapshot. A hidden target still pends (no provable geometry).
+          // Honest boundary clamp: at the true scroll limit the region cannot
+          // be held further. Early-fit short viewports have no scroll travel at
+          // all, so passive stream growth displacing a static footer would
+          // previously fall through and hand off with a vicinity-follow clear —
+          // undoing the pointerdown pause. Require structural proof + quiet here
+          // too: passive displacement alone re-arms (preserving the ORIGINAL
+          // pause anchor) until sustained stillness drops it with no adopt and
+          // no snapshot. A hidden target still pends (no provable geometry).
           let atLimit = false
           try {
-            const st = liveContainer.scrollTop
-            const sh = liveContainer.scrollHeight
-            const ch = liveContainer.clientHeight
-            const extreme = -(sh - ch)
-            atLimit = st >= -1 || st <= extreme + 1
+            // Normal flow: the oldest edge is scrollTop 0, the newest edge is the
+            // container's own scroll travel — one geometry authority, both ends.
+            const metrics = readScrollMetrics(liveContainer)
+            atLimit = distanceFromOldest(metrics) <= 1 || distanceFromBottom(metrics) <= 1
           } catch {
             atLimit = false
           }
@@ -2883,7 +2824,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
               messageId: rep.id,
               intraRowOffset: rep.offset,
               scrollTop: st,
-              isAtBottom: isAtBottom(st, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+              isAtBottom: isAtBottom(readScrollMetrics(liveContainer), FLOW_BOTTOM_THRESHOLD_PX)
             },
             { expectedEpoch: intent.epoch }
           )
@@ -2982,14 +2923,6 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     }
     const hold = (reason: string): void => {
       void reason
-      // Geometry-only quantum sync BEFORE every guard: a DPR change inside
-      // owned/user/unaligned positioning still sets geometry before first
-      // paint/reveal, and readonly layout checks below stay correct. No
-      // anchor/snapshot/generation touch; write-only on change so no RO loop.
-      try {
-        const live = container.firstElementChild
-        if (live instanceof Element) syncMessagesPixelQuantum(live)
-      } catch {}
       const vp = viewportRef.current
       if (!vp) {
         layoutHoldRef.current = null
@@ -3186,24 +3119,38 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       // Provenance-guarded hold: the keeper may hold only the displayed
       // route's own anchor. A foreign live anchor (provenance != displayed)
       // is inert here — never compensated as if it belonged to this route.
-      // Bottom semantic (no row anchor): pin the column-reverse bottom
-      // (scrollTop 0) through layout/insertion so true bottom survives new
-      // user/assistant rows and stream growth. Gated above on unowned +
-      // no live user session, so a subsequent genuine wheel scroll-away is
-      // never fought here (its takeover owns the new anchor instead).
+      // Provenance-guarded hold: the keeper may hold only the displayed
+      // route's own anchor. A foreign live anchor (provenance != displayed)
+      // is inert here — never compensated as if it belonged to this route.
+      // Bottom semantic (no row anchor): pin the normal-flow bottom (the
+      // container's own scroll travel) through layout/insertion so true bottom
+      // survives new user/assistant rows and stream growth. Gated above on
+      // unowned + no live user session, so a subsequent genuine wheel
+      // scroll-away is never fought here (its takeover owns the new anchor
+      // instead).
       const displayed = vp.controller.displayedRoute
       const anchor = vp.controller.getAnchorFor(displayed)
       if (!anchor) {
-        // Bottom semantic: pin the column-reverse bottom through layout growth.
+        // Bottom semantic: pin the normal-flow bottom through layout growth.
         // During a live gesture the pin only applies while the viewport is STILL
         // at the genuine bottom (a gesture that left the bottom published its own
         // row anchor/offset through its takeover); an absolute scrollTop write
         // must never pull a scrolling user back.
         layoutHoldRef.current = null
-        if (vp.controller.hasActiveUserInteraction() && Math.abs(container.scrollTop) > 1) return
+        let metrics: { scrollTop: number; scrollHeight: number; clientHeight: number }
+        let bottomTarget = 0
+        let atBottomNow = false
         try {
-          if (Math.abs(container.scrollTop) > 1) {
-            container.scrollTop = 0
+          metrics = readScrollMetrics(container)
+          bottomTarget = maxScrollTop(metrics)
+          atBottomNow = distanceFromBottom(metrics) <= 1
+        } catch {
+          return
+        }
+        if (vp.controller.hasActiveUserInteraction() && !atBottomNow) return
+        try {
+          if (!atBottomNow) {
+            container.scrollTop = bottomTarget
             compensatingRef.current = { expected: container.scrollTop }
             recordCompensationWrite(vp.controller, container)
           }

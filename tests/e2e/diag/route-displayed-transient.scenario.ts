@@ -417,7 +417,7 @@ export default async function observe({ page, electronApp, capture, writeText }:
       if ((await page.locator(selector).count()) > 0) return true
       if (Date.now() - start > timeoutMs) return false
       const s = await snapshot(anchorId, parentBranchId)
-      if (typeof s.scrollTop === 'number' && s.maxScroll > 0 && Math.abs(s.scrollTop) > 0.92 * s.maxScroll) dir = 1
+      if (typeof s.scrollTop === 'number' && s.maxScroll > 0 && s.maxScroll - s.scrollTop > 0.92 * s.maxScroll) dir = 1
       await wheel(dir * 300)
     }
   }
@@ -446,7 +446,7 @@ export default async function observe({ page, electronApp, capture, writeText }:
         continue
       }
       if (s.maxScroll < 80) break // short route: cannot be non-clamped; report below
-      const r = Math.abs(s.scrollTop) / Math.max(1, s.maxScroll)
+      const r = Math.max(0, s.maxScroll - s.scrollTop) / Math.max(1, s.maxScroll)
       const dividerOK = s.dividerTop >= s.clientHeight * 0.25 && s.dividerTop <= s.clientHeight * 0.65
       const ratioOK = r >= 0.15 && r <= 0.85
       if (dividerOK && ratioOK) break
@@ -461,13 +461,13 @@ export default async function observe({ page, electronApp, capture, writeText }:
       await wheel(Math.round(delta / 2))
     }
     s = await snapshot(anchorId, parentBranchId)
-    const ratio = round(Math.abs(s.scrollTop) / Math.max(1, s.maxScroll))
+    const ratio = round(Math.max(0, s.maxScroll - s.scrollTop) / Math.max(1, s.maxScroll))
     const dividerMid =
       s.dividerTop !== null &&
       s.dividerTop !== undefined &&
       s.dividerTop >= s.clientHeight * 0.2 &&
       s.dividerTop <= s.clientHeight * 0.7
-    const clamped = s.maxScroll < 80 || Math.abs(s.scrollTop) <= 1 || ratio < 0.15 || ratio > 0.85 || !dividerMid
+    const clamped = s.maxScroll < 80 || s.maxScroll - s.scrollTop <= 1 || ratio < 0.15 || ratio > 0.85 || !dividerMid
     return { ok: true as const, s, ratio, clamped }
   }
 
@@ -607,8 +607,8 @@ export default async function observe({ page, electronApp, capture, writeText }:
         `${name}: CLAMPED reading position (short route or boundary); result is coverage-limited, not a pass by itself`
       )
     }
-    if (Math.abs(s.scrollTop) <= 0 && s.maxScroll > 80) {
-      throw new Error(`${name}: reading position is at the top boundary; refusing a top-anchored switch`)
+    if (s.maxScroll - s.scrollTop <= 0 && s.maxScroll > 80) {
+      throw new Error(`${name}: reading position is at the bottom boundary; refusing a bottom-anchored switch`)
     }
     const pre = s
     await capture(`pre-${name}`)

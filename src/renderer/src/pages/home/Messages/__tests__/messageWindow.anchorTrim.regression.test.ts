@@ -60,7 +60,11 @@ describe('B-06 anchor-preserving trim regression — 200-group cap with opposite
     // At newest edge, derived hasMoreNewer false, hasMoreOlder true
     expect(win.hasMoreOlder).toBe(true)
     expect(win.hasMoreNewer).toBe(false)
-    expect(win.boundedViewportObservability?.didTrim).toBe(false)
+    // The newest-capacity slice is a local trim of the loaded projection: the
+    // 200 older resident groups are omitted here and reported on the older edge.
+    expect(win.boundedViewportObservability?.didTrim).toBe(true)
+    expect(win.boundedViewportObservability?.trimmedEdge).toBe('older')
+    expect(win.boundedViewportObservability?.trimmedGroups).toBe(200)
 
     // Expand older by 50 beyond bound: provisional 150..399 (250) => trim newer 50 => 150..349
     const beforeOldest = win.oldestMessageId! // stable anchor: oldest at start
@@ -717,7 +721,12 @@ describe('latest-edge reconcile retains the held row across insertion (bounded)'
     )
     expect(retained.range).toEqual(plain.range)
     expect(retained.displayMessages.map((m) => m.id)).toEqual(plain.displayMessages.map((m) => m.id))
-    expect(retained.boundedViewportObservability?.didTrim).toBe(false)
+    // No retention trim: the newer edge is untouched (the plain and retained
+    // windows are identical). The reported trim is the newest-capacity slice's
+    // own local omission of the 2 older resident groups.
+    expect(retained.boundedViewportObservability?.didTrim).toBe(true)
+    expect(retained.boundedViewportObservability?.trimmedEdge).toBe('older')
+    expect(retained.boundedViewportObservability?.trimmedGroups).toBe(2)
   })
 
   it('an unretainable id degrades to the plain bounded latest window (fail-closed)', () => {

@@ -1,3 +1,4 @@
+import { distanceFromBottom, type FlowScrollMetrics } from '@renderer/pages/home/Messages/flowScrollGeometry'
 import { ChevronDown } from 'lucide-react'
 import type { FC, RefObject } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -5,15 +6,15 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 /**
- * Genuine physical bottom gate (renderer-local geometry only):
- * `abs(scrollTop) <= 1`. Mirrors the canonical `isGenuinePhysicalBottom`
- * in Messages.tsx (kept there by the streaming-follow visual contract);
- * duplicated here so this lightweight button never imports the full
- * Messages module. 1px is subpixel rounding tolerance — never the 50px
- * snapshot vicinity.
+ * Genuine physical bottom gate (renderer-local geometry only): the container's
+ * own scroll travel reached within 1px, i.e. `distanceFromBottom(metrics) <= 1`.
+ * Mirrors the canonical `isGenuinePhysicalBottom` in Messages.tsx (kept there by
+ * the streaming-follow visual contract); both read the same shared flow
+ * primitive, so the two can never drift into parallel formulas. 1px is subpixel
+ * rounding tolerance — never the 50px snapshot vicinity.
  */
-const isAtGenuineBottom = (scrollTop: unknown): boolean =>
-  typeof scrollTop === 'number' && Number.isFinite(scrollTop) && Math.abs(scrollTop) <= 1
+const isAtGenuineBottom = (metrics: FlowScrollMetrics): boolean =>
+  Number.isFinite(metrics.scrollTop) && distanceFromBottom(metrics) <= 1
 
 interface BackToBottomButtonProps {
   /** Canonical explicit bottom navigation (Messages scrollToBottom). */
@@ -34,10 +35,11 @@ interface BackToBottomButtonProps {
   hasMoreNewer?: boolean
 }
 
-const readScrollTop = (container: HTMLElement | null): number | null => {
+const readContainerMetrics = (container: HTMLElement | null): FlowScrollMetrics | null => {
   if (!container) return null
   const value = container.scrollTop
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return { scrollTop: value, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight }
 }
 
 /**
@@ -45,11 +47,11 @@ const readScrollTop = (container: HTMLElement | null): number | null => {
  *
  * - Always available, independent of the conversation-navigation setting.
  * - Visibility derives from the genuine physical bottom
- *   (`abs(scrollTop) <= 1px`; the 50px snapshot vicinity never counts) AND
+ *   (`distanceFromBottom <= 1px`; the 50px snapshot vicinity never counts) AND
  *   the authoritative newer completeness: hidden only when physically at the
  *   bottom with no newer messages beyond the current projection
- *   (`hasMoreNewer === false`). A historical window parked at scrollTop 0
- *   with `hasMoreNewer === true` stays visible — physical bottom is the
+ *   (`hasMoreNewer === false`). A historical window parked at its own lower
+ *   edge with `hasMoreNewer === true` stays visible — physical bottom is the
  *   window's lower edge, not the newest bottom.
  * - Re-evaluated on scroll, resize, and content growth (streaming/geometry
  *   changes), so it appears whenever the viewport is away from the bottom.
@@ -68,10 +70,10 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
   }, [containerRef])
 
   const refresh = useCallback(() => {
-    const top = readScrollTop(resolveContainer())
-    if (top === null) return
+    const metrics = readContainerMetrics(resolveContainer())
+    if (metrics === null) return
     setIsAtBottom((prev) => {
-      const next = isAtGenuineBottom(top)
+      const next = isAtGenuineBottom(metrics)
       return prev === next ? prev : next
     })
   }, [resolveContainer])

@@ -10,7 +10,11 @@ import { useMessageActionController } from '@renderer/hooks/useMessageActionCont
 import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
 import { resolveChromeAuthoritySegment, useRetainedRouteSegments } from '@renderer/hooks/useRetainedRouteSegments'
 import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
-import useScrollPosition, { commitSnapshotForRoute, routeScrollKey } from '@renderer/hooks/useScrollPosition'
+import useScrollPosition, {
+  commitSnapshotForRoute,
+  normalizeSaved,
+  routeScrollKey
+} from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
@@ -18,34 +22,38 @@ import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
 import BackToBottomButton from '@renderer/pages/home/Messages/BackToBottomButton'
 import {
-  COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
-  isAtBottom as isColumnReverseAtBottom,
-  isAtNewest as isColumnReverseAtNewest,
-  isAtOldest as isColumnReverseAtOldest,
-  isExactlyAtNewest,
-  isExactlyAtOldest
-} from '@renderer/pages/home/Messages/columnReverseGeometry'
-import {
   createVisibleAnchorCache,
   findFirstVisibleMessage,
   findViewportTopAnchorWithOffset,
   getMessageRowById,
   isElementVisibleInViewport
 } from '@renderer/pages/home/Messages/domVisibility'
+import {
+  FLOW_BOTTOM_THRESHOLD_PX,
+  isAtBottom as isAtFlowBottom,
+  isAtNewest as isAtFlowNewest,
+  isAtOldest as isAtFlowOldest,
+  isExactlyAtNewest,
+  isExactlyAtOldest,
+  maxScrollTop,
+  readScrollMetrics
+} from '@renderer/pages/home/Messages/flowScrollGeometry'
 import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
 import {
-  applyColumnReverseScroll,
+  applyFlowScroll,
   type BootstrapPhase,
   canHandleUserViewportScroll,
   chooseNavigationWindow,
-  computeColumnReverseMessageScrollTop,
+  computeFlowMessageScrollTop,
   computeRestoreMessageScrollTop,
   findFoldedMarkerElement,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
+  type MessageNavigationPrepareStatus,
   type MessageNavigationResult,
   type MessageNavigationScrollOutcome,
+  prepareMessageNavigationTarget,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
@@ -69,6 +77,7 @@ import {
   createLatestMessageWindow,
   derivePaginationWindow,
   getLatestWindowCompleteness,
+  isHistoryHeadLoaded,
   mergeWindowIntoTopic,
   type MessageWindow,
   reconcileMessageWindow
@@ -119,7 +128,12 @@ import {
   selectReferenceSourceNames
 } from '@renderer/store/newMessage'
 import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
-import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import {
+  getPendingRouteRestorePublicationToken,
+  loadRouteMessagesThunk,
+  resolveAdoptedResidentBaseline,
+  updateMessageAndBlocksThunk
+} from '@renderer/store/thunk/messageThunk'
 import {
   activeBranchSet,
   deletionFallbackConsumed,
@@ -178,6 +192,7 @@ import {
   buildDividerSearchProgressFromVisible,
   buildDividerVisibleMessages,
   isDividerVisibleUnionExact,
+  isDividerVisibleViewportOwned,
   planDividerVisibleRebase
 } from './dividerVisibleRebase'
 /**
@@ -325,9 +340,11 @@ const logger = loggerService.withContext('Messages')
 
 /**
  * Landing movement timing. The journey is driven frame by frame inside the
- * navigation transaction (native smooth scrolling does not animate this
- * column-reverse scroller), so the duration is explicit: a short hop and a long
- * jump both feel deliberate, and the whole movement is bounded (~420ms max).
+ * navigation transaction instead of by native smooth scrolling, so the
+ * duration is explicit: a short hop and a long jump both feel deliberate, and
+ * the whole movement is bounded (~420ms max). The flow scroller would make
+ * native `behavior: 'smooth'` viable, so this manual animator is a removable
+ * legacy path; navigation timing is intentionally left unchanged here.
  */
 const SEARCH_MATCH_MOTION_MIN_DURATION_MS = 140
 const SEARCH_MATCH_MOTION_MAX_DURATION_MS = 420
@@ -367,7 +384,6 @@ const measureRect = (element: Element | null | undefined): MeasuredRect | null =
     return null
   }
 }
-
 /**
  * Measures one search hit and plans its landing.
  *
@@ -429,7 +445,7 @@ const planSearchMatchLanding = (args: {
     matchHeight,
     containerClientHeight: container.clientHeight,
     currentScrollTop: container.scrollTop,
-    minScrollTop: -(container.scrollHeight - container.clientHeight),
+    maxScrollTop: maxScrollTop(readScrollMetrics(container)),
     band,
     reducedMotion: prefersReducedMotion()
   })
@@ -449,17 +465,6 @@ export const shouldHandleSendMessageForTopic = (
   if (!payload || typeof payload.topicId !== 'string' || payload.topicId.length === 0) return true
   return payload.topicId === currentTopicId
 }
-
-/**
- * Genuine physical bottom for column-reverse follow resume (renderer-local
- * geometry only): `abs(scrollTop) <= 1`. 1px is subpixel rounding tolerance
- * (same as the oldest-edge exact gate) — never the 50px snapshot vicinity,
- * so a user reading near the tail never jumps to follow. Snapshot
- * `isAtBottom` (50px) semantics are unchanged; this gate only chooses the
- * live anchor (null = follow) for real user scrolls.
- */
-export const isGenuinePhysicalBottom = (scrollTop: unknown): boolean =>
-  typeof scrollTop === 'number' && Number.isFinite(scrollTop) && Math.abs(scrollTop) <= 1
 
 /**
  * Explicit send-to-bottom intent (SEND_MESSAGE) dependencies (focused-test
@@ -612,7 +617,7 @@ export const runSendBottomIntent = async (
 
   // Suspend the incompatible prior row keeper BEFORE the navigation scroll
   // runs: adopting the bottom semantic now lets keeper layout/mutation holds
-  // pin scrollTop 0 through the insertion that follows instead of undoing
+  // pin the bottom edge through the insertion that follows instead of undoing
   // the scroll back to the old reading row. Fail-closed when the session
   // moved under us (owned/dirty/route/epoch) — no mutation on refusal paths
   // below except this bottom suspension which itself refuses then.
@@ -925,8 +930,9 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // Canonical viewport projection (S6.2a): displayGroups are precomputed
   // canonical groups (consecutive assistant messages sharing a non-empty askId
   // form one group; all other messages are singleton groups). Projection is
-  // one-to-one (no cross-run merge/split), newest group first (column-reverse
-  // outer), oldest message first within each group, viewport-local indices
+  // one-to-one (no cross-run merge/split), newest group first (projected list
+  // order; the DOM render reverses once at the flow-node boundary), oldest
+  // message first within each group, viewport-local indices
   // (0 = newest in displayMessages), and canonical keys (group.key) with
   // stable entity-derived Fragment keys.
   //
@@ -1159,34 +1165,33 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         <div
           style={{
             display: 'flex',
-            flexDirection: 'column-reverse',
-            // Paused-stream fractional-zoom jitter: native TRUE intrinsic
-            // height of the sole firstElementChild content wrapper (content +
-            // margins, rounded up to the live device-pixel quantum). The
-            // keeper synchronizes `--messages-pixel-size` to
-            // `1/window.devicePixelRatio` on this same wrapper (write-only on
-            // change, existing observer/layout path, no new state/listeners);
-            // top-alignment keeps the reversed children off the fractional
-            // root start. Unsupported engines ignore the height declaration
-            // and keep the previous automatic height (no render break).
-            height: 'calc-size(auto, round(up, size, var(--messages-pixel-size, 1px)))',
-            justifyContent: 'flex-end',
+            flexDirection: 'column',
+            // Normal flow: DOM order equals visual order (oldest at the top,
+            // newest at the bottom). A short flow is aligned to the bottom of
+            // the scroll host by `marginBlockStart: auto` — the host takes the
+            // available height and this wrapper is pushed to its end. That
+            // replaces both the previous reversed direction and the
+            // device-pixel `calc-size` rounding wrapper: growing downward from
+            // a stable top needs no fractional-zoom rounding hack.
+            marginBlockStart: 'auto',
             flexShrink: 0
           }}>
-          {/* App-owned browse paging: this wrapper is layout-only (same DOM
-          order/structure as before). Both edges are evaluated from live
-          container geometry + committed viewport state on genuine user
-          scroll/input (maybePageAtEdge) — never library latch events. */}
+          {/* Prompts always render; the persisted showPrompt setting is inert. */}
+          <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
+          {/* App-owned browse paging: this wrapper is layout-only (no chrome,
+          no observation). Both edges are evaluated from live container
+          geometry + committed viewport state on genuine user scroll/input
+          (maybePageAtEdge) — never library latch events. */}
           <div data-older-paging="app-owned" style={{ overflow: 'visible' }}>
             <MessageContextMenu topicId={topic.id}>
               <ScrollContainer>
-                {isLoadingNewer && (
+                {isLoadingMore && (
                   <LoaderContainer>
                     <LoadingIcon color="var(--color-text-2)" />
                   </LoaderContainer>
                 )}
                 {renderMessageSegments()}
-                {isLoadingMore && (
+                {isLoadingNewer && (
                   <LoaderContainer>
                     <LoadingIcon color="var(--color-text-2)" />
                   </LoaderContainer>
@@ -1194,9 +1199,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
               </ScrollContainer>
             </MessageContextMenu>
           </div>
-
-          {/* Prompts always render; the persisted showPrompt setting is inert. */}
-          <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
         </div>
       </MessagesContainer>
       <BackToBottomButton
@@ -1392,26 +1394,27 @@ const Messages = ({
   })
   const getLegacyMainSavedPosition = useCallback(() => {
     try {
-      const saved = window.keyv.get(`scroll:topic-${topic.id}`)
-      if (saved && typeof saved === 'object' && 'scrollTop' in saved) {
-        return saved as { scrollTop: number; anchorId: string | null; isAtBottom: boolean }
-      }
-      if (typeof saved === 'number') {
-        return { scrollTop: saved, anchorId: null, isAtBottom: false }
-      }
+      // Coordinate-space gate (shared hook normalizer): a legacy topic-only
+      // record predates the normal-flow conversion, so foreign numbers are
+      // dropped (anchorless absent → downstream bottom/latest default) while
+      // the stable anchor, intra-row offset, and bottom classification survive.
+      return normalizeSaved(window.keyv.get(`scroll:topic-${topic.id}`))
     } catch {
       // fail-closed: no legacy fallback
+      return null
     }
-    return null
   }, [topic.id])
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
   const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
   // History-edge fact for head fork dividers: the displayed window provably
-  // contains the true history head only when Main reported no older page.
-  // Unknown (fact absent) counts as unknown, never as a head.
-  const historyHeadLoaded = viewportState.window?.authoritativeHasMoreBefore === false
+  // contains the true history head only when Main reported no older page AND the
+  // display itself has no resident older page left to show. A newest-capacity
+  // window omits resident older groups locally, so Main's exhausted edge alone
+  // would promote the head fork above rows that really precede it. Unknown (fact
+  // absent) counts as unknown, never as a head.
+  const historyHeadLoaded = isHistoryHeadLoaded(viewportState.window)
   const isLoadingMore = viewportState.loading.older
   const isLoadingNewer = viewportState.loading.newer
 
@@ -1908,20 +1911,56 @@ const Messages = ({
   // reducer dispatch + plan ref in ONE sync call; stale epochs refuse with no
   // dispatch, never tearing down the new session. Ordinary message
   // navigation / edit mode never enters that entry (not a route transition).
-  // Bootstrap arm: same hidden-until-positioned contract without claiming the
-  // viewport scroll token (the navigation transaction owns its own token).
-  // Controller ownership alone suppresses transient capture pre-paint; the
-  // stable completion commits explicitly without requiring user input.
-  const armBootstrapTransition = useCallback(
-    (plan: ViewportFirstPositionPlan, topicIdAtStart: string, routeAtStart: string | null) => {
+  // Bootstrap fetch: open the generic fetch-hold session the async navigation
+  // reads under (hidden-but-measurable, never positioned yet). The navigation
+  // transaction owns its own scroll token; this hold only owns the hook and
+  // the hidden phase. No first-position plan is delivered here, so the
+  // pre-paint layout effect cannot consume its exactly-once placement on the
+  // stale (pre-navigation) projection.
+  const beginBootstrapFetch = useCallback(
+    (topicIdAtStart: string, routeAtStart: string | null) => {
       tearDownViewportTransition()
       const epoch = controller.request({ kind: 'generic', topicId: topicIdAtStart, targetRoute: routeAtStart }).epoch
-      controller.appliedWindow(epoch)
-      transitionPlanRef.current = { topicId: topicIdAtStart, routeId: routeAtStart, epoch, plan, outcome: null }
       notifyViewport()
       return epoch
     },
     [controller, tearDownViewportTransition, notifyViewport]
+  )
+  /**
+   * Bootstrap positioning-plan commit: deliver the first-position plan for
+   * the SAME session the caller opened with `beginBootstrapFetch`, only
+   * after the navigation finished and the target projection is committed.
+   * Never opens a new epoch; a stale/superseded session refuses with no
+   * dispatch and never disturbs the newer owner (failVisible stays
+   * epoch-gated and inert for them). The pre-paint layout effect (or the
+   * awaiting completion below) then attempts the plan exactly once on the
+   * target's own projection.
+   */
+  const commitBootstrapPositioningPlan = useCallback(
+    (epoch: number, plan: ViewportFirstPositionPlan, topicIdAtStart: string, routeAtStart: string | null) => {
+      if (controller.currentEpoch !== epoch) return false
+      if (!controller.isSessionCurrent(epoch)) return false
+      if (controller.currentPhase !== 'fetch-hold') return false
+      if (unmountedRef.current) return false
+      if (topicIdRef.current !== topicIdAtStart || routeRef.current !== routeAtStart) return false
+      if (!controller.appliedWindow(epoch)) return false
+      transitionPlanRef.current = { topicId: topicIdAtStart, routeId: routeAtStart, epoch, plan, outcome: null }
+      // Same observable plan delivery as the atomic route-switch entry:
+      // supersede any previous ack, arm this epoch's placement ack, and bump
+      // the reactive plan generation so the pre-paint layout effect attempts
+      // this plan exactly once.
+      settlePlanAck(null, false)
+      let ackResolve: (observed: boolean) => void = () => undefined
+      const ackPromise = new Promise<boolean>((resolve) => {
+        ackResolve = resolve
+      })
+      planAckRef.current = { epoch, resolve: ackResolve, promise: ackPromise }
+      planSeqRef.current += 1
+      setPlanSeq(planSeqRef.current)
+      notifyViewport()
+      return true
+    },
+    [controller, notifyViewport, settlePlanAck]
   )
   // Displayed-route/stable-snapshot coordinator (route-local viewports).
   // - Selected route = Redux intent (`routeRef`); displayed route =
@@ -2168,7 +2207,7 @@ const Messages = ({
       }
       let atBottom = false
       try {
-        atBottom = isColumnReverseAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+        atBottom = isAtFlowBottom(readScrollMetrics(live), FLOW_BOTTOM_THRESHOLD_PX)
       } catch {
         atBottom = false
       }
@@ -2490,13 +2529,12 @@ const Messages = ({
   }, [tearDownViewportTransition, topic.id, clearTimeoutTimer, viewportDispatch, settlePlanAck])
 
   // S3.1: Explicit topic transition coordinator. Detects topic prop changes
-  // and orchestrates deterministic cleanup: save old-topic scroll position,
-  // viewport reset (generation advance, stale rejection), timer clearing,
-  // bootstrap phase reset, and saved-restore flag reset. The component
+  // and orchestrates deterministic cleanup: viewport reset (generation
+  // advance, stale rejection), timer clearing, bootstrap phase reset, and
+  // saved-restore flag reset. Departure freeze is owned by the unified
+  // switch entry (HomeViewportScope freezes BEFORE selected changes), so no
+  // save callback remains here. The component
   // remains mounted across topic changes — no key-driven remount.
-  // S3.2: saveOldTopicScrollPosition is called explicitly before topic/reset
-  // so the old topic's scroll is snapshotted to the old key before any
-  // transition state changes.
   useTopicTransition({
     topicId: topic.id,
     viewportDispatch,
@@ -2519,8 +2557,7 @@ const Messages = ({
     resetOnFirstUpdate: () => {
       onFirstUpdateFiredRef.current = false
     },
-    transitionEpochRef,
-    saveOldTopicScrollPosition: savePosition
+    transitionEpochRef
   })
 
   // Unified context info: boundary message ID, context count, and the single
@@ -3021,6 +3058,27 @@ const Messages = ({
       // follows newly appended messages, retaining its prior group capacity.
       const currentWindow = viewportStateRef.current.window
       if (!currentWindow) return
+      // Divider-visible ownership: the visible commit applies the union window
+      // and publishes the union order as the resident order in the same tick.
+      // The ordinary reconcile below would re-derive that union against the
+      // new projection (capacity-fill an older row, or drop preserved rows)
+      // with no layout compensation under the owning session — displacing the
+      // divider the first compensation just placed and tripping the quiet
+      // identity gate into fail-visible. While this session owns the viewport
+      // the union is the committed truth; positioning and the quiet commit
+      // belong to it alone (single owner).
+      // Single owner: while a divider-visible session owns this topic/route viewport,
+      // the committed union window is the positioning truth and the ordinary
+      // same-route reconcile must not re-derive it (predicate is epoch- and
+      // route-scoped, so later mutations/streams on this route reconcile
+      // normally once the session commits/terminates or is superseded).
+      if (
+        isDividerVisibleViewportOwned(dividerVisibleRef.current, topic.id, routeRef.current, (epoch) =>
+          controller.isSessionCurrent(epoch)
+        )
+      ) {
+        return
+      }
       const currentDisplayMessages = currentWindow.displayMessages
       // Same-route insertion/append retention: the loaded projection can grow
       // while the shared keeper holds a clicked interaction region or the user's
@@ -3124,15 +3182,13 @@ const Messages = ({
    * expand (the block's own control) opens a block; selection ranges and
    * keyboard moves through hidden members never expand.
    */
-  const revealNavigationTarget = useCallback(async (_targetId: string) => {}, [])
+  const revealNavigationTarget = useCallback(async (_targetId: string): Promise<void> => undefined, [])
 
-  const settleNavigationDom = useCallback(
-    () =>
-      new Promise<void>((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-      }),
-    []
-  )
+  const settleNavigationDom = useCallback(() => {
+    return new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+  }, [])
 
   const cancelNavigationLoadsAndTimers = useCallback(() => {
     clearTimeoutTimer('loadMoreMessages')
@@ -3143,14 +3199,16 @@ const Messages = ({
   /**
    * Controlled progression for the search landing (Cmd/Ctrl+F).
    *
-   * The viewport is a `column-reverse` scroller whose valid `scrollTop` range is
-   * NEGATIVE (`0` is the newest bottom). Native smooth scrolling
-   * (`scrollTo({ behavior: 'smooth' })`) accepts such a write but never animates
-   * it in this scroller — measured: one write, zero movement, no cancelling
-   * writer — so the movement is produced here instead: one positional write per
-   * frame along an ease-out curve, on the SAME scroll owner, inside the SAME
-   * navigation transaction. No global `scroll-behavior`, no second scroll owner,
-   * no suppression window.
+   * History: the viewport used to be a `column-reverse` scroller whose valid
+   * `scrollTop` range was NEGATIVE (`0` was the newest bottom), and native
+   * smooth scrolling (`scrollTo({ behavior: 'smooth' })`) accepted such a write
+   * but never animated it. The scroller is now ordinary normal flow, where
+   * native smooth scrolling is viable, so this manual animator is a REMOVABLE
+   * legacy path: it is left in place unchanged so navigation timing stays
+   * byte-identical in this stage. It produces one positional write per frame
+   * along an ease-out curve, on the SAME scroll owner, inside the SAME
+   * navigation transaction — no global `scroll-behavior`, no second scroll
+   * owner, no suppression window.
    *
    * The returned promise IS the transaction's completion signal: it must not
    * finish — nor hand the viewport to the keeper/snapshot — while the viewport is
@@ -3466,7 +3524,7 @@ const Messages = ({
               if (typeof postScrollTop !== 'number' || !Number.isFinite(postScrollTop)) return 'not-found' as const
               let atBottom = false
               try {
-                atBottom = isColumnReverseAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+                atBottom = isAtFlowBottom(readScrollMetrics(live), FLOW_BOTTOM_THRESHOLD_PX)
               } catch {
                 atBottom = false
               }
@@ -3577,7 +3635,7 @@ const Messages = ({
             // resulting position without a journey.
             return adoptRowAnchor(resolved.targetId)
           }
-          const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
+          const scrollOutcome = applyFlowScroll(resolved, live, (targetId, alignment) => {
             // Element lookup is the navigated row itself (fold is message-level,
             // so a reveal has already mounted it): the arithmetic below positions
             // that row. No scrollTop is written outside this single arbiter.
@@ -3592,7 +3650,8 @@ const Messages = ({
               return 'not-found' as const
             }
             const elementTopWithinContainer = elRect.top - containerRect.top + live.scrollTop
-            const minScrollTop = -(live.scrollHeight - live.clientHeight)
+            // Normal flow: the clamped write range is `[0, scrollHeight - clientHeight]`.
+            const flowMaxScrollTop = live.scrollHeight - live.clientHeight
             // Saved-offset restore (bootstrap topic-mount recovery only): the
             // SAME transaction that armed the pre-paint first placement
             // converges on the passed-through stable offset — never `start`
@@ -3604,7 +3663,7 @@ const Messages = ({
               const restoreTop = computeRestoreMessageScrollTop({
                 elementTopWithinContainer,
                 restoreOffset: resolved.restoreOffset,
-                minScrollTop
+                maxScrollTop: flowMaxScrollTop
               })
               if (restoreTop === null) return 'not-found' as const
               if (Math.abs(live.scrollTop - restoreTop) <= 1) return 'success' as const
@@ -3615,12 +3674,12 @@ const Messages = ({
               }
               return 'success' as const
             }
-            const top = computeColumnReverseMessageScrollTop({
+            const top = computeFlowMessageScrollTop({
               elementTopWithinContainer,
               containerClientHeight: live.clientHeight,
               elementHeight: elRect.height,
               alignment,
-              minScrollTop
+              maxScrollTop: flowMaxScrollTop
             })
             if (top === null) return 'not-found' as const
             try {
@@ -3688,6 +3747,170 @@ const Messages = ({
   // stable commit on completion. No input-gated fence: a successful
   // programmatic restore is itself a valid stable viewport.
 
+  /**
+   * Shared target-load stage for message navigation (FULL + PREPARE stages).
+   *
+   * Canonical around-window ensure → atomic staged publication (blocks, then
+   * merged messages + route capability in ONE Redux commit) → wait until the
+   * Redux projection/React commit observably contains the target. No scroll,
+   * no controller touch — both the executing transaction and the bootstrap
+   * prepare entry run this SAME stage with the SAME publication shape.
+   *
+   * Bootstrap-PREPARE single flight (`viaRouteThunk: true`): only the
+   * injected around read changes — it is served by the standard
+   * `loadRouteMessagesThunk` (deferred: the thunk publishes nothing, this
+   * stage keeps its merge publication). The thunk's sync prefix registers
+   * the execution in `pendingRouteRestoreByTopic` BEFORE its first await
+   * (map handoff point), so a later same-topic same-route
+   * `loadTopicMessagesThunk` adopts the same in-flight read under the
+   * shared requestSeq instead of fetching a competing latest — and a
+   * completed loadTopic leaves no entry so this fetches fresh. The FULL
+   * path omits the flag and keeps the direct window read unchanged.
+   *
+   * Terminal contract (never hangs): `ready` (resident or committed), stale
+   * `cancelled`, authoritative missing `not-found` (single toast, same as the
+   * legacy path), retryable `error` (mapped to `cancelled` so pending is
+   * preserved). Stale/superseded completions never publish. No DB knowledge
+   * leaks beyond the injected read.
+   */
+  const ensureNavigationTargetReady = useCallback(
+    async (args: {
+      targetId: string
+      topicIdAtStart: string
+      routeAtStart: string | null
+      isStale: () => boolean
+      // Bootstrap-PREPARE single-flight selector: when true the injected
+      // around read is served by the standard `loadRouteMessagesThunk`
+      // (deferred). The FULL path omits it and keeps the direct read.
+      viaRouteThunk?: boolean
+      // Same-request adoption proof: invoked synchronously after the deferred
+      // around dispatch (sync prefix already registered the token) and before
+      // the first await settles, so the prepare baseline can adopt the
+      // dispatch-source publication generation. Pure local baseline only;
+      // never writes the resident registry.
+      onDeferredAroundDispatched?: (dispatchedPromise: unknown) => void
+    }): Promise<'ready' | 'cancelled' | 'not-found' | 'error'> => {
+      const { targetId, topicIdAtStart, routeAtStart, isStale } = args
+      const ensured = await ensureMessageLoaded(topicIdAtStart, targetId, {
+        getExistingMessages: () => messagesRef.current,
+        readAroundWindow: async (request) => {
+          if (args.viaRouteThunk === true) {
+            // Bootstrap-PREPARE single flight: the around window is fetched
+            // through the standard `loadRouteMessagesThunk` (deferred: this
+            // stage keeps its existing atomic staged-merge publication, the
+            // thunk publishes nothing). Its sync prefix registers the
+            // execution in the shared `pendingRouteRestoreByTopic` map BEFORE
+            // its first await (map handoff point), so a later same-topic
+            // same-route bootstrap latest adopts this around under the shared
+            // requestSeq instead of fetching a competing latest — and a
+            // completed loadTopic leaves no entry so this fetches fresh.
+            // Dispatch first: the thunk sync prefix registers the token before
+            // its first await. Adopt the dispatch-source publication generation
+            // into the local baseline only on same-request proof (promise
+            // identity + route); an unrelated resident change still stales.
+            const dispatchedAround = (dispatch as unknown as (a: unknown) => Promise<unknown>)(
+              loadRouteMessagesThunk(topicIdAtStart, routeAtStart, {
+                kind: 'around',
+                anchorMessageId: targetId,
+                before: (request as { before?: number }).before ?? NAVIGATION_VISUALLY_OLDER_GROUPS,
+                after: (request as { after?: number }).after ?? NAVIGATION_VISUALLY_NEWER_GROUPS,
+                deferPublish: true
+              })
+            )
+            try {
+              args.onDeferredAroundDispatched?.(dispatchedAround)
+            } catch {
+              // Fail-closed: baseline adoption is best-effort; the stale gate
+              // below still guards on the originally captured generation.
+            }
+            const thunkRes = (await dispatchedAround) as FetchMessagesWindowResponse | void
+            if (!thunkRes || !(thunkRes as unknown as { window?: unknown }).window) {
+              // Thunk stale discard (superseded / route-moved / current-moved /
+              // deleted / generation mismatch): the deferred thunk published
+              // nothing — throw so the loader maps it to retryable `error`
+              // (and the stage to `cancelled`, preserving pending). The
+              // loader's own post-fetch stale gate runs first when it trips.
+              throw new Error('around route read discarded as stale')
+            }
+            return thunkRes as unknown as FetchMessagesWindowResponse
+          }
+          const { dbService } = await import('@renderer/services/db')
+          // Navigation reads address the current route (never main by
+          // default when a branch is active).
+          const routedRequest: FetchMessagesWindowRequest = { ...request, branchId: routeAtStart }
+          try {
+            const response = (await runTopicWindowRead(topicIdAtStart, 'around', () =>
+              dbService.fetchMessagesWindow(routedRequest)
+            )) as unknown as FetchMessagesWindowResponse
+            return response
+          } catch (err) {
+            // Rethrow: a rejected around read is never swallowed here.
+            throw err
+          }
+        },
+        isStaleBeforeFetch: () => isStale() || routeRef.current !== routeAtStart,
+        isStaleAfterFetch: () => isStale() || routeRef.current !== routeAtStart
+      })
+
+      if (ensured.status === 'cancelled') return 'cancelled'
+      if (ensured.status === 'resident') {
+        if (isStale()) {
+          return 'cancelled'
+        }
+        return 'ready'
+      }
+      if (ensured.status === 'not-found') {
+        if (isStale()) {
+          return 'cancelled'
+        }
+        // Authoritative missing: single user-visible toast per navigate call.
+        // No retry loop here, so no toast storm. Pending clears via the
+        // existing `result !== 'cancelled'` path in bootstrap/event handlers.
+        window.toast.error(tRef.current('history.error.message_not_found'))
+        return 'not-found'
+      }
+      if (ensured.status === 'error') {
+        // Retryable transport/unknown/malformed: log already emitted in the
+        // loader (privacy-safe, no IDs). Preserve pending by mapping to
+        // `cancelled`; no user toast (no suitable generic key — log only).
+        return 'cancelled'
+      }
+
+      if (isStale()) {
+        return 'cancelled'
+      }
+
+      // Atomic staged publication (blocks then merged messages + route
+      // capability in ONE Redux commit, synchronously with no interleaving
+      // await). `messagesWindowMerged` unions the response-window capability
+      // into the same-route resident set so no intermediate all-immutable
+      // frame is published. No manual `messagesRef` assignment: the
+      // transaction below runs only after the projection commit is observable.
+      // Read-only window hydration: must not invalidate the semantic closure.
+      if (ensured.blocks.length > 0) {
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart)))
+      }
+      dispatch(
+        newMessagesActions.messagesWindowMerged({
+          topicId: topicIdAtStart,
+          messages: ensured.messages,
+          route: routeAtStart,
+          mutableMessageIds: ensured.mutableMessageIds ?? []
+        })
+      )
+
+      const committed = await waitForProjectionCommit(targetId, isStale)
+      if (!committed) {
+        return 'cancelled'
+      }
+      if (isStale()) {
+        return 'cancelled'
+      }
+
+      return 'ready'
+    },
+    [dispatch, waitForProjectionCommit]
+  )
   /**
    * Unified stable-ID navigation entry point (single assembly site).
    *
@@ -3758,70 +3981,22 @@ const Messages = ({
         }
 
         const routeAtStart = routeRef.current
-        const ensured = await ensureMessageLoaded(topicIdAtStart, targetId, {
-          getExistingMessages: () => messagesRef.current,
-          readAroundWindow: async (request) => {
-            const { dbService } = await import('@renderer/services/db')
-            // Navigation reads address the current route (never main by
-            // default when a branch is active).
-            const routedRequest: FetchMessagesWindowRequest = { ...request, branchId: routeAtStart }
-            return (await runTopicWindowRead(topicIdAtStart, 'around', () =>
-              dbService.fetchMessagesWindow(routedRequest)
-            )) as unknown as FetchMessagesWindowResponse
-          },
-          isStaleBeforeFetch: () => isStale() || routeRef.current !== routeAtStart,
-          isStaleAfterFetch: () => isStale() || routeRef.current !== routeAtStart
+        // Shared target-load stage (FULL path): ensure → publish → observable
+        // projection. The bootstrap prepare entry below runs this SAME stage,
+        // then its prepare-only transaction instead of the executing one here.
+        const ready = await ensureNavigationTargetReady({
+          targetId,
+          topicIdAtStart,
+          routeAtStart,
+          isStale
         })
-
-        if (ensured.status === 'cancelled') return 'cancelled' as const
-        if (ensured.status === 'resident') {
-          if (isStale()) return 'cancelled' as const
-          return runTransaction(intent, { landing })
-        }
-        if (ensured.status === 'not-found') {
-          if (isStale()) return 'cancelled' as const
-          // Authoritative missing: single user-visible toast per navigate call.
-          // No retry loop here, so no toast storm. Pending clears via the
-          // existing `result !== 'cancelled'` path in bootstrap/event handlers.
-          window.toast.error(tRef.current('history.error.message_not_found'))
-          return 'not-found' as const
-        }
-        if (ensured.status === 'error') {
-          // Retryable transport/unknown/malformed: log already emitted in the
-          // loader (privacy-safe, no IDs). Preserve pending by mapping to
-          // `cancelled`; no user toast (no suitable generic key — log only).
-          return 'cancelled' as const
-        }
-
-        if (isStale()) return 'cancelled' as const
-
-        // Atomic staged publication (blocks then merged messages + route
-        // capability in ONE Redux commit, synchronously with no interleaving
-        // await). `messagesWindowMerged` unions the response-window capability
-        // into the same-route resident set so no intermediate all-immutable
-        // frame is published. No manual `messagesRef` assignment: the
-        // transaction below runs only after the projection commit is observable.
-        // Read-only window hydration: must not invalidate the semantic closure.
-        if (ensured.blocks.length > 0) {
-          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart)))
-        }
-        dispatch(
-          newMessagesActions.messagesWindowMerged({
-            topicId: topicIdAtStart,
-            messages: ensured.messages,
-            route: routeAtStart,
-            mutableMessageIds: ensured.mutableMessageIds ?? []
-          })
-        )
-
-        const committed = await waitForProjectionCommit(targetId, isStale)
-        if (!committed) return 'cancelled' as const
-        if (isStale()) return 'cancelled' as const
+        if (ready === 'not-found') return 'not-found' as const
+        if (ready !== 'ready') return 'cancelled' as const
 
         return runTransaction(intent, { landing })
       })()
     },
-    [canFollowResidentSelectionEndpoint, controller, dispatch, runTransaction, waitForProjectionCommit]
+    [canFollowResidentSelectionEndpoint, controller, ensureNavigationTargetReady, runTransaction]
   )
 
   /**
@@ -3856,6 +4031,143 @@ const Messages = ({
       })
     },
     [navigate, savePosition, clearReadingAnchorPendingTarget, scheduleReadingAnchor]
+  )
+  /**
+   * Bootstrap-only PREPARE navigation entry (explicit stage contract).
+   *
+   * Runs the shared target-load stage (`ensureNavigationTargetReady`: same
+   * ensure → publish → observable-projection as the FULL path) and then the
+   * prepare-only transaction (`prepareMessageNavigationTarget`: resolve →
+   * window commit → settle → visibility gate, navigation token closed on
+   * every exit). 0 scroll writes, 0 controller adoption — it can never hit
+   * the owned-active refusal that the executing scroll path meets while the
+   * bootstrap fetch-hold owns the viewport. The SAME bootstrap epoch then
+   * goes to the existing first-placement → aligned → reveal → stable commit;
+   * never a new epoch, never a release/re-acquire, never an owner relaxation.
+   *
+   * Terminal contract: `prepared` (projection committed, token closed),
+   * `not-found` (authoritative missing, token closed), `cancelled`
+   * (stale/throw, token closed) — never a permanently hidden transition.
+   */
+  const runPrepareOnlyTransaction = useCallback(
+    (intent: MessageNavigationIntent): Promise<MessageNavigationPrepareStatus> => {
+      return prepareMessageNavigationTarget(intent, {
+        begin: (token, targetId, source, alignment) => {
+          const generation = viewportStateRef.current.navigation.generation
+          const committed = waitForNavigationCommit(token, generation)
+          viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
+          return committed
+        },
+        isCurrent: isCurrentNavigation,
+        cancelLoadsAndTimers: cancelNavigationLoadsAndTimers,
+        resolve: (requestedIntent) => resolveMessageNavigation(messagesRef.current, requestedIntent),
+        prepareWindow: (resolved) =>
+          chooseNavigationWindow(messagesRef.current, viewportStateRef.current.window, resolved, displayCount),
+        applyWindow: (token, window) => {
+          const initialState = viewportStateRef.current
+          const committed = viewportCommitWaiterRef.current.wait(initialState, (committedState) => {
+            if (committedState.navigation.token !== token) return false
+            return committedState.window === window ? true : null
+          })
+          viewportDispatch({ type: 'navigation/apply-window', token, window })
+          return committed
+        },
+        getTargetStatus: navigationTargetStatus,
+        revealTarget: revealNavigationTarget,
+        settleDom: settleNavigationDom,
+        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
+      }).then((result) => result.status)
+    },
+    [
+      cancelNavigationLoadsAndTimers,
+      displayCount,
+      isCurrentNavigation,
+      navigationTargetStatus,
+      revealNavigationTarget,
+      settleNavigationDom,
+      viewportDispatch,
+      waitForNavigationCommit
+    ]
+  )
+
+  /**
+   * Bootstrap prepare entry: shared staleness contract (per-call navigate
+   * epoch + transition epoch + deletion/resident generations, same as the
+   * FULL path), then the shared target-load stage, then the prepare-only
+   * transaction. Non-message intents (bottom/top/scrollTop restores) take the
+   * prepare-only transaction directly (zero reads, same as the FULL path).
+   */
+  const prepareNavigationTarget = useCallback(
+    (intent: MessageNavigationIntent): Promise<MessageNavigationPrepareStatus> => {
+      // Explicit navigation invalidates any pending shared interaction hold:
+      // the navigation owns viewport geometry from here.
+      try {
+        controller.clearInteractionIntent()
+      } catch {}
+      if (intent.kind !== 'message') return runPrepareOnlyTransaction(intent)
+      const targetId = intent.targetId
+      if (messagesRef.current.some((m) => m.id === targetId)) return runPrepareOnlyTransaction(intent)
+
+      return (async (): Promise<MessageNavigationPrepareStatus> => {
+        const navigateEpochAtStart = ++navigateEpochRef.current
+        const topicIdAtStart = topicIdRef.current
+        const transitionEpochAtStart = transitionEpochRef.current
+        const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
+        const residentGenAtStart = captureResidentGeneration(() => store.getState(), topicIdAtStart)
+        // Adoptable baseline: starts at the pre-dispatch capture and moves to
+        // the dispatch-source publication generation only on same-request
+        // proof (dispatched deferred around promise identity + route). Any
+        // unrelated resident advance still stales. Local variable only —
+        // never dispatches or writes the resident registry.
+        let residentGenBaseline = residentGenAtStart
+        const isStale = (): boolean => {
+          if (topicIdRef.current !== topicIdAtStart) return true
+          if (navigateEpochRef.current !== navigateEpochAtStart) return true
+          if (transitionEpochRef.current !== transitionEpochAtStart) return true
+          if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) return true
+          if (
+            shouldDiscardPaginationForResident(
+              residentGenBaseline,
+              captureResidentGeneration(() => store.getState(), topicIdAtStart)
+            )
+          ) {
+            return true
+          }
+          return false
+        }
+
+        const routeAtStart = routeRef.current
+        const ready = await ensureNavigationTargetReady({
+          targetId,
+          topicIdAtStart,
+          routeAtStart,
+          isStale,
+          viaRouteThunk: true,
+          onDeferredAroundDispatched: (dispatchedPromise) => {
+            try {
+              // Same-request adoption: read the publication token and move the
+              // local baseline to the dispatch-source generation only on proof
+              // (promise identity + route). An unrelated resident advance still
+              // stales; the resident registry is never written.
+              const token = getPendingRouteRestorePublicationToken(topicIdAtStart)
+              residentGenBaseline = resolveAdoptedResidentBaseline(
+                residentGenBaseline,
+                token,
+                dispatchedPromise,
+                routeAtStart
+              )
+            } catch {
+              // Fail-closed: keep the pre-dispatch baseline on read failure.
+            }
+          }
+        })
+        if (ready === 'not-found') return 'not-found'
+        if (ready !== 'ready') return 'cancelled'
+
+        return runPrepareOnlyTransaction(intent)
+      })()
+    },
+    [controller, ensureNavigationTargetReady, runPrepareOnlyTransaction]
   )
 
   // 滚动到指定消息组
@@ -4490,109 +4802,134 @@ const Messages = ({
       // local plan only: a missing pending target reveals at the deterministic
       // default (bottom) — never outgoing geometry.
       const pendingTarget = decision.intent.kind === 'message' ? decision.intent.targetId : null
-      const bootstrapRestoreEpoch = armBootstrapTransition(
-        pendingTarget
-          ? { kind: 'message', messageId: pendingTarget, wantOffset: null, fallbackScrollTop: null }
-          : { kind: 'bottom' },
-        topic.id,
-        routeRef.current
-      )
-      void navigate(decision.intent).then((result) => {
-        if (controller.currentEpoch !== bootstrapRestoreEpoch) return
-        if (transitionEpochRef.current !== bootstrapEpoch) {
-          failVisibleTransition(bootstrapRestoreEpoch)
-          return
-        }
-        // Placement evidence (never trust the 'success' string alone): only
-        // the current transaction's actually placed target may commit. The
-        // shared helper records outcome + phase together (exactly-once with
-        // the pre-paint layout attempt); unplaced/refused/terminal fails
-        // visible preserving the prior lawful snapshot.
-        const pendingTransition = transitionPlanRef.current
-        if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-          try {
-            const live = scrollContainerRef.current
+      const pendingRouteAtArm = routeRef.current
+      const pendingPlan: ViewportFirstPositionPlan = pendingTarget
+        ? { kind: 'message', messageId: pendingTarget, wantOffset: null, fallbackScrollTop: null }
+        : { kind: 'bottom' }
+      // Fetch-hold only: the first-position plan is committed after the
+      // navigation completes (same session, see below), so the pre-paint
+      // attempt cannot consume it on the stale projection.
+      const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, pendingRouteAtArm)
+      void prepareNavigationTarget(decision.intent).then(
+        (result) => {
+          if (controller.currentEpoch !== bootstrapRestoreEpoch) return
+          if (transitionEpochRef.current !== bootstrapEpoch) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          // Same-session plan delivery: the prepare finished (it commits the
+          // target projection) and this session is still current, so
+          // move fetch-hold → positioning and deliver the plan. Never a new
+          // epoch; a stale refusal fails visible without releasing a newer
+          // owner (failVisible is epoch-gated inert for them).
+          if (!commitBootstrapPositioningPlan(bootstrapRestoreEpoch, pendingPlan, topic.id, pendingRouteAtArm)) {
+            if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+            // Same-epoch adoption: the route pipeline adopted this fetch-hold
+            // and drove it past fetch-hold itself — never release another
+            // driver's session; its own currency gates own the outcome.
+            if (controller.currentPhase !== 'fetch-hold') {
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
+          }
+          // Placement evidence (never trust the 'success' string alone): only
+          // the current transaction's actually placed target may commit. The
+          // shared helper records outcome + phase together (exactly-once with
+          // the pre-paint layout attempt); unplaced/refused/terminal fails
+          // visible preserving the prior lawful snapshot.
+          const pendingTransition = transitionPlanRef.current
+          if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
+            try {
+              const live = scrollContainerRef.current
+              if (
+                !live ||
+                unmountedRef.current ||
+                topicIdRef.current !== topic.id ||
+                routeRef.current !== pendingTransition.routeId ||
+                !controller.isSessionCurrent(bootstrapRestoreEpoch)
+              ) {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                bootstrapPhaseRef.current = 'done'
+                return
+              }
+              let attempt: ViewportFirstPositionOutcome | 'refused'
+              try {
+                attempt = attemptFirstPosition(controller, pendingTransition, live)
+              } catch {
+                attempt = 'refused'
+              }
+              if (attempt === 'refused') {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                bootstrapPhaseRef.current = 'done'
+                return
+              }
+              if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                bootstrapPhaseRef.current = 'done'
+                return
+              }
+            } catch {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+          } else if ((controller.currentPhase as string) !== 'aligned') {
+            const phaseNow = controller.currentPhase as string
+            if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+              if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+          }
+          if (result !== 'cancelled') {
+            // Positive placement required: the attempt above (or the pre-paint
+            // layout attempt it deduplicates) left aligned/searching. A success
+            // string with an unplaced target never forces placed. Final empty
+            // windows never commit (fail-visible preserves the lawful snapshot).
+            const phaseNow = controller.currentPhase as string
+            if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+            if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
             if (
-              !live ||
-              unmountedRef.current ||
               topicIdRef.current !== topic.id ||
-              routeRef.current !== pendingTransition.routeId ||
-              !controller.isSessionCurrent(bootstrapRestoreEpoch)
+              !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+              unmountedRef.current
             ) {
               failVisibleTransition(bootstrapRestoreEpoch)
               bootstrapPhaseRef.current = 'done'
               return
             }
-            let attempt: ViewportFirstPositionOutcome | 'refused'
-            try {
-              attempt = attemptFirstPosition(controller, pendingTransition, live)
-            } catch {
-              attempt = 'refused'
-            }
-            if (attempt === 'refused') {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-          } catch {
-            failVisibleTransition(bootstrapRestoreEpoch)
+            clearPendingNavigate(pending)
             bootstrapPhaseRef.current = 'done'
-            return
-          }
-        } else if ((controller.currentPhase as string) !== 'aligned') {
-          const phaseNow = controller.currentPhase as string
-          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
-            if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
-            failVisibleTransition(bootstrapRestoreEpoch)
+            controller.revealed(bootstrapRestoreEpoch)
+            notifyViewport()
+            // Stable completion commit: the final visible viewport is the
+            // route's stable snapshot (no user input required). Gated by the
+            // same epoch; advances displayed provenance.
+            commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
+          } else {
             bootstrapPhaseRef.current = 'done'
-            return
+            // Cancelled transactions position nothing: terminate visibly
+            // without committing (release exactly once).
+            failVisibleTransition(bootstrapRestoreEpoch)
           }
+        },
+        (err: unknown) => {
+          // Rethrow: the rejection bypass is never swallowed here.
+          throw err
         }
-        if (result !== 'cancelled') {
-          // Positive placement required: the attempt above (or the pre-paint
-          // layout attempt it deduplicates) left aligned/searching. A success
-          // string with an unplaced target never forces placed. Final empty
-          // windows never commit (fail-visible preserves the lawful snapshot).
-          const phaseNow = controller.currentPhase as string
-          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            bootstrapPhaseRef.current = 'done'
-            return
-          }
-          if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            bootstrapPhaseRef.current = 'done'
-            return
-          }
-          if (
-            topicIdRef.current !== topic.id ||
-            !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
-            unmountedRef.current
-          ) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            bootstrapPhaseRef.current = 'done'
-            return
-          }
-          clearPendingNavigate(pending)
-          bootstrapPhaseRef.current = 'done'
-          controller.revealed(bootstrapRestoreEpoch)
-          notifyViewport()
-          // Stable completion commit: the final visible viewport is the
-          // route's stable snapshot (no user input required). Gated by the
-          // same epoch; advances displayed provenance.
-          commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
-        } else {
-          bootstrapPhaseRef.current = 'done'
-          // Cancelled transactions position nothing: terminate visibly
-          // without committing (release exactly once).
-          failVisibleTransition(bootstrapRestoreEpoch)
-        }
-      })
+      )
       return
     }
 
@@ -4631,7 +4968,9 @@ const Messages = ({
           : decision.intent.kind === 'scrollTop'
             ? { kind: 'scrollTop', scrollTop: decision.intent.scrollTop }
             : { kind: 'bottom' }
-    const bootstrapRestoreEpoch = armBootstrapTransition(restorePlan, topic.id, routeRef.current)
+    // Fetch-hold only (see pending path above): the restore plan is
+    // committed after the navigation completes, same session.
+    const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, routeRef.current)
     // Immutable requested restore target: the identity + finite desired
     // offset captured from the plan BEFORE the async navigate. The
     // completion below must align + verify THIS row's geometry and commit
@@ -4647,135 +4986,82 @@ const Messages = ({
     // Armed target route: the stale guard below must compare the CURRENT
     // route against THIS value, not against itself.
     const restoreRouteAtArm = routeRef.current
-    void navigate(decision.intent).then((result) => {
-      if (controller.currentEpoch !== bootstrapRestoreEpoch) return
-      if (transitionEpochRef.current !== restoreEpoch) {
-        failVisibleTransition(bootstrapRestoreEpoch)
-        return
-      }
-      // Same placement-evidence contract as the pending path above: never
-      // trust the result string alone; unplaced/refused/terminal fails
-      // visible preserving the prior lawful snapshot.
-      const pendingTransition = transitionPlanRef.current
-      if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-        try {
-          const live = scrollContainerRef.current
-          if (
-            !live ||
-            unmountedRef.current ||
-            topicIdRef.current !== topic.id ||
-            routeRef.current !== pendingTransition.routeId ||
-            !controller.isSessionCurrent(bootstrapRestoreEpoch)
-          ) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
-          }
-          let attempt: ViewportFirstPositionOutcome | 'refused'
-          try {
-            attempt = attemptFirstPosition(controller, pendingTransition, live)
-          } catch {
-            attempt = 'refused'
-          }
-          if (attempt === 'refused') {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
-          }
-          if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
-          }
-        } catch {
+    void prepareNavigationTarget(decision.intent).then(
+      (result) => {
+        if (controller.currentEpoch !== bootstrapRestoreEpoch) return
+        if (transitionEpochRef.current !== restoreEpoch) {
           failVisibleTransition(bootstrapRestoreEpoch)
           return
         }
-      } else if ((controller.currentPhase as string) !== 'aligned') {
-        const phaseNow = controller.currentPhase as string
-        if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+        // Same-session plan delivery (see pending path above): fetch-hold →
+        // positioning with the requested restore plan, only now that the
+        // prepare finished and the target projection is committed.
+        if (!commitBootstrapPositioningPlan(bootstrapRestoreEpoch, restorePlan, topic.id, restoreRouteAtArm)) {
           if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+          // Same-epoch adoption (see pending path above): never release
+          // another driver's session.
+          if (controller.currentPhase !== 'fetch-hold') return
           failVisibleTransition(bootstrapRestoreEpoch)
           return
         }
-      }
-      // Stable completion commit (same epoch gate already checked above):
-      // - Anchored restore (immutable requested id + finite desired offset):
-      //   align + verify the REQUESTED row's actual geometry, then commit it
-      //   explicitly via the identity commit. A failed/clamped/missing
-      //   geometry fails visible preserving the prior lawful snapshot — never
-      //   a fabricated identity commit, never a crossing-first capture.
-      // - Anchorless/bottom/offset-less restores keep the existing
-      //   capture/default commit below. Advances displayed provenance.
-      if (shouldPersistNavigationResult(result)) {
-        const phaseNow = controller.currentPhase as string
-        if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
-          failVisibleTransition(bootstrapRestoreEpoch)
-          return
-        }
-        if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
-          failVisibleTransition(bootstrapRestoreEpoch)
-          return
-        }
-        if (
-          topicIdRef.current !== topic.id ||
-          !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
-          unmountedRef.current
-        ) {
-          failVisibleTransition(bootstrapRestoreEpoch)
-          return
-        }
-        if (requestedRestoreId !== null && requestedRestoreOffset !== null) {
-          // Stale guard: the committed projection must still cover the
-          // immutable requested target on the current route.
-          let projectionCovers = false
+        // Same placement-evidence contract as the pending path above: never
+        // trust the result string alone; unplaced/refused/terminal fails
+        // visible preserving the prior lawful snapshot.
+        const pendingTransition = transitionPlanRef.current
+        if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
           try {
-            projectionCovers = messagesRef.current.some((m) => m.id === requestedRestoreId)
-          } catch {
-            projectionCovers = false
-          }
-          if (!projectionCovers) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
-          }
-          const liveForRestore = scrollContainerRef.current
-          if (!liveForRestore) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
-          }
-          let restoreAligned = false
-          let restoreDomResident = false
-          let restoreRowVisible = false
-          try {
-            const rowEl = getMessageRowById(requestedRestoreId)
-            restoreDomResident = rowEl !== null
-            restoreRowVisible = checkElement(requestedRestoreId) === 'visible'
-            if (rowEl && restoreRowVisible) {
-              const aligned = alignRetainedViewportOnce({
-                container: liveForRestore,
-                rowEl,
-                anchorId: requestedRestoreId,
-                wantOffset: requestedRestoreOffset,
-                isAtBottom: false,
-                isRowVisible: true
-              })
-              restoreAligned = aligned.aligned
-            } else {
-              restoreAligned = false
+            const live = scrollContainerRef.current
+            if (
+              !live ||
+              unmountedRef.current ||
+              topicIdRef.current !== topic.id ||
+              routeRef.current !== pendingTransition.routeId ||
+              !controller.isSessionCurrent(bootstrapRestoreEpoch)
+            ) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            let attempt: ViewportFirstPositionOutcome | 'refused'
+            try {
+              attempt = attemptFirstPosition(controller, pendingTransition, live)
+            } catch {
+              attempt = 'refused'
+            }
+            if (attempt === 'refused') {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
             }
           } catch {
-            restoreAligned = false
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
           }
-          const restoreCommittable = isBootstrapRestoreAnchorCommittable({
-            requestedId: requestedRestoreId,
-            wantOffset: requestedRestoreOffset,
-            projectionCovers,
-            domResident: restoreDomResident,
-            rowVisible: restoreRowVisible,
-            topicMatch: topicIdRef.current === topic.id,
-            routeMatch: routeRef.current === restoreRouteAtArm,
-            epochCurrent: controller.isSessionCurrent(bootstrapRestoreEpoch),
-            mounted: !unmountedRef.current,
-            aligned: restoreAligned
-          })
-          if (!restoreCommittable) {
+        } else if ((controller.currentPhase as string) !== 'aligned') {
+          const phaseNow = controller.currentPhase as string
+          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+            if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+        }
+        // Stable completion commit (same epoch gate already checked above):
+        // - Anchored restore (immutable requested id + finite desired offset):
+        //   align + verify the REQUESTED row's actual geometry, then commit it
+        //   explicitly via the identity commit. A failed/clamped/missing
+        //   geometry fails visible preserving the prior lawful snapshot — never
+        //   a fabricated identity commit, never a crossing-first capture.
+        // - Anchorless/bottom/offset-less restores keep the existing
+        //   capture/default commit below. Advances displayed provenance.
+        if (result === 'prepared') {
+          const phaseNow = controller.currentPhase as string
+          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
             failVisibleTransition(bootstrapRestoreEpoch)
             return
           }
@@ -4787,36 +5073,107 @@ const Messages = ({
             failVisibleTransition(bootstrapRestoreEpoch)
             return
           }
+          if (requestedRestoreId !== null && requestedRestoreOffset !== null) {
+            // Stale guard: the committed projection must still cover the
+            // immutable requested target on the current route.
+            let projectionCovers = false
+            try {
+              projectionCovers = messagesRef.current.some((m) => m.id === requestedRestoreId)
+            } catch {
+              projectionCovers = false
+            }
+            if (!projectionCovers) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            const liveForRestore = scrollContainerRef.current
+            if (!liveForRestore) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            let restoreAligned = false
+            let restoreDomResident = false
+            let restoreRowVisible = false
+            try {
+              const rowEl = getMessageRowById(requestedRestoreId)
+              restoreDomResident = rowEl !== null
+              restoreRowVisible = checkElement(requestedRestoreId) === 'visible'
+              if (rowEl && restoreRowVisible) {
+                const aligned = alignRetainedViewportOnce({
+                  container: liveForRestore,
+                  rowEl,
+                  anchorId: requestedRestoreId,
+                  wantOffset: requestedRestoreOffset,
+                  isAtBottom: false,
+                  isRowVisible: true
+                })
+                restoreAligned = aligned.aligned
+              } else {
+                restoreAligned = false
+              }
+            } catch {
+              restoreAligned = false
+            }
+            const restoreCommittable = isBootstrapRestoreAnchorCommittable({
+              requestedId: requestedRestoreId,
+              wantOffset: requestedRestoreOffset,
+              projectionCovers,
+              domResident: restoreDomResident,
+              rowVisible: restoreRowVisible,
+              topicMatch: topicIdRef.current === topic.id,
+              routeMatch: routeRef.current === restoreRouteAtArm,
+              epochCurrent: controller.isSessionCurrent(bootstrapRestoreEpoch),
+              mounted: !unmountedRef.current,
+              aligned: restoreAligned
+            })
+            if (!restoreCommittable) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            if (
+              topicIdRef.current !== topic.id ||
+              !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+              unmountedRef.current
+            ) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              return
+            }
+            controller.revealed(bootstrapRestoreEpoch)
+            notifyViewport()
+            const anchoredCommitted = commitDisplayedStableWithAnchor(
+              topic.id,
+              routeRef.current,
+              bootstrapRestoreEpoch,
+              requestedRestoreId,
+              requestedRestoreOffset
+            )
+            if (!anchoredCommitted && controller.isSessionCurrent(bootstrapRestoreEpoch)) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+            }
+            return
+          }
           controller.revealed(bootstrapRestoreEpoch)
           notifyViewport()
-          const anchoredCommitted = commitDisplayedStableWithAnchor(
-            topic.id,
-            routeRef.current,
-            bootstrapRestoreEpoch,
-            requestedRestoreId,
-            requestedRestoreOffset
-          )
-          if (!anchoredCommitted && controller.isSessionCurrent(bootstrapRestoreEpoch)) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-          }
-          return
+          commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
+        } else {
+          failVisibleTransition(bootstrapRestoreEpoch)
         }
-        controller.revealed(bootstrapRestoreEpoch)
-        notifyViewport()
-        commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
-      } else {
-        failVisibleTransition(bootstrapRestoreEpoch)
+      },
+      (err: unknown) => {
+        // Rethrow: the rejection bypass is never swallowed here.
+        throw err
       }
-    })
+    )
   }, [
-    armBootstrapTransition,
+    beginBootstrapFetch,
+    commitBootstrapPositioningPlan,
     checkElement,
     commitDisplayedStable,
     commitDisplayedStableWithAnchor,
     failVisibleTransition,
     isTopicLoading,
     messages,
-    navigate,
+    prepareNavigationTarget,
     topic.id,
     getSavedPosition,
     scrollContainerRef
@@ -5384,7 +5741,7 @@ const Messages = ({
   // no session and never start an ordinary page), no route transition owns the
   // viewport, no restore-owned divider search owns the route, and the live
   // container geometry must rest at the direction's edge per the single
-  // column-reverse primitive. Three entries share this gate:
+  // normal-flow geometry primitive. Three entries share this gate:
   // - post-scroll (`handleScroll`): the primary path, edge vicinity;
   // - clamped pre-input (`maybePageOnClampedEdge`): a direction-confirmed
   //   wheel / page key parked at the EXACT clamped edge, where no scroll event
@@ -5433,12 +5790,8 @@ const Messages = ({
       if (!sessionLive) return
       let atEdge = false
       try {
-        const metrics = {
-          scrollTop: container.scrollTop,
-          scrollHeight: container.scrollHeight,
-          clientHeight: container.clientHeight
-        }
-        atEdge = direction === 'older' ? isColumnReverseAtOldest(metrics) : isColumnReverseAtNewest(metrics)
+        const metrics = readScrollMetrics(container)
+        atEdge = direction === 'older' ? isAtFlowOldest(metrics) : isAtFlowNewest(metrics)
       } catch {
         return
       }
@@ -5457,11 +5810,7 @@ const Messages = ({
       if (!container) return
       let exact = false
       try {
-        const metrics = {
-          scrollTop: container.scrollTop,
-          scrollHeight: container.scrollHeight,
-          clientHeight: container.clientHeight
-        }
+        const metrics = readScrollMetrics(container)
         exact = direction === 'older' ? isExactlyAtOldest(metrics) : isExactlyAtNewest(metrics)
       } catch {
         return
@@ -5551,7 +5900,13 @@ const Messages = ({
   // behavior elsewhere).
   const adoptTakeoverSnapshot = useCallback(
     (
-      measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+      measured: {
+        messageId: string | null
+        intraRowOffset: number | null
+        scrollTop: number
+        isAtBottom: boolean
+        atPhysicalBottom: boolean
+      },
       liveToken: { interactionId: number; epoch: number },
       opts?: { bottomFollow?: boolean }
     ) => {
@@ -5570,7 +5925,8 @@ const Messages = ({
           messageId: measured.messageId,
           intraRowOffset: measured.intraRowOffset ?? null,
           scrollTop: measured.scrollTop,
-          isAtBottom: measured.isAtBottom
+          isAtBottom: measured.isAtBottom,
+          atPhysicalBottom: measured.atPhysicalBottom
         },
         liveWindowId,
         liveToken,
@@ -5695,6 +6051,7 @@ const Messages = ({
       messageId?: string | null
       intraRowOffset?: number | null
       isAtBottom: boolean
+      atPhysicalBottom: boolean
     } | null = null
     try {
       measured = captureSnapshot()
@@ -5712,7 +6069,8 @@ const Messages = ({
         messageId: measured.messageId,
         intraRowOffset: measured.intraRowOffset ?? null,
         scrollTop: measured.scrollTop,
-        isAtBottom: measured.isAtBottom
+        isAtBottom: measured.isAtBottom,
+        atPhysicalBottom: measured.atPhysicalBottom
       },
       liveToken
     )
@@ -5931,10 +6289,14 @@ const Messages = ({
               messageId: measured.messageId ?? null,
               intraRowOffset: measured.intraRowOffset ?? null,
               scrollTop: measured.scrollTop,
-              isAtBottom: measured.isAtBottom
+              isAtBottom: measured.isAtBottom,
+              atPhysicalBottom: measured.atPhysicalBottom
             },
             liveToken,
-            { bottomFollow: isGenuinePhysicalBottom(measured.scrollTop) }
+            // Same single metrics read as the snapshot itself: the exact-bottom
+            // follow opt-in can never describe a different instant than the
+            // record it adopts.
+            { bottomFollow: measured.atPhysicalBottom }
           )
         }
       } else {
@@ -5956,8 +6318,8 @@ const Messages = ({
     // clamped at an edge with no scroll movement are covered by the
     // direction-confirmed pre-input path above; pointer, touch and focus carry
     // no direction and never page pre-input by design. The active direction is
-    // decided against the single column-reverse geometry primitive (bottom/newest
-    // is scrollTop ≈ 0, visual top/oldest is the most negative scrollTop).
+    // decided against the single normal-flow geometry primitive (bottom/newest
+    // is the container's own scroll travel, visual top/oldest is scrollTop 0).
     // Decided against ACTUAL post-scroll geometry in `maybePageAtEdge`: a live
     // gesture session and the direction's edge. An app compensation echo is
     // excluded here (see `compensationEcho` above) — its own scroll is app
@@ -7353,12 +7715,22 @@ const Messages = ({
       // Batched publish helper: blocks + rebase dispatched synchronously with
       // the window commit in the same tick (no intermediate paint).
       let deferredPublished = false
-      const publishDeferredProjection = (): void => {
+      const publishDeferredProjection = (unionMessages?: readonly Message[]): void => {
         if (deferredPublished) return
         deferredPublished = true
         // Chrome co-commit: target structure in the SAME sync batch as the
         // window commit (the commit entry calls this before window/apply).
         publishCommittedChrome(topicIdAtStart, branchId, chromeWires)
+        // The divider-visible union (preserved trunk prefix through the fork
+        // anchor plus the target exclusive suffix) is the published resident
+        // order: every preserved row is verified continuous against the
+        // authoritative target response, so the union is the target effective
+        // route's own order — not a target-window-only replacement. The
+        // existing rebase reducer upserts these entities and its block
+        // cleanup keys on removed ids, so still-displayed rows and their
+        // blocks stay alive atomically (no delete-then-restore). The hidden
+        // path passes nothing and publishes the target window order as before.
+        const residentMessages = unionMessages ?? deferredMessages
         // Read-only deferred route-window hydration: must not invalidate the semantic closure.
         if (deferredBlocks.length > 0) {
           dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart)))
@@ -7366,7 +7738,7 @@ const Messages = ({
         dispatch(
           newMessagesActions.rebaseRouteMessages({
             topicId: topicIdAtStart,
-            messages: deferredMessages,
+            messages: [...residentMessages] as Message[],
             route: branchId,
             mutableMessageIds: deferredMutable,
             reference: deferredReference
@@ -7476,7 +7848,9 @@ const Messages = ({
                             : null,
                         wantOffset: dividerVisualAnchorOffset
                       },
-                      publishDeferredProjection
+                      // Union publish: the committed union window order becomes the
+                      // resident order, so displayed rows and blocks survive.
+                      () => publishDeferredProjection(unionOldestFirst)
                     )
                     if (visibleEpoch !== null) {
                       // Visible path armed: the layout effect applies the first

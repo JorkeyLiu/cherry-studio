@@ -112,8 +112,8 @@ describe('production wiring (behavior-adjacent guards)', () => {
   it('browse paging is app-owned in both directions: edge trigger from live geometry, no external latch or replay', () => {
     const code = src()
     expect(code).toMatch(/maybePageAtEdge/)
-    expect(code).toMatch(/isColumnReverseAtOldest/)
-    expect(code).toMatch(/isColumnReverseAtNewest/)
+    expect(code).toMatch(/isAtFlowOldest/)
+    expect(code).toMatch(/isAtFlowNewest/)
     expect(code).toMatch(/isExactlyAtOldest/)
     expect(code).toMatch(/isExactlyAtNewest/)
     expect(code).toMatch(/hasActiveUserInteraction/)

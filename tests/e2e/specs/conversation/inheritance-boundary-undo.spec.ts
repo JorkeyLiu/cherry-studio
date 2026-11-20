@@ -18,7 +18,7 @@
  *   `Meta+Shift+z` repeats the effect; consecutive undo/redo stay consistent.
  * - Deleting the whole inherited prefix: branch objects stay listed and openable, the
  *   owned suffix keeps rendering, the branch/reference boundary entry renders at the
- *   history HEAD with visual bounding-box comparison (never column-reverse DOM order),
+ *   history HEAD with visual bounding-box comparison (never DOM order),
  *   including a child route with 0 messages; a reference with no surviving predecessor
  *   degrades to `status: 'missing'` without cascading into the target.
  * - Persistence: route switch + page reload re-derive the same boundary from Main.
@@ -358,7 +358,7 @@ const GEOMETRY_TOLERANCE = 2
 /**
  * The boundary divider must sit visually BETWEEN the last inherited message and the
  * first message after the boundary — judged only by bounding boxes, never by DOM
- * (column-reverse) order.
+ * order.
  */
 async function expectDividerBetween(
   page: any,

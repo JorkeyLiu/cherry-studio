@@ -471,6 +471,39 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
           resolveTransactionControlled = resolve
           pendingTransactionResolvers.push(resolve)
         })
+    ),
+    // Bootstrap-only prepare entry: same controllable seam as the full
+    // transaction above. Test bodies keep resolving 'success' (the legacy
+    // full-transaction terminal); the shim translates it to the prepare
+    // terminal 'prepared' so epoch/persistence assertions hold unchanged
+    // under the prepare-only bootstrap contract.
+    prepareMessageNavigationTarget: vi.fn(
+      (_intent: any, _deps: any): Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }> =>
+        new Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }>((resolve) => {
+          pendingTransactionResolvers.push((result) => {
+            if (result !== 'success') {
+              resolve({ status: result })
+              return
+            }
+            // Faithful prepared shape: echo the requested intent the way
+            // resolveMessageNavigation would (the completion only reads
+            // resolved.kind/targetId for its DEV trace).
+            const preparedResolved =
+              _intent?.kind === 'message'
+                ? {
+                    kind: 'message',
+                    targetId: _intent.targetId,
+                    alignment: _intent.alignment ?? 'start',
+                    restoreOffset: null
+                  }
+                : _intent?.kind === 'scrollTop'
+                  ? { kind: 'scrollTop', scrollTop: _intent.scrollTop }
+                  : _intent?.kind === 'top'
+                    ? { kind: 'top' }
+                    : { kind: 'bottom' }
+            resolve({ status: 'prepared', token: {}, resolved: preparedResolved } as any)
+          })
+        })
     )
   }
 })
@@ -547,7 +580,8 @@ vi.mock('@renderer/components/Scrollbar', () => ({
 }))
 
 vi.mock('@renderer/config/constant', () => ({
-  LOAD_MORE_COUNT: 20
+  LOAD_MORE_COUNT: 20,
+  isDev: false
 }))
 
 vi.mock('react-i18next', () => ({
@@ -650,16 +684,14 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
   })
 
   // -----------------------------------------------------------------------
-  // S3.2: Explicit old-topic scroll save ordering
-  //
-  // useTopicTransition now calls saveOldTopicScrollPosition (mapped to
-  // useScrollPosition.savePosition) BEFORE topic/reset, so the old topic's
-  // scroll position is snapshotted to the old key before any transition
-  // state changes. This replaces the implicit passive cleanup in
-  // useScrollPosition's key-change effect.
+  // Departure freeze moved pre-change: the unified switch entry
+  // (HomeViewportScope) freezes the outgoing displayed route BEFORE selected
+  // changes, while the controller still shows the old route. The transition
+  // coordinator therefore performs NO post-change save. These tests pin that
+  // no stale write lands under any key during A→B / A→B→A.
   // -----------------------------------------------------------------------
 
-  it('S3.2: savePosition is called before topic/reset on A→B transition', () => {
+  it('transition performs no post-change savePosition on A→B transition', () => {
     const topicA = makeTopic('topic-a')
     const topicB = makeTopic('topic-b')
     const assistant = makeAssistant()
@@ -679,8 +711,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // savePosition should not be called on initial render
     mocks.savePosition.mockClear()
 
-    // Switch topic — savePosition must be called during the transition
-    // (before viewport reset, timers, etc.)
+    // Switch topic — the transition must not save post-change (freeze is
+    // pre-change); teardown duties (reset/epoch/timers) still run.
     const { rerender } = render(
       <Messages
         assistant={assistant}
@@ -699,11 +731,13 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
-    // S3.2: savePosition must have been called exactly once for the old topic
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    // No post-change save: neither the old nor the new key may be written
+    // by the transition.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
+    expect(mocks.scrollKeyStore.size).toBe(0)
   })
 
-  it('S3.2: A→B→A saves each topic scroll independently (no cross-topic contamination)', () => {
+  it('A→B→A performs no post-change save (no cross-topic contamination possible)', () => {
     const topicA = makeTopic('topic-a')
     const topicB = makeTopic('topic-b')
     const assistant = makeAssistant()
@@ -721,7 +755,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
     mocks.savePosition.mockClear()
 
-    // A → B: saves topic A's scroll
+    // A → B: no post-change save under any key
     rerender(
       <Messages
         assistant={assistant}
@@ -730,12 +764,12 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
         sharedContextInfo={defaultSharedContextInfo}
       />
     )
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    expect(mocks.savePosition).not.toHaveBeenCalled()
 
     // Advance key ref to match topic B
     mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
 
-    // B → A: saves topic B's scroll
+    // B → A: still no post-change save; the store stays untouched
     rerender(
       <Messages
         assistant={assistant}
@@ -744,24 +778,20 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
         sharedContextInfo={defaultSharedContextInfo}
       />
     )
-    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+    expect(mocks.savePosition).not.toHaveBeenCalled()
+    expect(mocks.scrollKeyStore.size).toBe(0)
   })
 
   // -----------------------------------------------------------------------
-  // S3.2 Blocker 2 correction: Key-aware mounted integration test.
+  // Key-aware mounted integration test (post-change save removed).
   //
-  // Proves that A→B writes only the old A key and A→B→A preserves
-  // independent keys through the mock's real scrollKeyStore. The mock
-  // models production useScrollPosition key timing: scrollKeyRef is updated
-  // by a simulated passive effect AFTER render, so savePosition (called by
-  // useTopicTransition's useLayoutEffect) reads the stale ref — the OLD key.
-  //
-  // Uses distinct nonzero scrollTop values (-150 for A, -300 for B) and
-  // mock containers to prove each key retains its own value with no
-  // cross-topic contamination.
+  // Proves the transition writes NEITHER key: with distinct nonzero
+  // scrollTop values (-150 for A, -300 for B) staged in mock containers,
+  // A→B→A must leave the mock scrollKeyStore untouched — departure freeze
+  // now happens pre-change in the unified entry, never post-change here.
   // -----------------------------------------------------------------------
 
-  it('S3.2 Blocker 2: key-aware — A→B writes only old A key; A→B→A preserves independent keys', () => {
+  it('key-aware — A→B→A transition writes neither key (freeze is pre-change)', () => {
     const topicA = makeTopic('topic-a')
     const topicB = makeTopic('topic-b')
     const assistant = makeAssistant()
@@ -792,13 +822,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     mocks.savePosition.mockClear()
 
-    // A → B: useScrollPosition(keyB) called.
-    // Factory does NOT update scrollKeyRef (passive effect deferred).
-    // useTopicTransition's useLayoutEffect fires during rerender:
-    //   1. Calls savePosition() — reads scrollKeyRef.current = keyA (stale!)
-    //   2. Writes { scrollTop: -150 } to scrollKeyStore['scroll:keyA']
-    //   3. Increments epoch, dispatches topic/reset, etc.
-    // After rerender: passive effect advances scrollKeyRef to keyB.
+    // A → B: the transition performs no post-change save (freeze is
+    // pre-change). Staged distinct scrollTops stay uncommitted.
     rerender(
       <Messages
         assistant={assistant}
@@ -808,16 +833,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
-    // savePosition called once — writes to OLD key (keyA) with A's scrollTop
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
-    const aWrite = mocks.scrollKeyStore.get(storeKeyA)
-    expect(aWrite).toBeDefined()
-    expect((aWrite as any).scrollTop).toBe(-150)
-    expect((aWrite as any).isAtBottom).toBe(false)
-
-    // NEW key (keyB) must NOT have been written by the transition save
-    const bWrite = mocks.scrollKeyStore.get(storeKeyB)
-    expect(bWrite).toBeUndefined()
+    // No save under either key — neither old A's staged -150 nor new B
+    expect(mocks.savePosition).not.toHaveBeenCalled()
+    expect(mocks.scrollKeyStore.get(storeKeyA)).toBeUndefined()
+    expect(mocks.scrollKeyStore.get(storeKeyB)).toBeUndefined()
 
     // Simulate passive effect: advance scrollKeyRef to keyB.
     mocks.simulatePassiveKeyUpdate(keyB)
@@ -825,10 +844,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // Set up mock container with topic B's distinct scroll position.
     mocks.scrollContainerRef.current = createMockContainer(-300)
 
-    // B → A: useScrollPosition(keyA) called.
-    // useTopicTransition's useLayoutEffect fires:
-    //   1. Calls savePosition() — reads scrollKeyRef.current = keyB (stale!)
-    //   2. Writes { scrollTop: -300 } to scrollKeyStore['scroll:keyB']
+    // B → A: still no post-change save
     rerender(
       <Messages
         assistant={assistant}
@@ -838,24 +854,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
-    // savePosition called twice total — second call writes to old key (keyB)
-    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
-    const bWrite2 = mocks.scrollKeyStore.get(storeKeyB)
-    expect(bWrite2).toBeDefined()
-    expect((bWrite2 as any).scrollTop).toBe(-300)
-    expect((bWrite2 as any).isAtBottom).toBe(false)
-
-    // keyA still has its original value — no cross-contamination
-    const aStill = mocks.scrollKeyStore.get(storeKeyA)
-    expect((aStill as any).scrollTop).toBe(-150)
-
-    // Simulate passive effect: advance scrollKeyRef back to keyA.
-    mocks.simulatePassiveKeyUpdate(keyA)
-
-    // Both keys exist independently in the store
-    expect(mocks.scrollKeyStore.size).toBe(2)
-    expect(mocks.scrollKeyStore.has(storeKeyA)).toBe(true)
-    expect(mocks.scrollKeyStore.has(storeKeyB)).toBe(true)
+    expect(mocks.savePosition).not.toHaveBeenCalled()
+    expect(mocks.scrollKeyStore.get(storeKeyA)).toBeUndefined()
+    expect(mocks.scrollKeyStore.get(storeKeyB)).toBeUndefined()
+    expect(mocks.scrollKeyStore.size).toBe(0)
   })
 
   it('S3.2: same-topic re-render does NOT call savePosition', () => {
@@ -1101,15 +1103,15 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // handlePendingNavigateEvent has called deps.navigate().
     await act(async () => {})
 
-    // S3.2: Reset mock after initial render so we can distinguish the
-    // transition coordinator's explicit savePosition from any stale calls.
+    // Reset mock after initial render: the transition performs no
+    // post-change save, so any call below would be a stale completion.
     mocks.savePosition.mockClear()
 
     // Before resolving the navigation, transition A → B (epoch incremented).
     // The epoch-guarded clearPending callback captures navEpoch at handler
     // start (0) and checks transitionEpochRef.current at call time.
-    // S3.2: useTopicTransition calls saveOldTopicScrollPosition before
-    // topic/reset, so savePosition is called once for the old topic.
+    // The transition performs no post-change save; only a stale completion
+    // could call savePosition below (guarded by epoch).
     await act(async () => {
       rerender(
         <Messages
@@ -1134,9 +1136,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // S3.1 Blocker 1: stale clearPending must NOT have been called
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    // S3.2: savePosition called exactly once — from the transition coordinator's
-    // explicit old-topic scroll save. The stale completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    // No post-change save exists anymore: the stale completion must NOT add
+    // a call, so the count stays at zero.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 1: NAVIGATE_TO_MESSAGE same-epoch completion clears pending and persists', async () => {
@@ -1200,8 +1202,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
 
-    // Transition A → B before the navigation resolves
-    // S3.2: useTopicTransition calls saveOldTopicScrollPosition before topic/reset
+    // Transition A → B before the navigation resolves. The transition
+    // performs no post-change save; only a stale completion could call.
     await act(async () => {
       rerender(
         <Messages
@@ -1221,9 +1223,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await handlerPromise
 
-    // S3.2: savePosition called exactly once — from the transition coordinator's
-    // explicit old-topic scroll save. The stale completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    // The stale completion must NOT add a call, so the count stays at zero.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 2: NAVIGATE_TO_MESSAGE same-epoch savePosition persists', async () => {
@@ -1283,7 +1284,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
 
-    // Transition A → B (epoch 1) — savePosition called once for old topic A
+    // Transition A → B (epoch 1) — no post-change save: departure freeze is
+    // pre-change via the unified entry, the transition writes nothing.
     await act(async () => {
       rerender(
         <Messages
@@ -1295,8 +1297,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       )
     })
 
-    // B → A (epoch 2) — savePosition called once for old topic B;
-    // bootstrap detects matching pending and starts a new transaction
+    // B → A (epoch 2) — likewise no post-change save; bootstrap detects
+    // matching pending and starts a new transaction
     // (promise #2), which overwrites resolveTransactionControlled.
     await act(async () => {
       rerender(
@@ -1327,9 +1329,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Epoch-0 handler is stale at epoch 2: must NOT clear or persist
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    // S3.2: savePosition called exactly twice — once per transition coordinator
-    // call (A→B and B→A). The stale epoch-0 handler must NOT add calls.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+    // S3.2: savePosition never called — neither transition performs a
+    // post-change save (departure freeze is pre-change). The stale epoch-0
+    // handler must NOT add calls.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------
@@ -1368,8 +1371,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
 
-    // Transition A → B (epoch incremented to 1) — savePosition called once
-    // for old topic A by the transition coordinator
+    // Transition A → B (epoch incremented to 1) — no post-change save: the
+    // transition writes nothing; departure freeze is pre-change.
     await act(async () => {
       rerender(
         <Messages
@@ -1388,9 +1391,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Stale: clearPendingNavigate must NOT have been called
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    // S3.2: savePosition called exactly once — from the transition coordinator.
+    // S3.2: savePosition never called — no post-change save on transition.
     // The stale bootstrap completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 1: pending bootstrap same-epoch completion clears pending and persists', async () => {
@@ -1464,7 +1467,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
 
-    // A → B (epoch 1) — savePosition called once for old topic A
+    // A → B (epoch 1) — no post-change save (departure freeze is pre-change)
     await act(async () => {
       rerender(
         <Messages
@@ -1476,8 +1479,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       )
     })
 
-    // B → A (epoch 2) — savePosition called once for old topic B;
-    // bootstrap detects matching pending and starts new navigation
+    // B → A (epoch 2) — likewise no post-change save; bootstrap detects
+    // matching pending and starts new navigation
     // (resolver index 1). Unified navigate ensures (async) before the
     // transaction, so drain the ensure microtask chain before asserting.
     // Refresh the loaded projection reference so the first-load window
@@ -1508,11 +1511,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // clearPendingNavigate called exactly once (epoch-2 bootstrap only)
     expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1)
-    // S3.2: savePosition called exactly twice — two from transition
-    // coordinators (A→B, B→A). The epoch-2 bootstrap completion persists
-    // via the stable commit (not savePosition). The stale epoch-0
-    // completion must add neither call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+    // S3.2: savePosition never called — neither transition performs a
+    // post-change save (departure freeze is pre-change). The epoch-2
+    // bootstrap completion persists via the stable commit (not
+    // savePosition). The stale epoch-0 completion must add no call.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
     expect(mocks.commitStableViewport).toHaveBeenCalledTimes(1)
   })
 
@@ -1551,7 +1554,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
 
-    // Transition A → B (epoch 1) — savePosition called once for old topic A
+    // Transition A → B (epoch 1) — no post-change save (freeze is pre-change)
     await act(async () => {
       rerender(
         <Messages
@@ -1568,9 +1571,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
 
-    // S3.2: savePosition called exactly once — from the transition coordinator.
-    // The stale bootstrap completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    // S3.2: savePosition never called — no post-change save on transition.
+    // The stale restore completion must NOT add a call.
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 2: saved restore same-epoch completion persists', async () => {
@@ -1790,7 +1793,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Reset mock after initial render + scrollToBottom
     mocks.savePosition.mockClear()
 
-    // Transition A → B (epoch 1) — savePosition called once for old topic A
+    // Transition A → B (epoch 1) — no post-change save (freeze is pre-change)
     await act(async () => {
       rerender(
         <Messages
@@ -1808,9 +1811,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
 
-    // S3.2: savePosition called exactly once — from the transition coordinator.
+    // S3.2: savePosition never called — no post-change save on transition.
     // The stale scrollToBottom completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 2: imperative scrollToBottom same-epoch completion persists', async () => {

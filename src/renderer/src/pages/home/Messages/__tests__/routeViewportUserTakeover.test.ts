@@ -58,7 +58,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
   it('fetch-hold wheel during A→main writes A exclusive, not selected main', () => {
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     commitSnapshotForRoute('topic-t1::A', {
       scrollTop: -400,
@@ -76,7 +76,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     expect(c.programmaticOwned).toBe(true)
     // Scroll lands: crossing-first measure on the still-outgoing A viewport.
     const out = c.userTakeover(
-      { messageId: 'mExclA', intraRowOffset: -8, scrollTop: -120, isAtBottom: false },
+      { messageId: 'mExclA', intraRowOffset: -8, scrollTop: -120, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -134,7 +134,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     c.firstPositioned(epoch, 'searching')
     const token = c.declareUserIntent()
     const out = c.userTakeover(
-      { messageId: 'mDivLive', intraRowOffset: 10, scrollTop: -60, isAtBottom: false },
+      { messageId: 'mDivLive', intraRowOffset: 10, scrollTop: -60, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -179,7 +179,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     // even with a live session: provenance first, token second.
     const token = c.declareUserIntent()
     const rej = c.userTakeover(
-      { messageId: 'mEdge', intraRowOffset: 0, scrollTop: -5, isAtBottom: false },
+      { messageId: 'mEdge', intraRowOffset: 0, scrollTop: -5, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -192,7 +192,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })
     const token = c.declareUserIntent()
     const out = c.userTakeover(
-      { messageId: 'mStable', intraRowOffset: -3, scrollTop: -200, isAtBottom: false },
+      { messageId: 'mStable', intraRowOffset: -3, scrollTop: -200, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -223,7 +223,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })
     const t0 = c.declareUserIntent()
     const excl = c.userTakeover(
-      { messageId: 'mAexcl06', intraRowOffset: -8, scrollTop: -120, isAtBottom: false },
+      { messageId: 'mAexcl06', intraRowOffset: -8, scrollTop: -120, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       t0
     )
@@ -271,7 +271,13 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     // Same-route window refresh for ordinary pagination/reconcile.
     expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'A' }, wid('28'))).toBe(true)
     // Layout scroll with NO declare (programmatic window growth): rejected.
-    const prog = c.userTakeover({ messageId: 'mMsg11', intraRowOffset: -4, scrollTop: -310, isAtBottom: false })
+    const prog = c.userTakeover({
+      messageId: 'mMsg11',
+      intraRowOffset: -4,
+      scrollTop: -310,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     expect(prog.taken).toBe(false)
     if (!prog.taken) expect(prog.reason).toBe('no-user-intent')
     expect(c.getAnchorFor({ topicId: 't1', route: 'A' })).toEqual({
@@ -285,7 +291,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     const wheel = c.declareUserIntent()
     expect(wheel.interactionId).not.toBe(t0.interactionId)
     const u1 = c.userTakeover(
-      { messageId: 'mWheel1', intraRowOffset: -6, scrollTop: -200, isAtBottom: false },
+      { messageId: 'mWheel1', intraRowOffset: -6, scrollTop: -200, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       wheel
     )
@@ -293,7 +299,7 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     const wheelRefresh = c.declareUserIntent()
     expect(wheelRefresh.interactionId).toBe(wheel.interactionId)
     const u2 = c.userTakeover(
-      { messageId: 'mWheel2', intraRowOffset: -5, scrollTop: -260, isAtBottom: false },
+      { messageId: 'mWheel2', intraRowOffset: -5, scrollTop: -260, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       wheelRefresh
     )

@@ -479,11 +479,11 @@ describe('Edit-selection follow (mounted Messages)', () => {
     await act(async () => {})
 
     const { scrollTo } = graftSelectionRows([
-      { id: 'u0', top: -300 },
-      { id: 'a0', top: -200 },
-      { id: 'u1', top: -1200 },
-      { id: 'a1', top: -1100 },
-      { id: 'u2', top: -2500 }
+      { id: 'u0', top: 4900 },
+      { id: 'a0', top: 5000 },
+      { id: 'u1', top: 4000 },
+      { id: 'a1', top: 4100 },
+      { id: 'u2', top: 2700 }
     ])
 
     await pressSelectionKey('ArrowDown')
@@ -494,7 +494,7 @@ describe('Edit-selection follow (mounted Messages)', () => {
     // double-frame settle could not exist here at all.
     expect(store.getState().editMode.selectedGroupIds).toEqual(['u0', 'u1'])
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1200 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4000 })
     // Nothing on this path may need a window read: the row is resident.
     expect(mocks.ensureMock).not.toHaveBeenCalled()
   })
@@ -509,8 +509,8 @@ describe('Edit-selection follow (mounted Messages)', () => {
     // The second turn's row is NOT in the DOM: window load / reveal / settle
     // still own this step, so the synchronous path must not write.
     const { scrollTo } = graftSelectionRows([
-      { id: 'u0', top: -300 },
-      { id: 'a0', top: -200 }
+      { id: 'u0', top: 4900 },
+      { id: 'a0', top: 5000 }
     ])
 
     await pressSelectionKey('ArrowDown')
@@ -527,19 +527,19 @@ describe('Edit-selection follow (mounted Messages)', () => {
     await act(async () => {})
 
     const { scrollTo } = graftSelectionRows([
-      { id: 'u0', top: -300 },
-      { id: 'a0', top: -200 },
-      { id: 'u1', top: -1200 },
-      { id: 'a1', top: -1100 },
-      { id: 'u2', top: -2500 }
+      { id: 'u0', top: 4900 },
+      { id: 'a0', top: 5000 },
+      { id: 'u1', top: 4000 },
+      { id: 'a1', top: 4100 },
+      { id: 'u2', top: 2700 }
     ])
 
     await pressSelectionKey('ArrowDown')
     await pressSelectionKey('ArrowDown')
 
     expect(store.getState().editMode.selectedGroupIds).toEqual(['u0', 'u1', 'u2'])
-    expect(scrollTo).toHaveBeenNthCalledWith(1, { top: -1200 })
-    expect(scrollTo).toHaveBeenNthCalledWith(2, { top: -2500 })
+    expect(scrollTo).toHaveBeenNthCalledWith(1, { top: 4000 })
+    expect(scrollTo).toHaveBeenNthCalledWith(2, { top: 2700 })
   })
 
   it('keeps the last followed endpoint on a clamped key (no viewport write, selection intact)', async () => {
@@ -550,9 +550,9 @@ describe('Edit-selection follow (mounted Messages)', () => {
     await act(async () => {})
 
     const { scrollTo } = graftSelectionRows([
-      { id: 'u0', top: -300 },
-      { id: 'a0', top: -200 },
-      { id: 'u1', top: -1200 }
+      { id: 'u0', top: 4900 },
+      { id: 'a0', top: 5000 },
+      { id: 'u1', top: 4000 }
     ])
 
     await pressSelectionKey('ArrowDown')
@@ -566,7 +566,7 @@ describe('Edit-selection follow (mounted Messages)', () => {
       focusedGroupId: 'u1'
     })
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1200 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4000 })
   })
 
   it('keeps ordinary message navigation on the full asynchronous transaction', async () => {
@@ -577,9 +577,9 @@ describe('Edit-selection follow (mounted Messages)', () => {
     await act(async () => {})
 
     const { scrollTo } = graftSelectionRows([
-      { id: 'u0', top: -300 },
-      { id: 'a0', top: -200 },
-      { id: 'u1', top: -1200 }
+      { id: 'u0', top: 4900 },
+      { id: 'a0', top: 5000 },
+      { id: 'u1', top: 4000 }
     ])
 
     const handler = mocks.eventHandlers.NAVIGATE_TO_MESSAGE

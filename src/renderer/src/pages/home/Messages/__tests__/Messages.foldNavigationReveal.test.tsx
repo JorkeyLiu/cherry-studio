@@ -505,8 +505,8 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    rowTops = { a1: -1000, u1: -1100 }
-    markerTop = -900
+    rowTops = { a1: 4200, u1: 4100 }
+    markerTop = 4300
 
     // Collapsed: the block is closed and the target row genuinely has no element.
     const marker = collapsedBlock()
@@ -524,7 +524,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     expect(expandedBlock()).toBeNull()
     expect(rowFor('a1')).toBeNull()
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -900 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4300 })
     // A reveal is presentation: nothing is selected and nothing is written —
     // no fold write either, since only a manual expand may open the block.
     expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
@@ -540,7 +540,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    rowTops = { a1: -400 }
+    rowTops = { a1: 4800 }
 
     expect(collapsedBlock()).toBeNull()
     expect(rowFor('a1')).not.toBeNull()
@@ -548,7 +548,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     await fireNavigation('a1')
 
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -400 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4800 })
     expect(expandedBlock()).toBeNull()
   })
 
@@ -561,7 +561,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    markerTop = -900
+    markerTop = 4300
 
     await fireNavigation('a1')
     expect(collapsedBlock()).not.toBeNull()
@@ -575,7 +575,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     expect(expandedBlock()).toBeNull()
     expect(rowFor('a1')).toBeNull()
     expect(scrollTo).toHaveBeenCalledTimes(2)
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: -900 })
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 4300 })
     expect(dbService.setTurnFolds).not.toHaveBeenCalled()
   })
 
@@ -590,7 +590,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     const host = graftContainer()
     const scrollTo = vi.fn()
     ;(host as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
-    markerTop = -1600
+    markerTop = 3600
 
     const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
     expect(typeof handler).toBe('function')
@@ -619,7 +619,7 @@ describe('Message-fold navigation reveal (mounted Messages)', () => {
     expect(expandedBlock()).toBeNull()
     expect(collapsedBlock()?.getAttribute('data-folded-message-ids')).toContain('a2')
     expect(scrollTo).toHaveBeenCalledTimes(1)
-    expect(scrollTo).toHaveBeenCalledWith({ top: -1600 })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 3600 })
     expect(mocks.selectAnswerStable).not.toHaveBeenCalled()
   })
 })

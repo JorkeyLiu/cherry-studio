@@ -381,7 +381,7 @@ describe('placement-ack repair (F1 empty + F2 activation gating)', () => {
       expect(c.canAcceptUserScrollWrite()).toBe(true)
       c.declareUserIntent()
       const takeover = c.userTakeover(
-        { messageId: 'm1', intraRowOffset: -5, scrollTop: -50, isAtBottom: false },
+        { messageId: 'm1', intraRowOffset: -5, scrollTop: -50, isAtBottom: false, atPhysicalBottom: false },
         'm00::m01::2'
       )
       expect(takeover.taken).toBe(true)

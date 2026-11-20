@@ -16,6 +16,7 @@
  *   adopted nor overwritten.
  */
 
+import { distanceFromBottom, type FlowScrollMetrics, maxScrollTop, readScrollMetrics } from './flowScrollGeometry'
 import type { RouteId, RouteViewportController, RouteViewportSnapshot } from './routeViewportController'
 
 /**
@@ -102,14 +103,15 @@ export const shouldRestoreRetainedWindowInPlace = (input: RetainedWindowInPlaceI
 /**
  * Validated-continuation geometric acceptance (production epsilon, NOT E2E
  * measurement tolerance): anchor intra-row offset within 1px and true bottom
- * (column-reverse scrollTop 0) within 1px. This matches the existing
+ * (normal flow: `scrollTop` at the container's own scroll travel) within 1px.
+ * This matches the existing
  * production alignment-write epsilon used by the viewport transition
  * (`applyViewportFirstPosition`: `abs(delta) > 1` writes) and the pagination
  * compensation epsilon (`routeRestoreAnchor`: `epsilonPx = 1`). The E2E
  * contract tolerances (12px anchor / 100px bottom) are measurement/test
  * budgets and must never gate production geometry: the snapshot commit stores
  * the target `wantOffset`, so accepted geometry must already be accurate
- * within the same 1px production epsilon. `COLUMN_REVERSE_BOTTOM_THRESHOLD`
+ * same 1px production epsilon. `FLOW_BOTTOM_THRESHOLD_PX`
  * (50px) only classifies bottom proximity, never geometric alignment.
  */
 export const RETAINED_CONTINUATION_ALIGN_EPS_PX = 1
@@ -120,10 +122,10 @@ export const isRetainedAnchorOffsetAligned = (haveOffset: number, wantOffset: nu
   return Math.abs(haveOffset - wantOffset) <= RETAINED_CONTINUATION_ALIGN_EPS_PX
 }
 
-/** Pure bottom check: column-reverse scrollTop already at true bottom (1px). */
-export const isRetainedBottomAligned = (scrollTop: number): boolean => {
-  if (!Number.isFinite(scrollTop)) return false
-  return Math.abs(scrollTop) <= RETAINED_CONTINUATION_ALIGN_EPS_PX
+/** Pure bottom check: the flow coordinate already at the true bottom (1px). */
+export const isRetainedBottomAligned = (metrics: FlowScrollMetrics): boolean => {
+  if (!Number.isFinite(metrics.scrollTop)) return false
+  return distanceFromBottom(metrics) <= RETAINED_CONTINUATION_ALIGN_EPS_PX
 }
 
 /**
@@ -195,18 +197,25 @@ export const alignRetainedViewportOnce = (input: {
       }
     }
     if (!input.anchorId && input.isAtBottom === true) {
-      if (!Number.isFinite(container.scrollTop)) return { aligned: false, writes: 0 }
-      if (!Number.isFinite(container.clientHeight) || container.clientHeight <= 0) {
+      let metrics: FlowScrollMetrics
+      try {
+        metrics = readScrollMetrics(container)
+      } catch {
         return { aligned: false, writes: 0 }
       }
-      if (isRetainedBottomAligned(container.scrollTop)) return { aligned: true, writes: 0 }
+      if (!Number.isFinite(metrics.scrollTop)) return { aligned: false, writes: 0 }
+      if (!Number.isFinite(metrics.clientHeight) || metrics.clientHeight <= 0) {
+        return { aligned: false, writes: 0 }
+      }
+      if (isRetainedBottomAligned(metrics)) return { aligned: true, writes: 0 }
+      const bottom = maxScrollTop(metrics)
       try {
-        container.scrollTop = 0
+        container.scrollTop = bottom
       } catch {
         return { aligned: false, writes: 0 }
       }
       try {
-        if (isRetainedBottomAligned(container.scrollTop)) return { aligned: true, writes: 1 }
+        if (isRetainedBottomAligned(readScrollMetrics(container))) return { aligned: true, writes: 1 }
         return { aligned: false, writes: 1 }
       } catch {
         return { aligned: false, writes: 1 }

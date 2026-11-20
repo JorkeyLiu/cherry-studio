@@ -979,9 +979,9 @@ test.describe('Topic-internal branches end-to-end', () => {
       // still holds scroll ownership (navigation/anchoring). Programmatic
       // scrollTop writes carry no interaction token so the route stable keeper
       // compensates them; only genuine `page.mouse.wheel` over #messages owns
-      // the viewport. Column-reverse sign: bottom/newest is scrollTop≈0, the
-      // oldest edge is scrollTop≈clientHeight-scrollHeight (most negative), so
-      // negative deltaY (scroll up) moves toward history. Bounded sweep with
+      // the viewport. Normal-flow sign: newest/bottom is scrollTop≈max(0, sh-ch),
+      // the oldest edge is scrollTop≈0, so negative deltaY (scroll up) moves
+      // toward history. Bounded sweep with
       // live geometry/resident predicates — no force, no fixed multi-second
       // wait, no scrollTop assignment, no dispatched scroll event.
       const durableWheelFocus = async (): Promise<void> => {
@@ -1019,8 +1019,8 @@ test.describe('Topic-internal branches end-to-end', () => {
             scrollTop: st,
             scrollHeight: sh,
             clientHeight: ch,
-            targetTop: Math.min(0, ch - sh),
-            oldestDistance: sh - Math.abs(st) - ch,
+            targetTop: 0,
+            oldestDistance: Math.max(0, st),
             residentLen: ids.length,
             headId: ids.length > 0 ? ids[0] : null,
             loading: s.messages?.loadingByTopic?.[tid] === true
@@ -1535,13 +1535,13 @@ test.describe('Topic-internal branches end-to-end', () => {
       { tid: topicId, len: ANCHOR_IDX + 1 },
       { timeout: 30000 }
     )
-    // Column-reverse production synonym: bottom (newest) is scrollTop ≈ 0.
+    // Normal-flow production synonym: bottom (newest) is distBottom ≈ 0.
     // The oldest-edge formula (scrollHeight - |scrollTop| - clientHeight) must
     // never be used for a bottom assertion — it measures the opposite edge.
     const bottomMetrics = await scrollMetrics(page)
     expect(
-      Math.abs(bottomMetrics.scrollTop),
-      'new branch must land at latest/bottom (column-reverse scrollTop≈0)'
+      Math.max(0, bottomMetrics.scrollHeight - bottomMetrics.clientHeight - bottomMetrics.scrollTop),
+      'new branch must land at latest/bottom (normal-flow distBottom≈0)'
     ).toBeLessThanOrEqual(120)
     const visualBranches = await listBranches(page, topicId)
     expect(visualBranches).toHaveLength(1)
@@ -1923,7 +1923,7 @@ test.describe('Topic-internal branches end-to-end', () => {
         const h = await page.evaluate(() => document.querySelector('#messages')?.getBoundingClientRect().height ?? 0)
         return h / 2
       }
-      // Probe the wheel sign once (column-reverse safe): +140 then compare.
+      // Probe the wheel sign once (direction-agnostic): +140 then compare.
       const off0 = await vcForkOffset()
       await vcWheel(140)
       await vcSettled()
@@ -3450,8 +3450,8 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
     expect(freshRoles[freshIds[1]]?.askId).toBe(freshIds[0])
     // Primary rendered-UI proof (Redux above only supplements): visual
     // top-to-bottom order matches the resident, and each new row is really
-    // rendered. #messages renders flex column-reverse so raw DOM query order
-    // is newest-to-oldest; sort by geometry top for the user-visible order.
+    // rendered. #messages renders normal flow (oldest-first) so raw DOM query order
+    // is oldest-to-newest; sort by geometry top for the user-visible order.
     const domOrder: string[] = await page.evaluate(() =>
       Array.from(document.querySelectorAll('#messages [data-message-id]'))
         .map((el) => ({

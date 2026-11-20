@@ -7,16 +7,18 @@
  *   (opt-in `bottomFollow`): live anchor null, snapshot stays TRUTHFUL
  *   (measured messageId/offset/isAtBottom untouched — never a synthesized
  *   bottom record).
- * - A wide near-bottom scroll (e.g. -30, inside the 50px snapshot vicinity)
- *   never jumps: row kept, no follow.
+ * - A wide near-bottom scroll (30px, inside the 50px snapshot vicinity) never
+ *   jumps: row kept, no follow.
  * - Programmatic / no-gesture scrolls never take over (no inference).
- * - Exact gate is `abs(scrollTop) <= 1` (renderer-local
- *   `isGenuinePhysicalBottom`), not the 50px snapshot threshold.
+ * - The exact gate is the flow geometry authority's 1px subpixel park
+ *   (`isExactlyAtNewest`), the very predicate `captureSnapshot` publishes as
+ *   `atPhysicalBottom` — never the 50px snapshot threshold, and never a
+ *   second hand-written formula.
  */
 import { commitSnapshotForRoute } from '@renderer/hooks/useScrollPosition'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isGenuinePhysicalBottom } from '../Messages'
+import { type FlowScrollMetrics, isExactlyAtNewest } from '../flowScrollGeometry'
 import { RouteViewportController } from '../routeViewportController'
 
 vi.mock('@renderer/services/scrollSnapshotCache', () => ({
@@ -45,6 +47,10 @@ beforeEach(() => {
   }
 })
 
+/** 1000px of content in a 400px viewport: the newest edge is 600. */
+const FLOW_BOTTOM = 600
+const metrics = (scrollTop: number): FlowScrollMetrics => ({ scrollTop, scrollHeight: 1000, clientHeight: 400 })
+
 const commitTaken = (
   routeKey: string,
   snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
@@ -60,18 +66,18 @@ const commitTaken = (
   expect(ok).toBe(true)
 }
 
-describe('isGenuinePhysicalBottom exact gate', () => {
-  it('accepts only the exact physical bottom (1px subpixel tolerance)', () => {
-    expect(isGenuinePhysicalBottom(0)).toBe(true)
-    expect(isGenuinePhysicalBottom(-0.5)).toBe(true)
-    expect(isGenuinePhysicalBottom(1)).toBe(true)
-    expect(isGenuinePhysicalBottom(-1)).toBe(true)
-    expect(isGenuinePhysicalBottom(-1.01)).toBe(false)
-    expect(isGenuinePhysicalBottom(-30)).toBe(false)
-    expect(isGenuinePhysicalBottom(-49)).toBe(false)
-    expect(isGenuinePhysicalBottom(-200)).toBe(false)
-    expect(isGenuinePhysicalBottom(NaN)).toBe(false)
-    expect(isGenuinePhysicalBottom(null)).toBe(false)
+describe('exact physical bottom gate (flow geometry authority)', () => {
+  it('accepts only the exact newest-edge park (1px subpixel tolerance)', () => {
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM))).toBe(true)
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM - 0.5))).toBe(true)
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM - 1))).toBe(true)
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM - 1.01))).toBe(false)
+    // The 50px snapshot vicinity is NOT the exact gate.
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM - 30))).toBe(false)
+    expect(isExactlyAtNewest(metrics(FLOW_BOTTOM - 49))).toBe(false)
+    // The oldest edge is the farthest point from the bottom.
+    expect(isExactlyAtNewest(metrics(0))).toBe(false)
+    expect(isExactlyAtNewest(metrics(NaN))).toBe(false)
   })
 })
 
@@ -80,13 +86,13 @@ describe('pause click vs genuine scroll resume', () => {
     const c = new RouteViewportController({ topicId: 't1', route: null })
     const token = c.declareUserIntent()
     const out = c.userTakeover(
-      { messageId: 'm2', intraRowOffset: -60, scrollTop: 0, isAtBottom: true },
+      { messageId: 'm2', intraRowOffset: -60, scrollTop: FLOW_BOTTOM, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       token
     )
     expect(out.taken).toBe(true)
     if (!out.taken) return
-    expect(out.snapshot).toMatchObject({ messageId: 'm2', scrollTop: 0, isAtBottom: true })
+    expect(out.snapshot).toMatchObject({ messageId: 'm2', scrollTop: FLOW_BOTTOM, isAtBottom: true })
     commitTaken(out.routeKey, out.snapshot)
     c.clearUserIntent()
     expect(c.getAnchorFor({ topicId: 't1', route: null })).toEqual({
@@ -104,7 +110,7 @@ describe('pause click vs genuine scroll resume', () => {
     // Pause first (row held at bottom).
     const pauseToken = c.declareUserIntent()
     const paused = c.userTakeover(
-      { messageId: 'm2', intraRowOffset: -60, scrollTop: 0, isAtBottom: true },
+      { messageId: 'm2', intraRowOffset: -60, scrollTop: FLOW_BOTTOM, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       pauseToken
     )
@@ -116,10 +122,10 @@ describe('pause click vs genuine scroll resume', () => {
     // Ordinary wheel away keeps the row (no auto-resume).
     const away = c.declareUserIntent()
     const awayOut = c.userTakeover(
-      { messageId: 'm2', intraRowOffset: -60, scrollTop: -400, isAtBottom: false },
+      { messageId: 'm2', intraRowOffset: -60, scrollTop: 200, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       away,
-      { bottomFollow: isGenuinePhysicalBottom(-400) }
+      { bottomFollow: isExactlyAtNewest(metrics(200)) }
     )
     expect(awayOut.taken).toBe(true)
     if (!awayOut.taken) return
@@ -133,14 +139,14 @@ describe('pause click vs genuine scroll resume', () => {
     // snapshot still carries the measured row truth (never nulled).
     const bottom = c.declareUserIntent()
     const bottomOut = c.userTakeover(
-      { messageId: 'mTail', intraRowOffset: -4, scrollTop: 0, isAtBottom: true },
+      { messageId: 'mTail', intraRowOffset: -4, scrollTop: FLOW_BOTTOM, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       bottom,
-      { bottomFollow: isGenuinePhysicalBottom(0) }
+      { bottomFollow: true }
     )
     expect(bottomOut.taken).toBe(true)
     if (!bottomOut.taken) return
-    expect(bottomOut.snapshot).toMatchObject({ messageId: 'mTail', scrollTop: 0, isAtBottom: true })
+    expect(bottomOut.snapshot).toMatchObject({ messageId: 'mTail', scrollTop: FLOW_BOTTOM, isAtBottom: true })
     commitTaken(bottomOut.routeKey, bottomOut.snapshot)
     expect(c.getAnchorFor({ topicId: 't1', route: null })).toBeNull()
     const saved = store.get('scroll:topic-t1::main') as { messageId: string; isAtBottom: boolean }
@@ -153,11 +159,12 @@ describe('pause click vs genuine scroll resume', () => {
   it('wide near-bottom scroll never jumps to follow (50px vicinity is not exact)', () => {
     const c = new RouteViewportController({ topicId: 't1', route: null })
     const token = c.declareUserIntent()
+    const nearBottom = FLOW_BOTTOM - 30
     const out = c.userTakeover(
-      { messageId: 'mTail', intraRowOffset: -4, scrollTop: -30, isAtBottom: true },
+      { messageId: 'mTail', intraRowOffset: -4, scrollTop: nearBottom, isAtBottom: true, atPhysicalBottom: false },
       undefined,
       token,
-      { bottomFollow: isGenuinePhysicalBottom(-30) }
+      { bottomFollow: isExactlyAtNewest(metrics(nearBottom)) }
     )
     expect(out.taken).toBe(true)
     if (!out.taken) return
@@ -174,7 +181,13 @@ describe('pause click vs genuine scroll resume', () => {
     const c = new RouteViewportController({ topicId: 't1', route: null })
     const token = c.declareUserIntent()
     const out = c.userTakeover(
-      { messageId: 'mTail', intraRowOffset: -4, scrollTop: -30, isAtBottom: true },
+      {
+        messageId: 'mTail',
+        intraRowOffset: -4,
+        scrollTop: FLOW_BOTTOM - 30,
+        isAtBottom: true,
+        atPhysicalBottom: false
+      },
       undefined,
       token,
       { bottomFollow: true }
@@ -187,7 +200,7 @@ describe('pause click vs genuine scroll resume', () => {
   it('programmatic scroll with no live session never takes over', () => {
     const c = new RouteViewportController({ topicId: 't1', route: null })
     const out = c.userTakeover(
-      { messageId: 'mTail', intraRowOffset: -4, scrollTop: 0, isAtBottom: true },
+      { messageId: 'mTail', intraRowOffset: -4, scrollTop: FLOW_BOTTOM, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       undefined,
       { bottomFollow: true }
@@ -201,7 +214,7 @@ describe('pause click vs genuine scroll resume', () => {
     const c = new RouteViewportController({ topicId: 't1', route: null })
     const live = c.declareUserIntent()
     const out = c.userTakeover(
-      { messageId: 'mTail', intraRowOffset: -4, scrollTop: 0, isAtBottom: true },
+      { messageId: 'mTail', intraRowOffset: -4, scrollTop: FLOW_BOTTOM, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       { interactionId: live.interactionId + 99, epoch: live.epoch },
       { bottomFollow: true }

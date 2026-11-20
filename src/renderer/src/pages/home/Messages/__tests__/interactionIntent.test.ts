@@ -178,7 +178,7 @@ describe('shared interaction intent', () => {
     t.declareUserIntent()
     const token = t.activeInteractionToken
     const taken = t.userTakeover(
-      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false },
+      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )

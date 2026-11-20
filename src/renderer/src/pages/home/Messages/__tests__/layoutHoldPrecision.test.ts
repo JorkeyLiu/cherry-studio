@@ -16,7 +16,7 @@ import {
   resolveDroppedHoldBaseline,
   resolveLayoutHold,
   stepLayoutHold
-} from '../columnReverseGeometry'
+} from '../flowScrollGeometry'
 
 describe('keeper precision contract (gap-exposing)', () => {
   it('a +0.8px layout growth is held (one native quantum away, not ignored)', () => {

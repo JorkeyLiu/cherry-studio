@@ -5,14 +5,17 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
 import { useActiveTopic } from '@renderer/hooks/useTopic'
+import { RouteViewportProvider, useRouteViewportCommands } from '@renderer/pages/home/Messages/routeViewportContext'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import NavigationService from '@renderer/services/NavigationService'
+import { useAppSelector } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import { setAssistantsWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { AnimatePresence, motion } from 'motion/react'
-import type { FC } from 'react'
+import type { Dispatch, FC, SetStateAction } from 'react'
 import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 import { useDispatch } from 'react-redux'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -27,7 +30,6 @@ let _activeAssistant: Assistant
 // LOCK-002: navigation always renders on the left, topics always on the right.
 const HomePage: FC = () => {
   const { assistants } = useAssistants()
-  const navigate = useNavigate()
 
   const location = useLocation()
   const state = location.state
@@ -36,11 +38,60 @@ const HomePage: FC = () => {
     state?.assistant || _activeAssistant || assistants[0]
   )
   const { activeTopic, setActiveTopic: _setActiveTopic } = useActiveTopic(activeAssistant?.id ?? '', state?.topic)
+
+  // Provider route input (same semantics as the former Chat-level provider):
+  // the selected topic's own active branch. Topic changes arrive via the
+  // `topicId` prop (provider syncs displayed); the branch is read fresh here.
+  const activeBranchId = useAppSelector((s) => selectActiveBranchId(s, activeTopic.id))
+
+  _activeAssistant = activeAssistant
+
+  return (
+    <Container id="home-page">
+      <RouteViewportProvider topicId={activeTopic.id} initialRoute={activeBranchId}>
+        <HomeViewportScope
+          activeAssistant={activeAssistant}
+          activeTopic={activeTopic}
+          setActiveAssistantState={_setActiveAssistant}
+          setActiveTopicState={_setActiveTopic}
+        />
+      </RouteViewportProvider>
+    </Container>
+  )
+}
+
+interface HomeViewportScopeProps {
+  activeAssistant: Assistant
+  activeTopic: Topic
+  setActiveAssistantState: (assistant: Assistant) => void
+  setActiveTopicState: Dispatch<SetStateAction<Topic>>
+}
+
+/**
+ * Viewport-scope content: every ordinary active-topic entry converges on the
+ * two callbacks below, which run INSIDE the single RouteViewportProvider so
+ * the outgoing freeze can execute synchronously BEFORE selected changes.
+ */
+const HomeViewportScope: FC<HomeViewportScopeProps> = ({
+  activeAssistant,
+  activeTopic,
+  setActiveAssistantState: _setActiveAssistant,
+  setActiveTopicState: _setActiveTopic
+}) => {
+  const navigate = useNavigate()
+
+  const location = useLocation()
+  const state = location.state
+
   const { showAssistants, showTopics } = useSettings()
   const { setShowAssistants } = useShowAssistants()
   const { toggleShowTopics } = useShowTopics()
   const dispatch = useDispatch()
   const lastTopicByAssistantRef = useRef<Record<string, string>>({})
+  // Departure-freeze command: synchronously snapshots the DISPLAYED (old)
+  // route under its own key. Fail-closed by controller ownership/provenance —
+  // dirty/owned states preserve the stored snapshot instead of overwriting it.
+  const { freezeDisplayed } = useRouteViewportCommands()
 
   const handleLeftResizeEnd = useCallback(
     (width: number) => {
@@ -48,8 +99,6 @@ const HomePage: FC = () => {
     },
     [dispatch]
   )
-
-  _activeAssistant = activeAssistant
 
   useShortcut('toggle_show_assistants', () => {
     if (!showAssistants) {
@@ -74,15 +123,20 @@ const HomePage: FC = () => {
         lastTopicByAssistantRef.current[activeAssistant.id] = activeTopic.id
       }
 
+      // 同步更新 active topic，避免不必要的重新渲染
+      const lastTopicId = lastTopicByAssistantRef.current[newAssistant.id]
+      const newTopic = newAssistant.topics.find((topic) => topic.id === lastTopicId) ?? newAssistant.topics[0]
+      // An assistant switch also replaces the topic: freeze the outgoing
+      // viewport before the transition. Same topic id never freezes.
+      if (newTopic?.id !== activeTopic?.id) {
+        freezeDisplayed()
+      }
       startTransition(() => {
         _setActiveAssistant(newAssistant)
-        // 同步更新 active topic，避免不必要的重新渲染
-        const lastTopicId = lastTopicByAssistantRef.current[newAssistant.id]
-        const newTopic = newAssistant.topics.find((topic) => topic.id === lastTopicId) ?? newAssistant.topics[0]
         _setActiveTopic((prev) => (newTopic?.id === prev?.id ? prev : newTopic))
       })
     },
-    [_setActiveTopic, activeAssistant?.id, activeTopic?.id]
+    [_setActiveAssistant, _setActiveTopic, activeAssistant?.id, activeTopic?.id, freezeDisplayed]
   )
 
   const setActiveTopic = useCallback(
@@ -91,12 +145,17 @@ const HomePage: FC = () => {
         lastTopicByAssistantRef.current[activeAssistant.id] = newTopic.id
       }
 
+      // Same-id is a no-op: never freeze, never transition.
+      if (newTopic?.id === activeTopic?.id) return
+      // Outgoing freeze BEFORE selected changes: the controller still shows
+      // the OLD displayed route (clean-stable captures, owned/dirty preserves).
+      freezeDisplayed()
       startTransition(() => {
         _setActiveTopic((prev) => (newTopic?.id === prev?.id ? prev : newTopic))
         dispatch(newMessagesActions.setTopicFulfilled({ topicId: newTopic.id, fulfilled: false }))
       })
     },
-    [_setActiveTopic, activeAssistant?.id, dispatch]
+    [_setActiveTopic, activeAssistant?.id, activeTopic?.id, dispatch, freezeDisplayed]
   )
 
   useEffect(() => {
@@ -121,7 +180,7 @@ const HomePage: FC = () => {
   }, [showAssistants, showTopics])
 
   return (
-    <Container id="home-page">
+    <>
       <Navbar
         activeAssistant={activeAssistant}
         activeTopic={activeTopic}
@@ -167,7 +226,7 @@ const HomePage: FC = () => {
           />
         </ErrorBoundary>
       </ContentContainer>
-    </Container>
+    </>
   )
 }
 

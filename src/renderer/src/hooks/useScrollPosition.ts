@@ -1,5 +1,12 @@
-import { COLUMN_REVERSE_BOTTOM_THRESHOLD_PX, isAtBottom } from '@renderer/pages/home/Messages/columnReverseGeometry'
 import { findViewportTopAnchorWithOffset } from '@renderer/pages/home/Messages/domVisibility'
+import {
+  FLOW_BOTTOM_THRESHOLD_PX,
+  FLOW_COORDINATE_SPACE,
+  type FlowCoordinateSpace,
+  isAtBottom,
+  isExactlyAtNewest,
+  readScrollMetrics
+} from '@renderer/pages/home/Messages/flowScrollGeometry'
 import {
   handleScrollSnapshotCleared,
   handleScrollSnapshotRead,
@@ -18,8 +25,13 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
  * - `intraRowOffset` is `anchorTop - containerTop` (negative when the anchor
  *   row crosses the top edge). Legacy snapshots without it fall back to
  *   anchor-vicinity restore.
- * - `rawScrollTop` is the exact container scrollTop for same-route fallback.
- *   It is never used as cross-route visual continuity.
+ * - `scrollTop`/`rawScrollTop` are the exact container offsets for same-route
+ *   fallback, in the coordinate space named by `coordinateSpace`. They are
+ *   ABSENT on a record written in another space (a pre-flow snapshot stores
+ *   column-reverse offsets, where 0 is the bottom): such a number can never be
+ *   reinterpreted as a normal-flow coordinate, while the convention-independent
+ *   identity anchor and bottom classification still survive. `rawScrollTop` is
+ *   never used as cross-route visual continuity.
  *
  * Ownership note: this module owns NO transition truth. Whether a scroll may
  * be captured is decided by the single route viewport transition controller
@@ -29,15 +41,32 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
  * real user scrolls and explicit controller stable commits.
  */
 export interface SavedScrollPosition {
-  scrollTop: number
+  scrollTop?: number
   anchorId: string | null
   messageId?: string | null
   intraRowOffset?: number | null
   rawScrollTop?: number
   isAtBottom: boolean
+  /** Coordinate space these offsets were measured in (absent = foreign/legacy). */
+  coordinateSpace?: FlowCoordinateSpace
 }
 
-const BOTTOM_THRESHOLD = COLUMN_REVERSE_BOTTOM_THRESHOLD_PX // px (single column-reverse primitive)
+/**
+ * A LIVE measurement: the container offset is always present. Only storage
+ * reads can produce the coordinate-less form above.
+ *
+ * `atPhysicalBottom` is the exact-bottom classification (1px subpixel
+ * tolerance) derived from the SAME metrics read as `scrollTop`/`isAtBottom`, so
+ * a consumer that needs the exact gate never re-reads the container and never
+ * invents its own bottom formula.
+ */
+export interface MeasuredScrollPosition extends SavedScrollPosition {
+  scrollTop: number
+  rawScrollTop: number
+  atPhysicalBottom: boolean
+}
+
+const BOTTOM_THRESHOLD = FLOW_BOTTOM_THRESHOLD_PX
 
 // --- Route-local key helpers (pure, no fences, no globals) ---
 /** Canonical hook key for a topic route (`topic-<id>::<branch|main>`). */
@@ -48,33 +77,65 @@ export const routeScrollKey = (topicId: string, branchId: string | null): string
 export const toScrollKey = (routeKey: string): string =>
   routeKey.startsWith('scroll:') ? routeKey : `scroll:${routeKey}`
 
-const normalizeSaved = (saved: unknown): SavedScrollPosition | null => {
-  if (saved && typeof saved === 'object' && 'scrollTop' in (saved as Record<string, unknown>)) {
+/**
+ * Coordinate-space gate shared by every persisted-snapshot read: only a
+ * record tagged with THIS space contributes numeric offsets. An untagged
+ * (pre-flow) record drops `scrollTop`/`rawScrollTop` — they can never be
+ * reinterpreted as normal-flow coordinates — while the stable anchor and
+ * bottom classification survive. Also reused by the legacy topic-only
+ * (`scroll:topic-<id>`) reader, which bypasses the hook.
+ */
+export const normalizeSaved = (saved: unknown): SavedScrollPosition | null => {
+  if (saved && typeof saved === 'object') {
     const rec = saved as Record<string, unknown>
     const anchorId = typeof rec.anchorId === 'string' ? rec.anchorId : null
     const messageId = typeof rec.messageId === 'string' ? rec.messageId : anchorId
     const intraRaw = rec.intraRowOffset
     const intraRowOffset = typeof intraRaw === 'number' && Number.isFinite(intraRaw) ? intraRaw : null
+    const isAtBottom = 'isAtBottom' in rec ? !!(rec.isAtBottom as boolean) : false
+    // Coordinate-space gate: only a record tagged with THIS space contributes
+    // numeric offsets. An untagged record predates the normal-flow conversion,
+    // so its numbers are dropped rather than reinterpreted — the identity
+    // anchor (messageId/anchorId + intraRowOffset) and the bottom
+    // classification are convention-independent and survive.
+    if (rec.coordinateSpace !== FLOW_COORDINATE_SPACE) {
+      const hasNumeric = typeof rec.scrollTop === 'number' || typeof rec.rawScrollTop === 'number'
+      if (!messageId && !isAtBottom && !hasNumeric) return null
+      return { anchorId, messageId, intraRowOffset, isAtBottom, coordinateSpace: FLOW_COORDINATE_SPACE }
+    }
     const rawRaw = rec.rawScrollTop
     const rawScrollTop =
       typeof rawRaw === 'number' && Number.isFinite(rawRaw)
         ? rawRaw
         : typeof rec.scrollTop === 'number'
           ? rec.scrollTop
-          : 0
-    const isAtBottom = 'isAtBottom' in rec ? !!(rec.isAtBottom as boolean) : false
+          : undefined
     const scrollTop = typeof rec.scrollTop === 'number' ? rec.scrollTop : rawScrollTop
-    return { scrollTop, anchorId, messageId, intraRowOffset, rawScrollTop, isAtBottom }
+    // An anchor-only flow-v1 record carries no numeric offsets (keys absent
+    // after a serialization round-trip drops undefined): the stable anchor
+    // and bottom classification still stand. Only a fully anchorless,
+    // bottomless, numericless record reads as absent.
+    if (scrollTop === undefined && rawScrollTop === undefined && !messageId && !isAtBottom) return null
+    return {
+      scrollTop,
+      anchorId,
+      messageId,
+      intraRowOffset,
+      rawScrollTop,
+      isAtBottom,
+      coordinateSpace: FLOW_COORDINATE_SPACE
+    }
   }
   if (typeof saved === 'number') {
-    // Backward compatibility: plain number = raw scrollTop only
+    // Backward compatibility: a plain number is a raw offset in an UNKNOWN
+    // coordinate space (pre-flow). It is not portable, so only the shape is
+    // preserved: no anchor, no coordinate, not bottom.
     return {
-      scrollTop: saved,
       anchorId: null,
       messageId: null,
       intraRowOffset: null,
-      rawScrollTop: saved,
-      isAtBottom: false
+      isAtBottom: false,
+      coordinateSpace: FLOW_COORDINATE_SPACE
     }
   }
   return null
@@ -120,7 +181,7 @@ export const commitSnapshotForRoute = (routeKey: string, snapshot: SavedScrollPo
   }
   if (!snapshot) return false
   try {
-    window.keyv.set(k, snapshot)
+    window.keyv.set(k, { ...snapshot, coordinateSpace: FLOW_COORDINATE_SPACE })
   } catch {
     return false
   }
@@ -179,7 +240,7 @@ export default function useScrollPosition(key: string, throttleWaitOrOptions?: n
   const scrollKey = useMemo(() => `scroll:${key}`, [key])
   const scrollKeyRef = useRef(scrollKey)
 
-  const captureSnapshot = useCallback((): SavedScrollPosition | null => {
+  const captureSnapshot = useCallback((): MeasuredScrollPosition | null => {
     const container = containerRef.current
     if (!container) return null
     const scrollTop = container.scrollTop
@@ -194,14 +255,19 @@ export default function useScrollPosition(key: string, throttleWaitOrOptions?: n
         ? findViewportTopAnchorWithOffset(container, { orderedRows })
         : findViewportTopAnchorWithOffset(container)
     const messageId = anchor?.messageId ?? null
+    // ONE metrics read for every classification below: isAtBottom (50px) and
+    // the exact physical bottom (1px) can never describe different instants.
+    const metrics = readScrollMetrics(container)
     return {
       scrollTop,
       anchorId: messageId,
       messageId,
       intraRowOffset: anchor ? anchor.intraRowOffset : null,
       rawScrollTop: scrollTop,
-      // Column-reverse: bottom (newest) is scrollTop ≈ 0 — single primitive.
-      isAtBottom: isAtBottom(scrollTop, BOTTOM_THRESHOLD)
+      // Normal flow: bottom (newest) is the container's own scroll travel.
+      isAtBottom: isAtBottom(metrics, BOTTOM_THRESHOLD),
+      atPhysicalBottom: isExactlyAtNewest(metrics),
+      coordinateSpace: FLOW_COORDINATE_SPACE
     }
   }, [])
 
@@ -231,7 +297,7 @@ export default function useScrollPosition(key: string, throttleWaitOrOptions?: n
           } catch {}
           return
         }
-        window.keyv.set(args.k, args.snapshot)
+        window.keyv.set(args.k, { ...args.snapshot, coordinateSpace: FLOW_COORDINATE_SPACE })
         handleScrollSnapshotSaved(args.k)
       }, throttleWait ?? 100),
     [throttleWait]
@@ -313,7 +379,7 @@ export default function useScrollPosition(key: string, throttleWaitOrOptions?: n
     }
     const snapshot = captureSnapshot()
     if (!snapshot) return
-    window.keyv.set(k, snapshot)
+    window.keyv.set(k, { ...snapshot, coordinateSpace: FLOW_COORDINATE_SPACE })
     handleScrollSnapshotSaved(k)
   }, [captureSnapshot, persistScrollPosition, canWrite])
 

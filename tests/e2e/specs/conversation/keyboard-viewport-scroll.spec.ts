@@ -10,8 +10,8 @@
  * Suspects (unproven, runtime evidence pending): the keydown target after an
  * ordinary viewport click sits outside #messages (body) so the
  * container-scoped capture listener never declares intent; native smooth
- * paging outlives the keyup/scrollend intent window; column-reverse native
- * default vs keeper compensation.
+ * paging outlives the keyup/scrollend intent window; normal-flow native
+ * default (scrollTop 0 at the oldest edge, max(0, sh-ch) at the newest edge) vs keeper compensation.
  *
  * Contract (test 1, expected RED until fixed): from a verified middle reading
  * position on a fully-loaded (no-pagination) topic, an ordinary real click on
@@ -513,13 +513,13 @@ async function wheelToMiddle(page: Page, ids: string[]): Promise<Anchor> {
     const idx = ids.indexOf(cur.id)
     if (idx < Math.floor(TOTAL / 3) || idx > Math.floor((TOTAL * 2) / 3)) return false
     const st = await readScrollState(page)
-    const topExtreme = -(st.scrollHeight - st.clientHeight)
-    if (Math.abs(st.scrollTop) < 500) return false
-    if (Math.abs(st.scrollTop - topExtreme) < 500) return false
+    const bottomExtreme = st.scrollHeight - st.clientHeight
+    if (st.scrollTop < 500) return false
+    if (Math.abs(st.scrollTop - bottomExtreme) < 500) return false
     return true
   }
   // Sweep one sign fully first (accumulating travel), then the reverse sweep
-  // with no column-reverse sign assumption — never alternating per round,
+  // with no scroll-sign assumption — never alternating per round,
   // which would oscillate around the start and never accumulate.
   for (let i = 0; i < 30; i++) {
     if (await isMiddle()) break
@@ -531,7 +531,10 @@ async function wheelToMiddle(page: Page, ids: string[]): Promise<Anchor> {
       await wheel(560)
     }
   }
-  expect(await isMiddle(), 'must reach a verified middle reading position (|st|>500 from both extremes)').toBe(true)
+  expect(
+    await isMiddle(),
+    'must reach a verified middle reading position (st>500 from the oldest edge, distBottom>500 from the newest edge)'
+  ).toBe(true)
   return settledOrThrow(page)
 }
 /**
@@ -560,10 +563,7 @@ async function wheelToMiddleByRange(page: Page): Promise<ScrollState> {
     const st = await readScrollState(page)
     const range = st.scrollHeight - st.clientHeight
     if (!Number.isFinite(range) || range < (2 * clearance + 1) * st.clientHeight) return false
-    return (
-      Math.abs(st.scrollTop) >= clearance * st.clientHeight &&
-      range - Math.abs(st.scrollTop) >= clearance * st.clientHeight
-    )
+    return st.scrollTop >= clearance * st.clientHeight && range - st.scrollTop >= clearance * st.clientHeight
   }
   // Sweep one sign fully first (accumulating travel), then the reverse sweep.
   for (let i = 0; i < 40; i++) {
@@ -1140,11 +1140,13 @@ async function describePagingLeg(
       : Math.abs(leg.finalFromPeak) >= excursion * 0.5
         ? 'moved-then-reverted'
         : 'moved-persisted'
+  const distNewest = Number.isFinite(range) && range > 0 ? Math.max(0, range - leg.endTop) : NaN
+  const distOldest = Number.isFinite(range) && range > 0 ? Math.max(0, leg.endTop) : NaN
   const boundary =
     Number.isFinite(range) && range > 0
-      ? Math.abs(leg.endTop) <= OFFSET_TOL
+      ? distNewest <= OFFSET_TOL
         ? 'newest-edge(clamped)'
-        : range - Math.abs(leg.endTop) <= OFFSET_TOL
+        : distOldest <= OFFSET_TOL
           ? 'oldest-edge(clamped)'
           : 'interior'
       : 'unknown-range'
@@ -1156,7 +1158,7 @@ async function describePagingLeg(
       `st=${Math.round(leg.startTop)}->${Math.round(leg.endTop)} min=${Math.round(leg.minTop)} max=${Math.round(leg.maxTop)} ` +
       `delta=${Math.round(leg.delta)} excursion=${Math.round(leg.maxExcursion)} fromPeak=${Math.round(leg.finalFromPeak)} ` +
       `ch=${Math.round(leg.clientHeight)} sh=${state ? Math.round(state.scrollHeight) : 'NaN'} range=${Math.round(range)} ` +
-      `distOldest=${Math.round(range - Math.abs(leg.endTop))} distNewest=${Math.round(Math.abs(leg.endTop))} ` +
+      `distOldest=${Number.isFinite(distOldest) ? Math.round(distOldest) : 'NaN'} distNewest=${Number.isFinite(distNewest) ? Math.round(distNewest) : 'NaN'} ` +
       `docDelta=${Math.round(leg.docDelta)} motion=${motion} boundary=${boundary} ` +
       `keyEvents=${captureNew.length}/${bubbleNew.length} scrollEnds=${endsNew.length} writesDelta=${Number.isFinite(writeDelta) ? writeDelta : '?'}`
   )
@@ -1292,16 +1294,17 @@ async function waitForTopicRestoreReady(
 }
 
 /**
- * Ordinary wheel drives to true physical bottom (scrollTop ~0). Seams
+ * Ordinary wheel drives to true physical bottom (distBottom ~0). Seams
  * surface only (wheel/click/keyboard); never writes scrollTop.
  */
 async function wheelToBottomEdge(page: Page): Promise<void> {
   for (let i = 0; i < 40; i++) {
     const st = await readScrollState(page)
-    if (Math.abs(st.scrollTop) <= 2) return
+    const distBottom = Math.max(0, st.scrollHeight - st.clientHeight - st.scrollTop)
+    if (distBottom <= 2) return
     const box = await page.locator('#messages').first().boundingBox()
     if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await page.mouse.wheel(0, st.scrollTop < 0 ? 420 : -420)
+    await page.mouse.wheel(0, distBottom > 2 ? 420 : -420)
     await page.waitForTimeout(200)
   }
   throw new Error('wheel-to-bottom failed')
@@ -1347,10 +1350,11 @@ async function parkCursorOnDeadSpot(page: Page): Promise<{ x: number; y: number;
 async function wheelToNearBottom(page: Page): Promise<number> {
   for (let i = 0; i < 12; i++) {
     const st = await readScrollState(page)
-    if (st.scrollTop <= -30 && st.scrollTop >= -200) return st.scrollTop
+    const distBottom = Math.max(0, st.scrollHeight - st.clientHeight - st.scrollTop)
+    if (distBottom >= 30 && distBottom <= 200) return distBottom
     const box = await page.locator('#messages').first().boundingBox()
     if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    if (st.scrollTop > -30) await page.mouse.wheel(0, -120)
+    if (distBottom < 30) await page.mouse.wheel(0, -120)
     else await page.mouse.wheel(0, 120)
     await page.waitForTimeout(300)
   }
@@ -1994,7 +1998,7 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
     ).toBeLessThanOrEqual(16)
     expect(nearWrites, 'write counter must be readable for the near-bottom leg').toBeGreaterThanOrEqual(0)
     expect(
-      Math.abs(nearState.scrollTop),
+      Math.max(0, nearState.scrollHeight - nearState.clientHeight - nearState.scrollTop),
       `last-page PageDown from ${Math.round(nearPre)} must reach physical bottom in one press (no stuck midpoint)`
     ).toBeLessThanOrEqual(2)
     expect(
@@ -2183,11 +2187,12 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
           // assertions below are unchanged.
           for (let i = 0; i < 40; i++) {
             const st = await readScrollState(page)
-            if (st.scrollTop <= -25 && st.scrollTop >= -45) return st.scrollTop
+            const distBottom = Math.max(0, st.scrollHeight - st.clientHeight - st.scrollTop)
+            if (distBottom >= 25 && distBottom <= 45) return distBottom
             const box = await page.locator('#messages').first().boundingBox()
             if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-            const far = Math.abs(st.scrollTop + 35) > 400
-            if (st.scrollTop > -25) await page.mouse.wheel(0, far ? -320 : -60)
+            const far = Math.abs(distBottom - 35) > 400
+            if (distBottom < 25) await page.mouse.wheel(0, far ? -320 : -60)
             else await page.mouse.wheel(0, far ? 320 : 60)
             await page.waitForTimeout(300)
           }
@@ -2202,17 +2207,18 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
         label: '0.7page',
         drive: async () => {
           const chNow = (await readScrollState(page)).clientHeight
-          const target = -Math.round(0.7 * chNow)
+          const target = Math.round(0.7 * chNow)
           // Coarse far step + fine near step: a fixed 160px step straddles
-          // the ±40px window (e.g. -480/-640 around -538) and oscillates
+          // the ±40px window (e.g. 480/640 around 538) and oscillates
           // forever. Window and assertions below are unchanged.
           for (let i = 0; i < 40; i++) {
             const st = await readScrollState(page)
-            if (Math.abs(st.scrollTop - target) <= 40) return st.scrollTop
+            const distBottom = Math.max(0, st.scrollHeight - st.clientHeight - st.scrollTop)
+            if (Math.abs(distBottom - target) <= 40) return distBottom
             const box = await page.locator('#messages').first().boundingBox()
             if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-            const step = Math.abs(st.scrollTop - target) > 400 ? 320 : 40
-            await page.mouse.wheel(0, st.scrollTop > target ? -step : step)
+            const step = Math.abs(distBottom - target) > 400 ? 320 : 40
+            await page.mouse.wheel(0, distBottom < target ? -step : step)
             await page.waitForTimeout(300)
           }
           throw new Error('drive to 0.7page failed')
@@ -2227,13 +2233,14 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
       await page.waitForTimeout(2000)
       const leg = await pressKeyAndSample(page, 'PageDown')
       await waitScrollQuiescence(page).catch(async () => (await readScrollState(page)).scrollTop)
-      const end = (await readScrollState(page)).scrollTop
+      const endState = await readScrollState(page)
+      const end = Math.max(0, endState.scrollHeight - endState.clientHeight - endState.scrollTop)
       test.info().annotations.push({
         type: 'kb-long-near',
         description: `${entry.label} pre=${Math.round(pre)} delta=${Math.round(leg.delta)} end=${Math.round(end)} revert=${Math.round(leg.finalFromPeak)}`
       })
       expect(
-        Math.abs(end),
+        end,
         `long ${entry.label} PageDown from ${Math.round(pre)} must reach physical bottom in one press`
       ).toBeLessThanOrEqual(2)
       expect(
@@ -2246,10 +2253,13 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
     // at least one of each on the long topic (ordinary input only).
     await wheelToBottomEdge(page)
     await page.waitForTimeout(1500)
-    expect(
-      Math.abs((await readScrollState(page)).scrollTop),
-      'natural wheel must reach the physical bottom on the long topic'
-    ).toBeLessThanOrEqual(2)
+    {
+      const atBottom = await readScrollState(page)
+      expect(
+        Math.max(0, atBottom.scrollHeight - atBottom.clientHeight - atBottom.scrollTop),
+        'natural wheel must reach the physical bottom on the long topic'
+      ).toBeLessThanOrEqual(2)
+    }
     // The cursor is parked off-scroller after the matrix; re-hover #messages
     // so this wheel reaches the intended scroller (wheel dispatches at the
     // cursor position).
@@ -2257,17 +2267,20 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
       const box = await page.locator('#messages').first().boundingBox()
       if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     }
-    // Column-reverse host: scrollTop 0 IS the bottom, so leaving it upward
+    // Normal-flow host: distBottom 0 IS the bottom, so leaving it upward
     // needs a negative delta (+500 would clamp at the edge and go nowhere).
     await page.mouse.wheel(0, -500)
     await page.waitForTimeout(1500)
     await expect(btbLocator, 'BTB must be exposed after wheeling away on the long topic').toBeAttached()
     await btbLocator.click()
     await page.waitForTimeout(1500)
-    expect(
-      Math.abs((await readScrollState(page)).scrollTop),
-      'explicit BTB activation must return to the physical bottom on the long topic'
-    ).toBeLessThanOrEqual(16)
+    {
+      const btbState = await readScrollState(page)
+      expect(
+        Math.max(0, btbState.scrollHeight - btbState.clientHeight - btbState.scrollTop),
+        'explicit BTB activation must return to the physical bottom on the long topic'
+      ).toBeLessThanOrEqual(16)
+    }
     try {
       const longProbe = await readProbe(page)
       // eslint-disable-next-line no-console

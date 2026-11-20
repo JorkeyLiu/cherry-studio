@@ -6,6 +6,11 @@ import { COMPOSER_FLOATING_CONTROL_BAND_PX } from './composerFloatingBand'
 /**
  * Scroll content host.
  *
+ * Normal document flow (`flex-direction: column`): the first child paints at
+ * the visual top, so the flow's own DOM order is its visual order — oldest
+ * message first, newest last. Content order is owned by the flow builder, never
+ * by a reversed flex direction.
+ *
  * The bottom padding is the flow's tail clearance, not a cosmetic inset: the
  * composer's floating control band paints over the last rows of this content
  * (`#messages` is the band's sibling, so no flow row can clear it from inside),
@@ -16,7 +21,7 @@ import { COMPOSER_FLOATING_CONTROL_BAND_PX } from './composerFloatingBand'
  */
 export const ScrollContainer = styled.div`
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   padding: 10px 10px ${COMPOSER_FLOATING_CONTROL_BAND_PX}px;
   .multi-select-mode & {
     padding-bottom: 60px;
@@ -38,21 +43,22 @@ export const MessagesWrapper = styled.div`
 
 export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   overflow-x: hidden;
   // Single scroll owner (#messages): the route viewport keeper owns all
-  // compensation on this host (column-reverse bottom pin + region holds).
-  // Browser scroll anchoring would fight it during editor resize/entry/cancel
-  // (native corrections vs keeper corrections read as bottom wobble and a
-  // release snap), so it stays disabled here only — never on editor, notes,
-  // history, or other native scrollers.
+  // compensation on this host (bottom pin + region holds). Browser scroll
+  // anchoring would fight it during editor resize/entry/cancel (native
+  // corrections vs keeper corrections read as bottom wobble and a release
+  // snap), so it stays disabled here only — never on editor, notes, history,
+  // or other native scrollers.
   overflow-anchor: none;
-  // Short content sizes to content height instead of stretching the full
-  // wrapper height (flex:1 forced full fill, pushing the column-reverse
-  // content to the visual bottom and leaving blank above Prompt).
-  // flex:0 1 auto keeps shrink-to-wrapper + own overflow-y:auto scroll
-  // for long content. Wrapper stays the flex:1/min-height:0 height boundary.
-  flex: 0 1 auto;
+  // The host takes the available wrapper height (flex:1 forces the full fill)
+  // and owns the overflow. In normal flow that is exactly what keeps the scroll
+  // geometry honest: the scrollport height is the visible height. Short content
+  // is bottom-aligned by the content wrapper's auto block-start margin instead
+  // of by a reversed direction, so the empty space belongs to the scrollport
+  // (above the flow) and never to the scrolled content.
+  flex: 1 1 auto;
   min-height: 0;
   // Local layer contract: this scroll host stays position:relative WITHOUT
   // its own z-index so it never traps descendants in a stacking context.

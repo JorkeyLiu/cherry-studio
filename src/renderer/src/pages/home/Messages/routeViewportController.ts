@@ -52,10 +52,16 @@ export type RouteViewportTerminalReason =
   | 'fail-visible'
 
 export interface RouteViewportSnapshot {
-  scrollTop: number
+  /** Flow scroll offset, absent = legacy pre-flow record (no numeric authority). */
+  scrollTop?: number
   messageId: string | null
   intraRowOffset: number | null
   isAtBottom: boolean
+}
+
+/** Snapshot built from a live container measurement: the flow offset is known. */
+export interface MeasuredRouteViewportSnapshot extends RouteViewportSnapshot {
+  scrollTop: number
 }
 
 export type RouteVisualAnchor =
@@ -230,7 +236,7 @@ export interface RouteViewportIntent {
 
 export interface StableCommit {
   routeKey: string
-  snapshot: RouteViewportSnapshot
+  snapshot: MeasuredRouteViewportSnapshot
 }
 
 /**
@@ -1387,7 +1393,7 @@ export class RouteViewportController {
     if (intent.kind === 'top' && this.anchor?.kind === 'message' && !measured.messageId) {
       return { committed: false, commit: null, didRelease: false }
     }
-    const snapshot: RouteViewportSnapshot = {
+    const snapshot: MeasuredRouteViewportSnapshot = {
       scrollTop: measured.scrollTop,
       messageId: measured.messageId,
       intraRowOffset: measured.intraRowOffset,
@@ -1623,16 +1629,23 @@ export class RouteViewportController {
    * genuine user SCROLL landing at the exact physical bottom clears the live
    * row anchor (keeper pins bottom through growth) while the returned snapshot
    * stays TRUTHFUL (measured messageId/offset/isAtBottom untouched — never a
-   * synthesized bottom record). The exact gate is `abs(scrollTop) <= 1` (1px
-   * subpixel rounding tolerance, same as the oldest-edge exact gate — never
-   * the 50px snapshot vicinity, so reading near-bottom never jumps). Opt-in
-   * only: the click-to-pause path omits it and keeps the row even at bottom.
+   * synthesized bottom record). The exact gate is `measured.atPhysicalBottom`
+   * (1px subpixel rounding tolerance, computed by the renderer from the same
+   * flow geometry authority as every other scroll decision — never the 50px
+   * snapshot vicinity, so reading near-bottom never jumps). Opt-in only: the
+   * click-to-pause path omits it and keeps the row even at bottom.
    *
    * Only the returned `{taken:true, routeKey, snapshot}` authorizes a
    * `commitSnapshotForRoute(routeKey, snapshot)` user-source write.
    */
   userTakeover(
-    measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+    measured: {
+      messageId: string | null
+      intraRowOffset: number | null
+      scrollTop: number
+      isAtBottom: boolean
+      atPhysicalBottom: boolean
+    },
     liveWindowId?: string,
     interactionToken?: UserInteractionTokenLike,
     opts?: { bottomFollow?: boolean }
@@ -1640,7 +1653,7 @@ export class RouteViewportController {
     | {
         taken: true
         routeKey: string
-        snapshot: RouteViewportSnapshot
+        snapshot: MeasuredRouteViewportSnapshot
         reason: 'owned-takeover' | 'stable-update'
         epoch: number
       }
@@ -1681,7 +1694,7 @@ export class RouteViewportController {
         return { taken: false, reason: 'window-mismatch', epoch: this.epoch }
       }
       const takeover: RouteRef = { topicId: cur.topicId, route: cur.routeId }
-      const snapshot: RouteViewportSnapshot = {
+      const snapshot: MeasuredRouteViewportSnapshot = {
         scrollTop: measured.scrollTop,
         messageId: measured.messageId,
         intraRowOffset: measured.intraRowOffset,
@@ -1690,7 +1703,7 @@ export class RouteViewportController {
       // Genuine scroll landing at the exact physical bottom resumes follow:
       // live anchor null, snapshot truthful. Re-validated here so a stale
       // opt-in at a wide offset can never null a reading row.
-      const ownedFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+      const ownedFollowBottom = opts?.bottomFollow === true && measured.atPhysicalBottom === true
       const nextAnchor: RouteVisualAnchor | null =
         ownedFollowBottom || !snapshot.messageId
           ? null
@@ -1742,14 +1755,14 @@ export class RouteViewportController {
     // strict window check (route switch provenance).
     void live
     void isSyntheticWindow
-    const snapshot: RouteViewportSnapshot = {
+    const snapshot: MeasuredRouteViewportSnapshot = {
       scrollTop: measured.scrollTop,
       messageId: measured.messageId,
       intraRowOffset: measured.intraRowOffset,
       isAtBottom: measured.isAtBottom
     }
     // Same exact-bottom follow rule as the owned path above (see method doc).
-    const stableFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+    const stableFollowBottom = opts?.bottomFollow === true && measured.atPhysicalBottom === true
     const nextAnchor: RouteVisualAnchor | null =
       stableFollowBottom || !snapshot.messageId
         ? null
@@ -1879,7 +1892,7 @@ export class RouteViewportController {
     measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
     opts?: { expectedEpoch?: number }
   ):
-    | { taken: true; routeKey: string; snapshot: RouteViewportSnapshot; epoch: number }
+    | { taken: true; routeKey: string; snapshot: MeasuredRouteViewportSnapshot; epoch: number }
     | {
         taken: false
         reason:
@@ -1917,7 +1930,7 @@ export class RouteViewportController {
     if (!measured.messageId && measured.isAtBottom !== true) {
       return { taken: false, reason: 'nonbottom-null', epoch: this.epoch }
     }
-    const snapshot: RouteViewportSnapshot = {
+    const snapshot: MeasuredRouteViewportSnapshot = {
       scrollTop: measured.scrollTop,
       messageId: measured.messageId,
       intraRowOffset: measured.intraRowOffset,
@@ -1969,7 +1982,7 @@ export class RouteViewportController {
     measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
     opts?: { expectedEpoch?: number }
   ):
-    | { taken: true; routeKey: string; snapshot: RouteViewportSnapshot; epoch: number }
+    | { taken: true; routeKey: string; snapshot: MeasuredRouteViewportSnapshot; epoch: number }
     | {
         taken: false
         reason:
@@ -2003,7 +2016,7 @@ export class RouteViewportController {
     if (!measured.messageId && measured.isAtBottom !== true) {
       return { taken: false, reason: 'nonbottom-null', epoch: this.epoch }
     }
-    const snapshot: RouteViewportSnapshot = {
+    const snapshot: MeasuredRouteViewportSnapshot = {
       scrollTop: measured.scrollTop,
       messageId: measured.messageId,
       intraRowOffset: measured.intraRowOffset,

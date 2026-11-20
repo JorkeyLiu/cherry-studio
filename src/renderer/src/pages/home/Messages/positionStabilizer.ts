@@ -151,10 +151,10 @@ export interface ViewportGeometrySample {
 /**
  * Layout metric of a sampled row: `viewportOffset + scrollTop`.
  *
- * This sum is INVARIANT under user scrolling in both scroll conventions: input
- * moves the scroll position and the row's viewport offset by equal and opposite
- * amounts (column-reverse included, where `scrollTop` decreases as the viewport
- * moves toward the visually older edge). It changes only when layout/content
+ * This sum is INVARIANT under user scrolling: input moves the scroll position
+ * and the row's viewport offset by equal and opposite amounts (normal flow
+ * included, where `scrollTop` grows as the viewport moves toward the visually
+ * newer edge). It changes only when layout/content moves the row, so the
  * moves the row, so the DIFFERENCE of this metric is the layout-only
  * displacement — compensating exactly that holds a row through layout growth
  * without cancelling the movement the user's own input produced.

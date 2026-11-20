@@ -22,13 +22,15 @@ import {
   buildDividerSearchProgressFromVisible,
   buildDividerVisibleMessages,
   isDividerVisibleUnionExact,
+  isDividerVisibleViewportOwned,
   planDividerVisibleRebase
 } from '../dividerVisibleRebase'
 import { createMessageViewportGroupModel } from '../messageGroups'
 import {
   createTargetMessageWindow,
   MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
-  type MessageWindow
+  type MessageWindow,
+  reconcileMessageWindow
 } from '../messageWindow'
 import { RouteViewportController } from '../routeViewportController'
 
@@ -792,5 +794,108 @@ describe('stable same-route window refresh stays intact (no adoption)', () => {
     expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'B' }, wid('a', 'b', 3))).toBe(false)
     c.markRenderedUnknown()
     expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'A' }, wid('a', 'b', 4))).toBe(false)
+  })
+})
+
+describe('visible union vs same-tick loaded rebase (reconcile hazard + single-owner guard)', () => {
+  it('ordinary reconcile re-derives the committed union with no compensation: older fill', () => {
+    // Parent-restore shape: L1 window [m6..m15 + o1] (11 rows), target
+    // around-window [m5..m29] (25 rows). The visible plan preserves the
+    // current prefix through the fork; the union starts one row later than
+    // the target head.
+    const current = [...Array.from({ length: 10 }, (_, i) => `m${6 + i}`), 'o1']
+    const response = Array.from({ length: 25 }, (_, i) => `m${5 + i}`)
+    const plan = planDividerVisibleRebase({
+      currentIdsOldestFirst: current,
+      targetResponseIdsOldestFirst: response,
+      targetWindowIdsOldestFirst: response,
+      forkAnchorId: 'm15',
+      currentHasMoreBefore: true,
+      targetHasMoreAfter: false
+    })
+    expect(plan).not.toBeNull()
+    expect(plan?.nextOldestFirst).toEqual(Array.from({ length: 24 }, (_, i) => `m${6 + i}`))
+    const currentNewestFirst = [...current].reverse().map(msg)
+    const loadedOldestFirst = response.map(msg)
+    const unionNewestFirst = buildDividerVisibleMessages(currentNewestFirst, loadedOldestFirst, plan!)
+    const unionOldestFirst = [...unionNewestFirst].reverse()
+    const unionModel = createMessageViewportGroupModel(unionOldestFirst)
+    const forkIdx = unionModel.groups.indexOf(unionModel.messageIdToGroup.get('m15')!)
+    const unionWindow = createTargetMessageWindow(
+      unionOldestFirst,
+      'm15',
+      forkIdx + 1,
+      unionModel.groups.length - forkIdx - 1,
+      { hasMoreBefore: true, hasMoreAfter: false }
+    )
+    expect(unionWindow.displayMessages.map((m) => m.id)).toEqual([...response.slice(1)].reverse())
+    // The same-tick loaded rebase publishes the target projection; an
+    // unguarded ordinary reconcile capacity-fills m5 above the anchor with
+    // no layout compensation — the production drift (offset +1 row).
+    const reconciled = reconcileMessageWindow(loadedOldestFirst, currentNewestFirst, unionWindow)
+    expect(reconciled.displayMessages.map((m) => m.id)).toEqual([...response].reverse())
+    expect(reconciled.displayMessages.length).toBe(unionWindow.displayMessages.length + 1)
+  })
+
+  it('ordinary reconcile drops preserved rows the rebased projection no longer carries', () => {
+    // Branch-to-parent shape: current branch window [m0..m15 + b1..b5]
+    // (21 rows), target around-window [m5..m29] (25 rows). The union keeps
+    // rows older than the rebased projection head.
+    const branchSuffix = ['b1', 'b2', 'b3', 'b4', 'b5']
+    const current = [...trunk, ...branchSuffix]
+    const response = [...trunk.slice(5), ...Array.from({ length: 14 }, (_, i) => `m${16 + i}`)]
+    expect(response.length).toBe(25)
+    const plan = planDividerVisibleRebase({
+      currentIdsOldestFirst: current,
+      targetResponseIdsOldestFirst: response,
+      targetWindowIdsOldestFirst: response,
+      forkAnchorId: 'm15',
+      currentHasMoreBefore: false,
+      targetHasMoreAfter: false
+    })
+    expect(plan).not.toBeNull()
+    expect(plan?.nextOldestFirst.length).toBe(30)
+    const currentNewestFirst = [...current].reverse().map(msg)
+    const loadedOldestFirst = response.map(msg)
+    const unionNewestFirst = buildDividerVisibleMessages(currentNewestFirst, loadedOldestFirst, plan!)
+    const unionOldestFirst = [...unionNewestFirst].reverse()
+    expect(unionOldestFirst.length).toBe(30)
+    const unionModel = createMessageViewportGroupModel(unionOldestFirst)
+    const forkIdx = unionModel.groups.indexOf(unionModel.messageIdToGroup.get('m15')!)
+    const unionWindow = createTargetMessageWindow(
+      unionOldestFirst,
+      'm15',
+      forkIdx + 1,
+      unionModel.groups.length - forkIdx - 1,
+      { hasMoreBefore: false, hasMoreAfter: false }
+    )
+    expect(unionWindow.displayMessages.length).toBe(30)
+    // Unguarded reconcile amputates the 5 preserved rows above the anchor
+    // with no compensation — the production upward drift.
+    const reconciled = reconcileMessageWindow(loadedOldestFirst, currentNewestFirst, unionWindow)
+    expect(reconciled.displayMessages.map((m) => m.id)).toEqual([...response].reverse())
+    expect(reconciled.displayMessages.length).toBe(25)
+  })
+
+  it('viewport ownership holds only for the current session on the same topic+route', () => {
+    const pending = { ownerEpoch: 7, topicId: 't1', routeId: null as string | null }
+    expect(isDividerVisibleViewportOwned(pending, 't1', null, () => true)).toBe(true)
+    expect(isDividerVisibleViewportOwned({ ...pending, routeId: 'b1' }, 't1', 'b1', () => true)).toBe(true)
+    // Superseded session, foreign topic/route, absent or malformed pending,
+    // and a throwing currency check all refuse (never adopt, never throw).
+    expect(isDividerVisibleViewportOwned(pending, 't1', null, () => false)).toBe(false)
+    expect(isDividerVisibleViewportOwned(pending, 't2', null, () => true)).toBe(false)
+    expect(isDividerVisibleViewportOwned(pending, 't1', 'b1', () => true)).toBe(false)
+    expect(isDividerVisibleViewportOwned(null, 't1', null, () => true)).toBe(false)
+    expect(isDividerVisibleViewportOwned(undefined, 't1', null, () => true)).toBe(false)
+    expect(
+      isDividerVisibleViewportOwned({ ownerEpoch: Number.NaN, topicId: 't1', routeId: null }, 't1', null, () => true)
+    ).toBe(false)
+    expect(isDividerVisibleViewportOwned({ ...pending, topicId: '' }, 't1', null, () => true)).toBe(false)
+    expect(
+      isDividerVisibleViewportOwned(pending, 't1', null, () => {
+        throw new Error('currency exploded')
+      })
+    ).toBe(false)
   })
 })

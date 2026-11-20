@@ -234,7 +234,7 @@ async function hoverMessageAndOpenMore(page: any, messageId: string) {
   const sel = `[id="message-${e}"][data-message-id="${e}"]`
   let container = page.locator(sel).first()
   await expect(container, `message container ${messageId} must be visible`).toBeVisible({ timeout: 15000 })
-  // Ensure element is in viewport center to handle column-reverse InfiniteScroll viewport
+  // Ensure element is in viewport center to handle the normal-flow InfiniteScroll viewport
   await page.evaluate((id: string) => {
     const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
     const el = document.querySelector(`[id="message-${esc}"][data-message-id="${esc}"]`) as HTMLElement | null
@@ -533,7 +533,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
 
     // Find the group container and click the selector for tailId (second visible) to switch selection
     // MessageGroupModelList renders avatars for the grouped messages; locate by data-message-id
-    // The group containing our visibleIds is the one near the top of column-reverse? Search globally.
+    // The group containing our visibleIds is the one near the top of the normal-flow list? Search globally.
     //
     // E2E does NO IPC call counting here: contextBridge is immutable from
     // page.evaluate, so a monkeypatch of window.api.chatDb cannot observe

@@ -140,7 +140,7 @@ function domTestIds(container: HTMLElement): (string | null)[] {
 const FORK_TESTID = dividerRowTestId('u-anchor', null)
 
 describe('messageFlowNodes production wiring', () => {
-  it('maps groups, fork divider, and context divider into the exact newest→oldest flow', () => {
+  it('maps groups, fork divider, and context divider into the exact oldest→newest flow', () => {
     const { grouped, layers, contextKey, forkDividers, nodes } = buildFlow([])
 
     // All six groups projected newest-first; anchor group found by real key.
@@ -150,8 +150,8 @@ describe('messageFlowNodes production wiring', () => {
     expect(contextKey).toBe(anchorEntry![0])
     expect(forkDividers.map((d) => d.anchorMessageId)).toEqual(['u-anchor'])
 
-    // Exact node sequence: fork DOM-before the anchor body, context DOM-after.
-    expect(nodes.map((n) => n.kind)).toEqual(['turn', 'turn', 'turn', 'boundary', 'turn', 'boundary', 'turn', 'turn'])
+    // Exact node sequence: context DOM-before the anchor body, fork DOM-after (visually below it).
+    expect(nodes.map((n) => n.kind)).toEqual(['turn', 'turn', 'boundary', 'turn', 'boundary', 'turn', 'turn', 'turn'])
 
     // Every turn entry carries real group-derived identity: stable key,
     // askId, selection flag, segment id, liveness, and layer identity.
@@ -159,11 +159,14 @@ describe('messageFlowNodes production wiring', () => {
     expect(turnEntries.length).toBe(6)
     expect(layers.length).toBe(1)
     const itemsNewestFirst = layers[0].segments.flatMap((s) => s.items)
+    // Nodes run oldest→newest after the flow reversal; the layer items stay
+    // newest-first, so identity comparisons run against the reversed items.
+    const itemsOldestFirst = [...itemsNewestFirst].reverse()
     expect(turnEntries.map((e) => e.groupKey)).toEqual(
-      itemsNewestFirst.map(([, msgs]) => deriveStableGroupId(msgs as readonly Message[]))
+      itemsOldestFirst.map(([, msgs]) => deriveStableGroupId(msgs as readonly Message[]))
     )
     expect(turnEntries.map((e) => e.turnAskId)).toEqual(
-      itemsNewestFirst.map(([, msgs]) => deriveTurnAskId(msgs as readonly Message[]))
+      itemsOldestFirst.map(([, msgs]) => deriveTurnAskId(msgs as readonly Message[]))
     )
     expect(turnEntries.map((e) => e.selected)).toEqual([false, false, false, false, false, false])
     expect(turnEntries.map((e) => e.kind)).toEqual(['history', 'history', 'history', 'history', 'history', 'history'])
@@ -171,35 +174,36 @@ describe('messageFlowNodes production wiring', () => {
       expect(e.layerRunId).toBe(layers[0].stableLayerId)
     }
     // Real askIds: assistant groups resolve to their user askId.
-    expect(turnEntries.map((e) => e.turnAskId)).toEqual(['u-new', 'u-new', 'u-anchor', 'u-anchor', 'u-old', 'u-old'])
+    expect(turnEntries.map((e) => e.turnAskId)).toEqual(['u-old', 'u-old', 'u-anchor', 'u-anchor', 'u-new', 'u-new'])
 
     // Boundary identities are production-derived, not fixtures.
     const boundaries = nodes.filter((n) => n.kind === 'boundary').map((n) => n.entry)
     expect(boundaries.length).toBe(2)
-    expect(boundaries[0].boundaryKind).toBe('fork')
-    expect(boundaries[0].boundaryKey).toBe('branch-fork-u-anchor-main')
-    expect(boundaries[1].boundaryKind).toBe('context')
-    expect(boundaries[1].boundaryKey).toBe(`context-boundary:${contextKey}`)
+    // Oldest→newest node order: the context boundary precedes the fork boundary.
+    expect(boundaries[0].boundaryKind).toBe('context')
+    expect(boundaries[0].boundaryKey).toBe(`context-boundary:${contextKey}`)
+    expect(boundaries[1].boundaryKind).toBe('fork')
+    expect(boundaries[1].boundaryKey).toBe('branch-fork-u-anchor-main')
 
     // Rendered through the real composer: exact DOM order, standalone
     // boundaries, preserved identity attributes, no duplication/omission.
     const { container } = render(<>{renderEditFlowNodes({ nodes, isEditMode: true })}</>)
     expect(domTestIds(container)).toEqual([
       'edit-turn',
-      'body-a-new',
-      'body-u-new',
-      'edit-turn-cover',
-      'edit-turn',
-      'body-a-anchor',
-      'edit-turn-cover',
-      FORK_TESTID,
-      'edit-turn',
-      'body-u-anchor',
+      'body-u-old',
+      'body-a-old',
       'edit-turn-cover',
       'context-boundary',
       'edit-turn',
-      'body-a-old',
-      'body-u-old',
+      'body-u-anchor',
+      'edit-turn-cover',
+      FORK_TESTID,
+      'edit-turn',
+      'body-a-anchor',
+      'edit-turn-cover',
+      'edit-turn',
+      'body-u-new',
+      'body-a-new',
       'edit-turn-cover'
     ])
     const ids = domTestIds(container).filter((id) => id !== 'edit-turn' && id !== 'edit-turn-cover')
@@ -208,10 +212,10 @@ describe('messageFlowNodes production wiring', () => {
     const fork = container.querySelector(`[data-testid="${FORK_TESTID}"]`) as Element
     const anchorBody = container.querySelector('[data-testid="body-u-anchor"]') as Element
     const context = container.querySelector('[data-testid="context-boundary"]') as Element
-    // Newest→oldest DOM order: fork before anchor (visually below it),
-    // context after anchor (visually above it).
-    expect(fork.compareDocumentPosition(anchorBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(anchorBody.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Oldest→newest DOM order: context before anchor (visually above it),
+    // fork after anchor (visually below it).
+    expect(context.compareDocumentPosition(anchorBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(anchorBody.compareDocumentPosition(fork) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // Standalone siblings: never inside a turn container.
     expect(fork.closest('[data-turn-ask]')).toBeNull()
     expect(context.closest('[data-turn-ask]')).toBeNull()

@@ -29,8 +29,8 @@
  * input goes through the real mouse. Never dispatches scrollToBottom or
  * SEND_MESSAGE to fake a gesture.
  *
- * Geometry: #messages renders column-reverse, so bottom/newest is
- * scrollTop ~= 0 and reading positions are negative scrollTop.
+ * Geometry: #messages renders a normal DOM flow (flex-direction: column,
+ * oldest-first), so bottom/newest is scrollTop ~= max(0, sh-ch) and reading positions are scrollTop between 0 and that bottom extreme.
  */
 import type { Page } from '@playwright/test'
 
@@ -47,7 +47,7 @@ const BOTTOM_TOL = 100
 const PAUSED_MIN = 200
 const IMMEDIATE_TOL = 6
 const ANCHOR_TOL = 12
-/** Product gate for genuine physical-bottom arrival (column-reverse scrollTop ~= 0). */
+/** Product gate for genuine physical-bottom arrival (normal-flow distBottom ~= 0). */
 const PRODUCT_BOTTOM_TOL = 1
 /** Meaningful post-pause hold growth: multiple chunks, bounded to the finite mock budget. */
 const HOLD_GROWTH = 500
@@ -197,6 +197,29 @@ async function waitForBlockGrowthWithBudget(
 
 async function readScrollTop(page: Page): Promise<number> {
   return page.locator('#messages').evaluate((el) => el.scrollTop)
+}
+
+interface FlowGeometry {
+  st: number
+  sh: number
+  ch: number
+}
+
+async function readFlowGeometry(page: Page): Promise<FlowGeometry> {
+  return page.locator('#messages').evaluate((el: HTMLElement) => ({
+    st: el.scrollTop,
+    sh: el.scrollHeight,
+    ch: el.clientHeight
+  }))
+}
+
+/** Distance from the newest/bottom edge in normal flow: max(0, sh-ch) - st. */
+function distBottom(g: FlowGeometry): number {
+  return g.sh - g.ch - g.st
+}
+
+async function readDistBottom(page: Page): Promise<number> {
+  return distBottom(await readFlowGeometry(page))
 }
 
 /** Crossing-first visible anchor + container-relative offset (repo convention).
@@ -755,7 +778,7 @@ test.describe('Streaming click-to-pause follow', () => {
       (tol: number) => {
         const el = document.getElementById('messages') as HTMLElement | null
         if (!el) return false
-        return el.scrollHeight - el.clientHeight > 500 && Math.abs(el.scrollTop) <= tol
+        return el.scrollHeight - el.clientHeight > 500 && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
       },
       BOTTOM_TOL,
       { timeout: 30000 }
@@ -769,7 +792,7 @@ test.describe('Streaming click-to-pause follow', () => {
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
     await waitForBlockGrowth(page, blockA, lenBeforeRight + 800)
-    expect(await readScrollTop(page), 'right-click must not pause follow').toBeLessThanOrEqual(BOTTOM_TOL)
+    expect(await readDistBottom(page), 'right-click must not pause follow').toBeLessThanOrEqual(BOTTOM_TOL)
 
     // ── Other-route clicks never disturb this route's follow. ──
     await activateTopic(page, inertTopicId)
@@ -781,7 +804,7 @@ test.describe('Streaming click-to-pause follow', () => {
     const stillStreamingA = await findStreamingBlockId(page)
     expect(stillStreamingA, 'stream A must still be active after the other-route detour').not.toBeNull()
     blockA = stillStreamingA as string
-    expect(await readScrollTop(page), 'other-route clicks must not disturb follow').toBeLessThanOrEqual(BOTTOM_TOL)
+    expect(await readDistBottom(page), 'other-route clicks must not disturb follow').toBeLessThanOrEqual(BOTTOM_TOL)
 
     // Stream A completes normally (no pause was ever engaged).
     const expectedA = getSlowStreamReply(MODEL)
@@ -818,7 +841,7 @@ test.describe('Streaming click-to-pause follow', () => {
       (tol: number) => {
         const el = document.getElementById('messages') as HTMLElement | null
         if (!el) return false
-        return el.scrollHeight - el.clientHeight > 500 && Math.abs(el.scrollTop) <= tol
+        return el.scrollHeight - el.clientHeight > 500 && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
       },
       BOTTOM_TOL,
       { timeout: 30000 }
@@ -1079,8 +1102,8 @@ test.describe('Streaming click-to-pause follow', () => {
     )
     expect(samplerEndStatusB, 'stream still active at sampler end (remaining budget for hold)').toBe('streaming')
     await waitForBlockGrowthWithBudget(page, blockB, samplerEndLenB + HOLD_GROWTH, 'pause-hold')
-    const pausedTop = await readScrollTop(page)
-    expect(Math.abs(pausedTop), 'continued growth after pause never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
+    const pausedDist = await readDistBottom(page)
+    expect(pausedDist, 'continued growth after pause never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
     const pausedAnchor = await readAnchor(page)
     expect(pausedAnchor, 'anchor must still resolve while paused').not.toBeNull()
     expect(pausedAnchor!.id, 'pause holds the pressed reading row').toBe(postAnchor!.id)
@@ -1124,7 +1147,7 @@ test.describe('Streaming click-to-pause follow', () => {
       const atOldest = await page.evaluate(() => {
         const el = document.getElementById('messages') as HTMLElement | null
         if (!el) return true
-        return Math.abs(el.scrollTop + (el.scrollHeight - el.clientHeight)) <= 4
+        return Math.abs(el.scrollTop) <= 4
       })
       if (atOldest) break
       await page.mouse.wheel(0, -160)
@@ -1154,7 +1177,7 @@ test.describe('Streaming click-to-pause follow', () => {
       console.log(`[E2E] user-text search dump: ${JSON.stringify(dump)}`)
     }
     expect(userTextPoint, 'visible user-message text point must exist').not.toBeNull()
-    expect(Math.abs(await readScrollTop(page)), 'ordinary scroll-away stays paused').toBeGreaterThan(PAUSED_MIN)
+    expect(await readDistBottom(page), 'ordinary scroll-away stays paused').toBeGreaterThan(PAUSED_MIN)
     const selPreAnchor = await readAnchor(page)
     await page.mouse.move(userTextPoint!.x, userTextPoint!.y)
     await page.mouse.down()
@@ -1201,7 +1224,7 @@ test.describe('Streaming click-to-pause follow', () => {
       blockB,
       { timeout: 60000 }
     )
-    expect(Math.abs(await readScrollTop(page)), 'control presses stay paused').toBeGreaterThan(PAUSED_MIN)
+    expect(await readDistBottom(page), 'control presses stay paused').toBeGreaterThan(PAUSED_MIN)
     const ctrlAnchor = await readAnchor(page)
     expect(ctrlAnchor, 'anchor must still resolve after the control press').not.toBeNull()
     expect(ctrlAnchor!.id, 'control presses never move the held row').toBe(ctrlPreAnchor!.id)
@@ -1219,22 +1242,24 @@ test.describe('Streaming click-to-pause follow', () => {
     // bottom-hold → follow).
     const resumeDiag = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
-      return { top: el?.scrollTop ?? NaN, h: el?.scrollHeight ?? NaN }
+      return { top: el?.scrollTop ?? NaN, h: el?.scrollHeight ?? NaN, ch: el?.clientHeight ?? NaN }
     })
-    console.log(`[E2E] resume pre-click: scrollTop=${Math.round(resumeDiag.top)} h=${resumeDiag.h}`)
+    console.log(
+      `[E2E] resume pre-click: distBottom=${Math.round(resumeDiag.h - resumeDiag.ch - resumeDiag.top)} h=${resumeDiag.h}`
+    )
     await bottomBtn.click({ timeout: 10000 })
     for (let i = 0; i < 6; i++) {
       await page.waitForTimeout(500)
       const sample = await page.evaluate(() => {
         const el = document.getElementById('messages') as HTMLElement | null
-        return el?.scrollTop ?? NaN
+        return (el?.scrollHeight ?? NaN) - (el?.clientHeight ?? NaN) - (el?.scrollTop ?? NaN)
       })
-      console.log(`[E2E] resume post-click t=${(i + 1) * 500}ms scrollTop=${Math.round(sample)}`)
+      console.log(`[E2E] resume post-click t=${(i + 1) * 500}ms distBottom=${Math.round(sample)}`)
     }
     await page.waitForFunction(
       (tol: number) => {
         const el = document.getElementById('messages') as HTMLElement | null
-        return !!el && Math.abs(el.scrollTop) <= tol
+        return !!el && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
       },
       BOTTOM_TOL,
       { timeout: 15000 }
@@ -1246,7 +1271,7 @@ test.describe('Streaming click-to-pause follow', () => {
     const resumeState = await streamBlockState(page, blockB)
     if (resumeState?.status === 'streaming') {
       await waitForBlockGrowth(page, blockB, resumeLen + 800)
-      expect(await readScrollTop(page), 'resumed follow stays pinned through growth').toBeLessThanOrEqual(BOTTOM_TOL)
+      expect(await readDistBottom(page), 'resumed follow stays pinned through growth').toBeLessThanOrEqual(BOTTOM_TOL)
     }
 
     // Stream B completes normally after pause + resume.
@@ -1438,8 +1463,8 @@ test.describe('Streaming click-to-pause follow', () => {
     })
     // Live pre-press basis (no stale snapshot): still following at the
     // physically clamped bottom, zero prior presses/wheels, anchor resolves.
-    const prePressTop = await readScrollTop(page)
-    expect(prePressTop, 'control leg starts following at the bottom (no prior pause)').toBeLessThanOrEqual(BOTTOM_TOL)
+    const prePressDist = await readDistBottom(page)
+    expect(prePressDist, 'control leg starts following at the bottom (no prior pause)').toBeLessThanOrEqual(BOTTOM_TOL)
     const guardBefore = (await page.evaluate(() => ({ ...(window as any).__ctrlFirstGuard }))) as {
       presses: number
       wheels: number
@@ -1501,7 +1526,7 @@ test.describe('Streaming click-to-pause follow', () => {
     // Early-press budget: lenAtPress < 600 so lenAtPress+2000 (~2600) fits the
     // finite 4145-char budget with margin; budget-guarded wait for numerics.
     await waitForBlockGrowthWithBudget(page, pressBlock, lenAtPress + 2000, 'control-hold')
-    expect(Math.abs(await readScrollTop(page)), 'control press pauses follow').toBeGreaterThan(PAUSED_MIN)
+    expect(await readDistBottom(page), 'control press pauses follow').toBeGreaterThan(PAUSED_MIN)
     const heldAnchor = await readAnchor(page)
     expect(heldAnchor, 'anchor must still resolve while control-paused').not.toBeNull()
     expect(heldAnchor!.id, 'control press holds the reading row').toBe(preAnchor!.id)
@@ -1545,7 +1570,7 @@ test.describe('Streaming click-to-pause follow', () => {
     const needle = `wheel resume slow stream ${EXTENDED_SLOW_STREAM_MARKER}`
     await uiSendMessage(page, needle)
     const blockW = await waitForStreamingContent(page, 2000)
-    expect(await readScrollTop(page), 'wheel leg starts following at the bottom').toBeLessThanOrEqual(BOTTOM_TOL)
+    expect(await readDistBottom(page), 'wheel leg starts following at the bottom').toBeLessThanOrEqual(BOTTOM_TOL)
 
     const wheelCenter = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
@@ -1575,19 +1600,20 @@ test.describe('Streaming click-to-pause follow', () => {
       'wheel-leg-hold',
       extendedSlowStreamTotalLength()
     )
-    expect(Math.abs(await readScrollTop(page)), 'content press pauses follow').toBeGreaterThan(PAUSED_MIN)
+    expect(await readDistBottom(page), 'content press pauses follow').toBeGreaterThan(PAUSED_MIN)
     const wheelHeld = await readAnchor(page)
     expect(wheelHeld, 'anchor must still resolve while wheel-leg paused').not.toBeNull()
     expect(wheelHeld!.id, 'wheel-leg pause holds the reading row').toBe(wheelPreAnchor!.id)
 
     // Genuine wheel return: real wheel events over #messages only (the mouse
     // stays inside the viewport; positive deltaY drives toward the
-    // column-reverse bottom). Never clicks the back-to-bottom button, never
+    // normal-flow bottom). Never clicks the back-to-bottom button, never
     // writes scrollTop, never calls scrollIntoView, never forces adoption.
     // Driver targets the exact physical bottom (product gate <= 1): the old
-    // <= 100 break stopped at e.g. -81 and later growth carried the viewport
-    // to 852 before the pin check, while a true 0 landing passed — so the
-    // driver must keep wheeling with settle stabilization until <= 1.
+    // <= 100 break stopped at e.g. -81 (reverse-flow frame) and later growth
+    // carried the viewport to 852 before the pin check, while a true 0
+    // landing passed — so the driver must keep wheeling with settle
+    // stabilization until <= 1.
     const center = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) return null
@@ -1597,9 +1623,9 @@ test.describe('Streaming click-to-pause follow', () => {
     expect(center, '#messages center must resolve').not.toBeNull()
     await page.mouse.move(center!.x, center!.y)
     await page.waitForTimeout(300)
-    let landedTop = await readScrollTop(page)
+    let landedDist = await readDistBottom(page)
     let wheelSteps = 0
-    let bottomedExact = Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL
+    let bottomedExact = landedDist <= PRODUCT_BOTTOM_TOL
     for (let i = 0; i < 40 && !bottomedExact; i++) {
       const state = await streamBlockState(page, blockW)
       if (state?.status !== 'streaming') break
@@ -1609,34 +1635,32 @@ test.describe('Streaming click-to-pause follow', () => {
       await page.mouse.wheel(0, 640)
       await page.waitForTimeout(150)
       await page.waitForTimeout(150)
-      landedTop = await readScrollTop(page)
+      landedDist = await readDistBottom(page)
       wheelSteps++
       console.log(
-        `[E2E] wheel-resume step=${wheelSteps} scrollTop=${landedTop} len=${state?.length ?? -1} status=${state?.status ?? '?'}`
+        `[E2E] wheel-resume step=${wheelSteps} distBottom=${landedDist} len=${state?.length ?? -1} status=${state?.status ?? '?'}`
       )
-      if (Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL) {
+      if (landedDist <= PRODUCT_BOTTOM_TOL) {
         // Stabilization confirm: one more frame with no new input; growth
         // while resumed must keep the viewport pinned, not drift away.
         await page.waitForTimeout(150)
-        landedTop = await readScrollTop(page)
-        if (Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL) bottomedExact = true
+        landedDist = await readDistBottom(page)
+        if (landedDist <= PRODUCT_BOTTOM_TOL) bottomedExact = true
       }
     }
-    console.log(`[E2E] wheel-resume landed: scrollTop=${landedTop} steps=${wheelSteps}`)
+    console.log(`[E2E] wheel-resume landed: distBottom=${landedDist} steps=${wheelSteps}`)
     expect(
       bottomedExact,
-      `genuine wheel must reach the exact physical bottom (<=${PRODUCT_BOTTOM_TOL}) while streaming (landed=${landedTop})`
+      `genuine wheel must reach the exact physical bottom (<=${PRODUCT_BOTTOM_TOL}) while streaming (landedDist=${landedDist})`
     ).toBe(true)
     // Exact physical arrival oracle (product gate), asserted BEFORE any growth
     // pinning below. The near-bottom BOTTOM_TOL follow checks elsewhere keep
-    // their existing negative semantics; this is the strict arrival proof.
-    expect(Math.abs(landedTop), 'wheel resume lands at the exact physical bottom').toBeLessThanOrEqual(
-      PRODUCT_BOTTOM_TOL
-    )
+    // their existing distance-from-bottom semantics; this is the strict arrival proof.
+    expect(landedDist, 'wheel resume lands at the exact physical bottom').toBeLessThanOrEqual(PRODUCT_BOTTOM_TOL)
 
     // Continued growth (500+ chars, still streaming) stays pinned to the
     // bottom through the resumed follow; the stream completes normally.
-    // Near-bottom BOTTOM_TOL pin semantics unchanged (negative-away check is
+    // Near-bottom BOTTOM_TOL pin semantics unchanged (distance-from-bottom away check is
     // the paused oracle; pinned-follow keeps the wide gate here).
     const lenAtResume = (await streamBlockState(page, blockW))?.length ?? 0
     const resumeStatus = (await streamBlockState(page, blockW))?.status ?? '?'
@@ -1651,7 +1675,7 @@ test.describe('Streaming click-to-pause follow', () => {
       'wheel-resume',
       extendedSlowStreamTotalLength()
     )
-    expect(Math.abs(await readScrollTop(page)), 'resumed wheel follow stays pinned through growth').toBeLessThanOrEqual(
+    expect(await readDistBottom(page), 'resumed wheel follow stays pinned through growth').toBeLessThanOrEqual(
       BOTTOM_TOL
     )
     const expectedW = getExtendedSlowStreamReply(MODEL)
@@ -1694,7 +1718,7 @@ test.describe('Streaming click-to-pause follow', () => {
         (tol: number) => {
           const el = document.getElementById('messages') as HTMLElement | null
           if (!el) return false
-          return el.scrollHeight - el.clientHeight > 500 && Math.abs(el.scrollTop) <= tol
+          return el.scrollHeight - el.clientHeight > 500 && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
         },
         BOTTOM_TOL,
         { timeout: 30000 }
@@ -1747,7 +1771,7 @@ test.describe('Streaming click-to-pause follow', () => {
         expect(errPx, 'wrapper extent is a quantum multiple').toBeLessThanOrEqual(1 / 64 + 1e-6)
       }
       // Bottom follow resumes correctly through the zoom change (no new state).
-      expect(await readScrollTop(page), 'bottom follow resumes after zoom').toBeLessThanOrEqual(BOTTOM_TOL)
+      expect(await readDistBottom(page), 'bottom follow resumes after zoom').toBeLessThanOrEqual(BOTTOM_TOL)
 
       // Pause via the shared atomic sampler on the CURRENT topic block.
       // Hover-settle first: moving over #messages reveals row menubars, so
@@ -1825,7 +1849,7 @@ test.describe('Streaming click-to-pause follow', () => {
         pTopRange,
         `held paragraph never jitters beyond one layout quantum at zoom (actualDPR=${geo.dpr} range=${pTopRange})`
       ).toBeLessThanOrEqual(1 / 64 + 1e-6)
-      // Held pause: background scroll is negative (column-reverse reading
+      // Held pause: background scrollTop is positive (normal-flow reading
       // position, not bottom) and business state is preserved, never rewritten
       // to a missing value. Uses the already-observed sampler-end length +
       // HOLD_GROWTH on the XL ~8200-char budget (not lenAtPause+2000 on the
@@ -1850,9 +1874,9 @@ test.describe('Streaming click-to-pause follow', () => {
         'zoom-hold',
         extendedSlowStreamTotalLength()
       )
-      const pausedTop = await readScrollTop(page)
-      expect(pausedTop, 'paused background scroll stays negative (column-reverse reading position)').toBeLessThan(0)
-      expect(Math.abs(pausedTop), 'continued zoom growth never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
+      const pausedGeo = await readFlowGeometry(page)
+      expect(pausedGeo.st, 'paused background scrollTop is positive (normal-flow reading position)').toBeGreaterThan(0)
+      expect(distBottom(pausedGeo), 'continued zoom growth never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
       expect(await currentTopicId(page), 'topic business state preserved (no rewrite)').toBe(topicZoom)
       const pausedAnchor = await readAnchor(page)
       expect(pausedAnchor, 'anchor must still resolve while zoom-paused').not.toBeNull()

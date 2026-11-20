@@ -398,7 +398,7 @@ async function waitForAssistantResponseComplete(
  * Uses the existing MessageMenubar `context-anchor-btn` active marker rather
  * than divider existence alone, plus DOM source-order adjacency (newest-first
  * source: divider immediately follows the boundary message container,
- * i.e. boundIdx+1==divIdx per the column-reverse DOM-after-anchor production
+ * i.e. boundIdx+1==divIdx per the normal-flow DOM-after-anchor production
  * placement in messageFlowNodes.ts).
  */
 async function expectAnchorHighlightAndDivider(
@@ -622,7 +622,7 @@ async function wheelLoadOlder(page: any, topicId: string): Promise<{ before: str
   // `> DISPLAY_LIMIT` without `after > before` would mask a broken load-more.
   //
   // Trigger note: the inverse InfiniteScroll library only fires at the true
-  // oldest edge (scrollTop within ~2px of the absolute top). A 120px
+  // oldest edge (scrollTop within ~2px of 0). A 120px
   // proximity read must not stop genuine wheel input early; wheels continue
   // to the edge budget, then a deterministic poll waits for async
   // scroll/throttle/load completion before the strict growth assertions.

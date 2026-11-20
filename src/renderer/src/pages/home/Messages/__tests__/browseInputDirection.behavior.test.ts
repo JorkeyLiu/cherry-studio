@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { distanceFromOldest, isAtNewest, isExactlyAtNewest, isExactlyAtOldest } from '../columnReverseGeometry'
+import { distanceFromOldest, isAtNewest, isExactlyAtNewest, isExactlyAtOldest } from '../flowScrollGeometry'
 import { browseDirectionForClampedInput, decideSelectionBoundaryPage } from '../positionStabilizer'
 
 describe('browseDirectionForClampedInput (semantic direction only, no thresholds)', () => {
@@ -58,14 +58,15 @@ describe('browseDirectionForClampedInput (semantic direction only, no thresholds
 })
 
 describe('clamped-edge primitives are symmetric (exact edge, not vicinity prefetch)', () => {
-  // Column-reverse: oldest edge parks at scrollTop = -(scrollHeight - clientHeight),
-  // newest edge parks at the scrollTop 0 clamp.
+  // Normal flow: the oldest edge parks at scrollTop 0, the newest edge at the
+  // travel clamp (scrollHeight - clientHeight = 3400).
+  const TRAVEL = 4000 - 600
   const atOldest = (scrollHeight: number, clientHeight: number, drift = 0) => ({
-    scrollTop: -(scrollHeight - clientHeight) + drift,
+    scrollTop: 0 + drift,
     scrollHeight,
     clientHeight
   })
-  const atNewest = (scrollTop: number) => ({ scrollTop, scrollHeight: 4000, clientHeight: 600 })
+  const atNewest = (drift = 0) => ({ scrollTop: TRAVEL - drift, scrollHeight: 4000, clientHeight: 600 })
 
   it('holds exactly at the oldest clamped edge (subpixel rounding tolerated)', () => {
     expect(isExactlyAtOldest(atOldest(4000, 600))).toBe(true)
@@ -80,13 +81,13 @@ describe('clamped-edge primitives are symmetric (exact edge, not vicinity prefet
   it('refuses away-from-edge geometry in both directions (no pre-input fetch off the edge)', () => {
     expect(isExactlyAtOldest(atOldest(4000, 600, 2))).toBe(false)
     expect(isExactlyAtOldest(atOldest(4000, 600, 50))).toBe(false)
-    expect(distanceFromOldest({ scrollTop: -1700, scrollHeight: 4000, clientHeight: 600 })).toBe(1700)
-    expect(isExactlyAtOldest({ scrollTop: -1700, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
+    expect(distanceFromOldest({ scrollTop: 1700, scrollHeight: 4000, clientHeight: 600 })).toBe(1700)
+    expect(isExactlyAtOldest({ scrollTop: 1700, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
     // The opposite edge qualifies for the OTHER direction only.
-    expect(isExactlyAtNewest({ scrollTop: -1700, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
-    expect(isExactlyAtOldest({ scrollTop: 0, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
-    expect(isExactlyAtNewest(atNewest(-2))).toBe(false)
-    expect(isExactlyAtNewest(atNewest(-50))).toBe(false)
+    expect(isExactlyAtNewest({ scrollTop: 1700, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
+    expect(isExactlyAtOldest({ scrollTop: TRAVEL, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
+    expect(isExactlyAtNewest(atNewest(2))).toBe(false)
+    expect(isExactlyAtNewest(atNewest(50))).toBe(false)
   })
 
   it('keeps the post-scroll vicinity wider than the clamped pre-input edge', () => {
@@ -96,8 +97,8 @@ describe('clamped-edge primitives are symmetric (exact edge, not vicinity prefet
     const insideOldest = atOldest(4000, 600, 100)
     expect(distanceFromOldest(insideOldest)).toBe(100)
     expect(isExactlyAtOldest(insideOldest)).toBe(false)
-    expect(isAtNewest({ scrollTop: -100, scrollHeight: 4000, clientHeight: 600 })).toBe(true)
-    expect(isExactlyAtNewest({ scrollTop: -100, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
+    expect(isAtNewest({ scrollTop: TRAVEL - 100, scrollHeight: 4000, clientHeight: 600 })).toBe(true)
+    expect(isExactlyAtNewest({ scrollTop: TRAVEL - 100, scrollHeight: 4000, clientHeight: 600 })).toBe(false)
   })
 })
 

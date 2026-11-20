@@ -22,9 +22,9 @@
  * rendering tolerance, never enough to hide a jump) and elementFromPoint at
  * the original click point still resolves to the same tab — never a jump to
  * a body anchor, another message, or global bottom. Raw `scrollTop`
- * invariance does NOT hold in column-reverse (a height swap below the
- * viewport necessarily changes `scrollTop` for the SAME tab position), so
- * tab geometry + hit-testing is primary. Covers long→short and short→long,
+ * invariance does NOT hold in normal flow (keeper compensation and height
+ * changes above the viewport legitimately move `scrollTop` for the SAME tab position),
+ * so tab geometry + hit-testing is primary. Covers long→short and short→long,
  * repeated switches without wheel repair between every click, a delayed
  * selection hold with observer churn (A1), and an additional mid-topic
  * switch (A4); the true-tail test covers the route bottom in both
@@ -34,7 +34,7 @@
  * Contract B (send-from-reading): from a verified non-bottom reading position
  * (after loading the older window so the bootstrap is paginated), sending via
  * the real textarea/Enter through the mock provider must land the viewport at
- * the ACTUAL latest/bottom (column-reverse scrollTop ~= 0 + newest rows
+ * the ACTUAL latest/bottom (normal-flow scrollTop ~= max(0, sh-ch) + newest rows
  * visible + read-only `fetchMessagesWindow({ kind: 'latest' })` tail equals
  * the new reply) — never restored to the previous non-bottom position.
  *
@@ -46,8 +46,8 @@
  * wheel) always go through the real UI. Never dispatches scrollToBottom or
  * SEND_MESSAGE to fake a send.
  *
- * Geometry: #messages renders column-reverse, so bottom/newest is
- * scrollTop ~= 0 and the oldest edge is the most negative scrollTop.
+ * Geometry: #messages renders a normal DOM flow (flex-direction: column,
+ * oldest-first), so bottom/newest is scrollTop ~= max(0, sh-ch) and the oldest edge is scrollTop 0.
  */
 import type { Page } from '@playwright/test'
 
@@ -193,7 +193,7 @@ function buildScrollIntentEntries(topicId: string, assistantId: string) {
  * True-tail variant: 7 single rounds + the LAST ask carrying TWO answers
  * (short selected vs tall) at the route bottom. Total 17 authority rows with
  * the answer group as the newest rows — the tab switch happens at the real
- * tail, where column-reverse bottom clamp applies, not at a mid-topic group
+ * tail, where the normal-flow bottom clamp applies, not at a mid-topic group
  * with four rounds after it.
  */
 function buildTailScrollIntentEntries(topicId: string, assistantId: string) {
@@ -430,6 +430,11 @@ async function readScroll(page: Page): Promise<{ scrollTop: number; scrollHeight
   })
 }
 
+/** Distance from the newest/bottom edge in normal flow: max(0, sh-ch) - st. */
+function distBottom(scroll: { scrollTop: number; scrollHeight: number; clientHeight: number }): number {
+  return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop
+}
+
 async function settledAnchor(page: Page): Promise<{ id: string; offset: number }> {
   let prev: { id: string; offset: number } | null = null
   let stable = 0
@@ -451,7 +456,7 @@ async function settledAnchor(page: Page): Promise<{ id: string; offset: number }
 
 /**
  * Ordinary wheel to a verified non-bottom reading position. Both wheel signs
- * are probed so no column-reverse sign assumption is baked in; direct
+ * are probed so no flow-direction sign assumption is baked in; direct
  * scrollTop writes are never used to establish the saved position.
  */
 async function wheelToReadingPosition(page: Page): Promise<Reading> {
@@ -461,9 +466,9 @@ async function wheelToReadingPosition(page: Page): Promise<Reading> {
     page.evaluate((minOff: number) => {
       const c = document.getElementById('messages') as HTMLElement | null
       if (!c) return { ok: false, st: NaN }
-      const topExtreme = -(c.scrollHeight - c.clientHeight)
+      const bottomExtreme = c.scrollHeight - c.clientHeight
       const st = c.scrollTop
-      return { ok: Math.abs(st) > minOff && Math.abs(st - topExtreme) > 200, st }
+      return { ok: bottomExtreme - st > minOff && st > 200, st }
     }, NON_BOTTOM_MIN)
   for (let i = 0; i < 30; i++) {
     if ((await probe()).ok) break
@@ -574,9 +579,7 @@ async function paginateToFullHistory(page: Page, topicId: string): Promise<void>
   }
   await expect.poll(async () => await loadedCount(topicId), { timeout: 15000 }).toBe(17)
   const paginatedScroll = await readScroll(page)
-  expect(Math.abs(paginatedScroll.scrollTop), 'paginated older window must be non-bottom').toBeGreaterThan(
-    NON_BOTTOM_MIN
-  )
+  expect(distBottom(paginatedScroll), 'paginated older window must be non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
 }
 
 /** Authoritative selection from Redux entities (foldSelected), not DOM styling. */
@@ -741,12 +744,12 @@ async function wheelToReadingPositionWithTabVisible(page: Page, messageId: strin
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
     // Still a reading position: must not have collapsed back to bottom.
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (distBottom(scroll) <= NON_BOTTOM_MIN) break
     if (await isTabInViewport()) {
       const anchor = await settledAnchor(page)
       const fresh = await readScroll(page)
       expect(
-        Math.abs(fresh.scrollTop),
+        distBottom(fresh),
         'nudge to reveal the answer tab must stay non-bottom (no bottom collapse)'
       ).toBeGreaterThan(NON_BOTTOM_MIN)
       return {
@@ -758,17 +761,17 @@ async function wheelToReadingPositionWithTabVisible(page: Page, messageId: strin
       }
     }
   }
-  // Opposite-sign sweep before failing loudly (no column-reverse assumption).
+  // Opposite-sign sweep before failing loudly (no flow-direction assumption).
   for (let i = 0; i < 24; i++) {
     await page.mouse.wheel(0, -280)
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (distBottom(scroll) <= NON_BOTTOM_MIN) break
     if (await isTabInViewport()) {
       const anchor = await settledAnchor(page)
       const fresh = await readScroll(page)
       expect(
-        Math.abs(fresh.scrollTop),
+        distBottom(fresh),
         'nudge to reveal the answer tab must stay non-bottom (no bottom collapse)'
       ).toBeGreaterThan(NON_BOTTOM_MIN)
       return {
@@ -788,7 +791,7 @@ async function wheelToReadingPositionWithTabVisible(page: Page, messageId: strin
 
 /**
  * True-tail positioning: the LAST answer group sits at the route bottom, so
- * the cold landing is already at bottom (scrollTop ~= 0) with the tail tab
+ * the cold landing is already at bottom (scrollTop ~= max(0, sh-ch)) with the tail tab
  * fully inside. A 300px-up non-bottom viewport would necessarily hide it, so
  * no wheel repositioning is required when the tab is already fully visible:
  * return the settled bottom reading directly. Only when the tab is not
@@ -864,7 +867,7 @@ async function wheelToTailTabVisible(page: Page, messageId: string): Promise<Rea
 /**
  * Tail stationary assertion: same 2px tab geometry + mandatory hit + painted
  * transition budget as the mid-topic contract, but WITHOUT the non-bottom
- * gate — the true tail starts at bottom (scrollTop ~= 0) and staying at
+ * gate — the true tail starts at bottom (scrollTop ~= max(0, sh-ch)) and staying at
  * bottom is correct (not a jump). Still guards the live scroll range.
  */
 async function expectTailTabStationary(
@@ -909,11 +912,13 @@ async function expectTailTabStationary(
     expect(members, `${label}: stationary tail tab must be a same-group member`).toContain(messageId)
   }
   const scroll = await readScroll(page)
-  const topExtreme = -(scroll.scrollHeight - scroll.clientHeight)
+  const bottomExtreme = scroll.scrollHeight - scroll.clientHeight
   expect(scroll.scrollTop, `${label}: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
-    topExtreme - OFFSET_TOL
+    0 - OFFSET_TOL
   )
-  expect(scroll.scrollTop, `${label}: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
+  expect(scroll.scrollTop, `${label}: post viewport stays at/below bottom`).toBeLessThanOrEqual(
+    bottomExtreme + OFFSET_TOL
+  )
 }
 
 async function waitForSelection(page: Page, topicId: string, memberIds: string[], expectedId: string): Promise<void> {
@@ -1378,12 +1383,14 @@ async function expectTabStationary(
   }
   // Never a jump to global bottom.
   const scroll = await readScroll(page)
-  expect(Math.abs(scroll.scrollTop), `${label}: must remain non-bottom (no bottom jump)`).toBeGreaterThan(BOTTOM_TOL)
-  const topExtreme = -(scroll.scrollHeight - scroll.clientHeight)
+  expect(distBottom(scroll), `${label}: must remain non-bottom (no bottom jump)`).toBeGreaterThan(BOTTOM_TOL)
+  const bottomExtreme = scroll.scrollHeight - scroll.clientHeight
   expect(scroll.scrollTop, `${label}: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
-    topExtreme - OFFSET_TOL
+    0 - OFFSET_TOL
   )
-  expect(scroll.scrollTop, `${label}: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
+  expect(scroll.scrollTop, `${label}: post viewport stays at/below bottom`).toBeLessThanOrEqual(
+    bottomExtreme + OFFSET_TOL
+  )
 }
 
 async function expectTabSelectionRendered(page: Page, selectedId: string, hiddenId: string): Promise<void> {
@@ -1775,7 +1782,7 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
         `A2-snapshot: return keeps the stable tab offset (before=${Math.round(preTab.offset)} after=${Math.round(postTab.offset)})`
       ).toBeLessThanOrEqual(TAB_TOL)
       const scrollAfter = await readScroll(page)
-      expect(Math.abs(scrollAfter.scrollTop), 'A2-snapshot: return stays non-bottom').toBeGreaterThan(BOTTOM_TOL)
+      expect(distBottom(scrollAfter), 'A2-snapshot: return stays non-bottom').toBeGreaterThan(BOTTOM_TOL)
       const snap = await page
         .evaluate((tid: string) => {
           try {
@@ -1912,7 +1919,7 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'CHAT SCROLL INTENT B: a real textarea/Enter send from the older paginated window lands at actual latest/bottom (scrollTop~=0, newest rows visible, latest-window tail equals the new reply), never restored to the prior non-bottom position; a post-bottom real user wheel scroll-away stays reading (no forced bottom stick). Route-boundary send/switch race omitted: no deterministic bounded seam without mid-stream timing control (would need arbitrary delays/harness changes).'
+        'CHAT SCROLL INTENT B: a real textarea/Enter send from the older paginated window lands at actual latest/bottom (scrollTop~=max(0,sh-ch), newest rows visible, latest-window tail equals the new reply), never restored to the prior non-bottom position; a post-bottom real user wheel scroll-away stays reading (no forced bottom stick). Route-boundary send/switch race omitted: no deterministic bounded seam without mid-stream timing control (would need arbitrary delays/harness changes).'
     })
     const page: Page = mainWindow
 
@@ -1946,13 +1953,13 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
       expect(tailIds.roles[newUserId]).toBe('user')
       expect(tailIds.roles[newAssistantId]).toBe('assistant')
 
-      // Viewport must be at the ACTUAL latest/bottom: column-reverse
-      // scrollTop ~= 0 with the newest user + reply visible — and it must
+      // Viewport must be at the ACTUAL latest/bottom: normal-flow
+      // scrollTop ~= max(0, sh-ch) with the newest user + reply visible — and it must
       // not have been restored to the prior non-bottom position.
       await page.waitForFunction(
         (tol: number) => {
           const el = document.getElementById('messages') as HTMLElement | null
-          return el ? Math.abs(el.scrollTop) <= tol : false
+          return el ? el.scrollHeight - el.clientHeight - el.scrollTop <= tol : false
         },
         BOTTOM_TOL,
         { timeout: 15000 }
@@ -1967,7 +1974,7 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
       // synchronized — never weakened.
       await waitForScrollQuiescence(page)
       const postScroll = await readScroll(page)
-      expect(Math.abs(postScroll.scrollTop)).toBeLessThanOrEqual(BOTTOM_TOL)
+      expect(distBottom(postScroll)).toBeLessThanOrEqual(BOTTOM_TOL)
       expect(Math.abs(postScroll.scrollTop - preSend.scrollTop)).toBeGreaterThan(200)
       await expect.poll(async () => await isRowVisibleInMessages(page, newAssistantId), { timeout: 15000 }).toBe(true)
       await expect.poll(async () => await isRowVisibleInMessages(page, newUserId), { timeout: 15000 }).toBe(true)
@@ -1990,9 +1997,7 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
       // stick). Bounded via wheelToReadingPosition; no scrollTop writes.
       const away = await wheelToReadingPosition(page)
       const scroll = await readScroll(page)
-      expect(Math.abs(scroll.scrollTop), 'post-bottom wheel scroll-away must leave bottom').toBeGreaterThan(
-        NON_BOTTOM_MIN
-      )
+      expect(distBottom(scroll), 'post-bottom wheel scroll-away must leave bottom').toBeGreaterThan(NON_BOTTOM_MIN)
       expect(Math.abs(scroll.scrollTop - away.scrollTop), 'scroll-away position must settle').toBeLessThanOrEqual(
         RETAIN_SCROLL_DELTA
       )

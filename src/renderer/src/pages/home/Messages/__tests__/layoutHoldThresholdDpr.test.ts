@@ -1,8 +1,8 @@
 /**
- * DPR-aware hold threshold (quantum half, VIEWPORT-13/14 follow-up).
+ * DPR-aware hold threshold (quantum half).
  *
  * Contract: HOLD threshold = actual layout scroll quantum half; quantum =
- * `1/dpr` (same source as the `--messages-pixel-size` sync). DPR1 keeps 0.5,
+ * `1/dpr`, read from `window.devicePixelRatio` by the keeper. DPR1 keeps 0.5,
  * DPR2 uses 0.25. Geometry helpers stay pure (no window); the keeper passes
  * `q/2` explicitly. Defaults preserve the old DPR1 behavior.
  */
@@ -16,7 +16,7 @@ import {
   resolveLayoutHoldThresholdForDpr,
   resolveLayoutHoldThresholdForPixelQuantum,
   stepLayoutHold
-} from '../columnReverseGeometry'
+} from '../flowScrollGeometry'
 import { resolveKeeperLayoutHoldThreshold } from '../routeViewportContext'
 
 describe('resolveLayoutHoldThresholdForPixelQuantum', () => {

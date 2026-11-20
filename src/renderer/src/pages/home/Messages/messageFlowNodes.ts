@@ -15,14 +15,16 @@ import type { MessageViewportProjectedGroup } from './messageViewportProjection'
  * `MessagesContent.renderMessageSegments`).
  *
  * The builder owns the exact production mapping — group iteration order
- * (newest→oldest under column-reverse), fork-divider placement (DOM-before
- * the anchor group), context-divider placement (DOM-after the anchor group),
- * stable group identity, turn askIds, selection flags, and layer identity —
- * while the React pixels (message body, fork row, context row) are supplied
- * by the caller through narrow render injectors. `Messages.tsx` passes the
- * real injectors; tests pass lightweight probes that preserve the identity
- * attributes, so executing this builder (not a re-implementation) plus
- * `renderEditFlowNodes` proves the real production flow wiring.
+ * (newest→oldest, reversed once at the end so the DOM order is normal-flow
+ * oldest→newest), fork-divider placement (pushed before the anchor group, so
+ * DOM-after the anchor once reversed), context-divider placement (pushed after
+ * the anchor group, so DOM-before it), stable group identity, turn askIds,
+ * selection flags, and layer identity — while the React pixels (message body,
+ * fork row, context row) are supplied by the caller through narrow render
+ * injectors. `Messages.tsx` passes the real injectors; tests pass lightweight
+ * probes that preserve the identity attributes, so executing this builder (not
+ * a re-implementation) plus `renderEditFlowNodes` proves the real production
+ * flow wiring.
  */
 
 /** One fork divider resolved against the current display window. */
@@ -328,12 +330,11 @@ export interface MessageFlowBodyArgs {
   isLast: boolean
   /**
    * This body is the DOM-first node of the composed flow, i.e. the visually
-   * bottom-most body under the column-reverse render order — nothing (no fork
-   * or reference divider) is placed below it. That is the position the
+   * top-most body under the normal-flow render order — nothing (no fork or
+   * reference divider) is placed above it. That is the position the
    * route-tail fold slot may occupy; it is derived from the stable flow order,
    * never from scroll position or a measured/unmounted DOM node.
    */
-  flowBottom: boolean
   groupMessages: (Message & { index: number })[]
 }
 
@@ -372,11 +373,13 @@ export interface BuildMessageFlowNodesInput {
 }
 
 /**
- * Build the mounted message flow in newest→oldest render order: turn bodies
- * and independent boundary nodes as siblings. Turn runs are grouped
- * downstream in renderEditFlowNodes with boundary flush, so a boundary
- * always splits turns (even same askId) and stays outside turn click
- * capture — liveness stays on the child body nodes.
+ * Build the mounted message flow in normal-flow DOM order (oldest→newest):
+ * iteration below walks the newest→oldest projection, and the collected nodes
+ * are reversed ONCE at the very end so the DOM order matches the visual order.
+ * Turn bodies and independent boundary nodes stay siblings; turn runs are
+ * grouped downstream in renderEditFlowNodes with boundary flush, so a boundary
+ * always splits turns (even same askId) and stays outside turn click capture —
+ * liveness stays on the child body nodes.
  */
 export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNode[] {
   const {
@@ -419,9 +422,10 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         // Fold is a MESSAGE-LEVEL fact: a turn whose every member row carries
         // its own `folded` flag is presentation-hidden, and a leftover group
         // `folded` flag contributes nothing (group fold is retired).
-        // Fork-divider placement (DOM order is newest→oldest under
-        // column-reverse): the divider renders BEFORE the anchor group
-        // (visually directly below the anchor). One divider per
+        // Fork-divider placement (iteration order is newest→oldest; the final
+        // reversal makes the DOM run oldest→newest): the divider is pushed
+        // BEFORE the anchor group here, so after the reversal it renders AFTER
+        // the anchor body — visually directly below the anchor. One divider per
         // (anchor, parent-route) fork: taken forks (the viewed route
         // passes through a child here) render the selected branch name
         // as the switcher; untaken forks render the branch-count form
@@ -432,9 +436,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         const dividersHere = forkDividers.filter(
           (d) => d.placement === 'message' && d.boundaryMessageId !== null && groupIdSet.has(d.boundaryMessageId)
         )
-        // Fork boundaries are independent siblings placed DOM-before the
-        // anchor body (visually directly below the anchor under
-        // column-reverse). They carry no turn click/hover behavior.
+        // Fork boundaries are independent siblings pushed before the anchor
+        // body (so they land DOM-after it once reversed: visually directly
+        // below the anchor). They carry no turn click/hover behavior.
         for (const divider of dividersHere) {
           const boundaryKey = forkBoundaryKey(divider.anchorMessageId, divider.parentBranchId)
           nodes.push({
@@ -455,7 +459,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
           })
         }
         // History-reference dividers: one per materialized relation layer,
-        // placed DOM-before the boundary group so each renders visually
+        // pushed before the boundary group so after the reversal each renders
         // directly below its OWN layer's last message (the same placement
         // family as a fork divider). Placement order (nearest layer first)
         // keeps the nearest divider adjacent to the target-owned suffix when
@@ -479,10 +483,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
           segment,
           isFirst,
           isLast,
-          // `nodes` is built in render order (newest→oldest under
-          // column-reverse), so an empty list means no boundary node has been
-          // placed below this body: it IS the flow bottom.
-          flowBottom: nodes.length === 0,
+          // `nodes` is collected in newest→oldest iteration order (before the
+          // final reversal to normal flow), so an empty list means no boundary
+          // node has been collected below this body: it IS the flow bottom.
           groupMessages: groupMessages as (Message & { index: number })[]
         })
         nodes.push({
@@ -506,10 +509,11 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             bodyNode
           }
         })
-        // Context boundary is an independent sibling placed
-        // DOM-after the anchor body (preserving the legacy visual
-        // placement exactly). The legacy projected key is retained for
-        // divider semantics; reconciliation uses stableGroupId above.
+        // Context boundary is an independent sibling pushed after the anchor
+        // body, so after the reversal it renders DOM-before the anchor body
+        // (preserving the legacy visual placement exactly). The legacy
+        // projected key is retained for divider semantics; reconciliation uses
+        // stableGroupId above.
         if (legacyKey === contextDividerGroupKey) {
           nodes.push({
             kind: 'boundary',
@@ -527,8 +531,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   // Head fork boundaries: a fork whose branch inherits nothing sits at the
   // history head of its parent route — the relation exists independently of
   // any prefix row, so the divider is shown even when no message carries it.
-  // Appended in newest→oldest DOM order so it renders at the visual beginning,
-  // below the reference divider when both mark that same head.
+  // Collected last in newest→oldest iteration order, so after the reversal it
+  // renders DOM-first; it sits above the reference divider when both mark that
+  // same head.
   for (const divider of forkDividers) {
     if (divider.placement !== 'head') continue
     const boundaryKey = forkBoundaryKey(divider.anchorMessageId, divider.parentBranchId)
@@ -551,8 +556,8 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   }
 
   // Beginning placement: a missing reference (the prefix is absent) marks the
-  // top of the target's own content. Appended last in newest→oldest DOM order
-  // so it renders at the visual beginning.
+  // top of the target's own content. Collected last in newest→oldest iteration
+  // order, so after the reversal it renders DOM-first.
   for (const divider of referenceDividers ?? []) {
     if (divider.placement !== 'beginning') continue
     nodes.push({
@@ -565,5 +570,8 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     })
   }
 
-  return nodes
+  // ONE reversal: the collection order above is newest→oldest, the flow DOM
+  // order is oldest→newest. Reversing here (never per-push, never in the
+  // renderer) keeps every placement rule above intact.
+  return [...nodes].reverse()
 }

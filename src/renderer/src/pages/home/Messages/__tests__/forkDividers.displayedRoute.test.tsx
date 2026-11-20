@@ -197,8 +197,8 @@ describe('fork dividers follow the displayed route across a real route switch', 
       </Provider>
     )
 
-    // Viewing b01: both the main-parent fork (taken) and the b01-parent fork.
-    expect(dividerKeys(container)).toEqual(['u-b::b01', 'u-a::main'])
+    // Viewing b01: both the main-parent fork (taken) and the b01-parent fork, oldest-first in normal flow.
+    expect(dividerKeys(container)).toEqual(['u-a::main', 'u-b::b01'])
     const forkA = container.querySelector('[data-divider-key="u-a::main"]') as HTMLElement
     const forkB = container.querySelector('[data-divider-key="u-b::b01"]') as HTMLElement
     expect(forkA.getAttribute('data-divider-placement')).toBe('message')
@@ -214,7 +214,7 @@ describe('fork dividers follow the displayed route across a real route switch', 
     act(() => {
       store.dispatch(activeBranchSet({ topicId: TOPIC, branchId: null }))
     })
-    expect(dividerKeys(container)).toEqual(['u-b::b01', 'u-a::main'])
+    expect(dividerKeys(container)).toEqual(['u-a::main', 'u-b::b01'])
     expect(container.querySelector('[data-divider-key="u-a::main"]')).toBe(forkA)
     expect(container.querySelector('[data-divider-key="u-b::b01"]')).toBe(forkB)
     expect((container.querySelector('[data-divider-key="u-a::main"]') as HTMLElement).getAttribute('data-taken')).toBe(
@@ -249,7 +249,7 @@ describe('fork dividers follow the displayed route across a real route switch', 
         <ForkFlowHarness messageIds={OLD_WINDOW_IDS} displayedBranchId="b01" />
       </Provider>
     )
-    expect(dividerKeys(container)).toEqual(['u-b::b01', 'u-a::main'])
+    expect(dividerKeys(container)).toEqual(['u-a::main', 'u-b::b01'])
     expect((container.querySelector('[data-divider-key="u-a::main"]') as HTMLElement).getAttribute('data-taken')).toBe(
       'b01'
     )

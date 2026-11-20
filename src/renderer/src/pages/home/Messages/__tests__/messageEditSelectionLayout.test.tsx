@@ -905,7 +905,9 @@ describe('renderEditFlowNodes', () => {
 
   it('turn wrapper preserves DOM order and adds no spacing of its own', () => {
     const rules = EditTurnContainer.componentStyle.rules.join('')
-    expect(rules).toContain('column-reverse')
+    // Normal flow: the turn wrapper keeps DOM order as visual order (no reversed direction, no margin/padding/gap of its own).
+    expect(rules).toContain('flex-direction: column')
+    expect(rules).not.toContain('column-reverse')
     expect(rules).not.toMatch(/margin\s*:/)
     expect(rules).not.toMatch(/padding\s*:/)
     expect(rules).not.toMatch(/gap\s*:/)

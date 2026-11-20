@@ -320,4 +320,58 @@ describe('routeFirstPlacement delivery', () => {
     expect(attemptFirstPosition(c, doomedPending, container)).toBe('unplaced')
     expect(isFirstPlacementAwaitingAttempt(c, doomedPending, doomed)).toBe(false)
   })
+
+  it('bootstrap fetch-hold exposes no consumable placement until the same-session positioning commit', () => {
+    const c = new RouteViewportController({ topicId: 't1', route: 'branch' })
+    stableBranch(c)
+    // beginBootstrapFetch shape: generic request opens fetch-hold (hidden,
+    // measurable) with NO plan delivered yet.
+    const fetchEpoch = c.request({ kind: 'generic', topicId: 't1', targetRoute: null }).epoch
+    expect(c.currentPhase).toBe('fetch-hold')
+    // No plan exists, so the completion gate reports nothing awaiting: the
+    // pre-paint layout effect (phase guard + null plan) stays hidden instead
+    // of consuming the exactly-once outcome on the stale projection.
+    expect(isFirstPlacementAwaitingAttempt(c, null, fetchEpoch)).toBe(false)
+    // commitBootstrapPositioningPlan shape: same epoch, still fetch-hold →
+    // appliedWindow moves to positioning; only then is the plan delivered.
+    expect(c.appliedWindow(fetchEpoch)).toBe(true)
+    expect(c.currentPhase).toBe('positioning')
+    const pending: FirstPlacementPending = {
+      topicId: 't1',
+      routeId: null,
+      epoch: fetchEpoch,
+      plan: { kind: 'message', messageId: 'm2', wantOffset: -58.9, fallbackScrollTop: null },
+      outcome: null
+    }
+    expect(isFirstPlacementAwaitingAttempt(c, pending, fetchEpoch)).toBe(true)
+    expect(attemptFirstPosition(c, pending, container)).toBe('placed')
+    // Exactly-once: the recorded outcome stands, no second scroll write.
+    expect(attemptFirstPosition(c, pending, container)).toBe('placed')
+    expect(writes()).toBe(1)
+    expect(c.currentPhase).toBe('aligned')
+  })
+
+  it('a superseded bootstrap fetch-hold can never deliver a stale placement', () => {
+    const c = new RouteViewportController({ topicId: 't1', route: 'branch' })
+    stableBranch(c)
+    const staleFetch = c.request({ kind: 'generic', topicId: 't1', targetRoute: null }).epoch
+    const newer = c.request({ kind: 'generic', topicId: 't1', targetRoute: null }).epoch
+    expect(newer).toBeGreaterThan(staleFetch)
+    // Same-session commit for the stale epoch refuses: no dispatch, and the
+    // newer owner is undisturbed.
+    expect(c.appliedWindow(staleFetch)).toBe(false)
+    expect(c.currentEpoch).toBe(newer)
+    expect(c.currentPhase).toBe('fetch-hold')
+    const stalePending: FirstPlacementPending = {
+      topicId: 't1',
+      routeId: null,
+      epoch: staleFetch,
+      plan: { kind: 'bottom' },
+      outcome: null
+    }
+    expect(attemptFirstPosition(c, stalePending, container)).toBe('refused')
+    expect(stalePending.outcome).toBeNull()
+    expect(writes()).toBe(0)
+    expect(c.currentEpoch).toBe(newer)
+  })
 })

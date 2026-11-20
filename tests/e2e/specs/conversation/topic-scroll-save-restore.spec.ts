@@ -256,6 +256,13 @@ async function getContainerScrollTop(page: import('@playwright/test').Page): Pro
   })
 }
 
+async function getDistBottom(page: import('@playwright/test').Page): Promise<number> {
+  return page.evaluate(() => {
+    const el = document.getElementById('messages')
+    return el ? el.scrollHeight - el.clientHeight - el.scrollTop : 0
+  })
+}
+
 async function getTopicMessageIds(page: import('@playwright/test').Page, topicId: string): Promise<string[]> {
   return page.evaluate((tid: string) => {
     const s = (window as any).store.getState()
@@ -326,13 +333,12 @@ async function expectBottomWithinTolerance(page: import('@playwright/test').Page
   await page.waitForFunction(
     () => {
       const el = document.getElementById('messages')
-      return el ? Math.abs(el.scrollTop) < 100 : false
+      return el ? el.scrollHeight - el.clientHeight - el.scrollTop < 100 : false
     },
     undefined,
     { timeout: 10000 }
   )
-  const top = await getContainerScrollTop(page)
-  expect(Math.abs(top)).toBeLessThan(100)
+  expect(await getDistBottom(page)).toBeLessThan(100)
 }
 
 async function waitForNonBottomSnapshot(
@@ -387,7 +393,7 @@ async function scrollMessageIntoViewAndPersist(
     page.evaluate(() => {
       const el = document.getElementById('messages')
       if (!el) return false
-      return Math.abs(el.scrollTop) > 300
+      return el.scrollHeight - el.clientHeight - el.scrollTop > 300
     })
   // Sweep both wheel signs (no column-reverse assumption) until the target is
   // visible at a non-bottom offset; each wheel is ordinary user input.
@@ -434,7 +440,7 @@ async function wheelToSecondCommittedPosition(
       await page.mouse.wheel(0, delta)
       await page.waitForTimeout(220)
       // Never collapse to bottom while seeking the divergent position.
-      if (Math.abs(await getContainerScrollTop(page)) <= 300) break
+      if ((await getDistBottom(page)) <= 300) break
     }
     const committed = await committedTop()
     if (committed !== null && Math.abs(committed - fromScrollTop) > 400) break
@@ -446,7 +452,7 @@ async function wheelToSecondCommittedPosition(
   if (!diverged) throw new Error('no committed snapshot after wheel divergence')
   expect(diverged.isAtBottom).toBe(false)
   expect(Math.abs(diverged.scrollTop - fromScrollTop)).toBeGreaterThan(400)
-  expect(Math.abs(await getContainerScrollTop(page))).toBeGreaterThan(300)
+  expect(await getDistBottom(page)).toBeGreaterThan(300)
   return diverged
 }
 
@@ -610,6 +616,590 @@ async function ensureOverflow(page: import('@playwright/test').Page, topicId: st
 
 async function addScrollSpacer(page: import('@playwright/test').Page, topicId: string): Promise<void> {
   await ensureOverflow(page, topicId)
+}
+
+// ---------------------------------------------------------------------------
+// Branch-route history-anchor restore (bounded regression for the
+// bootstrap-latest vs TOP-around race on topic return). Spec-local only:
+// no shared-helper, config, fixture, or production-source changes.
+//
+// Topology: topic A carries a non-main branch route with 14 effective rows
+// (4-row ancestor prefix + 10-row owned suffix); default displayCount is 10
+// (asserted read-only, never dispatched), so bootstrap latest(10) holds only
+// the suffix and never the route-oldest anchor. The anchor is made truly
+// visible first through real wheel pagination (production save path — the
+// snapshot is only read by this spec, never written), the topic round-trips
+// A->B->A via visible topic-item coordinate clicks (the topic list lives
+// outside #messages, so no click auto-scroll can pollute the messages
+// viewport), and the return must restore the anchor automatically: no wheel,
+// no load-older, same branch, saved identity + saved offset (existing
+// OFFSET_TOL, never weakened). Frame sampling starts BEFORE the B->A click
+// (page-viewport-resume pattern): the first and every subsequent *eligible*
+// visible frame must already show the anchor. Eligible excludes only
+// genuinely transitional frames (messages hidden, container hidden,
+// positioning phase, in-flight route load); a settled wrong-window paint
+// stays eligible and fails.
+// ---------------------------------------------------------------------------
+
+const BRANCH_RESTORE_MAIN_TOTAL = 10
+const BRANCH_RESTORE_SUFFIX_TOTAL = 10
+const BRANCH_RESTORE_FORK_IDX = 3
+
+function padBranchIdx(n: number): string {
+  return String(n).padStart(5, '0')
+}
+
+function branchRestoreContent(tag: string, i: number): string {
+  return `branch anchor seed ${tag}-${padBranchIdx(i)} ${'deterministic scrollable content '.repeat(60)}`
+}
+
+interface BranchRestoreTopology {
+  topicId: string
+  branchId: string
+  anchorId: string
+  mainIds: string[]
+  suffixIds: string[]
+  effectiveIds: string[]
+}
+
+async function seedBranchRestoreTopic(
+  page: import('@playwright/test').Page,
+  assistantId: string,
+  topicId: string,
+  name: string
+): Promise<BranchRestoreTopology> {
+  const addOk = await page.evaluate(
+    ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+      try {
+        ;(window as any).store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          }
+        })
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name }
+  )
+  expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+
+  const mainIds: string[] = []
+  const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+  for (let i = 0; i < BRANCH_RESTORE_MAIN_TOTAL; i++) {
+    const msgId = `${topicId}-msg-${padBranchIdx(i)}`
+    const blockId = `${topicId}-block-${padBranchIdx(i)}`
+    mainIds.push(msgId)
+    const role = i % 2 === 0 ? 'user' : 'assistant'
+    const message: Record<string, unknown> = {
+      id: msgId,
+      topicId,
+      role,
+      assistantId,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'success',
+      blocks: [blockId],
+      sortOrder: i
+    }
+    if (role === 'assistant') message.askId = mainIds[i - 1]
+    entries.push({
+      message,
+      blocks: [
+        {
+          id: blockId,
+          messageId: msgId,
+          type: 'main_text',
+          content: branchRestoreContent('main', i),
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ]
+    })
+  }
+  const persist = await page.evaluate(
+    async ({
+      topicId,
+      assistantId,
+      name,
+      entries
+    }: {
+      topicId: string
+      assistantId: string
+      name: string
+      entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+    }) => {
+      try {
+        const api = (window as any).api as any
+        const ensured = await api.chatDb.ensureTopic({ topicId, assistantId, name })
+        if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic failed ${JSON.stringify(ensured)}` }
+        const pasted = await api.chatDb.pasteMessagesToTopic({ topicId, entries })
+        if (!pasted || pasted.ok !== true) return { ok: false, err: `paste failed ${JSON.stringify(pasted)}` }
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name, entries }
+  )
+  expect(persist.ok, `persist failed: ${(persist as any).err}`).toBe(true)
+
+  const forkAnchor = mainIds[BRANCH_RESTORE_FORK_IDX]
+  const created: any = await page.evaluate(
+    async ({ tid, anchor }: { tid: string; anchor: string }) =>
+      await (window as any).api.chatDb.createBranch({
+        topicId: tid,
+        parentBranchId: null,
+        anchorMessageId: anchor,
+        name: `E2E branch ${tid}`
+      }),
+    { tid: topicId, anchor: forkAnchor }
+  )
+  expect(created?.ok, `createBranch failed: ${JSON.stringify(created)}`).toBe(true)
+  const branchId = created.value.branch.id as string
+  expect(branchId, 'branch id must be issued by Main').toBeTruthy()
+
+  let afterId = forkAnchor
+  const suffixIds: string[] = []
+  for (let k = 0; k < BRANCH_RESTORE_SUFFIX_TOTAL; k++) {
+    const mid = `${topicId}-suffix-${padBranchIdx(k)}`
+    const blockId = `${topicId}-suffix-block-${padBranchIdx(k)}`
+    const role = (BRANCH_RESTORE_MAIN_TOTAL + k) % 2 === 0 ? 'user' : 'assistant'
+    const message: Record<string, unknown> = {
+      id: mid,
+      topicId,
+      role,
+      assistantId,
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    }
+    if (role === 'assistant') message.askId = afterId
+    const entry = {
+      message,
+      blocks: [
+        {
+          id: blockId,
+          messageId: mid,
+          type: 'main_text',
+          content: branchRestoreContent('suffix', k),
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ]
+    }
+    const inserted: any = await page.evaluate(
+      async ({ tid, bid, after, entry }: { tid: string; bid: string; after: string; entry: unknown }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId: tid,
+          branchId: bid,
+          afterMessageId: after,
+          entries: [entry]
+        }),
+      { tid: topicId, bid: branchId, after: afterId, entry }
+    )
+    expect(inserted?.ok, `suffix insert ${k} failed: ${JSON.stringify(inserted)}`).toBe(true)
+    suffixIds.push(mid)
+    afterId = mid
+  }
+
+  const route: any = await page.evaluate(
+    async ({ tid, bid }: { tid: string; bid: string }) =>
+      await (window as any).api.chatDb.fetchMessages({ topicId: tid, branchId: bid }),
+    { tid: topicId, bid: branchId }
+  )
+  expect(route?.ok, `effective route fetch failed: ${JSON.stringify(route)}`).toBe(true)
+  const effectiveIds = (route.value.messages as Array<{ id: string }>).map((m) => m.id)
+  expect(effectiveIds, 'effective branch route must be anchor-inclusive prefix + owned suffix').toEqual([
+    ...mainIds.slice(0, BRANCH_RESTORE_FORK_IDX + 1),
+    ...suffixIds
+  ])
+  expect(effectiveIds.length, 'effective branch route must hold 14 rows').toBe(
+    BRANCH_RESTORE_FORK_IDX + 1 + BRANCH_RESTORE_SUFFIX_TOTAL
+  )
+  return { topicId, branchId, anchorId: mainIds[0], mainIds, suffixIds, effectiveIds }
+}
+
+async function seedSmallMainTopic(
+  page: import('@playwright/test').Page,
+  assistantId: string,
+  topicId: string,
+  name: string,
+  total: number
+): Promise<string[]> {
+  const addOk = await page.evaluate(
+    ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+      try {
+        ;(window as any).store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          }
+        })
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name }
+  )
+  expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+  const ids: string[] = []
+  const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+  for (let i = 0; i < total; i++) {
+    const msgId = `${topicId}-msg-${padBranchIdx(i)}`
+    const blockId = `${topicId}-block-${padBranchIdx(i)}`
+    ids.push(msgId)
+    entries.push({
+      message: {
+        id: msgId,
+        topicId,
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        assistantId,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'success',
+        blocks: [blockId],
+        sortOrder: i
+      },
+      blocks: [
+        {
+          id: blockId,
+          messageId: msgId,
+          type: 'main_text',
+          content: `small topic seed ${padBranchIdx(i)}`,
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ]
+    })
+  }
+  const persist = await page.evaluate(
+    async ({
+      topicId,
+      assistantId,
+      name,
+      entries
+    }: {
+      topicId: string
+      assistantId: string
+      name: string
+      entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+    }) => {
+      try {
+        const api = (window as any).api as any
+        const ensured = await api.chatDb.ensureTopic({ topicId, assistantId, name })
+        if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic failed ${JSON.stringify(ensured)}` }
+        const pasted = await api.chatDb.pasteMessagesToTopic({ topicId, entries })
+        if (!pasted || pasted.ok !== true) return { ok: false, err: `paste failed ${JSON.stringify(pasted)}` }
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, err: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    { topicId, assistantId, name, entries }
+  )
+  expect(persist.ok, `persist failed: ${(persist as any).err}`).toBe(true)
+  return ids
+}
+
+async function getBranchScrollPosition(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  branchId: string
+): Promise<ScrollSnapshot | null> {
+  return page.evaluate(
+    ({ topicId, branchId }: { topicId: string; branchId: string }) => {
+      const keys = [`scroll:topic-${topicId}::${branchId}`, `scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
+      for (const key of keys) {
+        const val = (window as any).keyv?.get(key)
+        if (val && typeof val === 'object' && 'scrollTop' in val) {
+          const rec = val as Record<string, unknown>
+          const canonical =
+            typeof rec.messageId === 'string' && (rec.messageId as string).length > 0
+              ? (rec.messageId as string)
+              : typeof rec.anchorId === 'string'
+                ? (rec.anchorId as string)
+                : null
+          const rawOffset = rec.intraRowOffset
+          const offset = typeof rawOffset === 'number' && Number.isFinite(rawOffset) ? rawOffset : null
+          return {
+            scrollTop: rec.scrollTop as number,
+            anchorId: canonical,
+            messageId: canonical,
+            intraRowOffset: offset,
+            isAtBottom: !!(rec.isAtBottom as boolean)
+          }
+        }
+      }
+      return null
+    },
+    { topicId, branchId }
+  )
+}
+
+async function waitForBranchAnchorSnapshot(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  branchId: string,
+  anchorId: string,
+  timeout = 15000
+): Promise<ScrollSnapshot> {
+  await page.waitForFunction(
+    ({ tid, bid, aid }: { tid: string; bid: string; aid: string }) => {
+      const keys = [`scroll:topic-${tid}::${bid}`, `scroll:topic-${tid}::main`, `scroll:topic-${tid}`]
+      for (const key of keys) {
+        const v = (window as any).keyv?.get(key)
+        if (v && typeof v === 'object' && 'scrollTop' in v && v.isAtBottom === false) {
+          const id =
+            typeof v.messageId === 'string' && v.messageId.length > 0
+              ? v.messageId
+              : typeof v.anchorId === 'string'
+                ? v.anchorId
+                : null
+          if (id === aid && typeof v.intraRowOffset === 'number' && Number.isFinite(v.intraRowOffset)) return true
+        }
+      }
+      return false
+    },
+    { tid: topicId, bid: branchId, aid: anchorId },
+    { timeout }
+  )
+  const snap = await getBranchScrollPosition(page, topicId, branchId)
+  if (!snap) throw new Error(`no branch snapshot for ${topicId} after wait`)
+  return snap
+}
+
+/**
+ * Visible topic-item coordinate click. The topic list lives outside
+ * #messages, and mouse.click at coordinates performs no Playwright
+ * auto-scroll, so the messages viewport cannot be polluted by this
+ * navigation (unlike locator.click auto-scroll semantics).
+ */
+async function clickTopicItemByCoords(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  previousTopicId?: string
+): Promise<void> {
+  if (previousTopicId) await removeScrollSpacer(page, previousTopicId)
+  const item = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+  await item.waitFor({ state: 'attached', timeout: 15000 })
+  await item.scrollIntoViewIfNeeded()
+  await item.waitFor({ state: 'visible', timeout: 15000 })
+  const box = await item.boundingBox()
+  if (!box) throw new Error(`topic item ${topicId} has no bounding box for coordinate click`)
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await waitForActiveTopic(page, topicId)
+}
+
+async function switchToBranchRouteViaCascader(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  branchId: string,
+  expectedLen: number
+): Promise<void> {
+  await page.locator('[data-testid="branch-selector-entry"]').first().click()
+  await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+  await page.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
+  await page.waitForFunction(
+    ({ tid, bid, len }: { tid: string; bid: string; len: number }) => {
+      const s = (window as any).store.getState()
+      const ids = s.messages?.messageIdsByTopic?.[tid]
+      return (
+        s.topicBranch?.activeBranchIdByTopic?.[tid] === bid &&
+        Array.isArray(ids) &&
+        ids.length === len &&
+        s.messages?.loadingByTopic?.[tid] !== true
+      )
+    },
+    { tid: topicId, bid: branchId, len: expectedLen },
+    { timeout: 30000 }
+  )
+  await page.waitForFunction(
+    (expected: number) => document.querySelectorAll('#messages [data-message-id]').length === expected,
+    expectedLen,
+    { timeout: 30000 }
+  )
+}
+
+async function isMessageVisibleInContainer(page: import('@playwright/test').Page, messageId: string): Promise<boolean> {
+  return page.evaluate((mid: string) => {
+    const container = document.getElementById('messages')
+    const el = document.getElementById(`message-${mid}`)
+    if (!container || !el || !el.isConnected) return false
+    if (window.getComputedStyle(el).display === 'none') return false
+    const c = container.getBoundingClientRect()
+    const r = el.getBoundingClientRect()
+    if (r.height === 0) return false
+    return Math.min(r.bottom, c.bottom) - Math.max(r.top, c.top) > 0
+  }, messageId)
+}
+
+/**
+ * Genuine-user pagination toward history: real wheel input pages the branch
+ * bootstrap (latest 10) up until the route-oldest anchor is truly visible,
+ * then fine-tunes it into a nonzero mid-viewport band so the production
+ * commit carries a real row offset (not an edge clamp). Settles scrollend +
+ * keeper before reading the committed pre-away snapshot.
+ */
+async function wheelHistoryAnchorIntoView(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  branchId: string,
+  anchorId: string
+): Promise<ScrollSnapshot> {
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  for (let i = 0; i < 40; i++) {
+    if (await isMessageVisibleInContainer(page, anchorId)) break
+    await page.mouse.wheel(0, -640)
+    await page.waitForTimeout(220)
+  }
+  expect(
+    await isMessageVisibleInContainer(page, anchorId),
+    'history anchor must become visible via real wheel pagination'
+  ).toBe(true)
+  for (let i = 0; i < 16; i++) {
+    const m = await measureRequestedRow(page, anchorId)
+    if (m && m.found && m.offset >= 40 && m.offset <= 220) break
+    await page.mouse.wheel(0, (m?.offset ?? 999) < 40 ? -160 : 160)
+    await page.waitForTimeout(220)
+  }
+  expect(
+    await isMessageVisibleInContainer(page, anchorId),
+    'history anchor must stay visible after offset tuning'
+  ).toBe(true)
+  await page.waitForTimeout(1200)
+  const snap = await waitForBranchAnchorSnapshot(page, topicId, branchId, anchorId, 15000)
+  expect(snap.isAtBottom, 'pre-away branch snapshot must be a non-bottom reading position').toBe(false)
+  return snap
+}
+
+interface BranchReturnFrame {
+  t: number
+  anchorId: string
+  anchorOffset: number
+  scrollTop: number
+  phase: string
+  messagesVisible: boolean
+  containerVis: string
+  loading: boolean
+}
+
+async function startBranchReturnProbe(page: import('@playwright/test').Page, topicId: string): Promise<void> {
+  await page.evaluate(
+    ({ tid, k }: { tid: string; k: string }) => {
+      const frames: BranchReturnFrame[] = []
+      let running = true
+      let raf = 0
+      const t0 = performance.now()
+      const readFrame = (): BranchReturnFrame => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        let messagesVisible = false
+        let containerVis = ''
+        let anchorId = ''
+        let anchorOffset = 0
+        let scrollTop = NaN
+        let phase = ''
+        try {
+          if (container) {
+            const cs = getComputedStyle(container)
+            containerVis = cs.visibility
+            const r = container.getBoundingClientRect()
+            messagesVisible = cs.display !== 'none' && r.width > 0 && r.height > 0
+            scrollTop = container.scrollTop
+            phase = container.getAttribute('data-viewport-phase') ?? ''
+            const c = container.getBoundingClientRect()
+            const rows = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
+            const cands: { id: string; top: number; bottom: number }[] = []
+            for (const row of rows) {
+              const br = row.getBoundingClientRect()
+              const id = row.getAttribute('data-message-id')
+              if (id) cands.push({ id, top: br.top, bottom: br.bottom })
+            }
+            if (cands.length > 0) {
+              const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
+              const picked =
+                crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+              anchorId = picked.id
+              anchorOffset = picked.top - c.top
+            }
+          }
+        } catch {
+          // keep defaults; the frame still records the failure shape
+        }
+        let loading = false
+        try {
+          loading = (window as any).store?.getState()?.messages?.loadingByTopic?.[tid] === true
+        } catch {
+          // keep default
+        }
+        return {
+          t: Math.round((performance.now() - t0) * 10) / 10,
+          anchorId,
+          anchorOffset: Math.round(anchorOffset * 10) / 10,
+          scrollTop: Math.round(scrollTop * 10) / 10,
+          phase,
+          messagesVisible,
+          containerVis,
+          loading
+        }
+      }
+      const tick = () => {
+        if (!running) return
+        frames.push(readFrame())
+        raf = requestAnimationFrame(tick)
+      }
+      tick()
+      ;(window as any)[k] = {
+        frames,
+        stop: () => {
+          running = false
+          try {
+            cancelAnimationFrame(raf)
+          } catch {
+            // ignore
+          }
+        }
+      }
+    },
+    { tid: topicId, k: '__branch_return_probe' }
+  )
+}
+
+async function stopBranchReturnProbe(page: import('@playwright/test').Page): Promise<BranchReturnFrame[]> {
+  return page
+    .evaluate((k: string) => {
+      const p = (window as any)[k] as { frames: BranchReturnFrame[]; stop: () => void } | undefined
+      try {
+        p?.stop?.()
+      } catch {
+        // ignore
+      }
+      const frames = p ? [...p.frames] : []
+      delete (window as any)[k]
+      return { frames }
+    }, '__branch_return_probe')
+    .then((r: { frames: BranchReturnFrame[] }) => r.frames)
 }
 
 // ---------------------------------------------------------------------------
@@ -842,5 +1432,172 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     }
 
     await removeScrollSpacer(mainWindow, topicB)
+  })
+  test('branch-route history anchor auto-restores on topic return without paging (bootstrap-latest race)', async ({
+    mainWindow
+  }) => {
+    const page = mainWindow
+    const displayCount = await page.evaluate(() => (window as any).store.getState().messages?.displayCount)
+    expect(displayCount, 'default displayCount must be 10 (no global config change)').toBe(10)
+    const liveAssistantId = await page.evaluate(
+      () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
+    )
+    expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
+
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const topo = await seedBranchRestoreTopic(
+      page,
+      liveAssistantId as string,
+      `branch-anchor-a-${stamp}`,
+      `Branch A ${stamp}`
+    )
+    const { topicId: topicA, branchId, anchorId } = topo
+
+    // Main-authoritative bound: bootstrap latest(10) on the branch route must
+    // not contain the route-oldest anchor.
+    const latestRes: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: bid,
+          limit: 10
+        }),
+      { tid: topicA, bid: branchId }
+    )
+    expect(latestRes.ok, `branch latest oracle failed: ${JSON.stringify(latestRes)}`).toBe(true)
+    expect(latestRes.value.window.returnedCount).toBe(10)
+    expect((latestRes.value.messages as Array<{ id: string }>).map((m) => m.id)).not.toContain(anchorId)
+
+    const topicB = `branch-anchor-b-${stamp}`
+    await seedSmallMainTopic(page, liveAssistantId as string, topicB, `Branch B ${stamp}`, 4)
+
+    // Activate A on its main route (bootstrap latest 10 of 10 main rows).
+    await clickTopicItemByCoords(page, topicA)
+    await waitForTopicDomActivation(page, topicA)
+    const mainResident = await getTopicMessageIds(page, topicA)
+    expect(mainResident.length).toBe(BRANCH_RESTORE_MAIN_TOTAL)
+
+    // Switch to the branch route through the production cascader UI:
+    // bootstrap latest(10) holds only the owned suffix, anchor absent.
+    await switchToBranchRouteViaCascader(page, topicA, branchId, 10)
+    const bootResident = await getTopicMessageIds(page, topicA)
+    expect(bootResident).toEqual(topo.suffixIds)
+    expect(bootResident).not.toContain(anchorId)
+    const bootDom = await getRenderedMessageIds(page)
+    expect(bootDom).not.toContain(anchorId)
+
+    // Genuine-user pagination makes the history anchor truly visible; the
+    // production path commits the pre-away snapshot (read-only oracle here).
+    await captureMessagesHost(page)
+    const preAway = await wheelHistoryAnchorIntoView(page, topicA, branchId, anchorId)
+    const requestedId = preAway.messageId || preAway.anchorId
+    expect(requestedId, 'pre-away snapshot must carry the history anchor identity').toBe(anchorId)
+    expect(preAway.intraRowOffset, 'pre-away snapshot must carry a finite intra-row offset').not.toBeNull()
+    expect(Number.isFinite(preAway.intraRowOffset as number)).toBe(true)
+    const savedOffset = preAway.intraRowOffset as number
+
+    // A->B through a visible topic-item coordinate click.
+    await clickTopicItemByCoords(page, topicB, topicA)
+    await waitForTopicDomActivation(page, topicB)
+    await assertTopicDomExclusive(page, topicB, topicA)
+
+    // B->A with the return probe sampling from BEFORE the click. No wheel,
+    // no load-older, no snapshot write anywhere after this point.
+    await startBranchReturnProbe(page, topicA)
+    await clickTopicItemByCoords(page, topicA, topicB)
+    await waitForTopicDomActivation(page, topicA)
+    await page.waitForFunction(
+      ({ tid, bid }: { tid: string; bid: string }) =>
+        (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] === bid,
+      { tid: topicA, bid: branchId },
+      { timeout: 30000 }
+    )
+    await waitForRequestedRowOffsetRestoration(page, preAway, 30000)
+    const frames = await stopBranchReturnProbe(page)
+
+    // The anchor window published (not the superseding latest-10): the
+    // resident carries the saved anchor and never shrinks below bootstrap.
+    const returnedIds = await getTopicMessageIds(page, topicA)
+    expect(returnedIds, 'returned resident must carry the saved history anchor').toContain(anchorId)
+    expect(returnedIds.length, 'returned resident must not shrink below bootstrap').toBeGreaterThanOrEqual(10)
+
+    // Main-row true stable identity in the DOM (never the nav list).
+    const domAnchor = await page.evaluate((mid: string) => {
+      const byAttr = document.querySelector(`#messages [data-message-id="${mid}"]`)
+      const byId = document.getElementById(`message-${mid}`)
+      return { attr: !!byAttr, connected: !!byId && byId.isConnected }
+    }, anchorId)
+    expect(domAnchor.attr, 'history anchor must be rendered in #messages').toBe(true)
+    expect(domAnchor.connected, 'history anchor true row element must stay connected').toBe(true)
+    const returnedDom = await getRenderedMessageIds(page)
+    expect(returnedDom, 'rendered rows must match the returned resident set').toEqual(
+      expect.arrayContaining(returnedIds)
+    )
+    expect(returnedDom.length).toBe(returnedIds.length)
+
+    // Same branch route restored (not reset to main).
+    const restoredBranch = await page.evaluate(
+      (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+      topicA
+    )
+    expect(restoredBranch, 'topic return must restore the same branch route').toBe(branchId)
+
+    // The persisted snapshot still carries the requested identity + offset.
+    const snapAfter = await getBranchScrollPosition(page, topicA, branchId)
+    expect(snapAfter).toBeTruthy()
+    expect(snapAfter!.isAtBottom).toBe(false)
+    expect(snapAfter!.messageId || snapAfter!.anchorId, 'snapshot must preserve the requested identity').toBe(
+      requestedId
+    )
+    if (snapAfter!.intraRowOffset !== null && preAway.intraRowOffset !== null) {
+      expect(
+        Math.abs(snapAfter!.intraRowOffset - (preAway.intraRowOffset as number)),
+        'snapshot must preserve the requested intra-row offset'
+      ).toBeLessThanOrEqual(OFFSET_TOL)
+    }
+
+    // First and every subsequent eligible visible frame already holds the
+    // saved anchor at its saved offset (viewport ADR). Only genuinely
+    // transitional frames (hidden/positioning/in-flight load) are excluded,
+    // plus pre-click frames from the other topic: the probe starts BEFORE the
+    // B->A click, so early eligible frames still show topic B. The
+    // target-route gate (anchorId must belong to the returned resident)
+    // drops those without hiding signal: a settled wrong-window paint of
+    // topic A itself stays eligible and fails.
+    const visibleAny = frames.filter((f) => f.messagesVisible && f.containerVis !== 'hidden')
+    const eligible = frames.filter(
+      (f) =>
+        f.messagesVisible &&
+        f.containerVis !== 'hidden' &&
+        f.phase !== 'positioning' &&
+        !f.loading &&
+        f.anchorId &&
+        returnedIds.includes(f.anchorId)
+    )
+    const firstEligible = eligible.length > 0 ? eligible[0] : null
+    test.info().annotations.push({
+      type: 'branch-anchor-return-frames',
+      description:
+        `frames=${frames.length} visibleAny=${visibleAny.length} eligible=${eligible.length} ` +
+        `expected=${anchorId.slice(0, 24)}@${Math.round(savedOffset)} ` +
+        `firstEligible=${firstEligible ? `${firstEligible.anchorId.slice(0, 24)}@${Math.round(firstEligible.anchorOffset)} st=${Math.round(firstEligible.scrollTop)} phase=${firstEligible.phase}` : 'none'}`
+    })
+    expect(frames.length, 'probe must sample return frames').toBeGreaterThan(0)
+    expect(frames.length - visibleAny.length, 'must not hide every sample').toBeLessThan(frames.length)
+    expect(eligible.length, 'return must paint eligible visible frames (no hide-to-pass)').toBeGreaterThan(0)
+    expect(firstEligible!.anchorId, 'first eligible visible frame must already show the saved anchor').toBe(anchorId)
+    expect(
+      Math.abs(firstEligible!.anchorOffset - savedOffset),
+      'first eligible visible frame must already hold the saved offset'
+    ).toBeLessThanOrEqual(OFFSET_TOL)
+    const badIdx = eligible.findIndex(
+      (f) => f.anchorId !== anchorId || Math.abs(f.anchorOffset - savedOffset) > OFFSET_TOL
+    )
+    expect(badIdx, 'first and every subsequent eligible visible frame must hold the saved anchor@offset').toBe(-1)
+
+    await assertTopicDomExclusive(page, topicA, topicB)
+    await assertHostStable(page)
+    await removeScrollSpacer(page, topicA)
   })
 })

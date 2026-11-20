@@ -66,7 +66,13 @@ describe('controller detach/reattach session continuity', () => {
     const c = new RouteViewportController(displayed('t1', null))
     // Establish stable A anchor (user scroll path).
     c.declareUserIntent()
-    const taken = c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: -400, isAtBottom: false })
+    const taken = c.userTakeover({
+      messageId: 'mA',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     expect(taken.taken).toBe(true)
     c.noteInteractionScrollEnd()
     expect(c.getAnchorFor(displayed('t1', null))).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
@@ -179,7 +185,13 @@ describe('controller detach/reattach session continuity', () => {
   it('divider explicit continuation keeps the current offset, never the target historic snapshot', () => {
     const c = new RouteViewportController(displayed('t1', null))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mCurrent', intraRowOffset: -9, scrollTop: -300, isAtBottom: false })
+    c.userTakeover({
+      messageId: 'mCurrent',
+      intraRowOffset: -9,
+      scrollTop: -300,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     c.noteInteractionScrollEnd()
     // Detach preserves the run; reactivation via divider keeps click offset
     // and consumes the armed flag (explicit kind, never generic overwrite).

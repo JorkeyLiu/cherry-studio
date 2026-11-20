@@ -1,7 +1,15 @@
 import type { TopicBranchWire } from '@renderer/services/db/types'
+import type { Message } from '@renderer/types/newMessage'
+import { UserMessageStatus } from '@renderer/types/newMessage'
 import { describe, expect, it } from 'vitest'
 
 import { resolveForkDividers } from '../messageFlowNodes'
+import {
+  createLatestMessageWindow,
+  derivePaginationWindow,
+  isHistoryHeadLoaded,
+  type MessageWindow
+} from '../messageWindow'
 
 const branch = (over: Partial<TopicBranchWire> & { id: string; anchorMessageId: string }): TopicBranchWire => ({
   topicId: 't1',
@@ -213,5 +221,59 @@ describe('resolveForkDividers — inheritance boundary placement', () => {
     })
     expect(out).toHaveLength(1)
     expect(out[0].children.map((c) => c.id)).toEqual(['b1', 'b2'])
+  })
+})
+
+describe('head fork placement reads the displayed history head, not Main alone', () => {
+  const message = (id: string): Message => ({
+    id,
+    role: 'user',
+    assistantId: 'assistant',
+    topicId: 't1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    status: UserMessageStatus.SUCCESS,
+    blocks: []
+  })
+  const loaded = Array.from({ length: 14 }, (_, i) => message(`m${i < 10 ? `0${i}` : i}`))
+  const capacity = 10
+  const exhausted = { hasMoreBefore: false, hasMoreAfter: false }
+  const children = new Map([
+    [
+      'm-deleted',
+      [branch({ id: 'b1', anchorMessageId: 'm-deleted', inheritedBoundary: { kind: 'head', messageId: null } })]
+    ]
+  ])
+  const headPlacements = (window: MessageWindow) =>
+    resolveForkDividers({
+      displayMessageIds: new Set(window.displayMessages.map((m) => m.id)),
+      childrenByAnchor: children,
+      activeBranchId: null,
+      historyHeadLoaded: isHistoryHeadLoaded(window)
+    })
+
+  it('keeps the head fork offscreen while resident older groups are still browsable', () => {
+    // Main reports no older page, but the display shows only the newest 10 of 14
+    // resident groups: the true history head is one local page away.
+    const tail = createLatestMessageWindow(loaded, capacity, exhausted)
+    expect(tail.hasMoreOlder).toBe(true)
+    expect(headPlacements(tail)).toEqual([])
+  })
+
+  it('places the head fork once the display actually reaches the history head', () => {
+    const tail = createLatestMessageWindow(loaded, capacity, exhausted)
+    const outcome = derivePaginationWindow({
+      direction: 'older',
+      messages: loaded,
+      currentWindow: tail,
+      additionalGroupCount: capacity,
+      responseWindow: exhausted
+    })
+    expect(outcome.status).toBe('accepted')
+    if (outcome.status !== 'accepted') throw new Error('unreachable')
+
+    expect(outcome.window.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 13 })
+    const placements = headPlacements(outcome.window)
+    expect(placements).toHaveLength(1)
+    expect(placements[0]).toMatchObject({ placement: 'head', boundaryMessageId: null, anchorMessageId: 'm-deleted' })
   })
 })

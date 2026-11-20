@@ -176,7 +176,7 @@ describe('pause journey keeps the reading row without moving the viewport', () =
     // Measured at the press: the top-crossing reading row, still at bottom
     // (stream has not pulled away yet). No scrollTop write happens anywhere.
     const out = controller.userTakeover(
-      { messageId: 'm2', intraRowOffset: -60, scrollTop: 0, isAtBottom: true },
+      { messageId: 'm2', intraRowOffset: -60, scrollTop: 0, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       token
     )
@@ -237,7 +237,7 @@ describe('pause journey keeps the reading row without moving the viewport', () =
     driveBottomFollow(controller)
     const token = controller.declareUserIntent()
     const out = controller.userTakeover(
-      { messageId: null, intraRowOffset: null, scrollTop: -500, isAtBottom: false },
+      { messageId: null, intraRowOffset: null, scrollTop: -500, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )

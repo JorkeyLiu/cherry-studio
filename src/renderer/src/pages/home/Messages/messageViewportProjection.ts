@@ -14,7 +14,8 @@ import type { MessageViewportGroup } from './messageGroups'
  * MessageWindow, so every group message is present in `displayMessages`.
  *
  * Projection preserves:
- *  1. Outer order newest group first (column-reverse container).
+ *  1. Outer order newest group first (data order; the flow node build reverses
+ *     once into normal-flow DOM order).
  *  2. Inner order oldest message first per group.
  *  3. Viewport-local index (0 = newest in displayMessages).
  *  4. No input mutation.

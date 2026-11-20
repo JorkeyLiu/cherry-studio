@@ -191,12 +191,11 @@ async function measureForkRange(page: any, anchorId: string) {
   ).toBeGreaterThan(200)
   const isBottom = async (): Promise<boolean> => {
     const s: any = await readDividerState(page, anchorId)
-    return Math.abs(s.st) <= 100
+    return Math.max(0, s.sh - s.ch - s.st) <= 100
   }
   const isTop = async (): Promise<boolean> => {
     const s: any = await readDividerState(page, anchorId)
-    const extreme = -(s.sh - s.ch)
-    return Math.abs(s.st - extreme) <= 120
+    return Math.max(0, s.st) <= 120
   }
   const wheelToBottom = async (): Promise<void> => {
     for (let i = 0; i < 30; i++) {
@@ -255,8 +254,8 @@ async function positionToTarget(
   // (40): one small real-wheel calibration learns the local off/dy + st/dy
   // response, then each step is dy=err/offPerDy (damped, clamped to the safe
   // viewport range) so the step shrinks as the error shrinks. Direction sign
-  // comes ONLY from the observed calibration (reverse-column slope is -1, but
-  // never assumed); each wheel is ordinary user input followed by bounded
+  // comes ONLY from the observed calibration (sign is measured, never
+  // assumed); each wheel is ordinary user input followed by bounded
   // stable-geometry settle. Per-trial history is emitted ONLY on failure with
   // exit reason + before/delta/off/st; success returns the actual final
   // geometry (never a tracked best without reposition). Impossible fixtures
@@ -328,8 +327,8 @@ async function positionToTarget(
     // each +-40 moves ~40px and never settles within 12px. Small
     // proportional dy down to +-1 (still an ordinary real wheel at the safe
     // outer gutter) is allowed near the goal so the error settles 1px at a
-    // time. Zero-rounding fallback keeps the err/offPerDy sign so reverse
-    // slope is respected.
+    // time. Zero-rounding fallback keeps the err/offPerDy sign so the measured
+    // slope sign is respected.
     let dy = Math.round((err / offPerDy) * gain)
     if (!Number.isFinite(dy) || dy === 0) dy = (err / offPerDy > 0 ? 1 : -1) * 1
     const maxStep = 560

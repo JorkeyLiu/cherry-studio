@@ -27,14 +27,14 @@ import { css, keyframes, styled } from 'styled-components'
  * disconnected size step" feeling a serial schedule produces.
  *
  * The two properties overlap instead of serialising, and the schedule is honest
- * about the overlap: the fade is the shorter animation (and NOT a front-loaded
- * curve — see the timing constants below), so it is essentially complete when
+ * about the overlap: the closing fade is the shorter animation (and NOT a
+ * front-loaded curve — see the timing constants below), so it is essentially complete when
  * the clip boundary lands. Inside that window the clip boundary does cross rows
  * that are still partly visible, i.e. a row can be cut while it is already
  * fading — a brief, low-contrast clip within one gesture, never a cut of fully
  * opaque text and never "fade, then a dead gap, then a size step". Expanding
- * mirrors it: the space starts opening and the fade joins it one short step
- * later, so the text appears while the body is opening instead of after an
+ * runs on the same window: the fade covers the full expansion from the first
+ * frame, so the text appears while the body is opening instead of after an
  * empty expansion.
  * Both properties remain two animations on the same box carrying one shared
  * schedule, and every instance starts inside the same commit — i.e. at the same
@@ -95,14 +95,13 @@ const CLOSE_FADE_DELAY_MS = 0
 const CLOSE_SPACE_DELAY_MS = 0
 
 /**
- * Open: expand and fade in together. The fade joins the expansion one short
- * step later and lands with it (it overlaps the whole opening rather than
- * following an empty box), so the text appears while the body is opening.
+ * Open: expand and fade in together on one time base. The fade covers the full
+ * expansion and lands with it, so the text appears while the body is opening.
  */
 const OPEN_SPACE_MS = 200
 const OPEN_SPACE_DELAY_MS = 0
-const OPEN_FADE_DELAY_MS = 50
-const OPEN_FADE_MS = 150
+const OPEN_FADE_DELAY_MS = 0
+const OPEN_FADE_MS = 200
 
 /**
  * One shared motion window for the whole fold gesture: the body size/opacity
@@ -452,6 +451,11 @@ const SegmentFoldTransition: React.FC<SegmentFoldTransitionProps> = ({ folded, r
       [FOLD_FADE_DURATION_VAR]: `${timing.fadeDuration}ms`,
       [FOLD_FADE_DELAY_VAR]: `${timing.fadeDelay}ms`
     } as CSSProperties
+  } else if (motion !== null && motion.phase === 'opening' && motion.to === null) {
+    // Measure pass: the new body is already mounted but the fade is not armed
+    // yet. Opacity 0 is layout-neutral, so the natural height read stays
+    // honest; the armed fade then starts from 0 in the same pre-paint commit.
+    style = { opacity: 0 }
   }
 
   return (

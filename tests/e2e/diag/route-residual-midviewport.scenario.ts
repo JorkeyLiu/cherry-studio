@@ -158,8 +158,8 @@ const FN_SAMPLE_SRC = `function (spec) {
     const start = performance.now()
     const stamp = () => {
       const t = Math.round(performance.now() - start)
-      // Geometry-ordered (the flow is column-reverse, so DOM order is NOT
-      // visual order): the top-edge row straddles the scrollport top and the
+       // Geometry-ordered (the flow is normal-flow oldest-first, so geometry
+       // order is the source of truth): the top-edge row straddles the scrollport top and the
       // first fully-inside row is the visually highest row starting inside it.
       const rows = Array.from(document.querySelectorAll('#messages [data-message-id]'))
       const base = cTop()
@@ -345,7 +345,7 @@ function setOf(frames: any[], pick: (f: any) => unknown): string {
 /**
  * Same-frame spacing of every tracked row (and of the fork divider) against one
  * reference row. Frame-local subtraction cancels the route's content-origin
- * shift (the flow is column-reverse and the mounted window changes), so a
+ * shift (the flow is normal-flow and the mounted window changes), so a
  * spacing change >= 2px is a real insertion/removal between those two rows.
  */
 function gapMatrix(frames: any[], keys: string[], refKey: string): { text: string; flags: string[] } {
@@ -435,8 +435,8 @@ function summarizeWindow(name: string, frames: any[], keys: string[]): { text: s
   if (absentRows.length > 0) lines.push(`  rows absent in this window: ${absentRows.join(',')}`)
   if (layoutRows.length > 0) flags.push(`${name}: ROW-SPACING-FLAGGED ${layoutRows.join(' ')}`)
   if (movedRows.length > 0) flags.push(`${name}: VISIBLE-TOP-MOVED ${movedRows.join(' ')} scrollEx=${scrollEx}`)
-  // Route switches replace the mounted window AND the bottom-anchored content
-  // origin (column-reverse flow), so raw content coordinates are not comparable
+  // Route switches replace the mounted window AND the content
+  // origin (normal flow), so raw content coordinates are not comparable
   // across routes. Spacing between rows in the SAME frame cancels that origin
   // shift: a spacing change of >= 2px is a layout insertion/removal between
   // those two rows (e.g. the 32px group header row relocating across the fork
@@ -538,14 +538,14 @@ export default async function observe({ page, capture, writeText }: ObservationC
   if (!placed) throw new Error('could not measure the parent viewport for placement')
   const finalSnap: any[] = await page.evaluate(invoke(FN_SAMPLE_SRC, lit({ ...spec(0), durationMs: 0, maxFrames: 1 })))
   const p0 = finalSnap[0]
-  const scrollAbs = Math.abs(p0.scrollTop)
+  const distBottom = Math.max(0, p0.maxScroll - p0.scrollTop)
   log.push(
-    `parent reading position: scrollTop=${p0.scrollTop} (column-reverse flow: 0 = physical bottom, negative = scrolled away from it) absScroll=${scrollAbs} maxScroll=${p0.maxScroll} ratio=${round(scrollAbs / Math.max(1, p0.maxScroll))} dividerTop=${p0.dividerTop} clientHeight=${p0.clientHeight} topEdgeRow=...${p0.topEdgeRow} firstVisibleRow=...${p0.firstInsideRow} head row=...${suffix(headId)}`
+    `parent reading position: scrollTop=${p0.scrollTop} (normal flow: maxScroll = physical bottom, distBottom = scrolled away from it) distBottom=${distBottom} maxScroll=${p0.maxScroll} ratio=${round(distBottom / Math.max(1, p0.maxScroll))} dividerTop=${p0.dividerTop} clientHeight=${p0.clientHeight} topEdgeRow=...${p0.topEdgeRow} firstVisibleRow=...${p0.firstInsideRow} head row=...${suffix(headId)}`
   )
   const firstVisible = p0.firstInsideRow === suffix(headId) ? 'HEAD' : p0.firstInsideRow
-  if (scrollAbs <= 0 || scrollAbs < 0.15 * p0.maxScroll) {
+  if (distBottom <= 0 || distBottom < 0.15 * p0.maxScroll) {
     throw new Error(
-      `parent reading position is not clearly non-zero: scrollTop=${p0.scrollTop} maxScroll=${p0.maxScroll}`
+      `parent reading position is not clearly away from bottom: scrollTop=${p0.scrollTop} maxScroll=${p0.maxScroll}`
     )
   }
   if (p0.firstInsideRow === suffix(headId))
@@ -553,7 +553,7 @@ export default async function observe({ page, capture, writeText }: ObservationC
   if (p0.firstInsideRow === suffix(firstListId))
     throw new Error('first visible row is the list first row; not a mid-group reading position')
   log.push(
-    `placement conditions: abs(scrollTop)=${scrollAbs} > 0.15*maxScroll OK, first visible row (${firstVisible}) is neither the group head nor the list first row OK, divider top=${p0.dividerTop} inside the scrollport OK`
+    `placement conditions: distBottom=${distBottom} > 0.15*maxScroll OK, first visible row (${firstVisible}) is neither the group head nor the list first row OK, divider top=${p0.dividerTop} inside the scrollport OK`
   )
 
   await capture('a-parent-mid-viewport')

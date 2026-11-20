@@ -409,7 +409,7 @@ test.describe('Top visible incremental rebase (shared overlap materializer)', ()
     // shared-overlap visible path is eligible — the hidden atomic path must
     // restore it exactly with positively observed hidden positioning.
     // Offset -19 (negative crossing: row top 19px above the container top) is
-    // physically achievable for a mid-tail exclusive in the column-reverse
+    // physically achievable for a mid-tail exclusive in the normal-flow
     // container (older rows above scroll off-screen); tolerance stays 2px.
     // Bounded tails (main 6): use an available mid-tail anchor with newer
     // content below so -19 stays achievable — never the newest ([5]).
@@ -503,7 +503,7 @@ test.describe('Top visible incremental rebase (shared overlap materializer)', ()
     // writeSnap uses raw window.keyv.set (readback proves raw only); the key
     // existed from a genuine previous stable route, so injecting as close to
     // the switch as possible makes the snapshot effective.
-    // Offset: oldest +17 is physically impossible in the column-reverse
+    // Offset: oldest +17 is physically impossible in the normal-flow
     // container (oldest at the absolute top cannot sit 17px BELOW the
     // container top — no content above fills the gap; the browser clamps
     // scroll beyond the minimum). -17 (crossing: oldest top 17px ABOVE the

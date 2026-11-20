@@ -381,7 +381,7 @@ describe('resolveReferenceDividers (layered relations)', () => {
 })
 
 describe('buildMessageFlowNodes reference divider placement', () => {
-  it('renders the divider DOM-before the boundary group (visually directly below it)', () => {
+  it('renders the divider DOM-after the boundary group (visually directly below it)', () => {
     const grouped = project()
     const placements = resolveReferenceDividers(grouped, reference(), DST)
     const { nodes, element } = buildFlow(placements, { topicId: DST, messages: MESSAGES })
@@ -391,33 +391,33 @@ describe('buildMessageFlowNodes reference divider placement', () => {
     const boundaryBody = container.querySelector('[data-testid="body-s-a2"]') as Element
     expect(divider).not.toBeNull()
     expect(boundaryBody).not.toBeNull()
-    // Newest→oldest DOM order: divider before boundary body under column-reverse.
-    expect(divider.compareDocumentPosition(boundaryBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Oldest→newest DOM order: divider after boundary body under normal flow.
+    expect(boundaryBody.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // Never inside a turn container.
     expect(divider.closest('[data-turn-ask]')).toBeNull()
     expect(container.querySelectorAll('[data-testid="reference-boundary"]').length).toBe(1)
   })
 
-  it('renders both chain dividers at their own boundaries in nearest-first DOM order', () => {
+  it('renders both chain dividers at their own boundaries in oldest-first DOM order', () => {
     const grouped = project(CHAIN_MESSAGES)
     const placements = resolveReferenceDividers(grouped, chainReference(), C_TOPIC)
     const { nodes, element } = buildFlow(placements, { topicId: C_TOPIC, messages: CHAIN_MESSAGES })
     // Two distinct stable identities, never one folded key.
-    expect(boundaryKeysOf(nodes)).toEqual([referenceDividerKey(C_TOPIC), referenceDividerKey(B_TOPIC)])
+    expect(boundaryKeysOf(nodes)).toEqual([referenceDividerKey(B_TOPIC), referenceDividerKey(C_TOPIC)])
     const { container } = render(element)
     const dividers = Array.from(container.querySelectorAll('[data-testid="reference-boundary"]'))
-    expect(dividers.map((divider) => divider.getAttribute('data-reference-target-topic'))).toEqual([C_TOPIC, B_TOPIC])
+    expect(dividers.map((divider) => divider.getAttribute('data-reference-target-topic'))).toEqual([B_TOPIC, C_TOPIC])
     // The nearest divider (own relation, C→B) sits directly below B's last
     // message; the ancestor divider (B→A) directly below A's last message.
     const ownBody = container.querySelector('[data-testid="body-b-a2"]') as Element
     const ancestorBody = container.querySelector('[data-testid="body-a-a2"]') as Element
-    expect(dividers[0].compareDocumentPosition(ownBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(dividers[1].compareDocumentPosition(ancestorBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(ownBody.compareDocumentPosition(dividers[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(ancestorBody.compareDocumentPosition(dividers[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // Neither divider leaks into a turn container or above the owned suffix.
     expect(dividers[0].closest('[data-turn-ask]')).toBeNull()
     expect(dividers[1].closest('[data-turn-ask]')).toBeNull()
     const firstOwnedBody = container.querySelector('[data-testid="body-c-u1"]') as Element
-    expect(dividers[0].compareDocumentPosition(firstOwnedBody) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    expect(dividers[1].compareDocumentPosition(firstOwnedBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('renders the divider at the beginning when missing', () => {
@@ -430,8 +430,8 @@ describe('buildMessageFlowNodes reference divider placement', () => {
     const divider = container.querySelector('[data-testid="reference-boundary"]') as Element
     const oldest = container.querySelector('[data-testid="body-s-u1"]') as Element
     expect(divider).not.toBeNull()
-    // Appended last in newest→oldest DOM order = visual beginning (above oldest).
-    expect(oldest.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Collected last in newest→oldest build order = DOM-first after the reversal (visual beginning, above oldest).
+    expect(divider.compareDocumentPosition(oldest) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(container.querySelectorAll('[data-testid="reference-boundary"]').length).toBe(1)
   })
 

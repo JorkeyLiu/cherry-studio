@@ -431,7 +431,13 @@ describe('top-effect saved substitution is route-qualified (provenance, not disp
     const { RouteViewportController } = await import('@renderer/pages/home/Messages/routeViewportController')
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'a1', intraRowOffset: -12, scrollTop: -400, isAtBottom: false })
+    c.userTakeover({
+      messageId: 'a1',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     c.noteInteractionScrollEnd()
     c.request({
       kind: 'top',

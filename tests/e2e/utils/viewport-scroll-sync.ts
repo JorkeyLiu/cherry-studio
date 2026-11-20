@@ -98,7 +98,7 @@ export function isPhaseOk(phase: string): boolean {
   return phase === 'revealed' || phase === 'idle'
 }
 
-/** True when the container sits at a scroll extreme (either end). */
+/** True when the container sits at a scroll extreme (normal flow: oldest/top `scrollTop ≈ 0`, newest/bottom `scrollTop ≈ max(0, sh - ch)`). */
 export function isAtBoundary(
   g: Pick<ScrollGeometry, 'scrollTop' | 'scrollHeight' | 'clientHeight'>,
   tol: number
@@ -106,8 +106,8 @@ export function isAtBoundary(
   if (!Number.isFinite(g.scrollTop) || !Number.isFinite(g.scrollHeight) || !Number.isFinite(g.clientHeight))
     return false
   if (Math.abs(g.scrollTop) <= tol) return true
-  const extreme = -(g.scrollHeight - g.clientHeight)
-  return Math.abs(g.scrollTop - extreme) <= tol
+  const newest = Math.max(0, g.scrollHeight - g.clientHeight)
+  return Math.abs(g.scrollTop - newest) <= tol
 }
 
 /** Live anchor agrees with the persisted snapshot under the allowed set. An id alone never proves offset — callers keep their offset assertions. */

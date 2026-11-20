@@ -1,6 +1,22 @@
 import * as fs from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
+/**
+ * Accurate function boundary for the divider-switch handler (replaces the
+ * previous fixed 16000-char window, which silently dropped the atomic commit
+ * calls after the handler body grew past the window): from the unique
+ * `handleSelectRoute` declaration to its dedented `useCallback` close. Both
+ * anchors fail closed (missing marker fails the test) instead of silently
+ * truncating.
+ */
+function sliceDividerHandler(source: string): string {
+  const start = source.indexOf('const handleSelectRoute = useCallback(')
+  expect(start).toBeGreaterThanOrEqual(0)
+  const close = '\n  )\n'
+  const end = source.indexOf(close, start)
+  expect(end).toBeGreaterThan(start)
+  return source.slice(start, end + close.length - 1)
+}
 
 /**
  * Route-switch scroll contract (source-level pins; behavior is exercised in
@@ -49,12 +65,9 @@ describe('route-switch scroll + footer contract', () => {
   })
 
   it('divider path compensates the first-visible stable offset and never pends navigates', () => {
-    const switchIdx = messagesSource.indexOf('Divider route switch')
-    expect(switchIdx).toBeGreaterThanOrEqual(0)
     // Strip line comments so prose mentions (e.g. "never dispatches
     // NAVIGATE_TO_MESSAGE") cannot false-positive the call assertions.
-    const handler = messagesSource
-      .slice(switchIdx, switchIdx + 16000)
+    const handler = sliceDividerHandler(messagesSource)
       .split('\n')
       .filter((line) => !line.trim().startsWith('//'))
       .join('\n')

@@ -12,7 +12,7 @@ import {
 
 function geom(partial: Partial<ScrollGeometry> = {}): ScrollGeometry {
   return {
-    scrollTop: -500,
+    scrollTop: 500,
     scrollHeight: 2000,
     clientHeight: 800,
     phase: 'idle',
@@ -53,12 +53,11 @@ describe('isPhaseOk', () => {
     expect(isPhaseOk('')).toBe(false)
   })
 })
-
 describe('isAtBoundary', () => {
-  it('detects both extremes', () => {
+  it('detects both extremes (normal flow: oldest/top 0, newest/bottom max(0, sh - ch))', () => {
     expect(isAtBoundary({ scrollTop: 0, scrollHeight: 2000, clientHeight: 800 }, 2)).toBe(true)
-    expect(isAtBoundary({ scrollTop: -1200, scrollHeight: 2000, clientHeight: 800 }, 2)).toBe(true)
-    expect(isAtBoundary({ scrollTop: -500, scrollHeight: 2000, clientHeight: 800 }, 2)).toBe(false)
+    expect(isAtBoundary({ scrollTop: 1200, scrollHeight: 2000, clientHeight: 800 }, 2)).toBe(true)
+    expect(isAtBoundary({ scrollTop: 500, scrollHeight: 2000, clientHeight: 800 }, 2)).toBe(false)
   })
 
   it('rejects non-finite geometry', () => {
@@ -128,27 +127,26 @@ describe('waitSettled', () => {
     )
   })
 })
-
 describe('wheelAndSettle', () => {
   it('proves delivery via observed scroll movement', async () => {
     const readings = [
-      geom({ scrollTop: -500 }),
-      geom({ scrollTop: -700 }),
-      geom({ scrollTop: -700 }),
-      geom({ scrollTop: -700 }),
-      geom({ scrollTop: -700 })
+      geom({ scrollTop: 500 }),
+      geom({ scrollTop: 700 }),
+      geom({ scrollTop: 700 }),
+      geom({ scrollTop: 700 }),
+      geom({ scrollTop: 700 })
     ]
     const deps = mockDeps(readings)
     const r = await wheelAndSettle(deps, 560, { timeoutMs: 2000 })
     expect(deps.wheelCalls).toEqual([560])
     expect(r.scrollSeen).toBe(true)
     expect(r.boundaryNoOp).toBe(false)
-    expect(r.scrollTop).toBe(-700)
+    expect(r.scrollTop).toBe(700)
   })
 
   it('accepts a deterministic boundary no-op without movement', async () => {
-    const atBottom = geom({ scrollTop: 0, anchorId: 'last', snapshotId: 'last' })
-    const deps = mockDeps([atBottom])
+    const atOldest = geom({ scrollTop: 0, anchorId: 'first', snapshotId: 'first' })
+    const deps = mockDeps([atOldest])
     const r = await wheelAndSettle(deps, 560, { timeoutMs: 2000 })
     expect(deps.wheelCalls).toEqual([560])
     expect(r.scrollSeen).toBe(false)
@@ -156,7 +154,7 @@ describe('wheelAndSettle', () => {
   })
 
   it('never passes a non-boundary wheel with no scroll as success', async () => {
-    const stuck = geom({ scrollTop: -500 })
+    const stuck = geom({ scrollTop: 500 })
     const deps = mockDeps([stuck])
     await expect(wheelAndSettle(deps, 560, { timeoutMs: 400 })).rejects.toThrow(/failed to settle/)
     // The wheel was still dispatched exactly once: no silent skip, no retry loop.
@@ -165,7 +163,7 @@ describe('wheelAndSettle', () => {
 
   it('reports the last observed state on timeout', async () => {
     let n = 0
-    const deps = mockDeps(() => geom({ scrollTop: -500 - n++ * 50 }))
-    await expect(wheelAndSettle(deps, -560, { timeoutMs: 300 })).rejects.toThrow(/last=.*st=-/)
+    const deps = mockDeps(() => geom({ scrollTop: 500 + n++ * 50 }))
+    await expect(wheelAndSettle(deps, -560, { timeoutMs: 300 })).rejects.toThrow(/last=.*st=/)
   })
 })

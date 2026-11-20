@@ -1970,9 +1970,19 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
   const buildSegmentViewport = (
     initialScrollTop: number,
     clampMin: number,
-    opts: { bodyHeight?: number; scrollHeight?: number; clientHeight?: number } = {}
+    opts: {
+      bodyHeight?: number
+      scrollHeight?: number
+      clientHeight?: number
+      /** Shift content offsets into the normal-flow (positive) coordinate range. */
+      contentShift?: number
+      /** Upper clamp bound: 0 for reversed-coordinate cases, `travel` in normal flow. */
+      clampMax?: number
+    } = {}
   ) => {
     const bodyHeight = opts.bodyHeight ?? BODY_H
+    const contentShift = opts.contentShift ?? 0
+    const clampMax = opts.clampMax ?? 0
     const container = document.createElement('div')
     container.id = 'messages'
     mockRect(container, 'container')
@@ -1981,7 +1991,7 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
       configurable: true,
       get: () => value,
       set: (next: number) => {
-        value = Math.min(0, Math.max(clampMin, next))
+        value = Math.min(clampMax, Math.max(clampMin, next))
       }
     })
     Object.defineProperty(container, 'scrollHeight', {
@@ -2026,10 +2036,10 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
     let folded = false
     const sync = (): void => {
       const delta = folded ? bodyHeight : 0
-      run.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + delta, folded ? 0 : bodyHeight)
-      chrome.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + delta, folded ? 0 : bodyHeight)
-      body.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP, bodyHeight)
-      below.getBoundingClientRect = rectAt(BELOW_CONTENT_TOP, 120)
+      run.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + contentShift + delta, folded ? 0 : bodyHeight)
+      chrome.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + contentShift + delta, folded ? 0 : bodyHeight)
+      body.getBoundingClientRect = rectAt(HEADER_CONTENT_TOP + contentShift, bodyHeight)
+      below.getBoundingClientRect = rectAt(BELOW_CONTENT_TOP + contentShift, 120)
     }
     sync()
     return {
@@ -2118,10 +2128,15 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm1', -100)
     containerRect.top = 0
-    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(-50, -8400)
+    // Normal flow: 9000px of content in a 600px viewport → 8400px of travel.
+    const TRAVEL = 9000 - 600
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(TRAVEL - 50, 0, {
+      contentShift: TRAVEL,
+      clampMax: TRAVEL
+    })
     // Not enough room toward the newest edge to hold the seam: only 50px of the
     // 200px delta can be realized.
-    expect(container.scrollTop).toBe(-50)
+    expect(container.scrollTop).toBe(TRAVEL - 50)
     expect(viewportTop(chrome)).toBe(-150)
     expect(viewportTop(below)).toBe(70)
     expect(
@@ -2139,8 +2154,9 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
       keeper.rerender(1)
     })
     // The write is a REQUEST: the container stops at its real physical boundary
-    // (scrollTop 0) instead of being pulled past it or padded to fake a hold.
-    expect(container.scrollTop).toBe(0)
+    // (scrollTop = travel, the newest edge) instead of being pulled past it or
+    // padded to fake a hold.
+    expect(container.scrollTop).toBe(TRAVEL)
     expect(container.scrollHeight).toBe(9000)
     expect(viewportTop(chrome)).toBe(0)
     expect(viewportTop(below)).toBe(20)
@@ -2154,30 +2170,36 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
       | undefined
     expect(stored?.messageId).toBe('below')
     expect(stored?.intraRowOffset).toBe(20)
-    expect(stored?.scrollTop).toBe(0)
+    expect(stored?.scrollTop).toBe(TRAVEL)
     expect(stored?.isAtBottom).toBe(true)
     keeper.unmount()
   })
 
   // ------------------------------------------------------------- E2E exact numbers
-  // The recorded production placement was `scrollTop: -124` on a container of
-  // `scrollHeight: 936` / `clientHeight: 403`, and the observed header
-  // displacement was exactly 41.5px. Both follow from one law:
-  // `residual = max(0, foldedGroupHeight - |scrollTop|)`. The hold is a
+  // The recorded production placement was 124px of room toward an edge on a
+  // container of `scrollHeight: 936` / `clientHeight: 403` (533px of travel),
+  // and the observed header displacement was exactly 41.5px. Both follow from
+  // one law: `residual = max(0, foldedGroupHeight - room)`. The hold is a
   // REQUEST bounded by the real scroll range, never a padding invention. These
   // two cases pin both regimes at the same 124px of room: below the clamp
   // threshold for a 165.5px group (partial hold), above it for a 41.5px group
   // (full hold).
   it('E2E clamp regime: a 165.5px group under 124px of room leaves an honest 41.5px residual', async () => {
     const H = 165.5
-    const START = -124
+    // 936px of content in a 403px viewport → 533px of travel. The newest edge is
+    // scrollTop 533, so 124px of room means starting at 533 - 124 = 409.
+    const TRAVEL = 936 - 403
+    const ROOM = 124
+    const START = TRAVEL - ROOM
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm1', -100)
     containerRect.top = 0
-    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, -8400, {
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, 0, {
       bodyHeight: H,
       scrollHeight: 936,
-      clientHeight: 403
+      clientHeight: 403,
+      contentShift: TRAVEL,
+      clampMax: TRAVEL
     })
     const headerBefore = viewportTop(chrome)
     const belowBefore = viewportTop(below)
@@ -2206,22 +2228,23 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
     })
     expect(controller.activeInteractionIntent?.pendingLayoutMutation).toBe(true)
     expect(controller.activeInteractionIntent?.gestureId).toBe(deferred)
-    // The write is bounded by the physical range: -124 + 165.5 would leave the
-    // container, so it stops at 0 instead of being forced past it.
+    // The write is bounded by the physical range: START + 165.5 would leave the
+    // container, so it stops at the newest edge (travel) instead of being forced
+    // past it.
     act(() => {
       setFolded(true)
       keeper.rerender(1)
     })
-    expect(container.scrollTop).toBe(0)
+    expect(container.scrollTop).toBe(TRAVEL)
     // No invented geometry: the scroll range is untouched, so no blank band
     // was fabricated to fake a hold.
     expect(container.scrollHeight).toBe(936)
     expect(container.clientHeight).toBe(403)
-    const residual = Math.max(0, H - Math.abs(START))
+    const residual = Math.max(0, H - ROOM)
     expect(residual).toBe(41.5)
     expect(Math.abs(viewportTop(chrome) - headerBefore)).toBeCloseTo(residual, 6)
     // The content below absorbed exactly the realized part of the request.
-    expect(Math.abs(viewportTop(below) - belowBefore)).toBeCloseTo(Math.abs(START), 6)
+    expect(Math.abs(viewportTop(below) - belowBefore)).toBeCloseTo(ROOM, 6)
     await act(async () => {
       for (let i = 0; i < 6; i++) await flushFrame()
     })
@@ -2230,21 +2253,25 @@ describe('segment fold/expand: the group header is the viewport anchor', () => {
       | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
       | undefined
     expect(stored?.messageId).toBe('below')
-    expect(stored?.scrollTop).toBe(0)
+    expect(stored?.scrollTop).toBe(TRAVEL)
     expect(stored?.isAtBottom).toBe(true)
     keeper.unmount()
   })
 
   it('E2E clamp regime: a 41.5px group inside the same 124px of room holds fully', async () => {
     const H = 41.5
-    const START = -124
+    const TRAVEL = 936 - 403
+    const ROOM = 124
+    const START = TRAVEL - ROOM
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm1', -100)
     containerRect.top = 0
-    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, -8400, {
+    const { container, ref, chrome, below, setFolded } = buildSegmentViewport(START, 0, {
       bodyHeight: H,
       scrollHeight: 936,
-      clientHeight: 403
+      clientHeight: 403,
+      contentShift: TRAVEL,
+      clampMax: TRAVEL
     })
     const headerBefore = viewportTop(chrome)
     const belowBefore = viewportTop(below)

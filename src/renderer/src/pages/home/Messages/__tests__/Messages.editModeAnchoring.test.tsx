@@ -660,11 +660,13 @@ describe('Messages edit-mode overlay regression', () => {
     expect(wrapperRules).toContain('min-height: 0')
 
     const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
-    // Short-content contract: container must not force full fill with `flex: 1`.
-    // It sizes to content (flex:0 1 auto) and stays shrinkable inside the wrapper
-    // (min-height:0) with its own overflow-y:auto scroll for long content.
+    // Short-content contract: the host takes the available wrapper height
+    // (flex: 1 1 auto) so the scrollport height is the visible height, and short
+    // content is bottom-aligned by the content wrapper's auto block-start
+    // margin — never by a reversed direction and never by leaving the host
+    // content-sized (which re-created the blank space above the Prompt).
     expect(containerRules).not.toMatch(/flex:\s*1\s*;/)
-    expect(containerRules).toContain('flex: 0 1 auto')
+    expect(containerRules).toContain('flex: 1 1 auto')
     expect(containerRules).toContain('min-height: 0')
 
     // Verify real EditModeActionBar source declares absolute overlay (enrichment-proof)
@@ -679,14 +681,14 @@ describe('Messages edit-mode overlay regression', () => {
     expect(content).not.toContain('margin-top: -100%')
   })
 
-  it('short-content layout contract: container sizes to content, wrapper stays the height boundary, scroll stays on #messages', async () => {
+  it('short-content layout contract: host takes the available height, wrapper stays the height boundary, scroll stays on #messages', async () => {
     // jsdom has no real flex geometry, so this asserts the CSS contract that
     // prevents the short-content regression (1/2/3 messages left blank above
-    // Prompt when the container was forced full-height with `flex: 1`):
-    // wrapper keeps flex:1/min-height:0 as positioning + height boundary,
-    // container uses flex:0 1 auto (grow off, shrink on, basis content) with
-    // min-height:0 so short content takes content height while long content
-    // shrinks inside the wrapper and scrolls via its own overflow-y:auto.
+    // Prompt): wrapper keeps flex:1/min-height:0 as positioning + height
+    // boundary, the host takes that available height (flex:1 1 auto,
+    // min-height:0) so its scrollport is the visible height, and the content
+    // wrapper bottom-aligns short content with `margin-block-start: auto` while
+    // long content still scrolls through the host's own overflow-y:auto.
     const actualShared = (await vi.importActual('@renderer/pages/home/Messages/shared')) as any
     const wrapperRules: string = (actualShared.MessagesWrapper?.componentStyle?.rules?.join('') ?? '') as string
     const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
@@ -697,11 +699,10 @@ describe('Messages edit-mode overlay regression', () => {
     expect(wrapperRules).toContain('min-height: 0')
     expect(wrapperRules).toContain('overflow: hidden')
 
-    // Container: no forced fill; shrinkable scroll host.
-    expect(containerRules).not.toMatch(/flex:\s*1\s*;/)
-    expect(containerRules).toContain('flex: 0 1 auto')
+    // Container: fills the wrapper's available height and stays shrinkable.
+    expect(containerRules).toMatch(/flex:\s*1 1 auto/)
     expect(containerRules).toContain('min-height: 0')
-    expect(containerRules).toContain('column-reverse')
+    expect(containerRules).toContain('flex-direction: column')
 
     // Scroll stays on #messages: overflow-y:auto comes from the Scrollbar base
     // (MessagesContainer only overrides overflow-x). Verify the base contract

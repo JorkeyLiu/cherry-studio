@@ -149,13 +149,12 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     await page.mouse.move(messagesBox!.x + messagesBox!.width / 2, messagesBox!.y + messagesBox!.height / 2)
 
     const scrollBefore = await page.locator('#messages').evaluate((el) => el.scrollTop)
-    // The chat viewport is a column-reverse container: scrollTop 0 is the
+    // The chat viewport is a normal-flow container: scrollTop sh - ch is the
     // bottom (newest content). Scrolling UP (negative deltaY) moves through
     // the message history while the response is still streaming — the natural
     // gesture for reviewing earlier content mid-stream. A positive delta would
     // scroll toward the already-reached bottom and produce no movement.
-    // Column-reverse engines may report positive or negative scrollTop, so the
-    // assertion is a magnitude change.
+    // The assertion is a magnitude change.
     await page.mouse.wheel(0, -1500)
     await page.waitForTimeout(200)
     const scrollAfter = await page.locator('#messages').evaluate((el) => el.scrollTop)

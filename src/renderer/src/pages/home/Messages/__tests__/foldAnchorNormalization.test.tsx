@@ -306,7 +306,7 @@ describe('controller reconcile with corrected offset', () => {
     controller.declareUserIntent()
     const token = controller.activeInteractionToken
     const wheelGhost = controller.userTakeover(
-      { messageId: null, intraRowOffset: null, scrollTop: -300, isAtBottom: false },
+      { messageId: null, intraRowOffset: null, scrollTop: -300, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )
@@ -432,7 +432,7 @@ describe('answer-tab switch intent (SWITCHING, not reading restoration)', () => 
     c4.declareUserIntent()
     const token = c4.activeInteractionToken
     const taken = c4.userTakeover(
-      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false },
+      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )

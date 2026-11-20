@@ -18,10 +18,10 @@
  * query-based call sites cannot drift apart.
  *
  * Viewport-local canonical VISUAL ROW index (steady-scroll path):
- *   - Production `displayMessages` are newest-first (column-reverse view model;
- *     see `messageWindow.toReversed`). The rendered visual order is oldest-first
- *     top-to-bottom: the outer flow is newest-group-first under `column-reverse`
- *     (so the oldest group paints at the top) and each group's inner messages
+ *   - Production `displayMessages` are newest-first (the data model order; see
+ *     `messageWindow.toReversed`). The rendered visual order is oldest-first
+ *     top-to-bottom: the flow node list is reversed once at build time so the
+ *     DOM order is normal flow, and each group's inner messages
  *     stay oldest-first in normal grid flow. Fold hides unselected siblings
  *     (`display:none`); dividers/gaps carry no message identity.
  *   - `createVisibleAnchorCache` builds the visible canonical rows ONCE per
@@ -146,8 +146,8 @@ export const getMessageRowById = (messageId: string): HTMLElement | null => {
  * display ids plus the live element registry.
  *
  * Visual order is oldest-first top-to-bottom (the reverse of the newest-first
- * `displayMessages` consumed by the column-reverse view; group inner order is
- * oldest-first in normal flow). O(N) cheap pointer lookups only — no selector,
+ * `displayMessages` data order; the rendered flow is normal-flow DOM order, so
+ * DOM order and visual order agree). O(N) cheap pointer lookups only — no selector,
  * no style, no geometry. Missing/detached ids are skipped (cheap
  * `isConnected`, no layout). Hidden/fold rows STAY listed here; the visible
  * cache below filters them once at build time, so this membership alone is

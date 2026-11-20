@@ -514,12 +514,12 @@ test.describe('Send-history responsiveness: multi-model history, ordinary single
       )
       expect(postProbeContent).toBe(preProbeContent)
 
-      // Follow-bottom: the newest row is rendered and the column-reverse
+      // Follow-bottom: the newest row is rendered and the normal-flow
       // container rests at bottom (stable data markers, no ms thresholds).
       const atBottom = await page.evaluate(() => {
         const box = document.getElementById('messages') as HTMLElement | null
         if (!box) return false
-        return Math.abs(box.scrollTop) <= 100
+        return box.scrollHeight - box.clientHeight - box.scrollTop <= 100
       })
       expect(atBottom, 'ordinary send must follow bottom').toBe(true)
     })

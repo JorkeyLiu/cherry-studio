@@ -168,7 +168,7 @@ describe('shared arbiter priority (existing fail-closed)', () => {
     const token = c.declareUserIntent()
     expect(c.hasActiveUserInteraction()).toBe(true)
     const out = c.userTakeover(
-      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false },
+      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )

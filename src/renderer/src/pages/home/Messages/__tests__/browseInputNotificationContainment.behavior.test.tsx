@@ -231,7 +231,7 @@ describe('held browse input publishes one notification per gesture and no row re
     expect(counts.versionRenders).toBe(versionBefore + 1)
 
     const out = controller.userTakeover(
-      { messageId: 'm9', intraRowOffset: -10, scrollTop: -120, isAtBottom: false },
+      { messageId: 'm9', intraRowOffset: -10, scrollTop: -120, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       controller.activeInteractionToken ?? undefined
     )

@@ -20,6 +20,7 @@
  */
 
 import { getMessageRowById } from './domVisibility'
+import { maxScrollTop, readScrollMetrics } from './flowScrollGeometry'
 
 /** Visual phase exposed via `data-viewport-phase` (diagnostic, no user strings). */
 export type ViewportTransitionPhase = 'idle' | 'positioning' | 'revealed'
@@ -95,9 +96,16 @@ const cssEscape = (value: string): string => {
   return value
 }
 
-const oldestEdgeScrollTop = (container: HTMLElement): number => {
+/**
+ * Oldest (visual top) edge of the normal-flow scroll container: `scrollTop` 0,
+ * where no further historical scrolling is possible.
+ */
+const FLOW_OLDEST_EDGE_SCROLL_TOP = 0
+
+/** Newest (visual bottom) edge of the container: its own scroll travel. */
+const flowBottomScrollTop = (container: HTMLElement): number => {
   try {
-    return Math.min(0, container.clientHeight - container.scrollHeight)
+    return maxScrollTop(readScrollMetrics(container))
   } catch {
     return 0
   }
@@ -114,11 +122,16 @@ const oldestEdgeScrollTop = (container: HTMLElement): number => {
  * The oldest-edge parking is INTERMEDIATE search placement (`searching`), not
  * final success: the requested identity is still outside the resident window
  * and restore-owned pagination must continue under the same ownership.
- *
  * Message-row lookups use the raw DOM id (`getMessageRowById`, i.e. raw
  * `getElementById('message-'+id)` with no `CSS.escape`): writers use the raw
  * id and `getElementById` requires the raw string. `CSS.escape` stays only
  * for `querySelector`/selector contexts (divider rows).
+ *
+ * Coordinates are the normal-flow convention: `scrollTop` 0 is the oldest/top
+ * edge and the bottom plan writes `scrollHeight - clientHeight`. The
+ * `scrollIntoView({ block: 'start' })` fallbacks are real movements in this
+ * layout (a plain block flow), so they remain an honest last resort for rows
+ * without a saved offset.
  */
 export const applyViewportFirstPosition = (
   container: HTMLElement,
@@ -129,7 +142,8 @@ export const applyViewportFirstPosition = (
       return 'unplaced'
     }
     if (plan.kind === 'bottom') {
-      if (Math.abs(container.scrollTop) > 1) container.scrollTop = 0
+      const bottom = flowBottomScrollTop(container)
+      if (Math.abs(container.scrollTop - bottom) > 1) container.scrollTop = bottom
       return 'placed'
     }
     if (plan.kind === 'scrollTop') {
@@ -152,8 +166,9 @@ export const applyViewportFirstPosition = (
           return 'placed'
         }
         if (plan.edgeFallbackOnMissing) {
-          const edge = oldestEdgeScrollTop(container)
-          if (Math.abs(container.scrollTop - edge) > 1) container.scrollTop = edge
+          if (Math.abs(container.scrollTop - FLOW_OLDEST_EDGE_SCROLL_TOP) > 1) {
+            container.scrollTop = FLOW_OLDEST_EDGE_SCROLL_TOP
+          }
           return 'searching'
         }
         return 'unplaced'
@@ -207,8 +222,9 @@ export const applyViewportFirstPosition = (
       return 'placed'
     }
     if (plan.edgeFallbackOnMissing) {
-      const edge = oldestEdgeScrollTop(container)
-      if (Math.abs(container.scrollTop - edge) > 1) container.scrollTop = edge
+      if (Math.abs(container.scrollTop - FLOW_OLDEST_EDGE_SCROLL_TOP) > 1) {
+        container.scrollTop = FLOW_OLDEST_EDGE_SCROLL_TOP
+      }
       return 'searching'
     }
     return 'unplaced'

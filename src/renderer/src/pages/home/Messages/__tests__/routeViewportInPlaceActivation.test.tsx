@@ -806,16 +806,23 @@ describe('retained same-window pre-paint trigger (regression)', () => {
     expect(isRetainedAnchorOffsetAligned(0, 12.1)).toBe(false)
     expect(isRetainedAnchorOffsetAligned(NaN, -12)).toBe(false)
     expect(isRetainedAnchorOffsetAligned(0, Number.POSITIVE_INFINITY)).toBe(false)
-    expect(isRetainedBottomAligned(0)).toBe(true)
-    expect(isRetainedBottomAligned(1)).toBe(true)
-    expect(isRetainedBottomAligned(1.1)).toBe(false)
-    // 80px bottom is inside the 100px E2E budget but far outside true-bottom
-    // geometry (column-reverse scrollTop 0 within 1px).
-    expect(isRetainedBottomAligned(80)).toBe(false)
-    expect(isRetainedBottomAligned(100)).toBe(false)
-    expect(isRetainedBottomAligned(100.1)).toBe(false)
-    expect(isRetainedBottomAligned(NaN)).toBe(false)
-    expect(isRetainedBottomAligned(Number.NaN)).toBe(false)
+    // Flow bottom alignment: 1600px of content in a 600px viewport (1000px of
+    // travel); each case sits that many px away from the newest edge.
+    const atBottomDistance = (distance: number) => ({
+      scrollTop: 1000 - distance,
+      scrollHeight: 1600,
+      clientHeight: 600
+    })
+    expect(isRetainedBottomAligned(atBottomDistance(0))).toBe(true)
+    expect(isRetainedBottomAligned(atBottomDistance(1))).toBe(true)
+    expect(isRetainedBottomAligned(atBottomDistance(1.1))).toBe(false)
+    // 80px from the bottom is inside the 100px E2E budget but far outside
+    // true-bottom geometry (flow distanceFromBottom 0 within 1px).
+    expect(isRetainedBottomAligned(atBottomDistance(80))).toBe(false)
+    expect(isRetainedBottomAligned(atBottomDistance(100))).toBe(false)
+    expect(isRetainedBottomAligned(atBottomDistance(100.1))).toBe(false)
+    expect(isRetainedBottomAligned({ scrollTop: NaN, scrollHeight: 1600, clientHeight: 600 })).toBe(false)
+    expect(isRetainedBottomAligned({ scrollTop: 1000, scrollHeight: NaN, clientHeight: 600 })).toBe(false)
   })
 
   it('shared pre-paint helper: exact means zero writes; coverable mismatch means one write + 1px remeasure; failure never invents aligned', () => {
@@ -824,6 +831,7 @@ describe('retained same-window pre-paint trigger (regression)', () => {
       width?: number
       height?: number
       clientHeight?: number
+      scrollHeight?: number
       scrollTop?: number
       clampScroll?: boolean
     }) => {
@@ -832,6 +840,9 @@ describe('retained same-window pre-paint trigger (regression)', () => {
       const rect = () => ({ top: overrides.top ?? 100, width: overrides.width ?? 400, height: overrides.height ?? 600 })
       const container = {
         clientHeight: overrides.clientHeight ?? 600,
+        // Normal-flow travel: 1600px of content in a 600px viewport unless a
+        // case says otherwise.
+        scrollHeight: overrides.scrollHeight ?? 1600,
         getBoundingClientRect: () => ({ ...rect() }),
         isConnected: true
       } as unknown as HTMLElement
@@ -985,9 +996,9 @@ describe('retained same-window pre-paint trigger (regression)', () => {
     }
 
     // Bottom: exact means zero writes; 80px mismatch (inside E2E 100px,
-    // outside 1px) aligns with exactly one write to true bottom.
+    // outside 1px) aligns with exactly one write to the true bottom edge.
     {
-      const exact = makeContainer({ scrollTop: 0 })
+      const exact = makeContainer({ scrollTop: 1000 })
       expect(
         alignRetainedViewportOnce({
           container: exact.container,
@@ -1000,7 +1011,7 @@ describe('retained same-window pre-paint trigger (regression)', () => {
       ).toEqual({ aligned: true, writes: 0 })
       expect(exact.getWrites()).toBe(0)
 
-      const off = makeContainer({ scrollTop: -80 })
+      const off = makeContainer({ scrollTop: 920 })
       const res = alignRetainedViewportOnce({
         container: off.container,
         rowEl: null,
@@ -1010,10 +1021,9 @@ describe('retained same-window pre-paint trigger (regression)', () => {
         isRowVisible: true
       })
       expect(res).toEqual({ aligned: true, writes: 1 })
-      expect(off.getScrollTop()).toBe(0)
+      expect(off.getScrollTop()).toBe(1000)
     }
   })
-
   it('reconnect ordering: hidden/disconnected stays inert without consuming activation; layout setup precedes pre-paint measurement', () => {
     // Production contract (Messages layout lifetime + pre-paint + passive):
     // - the lifetime marker is layout-ordered before pre-paint measurement, so

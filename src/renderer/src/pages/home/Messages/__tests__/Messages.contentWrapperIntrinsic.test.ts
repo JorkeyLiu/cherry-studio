@@ -1,14 +1,15 @@
 /**
- * Content-wrapper intrinsic-height contract (paused-stream fractional zoom).
+ * Content-wrapper layout contract (normal flow, paused-stream fractional zoom).
  *
  * Static source guard for the sole firstElementChild content wrapper inside
- * #messages: same DOM level (no extra wrapper), top-aligned reversed
- * children, native TRUE intrinsic height (content + margins rounded up to the
- * live device-pixel quantum via `--messages-pixel-size`). The keeper
- * synchronizes the var to `1/window.devicePixelRatio` on the existing wrapper
- * through the existing observer/layout path (no new state/listeners). No
- * duplicated layout math, no JS number rounding, no timers/observers/hooks,
- * no manual height writes, no order/data change. Unit/static level only: real
+ * #messages: same DOM level (no extra wrapper), ordinary DOM order equal to
+ * visual order (oldest first), intrinsic content height, and short content
+ * bottom-aligned by `marginBlockStart: auto` against a scrollport that takes
+ * the available height. That replaces both the previous reversed direction and
+ * the device-pixel `calc-size` rounding wrapper: a flow that only grows
+ * downward from a stable top needs no fractional-zoom rounding hack. No
+ * duplicated layout math, no JS number rounding, no timers/observers/hooks, no
+ * manual height writes, no order/data change. Unit/static level only: real
  * pixel bounds are proven by the E2E rAF sampler in
  * tests/e2e/specs/conversation/streaming-click-pause.spec.ts.
  */
@@ -18,8 +19,8 @@ import { describe, expect, it } from 'vitest'
 
 const messagesSrc = () => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
 
-describe('content-wrapper intrinsic-height contract', () => {
-  it('sole firstElementChild wrapper keeps levels/order, top-aligns, uses native quantum intrinsic height', () => {
+describe('content-wrapper layout contract', () => {
+  it('sole firstElementChild wrapper keeps levels/order, is bottom-aligned by auto margin, and carries no quantum hack', () => {
     const src = messagesSrc()
     const containerIdx = src.indexOf('id="messages"')
     expect(containerIdx).toBeGreaterThan(-1)
@@ -27,15 +28,20 @@ describe('content-wrapper intrinsic-height contract', () => {
     // Same DOM: exactly one layout-only flex wrapper directly under the
     // container, holding the app-owned older-paging node + Prompt.
     expect(slice).toMatch(/display:\s*'flex'/)
-    expect(slice).toMatch(/flexDirection:\s*'column-reverse'/)
+    // Normal flow: DOM order IS visual order, so the oldest content (Prompt and
+    // the older-paging node) comes first and no direction is reversed.
+    expect(slice).toMatch(/flexDirection:\s*'column'/)
+    expect(slice).not.toMatch(/column-reverse/)
     expect(slice).toMatch(/data-older-paging/)
     expect(slice).toMatch(/<Prompt/)
-    // Top alignment of the reversed children (no fractional root start).
-    expect(slice).toMatch(/justifyContent:\s*'flex-end'/)
+    expect(slice.indexOf('<Prompt')).toBeLessThan(slice.indexOf('data-older-paging'))
+    // Short content bottom alignment without a reversed direction.
+    expect(slice).toMatch(/marginBlockStart:\s*'auto'/)
+    expect(slice).not.toMatch(/justifyContent:\s*'flex-end'/)
     expect(slice).toMatch(/flexShrink:\s*0/)
-    // Native TRUE intrinsic size rounded up to the live device-pixel quantum
-    // (keeper-synchronized var, 1px fallback for unsupported engines).
-    expect(slice).toMatch(/calc-size\(auto,\s*round\(up,\s*size,\s*var\(--messages-pixel-size,\s*1px\)\)\)/)
+    // No device-pixel quantum wrapper workaround survives on either side.
+    expect(slice).not.toMatch(/calc-size\(/)
+    expect(slice).not.toMatch(/--messages-pixel-size/)
   })
 
   it('no duplicated layout math / JS rounding / new coordination on the wrapper', () => {

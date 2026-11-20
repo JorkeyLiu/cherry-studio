@@ -3,17 +3,17 @@ import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMe
 import { describe, expect, it, vi } from 'vitest'
 
 import {
-  applyColumnReverseScroll,
+  applyFlowScroll,
   type BootstrapDecisionInput,
   canHandleUserViewportScroll,
   chooseNavigationWindow,
-  computeColumnReverseMessageScrollTop,
+  computeFlowMessageScrollTop,
   computeRestoreMessageScrollTop,
   type MessageNavigationIntent,
   planSearchMatchScroll,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
-  resolveColumnReverseScrollTarget,
+  resolveFlowScrollTarget,
   resolveMessageNavigation,
   resolveMessageRowIdForNode,
   resolveUnobscuredReadingBand,
@@ -45,8 +45,11 @@ const transaction = (intent: MessageNavigationIntent, options: { hidden?: boolea
     return true
   })
   const scrollCalls: Array<{ resolved: { kind: string }; top?: number }> = []
+  // 5000px of scroll travel (clientHeight 0): the promised targets are the
+  // container's own numbers, not a second formula.
+  const flowContainer = { scrollHeight: 5000, clientHeight: 0, scrollTop: 0, scrollTo: vi.fn() }
   const scroll = vi.fn((resolved) => {
-    const scrollTarget = resolveColumnReverseScrollTarget(resolved, 5000)
+    const scrollTarget = resolveFlowScrollTarget(resolved, flowContainer)
     scrollCalls.push({ resolved, top: scrollTarget?.top })
     return 'success' as const
   })
@@ -216,59 +219,56 @@ describe('message navigation transaction', () => {
     expect(run.scroll).not.toHaveBeenCalled()
   })
 
-  it('scroll adapter: top intent produces negative scrollTop for column-reverse layout', async () => {
+  it('scroll adapter: top intent produces the oldest-edge scrollTop of 0', async () => {
     const run = transaction({ kind: 'top', source: 'imperative' })
     expect(await run.result).toBe('success')
     expect(run.scrollCalls).toHaveLength(1)
     expect(run.scrollCalls[0].resolved.kind).toBe('top')
-    expect(run.scrollCalls[0].top).toBeLessThan(0)
+    expect(run.scrollCalls[0].top).toBe(0)
   })
 
-  it('scroll adapter: bottom intent produces scrollTop of exactly 0', async () => {
+  it('scroll adapter: bottom intent produces the newest-edge scrollTop (full travel)', async () => {
     const run = transaction({ kind: 'bottom', source: 'imperative' })
     expect(await run.result).toBe('success')
     expect(run.scrollCalls).toHaveLength(1)
     expect(run.scrollCalls[0].resolved.kind).toBe('bottom')
-    expect(run.scrollCalls[0].top).toBe(0)
+    expect(run.scrollCalls[0].top).toBe(5000)
   })
 })
 
-describe('resolveColumnReverseScrollTarget', () => {
-  const scrollHeight = 4000
+describe('resolveFlowScrollTarget', () => {
+  // 4000px of scroll travel (4800px of content in an 800px viewport).
+  const container = { scrollHeight: 4800, clientHeight: 800, scrollTop: 0, scrollTo: vi.fn() }
 
-  it('returns { top: -scrollHeight } for top kind (negative direction)', () => {
-    const target = resolveColumnReverseScrollTarget({ kind: 'top' }, scrollHeight)
-    expect(target).toEqual({ top: -scrollHeight })
-    expect(target!.top).toBeLessThan(0)
-  })
-
-  it('returns { top: 0 } for bottom kind', () => {
-    const target = resolveColumnReverseScrollTarget({ kind: 'bottom' }, scrollHeight)
+  it('returns { top: 0 } for top kind (oldest edge)', () => {
+    const target = resolveFlowScrollTarget({ kind: 'top' }, container)
     expect(target).toEqual({ top: 0 })
   })
 
-  it('returns { top: <value> } for scrollTop kind', () => {
-    const target = resolveColumnReverseScrollTarget({ kind: 'scrollTop', scrollTop: -1500 }, scrollHeight)
-    expect(target).toEqual({ top: -1500 })
+  it('returns { top: travel } for bottom kind (newest edge)', () => {
+    const target = resolveFlowScrollTarget({ kind: 'bottom' }, container)
+    expect(target).toEqual({ top: 4000 })
+  })
+
+  it('returns { top: <value> } for scrollTop kind, clamped into the real range', () => {
+    expect(resolveFlowScrollTarget({ kind: 'scrollTop', scrollTop: 1500 }, container)).toEqual({ top: 1500 })
+    expect(resolveFlowScrollTarget({ kind: 'scrollTop', scrollTop: 9000 }, container)).toEqual({ top: 4000 })
+    expect(resolveFlowScrollTarget({ kind: 'scrollTop', scrollTop: -1500 }, container)).toEqual({ top: 0 })
   })
 
   it('returns null for message kind (requires DOM element lookup)', () => {
-    const target = resolveColumnReverseScrollTarget(
-      { kind: 'message', targetId: 'm1', alignment: 'start' },
-      scrollHeight
-    )
+    const target = resolveFlowScrollTarget({ kind: 'message', targetId: 'm1', alignment: 'start' }, container)
     expect(target).toBeNull()
   })
 
-  it('handles zero scrollHeight gracefully for top kind', () => {
-    const target = resolveColumnReverseScrollTarget({ kind: 'top' }, 0)
-    expect(target).toEqual({ top: -0 })
-    // -0 and 0 are functionally identical for scrollTo
-    expect(Object.is(target!.top, 0) || Object.is(target!.top, -0)).toBe(true)
+  it('handles a zero-travel container gracefully (top and bottom both 0)', () => {
+    const flat = { scrollHeight: 800, clientHeight: 800, scrollTop: 0, scrollTo: vi.fn() }
+    expect(resolveFlowScrollTarget({ kind: 'top' }, flat)).toEqual({ top: 0 })
+    expect(resolveFlowScrollTarget({ kind: 'bottom' }, flat)).toEqual({ top: 0 })
   })
 })
 
-describe('applyColumnReverseScroll — production scroll adapter', () => {
+describe('applyFlowScroll — production scroll adapter', () => {
   const makeContainer = (scrollHeight = 4000) => ({
     scrollHeight,
     clientHeight: 800,
@@ -276,32 +276,35 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
     scrollTo: vi.fn()
   })
 
-  it('top: calls container.scrollTo with negative scrollHeight', () => {
+  it('top: calls container.scrollTo with the oldest edge (0)', () => {
     const container = makeContainer(5000)
-    expect(applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
-    expect(container.scrollTo).toHaveBeenCalledOnce()
-    expect(container.scrollTo).toHaveBeenCalledWith({ top: -5000 })
-  })
-
-  it('bottom: calls container.scrollTo with 0', () => {
-    const container = makeContainer(5000)
-    expect(applyColumnReverseScroll({ kind: 'bottom' }, container, vi.fn())).toBe('success')
+    expect(applyFlowScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledOnce()
     expect(container.scrollTo).toHaveBeenCalledWith({ top: 0 })
   })
 
-  it('scrollTop: passes through the scrollTop value to container.scrollTo', () => {
+  it('bottom: calls container.scrollTo with the container travel (scrollHeight - clientHeight)', () => {
     const container = makeContainer(5000)
-    expect(applyColumnReverseScroll({ kind: 'scrollTop', scrollTop: -1800 }, container, vi.fn())).toBe('success')
+    expect(applyFlowScroll({ kind: 'bottom' }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledOnce()
-    expect(container.scrollTo).toHaveBeenCalledWith({ top: -1800 })
+    expect(container.scrollTo).toHaveBeenCalledWith({ top: 5000 - 800 })
+  })
+
+  it('scrollTop: passes a reachable position through and clamps the rest', () => {
+    const container = makeContainer(5000)
+    expect(applyFlowScroll({ kind: 'scrollTop', scrollTop: 1800 }, container, vi.fn())).toBe('success')
+    expect(container.scrollTo).toHaveBeenCalledOnce()
+    expect(container.scrollTo).toHaveBeenCalledWith({ top: 1800 })
+    const beyond = makeContainer(5000)
+    expect(applyFlowScroll({ kind: 'scrollTop', scrollTop: 9000 }, beyond, vi.fn())).toBe('success')
+    expect(beyond.scrollTo).toHaveBeenCalledWith({ top: 5000 - 800 })
   })
 
   it('message: delegates to scrollElementIntoView callback with targetId and alignment', () => {
     const container = makeContainer()
     const scrollIntoView = vi.fn(() => 'success' as const)
     expect(
-      applyColumnReverseScroll({ kind: 'message', targetId: 'msg-42', alignment: 'center' }, container, scrollIntoView)
+      applyFlowScroll({ kind: 'message', targetId: 'msg-42', alignment: 'center' }, container, scrollIntoView)
     ).toBe('success')
     expect(container.scrollTo).not.toHaveBeenCalled()
     expect(scrollIntoView).toHaveBeenCalledOnce()
@@ -311,11 +314,7 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
   it('message: default alignment is start when not specified in resolved', () => {
     const scrollIntoView = vi.fn(() => 'success' as const)
     expect(
-      applyColumnReverseScroll(
-        { kind: 'message', targetId: 'msg-10', alignment: 'start' },
-        makeContainer(),
-        scrollIntoView
-      )
+      applyFlowScroll({ kind: 'message', targetId: 'msg-10', alignment: 'start' }, makeContainer(), scrollIntoView)
     ).toBe('success')
     expect(scrollIntoView).toHaveBeenCalledWith('msg-10', 'start')
   })
@@ -324,11 +323,7 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
     const container = makeContainer()
     const scrollIntoView = vi.fn(() => 'not-found' as const)
     expect(
-      applyColumnReverseScroll(
-        { kind: 'message', targetId: 'msg-missing', alignment: 'start' },
-        container,
-        scrollIntoView
-      )
+      applyFlowScroll({ kind: 'message', targetId: 'msg-missing', alignment: 'start' }, container, scrollIntoView)
     ).toBe('not-found')
     expect(container.scrollTo).not.toHaveBeenCalled()
   })
@@ -337,52 +332,48 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
     const container = makeContainer()
     const scrollIntoView = vi.fn(() => 'cancelled' as const)
     expect(
-      applyColumnReverseScroll(
-        { kind: 'message', targetId: 'msg-stale', alignment: 'start' },
-        container,
-        scrollIntoView
-      )
+      applyFlowScroll({ kind: 'message', targetId: 'msg-stale', alignment: 'start' }, container, scrollIntoView)
     ).toBe('cancelled')
   })
 
   it('null container: cancelled for top (no scrollTo, no scrollIntoView)', () => {
     const scrollIntoView = vi.fn()
-    expect(applyColumnReverseScroll({ kind: 'top' }, null, scrollIntoView)).toBe('cancelled')
+    expect(applyFlowScroll({ kind: 'top' }, null, scrollIntoView)).toBe('cancelled')
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('undefined container: cancelled for bottom', () => {
     const scrollIntoView = vi.fn()
-    expect(applyColumnReverseScroll({ kind: 'bottom' }, undefined, scrollIntoView)).toBe('cancelled')
+    expect(applyFlowScroll({ kind: 'bottom' }, undefined, scrollIntoView)).toBe('cancelled')
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('null container with message kind: still calls scrollElementIntoView', () => {
     const scrollIntoView = vi.fn(() => 'success' as const)
-    expect(
-      applyColumnReverseScroll({ kind: 'message', targetId: 'msg-5', alignment: 'end' }, null, scrollIntoView)
-    ).toBe('success')
+    expect(applyFlowScroll({ kind: 'message', targetId: 'msg-5', alignment: 'end' }, null, scrollIntoView)).toBe(
+      'success'
+    )
     expect(scrollIntoView).toHaveBeenCalledWith('msg-5', 'end')
   })
 
-  it('top with zero scrollHeight: calls scrollTo with -0', () => {
+  it('top with a zero-travel container: calls scrollTo with 0', () => {
     const container = makeContainer(0)
-    expect(applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
-    expect(container.scrollTo).toHaveBeenCalledWith({ top: -0 })
+    expect(applyFlowScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
+    expect(container.scrollTo).toHaveBeenCalledWith({ top: 0 })
   })
 
   it('each kind produces exactly one scrollTo or one scrollIntoView, never both', () => {
     const kinds = [
       { kind: 'top' as const },
       { kind: 'bottom' as const },
-      { kind: 'scrollTop' as const, scrollTop: -100 },
+      { kind: 'scrollTop' as const, scrollTop: 100 },
       { kind: 'message' as const, targetId: 'm1', alignment: 'start' as const }
     ]
 
     for (const resolved of kinds) {
       const container = makeContainer()
       const scrollIntoView = vi.fn()
-      applyColumnReverseScroll(resolved, container, scrollIntoView)
+      applyFlowScroll(resolved, container, scrollIntoView)
 
       if (resolved.kind === 'message') {
         expect(container.scrollTo).not.toHaveBeenCalled()
@@ -396,31 +387,33 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
 })
 
 describe('computeRestoreMessageScrollTop — saved-offset restore geometry', () => {
-  // Topic away/back regression shape: elementTop -561 (row content offset at
-  // scrollTop -470 with the row at -91), saved offset -91 → scrollTo -470.
+  // Topic away/back regression shape in normal-flow coordinates: 9426px of
+  // travel, the row content offset 561px above the current top (8865) with the
+  // saved stable intra-row offset -91 (row top 91px above the container top),
+  // so the landing scrollTop is 8865 + 91 = 8956.
   const RESTORE = {
-    elementTopWithinContainer: -561,
+    elementTopWithinContainer: 8865,
     restoreOffset: -91,
-    minScrollTop: -9426
+    maxScrollTop: 9426
   }
 
-  it('lands the row exactly at its saved negative offset', () => {
-    expect(computeRestoreMessageScrollTop(RESTORE)).toBe(-470)
+  it('lands the row exactly at its saved offset', () => {
+    expect(computeRestoreMessageScrollTop(RESTORE)).toBe(8956)
   })
 
   it('already-placed geometry is the identity (caller skips the write within 1px)', () => {
-    const top = computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: -561 })
+    const top = computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: 8865 })
     expect(top).not.toBeNull()
-    // scrollTop -470 already holds offset -91: |(-470) - (-470)| = 0, no write.
-    expect(Math.abs(-470 - top!)).toBeLessThanOrEqual(1)
+    // scrollTop 8956 already holds offset -91: |8956 - 8956| = 0, no write.
+    expect(Math.abs(8956 - top!)).toBeLessThanOrEqual(1)
   })
 
-  it('clamps beyond-edge targets to the oldest edge', () => {
-    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: -20000 })).toBe(RESTORE.minScrollTop)
+  it('clamps beyond-oldest targets to the oldest edge (0)', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: -10574 })).toBe(0)
   })
 
-  it('clamps above-bottom targets to 0', () => {
-    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: 50, restoreOffset: -91 })).toBe(0)
+  it('clamps beyond-newest targets to the newest edge (maxScrollTop)', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: 9476 })).toBe(RESTORE.maxScrollTop)
   })
 
   it('returns null for a missing offset (caller keeps its alignment path)', () => {
@@ -433,7 +426,7 @@ describe('computeRestoreMessageScrollTop — saved-offset restore geometry', () 
     expect(
       computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: Number.POSITIVE_INFINITY })
     ).toBeNull()
-    expect(computeRestoreMessageScrollTop({ ...RESTORE, minScrollTop: NaN })).toBeNull()
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, maxScrollTop: NaN })).toBeNull()
   })
 })
 
@@ -464,81 +457,80 @@ describe('resolveMessageNavigation restore offset pass-through', () => {
   })
 })
 
-describe('computeColumnReverseMessageScrollTop — explicit resident-row geometry', () => {
-  // Reproduces the verified delivery defect: a resident oldest row far above
-  // the viewport (elementTop -12073, container 802px, scroll range
-  // [-12142, 0]) must scroll to the clamped oldest edge — never stay at 0.
+describe('computeFlowMessageScrollTop — explicit resident-row geometry', () => {
+  // Reproduces the verified delivery defect in normal-flow coordinates: a
+  // resident oldest row far ABOVE the viewport (content offset 69 of 12142px
+  // travel in an 802px container) must be scrolled up to, never left at the
+  // newest edge. 12142 - 12073 = 69.
   const OLDEST = {
-    elementTopWithinContainer: -12073,
+    elementTopWithinContainer: 69,
     containerClientHeight: 802,
     elementHeight: 120,
-    minScrollTop: -12142
+    maxScrollTop: 12142
   }
 
-  it('start: oldest resident row scrolls to its exact content offset (finite, negative, moved)', () => {
-    const top = computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start' })
+  it('start: oldest resident row scrolls to its exact content offset (finite, positive, moved)', () => {
+    const top = computeFlowMessageScrollTop({ ...OLDEST, alignment: 'start' })
     expect(top).not.toBeNull()
     expect(Number.isFinite(top!)).toBe(true)
-    expect(top!).toBeLessThan(0)
+    expect(top!).toBeGreaterThan(0)
     expect(top!).toBe(OLDEST.elementTopWithinContainer)
   })
 
-  it('start: unreachable-beyond-edge offset clamps to the oldest edge', () => {
-    const top = computeColumnReverseMessageScrollTop({
+  it('start: an offset beyond the oldest edge clamps to that edge (0)', () => {
+    const top = computeFlowMessageScrollTop({
       ...OLDEST,
       alignment: 'start',
-      elementTopWithinContainer: -13000
+      elementTopWithinContainer: -858
     })
-    expect(top).toBe(OLDEST.minScrollTop)
+    expect(top).toBe(0)
   })
 
   it('start: mid-list row lands exactly at its content offset', () => {
-    const top = computeColumnReverseMessageScrollTop({
-      elementTopWithinContainer: -5546,
+    const top = computeFlowMessageScrollTop({
+      elementTopWithinContainer: 6596,
       containerClientHeight: 802,
       elementHeight: 120,
       alignment: 'start',
-      minScrollTop: -12142
+      maxScrollTop: 12142
     })
-    expect(top).toBe(-5546)
+    expect(top).toBe(6596)
   })
 
   it('center/end: offset by the free space around the row', () => {
     const base = {
-      elementTopWithinContainer: -5546,
+      elementTopWithinContainer: 6596,
       containerClientHeight: 802,
       elementHeight: 120,
-      minScrollTop: -12142
+      maxScrollTop: 12142
     }
-    expect(computeColumnReverseMessageScrollTop({ ...base, alignment: 'center' })).toBe(-5546 - (802 - 120) / 2)
-    expect(computeColumnReverseMessageScrollTop({ ...base, alignment: 'end' })).toBe(-5546 - (802 - 120))
+    expect(computeFlowMessageScrollTop({ ...base, alignment: 'center' })).toBe(6596 - (802 - 120) / 2)
+    expect(computeFlowMessageScrollTop({ ...base, alignment: 'end' })).toBe(6596 - (802 - 120))
   })
 
-  it('newest row at the bottom clamps to 0 (never positive)', () => {
-    const top = computeColumnReverseMessageScrollTop({
-      elementTopWithinContainer: -50,
+  it('newest resident row clamps at the newest edge (never beyond travel)', () => {
+    const top = computeFlowMessageScrollTop({
+      elementTopWithinContainer: 12092,
       containerClientHeight: 802,
       elementHeight: 120,
       alignment: 'start',
-      minScrollTop: -12142
+      maxScrollTop: 12142
     })
-    expect(top).toBe(-50)
-    const belowBottom = computeColumnReverseMessageScrollTop({
-      elementTopWithinContainer: 30,
+    expect(top).toBe(12092)
+    const belowNewest = computeFlowMessageScrollTop({
+      elementTopWithinContainer: 12172,
       containerClientHeight: 802,
       elementHeight: 120,
       alignment: 'start',
-      minScrollTop: -12142
+      maxScrollTop: 12142
     })
-    expect(belowBottom).toBe(0)
+    expect(belowNewest).toBe(12142)
   })
 
   it('non-finite input fails closed with null (caller skips the write)', () => {
+    expect(computeFlowMessageScrollTop({ ...OLDEST, alignment: 'start', elementTopWithinContainer: NaN })).toBeNull()
     expect(
-      computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start', elementTopWithinContainer: NaN })
-    ).toBeNull()
-    expect(
-      computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start', minScrollTop: Number.POSITIVE_INFINITY })
+      computeFlowMessageScrollTop({ ...OLDEST, alignment: 'start', maxScrollTop: Number.POSITIVE_INFINITY })
     ).toBeNull()
   })
 })
@@ -1101,7 +1093,10 @@ describe('resolveMessageRowIdForNode (search-match row resolution)', () => {
 
 const CONTAINER_HEIGHT = 600
 const CONTAINER_SCROLL_HEIGHT = 5000
-const MIN_SCROLL_TOP = -(CONTAINER_SCROLL_HEIGHT - CONTAINER_HEIGHT)
+/** Newest-edge resting position: the container's whole scroll travel. */
+const MAX_SCROLL_TOP = CONTAINER_SCROLL_HEIGHT - CONTAINER_HEIGHT
+/** Reading position 2000px up from the newest edge (the old -2000 shape). */
+const READING_SCROLL_TOP = MAX_SCROLL_TOP - 2000
 
 /** Band derived the way production derives it: from real measured rectangles. */
 const bandFor = (overlayBottom: number | null, paddingPx?: number) =>
@@ -1150,14 +1145,14 @@ describe('search match landing plan', () => {
       matchTopOffset: 0,
       matchHeight: 20,
       containerClientHeight: CONTAINER_HEIGHT,
-      currentScrollTop: -2000,
-      minScrollTop: MIN_SCROLL_TOP,
+      currentScrollTop: READING_SCROLL_TOP,
+      maxScrollTop: MAX_SCROLL_TOP,
       band: COVERED_BAND,
       ...overrides
     })
 
   it('centres the hit inside the unobscured band, not in the whole container', () => {
-    const currentScrollTop = -2000
+    const currentScrollTop = READING_SCROLL_TOP
     const matchTopOffset = 900 // far below the visible area
     const plan = planAt({ matchTopOffset, currentScrollTop })
     expect(plan?.kind).toBe('scroll')
@@ -1171,12 +1166,12 @@ describe('search match landing plan', () => {
 
   it('agrees with container centring when nothing is covered', () => {
     const uncovered = { top: 0, height: CONTAINER_HEIGHT }
-    const centring = computeColumnReverseMessageScrollTop({
-      elementTopWithinContainer: 900 - 2000,
+    const centring = computeFlowMessageScrollTop({
+      elementTopWithinContainer: 900 + READING_SCROLL_TOP,
       containerClientHeight: CONTAINER_HEIGHT,
       elementHeight: 20,
       alignment: 'center',
-      minScrollTop: MIN_SCROLL_TOP
+      maxScrollTop: MAX_SCROLL_TOP
     })
     const plan = planAt({ matchTopOffset: 900, band: uncovered })
     expect(plan).toMatchObject({ kind: 'scroll', top: centring })
@@ -1190,21 +1185,22 @@ describe('search match landing plan', () => {
     const plan = planAt({ matchTopOffset: 20 }) as { kind: string; top: number }
     expect(plan.kind).toBe('scroll')
     // Post-write on-screen position of the hit is clear of the covered strip.
-    expect(20 - 2000 - plan.top).toBeGreaterThan(COVERED_BAND.top)
+    expect(20 + READING_SCROLL_TOP - plan.top).toBeGreaterThan(COVERED_BAND.top)
   })
 
   it('clamps at the oldest edge and still reports the real distance', () => {
     const plan = planAt({ matchTopOffset: -3000 }) as { top: number; distance: number; animate: boolean }
-    expect(plan.top).toBe(MIN_SCROLL_TOP)
-    expect(plan.distance).toBeCloseTo(Math.abs(MIN_SCROLL_TOP + 2000), 6)
+    expect(plan.top).toBe(0)
+    expect(plan.distance).toBeCloseTo(READING_SCROLL_TOP, 6)
     expect(plan.animate).toBe(true)
   })
 
   it('does not animate reduced-motion users or a sub-threshold correction', () => {
     expect(planAt({ matchTopOffset: 900, reducedMotion: true })).toMatchObject({ animate: false })
-    // Parked at the newest edge: the plan clamps to scrollTop 0, a few pixels away.
-    const tiny = planAt({ matchTopOffset: 583, currentScrollTop: -3 })
-    expect(tiny).toMatchObject({ kind: 'scroll', top: 0, animate: false })
+    // Parked 3px shy of the newest edge: the plan clamps to that edge, a few
+    // pixels away.
+    const tiny = planAt({ matchTopOffset: 583, currentScrollTop: MAX_SCROLL_TOP - 3 })
+    expect(tiny).toMatchObject({ kind: 'scroll', top: MAX_SCROLL_TOP, animate: false })
     expect((tiny as { distance: number }).distance).toBeLessThan(SEARCH_MATCH_ANIMATION_MIN_DISTANCE_PX)
   })
 

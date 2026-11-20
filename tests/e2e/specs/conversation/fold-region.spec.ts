@@ -19,7 +19,7 @@
  * click at recorded points, wheel). No direct state dispatch, no
  * scrollToBottom, no scrollTop writes.
  *
- * Geometry: #messages renders column-reverse (bottom/newest scrollTop ~= 0).
+ * Geometry: #messages renders normal flow (oldest/top scrollTop ~= 0, bottom/newest scrollTop ~= max(0, sh - ch)).
  */
 import type { Page } from '@playwright/test'
 
@@ -319,9 +319,9 @@ async function wheelToReadingPosition(page: Page): Promise<{ scrollTop: number }
     page.evaluate((minOff: number) => {
       const c = document.getElementById('messages') as HTMLElement | null
       if (!c) return { ok: false, st: NaN }
-      const topExtreme = -(c.scrollHeight - c.clientHeight)
+      const bottomEdge = c.scrollHeight - c.clientHeight
       const st = c.scrollTop
-      return { ok: Math.abs(st) > minOff && Math.abs(st - topExtreme) > 200, st }
+      return { ok: bottomEdge - st > minOff && st > 200, st }
     }, NON_BOTTOM_MIN)
   for (let i = 0; i < 30; i++) {
     if ((await probe()).ok) break
@@ -509,7 +509,10 @@ async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Pr
   await hoverGroupRow(page, firstAssistantId)
   if (await isToggleInViewport(page)) {
     const fresh = await readScroll(page)
-    expect(Math.abs(fresh.scrollTop), 'fold target must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+    expect(
+      fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+      'fold target must stay non-bottom'
+    ).toBeGreaterThan(NON_BOTTOM_MIN)
     return
   }
   const box = await page.locator('#messages').first().boundingBox()
@@ -518,11 +521,14 @@ async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Pr
     await page.mouse.wheel(0, 280)
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= NON_BOTTOM_MIN) break
     await hoverGroupRow(page, firstAssistantId)
     if (await isToggleInViewport(page)) {
       const fresh = await readScroll(page)
-      expect(Math.abs(fresh.scrollTop), 'nudge to reveal toggle must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+      expect(
+        fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+        'nudge to reveal toggle must stay non-bottom'
+      ).toBeGreaterThan(NON_BOTTOM_MIN)
       await settledAnchor(page)
       return
     }
@@ -531,11 +537,14 @@ async function wheelUntilToggleVisible(page: Page, firstAssistantId: string): Pr
     await page.mouse.wheel(0, -280)
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= NON_BOTTOM_MIN) break
     await hoverGroupRow(page, firstAssistantId)
     if (await isToggleInViewport(page)) {
       const fresh = await readScroll(page)
-      expect(Math.abs(fresh.scrollTop), 'nudge to reveal toggle must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+      expect(
+        fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+        'nudge to reveal toggle must stay non-bottom'
+      ).toBeGreaterThan(NON_BOTTOM_MIN)
       await settledAnchor(page)
       return
     }
@@ -559,6 +568,9 @@ test.describe('Fold expand/compress interaction-region stationary', () => {
         'FOLD REGION ROUND TRIP: from a verified non-bottom reading viewport with the group expand/compress toggle fully in-viewport, a real physical pointer click must keep the SAME toggle interaction region at its previous viewport geometry with the stationary pointer still hitting the toggle — in BOTH directions (expand→compress or compress→expand from the live default) — never jumping. Painted transition frames sampled from BEFORE each click through settle; final collapse must restore the pre-expand stable route snapshot (click→restore).'
     })
     const page: Page = mainWindow
+    // Conventional 1280x800 desktop geometry for this round trip (per-test
+    // viewport; keyboard-viewport-scroll already resizes mid-test the same way).
+    await page.setViewportSize({ width: 1280, height: 800 })
     const { topicId, firstAssistantId } = await test.step('seed mid-topic fold group and cold-activate', async () =>
       setupFoldRegionTopic(page))
     await test.step('wheel to a verified non-bottom reading position with toggle visible', async () =>
@@ -648,15 +660,18 @@ test.describe('Fold expand/compress interaction-region stationary', () => {
     ).toBeLessThanOrEqual(REGION_TOL)
     expect(secondHit, 'fold direction 2: stationary pointer still hits the toggle').toBe(true)
     expect(second.worst, 'fold direction 2: painted transition frames never jump').toBeLessThanOrEqual(TRANSITION_TOL)
-    expect(Math.abs(postScroll.scrollTop), 'fold round trip: must remain non-bottom (no bottom jump)').toBeGreaterThan(
-      BOTTOM_TOL
-    )
-    const topExtreme = -(postScroll.scrollHeight - postScroll.clientHeight)
+    expect(
+      postScroll.scrollHeight - postScroll.clientHeight - postScroll.scrollTop,
+      'fold round trip: must remain non-bottom (no bottom jump)'
+    ).toBeGreaterThan(BOTTOM_TOL)
+    const bottomEdge = postScroll.scrollHeight - postScroll.clientHeight
     expect(
       postScroll.scrollTop,
       'fold round trip: post viewport stays inside the live scroll range'
-    ).toBeGreaterThanOrEqual(topExtreme - OFFSET_TOL)
-    expect(postScroll.scrollTop, 'fold round trip: post viewport stays at/above bottom').toBeLessThanOrEqual(OFFSET_TOL)
+    ).toBeGreaterThanOrEqual(0 - OFFSET_TOL)
+    expect(postScroll.scrollTop, 'fold round trip: post viewport stays at/above bottom').toBeLessThanOrEqual(
+      bottomEdge + OFFSET_TOL
+    )
     // Click→restore: the round trip restores the pre-expand stable route
     // snapshot (same reading identity, same intra-row offset, same scroll).
     // The reading scrolls above guarantee a pre snapshot exists.

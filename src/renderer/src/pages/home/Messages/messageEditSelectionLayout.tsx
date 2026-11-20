@@ -87,7 +87,9 @@ const SegmentRunHost: React.FC<{
  */
 export const SelectionBlock = styled.div`
   display: flex;
-  flex-direction: column-reverse;
+  // Normal flow: children are in flow DOM order (oldest first), so the outline
+  // never needs a reversed direction.
+  flex-direction: column;
   box-shadow: 0 0 0 1.5px var(--color-primary);
   border-radius: 10px;
 `
@@ -107,9 +109,9 @@ export const SelectionBlock = styled.div`
  *   and the message-toolbar immediate hide (same edit-class commit, no
  *   transition, height reserved). Nested ordinary actions run unchanged
  *   behind the outer shield — no per-child edit branches.
- * - `column-reverse` mirrors the scroll container and SelectionBlock:
- *   render order is newest→oldest, so the reversed flex keeps the older
- *   user group visually above the newer assistant group(s).
+ * - `column` matches the scroll container: DOM order is normal flow
+ *   (oldest→newest), so the older user group naturally sits above the newer
+ *   assistant group(s) without a reversed direction.
  * - Adds no spacing: no margin/padding/gap, only the shared 10px radius
  *   so the hover ring tracks the same corners as the selected outline.
  *   The edit cover is absolutely positioned (out of flow), so edit-mode
@@ -119,7 +121,7 @@ export const SelectionBlock = styled.div`
  */
 export const EditTurnContainer = styled.div`
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   border-radius: 10px;
   &.edit-turn-interactive {
     position: relative;
@@ -292,8 +294,9 @@ export function deriveTurnAskId(messages: readonly { id: string; role?: string; 
 }
 
 /**
- * Mounted message-flow sequence (render order newest→oldest, matching the
- * column-reverse scroll container where DOM-earlier means visually lower).
+ * Mounted message-flow sequence in normal-flow DOM order (oldest→newest),
+ * matching the scroll container where DOM order and visual order agree
+ * (DOM-earlier means visually higher).
  *
  * - `turn`: one mounted message-body group (one visual MessageGroup). The
  *   body node carries liveness (`data-layer-kind` / `data-layer-run-id`),
@@ -304,16 +307,18 @@ export function deriveTurnAskId(messages: readonly { id: string; role?: string; 
  *   the ordered rendered node. It carries no turn click/hover behavior,
  *   so divider controls stay outside turn selection capture.
  *
- * DOM vs visual order (column-reverse, newest→oldest render order):
- * - A fork boundary node renders DOM-immediately-before its anchor turn
+ * DOM vs visual order (normal flow): DOM order IS visual order, so the
+ * builder's single reversal decides where each divider lands.
+ * - A fork boundary node renders DOM-immediately-after its anchor turn
  *   body, i.e. visually directly below the anchor message: the boundary
  *   between the anchor (visually above the line) and the newer content
  *   (visually below the line).
- * - A context boundary node renders DOM-immediately-after its anchor turn
- *   body (where the legacy inline divider sat: after the group div), i.e.
- *   visually directly above the anchor message on the older side. Its
- *   position preserves the legacy visual placement exactly; only the DOM
- *   ownership changes (sibling instead of descendant of the turn).
+ * - A context boundary node renders DOM-immediately-before its anchor turn
+ *   body (where the legacy inline divider sat: after the group div of the
+ *   older side), i.e. visually directly above the anchor message on the
+ *   older side. Its position preserves the legacy visual placement exactly;
+ *   only the DOM ownership changes (sibling instead of descendant of the
+ *   turn).
  */
 export interface FlowBodyEntry {
   /** Stable entity-derived group key (unchanged by selection state). */
@@ -484,7 +489,7 @@ export function deriveSelectionChunkKey(runs: readonly FlowBodyEntry[][]): strin
 }
 
 export interface RenderEditFlowNodesOptions {
-  /** Mounted message flow in newest→oldest render order. */
+  /** Mounted message flow in normal-flow DOM order (oldest→newest). */
   nodes: FlowNode[]
   isEditMode: boolean
   onTurnClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
@@ -620,8 +625,9 @@ export function deriveRunSegmentChrome(run: readonly FlowBodyEntry[]): RunSegmen
  *   no hover state, no timers, no reparenting on hover.
  *
  * Resulting behavior:
- * - Selecting only the turn visually above the line excludes the line:
- *   the edge boundary renders outside (visually adjacent to) the outline.
+ * - Selecting only the turn above the divider line (the older side)
+ *   excludes the line: the edge boundary renders outside (visually adjacent
+ *   to) the outline.
  * - A continuous selection spanning both sides includes the interior
  *   boundary naturally inside the single unbroken outline — no split
  *   outlines, no duplicated IDs, no divider-specific visual hacks.

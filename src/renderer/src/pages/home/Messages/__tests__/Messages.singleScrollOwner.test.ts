@@ -2,8 +2,8 @@
  * Single scroll-owner contract for the owned chat viewport (#messages).
  *
  * The route viewport keeper is the sole compensation owner on this host
- * (column-reverse bottom pin + interaction-region holds). Browser scroll
- * anchoring (`overflow-anchor`) would fight it during message-editor
+ * The route viewport keeper is the sole compensation owner on this host
+ * (bottom pin + interaction-region holds). Browser scroll
  * top-edge resize (same-press DOWN→UP / UP→DOWN turnaround, clamped
  * height), edit open, and cancel — native corrections racing keeper
  * corrections read as ±5–10px bottom motion plus a release snap. Disabling
@@ -27,9 +27,13 @@ describe('single scroll-owner contract (#messages)', () => {
     expect(rules).toContain('overflow-anchor: none')
   })
 
-  it('keeps the host a column-reverse scroll container', () => {
+  it('keeps the host a normal-flow scroll container that takes the available height', () => {
     const rules: string = MessagesContainer?.componentStyle?.rules?.join('') ?? ''
-    expect(rules).toContain('column-reverse')
+    expect(rules).toContain('flex-direction: column')
+    expect(rules).not.toContain('column-reverse')
+    // The scrollport owns the available height; the content wrapper bottom-aligns
+    // short content with an auto block-start margin instead of a reversed flow.
+    expect(rules).toContain('flex: 1 1 auto')
     expect(rules).toContain('overflow-x: hidden')
   })
 

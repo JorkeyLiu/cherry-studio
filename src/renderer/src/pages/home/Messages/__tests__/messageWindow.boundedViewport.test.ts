@@ -6,8 +6,10 @@ import {
   createLatestMessageWindow,
   createOldestMessageWindow,
   createTargetMessageWindow,
+  derivePaginationWindow,
   expandMessageWindowNewer,
   expandMessageWindowOlder,
+  isHistoryHeadLoaded,
   MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
   reconcileMessageWindow
 } from '../messageWindow'
@@ -364,11 +366,144 @@ describe('messageWindow bounded viewport B-06 calibration default', () => {
     expect(win.boundedViewportObservability).toBeDefined()
     expect(win.boundedViewportObservability?.calibrationDefault).toBe(CALIBRATION_DEFAULT)
     expect(win.boundedViewportObservability?.boundedCapacity).toBe(10)
-    expect(win.boundedViewportObservability?.didTrim).toBe(false)
+    // The newest-capacity slice omits the projection's older groups locally, so
+    // the bound is reported honestly instead of reading as "nothing trimmed".
+    expect(win.boundedViewportObservability?.didTrim).toBe(true)
+    expect(win.boundedViewportObservability?.trimmedGroups).toBe(390)
+    expect(win.boundedViewportObservability?.trimmedEdge).toBe('older')
 
     const bounded = expandMessageWindowOlder(messages, createLatestMessageWindow(messages, CALIBRATION_DEFAULT), 10)
     expect(bounded.boundedViewportObservability?.didTrim).toBe(true)
     expect(bounded.boundedViewportObservability?.trimmedEdge).toBe('newer')
     expect(typeof bounded.boundedViewportObservability?.trimmedGroups).toBe('number')
+  })
+})
+
+describe('latest window local older omission vs Main authority', () => {
+  // A 14-group loaded projection displayed at capacity 10: the display window
+  // is the newest 10 groups (4..13) and 4 older groups stay resident but
+  // outside it. Main may simultaneously report that it has no older page left
+  // to read for this route — the two facts are independent.
+  const projection = users(14)
+  const capacity = 10
+  const exhausted = { hasMoreBefore: false, hasMoreAfter: false }
+  const chronologicalIds = projection.map(({ id }) => id)
+
+  it('keeps the newest-capacity range and both authority flags while reporting the resident older page', () => {
+    const win = createLatestMessageWindow(projection, capacity, exhausted)
+
+    expect(win.range).toEqual({ oldestGroupIndex: 4, newestGroupIndex: 13 })
+    expect(win.groupCount).toBe(capacity)
+    expect(ids(win)).toEqual(chronologicalIds.slice(4).toReversed())
+    // Main truth rides verbatim: nothing older to read.
+    expect(win.authoritativeHasMoreBefore).toBe(false)
+    expect(win.authoritativeHasMoreAfter).toBe(false)
+    // The display can still show the 4 resident older groups.
+    expect(win.hasMoreOlder).toBe(true)
+    expect(win.hasMoreNewer).toBe(false)
+    // The local trim is the reported mechanism, on the older edge only.
+    expect(win.boundedViewportObservability?.didTrim).toBe(true)
+    expect(win.boundedViewportObservability?.trimmedGroups).toBe(4)
+    expect(win.boundedViewportObservability?.trimmedEdge).toBe('older')
+  })
+
+  it('never invents an older page when the whole projection fits at the bound', () => {
+    const win = createLatestMessageWindow(users(capacity), capacity, exhausted)
+
+    expect(win.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 9 })
+    expect(win.hasMoreOlder).toBe(false)
+    expect(win.hasMoreNewer).toBe(false)
+    expect(win.authoritativeHasMoreBefore).toBe(false)
+    expect(win.boundedViewportObservability?.didTrim).toBe(false)
+    expect(win.boundedViewportObservability?.trimmedEdge).toBeNull()
+  })
+
+  it('still surfaces authoritative true at the head, independent of any local omission', () => {
+    const win = createLatestMessageWindow(users(capacity), capacity, {
+      hasMoreBefore: true,
+      hasMoreAfter: false
+    })
+
+    expect(win.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 9 })
+    expect(win.hasMoreOlder).toBe(true)
+    expect(win.hasMoreNewer).toBe(false)
+    expect(win.authoritativeHasMoreBefore).toBe(true)
+    expect(win.boundedViewportObservability?.didTrim).toBe(false)
+  })
+
+  it('never opens the newer edge from a local older trim', () => {
+    const win = createLatestMessageWindow(projection, capacity, exhausted)
+
+    expect(win.range?.newestGroupIndex).toBe(projection.length - 1)
+    expect(win.hasMoreNewer).toBe(false)
+    expect(win.boundedViewportObservability?.trimmedEdge).not.toBe('newer')
+  })
+
+  it('pages from the tail window into the resident older groups and closes the flag at the local head', () => {
+    const tail = createLatestMessageWindow(projection, capacity, exhausted)
+    expect(tail.hasMoreOlder).toBe(true)
+
+    const outcome = derivePaginationWindow({
+      direction: 'older',
+      messages: projection,
+      currentWindow: tail,
+      additionalGroupCount: capacity,
+      responseWindow: exhausted
+    })
+    expect(outcome.status).toBe('accepted')
+    if (outcome.status !== 'accepted') throw new Error('unreachable')
+    const paged = outcome.window
+
+    expect(paged.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 13 })
+    expect(ids(paged)).toEqual(chronologicalIds.toReversed())
+    // Nothing resident is left older than the displayed window now.
+    expect(paged.hasMoreOlder).toBe(false)
+    expect(paged.hasMoreNewer).toBe(false)
+    expect(paged.authoritativeHasMoreBefore).toBe(false)
+    expect(paged.paginationTarget).toBe(true)
+  })
+
+  it('keeps the local older traversability across a latest-edge reconcile', () => {
+    const tail = createLatestMessageWindow(projection, capacity, exhausted)
+    const appended = [...projection, message('m14'), message('m15')]
+    const reconciled = reconcileMessageWindow(appended, projection, tail)
+
+    expect(reconciled.edge).toBe('latest')
+    expect(reconciled.groupCount).toBe(capacity)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 6, newestGroupIndex: 15 })
+    expect(reconciled.authoritativeHasMoreBefore).toBe(false)
+    expect(reconciled.hasMoreOlder).toBe(true)
+    expect(reconciled.hasMoreNewer).toBe(false)
+  })
+
+  it('claims the history head only when Main is exhausted AND the display reaches it', () => {
+    // 14 resident groups shown as the newest 10: Main is exhausted, but 4
+    // resident older groups are still browsable, so the head is not displayed.
+    const tail = createLatestMessageWindow(projection, capacity, exhausted)
+    expect(isHistoryHeadLoaded(tail)).toBe(false)
+
+    // Same window after the resident older page is paged in: local head reached.
+    const paged = derivePaginationWindow({
+      direction: 'older',
+      messages: projection,
+      currentWindow: tail,
+      additionalGroupCount: capacity,
+      responseWindow: exhausted
+    })
+    expect(paged.status).toBe('accepted')
+    if (paged.status !== 'accepted') throw new Error('unreachable')
+    expect(isHistoryHeadLoaded(paged.window)).toBe(true)
+
+    // Unknown authority is never a head, even at the display's own oldest row.
+    expect(isHistoryHeadLoaded(createLatestMessageWindow(users(capacity), capacity))).toBe(false)
+    // Main still has an older page: not the head either.
+    expect(
+      isHistoryHeadLoaded(
+        createLatestMessageWindow(users(capacity), capacity, { hasMoreBefore: true, hasMoreAfter: false })
+      )
+    ).toBe(false)
+    // No window at all: nothing is proven.
+    expect(isHistoryHeadLoaded(null)).toBe(false)
+    expect(isHistoryHeadLoaded(undefined)).toBe(false)
   })
 })

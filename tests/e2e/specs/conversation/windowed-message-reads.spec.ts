@@ -340,7 +340,7 @@ test.describe('windowed reads: latest and around', () => {
       expectedTailIds.push(`${topicId}-msg-${pad(i, 5)}`)
     }
     expect(projection.ids).toEqual(expectedTailIds)
-    // DOM order is render-dependent (column-reverse / flex); assert same set regardless of order
+    // DOM order is render-dependent (normal flow / flex); assert same set regardless of order
     expect([...projection.domIds].sort()).toEqual([...expectedTailIds].sort())
     expect(projection.domIds).toContain(expectedTailIds[0])
     expect(projection.domIds).toContain(expectedTailIds[expectedTailIds.length - 1])
@@ -421,7 +421,7 @@ test.describe('windowed reads: latest and around', () => {
     expect(anchorInfo.ids.length).toBe(DISPLAY_LIMIT)
     const oldestAnchorId = anchorInfo.ids[0]
     expect(oldestAnchorId).toBeTruthy()
-    // DOM order is render-dependent (column-reverse); assert DOM contains the stable anchor and bounded set
+    // DOM order is render-dependent (normal flow); assert DOM contains the stable anchor and bounded set
     expect(anchorInfo.domIds).toContain(oldestAnchorId)
     expect([...anchorInfo.domIds].sort()).toEqual([...anchorInfo.ids].sort())
 
@@ -597,7 +597,7 @@ test.describe('windowed reads: latest and around', () => {
     // synthetic scrollTop write, no fake scroll event). The app-owned trigger
     // pages only from genuine user navigation at the actual oldest edge (live
     // gesture session + committed user-eligible viewport + oldest-edge
-    // geometry per the single column-reverse primitive); a synthetic
+    // geometry per the single normal-flow primitive); a synthetic
     // scrollTop assignment carries no session and must not page.
     // Production semantics: Messages around-query reads around oldestMessageId,
     // captures the CURRENT viewport-top row precommit (before the merge
@@ -606,7 +606,7 @@ test.describe('windowed reads: latest and around', () => {
     const edgeTarget = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) throw new Error('#messages not found')
-      return { targetTop: Math.min(0, el.clientHeight - el.scrollHeight) }
+      return { targetTop: 0 }
     })
     const targetTop = edgeTarget.targetTop
 
@@ -661,8 +661,8 @@ test.describe('windowed reads: latest and around', () => {
     //   pre-growth sample may be motion-stale by genuine user scrolling, so
     //   only motion-independent invariants assert (identity in the pre-load
     //   set, sane viewport offset, held mid-list direction).
-    // Correct oldest distance per the single column-reverse primitive:
-    // sh - ch - abs(st).
+    // Correct oldest distance per the single normal-flow primitive:
+    // scrollTop itself (oldest edge is scrollTop 0).
     const msgBox = await page.locator('#messages').first().boundingBox()
     expect(msgBox, '#messages must have a box for real wheel input').not.toBeNull()
     await page.mouse.move(msgBox!.x + msgBox!.width / 2, msgBox!.y + msgBox!.height / 2)
@@ -690,7 +690,7 @@ test.describe('windowed reads: latest and around', () => {
         return c ? { scrollTop: c.scrollTop, scrollHeight: c.scrollHeight, clientHeight: c.clientHeight } : null
       })
       if (g) {
-        const dist = g.scrollHeight - g.clientHeight - Math.abs(g.scrollTop)
+        const dist = g.scrollTop
         if (lastTop !== null && Math.abs(g.scrollTop - lastTop) <= 1 && dist <= 150) {
           still += 1
           if (still >= 2) {
@@ -745,22 +745,22 @@ test.describe('windowed reads: latest and around', () => {
     // The gesture must park held mid-list: the prepend grew ABOVE the held
     // reading row, so the oldest-edge distance must now span roughly the new
     // page (several hundred px) — parked mid-list, neither reset to the
-    // newest bottom (scrollTop 0) nor flung to the new window top
+    // newest bottom (distBottom 0) nor flung to the new window top
     // (distanceFromOldest 0). Correct oldest distance per the single
-    // column-reverse primitive: sh - ch - abs(st).
+    // normal-flow primitive: scrollTop itself.
     const scrollInfo = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) throw new Error('#messages not found')
       return {
-        targetTop: Math.min(0, el.clientHeight - el.scrollHeight),
+        targetTop: 0,
         before: null,
         after: { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
       }
     })
-    const afterDistOldest =
-      scrollInfo.after.scrollHeight - scrollInfo.after.clientHeight - Math.abs(scrollInfo.after.scrollTop)
+    const afterDistOldest = scrollInfo.after.scrollTop
+    const afterDistBottom = scrollInfo.after.scrollHeight - scrollInfo.after.clientHeight - scrollInfo.after.scrollTop
     expect(
-      Math.abs(scrollInfo.after.scrollTop) > 100,
+      afterDistBottom > 100,
       `scrollTop after the held prepend ${scrollInfo.after.scrollTop} must park away from the newest bottom`
     ).toBe(true)
     expect(
@@ -878,15 +878,17 @@ test.describe('windowed reads: latest and around', () => {
 
     expect(postState.geom, 'post geometry missing').toBeTruthy()
     const postGeom = postState.geom!
-    // Not reset to newest-bottom (0): scrollTop must park mid-list, far from 0.
+    // Not reset to the newest bottom (sh - ch): the viewport must park mid-list,
+    // far from the bottom edge.
+    const postDistBottom = postGeom.scrollHeight - postGeom.clientHeight - postGeom.scrollTop
     expect(
-      Math.abs(postGeom.scrollTop) > 20,
-      `scrollTop should not be reset to bottom 0, got ${postGeom.scrollTop} targetTop ${scrollInfo.targetTop}`
+      postDistBottom > 20,
+      `scrollTop should not be reset to the newest bottom, got ${postGeom.scrollTop} targetTop ${scrollInfo.targetTop}`
     ).toBe(true)
     // Held mid-list after above-growth: the oldest-edge distance still spans
     // roughly the prepended page (not 0 = flung to the window top, not
     // sh - ch = at the newest bottom — both covered by the parked check).
-    const postDistOldest = postGeom.scrollHeight - postGeom.clientHeight - Math.abs(postGeom.scrollTop)
+    const postDistOldest = postGeom.scrollTop
     expect(
       postDistOldest > 500,
       `post scrollTop ${postGeom.scrollTop} must park mid-list after above-growth (distOldest ${Math.round(postDistOldest)}, visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`

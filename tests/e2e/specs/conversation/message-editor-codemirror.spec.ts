@@ -952,8 +952,8 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
     const userDataDir = getUserDataDir()
     const tag = `cmr-${Date.now().toString(36)}`
     // Resize stage only: 3 tall preceding pairs (6 filler rows + 2 target =
-    // 8 total inside DISPLAY_LIMIT 10) give the #messages column-reverse
-    // viewport real older scroll margin, so the genuine-wheel placement below
+    // 8 total inside DISPLAY_LIMIT 10) give the #messages column viewport
+    // real older scroll margin, so the genuine-wheel placement below
     // can pull the top-edge grip out from under sticky chrome. All other
     // cases keep the 2-row override.
     const seeded = await test.step('seed long assistant draft and activate route', async () =>
@@ -2015,13 +2015,13 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         // Physical-clamp truth (not a false unclamped promise): both leg targets stay strictly inside [min,max]
         // with margin, and every sampled #messages viewport stays inside the live scroll range.
         for (const [idx, f] of frames.entries()) {
-          const topExtreme = -(f.msgSh - f.msgCh)
+          const bottomEdge = f.msgSh - f.msgCh
           expect(
             f.msgTop,
-            `${pressLabel} reversal frame ${idx}: viewport stays inside the live scroll range (top=${f.msgTop} extreme=${topExtreme})`
-          ).toBeGreaterThanOrEqual(topExtreme - 12)
+            `${pressLabel} reversal frame ${idx}: viewport stays inside the live scroll range (top=${f.msgTop} bottomEdge=${bottomEdge})`
+          ).toBeGreaterThanOrEqual(0 - 12)
           expect(f.msgTop, `${pressLabel} reversal frame ${idx}: viewport stays at/above bottom`).toBeLessThanOrEqual(
-            12
+            bottomEdge + 12
           )
         }
         expect(
@@ -2130,15 +2130,15 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
       const box = await page.locator('#messages').first().boundingBox()
       if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
       for (let i = 0; i < 30; i++) {
-        const st = (await readScrollDims()).top
-        if (Math.abs(st) <= 60) break
+        const dims = await readScrollDims()
+        if (dims.sh - dims.ch - dims.top <= 60) break
         await page.mouse.wheel(0, 560)
         await page.waitForTimeout(200)
       }
       const probe = await readScrollDims()
       expect(
-        Math.abs(probe.top),
-        `must reach a verified true bottom (top=${Math.round(probe.top)})`
+        probe.sh - probe.ch - probe.top,
+        `must reach a verified true bottom (distBottom=${Math.round(probe.sh - probe.ch - probe.top)})`
       ).toBeLessThanOrEqual(60)
       const row = page.locator(`[data-message-id="${msgId}"]`).first()
       await row.hover().catch(() => {})
@@ -2297,19 +2297,16 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         const top = f.scrollTop as number
         const sh = f.sh as number
         const ch = f.ch as number
-        const topExtreme = -(sh - ch)
-        expect(top, `entry frame ${idx}: viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
-          topExtreme - 12
-        )
-        expect(top, `entry frame ${idx}: viewport stays at/above bottom`).toBeLessThanOrEqual(12)
+        const bottomEdge = sh - ch
+        expect(top, `entry frame ${idx}: viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(0 - 12)
+        expect(top, `entry frame ${idx}: viewport stays at/above bottom`).toBeLessThanOrEqual(bottomEdge + 12)
       }
       const postScroll = await readScrollDims()
-      expect(postScroll.top, 'true-bottom entry stays inside the live scroll range').toBeGreaterThanOrEqual(
-        -(postScroll.sh - postScroll.ch) - 12
-      )
-      expect(Math.abs(postScroll.top), 'true-bottom entry remains bottom-clamped (no centering)').toBeLessThanOrEqual(
-        100
-      )
+      expect(postScroll.top, 'true-bottom entry stays inside the live scroll range').toBeGreaterThanOrEqual(0 - 12)
+      expect(
+        postScroll.sh - postScroll.ch - postScroll.top,
+        'true-bottom entry remains bottom-clamped (no centering)'
+      ).toBeLessThanOrEqual(100)
       // Structural mapping holds: the editor action bar carries the same message-controls annotation.
       const postRegion = await page
         .evaluate((id: string) => {

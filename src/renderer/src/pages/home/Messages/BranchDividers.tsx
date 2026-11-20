@@ -21,10 +21,10 @@ const logger = loggerService.withContext('BranchDividers')
  * Fork-divider placement and menu helpers for topic-internal branches.
  *
  * `displayMessages` arrive oldest→newest; the render loop iterates groups
- * newest→oldest (column-reverse). A divider is a centered, rule-free flow row
- * (no left-side absolute content), so it never overlaps TopicSegmentLine's
- * pointer region. A divider renders BEFORE its anchor group in DOM order
- * (visually directly below the anchor message).
+ * newest→oldest and the flow build reverses once into normal-flow DOM order. A
+ * divider is a centered, rule-free flow row (no left-side absolute content), so
+ * it never overlaps TopicSegmentLine's pointer region. A divider renders AFTER
+ * its anchor group in DOM order (visually directly below the anchor message).
  *
  * The row shares the weak-boundary presentation used by the
  * history-reference divider (`BoundaryPill`): one compact neutral pill with no

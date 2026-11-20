@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { FLOW_COORDINATE_SPACE } from '../../pages/home/Messages/flowScrollGeometry'
 import { SCROLL_SNAPSHOT_INDEX_KEY } from '../../services/scrollSnapshotCache'
 import useScrollPosition from '../useScrollPosition'
 
@@ -135,11 +136,21 @@ describe('useScrollPosition with bounded scroll snapshot cache', () => {
     vi.useRealTimers()
   })
 
-  it('supports legacy numeric format and indexes it on read', () => {
+  it('drops pre-flow plain numbers (no numeric restore) and indexes the read', () => {
     store.set('scroll:topic-cache-legacy', -250)
     const { result } = renderHook(() => useScrollPosition('topic-cache-legacy'))
     const pos = result.current.getSavedPosition()
-    expect(pos).toEqual(expect.objectContaining({ scrollTop: -250, anchorId: null, isAtBottom: false }))
+    expect(pos).toEqual(
+      expect.objectContaining({
+        anchorId: null,
+        messageId: null,
+        intraRowOffset: null,
+        isAtBottom: false,
+        coordinateSpace: FLOW_COORDINATE_SPACE
+      })
+    )
+    expect(pos?.scrollTop).toBeUndefined()
+    expect(pos?.rawScrollTop).toBeUndefined()
     const idx = store.get(SCROLL_SNAPSHOT_INDEX_KEY) as any[]
     expect(idx.find((e) => e.key === 'scroll:topic-cache-legacy')).toBeDefined()
   })

@@ -229,15 +229,15 @@ describe('SegmentFoldTransition', () => {
     expect(screen.getByTestId('body').textContent).toBe('include-folded/live')
     expect(motionHost().getAttribute('data-segment-fold-phase')).toBe('opening')
 
-    // The space opens on the first frame and the body joins it a short step
-    // later, landing while the space is still opening: the content arrives
-    // during the motion instead of after an empty box has already been drawn.
+    // The space opens on the first frame and the fade covers the full expansion
+    // from the first frame, landing with it: the content arrives during the
+    // motion instead of after an empty box has already been drawn.
     const spaceDelay = Number.parseFloat(cssVar('--fold-space-delay'))
     const spaceDuration = Number.parseFloat(cssVar('--fold-space-duration'))
     const fadeDelay = Number.parseFloat(cssVar('--fold-fade-delay'))
     const fadeDuration = Number.parseFloat(cssVar('--fold-fade-duration'))
     expect(spaceDelay, 'the space motion owns the first frame').toBe(0)
-    expect(fadeDelay, 'the fade joins the expansion, not after it').toBeGreaterThan(0)
+    expect(fadeDelay, 'the fade covers the full expansion from the first frame').toBe(0)
     expect(fadeDelay, 'the body must not pop in before the space has started opening').toBeLessThan(spaceDuration * 0.5)
     const overlap = Math.min(spaceDelay + spaceDuration, fadeDelay + fadeDuration) - Math.max(spaceDelay, fadeDelay)
     expect(overlap, 'fade and space move together, not one after the other').toBeGreaterThanOrEqual(spaceDuration * 0.6)

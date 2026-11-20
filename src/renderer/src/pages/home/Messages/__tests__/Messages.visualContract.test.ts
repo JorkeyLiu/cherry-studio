@@ -490,9 +490,11 @@ describe('visual position contracts', () => {
 
   it('(2e) streaming follow intent: pause keeps the row, genuine scroll at exact bottom resumes', () => {
     const src = messagesSrc()
-    // Renderer-local exact-bottom gate (never the 50px snapshot vicinity).
-    expect(src).toMatch(/isGenuinePhysicalBottom/)
-    expect(src).toMatch(/Math\.abs\(scrollTop\)\s*<=\s*1/)
+    // Renderer-local exact-bottom gate: the geometry authority's
+    // `isExactlyAtNewest`, published by the measurement as `atPhysicalBottom`
+    // (never the 50px snapshot vicinity, never a second formula).
+    expect(src).toMatch(/isExactlyAtNewest/)
+    expect(src).toMatch(/atPhysicalBottom/)
     // Scroll path opts into bottom follow with the exact gate; the pause
     // path keeps the default row behavior (no opt-in, never a synthesized
     // bottom record).
@@ -501,7 +503,7 @@ describe('visual position contracts', () => {
     const scrollEnd = src.indexOf("useShortcut('copy_last_message'", scrollIdx)
     const scrollSlice = src.slice(scrollIdx, scrollEnd > scrollIdx ? scrollEnd : scrollIdx + 6200)
     expect(scrollSlice).toMatch(/bottomFollow/)
-    expect(scrollSlice).toMatch(/isGenuinePhysicalBottom\(measured\.scrollTop\)/)
+    expect(scrollSlice).toMatch(/bottomFollow: measured\.atPhysicalBottom/)
     const adoptIdx = src.indexOf('const adoptTakeoverSnapshot = useCallback')
     expect(adoptIdx).toBeGreaterThan(-1)
     const pauseIdx = src.indexOf('const attemptStreamingPause = useCallback', adoptIdx)
@@ -515,9 +517,10 @@ describe('visual position contracts', () => {
     // Controller owns the opt-in with an exact re-validation (default row).
     const controller = controllerSrc()
     expect(controller).toMatch(/bottomFollow/)
-    expect(controller).toMatch(/Math\.abs\(measured\.scrollTop\)\s*<=\s*1/)
-    // No wide-threshold jump, no synthesized record, no new timers/modes.
-    expect(scrollSlice).not.toMatch(/COLUMN_REVERSE_BOTTOM_THRESHOLD_PX/)
+    expect(controller).toMatch(/opts\?\.bottomFollow === true && measured\.atPhysicalBottom === true/)
+    // No wide-threshold jump, no second bottom formula, no synthesized record,
+    // no new timers/modes.
+    expect(src).not.toMatch(/isGenuinePhysicalBottom/)
     expect(src).not.toMatch(/isPaused/)
     expect(src).not.toMatch(/pausedMode/)
   })

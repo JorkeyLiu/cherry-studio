@@ -206,14 +206,15 @@ describe('applyViewportFirstPosition', () => {
       rawScrollTop: null,
       edgeFallbackOnMissing: true
     }
-    // Oldest edge = min(0, 402 - 1268) = -866: a partial window lands near
-    // the pagination edge and auto-pages under the divider anchor. The
-    // outcome is `searching` — the caller must keep the restore intent,
-    // ownership, and preferred anchor and drive restore-owned pagination;
-    // it must NOT commit this edge scroll as the route stable snapshot.
+    // Oldest edge = 0 in normal flow (the container's own scroll origin): a
+    // partial window lands at the pagination edge and auto-pages under the
+    // divider anchor. The outcome is `searching` — the caller must keep the
+    // restore intent, ownership, and preferred anchor and drive restore-owned
+    // pagination; it must NOT commit this edge scroll as the route stable
+    // snapshot.
     expect(applyViewportFirstPosition(container, plan)).toBe('searching')
     expect(applyViewportFirstPosition(container, plan)).not.toBe('placed')
-    expect(container.scrollTop).toBe(-866)
+    expect(container.scrollTop).toBe(0)
   })
 
   it('message with edge fallback parks a partial window at the oldest edge as INTERMEDIATE search', () => {
@@ -229,7 +230,7 @@ describe('applyViewportFirstPosition', () => {
         edgeFallbackOnMissing: true
       })
     ).toBe('searching')
-    expect(container.scrollTop).toBe(-1352)
+    expect(container.scrollTop).toBe(0)
   })
 
   it('divider with edge fallback skips parking the newest row at the top (still searching, not placed)', () => {
@@ -254,7 +255,7 @@ describe('applyViewportFirstPosition', () => {
     }
     expect(applyViewportFirstPosition(container, plan)).toBe('searching')
     expect(spy).not.toHaveBeenCalled()
-    expect(container.scrollTop).toBe(-866)
+    expect(container.scrollTop).toBe(0)
   })
 
   it('edge searching never reports placed: requested identity still unresident', () => {

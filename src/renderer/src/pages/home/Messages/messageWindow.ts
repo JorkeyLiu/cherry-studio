@@ -39,7 +39,7 @@ export interface MessageWindow {
    * drops it.
    */
   paginationTarget?: true
-  /** Messages in newest-to-oldest order, as consumed by the column-reverse view. */
+  /** Messages in newest-to-oldest data order (the render reverses once for normal flow). */
   displayMessages: Message[]
   /** Sliced visual groups in chronological order, pre-computed from the range.
    *  Consumed directly by MessagesContent to avoid redundant group-model regrouping. */
@@ -78,6 +78,21 @@ export interface MessageWindow {
     retentionClamped?: boolean
   }
 }
+
+/**
+ * Whether the committed display window provably starts at the true history head
+ * of its route.
+ *
+ * Both facts must hold at once: Main reports no older page for the route
+ * (`authoritativeHasMoreBefore === false`), and the display has no resident older
+ * page left to browse (`hasMoreOlder === false`). A newest-capacity window can
+ * omit resident older groups locally, and the head is a relation position, not a
+ * row: claiming it while those rows are still reachable would place a head fork
+ * above content that actually precedes it. Absent authority is unknown, never a
+ * head.
+ */
+export const isHistoryHeadLoaded = (window: MessageWindow | null | undefined): boolean =>
+  window?.authoritativeHasMoreBefore === false && window.hasMoreOlder === false
 
 const createWindowFromRange = (
   model: MessageViewportGroupModel,
@@ -165,6 +180,18 @@ const createWindowFromRange = (
   }
 }
 
+/**
+ * Creates a window anchored at the newest groups in the topic.
+ *
+ * The newest-capacity slice is itself a bounded trim of the loaded projection:
+ * when the projection holds more groups than the bounded capacity, the surplus
+ * older groups stay resident but outside the display window, so the display can
+ * still be traversed locally toward them. That omission is reported through
+ * `boundedViewportObservability` exactly like every other bounded trim, which is
+ * what keeps the two window facts separate: an authoritative
+ * `hasMoreBefore === false` says Main has no older page left to read, it never
+ * says the local display has no older resident page left to show.
+ */
 export const createLatestMessageWindow = (
   messages: Message[],
   groupCapacity: number,
@@ -176,15 +203,28 @@ export const createLatestMessageWindow = (
   if (boundedCapacity === 0 || model.groups.length === 0)
     return createWindowFromRange(model, null, boundedCapacity, 'latest', authoritative)
 
+  const oldestGroupIndex = Math.max(0, model.groups.length - boundedCapacity)
+  // Resident groups the newest-capacity slice omits on the older edge (0 when
+  // the whole loaded projection fits under the bound).
+  const trimmedOlderGroups = oldestGroupIndex
+  const observability: MessageWindow['boundedViewportObservability'] | undefined =
+    trimmedOlderGroups > 0
+      ? {
+          calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+          boundedCapacity,
+          didTrim: true,
+          trimmedGroups: trimmedOlderGroups,
+          trimmedEdge: 'older'
+        }
+      : undefined
+
   return createWindowFromRange(
     model,
-    {
-      oldestGroupIndex: Math.max(0, model.groups.length - boundedCapacity),
-      newestGroupIndex: model.groups.length - 1
-    },
+    { oldestGroupIndex, newestGroupIndex: model.groups.length - 1 },
     boundedCapacity,
     'latest',
-    authoritative
+    authoritative,
+    observability
   )
 }
 

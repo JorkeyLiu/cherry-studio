@@ -1,5 +1,6 @@
 import type { Message } from '@renderer/types/newMessage'
 
+import { maxScrollTop, readScrollMetrics } from './flowScrollGeometry'
 import { createMessageViewportGroupModel } from './messageGroups'
 import type { MessageViewportNavigationSource, MessageViewportNavigationToken } from './messageViewportReducer'
 import type { MessageViewportState } from './messageViewportReducer'
@@ -9,6 +10,73 @@ import {
   createTargetMessageWindow,
   type MessageWindow
 } from './messageWindow'
+// ---------------------------------------------------------------------------
+// Prepare / execute stage contract
+// ---------------------------------------------------------------------------
+
+/**
+ * Dependencies for the PREPARE stage of message navigation.
+ *
+ * Strict subset of the full transaction dependencies: everything up to the
+ * target projection commit (resolve → window commit → settle → visibility
+ * gate), and nothing that moves the viewport. No `beginProgrammaticScroll`,
+ * no `scroll`, no `finish` — a prepare entry can never write scroll geometry
+ * and never adopts a controller viewport. The caller closes the navigation
+ * token (`cancel`); the projection (committed window) survives the close.
+ */
+export interface MessageNavigationPrepareDeps {
+  /**
+   * `true` may be returned synchronously by a caller that already owns the
+   * navigation without an observable commit (resident selection follow); the
+   * runner only ever `await`s the value.
+   */
+  begin: (
+    token: MessageViewportNavigationToken,
+    targetId: string | null,
+    source: MessageViewportNavigationSource,
+    alignment: MessageNavigationAlignment
+  ) => boolean | Promise<boolean>
+  isCurrent: (token: MessageViewportNavigationToken) => boolean
+  cancelLoadsAndTimers: () => void
+  resolve: (intent: MessageNavigationIntent) => ResolvedMessageNavigation | null
+  prepareWindow: (resolved: ResolvedMessageNavigation) => MessageWindow | null
+  applyWindow: (token: MessageViewportNavigationToken, window: MessageWindow) => Promise<boolean>
+  getTargetStatus: (targetId: string) => 'visible' | 'hidden' | 'missing'
+  revealTarget: (targetId: string) => Promise<void>
+  settleDom: () => Promise<void>
+  cancel: (token: MessageViewportNavigationToken) => void
+}
+
+/**
+ * Terminal status of the prepare stage. `prepared` means the target
+ * projection is committed and visible-gated (window applied, DOM settled);
+ * the viewport itself is untouched — positioning stays with the caller's
+ * existing first-placement path on the SAME epoch. `not-found` and
+ * `cancelled` carry the legacy transaction meaning.
+ */
+export type MessageNavigationPrepareStatus = 'prepared' | 'not-found' | 'cancelled'
+
+export interface PreparedMessageNavigation {
+  status: 'prepared'
+  token: MessageViewportNavigationToken
+  resolved: ResolvedMessageNavigation
+}
+
+export type MessageNavigationPrepareResult =
+  | PreparedMessageNavigation
+  | { status: 'not-found' }
+  | { status: 'cancelled' }
+
+/**
+ * Prepare-stage outcome with its close bookkeeping. `closed` is true exactly
+ * where the legacy full transaction closed the navigation token on that exit,
+ * so the refactored full path below keeps byte-identical close behavior while
+ * the dedicated prepare entry closes every remaining exit itself.
+ */
+interface PrepareStageOutcome {
+  result: MessageNavigationPrepareResult
+  closed: boolean
+}
 
 export const NAVIGATION_VISUALLY_OLDER_GROUPS = 10
 export const NAVIGATION_VISUALLY_NEWER_GROUPS = 19
@@ -16,63 +84,73 @@ export const NAVIGATION_VISUALLY_NEWER_GROUPS = 19
 export type MessageNavigationAlignment = 'start' | 'center' | 'end'
 
 /**
- * Resolves a navigation result to the concrete scroll target for a column-reverse container.
- * Returns `{ top: number }` for programmatic scrollTo calls, or `null` for message-level
- * targets that require element lookup + scrollIntoView.
+ * Resolves a navigation result to the concrete scroll target for the
+ * normal-flow container (`#messages`: `scrollTop` 0 is the oldest/top edge and
+ * `scrollHeight - clientHeight` is the newest/bottom edge).
+ * Returns `{ top: number }` for programmatic scrollTo calls, or `null` for
+ * message-level targets that require element lookup + arithmetic placement.
  *
- * In a column-reverse layout:
- *   - scrollTop ≈ 0 is the bottom (newest messages)
- *   - Negative scrollTop scrolls toward the visual top (oldest messages)
- *
- * 'top' uses -scrollHeight so the browser clamps to the actual minimum scrollTop.
- * 'bottom' uses 0 (the natural resting position).
+ * 'top' uses 0 (the natural resting position of the oldest edge).
+ * 'bottom' uses the container's live scroll travel, so the browser clamps to
+ * the actual maximum instead of a guessed height.
  */
-export const resolveColumnReverseScrollTarget = (
+export interface FlowScrollContainer {
+  readonly scrollTop: number
+  readonly scrollHeight: number
+  readonly clientHeight: number
+  scrollTo(options: { top: number }): void
+}
+
+/** Largest reachable `scrollTop` of a container (0 when unmeasurable). */
+const scrollTravelOf = (container: FlowScrollContainer | null | undefined): number => {
+  if (!container) return 0
+  try {
+    return maxScrollTop(readScrollMetrics(container))
+  } catch {
+    return 0
+  }
+}
+
+/** Clamp an arbitrary target into the container's real `[0, travel]` range. */
+const clampFlowScrollTop = (desired: number, container: FlowScrollContainer | null | undefined): number => {
+  if (!Number.isFinite(desired)) return 0
+  return Math.min(scrollTravelOf(container), Math.max(0, desired))
+}
+
+export const resolveFlowScrollTarget = (
   resolved: ResolvedMessageNavigation,
-  scrollHeight: number
+  container: FlowScrollContainer | null | undefined
 ): { top: number } | null => {
-  if (resolved.kind === 'bottom') return { top: 0 }
-  if (resolved.kind === 'top') return { top: -scrollHeight }
-  if (resolved.kind === 'scrollTop') return { top: resolved.scrollTop }
+  if (resolved.kind === 'bottom') return { top: scrollTravelOf(container) }
+  if (resolved.kind === 'top') return { top: 0 }
+  if (resolved.kind === 'scrollTop') return { top: clampFlowScrollTop(resolved.scrollTop, container) }
   // 'message' kind requires DOM element lookup; handled separately by the caller.
   return null
 }
 
 /**
- * Minimal container interface for column-reverse scroll operations.
- * Satisfied by the real scroll container element (scrollHeight + scrollTo).
- */
-export interface ColumnReverseScrollContainer {
-  readonly scrollHeight: number
-  readonly clientHeight: number
-  readonly scrollTop: number
-  scrollTo(options: { top: number }): void
-}
-
-/**
- * Pure geometry for positioning a message row inside a column-reverse
- * container (`#messages`: scrollTop 0 is the newest bottom, negative values
- * read toward the oldest top).
+ * Pure geometry for positioning a message row inside the normal-flow
+ * container.
  *
  * `elementTopWithinContainer` is the row's content offset
- * (`elRect.top - containerRect.top + container.scrollTop`); `minScrollTop`
- * is the clamped oldest edge (`-(scrollHeight - clientHeight)`, `<= 0`).
- * Returns the finite clamped `scrollTo` top for the requested alignment, or
- * `null` when any input is non-finite (fail-closed: caller skips the write).
+ * (`elRect.top - containerRect.top + container.scrollTop`); `maxScrollTop` is
+ * the clamped newest edge (`scrollHeight - clientHeight`, `>= 0`). Returns the
+ * finite clamped `scrollTo` top for the requested alignment, or `null` when any
+ * input is non-finite (fail-closed: caller skips the write).
  *
- * Native `scrollIntoView({ block: 'start' })` is a no-op for resident rows in
- * this layout (verified: unchanged far-negative target offsets, scrollTop
- * pinned at 0), so navigation scrolls the explicit container arithmetically.
+ * Native `scrollIntoView({ block: 'start' })` does move this container, but the
+ * explicit arithmetic below stays the single scroll arbiter: one write whose
+ * alignment, clamp and outcome the navigation transaction can verify.
  */
-export const computeColumnReverseMessageScrollTop = (args: {
+export const computeFlowMessageScrollTop = (args: {
   elementTopWithinContainer: number
   containerClientHeight: number
   elementHeight: number
   alignment: MessageNavigationAlignment
-  minScrollTop: number
+  maxScrollTop: number
 }): number | null => {
-  const { elementTopWithinContainer, containerClientHeight, elementHeight, alignment, minScrollTop } = args
-  for (const value of [elementTopWithinContainer, containerClientHeight, elementHeight, minScrollTop]) {
+  const { elementTopWithinContainer, containerClientHeight, elementHeight, alignment, maxScrollTop } = args
+  for (const value of [elementTopWithinContainer, containerClientHeight, elementHeight, maxScrollTop]) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null
   }
   const freeSpace = Math.max(0, containerClientHeight - elementHeight)
@@ -83,12 +161,12 @@ export const computeColumnReverseMessageScrollTop = (args: {
         ? elementTopWithinContainer - freeSpace
         : elementTopWithinContainer
   if (!Number.isFinite(desired)) return null
-  const lower = Math.min(0, minScrollTop)
-  return Math.max(lower, Math.min(0, desired))
+  const upper = Math.max(0, maxScrollTop)
+  return Math.min(upper, Math.max(0, desired))
 }
 
 /**
- * Pure geometry for a saved-offset restore inside a column-reverse container.
+ * Pure geometry for a saved-offset restore inside the normal-flow container.
  *
  * `elementTopWithinContainer` is the row's content offset
  * (`elRect.top - containerRect.top + container.scrollTop`, i.e. the scrollTop
@@ -101,15 +179,15 @@ export const computeColumnReverseMessageScrollTop = (args: {
 export const computeRestoreMessageScrollTop = (args: {
   elementTopWithinContainer: number
   restoreOffset: number | null | undefined
-  minScrollTop: number
+  maxScrollTop: number
 }): number | null => {
-  const { elementTopWithinContainer, restoreOffset, minScrollTop } = args
+  const { elementTopWithinContainer, restoreOffset, maxScrollTop } = args
   if (typeof restoreOffset !== 'number' || !Number.isFinite(restoreOffset)) return null
-  if (!Number.isFinite(elementTopWithinContainer) || !Number.isFinite(minScrollTop)) return null
+  if (!Number.isFinite(elementTopWithinContainer) || !Number.isFinite(maxScrollTop)) return null
   const desired = elementTopWithinContainer - restoreOffset
   if (!Number.isFinite(desired)) return null
-  const lower = Math.min(0, minScrollTop)
-  return Math.max(lower, Math.min(0, desired))
+  const upper = Math.max(0, maxScrollTop)
+  return Math.min(upper, Math.max(0, desired))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +284,10 @@ export type SearchMatchScrollPlan =
   | null
 
 /**
- * Where a search hit should put the viewport, in the same column-reverse
- * container convention as {@link computeColumnReverseMessageScrollTop}
- * (`scrollTop` 0 is the newest/bottom edge, older content is negative).
+ * Where a search hit should put the viewport, in the same normal-flow
+ * container convention as {@link computeFlowMessageScrollTop}
+ * (`scrollTop` 0 is the oldest/top edge; the newest/bottom edge is
+ * `scrollHeight - clientHeight`).
  *
  * Three outcomes, never a silent middle ground:
  * - `visible`: the hit already sits clearly inside the unobscured band, so no
@@ -230,7 +309,7 @@ export const planSearchMatchScroll = (args: {
   matchHeight: number
   containerClientHeight: number
   currentScrollTop: number
-  minScrollTop: number
+  maxScrollTop: number
   band: UnobscuredReadingBand
   reducedMotion?: boolean
   visibleMarginPx?: number
@@ -241,7 +320,7 @@ export const planSearchMatchScroll = (args: {
     matchHeight,
     containerClientHeight,
     currentScrollTop,
-    minScrollTop,
+    maxScrollTop,
     band,
     reducedMotion = false,
     visibleMarginPx = SEARCH_MATCH_VISIBLE_MARGIN_PX,
@@ -252,7 +331,7 @@ export const planSearchMatchScroll = (args: {
     matchHeight,
     containerClientHeight,
     currentScrollTop,
-    minScrollTop,
+    maxScrollTop,
     band?.top,
     band?.height
   ]) {
@@ -267,16 +346,17 @@ export const planSearchMatchScroll = (args: {
     matchTopOffset >= band.top + margin && matchTopOffset + matchHeight <= band.top + band.height - margin
   if (clearlyVisible) return { kind: 'visible' }
 
-  // Column-reverse keeps the plain content relation `viewportOffset =
-  // contentOffset - scrollTop` (the reverse direction lives in the SIGN of
-  // scrollTop), which is why raising `scrollTop` moves content up. Centring the
-  // hit inside the band therefore is: contentOffset + height/2 - bandCentre.
+  // Normal flow keeps the plain content relation `viewportOffset =
+  // contentOffset - scrollTop` (raising `scrollTop` still moves content up, so
+  // only the sign RANGE changed, never the relation). Centring the hit inside the
+  // band therefore is: contentOffset + height/2 - bandCentre, clamped into the
+  // container's real `[0, maxScrollTop]` range.
   const contentOffset = matchTopOffset + currentScrollTop
   const bandCentre = band.top + band.height / 2
   const desired = contentOffset + matchHeight / 2 - bandCentre
   if (!Number.isFinite(desired)) return null
-  const lower = Math.min(0, minScrollTop)
-  const top = Math.max(lower, Math.min(0, desired))
+  const upper = Math.max(0, maxScrollTop)
+  const top = Math.min(upper, Math.max(0, desired))
   if (!Number.isFinite(top)) return null
   const distance = Math.abs(top - currentScrollTop)
   return { kind: 'scroll', top, distance, animate: !reducedMotion && distance >= animateMinDistancePx }
@@ -295,7 +375,8 @@ export const planSearchMatchScroll = (args: {
 export type MessageNavigationScrollOutcome = MessageNavigationResult
 
 /**
- * Applies the concrete scroll for a resolved navigation intent in a column-reverse container.
+ * Applies the concrete scroll for a resolved navigation intent in the
+ * normal-flow container.
  *
  * - top/bottom/scrollTop: delegates to `container.scrollTo`.
  * - message: delegates to the `scrollElementIntoView` callback (DOM element lookup).
@@ -308,15 +389,15 @@ export type MessageNavigationScrollOutcome = MessageNavigationResult
  * This is the single call-site for navigation scroll execution — Messages.tsx's
  * transaction `scroll` callback calls this rather than duplicating the switch.
  */
-export const applyColumnReverseScroll = (
+export const applyFlowScroll = (
   resolved: ResolvedMessageNavigation,
-  container: ColumnReverseScrollContainer | null | undefined,
+  container: FlowScrollContainer | null | undefined,
   scrollElementIntoView: (
     targetId: string,
     alignment: MessageNavigationAlignment
   ) => MessageNavigationScrollOutcome | void
 ): MessageNavigationScrollOutcome => {
-  const scrollTarget = resolveColumnReverseScrollTarget(resolved, container?.scrollHeight ?? 0)
+  const scrollTarget = resolveFlowScrollTarget(resolved, container)
   if (scrollTarget) {
     if (!container) return 'cancelled'
     try {
@@ -385,7 +466,7 @@ export const canHandleUserViewportScroll = (state: Pick<MessageViewportState, 'n
  * Mirrors the internal SavedScrollPosition type from that hook.
  */
 export interface SavedScrollPositionSnapshot {
-  scrollTop: number
+  scrollTop?: number
   anchorId: string | null
   /** Canonical route-saved-row-anchor (alias of anchorId for legacy data). */
   messageId?: string | null
@@ -787,8 +868,114 @@ export const handlePendingNavigateEvent = async (
 // ---------------------------------------------------------------------------
 
 /**
+ * Shared PREPARE stage: target resolution → window commit → settle →
+ * visibility gate. Ends with the target projection committed and gated; the
+ * navigation token stays open so the full transaction can continue into the
+ * execute stage below. Never scrolls, never adopts a controller viewport, so
+ * an owned (fetch-hold) session stays owned throughout.
+ *
+ * Close bookkeeping (`closed`) mirrors the legacy full-transaction close
+ * behavior exactly: true only where the historical code closed the token
+ * (unresolvable intent, ungateable target). Every other exit leaves the token
+ * open for the caller: the full transaction continues into execute, and the
+ * dedicated prepare entry closes it (the committed projection survives the
+ * close).
+ */
+const runPrepareStages = async (
+  intent: MessageNavigationIntent,
+  token: MessageViewportNavigationToken,
+  dependencies: MessageNavigationPrepareDeps
+): Promise<PrepareStageOutcome> => {
+  const requestedTarget = intent.kind === 'message' ? intent.targetId : null
+  const alignment = 'alignment' in intent ? (intent.alignment ?? 'start') : 'start'
+
+  if (!(await dependencies.begin(token, requestedTarget, intent.source, alignment))) {
+    return { result: { status: 'cancelled' }, closed: false }
+  }
+  if (!dependencies.isCurrent(token)) return { result: { status: 'cancelled' }, closed: false }
+
+  dependencies.cancelLoadsAndTimers()
+  const resolved = dependencies.resolve(intent)
+  if (!resolved) {
+    dependencies.cancel(token)
+    return { result: { status: 'not-found' }, closed: true }
+  }
+
+  const window = dependencies.prepareWindow(resolved)
+  if (window && !(await dependencies.applyWindow(token, window))) {
+    return { result: { status: 'cancelled' }, closed: false }
+  }
+  if (!dependencies.isCurrent(token)) return { result: { status: 'cancelled' }, closed: false }
+  dependencies.cancelLoadsAndTimers()
+
+  await dependencies.settleDom()
+  if (!dependencies.isCurrent(token)) return { result: { status: 'cancelled' }, closed: false }
+
+  if (resolved.kind === 'message') {
+    const status = dependencies.getTargetStatus(resolved.targetId)
+    if (status === 'hidden') {
+      await dependencies.revealTarget(resolved.targetId)
+      if (!dependencies.isCurrent(token)) return { result: { status: 'cancelled' }, closed: false }
+      await dependencies.settleDom()
+      if (!dependencies.isCurrent(token)) return { result: { status: 'cancelled' }, closed: false }
+    }
+    if (dependencies.getTargetStatus(resolved.targetId) !== 'visible') {
+      dependencies.cancel(token)
+      return { result: { status: 'not-found' }, closed: true }
+    }
+  }
+
+  return { result: { status: 'prepared', token, resolved }, closed: false }
+}
+
+/**
+ * Dedicated PREPARE entry for owned bootstrap restores (topic-mount pending +
+ * saved restore).
+ *
+ * Explicit stage contract, never an execution: runs ONLY the shared prepare
+ * stage above (resolve → window commit → settle → visibility gate; target
+ * loading stays the caller's own shared stage) and closes the navigation
+ * token on EVERY exit — `prepared` included — so no idle waiter hangs and no
+ * programmatic scroll token is left behind. The committed projection survives
+ * the close; positioning stays with the caller's existing first-placement
+ * path on the SAME controller epoch (no release, no re-acquire, no second
+ * scroller, no owner relaxation).
+ *
+ * Throwing dependencies fail closed: the token is cancelled and `cancelled`
+ * is returned, never a permanently hidden transition.
+ */
+export const prepareMessageNavigationTarget = async (
+  intent: MessageNavigationIntent,
+  dependencies: MessageNavigationPrepareDeps
+): Promise<MessageNavigationPrepareResult> => {
+  const token: MessageViewportNavigationToken = {}
+  let outcome: PrepareStageOutcome
+  try {
+    outcome = await runPrepareStages(intent, token, dependencies)
+  } catch {
+    try {
+      dependencies.cancel(token)
+    } catch {
+      // fail-closed: the terminal status below is the contract
+    }
+    return { status: 'cancelled' }
+  }
+  if (!outcome.closed) {
+    try {
+      dependencies.cancel(token)
+    } catch {
+      // fail-closed: the projection commit above stands regardless
+    }
+  }
+  return outcome.result
+}
+
+/**
  * Runs every message/restoration navigation through one last-navigation-wins
- * transaction.
+ * transaction: the shared prepare stage above, then the execute stage
+ * (programmatic scroll → settle → finish). The execute stage is the ONLY
+ * viewport mover and the ONLY controller adopter; prepare-only callers never
+ * enter it.
  *
  * `dependencies.resident` selects the resident-follow shape: the caller proved
  * the endpoint row is already resident and visible, so the geometry write is
@@ -810,10 +997,10 @@ export const runMessageNavigationTransaction = async (
   dependencies: MessageNavigationTransactionDependencies
 ): Promise<MessageNavigationResult> => {
   const token: MessageViewportNavigationToken = {}
-  const requestedTarget = intent.kind === 'message' ? intent.targetId : null
-  const alignment = 'alignment' in intent ? (intent.alignment ?? 'start') : 'start'
 
   if (dependencies.resident === true) {
+    const requestedTarget = intent.kind === 'message' ? intent.targetId : null
+    const alignment = 'alignment' in intent ? (intent.alignment ?? 'start') : 'start'
     const residentResolved = dependencies.resolve(intent)
     if (!residentResolved) {
       dependencies.cancel(token)
@@ -832,37 +1019,12 @@ export const runMessageNavigationTransaction = async (
     return outcome
   }
 
-  if (!(await dependencies.begin(token, requestedTarget, intent.source, alignment))) return 'cancelled'
-  if (!dependencies.isCurrent(token)) return 'cancelled'
-
-  dependencies.cancelLoadsAndTimers()
-  const resolved = dependencies.resolve(intent)
-  if (!resolved) {
-    dependencies.cancel(token)
-    return 'not-found'
+  const outcome = await runPrepareStages(intent, token, dependencies)
+  if (outcome.result.status !== 'prepared') {
+    if (outcome.closed) dependencies.cancel(token)
+    return outcome.result.status
   }
-
-  const window = dependencies.prepareWindow(resolved)
-  if (window && !(await dependencies.applyWindow(token, window))) return 'cancelled'
-  if (!dependencies.isCurrent(token)) return 'cancelled'
-  dependencies.cancelLoadsAndTimers()
-
-  await dependencies.settleDom()
-  if (!dependencies.isCurrent(token)) return 'cancelled'
-
-  if (resolved.kind === 'message') {
-    const status = dependencies.getTargetStatus(resolved.targetId)
-    if (status === 'hidden') {
-      await dependencies.revealTarget(resolved.targetId)
-      if (!dependencies.isCurrent(token)) return 'cancelled'
-      await dependencies.settleDom()
-      if (!dependencies.isCurrent(token)) return 'cancelled'
-    }
-    if (dependencies.getTargetStatus(resolved.targetId) !== 'visible') {
-      dependencies.cancel(token)
-      return 'not-found'
-    }
-  }
+  const resolved = outcome.result.resolved
 
   if (!(await dependencies.beginProgrammaticScroll(token))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'

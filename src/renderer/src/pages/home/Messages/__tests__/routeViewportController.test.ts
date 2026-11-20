@@ -263,7 +263,7 @@ describe('user intent declare (pending-only, never terminates)', () => {
     expect(c2.currentPhase).toBe('stable')
     expect(c2.userIntentPending).toBe(true)
     const out = c2.userTakeover(
-      { messageId: 'm5', intraRowOffset: -30, scrollTop: -100, isAtBottom: false },
+      { messageId: 'm5', intraRowOffset: -30, scrollTop: -100, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       stable
     )
@@ -283,12 +283,18 @@ describe('user intent declare (pending-only, never terminates)', () => {
 })
 
 describe('userTakeover atomic (single user-scroll event)', () => {
-  const measured = { messageId: 'mExcl', intraRowOffset: -8, scrollTop: -120, isAtBottom: false }
+  const measured = {
+    messageId: 'mExcl',
+    intraRowOffset: -8,
+    scrollTop: -120,
+    isAtBottom: false,
+    atPhysicalBottom: false
+  }
 
   it('fetch-hold pre-apply takes over the outgoing route (never the incoming selected key)', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     const { epoch } = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
     expect(c.currentPhase).toBe('fetch-hold')
@@ -343,7 +349,13 @@ describe('userTakeover atomic (single user-scroll event)', () => {
     c.firstPositioned(epoch, 'searching')
     expect(c.currentPhase).toBe('searching')
     c.declareUserIntent()
-    const out = c.userTakeover({ messageId: 'mDiv', intraRowOffset: 10, scrollTop: -50, isAtBottom: false })
+    const out = c.userTakeover({
+      messageId: 'mDiv',
+      intraRowOffset: 10,
+      scrollTop: -50,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     expect(out.taken).toBe(true)
     if (out.taken) {
       expect(out.routeKey).toBe('topic-t1::b1')
@@ -426,7 +438,13 @@ describe('userTakeover atomic (single user-scroll event)', () => {
   it('bottom measured without identity clears the anchor', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    const out = c.userTakeover({ messageId: null, intraRowOffset: null, scrollTop: 0, isAtBottom: true })
+    const out = c.userTakeover({
+      messageId: null,
+      intraRowOffset: null,
+      scrollTop: 0,
+      isAtBottom: true,
+      atPhysicalBottom: true
+    })
     expect(out.taken).toBe(true)
     expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
   })
@@ -558,7 +576,13 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
   it('ordinary pagination commit publishes the precommit anchor + windowId with a one-shot hold', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'm9', intraRowOffset: -40, scrollTop: -900, isAtBottom: false })
+    c.userTakeover({
+      messageId: 'm9',
+      intraRowOffset: -40,
+      scrollTop: -900,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     c.noteInteractionScrollEnd()
     const genBefore = c.windowGeneration
     // Same-route older growth: precommit reading row m9 at offset -40.
@@ -584,7 +608,13 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
   it('ordinary pagination commit hold survives a live user session but a newer window invalidates it', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'm9', intraRowOffset: -40, scrollTop: -900, isAtBottom: false })
+    c.userTakeover({
+      messageId: 'm9',
+      intraRowOffset: -40,
+      scrollTop: -900,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     // New input arrives for the continuous upward gesture (same live session).
     c.declareUserIntent()
     expect(c.hasActiveUserInteraction()).toBe(true)
@@ -661,7 +691,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     // Outgoing A is clean-stable: capture allowed.
     expect(c.shouldCaptureOutgoing()).toBe(true)
@@ -699,7 +729,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
     c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('1'))
@@ -721,7 +751,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
   it('ordinary switch to a different target still uses the persisted snapshot (no retained leak)', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     // First request stashes the A anchor; the main session itself holds null.
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
@@ -749,7 +779,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
     c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('1'))
@@ -783,7 +813,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     store.set('topic-t1::A', { messageId: 'mA' })
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     const freeze = (): boolean => {
       if (!c.shouldCaptureOutgoing()) return false
@@ -845,7 +875,8 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
     messageId: id,
     intraRowOffset: -8,
     scrollTop: top,
-    isAtBottom: false
+    isAtBottom: false,
+    atPhysicalBottom: false
   })
 
   it('declare opens a session with a stable id; refresh keeps the id (wheel momentum)', () => {
@@ -862,7 +893,7 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
   it('no session rejects takeover without touching anchor (no-user-intent)', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
-    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
+    c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false, atPhysicalBottom: false })
     c.noteInteractionScrollEnd()
     const rej = c.userTakeover(measured('mX'))
     expect(rej.taken).toBe(false)
@@ -984,7 +1015,7 @@ describe('compensation echo marker (app scroll never pages, input still does)', 
     expect(refreshed.interactionId).toBe(token.interactionId)
     expect(c.consumeCompensationEcho(-1500)).toBe(false)
     const adopted = c.userTakeover(
-      { messageId: 'mUser', intraRowOffset: -4, scrollTop: -1500, isAtBottom: false },
+      { messageId: 'mUser', intraRowOffset: -4, scrollTop: -1500, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       refreshed
     )
@@ -1065,7 +1096,13 @@ describe('compensation echo marker (app scroll never pages, input still does)', 
 describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', () => {
   const stableA = (c: RouteViewportController, id = 'a1', offset = -12): void => {
     c.declareUserIntent()
-    c.userTakeover({ messageId: id, intraRowOffset: offset, scrollTop: -400, isAtBottom: false })
+    c.userTakeover({
+      messageId: id,
+      intraRowOffset: offset,
+      scrollTop: -400,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
     c.noteInteractionScrollEnd()
   }
   const savedOf = (id: string | null, offset: number | null = -12) =>

@@ -7,6 +7,22 @@ import {
   setPendingAnchorNavigate
 } from '@renderer/services/MessagesService'
 import { beforeEach, describe, expect, it } from 'vitest'
+/**
+ * Accurate function boundary for the divider-switch handler (replaces the
+ * previous fixed 16000-char window, which silently dropped the atomic commit
+ * calls after the handler body grew past the window): from the unique
+ * `handleSelectRoute` declaration to its dedented `useCallback` close. Both
+ * anchors fail closed (missing marker fails the test) instead of silently
+ * truncating.
+ */
+function sliceDividerHandler(source: string): string {
+  const start = source.indexOf('const handleSelectRoute = useCallback(')
+  expect(start).toBeGreaterThanOrEqual(0)
+  const close = '\n  )\n'
+  const end = source.indexOf(close, start)
+  expect(end).toBeGreaterThan(start)
+  return source.slice(start, end + close.length - 1)
+}
 
 /**
  * Pending-anchor bootstrap path (behavioral companion to the
@@ -65,9 +81,7 @@ describe('true branch incremental switch (windowed)', () => {
   const thunkSource = fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
 
   it('divider switch reads around the fork anchor (not history snapshot, not bottom)', () => {
-    const idx = messagesSource.indexOf('Divider route switch')
-    expect(idx).toBeGreaterThanOrEqual(0)
-    const slice = messagesSource.slice(idx, idx + 16000)
+    const slice = sliceDividerHandler(messagesSource)
     // Production path delegates the fork-anchor around read (+latest fallback) to loadRouteMessagesThunk with deferPublish
     expect(slice).toMatch(/loadRouteMessagesThunk/)
     expect(slice).toMatch(/deferPublish/)

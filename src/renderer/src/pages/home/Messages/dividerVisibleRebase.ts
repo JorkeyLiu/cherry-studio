@@ -187,6 +187,32 @@ export const buildDividerSearchProgressFromVisible = (
 }
 
 /**
+ * Divider-visible viewport ownership for the ordinary projection reconcile.
+ *
+ * While a divider-visible session owns the viewport for this topic/route, the
+ * committed union window is the positioning truth and the ordinary same-route
+ * reconcile must not re-derive it (single owner positions). Pure, no store.
+ */
+export type DividerVisibleViewportOwnership = Pick<DividerVisiblePending, 'ownerEpoch' | 'topicId' | 'routeId'>
+
+export const isDividerVisibleViewportOwned = (
+  pending: DividerVisibleViewportOwnership | null | undefined,
+  topicId: string,
+  routeId: string | null,
+  isSessionCurrent: (epoch: number) => boolean
+): boolean => {
+  if (!pending) return false
+  if (typeof pending.ownerEpoch !== 'number' || !Number.isFinite(pending.ownerEpoch)) return false
+  if (typeof pending.topicId !== 'string' || pending.topicId.length === 0) return false
+  if (pending.topicId !== topicId || pending.routeId !== routeId) return false
+  try {
+    return isSessionCurrent(pending.ownerEpoch) === true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Build the next display message list reusing existing resident objects for
  * the preserved prefix where possible (same stable ID → same reference, so
  * React keeps the mounted DOM nodes). The appended suffix objects come from

@@ -83,7 +83,7 @@ describe('adoptRenderedAsDisplayed terminal fallback', () => {
     expect(c.canAcceptUserScrollWrite()).toBe(true)
     c.declareUserIntent()
     const takeover = c.userTakeover(
-      { messageId: 'm14', intraRowOffset: -58.9, scrollTop: -58.9, isAtBottom: false },
+      { messageId: 'm14', intraRowOffset: -58.9, scrollTop: -58.9, isAtBottom: false, atPhysicalBottom: false },
       'w-main-30'
     )
     expect(takeover.taken).toBe(true)

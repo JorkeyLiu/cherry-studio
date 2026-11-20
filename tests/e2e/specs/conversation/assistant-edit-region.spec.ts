@@ -17,7 +17,7 @@
  * editor must keep the SAME interaction region stationary — the clicked
  * message row's viewport geometry with the stationary pointer still hitting
  * the same message — instead of per-button smooth-centering each control.
- * Raw `scrollTop` invariance does NOT hold in column-reverse (a height swap
+ * Raw `scrollTop` invariance does NOT hold in normal flow either (a height swap
  * below the viewport necessarily changes `scrollTop` for the SAME row
  * position), so message-row geometry + hit-testing is primary.
  *
@@ -32,8 +32,8 @@
  * go through the real UI. Never dispatches editing state or scrollToBottom
  * to fake the flow.
  *
- * Geometry: #messages renders column-reverse, so bottom/newest is
- * scrollTop ~= 0 and the oldest edge is the most negative scrollTop.
+ * Geometry: #messages renders normal flow, so bottom/newest is
+ * scrollTop ~= scrollHeight - clientHeight and the oldest edge is scrollTop 0.
  */
 import type { Page } from '@playwright/test'
 
@@ -346,9 +346,9 @@ async function wheelToReadingPosition(page: Page): Promise<Reading> {
     page.evaluate((minOff: number) => {
       const c = document.getElementById('messages') as HTMLElement | null
       if (!c) return { ok: false, st: NaN }
-      const topExtreme = -(c.scrollHeight - c.clientHeight)
       const st = c.scrollTop
-      return { ok: Math.abs(st) > minOff && Math.abs(st - topExtreme) > 200, st }
+      const distBottom = c.scrollHeight - c.clientHeight - st
+      return { ok: distBottom > minOff && st > 200, st }
     }, NON_BOTTOM_MIN)
   for (let i = 0; i < 30; i++) {
     if ((await probe()).ok) break
@@ -680,7 +680,10 @@ async function wheelToReadingPositionWithEditVisible(page: Page, messageId: stri
   if (await isEditButtonInViewport(page, messageId)) {
     const anchor = await settledAnchor(page)
     const fresh = await readScroll(page)
-    expect(Math.abs(fresh.scrollTop), 'edit target must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+    expect(
+      fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+      'edit target must stay non-bottom'
+    ).toBeGreaterThan(NON_BOTTOM_MIN)
     return {
       anchorId: anchor.id,
       offset: anchor.offset,
@@ -695,12 +698,15 @@ async function wheelToReadingPositionWithEditVisible(page: Page, messageId: stri
     await page.mouse.wheel(0, 280)
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= NON_BOTTOM_MIN) break
     await row.hover().catch(() => {})
     if (await isEditButtonInViewport(page, messageId)) {
       const anchor = await settledAnchor(page)
       const fresh = await readScroll(page)
-      expect(Math.abs(fresh.scrollTop), 'nudge to reveal Edit must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+      expect(
+        fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+        'nudge to reveal Edit must stay non-bottom'
+      ).toBeGreaterThan(NON_BOTTOM_MIN)
       return {
         anchorId: anchor.id,
         offset: anchor.offset,
@@ -714,12 +720,15 @@ async function wheelToReadingPositionWithEditVisible(page: Page, messageId: stri
     await page.mouse.wheel(0, -280)
     await page.waitForTimeout(220)
     const scroll = await readScroll(page)
-    if (Math.abs(scroll.scrollTop) <= NON_BOTTOM_MIN) break
+    if (scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= NON_BOTTOM_MIN) break
     await row.hover().catch(() => {})
     if (await isEditButtonInViewport(page, messageId)) {
       const anchor = await settledAnchor(page)
       const fresh = await readScroll(page)
-      expect(Math.abs(fresh.scrollTop), 'nudge to reveal Edit must stay non-bottom').toBeGreaterThan(NON_BOTTOM_MIN)
+      expect(
+        fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop,
+        'nudge to reveal Edit must stay non-bottom'
+      ).toBeGreaterThan(NON_BOTTOM_MIN)
       return {
         anchorId: anchor.id,
         offset: anchor.offset,
@@ -921,14 +930,17 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     // Never a jump to global bottom; stays inside the live scroll range (at
     // true physical boundaries record clamping via the range gate below, not
     // a false offset demand — this viewport is verified non-bottom by setup).
-    expect(Math.abs(postScroll.scrollTop), `Edit open: must remain non-bottom (no bottom jump)`).toBeGreaterThan(
-      BOTTOM_TOL
-    )
-    const topExtreme = -(postScroll.scrollHeight - postScroll.clientHeight)
+    expect(
+      postScroll.scrollHeight - postScroll.clientHeight - postScroll.scrollTop,
+      `Edit open: must remain non-bottom (no bottom jump)`
+    ).toBeGreaterThan(BOTTOM_TOL)
+    const bottomEdge = postScroll.scrollHeight - postScroll.clientHeight
     expect(postScroll.scrollTop, `Edit open: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
-      topExtreme - OFFSET_TOL
+      0 - OFFSET_TOL
     )
-    expect(postScroll.scrollTop, `Edit open: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
+    expect(postScroll.scrollTop, `Edit open: post viewport stays at/above bottom`).toBeLessThanOrEqual(
+      bottomEdge + OFFSET_TOL
+    )
     // Ordering evidence for the shared-mechanism choice: the competing
     // smooth-center write must be visible in the spy when the region jumps.
     test.info().annotations.push({
@@ -1084,14 +1096,17 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     expect(hit, `Cancel: original Edit click point still hits the same message after Cancel`).toBe(true)
     expect(cancelRegionWorst, `Cancel: painted region cancel frames never jump`).toBeLessThanOrEqual(TRANSITION_TOL)
     void cancelWorst
-    expect(Math.abs(postScroll.scrollTop), `Cancel: must remain non-bottom (no bottom jump)`).toBeGreaterThan(
-      BOTTOM_TOL
-    )
-    const topExtreme = -(postScroll.scrollHeight - postScroll.clientHeight)
+    expect(
+      postScroll.scrollHeight - postScroll.clientHeight - postScroll.scrollTop,
+      `Cancel: must remain non-bottom (no bottom jump)`
+    ).toBeGreaterThan(BOTTOM_TOL)
+    const bottomEdge = postScroll.scrollHeight - postScroll.clientHeight
     expect(postScroll.scrollTop, `Cancel: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
-      topExtreme - OFFSET_TOL
+      0 - OFFSET_TOL
     )
-    expect(postScroll.scrollTop, `Cancel: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
+    expect(postScroll.scrollTop, `Cancel: post viewport stays at/above bottom`).toBeLessThanOrEqual(
+      bottomEdge + OFFSET_TOL
+    )
   })
 
   test('baseline no-effect geometry drift stays quiet', async ({ mainWindow }) => {
@@ -1164,26 +1179,27 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       newestAssistantId,
       { timeout: 30000 }
     )
-    // Genuine wheel to the true bottom (column-reverse: bottom/newest is
-    // scrollTop ~= 0). Only physical wheel input, never a scrollTop write.
+    // Genuine wheel to the true bottom (normal flow: bottom/newest is
+    // scrollTop ~= scrollHeight - clientHeight). Only physical wheel input, never a scrollTop write.
     const box = await page.locator('#messages').first().boundingBox()
     if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     for (let i = 0; i < 30; i++) {
-      const st = (await readScroll(page)).scrollTop
-      if (Math.abs(st) <= TRUE_BOTTOM_TOL) break
+      const cur = await readScroll(page)
+      if (cur.scrollHeight - cur.clientHeight - cur.scrollTop <= TRUE_BOTTOM_TOL) break
       await page.mouse.wheel(0, 560)
       await page.waitForTimeout(200)
     }
     const bottomProbe = await readScroll(page)
     expect(
-      Math.abs(bottomProbe.scrollTop),
-      `must reach a verified true-bottom viewport (st=${Math.round(bottomProbe.scrollTop)})`
+      bottomProbe.scrollHeight - bottomProbe.clientHeight - bottomProbe.scrollTop,
+      `must reach a verified true-bottom viewport (distBottom=${Math.round(bottomProbe.scrollHeight - bottomProbe.clientHeight - bottomProbe.scrollTop)})`
     ).toBeLessThanOrEqual(TRUE_BOTTOM_TOL)
     const bottomAnchor = await settledAnchor(page).catch(() => null)
     const bottomScrollSettled = await readScroll(page)
-    expect(Math.abs(bottomScrollSettled.scrollTop), 'settled viewport must still be true-bottom').toBeLessThanOrEqual(
-      TRUE_BOTTOM_TOL
-    )
+    expect(
+      bottomScrollSettled.scrollHeight - bottomScrollSettled.clientHeight - bottomScrollSettled.scrollTop,
+      'settled viewport must still be true-bottom'
+    ).toBeLessThanOrEqual(TRUE_BOTTOM_TOL)
     const row = page
       .locator(`#message-${escId(newestAssistantId)}[data-message-id="${escId(newestAssistantId)}"]`)
       .first()
@@ -1249,8 +1265,11 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     const postPhase = await readPhase(page)
     const spy = await readEditSpy(page)
     await clearEditSpy(page).catch(() => {})
-    const postTopExtreme = -(postScroll.scrollHeight - postScroll.clientHeight)
-    const openWorstAbs = openScrollSamples.length > 0 ? Math.max(...openScrollSamples.map((v) => Math.abs(v))) : NaN
+    const postBottomEdge = postScroll.scrollHeight - postScroll.clientHeight
+    const openWorstDist =
+      openScrollSamples.length > 0
+        ? Math.max(...openScrollSamples.map((v) => postScroll.scrollHeight - postScroll.clientHeight - v))
+        : NaN
     const hit = await hitTestMessageAtPoint(page, point, newestAssistantId)
     const regionInViewport =
       post.regionOffset !== null &&
@@ -1258,11 +1277,11 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       post.regionOffset >= -OFFSET_TOL &&
       post.regionOffset <= post.containerRect.height + OFFSET_TOL
     console.log(
-      `[E2E] aer-bottom preScroll=${Math.round(preScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)} topExtreme=${Math.round(postTopExtreme)} openWorstAbs=${Number.isFinite(openWorstAbs) ? openWorstAbs.toFixed(1) : 'NaN'} hit=${hit} regionInView=${regionInViewport} anchor=${bottomAnchor ? `${bottomAnchor.id}@${Math.round(bottomAnchor.offset)}` : 'null'} feas=${JSON.stringify(feasibility)} spy=${JSON.stringify(spy).slice(0, 500)}`
+      `[E2E] aer-bottom preScroll=${Math.round(preScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)} bottomEdge=${Math.round(postBottomEdge)} openWorstDist=${Number.isFinite(openWorstDist) ? openWorstDist.toFixed(1) : 'NaN'} hit=${hit} regionInView=${regionInViewport} anchor=${bottomAnchor ? `${bottomAnchor.id}@${Math.round(bottomAnchor.offset)}` : 'null'} feas=${JSON.stringify(feasibility)} spy=${JSON.stringify(spy).slice(0, 500)}`
     )
     test.info().annotations.push({
       type: 'aer-bottom-geometry',
-      description: `preScroll=${Math.round(preScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)} topExtreme=${Math.round(postTopExtreme)} openWorstAbs=${Number.isFinite(openWorstAbs) ? openWorstAbs.toFixed(1) : 'NaN'} hit=${hit} regionInView=${regionInViewport} anchor=${bottomAnchor ? `${bottomAnchor.id}@${Math.round(bottomAnchor.offset)}` : 'null'} preMsgOff=${Math.round(pre.messageOffset)} postMsgOff=${Math.round(post.messageOffset)} preRegion=${pre.regionOffset !== null ? Math.round(pre.regionOffset) : 'null'} postRegion=${post.regionOffset !== null ? Math.round(post.regionOffset) : 'null'} feas=${JSON.stringify(feasibility)} prePhase=${prePhase} postPhase=${postPhase} spy=${JSON.stringify(spy).slice(0, 900)}`
+      description: `preScroll=${Math.round(preScroll.scrollTop)} postScroll=${Math.round(postScroll.scrollTop)} bottomEdge=${Math.round(postBottomEdge)} openWorstDist=${Number.isFinite(openWorstDist) ? openWorstDist.toFixed(1) : 'NaN'} hit=${hit} regionInView=${regionInViewport} anchor=${bottomAnchor ? `${bottomAnchor.id}@${Math.round(bottomAnchor.offset)}` : 'null'} preMsgOff=${Math.round(pre.messageOffset)} postMsgOff=${Math.round(post.messageOffset)} preRegion=${pre.regionOffset !== null ? Math.round(pre.regionOffset) : 'null'} postRegion=${post.regionOffset !== null ? Math.round(post.regionOffset) : 'null'} feas=${JSON.stringify(feasibility)} prePhase=${prePhase} postPhase=${postPhase} spy=${JSON.stringify(spy).slice(0, 900)}`
     })
     // Boundary contract (NOT a blanket jump permission): the open must stay
     // honestly clamped — inside the live range AND still bottom. Pulling away
@@ -1272,14 +1291,14 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     expect(
       postScroll.scrollTop,
       `BOTTOM-REFUSAL trigger=real-Edit-click newest=${newestAssistantId} feas=${JSON.stringify(feasibility)} anchor=${bottomAnchor ? `${bottomAnchor.id}@${Math.round(bottomAnchor.offset)}` : 'null'}: post viewport left the honest bottom clamp (controller refused nothing)`
-    ).toBeGreaterThanOrEqual(postTopExtreme - OFFSET_TOL)
+    ).toBeGreaterThanOrEqual(0 - OFFSET_TOL)
     expect(
       postScroll.scrollTop,
       `BOTTOM-REFUSAL trigger=real-Edit-click newest=${newestAssistantId}: post viewport left the honest bottom clamp`
-    ).toBeLessThanOrEqual(OFFSET_TOL)
+    ).toBeLessThanOrEqual(postBottomEdge + OFFSET_TOL)
     expect(
-      Math.abs(postScroll.scrollTop),
-      `bottom Edit open: must remain bottom-clamped, never smooth-centered (openWorstAbs=${Number.isFinite(openWorstAbs) ? openWorstAbs.toFixed(1) : 'NaN'})`
+      postScroll.scrollHeight - postScroll.clientHeight - postScroll.scrollTop,
+      `bottom Edit open: must remain bottom-clamped, never smooth-centered (openWorstDist=${Number.isFinite(openWorstDist) ? openWorstDist.toFixed(1) : 'NaN'})`
     ).toBeLessThanOrEqual(BOTTOM_TOL)
     expect(post.regionOffset, 'bottom editor action-bar region must be measurable').not.toBeNull()
     expect(regionInViewport, 'bottom editor action-bar region stays in-viewport (honest clamp)').toBe(true)
@@ -1313,25 +1332,28 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     await row.hover().catch(() => {})
     const cancelPost = await captureControlGeometry(page, newestAssistantId)
     const cancelPostScroll = await readScroll(page)
-    const cancelWorstAbs = cancelSamples.length > 0 ? Math.max(...cancelSamples.map((v) => Math.abs(v))) : Number.NaN
+    const cancelWorstDist =
+      cancelSamples.length > 0
+        ? Math.max(...cancelSamples.map((v) => cancelPostScroll.scrollHeight - cancelPostScroll.clientHeight - v))
+        : Number.NaN
     const returnRegionDrift =
       pre.regionOffset !== null && cancelPost.regionOffset !== null
         ? Math.abs(cancelPost.regionOffset - pre.regionOffset)
         : Number.NaN
     const cancelHit = await hitTestMessageAtPoint(page, point, newestAssistantId)
     console.log(
-      `[E2E] aer-bottom-cancel preRegion=${pre.regionOffset !== null ? Math.round(pre.regionOffset) : 'null'} cancelRegion=${cancelPost.regionOffset !== null ? Math.round(cancelPost.regionOffset) : 'null'} drift=${Number.isFinite(returnRegionDrift) ? returnRegionDrift.toFixed(1) : 'NaN'} preScroll=${Math.round(preScroll.scrollTop)} cancelScroll=${Math.round(cancelPostScroll.scrollTop)} worstAbs=${Number.isFinite(cancelWorstAbs) ? cancelWorstAbs.toFixed(1) : 'NaN'} hit=${cancelHit}`
+      `[E2E] aer-bottom-cancel preRegion=${pre.regionOffset !== null ? Math.round(pre.regionOffset) : 'null'} cancelRegion=${cancelPost.regionOffset !== null ? Math.round(cancelPost.regionOffset) : 'null'} drift=${Number.isFinite(returnRegionDrift) ? returnRegionDrift.toFixed(1) : 'NaN'} preScroll=${Math.round(preScroll.scrollTop)} cancelScroll=${Math.round(cancelPostScroll.scrollTop)} worstDist=${Number.isFinite(cancelWorstDist) ? cancelWorstDist.toFixed(1) : 'NaN'} hit=${cancelHit}`
     )
     test.info().annotations.push({
       type: 'aer-bottom-cancel-geometry',
-      description: `returnRegionDrift=${Number.isFinite(returnRegionDrift) ? returnRegionDrift.toFixed(1) : 'NaN'} preScroll=${Math.round(preScroll.scrollTop)} cancelScroll=${Math.round(cancelPostScroll.scrollTop)} worstAbs=${Number.isFinite(cancelWorstAbs) ? cancelWorstAbs.toFixed(1) : 'NaN'} hit=${cancelHit}`
+      description: `returnRegionDrift=${Number.isFinite(returnRegionDrift) ? returnRegionDrift.toFixed(1) : 'NaN'} preScroll=${Math.round(preScroll.scrollTop)} cancelScroll=${Math.round(cancelPostScroll.scrollTop)} worstDist=${Number.isFinite(cancelWorstDist) ? cancelWorstDist.toFixed(1) : 'NaN'} hit=${cancelHit}`
     })
     expect(returnRegionDrift, 'bottom Cancel: closed→closed controls region returns exactly').toBeLessThanOrEqual(
       REGION_TOL
     )
     expect(cancelHit, 'bottom Cancel: original click point still hits the newest message').toBe(true)
     expect(
-      Math.abs(cancelPostScroll.scrollTop),
+      cancelPostScroll.scrollHeight - cancelPostScroll.clientHeight - cancelPostScroll.scrollTop,
       'bottom Cancel: must remain bottom-clamped (no recenter during cancel)'
     ).toBeLessThanOrEqual(BOTTOM_TOL)
     void openSamples
@@ -1441,7 +1463,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
           : Number.NaN
       expect(returnDrift, 'Escape-cancel close: controls region returns to pre-edit').toBeLessThanOrEqual(REGION_TOL)
       expect(
-        Math.abs(afterScroll.scrollTop),
+        afterScroll.scrollHeight - afterScroll.clientHeight - afterScroll.scrollTop,
         'Escape-cancel close: must remain non-bottom (no bottom jump)'
       ).toBeGreaterThan(BOTTOM_TOL)
     } else {
@@ -1514,10 +1536,12 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     expect(takeoverMove, 'genuine wheel+keyboard while editing must actually move the viewport').toBeGreaterThan(
       TAKEOVER_MIN_MOVE
     )
-    expect(Math.abs(takenScroll.scrollTop), 'takeover viewport must stay non-bottom').toBeGreaterThan(BOTTOM_TOL)
-    const takenTopExtreme = -(takenScroll.scrollHeight - takenScroll.clientHeight)
+    expect(
+      takenScroll.scrollHeight - takenScroll.clientHeight - takenScroll.scrollTop,
+      'takeover viewport must stay non-bottom'
+    ).toBeGreaterThan(BOTTOM_TOL)
     expect(takenScroll.scrollTop, 'takeover viewport stays inside the live range').toBeGreaterThanOrEqual(
-      takenTopExtreme - OFFSET_TOL
+      0 - OFFSET_TOL
     )
     // Genuine editor resize while taken over: real typing into the focused
     // CodeMirror surface (never a height injection). Must not snap back to pre-edit.
@@ -1640,7 +1664,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     expect(editorGone, 'editor must close after the post-takeover Cancel click').toBe(true)
     await waitForScrollQuiescence(page)
     const finalScroll = await readScroll(page)
-    const finalTopExtreme = -(finalScroll.scrollHeight - finalScroll.clientHeight)
+    const finalBottomEdge = finalScroll.scrollHeight - finalScroll.clientHeight
     const cancelWorstSnap = cancelScrollTrace.length
       ? Math.min(...cancelScrollTrace.map((v) => Math.abs(v - preScrollTop)))
       : Number.NaN
@@ -1653,9 +1677,11 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       description: `finalScroll=${Math.round(finalScroll.scrollTop)} takenAdjusted=${Math.round(takenScrollAdjusted.scrollTop)} drift=${finalTakeoverDrift.toFixed(1)} worstSnapToPre=${Number.isFinite(cancelWorstSnap) ? cancelWorstSnap.toFixed(1) : 'NaN'} preScroll=${Math.round(preScrollTop)} clicks=${cancelClicks} hit=${cancelHitDetail} topic=${topicId}`
     })
     expect(finalScroll.scrollTop, 'post-takeover Cancel stays inside the live scroll range').toBeGreaterThanOrEqual(
-      finalTopExtreme - OFFSET_TOL
+      0 - OFFSET_TOL
     )
-    expect(finalScroll.scrollTop, 'post-takeover Cancel stays at/above bottom').toBeLessThanOrEqual(OFFSET_TOL)
+    expect(finalScroll.scrollTop, 'post-takeover Cancel stays at/above bottom').toBeLessThanOrEqual(
+      finalBottomEdge + OFFSET_TOL
+    )
     expect(
       finalTakeoverDrift,
       'post-takeover Cancel: final viewport stays where the user left it (no snapback to the pre-edit hold)'
@@ -1891,36 +1917,39 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
         DISPLAY_COUNT
       )
       // 7. Still a genuine mid-list reading position (never a bottom jump).
-      expect(Math.abs(metrics.postScrollTop), `round ${round}: remains non-bottom (no bottom jump)`).toBeGreaterThan(
-        BOTTOM_TOL
-      )
-      const topExtreme = -(metrics.scrollHeight - metrics.clientHeight)
+      expect(
+        metrics.scrollHeight - metrics.clientHeight - metrics.postScrollTop,
+        `round ${round}: remains non-bottom (no bottom jump)`
+      ).toBeGreaterThan(BOTTOM_TOL)
       expect(
         metrics.postScrollTop,
         `round ${round}: post viewport stays inside the live scroll range`
-      ).toBeGreaterThanOrEqual(topExtreme - OFFSET_TOL)
+      ).toBeGreaterThanOrEqual(0 - OFFSET_TOL)
     }
   })
   test('insert at true bottom keeps the honest bottom pin (content shifts up)', async ({ mainWindow }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'INSERT TRUE-BOTTOM PIN (must stay unchanged): at the natural bottom the bottom pin owns geometry, a mid-list region hold is never armed, and the real msg-insert-btn click leaves the viewport at the honest bottom (scrollTop ~ 0) while the pair is added — the accepted bottom behaviour.'
+        'INSERT TRUE-BOTTOM PIN (must stay unchanged): at the natural bottom the bottom pin owns geometry, a mid-list region hold is never armed, and the real msg-insert-btn click leaves the viewport at the honest bottom (scrollTop ~= scrollHeight - clientHeight) while the pair is added — the accepted bottom behaviour.'
     })
     const page: Page = mainWindow
     const { topicId } = await test.step('seed mid-topic assistant topic and cold-activate', async () =>
       setupEditRegionTopic(page))
-    // Wheel to the true physical bottom (column-reverse: scrollTop ~= 0).
+    // Wheel to the true physical bottom (normal flow: scrollTop ~= scrollHeight - clientHeight).
     const box = await page.locator('#messages').first().boundingBox()
     if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     for (let i = 0; i < 16; i++) {
       const scroll = await readScroll(page)
-      if (Math.abs(scroll.scrollTop) <= 8) break
+      if (scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 8) break
       await page.mouse.wheel(0, 400)
       await page.waitForTimeout(180)
     }
     const bottomScroll = await readScroll(page)
-    expect(Math.abs(bottomScroll.scrollTop), 'precondition: viewport reached the true bottom').toBeLessThanOrEqual(8)
+    expect(
+      bottomScroll.scrollHeight - bottomScroll.clientHeight - bottomScroll.scrollTop,
+      'precondition: viewport reached the true bottom'
+    ).toBeLessThanOrEqual(8)
     const bottomAssistantId = await page.evaluate((tid: string) => {
       const s = (window as any).store.getState()
       const ids: string[] = s.messages?.messageIdsByTopic?.[tid] ?? []
@@ -1957,7 +1986,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     )
     expect(postCount, 'insert at bottom: pair added').toBe(preCount + 2)
     expect(
-      Math.abs(postScroll.scrollTop),
+      postScroll.scrollHeight - postScroll.clientHeight - postScroll.scrollTop,
       'insert at bottom: the honest bottom pin is unchanged (no upward pull)'
     ).toBeLessThanOrEqual(TRUE_BOTTOM_TOL)
   })

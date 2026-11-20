@@ -347,8 +347,8 @@ const PartialHint = styled.span`
  * is wired here: the keeper absorbs each committed step as layout
  * compensation, exactly like the ordinary observer loop — only synchronously.
  */
-const BROWSE_OPEN_FADE_MS = 150
-const BROWSE_OPEN_FADE_DELAY_MS = 50
+const BROWSE_OPEN_FADE_MS = 200
+const BROWSE_OPEN_FADE_DELAY_MS = 0
 
 /**
  * One shared motion window for the whole browse gesture: the JS-driven space
@@ -1042,6 +1042,12 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
     // just gave this block. Same element types and keys either way, so the runs
     // underneath are updated in place and never recreated.
     const bodies = motion?.phase === 'collapsing' ? (retainedExpandedChildrenRef.current ?? children) : children
+    // Opening measure pass (expanding, to null): the new bodies are already
+    // mounted but the fade is not armed yet. Opacity 0 is layout-neutral, so
+    // the natural height read stays honest; the armed fade then starts from 0
+    // in the same pre-paint commit — no extra frame, no delay.
+    const isOpeningMeasure = motion !== null && motion.phase === 'expanding' && motion.to === null
+    const bodyStyle: CSSProperties | undefined = isOpeningMeasure ? { opacity: 0 } : undefined
     // Fade-only inline vars (inherited by the body region): the space is
     // owned by the JS driver (inline height + synchronous keeper settlement),
     // never by CSS vars, so no style here can move layout on its own.
@@ -1156,7 +1162,8 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
             className="folded-section-body"
             data-testid="folded-section-body"
             data-browse-view={browseView}
-            data-browse-phase={browsePhase ?? undefined}>
+            data-browse-phase={browsePhase ?? undefined}
+            style={bodyStyle}>
             {bodies}
           </FoldBody>
         </FoldContent>

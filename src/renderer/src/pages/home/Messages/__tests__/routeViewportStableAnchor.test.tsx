@@ -661,7 +661,7 @@ describe('layout-space hold symmetry, re-seed provenance and fail-closed recover
     // The atomic takeover then publishes m3 as the new live anchor.
     const token = controller.activeInteractionToken
     const out = controller.userTakeover(
-      { messageId: 'm3', intraRowOffset: -15, scrollTop: 400, isAtBottom: false },
+      { messageId: 'm3', intraRowOffset: -15, scrollTop: 400, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )
@@ -1035,7 +1035,7 @@ describe('user input takes over the anchor', () => {
     const token = controller.activeInteractionToken
     expect(token).not.toBeNull()
     const out = controller.userTakeover(
-      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false },
+      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )
@@ -1112,7 +1112,7 @@ describe('keyboard native paging lifecycle (no keyup idle close)', () => {
     const token = controller.activeInteractionToken
     expect(token).not.toBeNull()
     const out = controller.userTakeover(
-      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false },
+      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token ?? undefined
     )

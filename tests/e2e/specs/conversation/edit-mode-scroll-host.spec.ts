@@ -62,6 +62,13 @@ async function getContainerScrollTop(page: any): Promise<number> {
   })
 }
 
+async function getDistBottom(page: any): Promise<number> {
+  return page.evaluate(() => {
+    const el = document.getElementById('messages')
+    return el ? el.scrollHeight - el.clientHeight - el.scrollTop : 0
+  })
+}
+
 async function getFirstVisibleMessageId(page: any): Promise<string | null> {
   return page.evaluate(() => {
     const container = document.getElementById('messages')
@@ -224,7 +231,7 @@ async function waitForNonBottom(page: any, timeout = 5000): Promise<void> {
     () => {
       const el = document.getElementById('messages')
       if (!el) return false
-      return Math.abs(el.scrollTop) > 80
+      return el.scrollHeight - el.clientHeight - el.scrollTop > 80
     },
     undefined,
     { timeout }
@@ -264,14 +271,13 @@ async function wheelToNonBottom(page: any, topicId: string, messageId: string | 
   while (Date.now() < deadline) {
     const st = await getContainerScrollTop(page)
     lastSt = st
-    if (Math.abs(st) > 80) return
-    // Wheel up (negative deltaY) moves toward older content under
-    // column-reverse (away from bottom scrollTop 0). Alternate with a
-    // larger step if stuck.
+    if ((await getDistBottom(page)) > 80) return
+    // Wheel up (negative deltaY) moves toward older content in normal flow
+    // (away from the bottom edge). Alternate with a larger step if stuck.
     await page.mouse.wheel(0, -600)
     await page.waitForTimeout(250)
     const st2 = await getContainerScrollTop(page)
-    if (Math.abs(st2) > 80) return
+    if ((await getDistBottom(page)) > 80) return
     if (Math.abs(st2 - st) < 1) {
       await page.mouse.wheel(0, -1200)
       await page.waitForTimeout(250)
@@ -390,8 +396,9 @@ test.describe('edit-mode scroll host — integrated UI', () => {
     console.log('[edit-host] nonbottom diag', JSON.stringify(diagNonBottom))
     const firstVisibleBefore = await getFirstVisibleMessageId(page)
     const scrollTopBefore = await getContainerScrollTop(page)
+    const distBottomBefore = await getDistBottom(page)
     expect(firstVisibleBefore).toBeTruthy()
-    expect(Math.abs(scrollTopBefore)).toBeGreaterThan(80)
+    expect(distBottomBefore).toBeGreaterThan(80)
 
     // Ensure edit mode initially off
     const initiallyEnabled = await page.evaluate(() => (window as any).store.getState().editMode?.enabled === true)
@@ -417,6 +424,7 @@ test.describe('edit-mode scroll host — integrated UI', () => {
       .catch(() => {})
 
     const scrollTopEntered = await getContainerScrollTop(page)
+    const distBottomEntered = await getDistBottom(page)
     const firstVisibleEntered = await getFirstVisibleMessageId(page)
     const diagEntered = await page.evaluate(() => {
       const el = document.getElementById('messages')
@@ -438,7 +446,7 @@ test.describe('edit-mode scroll host — integrated UI', () => {
     })
     expect(overflowEntered, 'overflow must persist on enter').not.toBeNull()
     expect(overflowEntered!.sh).toBeGreaterThan(overflowEntered!.ch)
-    expect(Math.abs(scrollTopEntered)).toBeGreaterThan(40)
+    expect(distBottomEntered).toBeGreaterThan(40)
     expect(Math.abs(scrollTopEntered - scrollTopBefore)).toBeLessThan(180)
     if (firstVisibleBefore && firstVisibleEntered) {
       expect(firstVisibleEntered).toBe(firstVisibleBefore)
@@ -451,6 +459,7 @@ test.describe('edit-mode scroll host — integrated UI', () => {
     })
     await page.waitForTimeout(800)
     const scrollTopExited = await getContainerScrollTop(page)
+    const distBottomExited = await getDistBottom(page)
     const firstVisibleExited = await getFirstVisibleMessageId(page)
     const diagExited = await page.evaluate(() => {
       const el = document.getElementById('messages')
@@ -466,7 +475,7 @@ test.describe('edit-mode scroll host — integrated UI', () => {
     })
     expect(overflowExited, 'overflow must persist on exit').not.toBeNull()
     expect(overflowExited!.sh).toBeGreaterThan(overflowExited!.ch)
-    expect(Math.abs(scrollTopExited)).toBeGreaterThan(40)
+    expect(distBottomExited).toBeGreaterThan(40)
     expect(Math.abs(scrollTopExited - scrollTopEntered)).toBeLessThan(180)
     expect(Math.abs(scrollTopExited - scrollTopBefore)).toBeLessThan(220)
     if (firstVisibleBefore && firstVisibleExited) {

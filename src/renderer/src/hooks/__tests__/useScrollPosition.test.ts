@@ -28,8 +28,8 @@ afterEach(() => {
 
 /**
  * Create a mock scroll container with controllable scroll dimensions.
- * The container simulates a column-reverse layout where scrollTop ≈ 0
- * means "at bottom" (newest messages).
+ * Normal-flow geometry: scrollTop 0 is the oldest (top) edge and
+ * `scrollHeight - clientHeight` is the newest (bottom) edge.
  */
 const createMockContainer = (options?: { scrollTop?: number; scrollHeight?: number }) => {
   const el = document.createElement('div')
@@ -62,8 +62,10 @@ describe('useScrollPosition', () => {
       )
     })
 
-    it('detects isAtBottom when scrollTop is near zero (column-reverse layout)', () => {
-      const container = createMockContainer({ scrollTop: -10 })
+    it('detects isAtBottom when scrollTop rests at the normal-flow newest edge', () => {
+      // 5000px of content in an unmeasured (0-height) scrollport: the newest
+      // edge is scrollTop 5000, so 10px shy of it is the bottom vicinity.
+      const container = createMockContainer({ scrollTop: 4990 })
       const { result } = renderHook(() => useScrollPosition('test-topic'))
 
       act(() => {
@@ -217,17 +219,25 @@ describe('useScrollPosition', () => {
       )
     })
 
-    it('supports legacy plain number format', () => {
+    it('drops an untagged legacy numeric position (no cross-coordinate-space reuse)', () => {
       store.set('scroll:test-topic', -250)
       const { result } = renderHook(() => useScrollPosition('test-topic'))
 
-      expect(result.current.getSavedPosition()).toEqual(
-        expect.objectContaining({
-          scrollTop: -250,
-          anchorId: null,
-          isAtBottom: false
-        })
-      )
+      // A bare number was measured in the retired reversed coordinate space, so
+      // it is not portable: the numeric fallback is absent and only the
+      // convention-independent fields survive.
+      const saved = result.current.getSavedPosition() as {
+        scrollTop?: number
+        anchorId: string | null
+        messageId: string | null
+        intraRowOffset: number | null
+        isAtBottom: boolean
+      }
+      expect(saved.scrollTop).toBeUndefined()
+      expect(saved.anchorId).toBeNull()
+      expect(saved.messageId).toBeNull()
+      expect(saved.intraRowOffset).toBeNull()
+      expect(saved.isAtBottom).toBe(false)
     })
   })
 

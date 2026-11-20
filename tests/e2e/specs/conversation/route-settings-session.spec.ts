@@ -623,7 +623,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     // Divider explicit continue-here: current offset wins over historic target snapshot.
     // Deterministic prep via real wheel only (never direct scrollTop): coarse sweep
     // until the shared fork row is visible, then fine-center with a probed wheel
-    // sign (column-reverse safe, smallest adaptation of true-branch
+    // sign (direction-agnostic, smallest adaptation of true-branch
     // vcWheelPositionDivider). The restored main-exclusive position (msg16..29)
     // never shows the fork, so this prep must wheel first; the click offset is
     // captured explicitly from the live fork row afterwards.

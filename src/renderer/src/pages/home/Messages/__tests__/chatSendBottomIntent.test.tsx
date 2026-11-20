@@ -93,7 +93,7 @@ describe('send bottom adoption replaces the retained reading anchor', () => {
     // Same single-writer path as handleScroll: declare, takeover, commit.
     const token = controller.declareUserIntent()
     const out = controller.userTakeover(
-      { messageId: 'm3', intraRowOffset: -8, scrollTop: 0, isAtBottom: true },
+      { messageId: 'm3', intraRowOffset: -8, scrollTop: 0, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       token
     )
@@ -118,7 +118,7 @@ describe('send bottom adoption replaces the retained reading anchor', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm2', -60)
     const out = controller.userTakeover(
-      { messageId: 'm3', intraRowOffset: -8, scrollTop: 0, isAtBottom: true },
+      { messageId: 'm3', intraRowOffset: -8, scrollTop: 0, isAtBottom: true, atPhysicalBottom: true },
       undefined,
       undefined
     )
@@ -249,7 +249,7 @@ describe('programmatic bottom adoption (gesture-free, genuine sessions untouched
     expect(controller.activeInteractionScrollCount).toBe(0)
     // A subsequent real wheel scroll-away adopts normally through takeover.
     const wheel = controller.userTakeover(
-      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false },
+      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -268,7 +268,7 @@ interface SequenceHarness {
   deps: SendBottomIntentDeps
   commits: {
     routeKey: string
-    snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
+    snapshot: { scrollTop?: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
   }[]
   notify: ReturnType<typeof vi.fn>
   navigateSpy: ReturnType<typeof vi.fn>
@@ -444,7 +444,7 @@ describe('runSendBottomIntent handler guards (actual sequence path)', () => {
     // the keeper bottom-hold is gated on no live session).
     expect(controller.userIntentPending).toBe(true)
     const wheel = controller.userTakeover(
-      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false },
+      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )
@@ -739,7 +739,7 @@ describe('send bottom keeper adoption (mounted keeper holds bottom, never the ol
     // is gated on no live session, so it never fights the user's scroll.
     const token = controller.declareUserIntent()
     const wheel = controller.userTakeover(
-      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false },
+      { messageId: 'm4', intraRowOffset: -5, scrollTop: -50, isAtBottom: false, atPhysicalBottom: false },
       undefined,
       token
     )

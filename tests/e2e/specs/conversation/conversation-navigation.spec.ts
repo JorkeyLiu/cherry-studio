@@ -33,8 +33,9 @@
  * input goes through the real mouse. Never dispatches scrollToBottom or
  * SEND_MESSAGE to fake a gesture.
  *
- * Geometry: #messages renders column-reverse, so bottom/newest is
- * scrollTop ~= 0 and reading positions are negative scrollTop.
+ * Geometry: #messages renders a normal DOM flow (flex-direction: column,
+ * oldest-first), so bottom/newest is scrollTop ~= max(0, sh-ch) and reading
+ * positions are scrollTop between 0 and that bottom extreme.
  */
 import type { Page } from '@playwright/test'
 import * as fs from 'node:fs'
@@ -397,9 +398,27 @@ async function waitForTopAlignment(page: any, messageId: string, tol = 32): Prom
   expect(geo).not.toBeNull()
   return geo!
 }
-
 async function readScrollTop(page: any): Promise<number> {
   return page.locator('#messages').evaluate((el: HTMLElement) => el.scrollTop)
+}
+
+interface FlowGeometry {
+  st: number
+  sh: number
+  ch: number
+}
+
+async function readFlowGeometry(page: any): Promise<FlowGeometry> {
+  return page.locator('#messages').evaluate((el: HTMLElement) => ({
+    st: el.scrollTop,
+    sh: el.scrollHeight,
+    ch: el.clientHeight
+  }))
+}
+
+/** Distance from the newest/bottom edge in normal flow: max(0, sh-ch) - st. */
+function distBottom(g: FlowGeometry): number {
+  return g.sh - g.ch - g.st
 }
 
 /**
@@ -668,7 +687,7 @@ async function readAnchor(page: any): Promise<Anchor | null> {
  * T3 hold-entry settle (diagnostic-probe anchored: 2026-10-13 ui:observe
  * t3-quiet-vs-drift-probe reproduced the reported hold flip on current
  * bundles — immediate baseline 162ms post-wheel at len 1162 / offset +6.4
- * shifted 40px within 40ms with scrollTop fixed at -1568, then flipped
+ * shifted 40px within 40ms with scrollTop fixed at -1568 (reverse-flow frame),
  * rows through +594 chars with scrollTop never moving). The 8x150ms
  * real-wheel burst outpaces settled render, so a baseline taken immediately
  * measures input settling, not the keeper. The baseline therefore waits for
@@ -1054,7 +1073,7 @@ test.describe('conversation navigation redesign', () => {
     await page.waitForFunction(
       (tol: number) => {
         const el = document.getElementById('messages') as HTMLElement | null
-        return !!el && Math.abs(el.scrollTop) <= tol
+        return !!el && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
       },
       PRODUCT_BOTTOM_TOL,
       { timeout: 15000 }
@@ -1578,8 +1597,8 @@ test.describe('conversation navigation redesign', () => {
       await page.waitForTimeout(150)
     }
     const lastWheelTime = Date.now()
-    const awayTop = await page.locator('#messages').evaluate((el) => el.scrollTop)
-    expect(Math.abs(awayTop), 'real wheel must leave the genuine bottom').toBeGreaterThan(50)
+    const awayGeo = await readFlowGeometry(page)
+    expect(distBottom(awayGeo), 'real wheel must leave the genuine bottom').toBeGreaterThan(50)
 
     // Hold-entry settle BEFORE the baseline (see waitForQuietReadingAnchor):
     // genuine wheel-quiet + stable visible anchor + required row overlap, so
@@ -1595,7 +1614,7 @@ test.describe('conversation navigation redesign', () => {
     // 8000ms settle + hold growth, so lenAtPause + HOLD_GROWTH stays
     // arithmetically reachable. While the user reads away, streaming MAIN_TEXT
     // must grow by that reachable amount and the first visible reading anchor
-    // (row-stable per viewport ADR, not raw scrollTop under column-reverse
+    // (row-stable per viewport ADR, not raw scrollTop under normal-flow
     // growth) must not drift; generation continues after the hold.
     const holdBlockId = await findStreamingBlockId(page)
     expect(holdBlockId, 'active streaming block must exist while reading away').not.toBeNull()
@@ -1613,8 +1632,8 @@ test.describe('conversation navigation redesign', () => {
       `[E2E] T3 hold entry: lenAtPause=${lenAtPause} total=${extendedTotal} remaining=${extendedTotal - lenAtPause} anchor=${preAnchor!.id} status=${holdPre?.status}`
     )
     await waitForBlockGrowth(page, holdBlockId!, lenAtPause + HOLD_GROWTH)
-    const pausedTop = await page.locator('#messages').evaluate((el) => el.scrollTop)
-    expect(Math.abs(pausedTop), 'continued growth while away never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
+    const pausedGeo = await readFlowGeometry(page)
+    expect(distBottom(pausedGeo), 'continued growth while away never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
     const pausedAnchor = await readAnchor(page)
     expect(pausedAnchor, 'anchor must still resolve through hold growth').not.toBeNull()
     expect(pausedAnchor!.id, 'hold keeps the reading row').toBe(preAnchor!.id)
@@ -1625,7 +1644,7 @@ test.describe('conversation navigation redesign', () => {
     expect(pausedState?.status, 'generation continues while reading away').toBe('streaming')
     console.log(
       `[E2E] T3 hold done: grew to ${pausedState?.length} anchor=${pausedAnchor!.id} ` +
-        `dOffset=${Math.abs(pausedAnchor!.offset - preAnchor!.offset).toFixed(1)} top=${Math.round(pausedTop)}`
+        `dOffset=${Math.abs(pausedAnchor!.offset - preAnchor!.offset).toFixed(1)} distBottom=${Math.round(distBottom(pausedGeo))}`
     )
 
     // The always-available button reveals with no settings gate and no hover.
@@ -1637,13 +1656,13 @@ test.describe('conversation navigation redesign', () => {
     await page.waitForFunction(
       (tol: number) => {
         const el = document.getElementById('messages') as HTMLElement | null
-        return !!el && Math.abs(el.scrollTop) <= tol
+        return !!el && el.scrollHeight - el.clientHeight - el.scrollTop <= tol
       },
       PRODUCT_BOTTOM_TOL,
       { timeout: 15000 }
     )
-    const settledTop = await page.locator('#messages').evaluate((el) => el.scrollTop)
-    expect(Math.abs(settledTop), 'explicit bottom navigation must reach the genuine bottom').toBeLessThanOrEqual(
+    const settledGeo = await readFlowGeometry(page)
+    expect(distBottom(settledGeo), 'explicit bottom navigation must reach the genuine bottom').toBeLessThanOrEqual(
       BOTTOM_TOL
     )
 
@@ -1655,7 +1674,7 @@ test.describe('conversation navigation redesign', () => {
       const resumeLen = resumePre.length
       await waitForBlockGrowth(page, holdBlockId!, resumeLen + HOLD_GROWTH)
       expect(
-        await page.locator('#messages').evaluate((el) => el.scrollTop),
+        distBottom(await readFlowGeometry(page)),
         'resumed follow stays pinned through growth'
       ).toBeLessThanOrEqual(BOTTOM_TOL)
       console.log(`[E2E] T3 resume pinned through +${HOLD_GROWTH} from ${resumeLen}`)
@@ -1673,7 +1692,7 @@ test.describe('conversation navigation redesign', () => {
     )
     await expectBackToBottomHidden(page)
     console.log(
-      `[E2E] T3 button revealed away=${Math.round(awayTop)} settled=${Math.round(settledTop)} holdDone complete hidden`
+      `[E2E] T3 button revealed awayDist=${Math.round(distBottom(awayGeo))} settledDist=${Math.round(distBottom(settledGeo))} holdDone complete hidden`
     )
   })
 
@@ -1852,7 +1871,7 @@ test.describe('conversation navigation redesign', () => {
     }, topicId)
     expect(resident.ids.length).toBe(6)
     expect(resident.dom).toBe(6)
-    expect(Math.abs(await readScrollTop(page))).toBeLessThanOrEqual(1)
+    expect(distBottom(await readFlowGeometry(page)), 'current latest bottom in normal flow').toBeLessThanOrEqual(1)
 
     // Outline holds exactly the three user rows in chronological order.
     const nav = page.getByTestId('conversation-navigation')

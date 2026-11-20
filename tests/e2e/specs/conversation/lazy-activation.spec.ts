@@ -724,14 +724,19 @@ test.describe('Cmd/Ctrl+F search -> chat viewport coherence', () => {
 
     let firstMotionSamples: MotionSample[] = []
     let firstLanding = 0
+    let journeyFrom = 0
 
     await test.step('from bottom: the first hit lands readable under the search panel', async () => {
-      // The route opens at the column-reverse bottom (scrollTop ~= 0).
+      // The route opens at the normal-flow bottom (scrollTop ~= max(0, sh - ch)).
       await page.waitForFunction(
-        () => Math.abs((document.getElementById('messages') as HTMLElement).scrollTop) <= 1,
+        () => {
+          const el = document.getElementById('messages') as HTMLElement
+          return el.scrollHeight - el.clientHeight - el.scrollTop <= 1
+        },
         undefined,
         { timeout: 15000 }
       )
+      journeyFrom = await readScrollTop(page)
       await startScrollMotionCapture(page)
       // Sampled from before the query is even typed: the located hit must become
       // registered and stay registered through the jump.
@@ -772,15 +777,16 @@ test.describe('Cmd/Ctrl+F search -> chat viewport coherence', () => {
         return
       }
       expect(firstMotionSamples.length, 'scroll motion must be sampled per frame').toBeGreaterThan(5)
-      const travel = intermediateFrames(firstMotionSamples, 0, firstLanding)
+      const travel = intermediateFrames(firstMotionSamples, journeyFrom, firstLanding)
       expect(
         travel.length,
         `the jump must animate through intermediate positions (samples: ${JSON.stringify(
           firstMotionSamples.map((sample) => Math.round(sample.top))
         )})`
       ).toBeGreaterThanOrEqual(2)
-      // No frame may pass the landing position and come back.
-      const overshoot = firstMotionSamples.filter((sample) => Math.abs(sample.top) > Math.abs(firstLanding) + 8)
+      // No frame may pass the landing position and come back (the journey runs
+      // from the bottom toward a smaller scrollTop, so overshoot is below landing).
+      const overshoot = firstMotionSamples.filter((sample) => sample.top < firstLanding - 8)
       expect(
         overshoot.map((sample) => Math.round(sample.top)),
         'no frame may overshoot the landing'
@@ -822,7 +828,7 @@ test.describe('Cmd/Ctrl+F search -> chat viewport coherence', () => {
       // row's top.
       expect(second.rowId).toBe(longRowId)
       // Toward the newest end of the same row: a deeper hit means a LARGER
-      // (less negative) column-reverse scrollTop.
+      // normal-flow scrollTop.
       expect(second.scrollTop).toBeGreaterThan(firstHitScrollTop + 100)
       // Both hits stay highlighted and the located one stays the current match:
       // moving between hits must not blink the highlight out of the registry.
@@ -928,10 +934,17 @@ test.describe('Cmd/Ctrl+F search -> chat viewport coherence', () => {
       await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
       for (let i = 0; i < 30; i++) {
         await page.mouse.wheel(0, 800)
-        if (Math.abs(await readScrollTop(page)) <= 2) break
+        const distBottom = await page.evaluate(() => {
+          const el = document.getElementById('messages') as HTMLElement
+          return el.scrollHeight - el.clientHeight - el.scrollTop
+        })
+        if (distBottom <= 2) break
       }
       await page.waitForFunction(
-        () => Math.abs((document.getElementById('messages') as HTMLElement).scrollTop) <= 2,
+        () => {
+          const el = document.getElementById('messages') as HTMLElement
+          return el.scrollHeight - el.clientHeight - el.scrollTop <= 2
+        },
         undefined,
         { timeout: 15000 }
       )
@@ -943,9 +956,13 @@ test.describe('Cmd/Ctrl+F search -> chat viewport coherence', () => {
       await contentSearch.locator('input').first().fill(SEARCH_QUERY)
       await expect(contentSearch).toContainText('1/2', { timeout: 15000 })
 
-      // Take the viewport over only once the movement is really under way.
+      // Take the viewport over only once the movement is really under way
+      // (the viewport has left the bottom by more than 40px).
       await page.waitForFunction(
-        () => Math.abs((document.getElementById('messages') as HTMLElement).scrollTop) > 40,
+        () => {
+          const el = document.getElementById('messages') as HTMLElement
+          return el.scrollHeight - el.clientHeight - el.scrollTop > 40
+        },
         undefined,
         { timeout: 15000 }
       )

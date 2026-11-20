@@ -637,8 +637,8 @@ export default async function observe({ page, electronApp, capture, writeText }:
       if (count > 0) return true
       if (Date.now() - start > timeoutMs) return false
       const s = await snapshot()
-      // column-reverse: negative scrollTop moves up the history.
-      if (typeof s.scrollTop === 'number' && s.maxScroll > 0 && Math.abs(s.scrollTop) > 0.92 * s.maxScroll) dir = 1
+      // normal flow: distBottom large means parked near the oldest edge.
+      if (typeof s.scrollTop === 'number' && s.maxScroll > 0 && s.maxScroll - s.scrollTop > 0.92 * s.maxScroll) dir = 1
       await wheel(dir * 300)
     }
   }
@@ -683,9 +683,9 @@ export default async function observe({ page, electronApp, capture, writeText }:
       continue
     }
     // The wheel steps above also move the absolute scroll offset; loop until the
-    // divider sits mid-scrollport AND the offset is clearly non-top/non-bottom.
-    const abs = Math.abs(s.scrollTop)
-    const ratio = abs / Math.max(1, s.maxScroll)
+    // divider sits mid-scrollport AND the offset is clearly non-oldest/non-bottom.
+    const distBottom = Math.max(0, s.maxScroll - s.scrollTop)
+    const ratio = distBottom / Math.max(1, s.maxScroll)
     if (ratio < 0.15 || ratio > 0.85) {
       await wheel(ratio < 0.15 ? -Math.round(s.maxScroll * 0.1) : Math.round(s.maxScroll * 0.1))
       continue
@@ -693,22 +693,20 @@ export default async function observe({ page, electronApp, capture, writeText }:
     break
   }
   const p0 = placed
-  const absScroll = Math.abs(p0.scrollTop)
-  const scrollRatio = round(absScroll / Math.max(1, p0.maxScroll))
+  const awayBottom = Math.max(0, p0.maxScroll - p0.scrollTop)
+  const scrollRatio = round(awayBottom / Math.max(1, p0.maxScroll))
   log.push('')
   log.push(
-    `parent reading position (${pair.parentRoute}): dividerTop=${p0.dividerTop} clientHeight=${p0.clientHeight} scrollTop=${p0.scrollTop} absScroll=${absScroll} maxScroll=${p0.maxScroll} ratio=${scrollRatio} phase=${p0.phase} firstInsideRow=${p0.firstInsideRow} topEdgeRow=${p0.topEdgeRow}`
+    `parent reading position (${pair.parentRoute}): dividerTop=${p0.dividerTop} clientHeight=${p0.clientHeight} scrollTop=${p0.scrollTop} distBottom=${awayBottom} maxScroll=${p0.maxScroll} ratio=${scrollRatio} phase=${p0.phase} firstInsideRow=${p0.firstInsideRow} topEdgeRow=${p0.topEdgeRow}`
   )
-  if (absScroll <= 0 || scrollRatio < 0.15) {
-    throw new Error(`parent reading position is not clearly non-top: scrollTop=${p0.scrollTop} ratio=${scrollRatio}`)
+  if (awayBottom <= 0 || scrollRatio < 0.15) {
+    throw new Error(`parent reading position is not clearly non-bottom: scrollTop=${p0.scrollTop} ratio=${scrollRatio}`)
   }
   if (scrollRatio > 0.85) {
-    throw new Error(
-      `parent reading position is at the list top boundary: scrollTop=${p0.scrollTop} ratio=${scrollRatio}`
-    )
+    throw new Error(`parent reading position is at the oldest boundary: scrollTop=${p0.scrollTop} ratio=${scrollRatio}`)
   }
   log.push(
-    `viewport contract: divider at ${p0.dividerTop}px inside a ${p0.clientHeight}px scrollport, scroll offset at ${round(scrollRatio * 100)}% of the achievable range (non-top, non-bottom) OK`
+    `viewport contract: divider at ${p0.dividerTop}px inside a ${p0.clientHeight}px scrollport, scroll offset at ${round(scrollRatio * 100)}% of the achievable range (non-oldest, non-bottom) OK`
   )
 
   const settledParentPre: any = await snapshot()

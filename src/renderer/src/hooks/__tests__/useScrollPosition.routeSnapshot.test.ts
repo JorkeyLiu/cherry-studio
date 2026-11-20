@@ -7,6 +7,7 @@
  * persist — only displayed-stable user scrolls (plus explicit stable
  * commits via `commitSnapshotForRoute`).
  */
+import { FLOW_COORDINATE_SPACE } from '@renderer/pages/home/Messages/flowScrollGeometry'
 import { RouteViewportController } from '@renderer/pages/home/Messages/routeViewportController'
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -57,32 +58,51 @@ const mockContainer = (scrollTop = -200) => {
 }
 
 describe('route-local snapshot schema', () => {
-  it('normalizes legacy snapshots without offset (fallback, no crash)', () => {
+  it('drops untagged pre-flow offsets, keeps stable anchor (fallback, no crash)', () => {
     store.set('scroll:topic-legacy', { scrollTop: -300, anchorId: 'm1', isAtBottom: false })
     const { result } = renderHook(() => useScrollPosition('topic-legacy'))
     const pos = result.current.getSavedPosition()
     expect(pos).toEqual(
       expect.objectContaining({
-        scrollTop: -300,
         anchorId: 'm1',
         messageId: 'm1',
         intraRowOffset: null,
-        isAtBottom: false
+        isAtBottom: false,
+        coordinateSpace: FLOW_COORDINATE_SPACE
       })
     )
+    expect(pos?.scrollTop).toBeUndefined()
+    expect(pos?.rawScrollTop).toBeUndefined()
   })
 
-  it('normalizes legacy object without isAtBottom and plain numbers', () => {
+  it('drops untagged object offsets and plain pre-flow numbers, keeps stable anchor', () => {
     store.set('scroll:topic-old2', { scrollTop: -100, anchorId: 'm2' })
     const { result } = renderHook(() => useScrollPosition('topic-old2'))
-    expect(result.current.getSavedPosition()).toEqual(
-      expect.objectContaining({ anchorId: 'm2', messageId: 'm2', isAtBottom: false })
+    const old2 = result.current.getSavedPosition()
+    expect(old2).toEqual(
+      expect.objectContaining({
+        anchorId: 'm2',
+        messageId: 'm2',
+        isAtBottom: false,
+        coordinateSpace: FLOW_COORDINATE_SPACE
+      })
     )
+    expect(old2?.scrollTop).toBeUndefined()
+    expect(old2?.rawScrollTop).toBeUndefined()
     store.set('scroll:topic-num', -250)
     const { result: r2 } = renderHook(() => useScrollPosition('topic-num'))
-    expect(r2.current.getSavedPosition()).toEqual(
-      expect.objectContaining({ scrollTop: -250, anchorId: null, isAtBottom: false })
+    const num = r2.current.getSavedPosition()
+    expect(num).toEqual(
+      expect.objectContaining({
+        anchorId: null,
+        messageId: null,
+        intraRowOffset: null,
+        isAtBottom: false,
+        coordinateSpace: FLOW_COORDINATE_SPACE
+      })
     )
+    expect(num?.scrollTop).toBeUndefined()
+    expect(num?.rawScrollTop).toBeUndefined()
   })
 
   it('savePosition writes route-saved-row-anchor fields synchronously', () => {

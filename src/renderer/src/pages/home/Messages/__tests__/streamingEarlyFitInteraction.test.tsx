@@ -196,7 +196,7 @@ const driveBottomFollow = (controller: RouteViewportController): void => {
 const pressPauseEarlyFit = (controller: RouteViewportController, messageId: string, offset: number) => {
   const token = controller.declareUserIntent()
   const out = controller.userTakeover(
-    { messageId, intraRowOffset: offset, scrollTop: 0, isAtBottom: true },
+    { messageId, intraRowOffset: offset, scrollTop: 0, isAtBottom: true, atPhysicalBottom: true },
     undefined,
     token
   )

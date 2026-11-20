@@ -1,69 +1,111 @@
 /**
- * Single column-reverse scroll geometry primitive.
+ * Single normal-flow scroll geometry primitive for the messages viewport.
  *
- * The messages viewport renders newest-first inside `flex-direction:
- * column-reverse`, so production coordinates are:
- *   - bottom (newest) is `scrollTop ≈ 0`
- *   - visual top (oldest) is the most negative `scrollTop`
+ * The messages viewport renders oldest-first inside `flex-direction: column`,
+ * so production coordinates are ordinary, positive scroll offsets:
+ *   - the visual top (oldest) is `scrollTop ≈ 0`
+ *   - the bottom (newest) is `scrollTop ≈ scrollHeight - clientHeight`
  *
- * Two distances, never confused:
- *   - `distanceFromBottom = abs(scrollTop)`
- *   - `distanceFromOldest = max(0, scrollHeight - clientHeight - abs(scrollTop))`
+ * One derived quantity, never hand-rolled: `maxScrollTop = max(0, scrollHeight
+ * - clientHeight)` is the scrollable travel, i.e. the largest value
+ * `scrollTop` can take. Two distances, never confused:
+ *   - `distanceFromBottom = max(0, maxScrollTop - scrollTop)`
+ *   - `distanceFromOldest = max(0, scrollTop)`
  *
  * All production scroll judgments (bottom snapshots, newer prefetch, oldest
- * replay validity) and pure tests should use these helpers instead of
- * hand-rolled `scrollHeight - scrollTop - clientHeight` formulas, which mix
- * up the oldest distance with the bottom distance under column-reverse.
+ * replay validity) and pure tests use these helpers instead of hand-rolled
+ * `scrollHeight - scrollTop - clientHeight` formulas, which mix up the oldest
+ * distance with the bottom distance. Every helper takes the SAME metrics shape
+ * and every call site builds it with `readScrollMetrics` — no parallel formula
+ * may grow beside this module.
  */
 
-export const COLUMN_REVERSE_BOTTOM_THRESHOLD_PX = 50
-export const COLUMN_REVERSE_OLDER_THRESHOLD_PX = 150
-export const COLUMN_REVERSE_NEWER_PREFETCH_PX = 150
+/**
+ * Coordinate-space tag written next to a persisted scroll snapshot.
+ *
+ * Persisted numeric scroll offsets are only meaningful in the coordinate space
+ * they were measured in. Snapshots saved before this tag existed carry
+ * `column-reverse` coordinates (bottom = 0, older = negative) and are therefore
+ * NOT portable into this space: readers drop their numeric fallbacks and keep
+ * only the convention-independent identity anchor (`messageId` +
+ * `intraRowOffset`) and the `isAtBottom` classification.
+ */
+export const FLOW_COORDINATE_SPACE = 'flow-v1' as const
+export type FlowCoordinateSpace = typeof FLOW_COORDINATE_SPACE
 
-export interface ColumnReverseMetrics {
+export const FLOW_BOTTOM_THRESHOLD_PX = 50
+export const FLOW_OLDER_THRESHOLD_PX = 150
+export const FLOW_NEWER_PREFETCH_PX = 150
+
+/** The three live geometry readings every distance helper is derived from. */
+export interface FlowScrollMetrics {
   scrollTop: number
   scrollHeight: number
   clientHeight: number
 }
 
-/** Distance from the newest/bottom edge in a column-reverse container. */
-export const distanceFromBottom = (scrollTop: number): number => Math.abs(scrollTop)
-
-/** Distance from the oldest/top edge in a column-reverse container. */
-export const distanceFromOldest = (metrics: ColumnReverseMetrics): number =>
-  Math.max(0, metrics.scrollHeight - metrics.clientHeight - Math.abs(metrics.scrollTop))
-
-/** True when the viewport rests at the newest/bottom vicinity. */
-export const isAtBottom = (scrollTop: number, thresholdPx = COLUMN_REVERSE_BOTTOM_THRESHOLD_PX): boolean =>
-  distanceFromBottom(scrollTop) <= thresholdPx
-
-/** True when the viewport rests at the oldest/top vicinity. */
-export const isAtOldest = (metrics: ColumnReverseMetrics, thresholdPx = COLUMN_REVERSE_OLDER_THRESHOLD_PX): boolean =>
-  distanceFromOldest(metrics) <= thresholdPx
+/** Any live source of those readings (a scroll container satisfies this). */
+export interface FlowScrollSource {
+  readonly scrollTop: number
+  readonly scrollHeight: number
+  readonly clientHeight: number
+}
 
 /**
- * True when the viewport is parked EXACTLY at the clamped oldest edge (no
- * scroll movement possible). 1px subpixel rounding tolerance only — never a
- * prefetch vicinity. Used solely for the direction-confirmed clamped-input
- * path (wheel/key with no scroll event); post-scroll paging keeps the
- * vicinity primitive above.
+ * Single adapter from a live scroll element to the geometry shape. The only
+ * allowed way to build `FlowScrollMetrics`, so no call site invents its own
+ * subset of the readings.
  */
+export const readScrollMetrics = (source: FlowScrollSource): FlowScrollMetrics => ({
+  scrollTop: source.scrollTop,
+  scrollHeight: source.scrollHeight,
+  clientHeight: source.clientHeight
+})
+
+/**
+ * Largest reachable `scrollTop` (the scrollable travel). Non-finite input
+ * yields `NaN`, which every comparison below fails closed on.
+ */
+export const maxScrollTop = (metrics: FlowScrollMetrics): number =>
+  Math.max(0, metrics.scrollHeight - metrics.clientHeight)
+
+/** Distance from the newest/bottom edge in a normal-flow container. */
+export const distanceFromBottom = (metrics: FlowScrollMetrics): number =>
+  Math.max(0, maxScrollTop(metrics) - metrics.scrollTop)
+
+/** Distance from the oldest/top edge in a normal-flow container. */
+export const distanceFromOldest = (metrics: FlowScrollMetrics): number => Math.max(0, metrics.scrollTop)
+
+/** True when the viewport rests at the newest/bottom vicinity. */
+export const isAtBottom = (metrics: FlowScrollMetrics, thresholdPx = FLOW_BOTTOM_THRESHOLD_PX): boolean =>
+  distanceFromBottom(metrics) <= thresholdPx
+
+/** True when the viewport rests at the oldest/top vicinity. */
+export const isAtOldest = (metrics: FlowScrollMetrics, thresholdPx = FLOW_OLDER_THRESHOLD_PX): boolean =>
+  distanceFromOldest(metrics) <= thresholdPx
 
 /**
  * True when the viewport rests at the newest/bottom vicinity (browse edge
  * eligibility for the newer direction, mirroring `isAtOldest`).
  */
-export const isAtNewest = (metrics: ColumnReverseMetrics, thresholdPx = COLUMN_REVERSE_NEWER_PREFETCH_PX): boolean =>
-  distanceFromBottom(metrics.scrollTop) <= thresholdPx
+export const isAtNewest = (metrics: FlowScrollMetrics, thresholdPx = FLOW_NEWER_PREFETCH_PX): boolean =>
+  distanceFromBottom(metrics) <= thresholdPx
 
 /**
- * True when the viewport is parked EXACTLY at the clamped newest edge
- * (`scrollTop` 0, no scroll movement possible). Mirror of `isExactlyAtOldest`
- * for the direction-confirmed clamped-input path; post-scroll paging keeps the
- * vicinity primitive above.
+ * True when the viewport is parked EXACTLY at the clamped newest edge (no
+ * scroll movement possible). 1px subpixel rounding tolerance only — never a
+ * prefetch vicinity. Used solely for the direction-confirmed clamped-input
+ * path (wheel/key with no scroll event); post-scroll paging keeps the
+ * vicinity primitives above.
  */
-export const isExactlyAtNewest = (metrics: ColumnReverseMetrics): boolean => distanceFromBottom(metrics.scrollTop) <= 1
-export const isExactlyAtOldest = (metrics: ColumnReverseMetrics): boolean => distanceFromOldest(metrics) <= 1
+export const isExactlyAtNewest = (metrics: FlowScrollMetrics): boolean => distanceFromBottom(metrics) <= 1
+
+/**
+ * True when the viewport is parked EXACTLY at the clamped oldest edge
+ * (`scrollTop` 0, no scroll movement possible). Mirror of `isExactlyAtNewest`
+ * for the direction-confirmed clamped-input path.
+ */
+export const isExactlyAtOldest = (metrics: FlowScrollMetrics): boolean => distanceFromOldest(metrics) <= 1
 
 /**
  * Layout-space hold metric for ONE anchor row.
@@ -75,14 +117,13 @@ export const isExactlyAtOldest = (metrics: ColumnReverseMetrics): boolean => dis
  * and fights a genuine user scroll (which is why a live gesture had to veto the
  * hold altogether).
  *
- * Under this container's fixed convention (see the module header: bottom/newest
- * is `scrollTop ≈ 0`, older is negative, so raising `scrollTop` moves content
- * up and `dViewportOffset/dScrollTop = -1`), the row's layout position is
- * `P = viewportOffset + scrollTop - c`. Differencing two samples of the same
- * row cancels the viewport/scroll coupling and leaves exactly the part of the
- * movement the CONTENT LAYOUT produced, with every pixel the user scrolled
- * removed. A pure user scroll therefore yields `0` (hold nothing, never cancel
- * the movement), and a pure layout change yields the growth to hold.
+ * The row's layout position is `P = viewportOffset + scrollTop - c` in ANY
+ * scroll convention, because raising `scrollTop` always moves content up, i.e.
+ * `dViewportOffset/dScrollTop = -1`. Differencing two samples of the same row
+ * therefore cancels the viewport/scroll coupling and leaves exactly the part of
+ * the movement the CONTENT LAYOUT produced, with every pixel the user scrolled
+ * removed. A pure user scroll yields `0` (hold nothing, never cancel the
+ * movement), and a pure layout change yields the growth to hold.
  */
 export interface LayoutHoldSample {
   /** Row top minus scroll-container top (`RouteVisualAnchor.offset`). */

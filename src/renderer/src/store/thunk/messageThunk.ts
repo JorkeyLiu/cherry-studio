@@ -3560,6 +3560,84 @@ export const validateWindowResponse = isValidWindowResponse
 // Viewport generation cannot be reused because bootstrap runs outside Messages.
 let loadTopicMessagesRequestSeq = 0
 const latestLoadTopicMessagesRequestByTopic = new Map<string, number>()
+/**
+ * Pending route-window restore (single-flight topic-return A→B→A).
+ *
+ * A `loadRouteMessagesThunk` window read registers its in-flight execution
+ * here (sync prefix, per topic) so a bootstrap that dispatches later in the
+ * same switch (child TOP effect before parent bootstrap) can adopt the same
+ * ongoing read instead of fetching a competing latest. Adoption reuses the
+ * restore's request token (no bump): the newest same-topic dispatch still
+ * supersedes via the shared map, preserving rapid ABA protection. Entries
+ * are removed on settle with an identity check, so newer restores are never
+ * reclaimed and nothing leaks.
+ */
+interface PendingRouteRestore {
+  route: string | null
+  requestSeq: number
+  kind: 'latest' | 'around'
+  request: FetchMessagesWindowRequest
+  promise: Promise<FetchMessagesWindowResponse | void>
+  /** Resident applicability generation read at route-dispatch registration. */
+  publicationGeneration: number
+}
+const pendingRouteRestoreByTopic = new Map<string, PendingRouteRestore>()
+/**
+ * Dispatch/request-source publication token for a pending route restore.
+ * Transient in-flight identity only (the shared single-flight map); never
+ * persisted, never written back into the resident registry by the renderer.
+ */
+export interface RouteRestorePublicationToken {
+  route: string | null
+  requestSeq: number
+  publicationGeneration: number
+}
+
+/**
+ * Read the current pending restore's publication token without claiming it.
+ * Returns a copy plus the in-flight promise for same-request proof; null
+ * when no entry is registered. Read-only: never bumps or writes generations.
+ */
+export function getPendingRouteRestorePublicationToken(
+  topicId: string
+): (RouteRestorePublicationToken & { promise: Promise<FetchMessagesWindowResponse | void> }) | null {
+  const entry = pendingRouteRestoreByTopic.get(topicId)
+  if (!entry) return null
+  return {
+    route: entry.route,
+    requestSeq: entry.requestSeq,
+    publicationGeneration: entry.publicationGeneration,
+    promise: entry.promise
+  }
+}
+
+/**
+ * Resolve the resident-generation baseline a prepare gate may use after it
+ * dispatched a deferred around. Returns the token's publication generation
+ * only when `dispatchedPromise` is proven to be the same in-flight request
+ * that registered the token (promise identity + route match); otherwise
+ * returns the originally captured generation so an unrelated resident change
+ * still invalidates. Pure: no store read, no dispatch, no global write.
+ */
+export function resolveAdoptedResidentBaseline(
+  capturedGeneration: number,
+  token: (RouteRestorePublicationToken & { promise?: unknown }) | null,
+  dispatchedPromise: unknown,
+  routeAtStart: string | null
+): number {
+  try {
+    if (!token) return capturedGeneration
+    if ((token.route ?? null) !== (routeAtStart ?? null)) return capturedGeneration
+    if (token.promise !== undefined && dispatchedPromise !== undefined && token.promise !== dispatchedPromise) {
+      return capturedGeneration
+    }
+    const gen = (token as { publicationGeneration?: unknown }).publicationGeneration
+    if (typeof gen !== 'number' || !Number.isFinite(gen)) return capturedGeneration
+    return gen
+  } catch {
+    return capturedGeneration
+  }
+}
 
 /**
  * Non-blocking anchor scheduling for topic activation.
@@ -3623,9 +3701,15 @@ export const loadTopicMessagesThunk =
           // Legacy: only non-empty cached topics are hits; empty falls through to fetch
           if (cachedIds.length > 0) {
             recordResidentReadHit()
-            // Supersede any older in-flight same-topic staged load before completing cache-hit activation
-            const requestSeq = ++loadTopicMessagesRequestSeq
-            latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+            // A fetchless hit must not supersede an in-flight same-target
+            // restore: the restore owns the window, the hit publishes
+            // nothing. Bump only when no same-route restore is in flight.
+            const pendingRestore = pendingRouteRestoreByTopic.get(topicId)
+            if (!pendingRestore || pendingRestore.route !== activeRouteOf(getState, topicId)) {
+              // Supersede any older in-flight same-topic staged load before completing cache-hit activation
+              const requestSeq = ++loadTopicMessagesRequestSeq
+              latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+            }
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -3642,9 +3726,15 @@ export const loadTopicMessagesThunk =
             !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
           if (isResidentHit) {
             recordResidentReadHit()
-            // Supersede any older in-flight same-topic staged load before completing cache-hit activation
-            const requestSeq = ++loadTopicMessagesRequestSeq
-            latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+            // A fetchless hit must not supersede an in-flight same-target
+            // restore: the restore owns the window, the hit publishes
+            // nothing. Bump only when no same-route restore is in flight.
+            const pendingRestore = pendingRouteRestoreByTopic.get(topicId)
+            if (!pendingRestore || pendingRestore.route !== activeRouteOf(getState, topicId)) {
+              // Supersede any older in-flight same-topic staged load before completing cache-hit activation
+              const requestSeq = ++loadTopicMessagesRequestSeq
+              latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+            }
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -3693,11 +3783,25 @@ export const loadTopicMessagesThunk =
     try {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
-      // Capture/bump per-topic applicability generation before both reads
-      dispatch(bumpGeneration(topicId))
-      const generation = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
-        0) as number
-
+      // Generation ownership with single-flight restore adoption: resolve the
+      // same-topic same-route pending restore BEFORE touching the resident
+      // applicability generation. An adopted deferred around publishes its
+      // joint window under the dispatch-source token
+      // (`publicationGeneration`, no bump), so the dispatching prepare's
+      // baseline stays applicable; any later external generation advance
+      // still invalidates via mismatch. Latest-first (no pending) keeps the
+      // historic bump+latest path.
+      const adoptionRoute = activeRouteOf(getState, topicId)
+      const pendingRestorePre = pendingRouteRestoreByTopic.get(topicId)
+      const adoptRestorePre =
+        pendingRestorePre !== undefined && pendingRestorePre.route === adoptionRoute ? pendingRestorePre : null
+      let generation: number
+      if (adoptRestorePre) {
+        generation = adoptRestorePre.publicationGeneration
+      } else {
+        dispatch(bumpGeneration(topicId))
+        generation = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0) as number
+      }
       const limitRaw = getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT
       const limit = clampWindowLimit(limitRaw)
       // Topic loads respect the stored route (main after a real topic
@@ -3705,18 +3809,22 @@ export const loadTopicMessagesThunk =
       const request: FetchMessagesWindowRequest = {
         kind: 'latest',
         topicId,
-        branchId: activeRouteOf(getState, topicId),
+        branchId: adoptionRoute,
         limit
       }
+      // Adopt the pre-resolved same-route restore (no second map read: no
+      // await has run since the pre-lookup, so the entry is unchanged).
+      const adoptRestore = adoptRestorePre
 
-      const requestSeq = ++loadTopicMessagesRequestSeq
-      latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+      let requestSeq: number
+      if (adoptRestore) {
+        requestSeq = adoptRestore.requestSeq
+      } else {
+        requestSeq = ++loadTopicMessagesRequestSeq
+        latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+      }
       const deletionGenAtStart = captureDeletionGeneration(topicId)
 
-      // Stage both latest window and segments under same generation
-      const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
-        dbService.fetchMessagesWindow(request)
-      )
       const segmentsPromise: Promise<any[]> = (
         dbService.listSegments ? dbService.listSegments(topicId) : Promise.resolve([])
       ) as Promise<any[]>
@@ -3726,7 +3834,32 @@ export const loadTopicMessagesThunk =
       const stagedStartMs = typeof performance !== 'undefined' ? performance.now() : Date.now()
       let stagedSuccess = false
       try {
-        ;[response, segmentsRaw] = await Promise.all([windowPromise, segmentsPromise])
+        if (adoptRestore) {
+          let adopted: FetchMessagesWindowResponse | void
+          try {
+            adopted = await adoptRestore.promise
+          } catch {
+            adopted = undefined
+          }
+          if (!adopted || !adopted.window) {
+            // Underlying restore superseded or failed: only refetch when no
+            // newer same-topic request owns the target now (otherwise this
+            // bootstrap is itself stale and the guards below discard it).
+            if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== adoptRestore.requestSeq) {
+              recordResidentReadDiscard('superseded')
+              return
+            }
+            adopted = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
+          }
+          response = adopted
+          segmentsRaw = await segmentsPromise
+        } else {
+          // Stage both latest window and segments under same generation
+          const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
+            dbService.fetchMessagesWindow(request)
+          )
+          ;[response, segmentsRaw] = await Promise.all([windowPromise, segmentsPromise])
+        }
         stagedSuccess = true
       } catch (e) {
         const stagedEndFail = typeof performance !== 'undefined' ? performance.now() : Date.now()
@@ -3767,7 +3900,12 @@ export const loadTopicMessagesThunk =
         return
       }
 
-      if (!validateWindowResponse(request, response!)) {
+      // Adopted restores validate against their own issuing request (the
+      // validator is kind-strict: an around window never satisfies a latest
+      // request shape). The joint publication below carries this same adopted
+      // window with its own Main-declared boundaries — never relabeled.
+      const effectiveRequest = adoptRestore ? adoptRestore.request : request
+      if (!validateWindowResponse(effectiveRequest, response!)) {
         recordResidentReadDiscard('malformed')
         logger.error(`[loadTopicMessagesThunk] malformed window response for ${topicId}`, {
           window: (response as any)?.window
@@ -3906,7 +4044,7 @@ export type LoadRouteWindowOpts =
 
 export const loadRouteMessagesThunk =
   (topicId: string, branchId: string | null, opts?: LoadRouteWindowOpts) =>
-  async (dispatch: AppDispatch, getState: () => RootState): Promise<FetchMessagesWindowResponse | void> => {
+  (dispatch: AppDispatch, getState: () => RootState): Promise<FetchMessagesWindowResponse | void> => {
     const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
     const requestSeq = ++loadTopicMessagesRequestSeq
     latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -3916,6 +4054,16 @@ export const loadRouteMessagesThunk =
       routeGenAtStart = selectRouteGeneration(getState(), topicId)
     } catch {
       routeGenAtStart = 0
+    }
+    // Dispatch-source publication token: resident applicability generation at
+    // registration (read-only, never a bump). A later same-route bootstrap
+    // latest adopts this token for its joint publication.
+    let publicationGeneration = 0
+    try {
+      publicationGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
+        0) as number
+    } catch {
+      publicationGeneration = 0
     }
     // Window intent: divider passes around/fork-anchor; top-selector passes
     // latest (isAtBottom) or around (saved anchorId); default is latest.
@@ -3943,75 +4091,101 @@ export const loadRouteMessagesThunk =
         limit: clampWindowLimit(limitRaw)
       }
     }
-    dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
-    try {
-      const response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
-      if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
-        recordResidentReadDiscard('superseded')
-        return
-      }
-      if (activeRouteOf(getState, topicId) !== route) {
-        recordResidentReadDiscard('superseded')
-        return
-      }
-      const currentId = getState().messages.currentTopicId
-      if (currentId !== null && currentId !== undefined && currentId !== topicId) {
-        recordResidentReadDiscard('currentMoved')
-        return
-      }
-      if (isDeletionStale(topicId, deletionGenAtStart)) {
-        recordResidentReadDiscard('deletedDuringFetch')
-        return
-      }
-      let routeGenNow = 0
+    // Cleanup identity rides on the per-call request token, not the entry
+    // reference: `requestSeq` is globally unique per call (single increment
+    // at registration, never reset) and this map has a single writer, so the
+    // current entry carries this seq only while this registration is still
+    // current. A settled older request therefore never deletes a newer
+    // request's entry. `route` narrows the guard to the exact registration.
+    const execution = (async (): Promise<FetchMessagesWindowResponse | void> => {
+      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
       try {
-        routeGenNow = selectRouteGeneration(getState(), topicId)
-      } catch {
-        routeGenNow = 0
-      }
-      if (routeGenNow !== routeGenAtStart) {
-        recordResidentReadDiscard('generationMismatch')
-        return
-      }
-      if (!validateWindowResponse(request, response)) {
-        recordResidentReadDiscard('malformed')
-        logger.error(`[loadRouteMessagesThunk] malformed window response for ${topicId}`, {
-          window: (response as any)?.window
-        } as unknown as Error)
-        throw new Error('malformed window response')
-      }
-      const typedMessages = response.messages as unknown as Message[]
-      const typedBlocks = response.blocks as unknown as MessageBlock[]
-      const mutableMessageIds = Array.isArray((response as { mutableMessageIds?: unknown }).mutableMessageIds)
-        ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-        : []
-      const deferPublish = !!(opts && (opts as { deferPublish?: boolean }).deferPublish)
-      if (deferPublish) {
-        // Deferred: caller will publish blocks + rebase atomically with the
-        // window commit in the same React batch (visible path must not paint
-        // new suffix before compensation). No dispatch here — just return.
+        const response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
+        if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
+          recordResidentReadDiscard('superseded')
+          return
+        }
+        if (activeRouteOf(getState, topicId) !== route) {
+          recordResidentReadDiscard('superseded')
+          return
+        }
+        const currentId = getState().messages.currentTopicId
+        if (currentId !== null && currentId !== undefined && currentId !== topicId) {
+          recordResidentReadDiscard('currentMoved')
+          return
+        }
+        if (isDeletionStale(topicId, deletionGenAtStart)) {
+          recordResidentReadDiscard('deletedDuringFetch')
+          return
+        }
+        let routeGenNow = 0
+        try {
+          routeGenNow = selectRouteGeneration(getState(), topicId)
+        } catch {
+          routeGenNow = 0
+        }
+        if (routeGenNow !== routeGenAtStart) {
+          recordResidentReadDiscard('generationMismatch')
+          return
+        }
+        if (!validateWindowResponse(request, response)) {
+          recordResidentReadDiscard('malformed')
+          logger.error(`[loadRouteMessagesThunk] malformed window response for ${topicId}`, {
+            window: (response as any)?.window
+          } as unknown as Error)
+          throw new Error('malformed window response')
+        }
+        const typedMessages = response.messages as unknown as Message[]
+        const typedBlocks = response.blocks as unknown as MessageBlock[]
+        const mutableMessageIds = Array.isArray((response as { mutableMessageIds?: unknown }).mutableMessageIds)
+          ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
+          : []
+        const deferPublish = !!(opts && (opts as { deferPublish?: boolean }).deferPublish)
+        if (deferPublish) {
+          // Deferred: caller will publish blocks + rebase atomically with the
+          // window commit in the same React batch (visible path must not paint
+          // new suffix before compensation). No dispatch here — just return.
+          return response
+        }
+        if (typedBlocks.length > 0) {
+          // Read-only route-window hydration: must not invalidate the semantic closure.
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(typedBlocks), topicId)))
+        }
+        // Atomic conservative rebase with Main-authoritative capability:
+        // single commit, no blank, no mixed route. Empty windows publish []
+        // (clear). Capability rides atomically; absent clears fail-closed.
+        dispatch(
+          newMessagesActions.rebaseRouteMessages({
+            topicId,
+            messages: typedMessages,
+            route,
+            mutableMessageIds,
+            reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+          })
+        )
         return response
+      } finally {
+        dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+        const currentRestore = pendingRouteRestoreByTopic.get(topicId)
+        if (
+          currentRestore !== undefined &&
+          currentRestore.requestSeq === requestSeq &&
+          currentRestore.route === route
+        ) {
+          pendingRouteRestoreByTopic.delete(topicId)
+        }
       }
-      if (typedBlocks.length > 0) {
-        // Read-only route-window hydration: must not invalidate the semantic closure.
-        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(typedBlocks), topicId)))
-      }
-      // Atomic conservative rebase with Main-authoritative capability:
-      // single commit, no blank, no mixed route. Empty windows publish []
-      // (clear). Capability rides atomically; absent clears fail-closed.
-      dispatch(
-        newMessagesActions.rebaseRouteMessages({
-          topicId,
-          messages: typedMessages,
-          route,
-          mutableMessageIds,
-          reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
-        })
-      )
-      return response
-    } finally {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+    })()
+    const pendingRestoreEntry: PendingRouteRestore = {
+      route,
+      requestSeq,
+      kind: request.kind,
+      request,
+      promise: execution,
+      publicationGeneration
     }
+    pendingRouteRestoreByTopic.set(topicId, pendingRestoreEntry)
+    return execution
   }
 
 /**

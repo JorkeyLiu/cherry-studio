@@ -39,7 +39,6 @@ import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
 import ConversationNavigation from './Messages/ConversationNavigation'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
-import { RouteViewportProvider } from './Messages/routeViewportContext'
 import Tabs from './Tabs'
 
 const logger = loggerService.withContext('Chat')
@@ -378,54 +377,53 @@ const Chat: FC<Props> = (props) => {
             flex={1}
             justify="space-between"
             style={{ height: mainHeight, width: '100%' }}>
-            <RouteViewportProvider topicId={props.activeTopic.id} initialRoute={activeBranchId}>
-              <ChatNavbar
-                activeAssistant={props.assistant}
-                activeTopic={props.activeTopic}
-                setActiveTopic={props.setActiveTopic}
-              />
-              <div
-                className="flex flex-1 flex-col justify-between"
-                style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-                <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
-                  {messageNavigation && (
-                    <ConversationNavigation
-                      topicId={props.activeTopic.id}
-                      readingAnchor={readingAnchor}
-                      onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
-                    />
-                  )}
-                  <Messages
-                    ref={messagesRef}
-                    assistant={assistant}
-                    topic={props.activeTopic}
-                    setActiveTopic={props.setActiveTopic}
-                    onComponentUpdate={messagesComponentUpdateHandler}
-                    onFirstUpdate={messagesComponentFirstUpdateHandler}
-                    sharedContextInfo={sharedContextInfo}
-                    onReadingAnchor={setReadingAnchor}
-                  />
-                </div>
-                {isContentSearchActive && (
-                  <ContentSearch
-                    ref={contentSearchRef}
-                    searchTarget={mainRef as React.RefObject<HTMLElement>}
-                    filter={contentSearchFilter}
-                    includeUser={filterIncludeUser}
-                    onIncludeUserChange={userOutlinedItemClickHandler}
-                    initialText={pendingSearchText}
-                    onLocateMatch={locateContentSearchMatch}
-                    onClose={disableContentSearch}
+            {/* Viewport scope is owned by HomePage (single provider above Navbar/Tabs/Chat). */}
+            <ChatNavbar
+              activeAssistant={props.assistant}
+              activeTopic={props.activeTopic}
+              setActiveTopic={props.setActiveTopic}
+            />
+            <div
+              className="flex flex-1 flex-col justify-between"
+              style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
+              <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+                {messageNavigation && (
+                  <ConversationNavigation
+                    topicId={props.activeTopic.id}
+                    readingAnchor={readingAnchor}
+                    onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
                   />
                 )}
-                <Inputbar
+                <Messages
+                  ref={messagesRef}
                   assistant={assistant}
-                  setActiveTopic={props.setActiveTopic}
                   topic={props.activeTopic}
+                  setActiveTopic={props.setActiveTopic}
+                  onComponentUpdate={messagesComponentUpdateHandler}
+                  onFirstUpdate={messagesComponentFirstUpdateHandler}
                   sharedContextInfo={sharedContextInfo}
+                  onReadingAnchor={setReadingAnchor}
                 />
               </div>
-            </RouteViewportProvider>
+              {isContentSearchActive && (
+                <ContentSearch
+                  ref={contentSearchRef}
+                  searchTarget={mainRef as React.RefObject<HTMLElement>}
+                  filter={contentSearchFilter}
+                  includeUser={filterIncludeUser}
+                  onIncludeUserChange={userOutlinedItemClickHandler}
+                  initialText={pendingSearchText}
+                  onLocateMatch={locateContentSearchMatch}
+                  onClose={disableContentSearch}
+                />
+              )}
+              <Inputbar
+                assistant={assistant}
+                setActiveTopic={props.setActiveTopic}
+                topic={props.activeTopic}
+                sharedContextInfo={sharedContextInfo}
+              />
+            </div>
           </Main>
         </motion.div>
         {showTopics && (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { COLUMN_REVERSE_BOTTOM_THRESHOLD_PX, isAtBottom } from '../columnReverseGeometry'
+import { FLOW_BOTTOM_THRESHOLD_PX, isAtBottom } from '../flowScrollGeometry'
 import { RouteViewportController } from '../routeViewportController'
 
 /**
@@ -43,10 +43,12 @@ describe('message navigation anchor handoff', () => {
     const epoch = controller.currentEpoch
 
     // Simulated post-scroll measurement for a resident historical target:
-    // scrolled to -1293, target at the container top (offset ~0.2).
-    const postScrollTop = -1293
+    // flow scrollTop 1293 of a 2000px content in a 600px viewport (travel
+    // 1400), target at the container top (offset ~0.2).
+    const postScrollTop = 1293
+    const flowMetrics = { scrollTop: postScrollTop, scrollHeight: 2000, clientHeight: 600 }
     const intraRowOffset = 0.2
-    const atBottom = isAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+    const atBottom = isAtBottom(flowMetrics, FLOW_BOTTOM_THRESHOLD_PX)
     expect(atBottom).toBe(false)
     const out = controller.adoptInteractionViewport(
       target,
@@ -68,9 +70,12 @@ describe('message navigation anchor handoff', () => {
     driveStableBottom(controller)
     const target = { topicId: 't1', route: null as string | null }
     // T2 attach shape: target near newest, clamped scroll keeps it inside the
-    // viewport while truthfully in the 50px bottom vicinity.
-    const postScrollTop = -30
-    expect(isAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)).toBe(true)
+    // viewport while truthfully in the 50px bottom vicinity (30px shy of the
+    // 1400px travel limit).
+    const postScrollTop = 1370
+    expect(
+      isAtBottom({ scrollTop: postScrollTop, scrollHeight: 2000, clientHeight: 600 }, FLOW_BOTTOM_THRESHOLD_PX)
+    ).toBe(true)
     const out = controller.adoptInteractionViewport(
       target,
       { messageId: 't-attach', intraRowOffset: 566, scrollTop: postScrollTop, isAtBottom: true },
@@ -95,7 +100,7 @@ describe('message navigation anchor handoff', () => {
     const epoch = controller.currentEpoch
     const good = controller.adoptInteractionViewport(
       target,
-      { messageId: 't-old', intraRowOffset: 0, scrollTop: -500, isAtBottom: false },
+      { messageId: 't-old', intraRowOffset: 0, scrollTop: 500, isAtBottom: false },
       { expectedEpoch: epoch }
     )
     expect(good.taken).toBe(true)
@@ -103,7 +108,7 @@ describe('message navigation anchor handoff', () => {
     // Stale epoch (route swapped under the transaction).
     const stale = controller.adoptInteractionViewport(
       target,
-      { messageId: 't-other', intraRowOffset: 0, scrollTop: -600, isAtBottom: false },
+      { messageId: 't-other', intraRowOffset: 0, scrollTop: 600, isAtBottom: false },
       { expectedEpoch: epoch + 99 }
     )
     expect(stale.taken).toBe(false)
@@ -112,7 +117,7 @@ describe('message navigation anchor handoff', () => {
     // Foreign route never adopts.
     const foreign = controller.adoptInteractionViewport(
       { topicId: 't1', route: 'b1' },
-      { messageId: 't-other', intraRowOffset: 0, scrollTop: -600, isAtBottom: false },
+      { messageId: 't-other', intraRowOffset: 0, scrollTop: 600, isAtBottom: false },
       { expectedEpoch: controller.currentEpoch }
     )
     expect(foreign.taken).toBe(false)
@@ -124,7 +129,7 @@ describe('message navigation anchor handoff', () => {
     owned.request({ kind: 'top', topicId: 't1', targetRoute: 'b1', saved: null })
     const refused = owned.adoptInteractionViewport(
       { topicId: 't1', route: null },
-      { messageId: 't-old', intraRowOffset: 0, scrollTop: -500, isAtBottom: false }
+      { messageId: 't-old', intraRowOffset: 0, scrollTop: 500, isAtBottom: false }
     )
     expect(refused.taken).toBe(false)
   })
@@ -136,7 +141,7 @@ describe('message navigation anchor handoff', () => {
     // Reading row first (post-navigation state).
     const row = controller.adoptInteractionViewport(
       target,
-      { messageId: 't-old', intraRowOffset: 0, scrollTop: -500, isAtBottom: false },
+      { messageId: 't-old', intraRowOffset: 0, scrollTop: 500, isAtBottom: false },
       { expectedEpoch: controller.currentEpoch }
     )
     expect(row.taken).toBe(true)

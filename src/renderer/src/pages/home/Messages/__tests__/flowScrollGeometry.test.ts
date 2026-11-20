@@ -1,58 +1,112 @@
 /**
- * Single column-reverse geometry primitive: bottom is `abs(scrollTop)`,
- * oldest is `scrollHeight - clientHeight - abs(scrollTop)` (clamped ≥ 0).
- * Guards the production/E2E direction confusion (bottom ≠ oldest).
+ * Single normal-flow scroll geometry primitive: the visual top (oldest) is
+ * `scrollTop ≈ 0` and the bottom (newest) is the container's own scroll travel
+ * `scrollHeight - clientHeight`. One metrics shape, one set of distances —
+ * guards the production/E2E direction confusion (bottom ≠ oldest).
  */
 import { describe, expect, it } from 'vitest'
 
 import {
-  COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
   didRealizeCompensation,
   distanceFromBottom,
   distanceFromOldest,
+  FLOW_BOTTOM_THRESHOLD_PX,
+  FLOW_COORDINATE_SPACE,
+  FLOW_NEWER_PREFETCH_PX,
+  FLOW_OLDER_THRESHOLD_PX,
   isAtBottom,
+  isAtNewest,
   isAtOldest,
+  isExactlyAtNewest,
+  isExactlyAtOldest,
   layoutDisplacement,
+  maxScrollTop,
+  readScrollMetrics,
   rebaseAfterCompensation,
   rebaseLayoutHold,
   resolveLayoutHold
-} from '../columnReverseGeometry'
+} from '../flowScrollGeometry'
 
-describe('columnReverseGeometry (single production primitive)', () => {
-  it('distanceFromBottom is abs(scrollTop): bottom rests at ≈0', () => {
-    expect(distanceFromBottom(0)).toBe(0)
-    expect(distanceFromBottom(-10)).toBe(10)
-    expect(distanceFromBottom(10)).toBe(10)
-    expect(distanceFromBottom(-300)).toBe(300)
+/** 1000px of content in a 400px viewport → 600px of scroll travel. */
+const view = (scrollTop: number, scrollHeight = 1000, clientHeight = 400) => ({
+  scrollTop,
+  scrollHeight,
+  clientHeight
+})
+
+describe('flowScrollGeometry (single production primitive)', () => {
+  it('maxScrollTop is the scrollable travel, clamped at zero', () => {
+    expect(maxScrollTop(view(0))).toBe(600)
+    expect(maxScrollTop(view(600))).toBe(600)
+    // Content fits the viewport: no travel at all.
+    expect(maxScrollTop(view(0, 300, 400))).toBe(0)
   })
 
-  it('distanceFromOldest is the opposite edge, clamped at zero', () => {
-    // scrollHeight 1000, client 400 → 600px of scrollable overflow.
-    expect(distanceFromOldest({ scrollTop: 0, scrollHeight: 1000, clientHeight: 400 })).toBe(600)
-    expect(distanceFromOldest({ scrollTop: -600, scrollHeight: 1000, clientHeight: 400 })).toBe(0)
-    expect(distanceFromOldest({ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 })).toBe(0)
-    expect(distanceFromOldest({ scrollTop: -590, scrollHeight: 1000, clientHeight: 400 })).toBe(10)
-    // Never negative when content fits.
-    expect(distanceFromOldest({ scrollTop: 0, scrollHeight: 300, clientHeight: 400 })).toBe(0)
+  it('distanceFromBottom is zero at the container travel and grows toward the top', () => {
+    expect(distanceFromBottom(view(600))).toBe(0)
+    expect(distanceFromBottom(view(590))).toBe(10)
+    expect(distanceFromBottom(view(0))).toBe(600)
+    // Never negative, even if a browser reports an over-scrolled value.
+    expect(distanceFromBottom(view(700))).toBe(0)
+  })
+
+  it('distanceFromOldest is the top distance, clamped at zero', () => {
+    expect(distanceFromOldest(view(0))).toBe(0)
+    expect(distanceFromOldest(view(10))).toBe(10)
+    expect(distanceFromOldest(view(600))).toBe(600)
+    expect(distanceFromOldest(view(-5))).toBe(0)
+  })
+
+  it('readScrollMetrics is the single adapter and keeps exactly the three readings', () => {
+    const source = { scrollTop: 12, scrollHeight: 800, clientHeight: 200 }
+    expect(readScrollMetrics(source)).toEqual({ scrollTop: 12, scrollHeight: 800, clientHeight: 200 })
   })
 
   it('isAtBottom uses the bottom distance with the production threshold', () => {
-    expect(COLUMN_REVERSE_BOTTOM_THRESHOLD_PX).toBe(50)
-    expect(isAtBottom(0)).toBe(true)
-    expect(isAtBottom(-49)).toBe(true)
-    expect(isAtBottom(-51)).toBe(false)
-    expect(isAtBottom(-300)).toBe(false)
-    expect(isAtBottom(-100, 120)).toBe(true)
+    expect(FLOW_BOTTOM_THRESHOLD_PX).toBe(50)
+    expect(isAtBottom(view(600))).toBe(true)
+    expect(isAtBottom(view(551))).toBe(true)
+    expect(isAtBottom(view(549))).toBe(false)
+    expect(isAtBottom(view(300))).toBe(false)
+    expect(isAtBottom(view(480), 120)).toBe(true)
   })
 
-  it('isAtOldest uses the oldest distance, never the bottom formula', () => {
-    const overflow = { scrollHeight: 1000, clientHeight: 400 }
-    expect(isAtOldest({ ...overflow, scrollTop: -600 })).toBe(true)
-    expect(isAtOldest({ ...overflow, scrollTop: -590 })).toBe(true)
-    expect(isAtOldest({ ...overflow, scrollTop: 0 })).toBe(false)
-    // Bottom vicinity (≈0) is the farthest point from the oldest edge.
-    expect(distanceFromOldest({ ...overflow, scrollTop: 0 })).toBeGreaterThan(200)
-    expect(distanceFromBottom(0)).toBe(0)
+  it('isAtOldest / isAtNewest are the two browse-edge vicinities, never each other', () => {
+    expect(FLOW_OLDER_THRESHOLD_PX).toBe(150)
+    expect(FLOW_NEWER_PREFETCH_PX).toBe(150)
+    expect(isAtOldest(view(0))).toBe(true)
+    expect(isAtOldest(view(140))).toBe(true)
+    expect(isAtOldest(view(160))).toBe(false)
+    expect(isAtNewest(view(600))).toBe(true)
+    expect(isAtNewest(view(460))).toBe(true)
+    expect(isAtNewest(view(440))).toBe(false)
+    // The two edges are never the same point in a scrollable container.
+    expect(isAtOldest(view(600))).toBe(false)
+    expect(isAtNewest(view(0))).toBe(false)
+  })
+
+  it('the exact edge gates are 1px subpixel tolerance only', () => {
+    expect(isExactlyAtOldest(view(0))).toBe(true)
+    expect(isExactlyAtOldest(view(0.5))).toBe(true)
+    expect(isExactlyAtOldest(view(2))).toBe(false)
+    expect(isExactlyAtNewest(view(600))).toBe(true)
+    expect(isExactlyAtNewest(view(599.5))).toBe(true)
+    expect(isExactlyAtNewest(view(598))).toBe(false)
+    // Content that fits: one physical park, both edges and the bottom.
+    expect(isExactlyAtNewest(view(0, 300, 400))).toBe(true)
+    expect(isExactlyAtOldest(view(0, 300, 400))).toBe(true)
+  })
+
+  it('fails closed on non-finite readings (never a false edge)', () => {
+    expect(isAtBottom(view(NaN))).toBe(false)
+    expect(isAtOldest(view(NaN))).toBe(false)
+    expect(isExactlyAtNewest(view(NaN))).toBe(false)
+    expect(isExactlyAtOldest(view(NaN))).toBe(false)
+    expect(Number.isNaN(maxScrollTop(view(0, NaN, 400)))).toBe(true)
+  })
+
+  it('names the persisted coordinate space so stored offsets cannot be reinterpreted', () => {
+    expect(FLOW_COORDINATE_SPACE).toBe('flow-v1')
   })
 })
 
