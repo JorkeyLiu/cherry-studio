@@ -45,7 +45,7 @@
  * Selector contract consumed from production (existing semantics, no production change):
  * - fork divider row: `#messages [data-divider-anchor][data-divider-parent][data-divider-key]`
  *   with popover opener `branch-fork-selected-<anchor>` / `branch-fork-toggle-<anchor>`
- *   and peer rows `branch-fork-item-<branchId>` / `branch-fork-item-parent-<anchor>`.
+ *   and peer rows `branch-cascader-item-<branchId|main>` (parent/original route + direct children).
  * - history-reference divider: `history-reference-divider` + `data-reference-status`.
  * The rendered `data-divider-anchor` is asserted to equal the authoritative branch
  * anchor, i.e. the boundary identity is Main's, never a fabricated one.
@@ -655,8 +655,7 @@ async function switchRouteViaDivider(page: any, boundaryAnchor: string, toBranch
   await opener.click()
   const list = page.locator(`[data-testid="branch-fork-list-${boundaryAnchor}"]`).first()
   await expect(list, 'fork divider popover must open').toBeVisible({ timeout: 15000 })
-  const itemTestId =
-    toBranchId === null ? `branch-fork-item-parent-${boundaryAnchor}` : `branch-fork-item-${toBranchId}`
+  const itemTestId = toBranchId === null ? `branch-cascader-item-main` : `branch-cascader-item-${toBranchId}`
   const item = list.locator(`[data-testid="${itemTestId}"]`).first()
   await expect(item, `route peer ${itemTestId} must be offered`).toBeVisible({ timeout: 15000 })
   try {
@@ -1293,10 +1292,10 @@ test.describe('branch/reference inheritance boundary under real edit-mode Undo',
     await sharedOpener.click()
     const sharedList = page.locator(`[data-testid="branch-fork-list-${ids[1]}"]`).first()
     await expect(sharedList, 'the shared head-group popover must open').toBeVisible({ timeout: 15000 })
-    const owningOption = sharedList.locator(`[data-testid="branch-fork-item-${owningBranchId}"]`).first()
+    const owningOption = sharedList.locator(`[data-testid="branch-cascader-item-${owningBranchId}"]`).first()
     await expect(owningOption, 'the suffix-owning child route must be offered').toBeVisible({ timeout: 15000 })
     await expect(
-      sharedList.locator(`[data-testid="branch-fork-item-${emptyBranchId}"]`),
+      sharedList.locator(`[data-testid="branch-cascader-item-${emptyBranchId}"]`),
       'the 0-message child route must be offered from the same entry'
     ).toHaveCount(1)
 

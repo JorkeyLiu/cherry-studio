@@ -85,6 +85,54 @@ export function buildBranchTreeIndex(branches: readonly TopicBranchWire[]): Bran
 }
 
 /**
+ * Scoped tree index for one fork divider: the parent/original route as the
+ * display root plus its direct child branches at the anchor — and nothing
+ * else. Other anchors, ancestor chains above the parent, descendant branches
+ * below the children and unrelated forks never enter the index, so a scoped
+ * panel physically cannot render them.
+ *
+ * Identity is never faked: row keys are the real branch ids (the root key is
+ * `branchRowKey(parentBranchId)`, i.e. the main-route key for a main-route
+ * fork), the parent relation of every child is the real `parentBranchId`,
+ * and the label of a branch display root comes from the caller's own
+ * `parentLabel` (the scoped index carries no catalog node for it). Filtering
+ * only changes which rows are displayed, never what the services receive.
+ */
+export function buildForkScopeIndex(
+  parentBranchId: string | null,
+  childrenAtAnchor: readonly TopicBranchWire[]
+): BranchTreeIndex {
+  const rootKey = branchRowKey(parentBranchId)
+  const ordered = [...childrenAtAnchor].sort(byCreation)
+  const byId = new Map<string, TopicBranchWire>(ordered.map((branch) => [branch.id, branch]))
+  const childrenOf = new Map<string, TopicBranchWire[]>([[rootKey, ordered]])
+  const parentKeyOf = new Map<string, string | null>([[rootKey, null]])
+  const depthOf = new Map<string, number>([[rootKey, 0]])
+  const orderedKeys: string[] = [rootKey]
+  for (const child of ordered) {
+    parentKeyOf.set(child.id, rootKey)
+    depthOf.set(child.id, 1)
+    orderedKeys.push(child.id)
+  }
+
+  const ancestorsOf = (branchId: string | null): string[] => {
+    const key = branchRowKey(branchId)
+    if (!parentKeyOf.has(key)) return []
+    if (key === rootKey) return []
+    return [rootKey]
+  }
+
+  const chainTo = (branchId: string | null): string[] => {
+    const key = branchRowKey(branchId)
+    if (key === rootKey) return [rootKey]
+    if (!parentKeyOf.has(key)) return [rootKey]
+    return [rootKey, key]
+  }
+
+  return { byId, childrenOf, parentKeyOf, depthOf, ancestorsOf, chainTo, orderedKeys }
+}
+
+/**
  * Drops expansion keys whose node no longer exists, so a catalog refresh
  * (rename keeps ids; delete/fallback removes them) never leaves stale rows
  * flagged as expanded.

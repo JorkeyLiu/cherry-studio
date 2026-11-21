@@ -12,7 +12,7 @@
  *    IDs, top breadcrumb shows `Topic / <default name>`, sidebar stays one.
  *    Nested-cascader depth/hover/focus behavior is covered by
  *    src/renderer/src/pages/home/components/ChatNavBar/ChatNavbarContent/__tests__/TopicContent.branch.test.tsx;
- *    this journey uses flat divider peer
+ *    this journey uses scoped shared-tree divider
  *    navigation for every L1↔L2 and L1→main switch, keeping only a small
  *    top-selector smoke (open, breadcrumb, direct row-control subtree delete
  *    through its popconfirm, post-delete absence).
@@ -24,17 +24,18 @@
  *    parent fork anchor itself); an IPC createBranch on the L1-owned suffix
  *    succeeds and includes the parent-owned prefix. The inherited toolbar
  *    true-branch button stays hidden (no UI fork from inherited).
- * 5. Windowed parent restore: flat divider peer navigation only (no top
+ * 5. Windowed parent restore: scoped shared-tree divider navigation only (no top
  *    cascader). L1→L2→L1 through the l2Anchor divider
- *    (branch-fork-toggle/selected-*, branch-fork-list-*, branch-fork-item-*
- *    scoped to the list), then the original-anchor divider switch
- *    (branch-fork-selected-*) to the parent/original route reloads main
+ *    (branch-fork-toggle/selected-*, branch-fork-list-* with scoped shared-tree
+ *    branch-cascader-item-{branchId|main} rows), then the original-anchor
+ *    divider switch (branch-fork-selected-*) to the parent/original route
+ *    reloads main
  *    around the shared fork anchor (older 10 / newer 19 groups →
  *    deterministic 25-resident window, authoritative hasMoreBefore=true);
  *    the shared anchor stays in the SAME vicinity — never bottom — then a
  *    real oldest-edge scroll pages the remaining head on demand until the
  *    resident converges to full length.
- * 6. Flat divider switch back to L2 (main→L1 via the original-anchor
+ * 6. Scoped shared-tree divider switch back to L2 (main→L1 via the original-anchor
  *    divider, L1→L2 via the l2Anchor divider) — breadcrumb updates, no jump.
  * 7. Same-profile relaunch: catalog, names, active route, and dividers
  *    persist (in-app reload proof).
@@ -551,7 +552,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'TRUE-BRANCH INTEGRATED UI: one sidebar topic throughout; toolbar forks local-only route nodes (no prefix clone, no topics); breadcrumb + flat fork-divider peer switching without bottom jump; same-profile relaunch persistence; subtree delete restores pre-branch UI; post-exit SQLite proves branch/row/topic integrity.'
+        'TRUE-BRANCH INTEGRATED UI: one sidebar topic throughout; toolbar forks local-only route nodes (no prefix clone, no topics); breadcrumb + scoped shared-tree fork-divider switching without bottom jump; same-profile relaunch persistence; subtree delete restores pre-branch UI; post-exit SQLite proves branch/row/topic integrity.'
     })
     const userDataDir = getUserDataDir()
     await waitForAppReady(mainWindow)
@@ -719,13 +720,13 @@ test.describe('Topic-internal branches end-to-end', () => {
       'insert must hide on older inherited refs'
     ).toHaveCount(0, { timeout: 10000 })
 
-    // 5. Flat divider peer navigation only (no top cascader): the bounded
+    // 5. Scoped shared-tree divider navigation only (no top cascader): the bounded
     // IPC seeds bypass the UI creation thunk, so the Redux catalog still
     // holds only L1 — publish the Main-authoritative list (setup-only, same
     // effect as fetchTopicBranchesThunk, no product change). The stale L1
     // resident (missing the owned suffix) has no l2Anchor divider yet, so
     // refresh it through a real-UI L1→main→L1 divider round-trip, then run
-    // the durable L1→L2→L1 flat peer navigation at l2AnchorId, and finally
+    // the durable L1→L2→L1 scoped shared-tree navigation at l2AnchorId, and finally
     // the measured L1→main windowed restore below (taken fork shows the
     // selected branch name; switching to the parent/original route lands on
     // the SAME shared anchor, never a bottom jump).
@@ -763,13 +764,13 @@ test.describe('Topic-internal branches end-to-end', () => {
         )
       }
       // Stale L1 → main (unmeasured refresh hop through the original-anchor
-      // flat divider peer list).
+      // scoped shared-tree divider list).
       const staleTaken = page.locator(`[data-testid="branch-fork-selected-${anchorId}"]`).first()
       await expect(staleTaken, 'stale L1 taken fork must be visible').toBeVisible({ timeout: 30000 })
       await staleTaken.click()
       const staleList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
       await expect(staleList, 'original-anchor divider popup must open').toBeVisible({ timeout: 15000 })
-      await staleList.locator(`[data-testid="branch-fork-item-parent-${anchorId}"]`).first().click()
+      await staleList.locator(`[data-testid="branch-cascader-item-main"]`).first().click()
       await waitRoute(null, [anchorId])
       // Main → fresh L1 (unmeasured refresh hop; the reloaded L1 resident
       // carries the owned suffix, so the l2Anchor divider renders).
@@ -778,30 +779,34 @@ test.describe('Topic-internal branches end-to-end', () => {
       await mainToggle.click()
       const mainList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
       await expect(mainList, 'main divider popup must open').toBeVisible({ timeout: 15000 })
-      const l1FromMain = mainList.locator(`[data-testid="branch-fork-item-${branch1Id}"]`).first()
+      const l1FromMain = mainList.locator(`[data-testid="branch-cascader-item-${branch1Id}"]`).first()
       await expect(l1FromMain, 'L1 must be offered on the main divider').toBeVisible({ timeout: 15000 })
       await l1FromMain.click()
       await waitRoute(branch1Id, [anchorId, l2AnchorId])
-      // Durable L1 → L2 through the l2Anchor flat divider peer list: the
-      // parent L1 option and the child L2 option share the item namespace,
-      // so both clicks are scoped to branch-fork-list-${l2AnchorId}.
+      // Durable L1 → L2 through the l2Anchor scoped shared-tree divider list:
+      // the parent L1 row and the child L2 row are both scoped to
+      // branch-fork-list-${l2AnchorId}.
       const l1Untaken = page.locator(`[data-testid="branch-fork-toggle-${l2AnchorId}"]`).first()
       await expect(l1Untaken, 'L1 untaken l2Anchor fork must be visible').toBeVisible({ timeout: 30000 })
       await l1Untaken.click()
       const l1PeerList = page.locator(`[data-testid="branch-fork-list-${l2AnchorId}"]`).first()
       await expect(l1PeerList, 'l2Anchor divider popup must open on L1').toBeVisible({ timeout: 15000 })
-      const l2PeerItem = l1PeerList.locator(`[data-testid="branch-fork-item-${branch2Id}"]`).first()
-      await expect(l2PeerItem, 'child L2 must be offered in the flat peer list').toBeVisible({ timeout: 15000 })
+      const l2PeerItem = l1PeerList.locator(`[data-testid="branch-cascader-item-${branch2Id}"]`).first()
+      await expect(l2PeerItem, 'child L2 must be offered in the scoped shared-tree divider list').toBeVisible({
+        timeout: 15000
+      })
       await l2PeerItem.click()
       await waitRoute(branch2Id, [anchorId, l2AnchorId])
-      // Durable L2 → L1 through the same flat divider at l2AnchorId.
+      // Durable L2 → L1 through the same scoped shared-tree divider at l2AnchorId.
       const l2Taken = page.locator(`[data-testid="branch-fork-selected-${l2AnchorId}"]`).first()
       await expect(l2Taken, 'L2 taken fork must be visible').toBeVisible({ timeout: 30000 })
       await l2Taken.click()
       const l2PeerList = page.locator(`[data-testid="branch-fork-list-${l2AnchorId}"]`).first()
       await expect(l2PeerList, 'l2Anchor divider popup must open on L2').toBeVisible({ timeout: 15000 })
-      const l1PeerItem = l2PeerList.locator(`[data-testid="branch-fork-item-${branch1Id}"]`).first()
-      await expect(l1PeerItem, 'parent L1 must be offered in the flat peer list').toBeVisible({ timeout: 15000 })
+      const l1PeerItem = l2PeerList.locator(`[data-testid="branch-cascader-item-${branch1Id}"]`).first()
+      await expect(l1PeerItem, 'parent L1 must be offered in the scoped shared-tree divider list').toBeVisible({
+        timeout: 15000
+      })
       await l1PeerItem.click()
       await waitRoute(branch1Id, [anchorId, l2AnchorId])
       await expect(page.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
@@ -826,21 +831,61 @@ test.describe('Topic-internal branches end-to-end', () => {
       // Visual reference before the switch: the shared anchor's viewport offset.
       const offsetBefore = await visualOffsetOfMessage(page, anchorId)
       expect(offsetBefore, 'shared anchor must be measurable before divider switch').not.toBeNull()
-      const parentItem = page.locator(`[data-testid="branch-fork-item-parent-${anchorId}"]`).first()
+      const parentItem = forkList.locator(`[data-testid="branch-cascader-item-main"]`).first()
       await expect(parentItem, 'parent/original route must be offered').toBeVisible({ timeout: 15000 })
-      await parentItem.click()
-      // Windowed parent restore (on-demand incremental contract): the parent
-      // fork read is `around` the shared anchor with the production navigation
-      // quotas (older 10 / newer 19 groups) — never a full-route fetch. All
-      // messages here are singleton groups (alternating user/assistant with
-      // distinct askIds), so the deterministic resident window is main[5..29]:
-      // 25 messages with authoritative hasMoreBefore=true (msgs 0..4 remain
-      // pageable on demand) and hasMoreAfter=false (window reaches the tail).
+      // Raw Main around window (read-window truth, oracle kept below): `around`
+      // the shared anchor with the production navigation quotas (older 10 /
+      // newer 19 groups) — never a full-route fetch. All messages here are
+      // singleton groups (alternating user/assistant with distinct askIds), so
+      // the deterministic read window is main[5..29]: 25 messages with
+      // authoritative hasMoreBefore=true (msgs 0..4 remain pageable on demand)
+      // and hasMoreAfter=false (window reaches the tail).
       const PARENT_RESTORE_BEFORE_GROUPS = 10
       const PARENT_RESTORE_AFTER_GROUPS = 19
       const PARENT_RESTORE_OLDEST_IDX = ANCHOR_IDX - PARENT_RESTORE_BEFORE_GROUPS // 5
       const PARENT_RESTORE_LEN = TOTAL - PARENT_RESTORE_OLDEST_IDX // 25
       const expectedParentIds = sourceIds.slice(PARENT_RESTORE_OLDEST_IDX, TOTAL)
+      // Visible-path precondition (divider explicit continuation, never a
+      // fallback): capture the actual current resident BEFORE the switch and
+      // derive the exact committed projection from it. Production preserves
+      // the current resident prefix through the anchor (verified continuous
+      // against the target route) and appends only the target-exclusive
+      // post-anchor suffix — the outgoing branch suffix unmounts while the
+      // anchor row never moves (same key/order). This committed projection is
+      // distinct from the Main read window above: read window vs committed
+      // projection must never be conflated.
+      const residentBeforeSwitch: string[] = await page.evaluate(
+        (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
+        sourceTopicId
+      )
+      const anchorIdxBefore = residentBeforeSwitch.indexOf(anchorId)
+      expect(
+        anchorIdxBefore,
+        'visible rebase requires the shared anchor resident before the switch'
+      ).toBeGreaterThanOrEqual(0)
+      const sharedPrefixBefore = residentBeforeSwitch.slice(0, anchorIdxBefore + 1)
+      const outgoingBefore = residentBeforeSwitch.slice(anchorIdxBefore + 1)
+      const mainIdSet = new Set(sourceIds)
+      const beforeIdSet = new Set(residentBeforeSwitch)
+      expect(
+        sharedPrefixBefore.every((id) => mainIdSet.has(id)),
+        'visible rebase preserves only the main-owned prefix through the anchor'
+      ).toBe(true)
+      expect(outgoingBefore.length, 'visible rebase requires an outgoing branch suffix to replace').toBeGreaterThan(0)
+      expect(
+        outgoingBefore.every((id) => !mainIdSet.has(id)),
+        'outgoing post-anchor suffix must be fully foreign to the main route'
+      ).toBe(true)
+      const incomingAfterAnchor = expectedParentIds.slice(expectedParentIds.indexOf(anchorId) + 1)
+      expect(incomingAfterAnchor.length, 'visible rebase requires a non-empty target-exclusive suffix').toBeGreaterThan(
+        0
+      )
+      expect(
+        incomingAfterAnchor.every((id) => !beforeIdSet.has(id)),
+        'incoming target suffix must be fully foreign to the current window'
+      ).toBe(true)
+      const expectedVisibleUnion = [...sharedPrefixBefore, ...incomingAfterAnchor]
+      await parentItem.click()
       // Active route is back on main (branchId null) in the same logical topic.
       await page.waitForFunction(
         (tid: string) => {
@@ -855,29 +900,33 @@ test.describe('Topic-internal branches end-to-end', () => {
         sourceTopicId
       )
       expect(activeAfterParent, 'windowed parent restore must land the active route back on main').toBeNull()
-      // Loaded resident is exactly the around window: anchor included, exact
-      // IDs in route order (never a bare len>0 claim).
+      // Committed projection (divider explicit continuation): the resident
+      // must become exactly the derived visible union — preserved prefix
+      // through the anchor plus the target-exclusive post-anchor suffix —
+      // never the raw around window. Exact IDs in route order (never a bare
+      // len>0 claim, never an either/or fallback between two arrays).
       await page.waitForFunction(
-        ({ tid, len, anchor }: { tid: string; len: number; anchor: string }) => {
+        ({ tid, ids }: { tid: string; ids: string[] }) => {
           const s = (window as any).store.getState()
-          const ids = s.messages?.messageIdsByTopic?.[tid]
+          const resident = s.messages?.messageIdsByTopic?.[tid]
           return (
-            Array.isArray(ids) &&
-            ids.length === len &&
-            ids.includes(anchor) &&
+            Array.isArray(resident) &&
+            resident.length === ids.length &&
+            resident.every((id: string, i: number) => id === ids[i]) &&
             s.messages?.loadingByTopic?.[tid] !== true
           )
         },
-        { tid: sourceTopicId, len: PARENT_RESTORE_LEN, anchor: anchorId },
+        { tid: sourceTopicId, ids: expectedVisibleUnion },
         { timeout: 30000 }
       )
       const parentResidentIds: string[] = await page.evaluate(
         (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
         sourceTopicId
       )
-      expect(parentResidentIds, 'windowed parent restore resident must be exactly main[5..29]').toEqual(
-        expectedParentIds
-      )
+      expect(
+        parentResidentIds,
+        'divider switch must commit exactly the visible union (preserved prefix + target suffix)'
+      ).toEqual(expectedVisibleUnion)
       // Authoritative completeness oracle via the same Main contract the
       // production divider switch reads (around/fork-anchor, main route):
       // older history remains available on demand; nothing newer is missing.
@@ -1164,7 +1213,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     ).toHaveCount(1, { timeout: 15000 })
 
     // 6. Flat divider switch back to L2 (no top cascader): main→L1 through
-    // the original-anchor divider, then L1→L2 through the l2Anchor flat peer
+    // the original-anchor divider, then L1→L2 through the l2Anchor scoped shared-tree
     // list. Divider switches are windowed around the fork anchor, so the
     // route contract is active L2 + resident carrying the anchor and the
     // L1-owned suffix (stable IDs, no clone) + breadcrumb keeping the branch
@@ -1181,7 +1230,7 @@ test.describe('Topic-internal branches end-to-end', () => {
       await backMainToggle.click()
       const backMainList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
       await expect(backMainList, 'main divider popup must open').toBeVisible({ timeout: 15000 })
-      const backL1Item = backMainList.locator(`[data-testid="branch-fork-item-${branch1Id}"]`).first()
+      const backL1Item = backMainList.locator(`[data-testid="branch-cascader-item-${branch1Id}"]`).first()
       await expect(backL1Item, 'L1 must be offered on the main divider').toBeVisible({ timeout: 15000 })
       await backL1Item.click()
       await page.waitForFunction(
@@ -1199,8 +1248,10 @@ test.describe('Topic-internal branches end-to-end', () => {
       await backL1Toggle.click()
       const backL2List = page.locator(`[data-testid="branch-fork-list-${l2AnchorId}"]`).first()
       await expect(backL2List, 'l2Anchor divider popup must open').toBeVisible({ timeout: 15000 })
-      const backL2Item = backL2List.locator(`[data-testid="branch-fork-item-${branch2Id}"]`).first()
-      await expect(backL2Item, 'child L2 must be offered in the flat peer list').toBeVisible({ timeout: 15000 })
+      const backL2Item = backL2List.locator(`[data-testid="branch-cascader-item-${branch2Id}"]`).first()
+      await expect(backL2Item, 'child L2 must be offered in the scoped shared-tree divider list').toBeVisible({
+        timeout: 15000
+      })
       await backL2Item.click()
       // L1 ("E2E Renamed Branch") is a middle ancestor of the L2 route here, and
       // middle ancestors are omitted as `…` when the path does not fit, so the
@@ -2330,10 +2381,11 @@ test.describe('Topic-internal branches end-to-end', () => {
       const takenToggle = page.locator(`[data-testid="branch-fork-selected-${anchorId}"]`).first()
       await expect(takenToggle, 'taken fork must show the selected branch name').toBeVisible({ timeout: 30000 })
       await takenToggle.click()
-      await expect(page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()).toBeVisible({
+      const vcForkList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
+      await expect(vcForkList, 'divider popup must open as an overlay').toBeVisible({
         timeout: 15000
       })
-      await page.locator(`[data-testid="branch-fork-item-parent-${anchorId}"]`).first().click()
+      await vcForkList.locator(`[data-testid="branch-cascader-item-main"]`).first().click()
       await waitActiveBranch(null)
       await waitRouteWindowStable(1)
       expect(await isVisibleInMessagesViewport(page, anchorId)).toBe(true)
@@ -2381,12 +2433,13 @@ test.describe('Topic-internal branches end-to-end', () => {
       const parentToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorId}"]`).first()
       await expect(parentToggle, 'parent route shows the untaken count form').toBeVisible({ timeout: 30000 })
       await parentToggle.click()
-      await expect(page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()).toBeVisible({
+      const vcReturnList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
+      await expect(vcReturnList, 'divider popup must open as an overlay').toBeVisible({
         timeout: 15000
       })
       // Single-probe install via reusable helper (one switch, no leak).
       await installVrbProbe(vrbSharedIds)
-      await page.locator(`[data-testid="branch-fork-item-${visualBranchId}"]`).first().click()
+      await vcReturnList.locator(`[data-testid="branch-cascader-item-${visualBranchId}"]`).first().click()
       await waitActiveBranch(visualBranchId)
       // True-branch visual divider return: zero synthesized scrolling. The
       // windowed return commits the around window and the restore-owned

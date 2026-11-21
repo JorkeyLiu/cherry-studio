@@ -703,8 +703,13 @@ test.describe('Fork viewport asymmetric — minimal divider visible atomic', () 
       await page.evaluate((ids: string[]) => {
         ;(window as any).__fork_incoming = ids
       }, incomingForProbe)
-      const itemSel = to === null ? `branch-fork-item-parent-${anchorId}` : `branch-fork-item-${to}`
-      await page.locator(`[data-testid="${itemSel}"]`).first().click()
+      const itemSel = to === null ? `branch-cascader-item-main` : `branch-cascader-item-${to}`
+      await page
+        .locator(`[data-testid="branch-fork-list-${anchorId}"]`)
+        .first()
+        .locator(`[data-testid="${itemSel}"]`)
+        .first()
+        .click()
       await waitActive(page, topicId, to)
       await waitVisible(page)
       await page.evaluate(

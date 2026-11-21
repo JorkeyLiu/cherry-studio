@@ -1,21 +1,16 @@
-import { loggerService } from '@logger'
-import { BranchRouteOptionRow } from '@renderer/pages/home/Messages/branchRouteOption'
-import { requestTopicBranches } from '@renderer/pages/home/Messages/useBranchTree'
-import { renameBranchWithHistory } from '@renderer/services/branchOperationHistory'
-import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
+import { useBranchRowActions } from '@renderer/pages/home/Messages/branchSelector/branchRowActions'
+import { branchRowKey, buildForkScopeIndex } from '@renderer/pages/home/Messages/branchSelector/branchTreeModel'
+import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
 import type { TopicBranchWire } from '@renderer/services/db/types'
-import { useAppDispatch } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import { Popover } from 'antd'
 import { ChevronDown } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import { BoundaryLabel, BoundaryPill, BoundaryPillButton, BoundaryRow, BoundaryRule } from './BoundaryPill'
 import { forkMarkerLabel } from './forkPlacement'
-
-const logger = loggerService.withContext('BranchDividers')
 
 /**
  * Fork-divider placement and menu helpers for topic-internal branches.
@@ -43,13 +38,13 @@ const logger = loggerService.withContext('BranchDividers')
  *   among the original/parent route at that fork and the sibling branches,
  *   with the current one selected.
  *
- * Popup binding: reuse ONLY the top selector's visual primitives and popover
- * interaction (overlay container, option row styling/highlight, rename/delete
- * controls). The data is a FLAT peer set for the exact fork (parent/original
- * route plus branches sharing the same `parentBranchId + anchorMessageId`,
- * including current). There is NO cascader, descendant column, hover-to-child,
- * or nested navigation inside a divider popup. Multi-column cascading remains
- * exclusive to the top global branch selector.
+ * Popup binding: the same shared tree panel as the top selector (same rows,
+ * current marker and copy/rename/delete handling; the fork entry hides the header),
+ * scoped to the exact fork — the parent/original route as the display root
+ * plus the branches sharing the same `parentBranchId + anchorMessageId`.
+ * Unrelated anchors, ancestor chains above the parent and descendant branches
+ * below the children never enter the scope. The popup overlays content and
+ * never pushes in-flow layout.
  *
  * Closed and open states occupy the same layout height: the popup overlays
  * content via Popover and never pushes in-flow content.
@@ -87,10 +82,11 @@ export function findAnchorsWithChildren(
 export { takenChildAtAnchor } from './forkPlacement'
 
 /**
- * Menu options for a fork: the parent/original route first, then the direct
- * child branches in (createdAt, id) order. `taken` (if any) is selected;
- * otherwise the current route (the menu opener context) is selected.
- * The parent option carries `parentBranchId` (null = main route).
+ * Option view of a fork scope: the parent/original route first, then the
+ * direct child branches in (createdAt, id) order — the same set and order
+ * `buildForkScopeIndex` renders as the scoped tree. `taken` (if any) is
+ * selected; otherwise the parent/original route (the menu opener context) is
+ * selected. The parent option carries `parentBranchId` (null = main route).
  */
 export function forkRouteOptions(
   parentLabel: string,
@@ -198,7 +194,7 @@ interface ForkDividerProps {
   anchorMessageId: string
   /** Taken branch at this anchor (undefined = untaken fork). */
   taken?: TopicBranchWire
-  /** Direct child branches at this anchor (non-empty, flat peer set). */
+  /** Direct child branches at this anchor (non-empty scope set, single anchor). */
   children: TopicBranchWire[]
   /** Parent route of the children at this fork (null = main route). */
   parentBranchId: string | null
@@ -214,11 +210,15 @@ interface ForkDividerProps {
 /**
  * One fork divider at an anchor. Taken forks render the selected branch
  * name as the switcher; untaken forks render the branch-count form. The
- * popup is a flat peer list (parent/original + direct children) reusing the
- * top selector's visual primitives; it overlays content and never pushes
- * layout. Switching targets the shared anchor/current vicinity — never
+ * popup is the shared branch-route tree panel, scoped to this exact fork —
+ * the parent/original route as the display root plus its direct children at
+ * the anchor — with the same rows, current marker and copy/rename/delete
+ * handling as the top selector, but without the header (tree only). It
+ * overlays content and never pushes layout. Switching targets the shared anchor/current vicinity — never
  * bottom (the caller preserves the visual reference without touching sidebar
- * topic identity). Rename/delete controls are provided for non-main options.
+ * topic identity). The main/original route row carries no branch management;
+ * when the parent/original route is itself a branch, that row allows the same
+ * copy/rename/delete operations as any branch row.
  */
 export const ForkDivider = ({
   topicId,
@@ -232,157 +232,105 @@ export const ForkDivider = ({
   onSelectRoute
 }: ForkDividerProps) => {
   const { t } = useTranslation()
-  const dispatch = useAppDispatch()
   const [open, setOpen] = useState(false)
-  const [renamingId, setRenamingId] = useState<string | null>(null)
-  const [draft, setDraft] = useState('')
-  const [deletingId, setDeletingId] = useState<string | null>(null)
+  /** Bumped per open so the tree always starts from the fork scope's floor. */
+  const [openCount, setOpenCount] = useState(0)
+  /**
+   * The popover's settled visibility, reported by antd once the panel is
+   * really on screen. The tree only measures from a laid-out panel, so this
+   * is its "you may measure now" signal — never the mere mount of the content.
+   */
+  const [treeVisible, setTreeVisible] = useState(false)
+  // Derived scope, single source: the parent/original route plus its direct
+  // children at this anchor — never another anchor, ancestor chain or
+  // descendant. Derived during render; no effects, no second index.
+  const scopeIndex = useMemo(() => buildForkScopeIndex(parentBranchId, children), [parentBranchId, children])
+  /** Route the scope marks current: the taken child if any, else the parent/original. */
+  const scopeCurrent = taken?.id ?? parentBranchId
+  const resolveBeforeName = useCallback(
+    (branchId: string): string | null => {
+      if (branchId === parentBranchId) return parentLabel
+      return children.find((child) => child.id === branchId)?.name ?? null
+    },
+    [children, parentBranchId, parentLabel]
+  )
+  const rowActions = useBranchRowActions({ topicId, activeBranchId, resolveBeforeName })
   // One shared two-state decision (branch name vs. children-here count) with
   // the outline's fork marker, so both surfaces name the same thing.
   const dividerLabel = forkMarkerLabel(taken, children, t)
-  const ordered = [...children].sort(
-    (a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id)
-  )
-  const byId = new Map(ordered.map((b) => [b.id, b]))
-  const takenId = taken?.id ?? null
-  // Flat peer set: parent/original route option + direct children. The
-  // selected route is the taken child if any, else the parent/original.
-  const options: { branchId: string | null; label: string; selected: boolean }[] = [
-    { branchId: parentBranchId, label: parentLabel, selected: takenId === null },
-    ...ordered.map((c) => ({
-      branchId: c.id as string | null,
-      label: c.name && c.name.length > 0 ? c.name : c.id,
-      selected: c.id === takenId
-    }))
-  ]
 
-  const commitRename = async (branchId: string): Promise<void> => {
-    const next = draft.trim()
-    if (next.length === 0) {
-      setRenamingId(null)
+  const handleSelectScopeRoute = (branchId: string | null): void => {
+    // Selecting the already-current route only closes, never navigates.
+    if ((branchId ?? null) === scopeCurrent) {
+      setOpen(false)
       return
     }
+    setOpen(false)
+    const esc =
+      typeof CSS !== 'undefined' && typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+        ? (CSS as unknown as { escape: (v: string) => string }).escape
+        : (v: string) => v
+    let dividerOffset: number | null = null
     try {
-      // Rename records one history action (undo/redo swap the two names). The
-      // name the row was showing is the value the rename moves away from.
-      await renameBranchWithHistory(dispatch, topicId, branchId, byId.get(branchId)?.name ?? null, next)
-      requestTopicBranches(dispatch, topicId)
-      setRenamingId(null)
-    } catch (error) {
-      logger.error('[ForkDivider] Failed to rename branch:', error as Error)
-      window.toast.error(t('common.error'))
-      setRenamingId(null)
+      const container = document.getElementById('messages')
+      const key = buildDividerKey(anchorMessageId, parentBranchId)
+      const row =
+        (document.querySelector(`[data-divider-key="${esc(key)}"]`) as HTMLElement | null) ??
+        (document.querySelector(
+          `[data-testid="${esc(dividerRowTestId(anchorMessageId, parentBranchId))}"]`
+        ) as HTMLElement | null)
+      dividerOffset = captureDividerOffset(row, container)
+    } catch {
+      dividerOffset = null
     }
+    onSelectRoute(branchId, anchorMessageId, {
+      anchorMessageId,
+      parentBranchId,
+      dividerKey: buildDividerKey(anchorMessageId, parentBranchId),
+      placement,
+      dividerOffset
+    })
   }
 
-  // Escape leaves the editor without writing anything: the draft is dropped
-  // and the next edit starts over from the branch's stored name.
-  const cancelRename = (): void => {
-    setRenamingId(null)
-    setDraft('')
+  // A successful delete dismisses this divider's popup (the refreshed catalog
+  // re-resolves the divider itself); a failed one stays open on the error.
+  const handleConfirmDelete = async (branchId: string): Promise<void> => {
+    if (await rowActions.confirmDelete(branchId)) setOpen(false)
   }
 
-  const confirmDelete = async (branchId: string): Promise<void> => {
-    setDeletingId(branchId)
-    try {
-      await deleteBranchSubtree(topicId, branchId, activeBranchId)
-      requestTopicBranches(dispatch, topicId)
-      window.toast.success(t('chat.topics.branch.deleted'))
-      setOpen(false)
-    } catch (error) {
-      logger.error('[ForkDivider] Failed to delete branch:', error as Error)
-      window.toast.error(t('common.error'))
-    } finally {
-      setDeletingId(null)
-    }
-  }
+  // Dismissing the delete confirmation reaches this popover as an outside
+  // press, so the popup closes with it — the same path as any other outside
+  // press. Only the top selector keeps its tree open across a confirmation.
+  const handleDeleteConfirmChange = useCallback((): void => {
+    // Intentionally no guard: the fork popup dismisses with outside presses.
+  }, [])
 
   const content = (
-    <div data-testid={`branch-fork-list-${anchorMessageId}`} style={{ minWidth: 200, maxWidth: 300 }}>
-      {options.map((opt) => {
-        const isBranch = opt.branchId !== null
-        const renaming = isBranch && renamingId === opt.branchId
-        return (
-          <BranchRouteOptionRow
-            key={opt.branchId ?? '__parent'}
-            branchId={opt.branchId}
-            label={opt.label}
-            selected={opt.selected}
-            testIdPrefix="branch-fork"
-            anchorMessageId={anchorMessageId}
-            renaming={renaming}
-            draft={draft}
-            onDraftChange={setDraft}
-            onCommitRename={() => void commitRename(opt.branchId as string)}
-            onCancelRename={cancelRename}
-            onStartRename={() => {
-              const node = opt.branchId !== null ? byId.get(opt.branchId) : undefined
-              setDraft(node?.name ?? '')
-              setRenamingId(opt.branchId)
-            }}
-            onConfirmDelete={() => void confirmDelete(opt.branchId as string)}
-            deleting={deletingId === opt.branchId}
-            renameLabel={t('chat.topics.branch.rename')}
-            deleteLabel={t('chat.topics.branch.delete')}
-            deleteConfirmTitle={t('chat.topics.branch.delete_confirm')}
-            onSelect={() => {
-              if ((opt.branchId ?? null) === (takenId ?? parentBranchId) && opt.selected) {
-                setOpen(false)
-                return
-              }
-              setOpen(false)
-              const esc =
-                typeof CSS !== 'undefined' &&
-                typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                  ? (CSS as unknown as { escape: (v: string) => string }).escape
-                  : (v: string) => v
-              let dividerOffset: number | null = null
-              try {
-                const container = document.getElementById('messages')
-                const key = buildDividerKey(anchorMessageId, parentBranchId)
-                const row =
-                  (document.querySelector(`[data-divider-key="${esc(key)}"]`) as HTMLElement | null) ??
-                  (document.querySelector(
-                    `[data-testid="${esc(dividerRowTestId(anchorMessageId, parentBranchId))}"]`
-                  ) as HTMLElement | null)
-                dividerOffset = captureDividerOffset(row, container)
-              } catch {
-                dividerOffset = null
-              }
-              // captureSelfOffset retained as a named seam (same measurement).
-              void captureSelfOffset
-              onSelectRoute(opt.branchId, anchorMessageId, {
-                anchorMessageId,
-                parentBranchId,
-                dividerKey: buildDividerKey(anchorMessageId, parentBranchId),
-                placement,
-                dividerOffset
-              })
-            }}
-          />
-        )
-      })}
+    <div data-testid={`branch-fork-list-${anchorMessageId}`}>
+      <BranchTreePanel
+        key={openCount}
+        index={scopeIndex}
+        topicName={parentLabel}
+        displayRootKey={branchRowKey(parentBranchId)}
+        displayRootLabel={parentLabel}
+        activeBranchId={scopeCurrent}
+        visible={treeVisible}
+        onSelectRoute={handleSelectScopeRoute}
+        onCommitRename={rowActions.commitRename}
+        onConfirmDelete={handleConfirmDelete}
+        deletingBranchId={rowActions.deletingBranchId}
+        onCopyBranch={rowActions.copyBranch}
+        copyingBranchId={rowActions.copyingBranchId}
+        onDeleteConfirmChange={handleDeleteConfirmChange}
+        maxWidth={FORK_PANEL_MAX_WIDTH}
+        minWidth={FORK_PANEL_MIN_WIDTH}
+        showHeader={false}
+      />
     </div>
   )
 
   const dividerKey = buildDividerKey(anchorMessageId, parentBranchId)
   const rowTestId = dividerRowTestId(anchorMessageId, parentBranchId)
-  const captureSelfOffset = (): number | null => {
-    try {
-      const container = document.getElementById('messages')
-      // Stable identity query: same anchor + same parent across routes.
-      const row =
-        (document.querySelector(`[data-divider-key="${CSS.escape(dividerKey)}"]`) as HTMLElement | null) ??
-        (document.querySelector(`[data-testid="${CSS.escape(rowTestId)}"]`) as HTMLElement | null) ??
-        // Legacy fallback: anchor-only test id (single divider per anchor).
-        (document.querySelector(
-          `[data-testid="branch-fork-divider-${CSS.escape(anchorMessageId)}"]`
-        ) as HTMLElement | null)
-      return captureDividerOffset(row, container)
-    } catch {
-      return null
-    }
-  }
 
   const crossOwner = isForkDividerCrossOwner(topicId, parentBranchId, taken ?? null)
   return (
@@ -401,9 +349,17 @@ export const ForkDivider = ({
         trigger="click"
         placement="bottom"
         open={open}
+        afterOpenChange={(next) => setTreeVisible(next)}
         onOpenChange={(v) => {
-          setOpen(v)
-          if (!v) setRenamingId(null)
+          if (v) {
+            // Remount the panel per open, so the tree always starts from the
+            // fork scope's floor instead of a previous open's expansion.
+            setOpenCount((count) => count + 1)
+            setOpen(true)
+            return
+          }
+          setTreeVisible(false)
+          setOpen(false)
         }}
         destroyOnHidden>
         <ForkDividerNameButton
@@ -423,6 +379,15 @@ export const ForkDivider = ({
     </ForkDividerRow>
   )
 }
+
+/**
+ * Fork scope panel width budget: the fork popup shows the shared tree without
+ * the top selector's header, so it opens narrower (220) than the top entry's
+ * 280 floor but keeps the same grow-only rule — content may widen it rightwards
+ * up to 300, and longer names truncate in place with ellipsis.
+ */
+const FORK_PANEL_MIN_WIDTH = 220
+const FORK_PANEL_MAX_WIDTH = 300
 
 /** Flow row of a fork divider: shared weak-boundary row, same height as before. */
 const ForkDividerRow = styled(BoundaryRow)`

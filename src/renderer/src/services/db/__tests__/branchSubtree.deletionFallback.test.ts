@@ -109,14 +109,26 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     listBranchesMock.mockResolvedValue({ topicId: 't-1', branches: [] })
   })
 
-  it('both delete entries share the same helper (TopicContent + BranchDividers call deleteBranchSubtree)', () => {
+  it('both delete entries share the same helper (TopicContent + BranchDividers delegate to useBranchRowActions)', () => {
     const topicContent = fs.readFileSync(
       'src/renderer/src/pages/home/components/ChatNavBar/ChatNavbarContent/TopicContent.tsx',
       'utf8'
     )
     const dividers = fs.readFileSync('src/renderer/src/pages/home/Messages/BranchDividers.tsx', 'utf8')
-    expect(topicContent).toMatch(/deleteBranchSubtree\(activeTopic\.id,\s*branchId,\s*activeBranchId\)/)
-    expect(dividers).toMatch(/deleteBranchSubtree\(topicId,\s*branchId,\s*activeBranchId\)/)
+    const hook = fs.readFileSync('src/renderer/src/pages/home/Messages/branchSelector/branchRowActions.ts', 'utf8')
+    // Both entries wire the shared hook with the real topic + route-fallback inputs.
+    expect(topicContent).toMatch(/useBranchRowActions\(\{\s*topicId:\s*activeTopic\.id,\s*activeBranchId/)
+    expect(dividers).toMatch(/useBranchRowActions\(\{\s*topicId,\s*activeBranchId/)
+    // Both entries route their delete through the shared confirmDelete — no
+    // direct service call remains in either entry (single owner).
+    expect(topicContent).toMatch(/await rowActions\.confirmDelete\(branchId\)/)
+    expect(dividers).toMatch(/await rowActions\.confirmDelete\(branchId\)/)
+    expect(topicContent).not.toMatch(/deleteBranchSubtree\(/)
+    expect(dividers).not.toMatch(/deleteBranchSubtree\(/)
+    // The shared hook owns the single service call with the full route-fallback
+    // params; the fallback stays service-owned, never switched at the entries.
+    expect(hook).toMatch(/import \{ deleteBranchSubtree \} from '@renderer\/services\/db\/branchSubtree'/)
+    expect(hook).toMatch(/await deleteBranchSubtree\(topicId,\s*branchId,\s*activeBranchId\)/)
   })
 
   it('active-deleted subtree emits one latest intent with the fallback route and drops deleted snapshots', async () => {
@@ -175,11 +187,17 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     const nextStart = src.indexOf('Top-selector route switch', start)
     expect(nextStart).toBeGreaterThan(start)
     const slice = src.slice(start, nextStart)
-    // Single owner: claim + cancel + latest + latest viewport + consume.
+    // Single owner: claim + cancel + windowed latest read + latest viewport
+    // over the full displayCount budget, pinned at bottom via the atomic
+    // route-window commit, then consume. The retired createLatestMessageWindow
+    // constructor is superseded by loadRouteMessagesThunk + applyWindowTransition.
     expect(slice).toMatch(/claimLoadedRoute\(activeBranchId\)/)
     expect(slice).toMatch(/cancelActiveLoads\(\)/)
     expect(slice).toMatch(/loadRouteMessagesThunk\(topicIdAtEffect,\s*routeAtEffect,\s*\{\s*kind:\s*'latest'/)
-    expect(slice).toMatch(/createLatestMessageWindow\(loaded,\s*displayCount/)
+    expect(slice).toMatch(/applyWindowTransition\(\{/)
+    expect(slice).toMatch(/kind:\s*'latest'/)
+    expect(slice).toMatch(/budget:\s*displayCount/)
+    expect(slice).toMatch(/kind:\s*'bottom'/)
     expect(slice).toMatch(/deletionFallbackConsumed/)
     // Never the generic snapshot choice inside the deletion path (comments
     // excluded: the effect comment names the forbidden path explicitly).
@@ -237,6 +255,20 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     s = reducer(s, activeBranchReset({ topicId: 't-1' }))
     expect(s.activeBranchIdByTopic['t-1']).toBeNull()
     const src = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
-    expect(src).toMatch(/createLatestMessageWindow\(loaded,\s*displayCount/)
+    // Bound to the deletion-fallback effect: the fallback rebuilds an explicit
+    // latest viewport over the full displayCount window (never a snapshot
+    // anchor, never a vicinity fallback), pinned at bottom — the transition
+    // constructor guarantees displayCount-completeness for the never-branched
+    // tail, and empty fallback routes clear atomically via the same constructor.
+    const start = src.indexOf('Route deletion fallback')
+    expect(start).toBeGreaterThanOrEqual(0)
+    const nextStart = src.indexOf('Top-selector route switch', start)
+    expect(nextStart).toBeGreaterThan(start)
+    const slice = src.slice(start, nextStart)
+    expect(slice).toMatch(/loadRouteMessagesThunk\(topicIdAtEffect,\s*routeAtEffect,\s*\{\s*kind:\s*'latest'/)
+    expect(slice).toMatch(/applyWindowTransition\(\{/)
+    expect(slice).toMatch(/kind:\s*'latest'/)
+    expect(slice).toMatch(/budget:\s*displayCount/)
+    expect(slice).toMatch(/kind:\s*'bottom'/)
   })
 })

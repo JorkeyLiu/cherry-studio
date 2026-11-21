@@ -599,7 +599,7 @@ async function switchRouteViaDivider(
   await opener.click()
   const list = page.locator(`[data-testid="branch-fork-list-${forkAnchorId}"]`).first()
   await expect(list, 'fork divider popup must open').toBeVisible({ timeout: 15000 })
-  const itemSel = toBranchId === null ? `branch-fork-item-parent-${forkAnchorId}` : `branch-fork-item-${toBranchId}`
+  const itemSel = toBranchId === null ? `branch-cascader-item-main` : `branch-cascader-item-${toBranchId}`
   const item = list.locator(`[data-testid="${itemSel}"]`).first()
   await expect(item, `route peer ${itemSel} must be offered`).toBeVisible({ timeout: 15000 })
   // Post-send the popup peer can be reported outside the viewport even after

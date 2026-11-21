@@ -1,16 +1,20 @@
 /**
- * Two-char Chinese branch names: Antd Button must not insert inter-char space.
- * Covers contract (7): local autoInsertSpace={false} on BranchRouteOptionRow
- * (popup), ForkDivider main button, and the top selector entry button.
+ * Two-char Chinese branch names: the shared tree panel renders labels in a
+ * plain span (never an Antd Button), so no inter-char space is inserted.
+ * Covers contract (7): local autoInsertSpace={false} on the ForkDivider main
+ * button and the top selector entry button.
  */
+import type { TopicBranchWire } from '@renderer/services/db/types'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ForkDivider } from '../BranchDividers'
-import { BranchRouteOptionRow } from '../branchRouteOption'
+import { buildForkScopeIndex } from '../branchSelector/branchTreeModel'
+import { BranchTreePanel } from '../branchSelector/BranchTreePanel'
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (k: string) => k })
+  useTranslation: () => ({ t: (k: string) => k }),
+  initReactI18next: { type: '3rdParty', init: vi.fn() }
 }))
 
 vi.mock('@renderer/store', () => ({
@@ -28,45 +32,53 @@ vi.mock('@renderer/services/db/DbService', () => ({
 vi.mock('@renderer/services/db/branchSubtree', () => ({
   deleteBranchSubtree: vi.fn()
 }))
-
-const baseProps = {
-  branchId: 'b1' as string | null,
-  label: '分支',
-  selected: true,
-  testIdPrefix: 'branch-fork' as const,
-  anchorMessageId: 'm1',
-  renaming: false,
-  draft: '',
-  onDraftChange: () => {},
+const panelProps = {
+  topicName: '主题',
+  activeBranchId: null as string | null,
+  visible: true,
+  onSelectRoute: () => {},
   onCommitRename: () => {},
-  onCancelRename: () => {},
-  onStartRename: () => {},
   onConfirmDelete: () => {},
-  deleting: false,
-  renameLabel: 'rename',
-  deleteLabel: 'delete',
-  deleteConfirmTitle: 'confirm',
-  onSelect: () => {}
+  onCopyBranch: () => {},
+  deletingBranchId: null as string | null,
+  copyingBranchId: null as string | null,
+  onDeleteConfirmChange: () => {},
+  maxWidth: 420
 }
 
-describe('BranchRouteOptionRow two-char Chinese name', () => {
-  it('renders the selected two-char label textContent unchanged (no spaced chars)', () => {
-    render(<BranchRouteOptionRow {...baseProps} />)
-    const btn = screen.getByTestId('branch-fork-item-b1')
-    // Antd may wrap label in a span; textContent must stay exactly two chars.
-    expect(btn.textContent).toBe('分支')
-    expect(btn.textContent).not.toContain(' ')
-    // No two-chinese spacing behavior: Antd inserts a space char between two
-    // CJK chars when autoInsertSpace is on; assert it did not happen.
-    expect(btn.innerHTML).not.toMatch(/分\s+支/)
+const twoCharChild = (name: string): TopicBranchWire =>
+  ({
+    id: 'b1',
+    topicId: 't1',
+    parentBranchId: null,
+    anchorMessageId: 'm1',
+    name,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }) as TopicBranchWire
+
+describe('Shared tree panel two-char Chinese name', () => {
+  it('renders the two-char label textContent unchanged (no spaced chars)', () => {
+    render(<BranchTreePanel index={buildForkScopeIndex(null, [twoCharChild('分支')])} {...panelProps} />)
+    const row = screen.getByTestId('branch-cascader-item-b1')
+    // The panel renders labels in a plain span, never an Antd Button, so no
+    // two-chinese auto-spacing can apply; textContent stays exactly two chars.
+    expect(row.textContent).toBe('分支')
+    expect(row.textContent).not.toContain(' ')
+    expect(row.innerHTML).not.toMatch(/分\s+支/)
   })
 
-  it('sets autoInsertSpace={false} on the option Button (source-level guard)', async () => {
+  it('proves the single menu: no BranchRouteOptionRow remains in prod', async () => {
     const fs = await import('fs')
+    for (const file of [
+      'src/renderer/src/pages/home/Messages/branchRouteOption.tsx',
+      'src/renderer/src/pages/home/Messages/BranchDividers.tsx'
+    ]) {
+      expect(fs.readFileSync(file, 'utf8')).not.toMatch(/BranchRouteOptionRow/)
+    }
+    // The hook the panel edits through still lives in the option module.
     const src = fs.readFileSync('src/renderer/src/pages/home/Messages/branchRouteOption.tsx', 'utf8')
-    expect(src).toMatch(/autoInsertSpace=\{false\}/)
-    // Local only: no global ConfigProvider autoInsertSpace=false.
-    expect(src).not.toMatch(/ConfigProvider/)
+    expect(src).toMatch(/useBranchRenameInput/)
   })
 })
 

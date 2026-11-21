@@ -45,8 +45,14 @@ describe('Messages window-merge wiring (atomic capability)', () => {
     expect(source).not.toMatch(/const startOlderWindowLoad/)
     expect(source).toMatch(/startWindowPageLoad\(direction\)/)
     const idx = source.indexOf('const startWindowPageLoad')
+    expect(idx).toBeGreaterThanOrEqual(0)
     const slice = source.slice(idx, idx + 26000)
-    expect(slice).toMatch(/derivePaginationWindow/)
+    // Bounded pagination transition derived from the accepted merge BEFORE
+    // publication: the loaded edge grows by the page, the opposite-edge trim
+    // never crosses the live reading row, and only the loaded edge takes the
+    // response's authoritative completeness flag.
+    expect(slice).toMatch(/canAdvancePaginationWindow/)
+    expect(slice).toMatch(/applyWindowTransition\(\{\s*kind: 'paginate'/)
     expect(slice).toMatch(/responseWindow:\s*response\.window/)
   })
 

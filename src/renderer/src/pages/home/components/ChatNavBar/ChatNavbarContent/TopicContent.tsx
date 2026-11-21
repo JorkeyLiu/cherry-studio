@@ -1,8 +1,8 @@
-import { loggerService } from '@logger'
 import {
   BranchBreadcrumb,
   type BranchCrumbSegment
 } from '@renderer/pages/home/Messages/branchSelector/BranchBreadcrumb'
+import { useBranchRowActions } from '@renderer/pages/home/Messages/branchSelector/branchRowActions'
 import {
   BRANCH_POPOVER_MAX_WIDTH,
   branchPopoverAlign,
@@ -12,11 +12,8 @@ import {
 } from '@renderer/pages/home/Messages/branchSelector/branchTreeModel'
 import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
-import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
-import { renameBranchWithHistory } from '@renderer/services/branchOperationHistory'
-import { copyBranchTree } from '@renderer/services/ClipboardService'
-import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
+import { useAppSelector } from '@renderer/store'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { Button, type GetRef, Popover, Tooltip } from 'antd'
@@ -34,7 +31,6 @@ type TopicContentProps = {
   setActiveTopic: (topic: Topic) => void
 }
 
-const logger = loggerService.withContext('TopicContent')
 /**
  * Fit used before the first open planned one: the anchored left edge and the
  * full ceiling. Module-level so it stays the same object, i.e. the align config
@@ -73,7 +69,6 @@ const UNMEASURED_POPOVER_FIT: BranchPopoverFit = { leftShift: 0, maxWidth: BRANC
  */
 const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const { t } = useTranslation()
-  const dispatch = useAppDispatch()
   const viewport = useRouteViewport()
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, activeTopic.id))
   const branchTree = useBranchTree(activeTopic.id, activeBranchId)
@@ -86,10 +81,16 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
    * its "you may measure now" signal — never the mere mount of the content.
    */
   const [treeVisible, setTreeVisible] = useState(false)
-  /** Row whose subtree delete is in flight, so only that row shows a spinner. */
-  const [deletingId, setDeletingId] = useState<string | null>(null)
-  /** Row whose branch-tree copy is in flight, so only that row shows a spinner. */
-  const [copyingId, setCopyingId] = useState<string | null>(null)
+  // Row management (copy/rename/delete) is the shared selector handling: the
+  // same DB-first commit/refresh/toast semantics as the fork-divider trees.
+  // Only this entry's trigger, full-catalog scope and kept-open reaction stay
+  // local. Branch names resolve from the live catalog for the rename history.
+  const branches = branchTree.branches
+  const resolveBeforeName = useCallback(
+    (branchId: string): string | null => branches.find((branch) => branch.id === branchId)?.name ?? null,
+    [branches]
+  )
+  const rowActions = useBranchRowActions({ topicId: activeTopic.id, activeBranchId, resolveBeforeName })
   /**
    * Whether a row's delete confirmation is open. It is a ref, not state: it
    * guards only the press that dismisses that confirmation and renders
@@ -153,7 +154,6 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const panelFit: BranchPopoverFit = popoverFit ?? UNMEASURED_POPOVER_FIT
   const popoverAlign = useMemo(() => branchPopoverAlign(panelFit), [panelFit])
 
-  const branches = branchTree.branches
   const path = branchTree.path
   const index = useMemo(() => buildBranchTreeIndex(branches), [branches])
 
@@ -183,66 +183,15 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   }
 
   /**
-   * Inline rename commit, DB-first: the row keeps its place while the write is
-   * in flight and the refreshed catalog then carries the stored name.
+   * Popconfirm delete commit: the shared handling owns the DB-first write,
+   * refresh and toast. The confirmation guard reset stays local — it belongs
+   * to this open session, same as the close path below.
    */
-  const commitRename = async (branchId: string, next: string): Promise<void> => {
-    try {
-      // Rename records one history action (undo/redo swap the two names). The
-      // name the row was showing is the value the rename moves away from.
-      await renameBranchWithHistory(
-        dispatch,
-        activeTopic.id,
-        branchId,
-        branches.find((branch) => branch.id === branchId)?.name ?? null,
-        next
-      )
-      requestTopicBranches(dispatch, activeTopic.id)
-    } catch (error) {
-      logger.error('[TopicContent] Failed to rename branch:', error as Error)
-      window.toast.error(t('common.error'))
-    }
-  }
-
-  /** Popconfirm delete commit: the subtree delete owns the route fallback. */
   const confirmDelete = async (branchId: string): Promise<void> => {
-    setDeletingId(branchId)
     try {
-      // The subtree delete owns the route fallback; never switch here.
-      await deleteBranchSubtree(activeTopic.id, branchId, activeBranchId)
-      requestTopicBranches(dispatch, activeTopic.id)
-      window.toast.success(t('chat.topics.branch.deleted'))
-    } catch (error) {
-      logger.error('[TopicContent] Failed to delete branch:', error as Error)
-      window.toast.error(t('common.error'))
+      await rowActions.confirmDelete(branchId)
     } finally {
       deleteConfirmRef.current = false
-      setDeletingId(null)
-    }
-  }
-
-  /**
-   * Branch-row copy, copy-only: the CLICKED row is the source (never the active
-   * route), Main captures that branch's own trunk plus its descendant branches'
-   * own rows, and nothing here switches route or opens edit mode. One copy runs
-   * at a time; the row owns the spinner while it is in flight.
-   */
-  const copyBranch = async (branchId: string): Promise<void> => {
-    if (copyingId !== null) return
-    setCopyingId(branchId)
-    try {
-      const count = await copyBranchTree(dispatch, activeTopic.id, branchId)
-      if (count > 0) {
-        window.toast.success(t('chat.edit.copied', { count }))
-      } else {
-        // Nothing was published (Main refused or the branch owns no rows).
-        window.toast.error(t('common.error'))
-      }
-    } catch (error) {
-      logger.error('[TopicContent] Failed to copy branch tree:', error as Error)
-      window.toast.error(t('common.error'))
-    } finally {
-      setCopyingId(null)
     }
   }
 
@@ -268,13 +217,13 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
       topicName={topicName}
       activeBranchId={activeBranchId}
       visible={treeVisible}
-      deletingBranchId={deletingId}
-      copyingBranchId={copyingId}
+      deletingBranchId={rowActions.deletingBranchId}
+      copyingBranchId={rowActions.copyingBranchId}
       onDeleteConfirmChange={handleDeleteConfirmChange}
       onSelectRoute={switchRoute}
-      onCommitRename={commitRename}
+      onCommitRename={rowActions.commitRename}
       onConfirmDelete={confirmDelete}
-      onCopyBranch={copyBranch}
+      onCopyBranch={rowActions.copyBranch}
       maxWidth={panelFit.maxWidth}
     />
   )

@@ -15,8 +15,8 @@
  *   on the selected-route change (never B projection settle) keeps the exact
  *   A anchor+snapshot with only the newest completion; a committed B switch
  *   restores B independently.
- * - Divider explicit continue-here: from main, a flat divider peer switch to
- *   the branch preserves the current shared-anchor offset even though the
+ * - Divider explicit continue-here: from main, a scoped shared-tree divider switch
+ *   to the branch preserves the current shared-anchor offset even though the
  *   branch historic snapshot points at a different exclusive anchor (never
  *   the target snapshot/bottom).
  *
@@ -49,7 +49,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'ROUTE SETTINGS SESSION: distinct main/branch anchors before Settings; Chat->Settings->Chat preserves the DOM session; >=2 ordinary top cycles after restore exact anchors; wheel to a new branch location restores after away/back; rapid A→B→A keeps only the newest completion; flat divider peer switch preserves the current shared-anchor offset despite a different historic branch snapshot.'
+        'ROUTE SETTINGS SESSION: distinct main/branch anchors before Settings; Chat->Settings->Chat preserves the DOM session; >=2 ordinary top cycles after restore exact anchors; wheel to a new branch location restores after away/back; rapid A→B→A keeps only the newest completion; scoped shared-tree divider switch preserves the current shared-anchor offset despite a different historic branch snapshot.'
     })
     const page = mainWindow
     await waitForAppReady(page)
@@ -697,7 +697,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     await toggle.click()
     const peerList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
     await expect(peerList, 'divider popup must open').toBeVisible({ timeout: 15000 })
-    const branchItem = peerList.locator(`[data-testid="branch-fork-item-${branchId}"]`).first()
+    const branchItem = peerList.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first()
     await expect(branchItem, 'branch must be offered on the divider').toBeVisible({ timeout: 15000 })
     await branchItem.click()
     await waitActive(branchId)

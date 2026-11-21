@@ -2200,7 +2200,7 @@ test.describe('conversation navigation redesign', () => {
     const updatedAtBeforeSwitch = await readTopicUpdatedAt(page, topicId)
     expect(updatedAtBeforeSwitch, 'the seeded topic must carry an authority timestamp').toBeTruthy()
 
-    // REAL route switch main → branch through the divider's flat peer list.
+    // REAL route switch main → branch through the divider's scoped shared-tree list.
     const dividerToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorAssistantId}"]`).first()
     await expect(dividerToggle, 'the main route must render the fork divider at the anchor').toBeVisible({
       timeout: 30000
@@ -2208,7 +2208,7 @@ test.describe('conversation navigation redesign', () => {
     await dividerToggle.click()
     const peerList = page.locator(`[data-testid="branch-fork-list-${anchorAssistantId}"]`).first()
     await expect(peerList, 'the divider peer list must open').toBeVisible({ timeout: 15000 })
-    await peerList.locator(`[data-testid="branch-fork-item-${branchId}"]`).first().click()
+    await peerList.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
     await page.waitForFunction(
       ({ tid, bid }: { tid: string; bid: string }) => {
         const s = (window as any).store.getState()

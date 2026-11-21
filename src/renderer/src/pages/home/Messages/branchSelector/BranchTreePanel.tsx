@@ -17,18 +17,24 @@ import {
   planScrollIntoView
 } from './branchTreeGeometry'
 import {
-  baseExpandedKeys,
   BRANCH_POPOVER_MIN_WIDTH,
   BRANCH_TREE_ROOT_ID,
   branchRowKey,
   branchRowTestId,
   type BranchTreeIndex,
   collapseAllExpandedKeys,
+  mergeExpandedKeys,
   pruneExpandedKeys
 } from './branchTreeModel'
 
 /**
- * The top selector's branch tree.
+ * The shared branch-route tree: the top selector renders the full catalog
+ * from the main-route root, and a fork divider renders its scope (the
+ * parent/original route plus its direct children at the anchor) from a scoped
+ * index. Both entries share rows, current state and copy/rename/delete
+ * handling; the top entry additionally shows the header (count + collapse
+ * all) while a fork entry hides it. Only the trigger, the displayed scope
+ * and the select adaptation differ per entry.
  *
  * Rows are a vertical AntD tree (no built-in connector lines, no virtual
  * list, no expand animation); the connectors are one SVG layer drawn from
@@ -116,13 +122,37 @@ export interface BranchTreePanelProps {
    */
   onDeleteConfirmChange: (isOpen: boolean) => void
   /**
+   * Displayed root row key. The top selector renders the full catalog from the
+   * main-route root; a fork divider renders its scope (the parent/original
+   * route plus its direct children at the anchor) from
+   * `branchRowKey(parentBranchId)`. Defaults to the main-route root.
+   */
+  displayRootKey?: string
+  /**
+   * Label of the display root when the scope index carries no catalog node for
+   * it (a fork whose parent/original route is a branch). The main-route root
+   * always uses `topicName`.
+   */
+  displayRootLabel?: string
+  /**
+   * Whether the header (branch tag + count + collapse all) renders. The top
+   * selector keeps it; a fork divider hides it and shows the tree only.
+   * Defaults to true.
+   */
+  showHeader?: boolean
+  /**
    * Widest the panel may become during this open, planned once by the owner
    * from the trigger and the window. The panel starts at its minimum and only
    * grows into this budget, so an expand never re-aligns or shifts it.
    */
   maxWidth: number
+  /**
+   * Narrowest the panel may become — and the width it opens at. Defaults to
+   * `BRANCH_POPOVER_MIN_WIDTH`; a fork divider passes its own smaller floor
+   * sized for its popup, so it never inherits the top selector's minimum.
+   */
+  minWidth?: number
 }
-
 export const BranchTreePanel = ({
   index,
   topicName,
@@ -135,8 +165,14 @@ export const BranchTreePanel = ({
   deletingBranchId,
   copyingBranchId,
   onDeleteConfirmChange,
-  maxWidth
+  displayRootKey: displayRootKeyProp,
+  displayRootLabel,
+  showHeader = true,
+  maxWidth,
+  minWidth: minWidthProp
 }: BranchTreePanelProps) => {
+  const minWidth = minWidthProp ?? BRANCH_POPOVER_MIN_WIDTH
+  const displayRootKey = displayRootKeyProp ?? BRANCH_TREE_ROOT_ID
   const { t } = useTranslation()
   // The glyph cut-outs are one mask on the connector layer, so the id must be
   // per mounted panel (two windows can show the selector at once) and usable
@@ -147,7 +183,9 @@ export const BranchTreePanel = ({
   const ancestors = useMemo(() => index.ancestorsOf(activeBranchId), [index, activeBranchId])
   // The open floor is the ancestor chain plus the current row itself, so the
   // route is both reachable and showing its own direct children.
-  const [expandedKeys, setExpandedKeys] = useState<string[]>(() => baseExpandedKeys(ancestors, activeKey))
+  const [expandedKeys, setExpandedKeys] = useState<string[]>(() =>
+    mergeExpandedKeys([displayRootKey], [...ancestors, activeKey])
+  )
   /** Expanded node whose first child should be revealed on the next frame. */
   const [revealKey, setRevealKey] = useState<string | null>(null)
 
@@ -175,12 +213,16 @@ export const BranchTreePanel = ({
 
   const labelOf = useCallback(
     (key: string): string => {
-      if (key === BRANCH_TREE_ROOT_ID) return topicName
+      if (key === displayRootKey) {
+        if (key === BRANCH_TREE_ROOT_ID) return topicName
+        // A scoped fork root carries no catalog node: the entry owns its label.
+        if (displayRootLabel !== undefined) return displayRootLabel
+      }
       const node = index.byId.get(key)
       if (!node) return key
       return node.name && node.name.length > 0 ? node.name : node.id
     },
-    [index, topicName]
+    [displayRootKey, displayRootLabel, index, topicName]
   )
 
   /* ---------------- in-place row editing ---------------- */
@@ -238,8 +280,7 @@ export const BranchTreePanel = ({
   })
   const treeData = useMemo(() => {
     const build = (key: string): DataNode => {
-      const children =
-        key === BRANCH_TREE_ROOT_ID ? (index.childrenOf.get(key) ?? []) : (index.childrenOf.get(key) ?? [])
+      const children = index.childrenOf.get(key) ?? []
       return {
         key,
         title: labelOf(key),
@@ -247,8 +288,8 @@ export const BranchTreePanel = ({
         children: children.map((child: TopicBranchWire) => build(child.id))
       }
     }
-    return [build(BRANCH_TREE_ROOT_ID)]
-  }, [index, labelOf])
+    return [build(displayRootKey)]
+  }, [displayRootKey, index, labelOf])
 
   /* ---------------- measured geometry ---------------- */
   const measureNodes = useCallback((): BranchGeoNode[] => {
@@ -538,18 +579,25 @@ export const BranchTreePanel = ({
       // The panel follows its own content, but never wider than the budget the
       // owner planned at open time, and never narrower than what it has already
       // reached in this open: growth is one-way and always to the right.
-      style={{ minWidth: Math.min(maxWidth, Math.max(BRANCH_POPOVER_MIN_WIDTH, settledWidth)), maxWidth }}>
-      <Header>
-        <HeaderTitle>{t('chat.topics.branch.tag')}</HeaderTitle>
-        {branchCount > 0 ? (
-          <HeaderCount title={t('chat.topics.branch.children_here', { count: branchCount })}>{branchCount}</HeaderCount>
-        ) : null}
-        <HeaderSpacer />
-        <CollapseButton type="button" data-testid="branch-collapse-all" onClick={collapseAll}>
-          {t('chat.topics.branch.collapse_all')}
-        </CollapseButton>
-      </Header>
-      <Scroller ref={scrollerRef} data-testid="branch-tree-scroll">
+      style={{ minWidth: Math.min(maxWidth, Math.max(minWidth, settledWidth)), maxWidth }}>
+      {showHeader ? (
+        <Header>
+          <HeaderTitle>{t('chat.topics.branch.tag')}</HeaderTitle>
+          {branchCount > 0 ? (
+            <HeaderCount title={t('chat.topics.branch.children_here', { count: branchCount })}>
+              {branchCount}
+            </HeaderCount>
+          ) : null}
+          <HeaderSpacer />
+          <CollapseButton type="button" data-testid="branch-collapse-all" onClick={collapseAll}>
+            {t('chat.topics.branch.collapse_all')}
+          </CollapseButton>
+        </Header>
+      ) : null}
+      <Scroller
+        ref={scrollerRef}
+        data-testid="branch-tree-scroll"
+        style={showHeader ? undefined : { padding: '2px 6px 6px' }}>
         <Content ref={contentRef}>
           <Edges aria-hidden="true" width="100%" height="100%">
             {/*

@@ -3274,7 +3274,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await taken.click()
     const takenList = page.locator(`[data-testid="branch-fork-list-${a1}"]`).first()
     await expect(takenList, 'divider popup must open on L1').toBeVisible({ timeout: 15000 })
-    await takenList.locator(`[data-testid="branch-fork-item-parent-${a1}"]`).first().click()
+    await takenList.locator(`[data-testid="branch-cascader-item-main"]`).first().click()
     await waitActiveRoute(topicId, null, allIds)
     expect(await activeRouteOf(topicId)).toBeNull()
 
@@ -3388,7 +3388,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await mainToggle.click()
     const mainList = page.locator(`[data-testid="branch-fork-list-${a1}"]`).first()
     await expect(mainList, 'main divider popup must open').toBeVisible({ timeout: 15000 })
-    await mainList.locator(`[data-testid="branch-fork-item-${branchId}"]`).first().click()
+    await mainList.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
     await waitActiveRoute(topicId, branchId, prefixIds)
     expect(await activeRouteOf(topicId)).toBe(branchId)
     await setEditMode(true)
@@ -3809,7 +3809,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await page
       .locator(`[data-testid="branch-fork-list-${a1}"]`)
       .first()
-      .locator(`[data-testid="branch-fork-item-parent-${a1}"]`)
+      .locator(`[data-testid="branch-cascader-item-main"]`)
       .first()
       .click()
     await waitRoute(topicId, null, prefixIds)
@@ -3838,7 +3838,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await page
       .locator(`[data-testid="branch-fork-list-${a1}"]`)
       .first()
-      .locator(`[data-testid="branch-fork-item-${branchId}"]`)
+      .locator(`[data-testid="branch-cascader-item-${branchId}"]`)
       .first()
       .click()
     await waitRoute(topicId, branchId, [...prefixIds, s1, s2])
@@ -3888,7 +3888,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await page
       .locator(`[data-testid="branch-fork-list-${a1}"]`)
       .first()
-      .locator(`[data-testid="branch-fork-item-parent-${a1}"]`)
+      .locator(`[data-testid="branch-cascader-item-main"]`)
       .first()
       .click()
     await waitRoute(topicId, null, prefixIds)
@@ -3930,7 +3930,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await page
       .locator(`[data-testid="branch-fork-list-${a1}"]`)
       .first()
-      .locator(`[data-testid="branch-fork-item-${branchId}"]`)
+      .locator(`[data-testid="branch-cascader-item-${branchId}"]`)
       .first()
       .click()
     await waitRoute(topicId, branchId, [...prefixIds, s1, s2])

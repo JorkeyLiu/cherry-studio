@@ -12,6 +12,7 @@ import {
   branchRowKey,
   branchRowTestId,
   buildBranchTreeIndex,
+  buildForkScopeIndex,
   chooseCrumbEntries,
   collapseAllExpandedKeys,
   type CrumbEntry,
@@ -304,5 +305,43 @@ describe('branch popover align config', () => {
       planBranchPopoverFit({ triggerLeft: 1035.5, triggerWidth: 32, viewportWidth: 1200 })
     )
     expect(narrow.targetOffset[0]).toBeGreaterThan(plan.leftShift)
+  })
+})
+
+describe('fork scope index', () => {
+  const child = (id: string, parentBranchId: string | null, createdAt: string): TopicBranchWire =>
+    wire(id, parentBranchId, createdAt)
+
+  it('roots a main-route fork at the main-route key with children in creation order', () => {
+    const late = child('b-2', null, '2026-01-02T00:00:00.000Z')
+    const early = child('b-1', null, '2026-01-01T00:00:00.000Z')
+    const index = buildForkScopeIndex(null, [late, early])
+    expect(index.orderedKeys).toEqual([BRANCH_TREE_ROOT_ID, 'b-1', 'b-2'])
+    expect(index.childrenOf.get(branchRowKey(null))?.map((branch) => branch.id)).toEqual(['b-1', 'b-2'])
+  })
+
+  it('roots a branch-parent fork at the real parent id, so service identity is never faked', () => {
+    const index = buildForkScopeIndex('bp', [child('c-1', 'bp', '2026-01-01T00:00:00.000Z')])
+    expect(index.orderedKeys).toEqual(['bp', 'c-1'])
+    // The root key is the real branch id (not the main-route key), and the
+    // child's real parent relation is what the delete/copy services receive.
+    expect(branchRowKey('bp')).toBe('bp')
+    expect(index.parentKeyOf.get('c-1')).toBe('bp')
+    expect(index.byId.get('c-1')?.parentBranchId).toBe('bp')
+  })
+
+  it('contains only the display root and its direct children: closure over one anchor', () => {
+    const index = buildForkScopeIndex(null, [
+      child('b-1', null, '2026-01-01T00:00:00.000Z'),
+      child('b-2', null, '2026-01-02T00:00:00.000Z')
+    ])
+    // No other anchors, ancestor chains or descendants can exist in the index:
+    // every other branch id resolves outside it.
+    expect(index.ancestorsOf('b-1')).toEqual([BRANCH_TREE_ROOT_ID])
+    expect(index.chainTo('b-2')).toEqual([BRANCH_TREE_ROOT_ID, 'b-2'])
+    expect(index.ancestorsOf('unrelated')).toEqual([])
+    expect(index.chainTo('unrelated')).toEqual([BRANCH_TREE_ROOT_ID])
+    expect(index.depthOf.get('b-1')).toBe(1)
+    expect(index.childrenOf.get('b-1') ?? []).toEqual([])
   })
 })

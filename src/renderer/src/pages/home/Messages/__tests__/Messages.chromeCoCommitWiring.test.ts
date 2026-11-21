@@ -91,17 +91,22 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     )
     expect(source).toContain('chromeWires = await chromeWiresPromise')
     // The deferred batch publishes the structure before hydrating route messages.
-    const batch = sliceOf(
-      'const publishDeferredProjection = (): void => {',
-      'const { window: targetWindow } = buildRouteViewport('
-    )
+    // The batch helper now takes the optional visible-union override (hidden
+    // path passes nothing and publishes the target window order as before);
+    // the slice runs from its definition through both commit entries (visible
+    // union call + hidden bare pass as onPublish).
+    expect(source).toMatch(/const publishDeferredProjection = \(unionMessages\?: readonly Message\[\]\): void/)
+    const batch = sliceOf('const publishDeferredProjection = (', 'if (restoreEpoch === null)')
     const publishIdx = batch.indexOf('publishCommittedChrome(topicIdAtStart, branchId, chromeWires)')
     const rebaseIdx = batch.indexOf('rebaseRouteMessages')
     expect(publishIdx).toBeGreaterThanOrEqual(0)
     expect(rebaseIdx).toBeGreaterThanOrEqual(0)
     expect(publishIdx).toBeLessThan(rebaseIdx)
-    // The deferred projection reaches commits as onPublish (visible + hidden entries).
-    expect((source.match(/publishDeferredProjection\n/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    // The deferred projection reaches commits as onPublish in both entries:
+    // the visible path wraps the union order, the hidden path passes the
+    // batch itself (which publishes the target window order).
+    expect(batch).toContain('() => publishDeferredProjection(unionOldestFirst)')
+    expect(source).toMatch(/^\s*publishDeferredProjection$/m)
   })
 
   it('the top pipeline joins the qualification before any commit and every top commit carries it', () => {

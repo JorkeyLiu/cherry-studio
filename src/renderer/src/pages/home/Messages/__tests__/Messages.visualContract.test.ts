@@ -25,8 +25,12 @@ describe('visual position contracts', () => {
     const src = messagesSrc()
     const idx = src.indexOf('EVENT_NAMES.NEW_TRUE_BRANCH')
     const slice = src.slice(idx, idx + 7000)
+    // Windowed `latest` route read (thunk) + latest viewport transition over
+    // the full displayCount budget, then an explicit bottom navigate — never
+    // a fork-point read, never a topic switch.
+    expect(slice).toMatch(/loadRouteMessagesThunk\(topicIdAtCreate, newRoute, \{\s*kind: 'latest'/)
+    expect(slice).toMatch(/applyWindowTransition\(\{/)
     expect(slice).toMatch(/kind:\s*'latest'/)
-    expect(slice).toMatch(/createLatestMessageWindow/)
     expect(slice).toMatch(/kind:\s*'bottom'/)
     expect(slice).not.toMatch(/setActiveTopic/)
   })
@@ -39,7 +43,14 @@ describe('visual position contracts', () => {
     const slice = src.slice(idx, end > idx ? end : idx + 20000)
     expect(slice).toMatch(/dividerVisualAnchorOffset/)
     expect(slice).toMatch(/data-divider-key/)
-    expect(slice).toMatch(/buildRouteViewport/)
+    // Target window built via the restore transition; the visible fast path
+    // plans + verifies the divider-visible union (exact ID coverage) instead
+    // of the retired buildRouteViewport constructor.
+    expect(slice).toMatch(/applyWindowTransition\(\{/)
+    expect(slice).toMatch(/kind:\s*'restore'/)
+    expect(slice).toMatch(/planDividerVisibleRebase/)
+    expect(slice).toMatch(/buildDividerVisibleMessages/)
+    expect(slice).toMatch(/isDividerVisibleUnionExact/)
     expect(slice).toMatch(/stepDividerSearch/)
     // No second stabilizer loop: the persistent keeper holds post-reveal
     // drift; no competing session may exist.
