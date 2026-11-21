@@ -25,6 +25,7 @@ import * as path from 'path'
 
 import { createMockServer, stopMockServer } from '../../tests/e2e/fixtures/mock-openai-server'
 import { closeElectronWithExactCleanup } from '../../tests/e2e/utils/electron-cleanup'
+import { isHiddenLaunchRequested } from '../../tests/e2e/utils/hidden-launch'
 import {
   assertChatDbReady,
   assertTextareaReady,
@@ -171,6 +172,14 @@ export async function runObservationSession(options: ObservationSessionOptions):
     result.runtimeAppDataPath = probed.runtimeAppDataPath
     result.chatDbPath = probed.chatDbPath
     log(`runtime appDataPath verified: ${probed.runtimeAppDataPath}`)
+
+    // 5b. Hidden-launch policy (default): the shared launcher seeds the disposable
+    //     profile and fails the launch if any window became visible.
+    log(
+      isHiddenLaunchRequested()
+        ? 'hidden launch: PASS (default unshown; the shared launcher refuses a visible window)'
+        : 'hidden launch: OPT-OUT (CHERRY_E2E_SHOW=1, window may be visible)'
+    )
 
     // 6. Onboarding bypass, mock provider seeding, and fail-fast readiness.
     await bypassOnboarding(mainWindow)

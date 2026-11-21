@@ -110,7 +110,11 @@ describe('segment catalog correction — real root store', () => {
     mockUpdateMeta.mockResolvedValue(seg('seg-r', 't-rename', 0, ['m1'], 'Renamed'))
     mockList.mockResolvedValue([seg('seg-r', 't-rename', 0, ['m1'], 'Renamed')])
     // Actual hook path: metadata write then shared converge (no raw updateSegment).
-    await (await import('@renderer/services/db')).dbService.updateSegmentMetadata('seg-r', 'Renamed')
+    await (await import('@renderer/services/db')).dbService.updateSegmentMetadata({
+      segmentId: 'seg-r',
+      name: 'Renamed',
+      branchId: null
+    })
     await convergeTopicSegmentCatalog(store.dispatch as any, 't-rename', store.getState as any)
     unsub()
     const entry = (store.getState() as any).residentRegistry.entries['t-rename']

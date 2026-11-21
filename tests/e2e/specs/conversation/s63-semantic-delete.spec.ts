@@ -179,7 +179,13 @@ test.describe('S63 semantic delete — integrated UI', () => {
           if (!ensured?.ok) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
           const pasted = await api.pasteMessagesToTopic({ topicId, entries })
           if (!pasted?.ok) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
-          const seg = await api.upsertSegment({ segmentId: segId, topicId, name: 's63-seg', messageIds: [u1, a1, u2] })
+          const seg = await api.upsertSegment({
+            segmentId: segId,
+            topicId,
+            name: 's63-seg',
+            messageIds: [u1, a1, u2],
+            branchId: null
+          })
           if (!seg?.ok) return { ok: false, err: `segment ${JSON.stringify(seg)}` }
           return { ok: true }
         } catch (e) {

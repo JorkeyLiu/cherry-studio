@@ -42,6 +42,9 @@ const EditModeActionBar = () => {
       <ActionBar>
         <SelectionCount>{t('chat.edit.selected', { count: totalSelectedMessages })}</SelectionCount>
         <ActionButtons>
+          {/* Copy/cut keep the plain toolbar behavior (one click, one action,
+              unchanged testids and keyboard shortcuts). Tree capture is offered
+              by the message context menu's copy/cut submenus instead. */}
           <Tooltip title={t('common.copy')}>
             <ActionButton
               shape="circle"

@@ -146,9 +146,17 @@ Notes on running:
 
 - The suite runs **serially**: `workers: 1`, `fullyParallel: false` (Electron apps must not
   run concurrently). Do not override with `--workers`.
-- **Headed/headless does not apply to Electron.** The fixture launches the real app and its
-  window appears on screen. The old guidance to use `--headed` is wrong for Electron and was
-  removed.
+- **Windows run UNSHOWN by default.** The shared launcher (`launchElectronApp` in
+  `tests/e2e/utils/prepare-app.ts`) seeds the disposable profile with the product's own
+  `launchToTray` setting (`tests/e2e/utils/hidden-launch.ts`), so the app starts
+  launch-to-tray: the main window is created hidden and never shown, no dock activation
+  happens, and a test run does not steal your focus. The window still renders and accepts
+  Playwright input (CDP does not need OS focus). A visible window is a hard launch
+  failure. Set `CHERRY_E2E_SHOW=1` to opt a single debugging run back into a visible
+  window (`CHERRY_E2E_SHOW=1 pnpm test:e2e -- --debug`). `pnpm ui:observe` shares the same
+  policy (its `--help` documents the env var).
+- **Headed/headless does not apply to Electron.** The old guidance to use `--headed` is
+  wrong for Electron and was removed; headless flags do not apply either.
 - Each test launches its own disposable app instance (see §4/§5). Long-running suites are
   expected; raise `test.setTimeout(...)` inside a test only when its flow legitimately
   exceeds the 60s default.

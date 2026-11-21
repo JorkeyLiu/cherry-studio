@@ -130,7 +130,15 @@ describe('020_topic_segment_header_identity', () => {
 
     // Group written through the API heads at its first member at creation.
     const segOrdered = 'seg-m020-ordered'
-    okValue(agg.upsertSegment(segOrdered, topicId, 'Ordered', ['u1', 'a1', 'u3'], undefined))
+    okValue(
+      agg.upsertSegment({
+        segmentId: segOrdered,
+        topicId,
+        name: 'Ordered',
+        messageIds: ['u1', 'a1', 'u3'],
+        branchId: null
+      })
+    )
     expect(repos.segments.getHeaderMessageId(segOrdered)).toBe('u1')
 
     // Scramble authority order underneath and clear the head, simulating a

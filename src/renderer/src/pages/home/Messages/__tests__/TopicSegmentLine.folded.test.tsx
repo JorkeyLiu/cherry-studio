@@ -712,7 +712,7 @@ describe('TopicSegmentLine group boundary', () => {
         expect(screen.queryByTestId('topic-segment-rename-inline'), 'the editor closes').toBeNull()
         if (expected) {
           await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-          expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', expected)
+          expect(updateSegmentMetadataMock).toHaveBeenCalledWith({ segmentId: 'seg-1', name: expected, branchId: null })
         } else {
           // Give the (wrong) write path a chance to run before asserting none.
           await act(async () => {
@@ -721,7 +721,9 @@ describe('TopicSegmentLine group boundary', () => {
           expect(updateSegmentMetadataMock, 'blank/unchanged drafts write nothing').not.toHaveBeenCalled()
         }
         // A rename is never a fold and never a row navigation.
-        expect(updateSegmentMetadataMock).not.toHaveBeenCalledWith('seg-1', undefined, undefined, true, null)
+        expect(updateSegmentMetadataMock).not.toHaveBeenCalledWith(
+          expect.objectContaining({ segmentId: 'seg-1', folded: true })
+        )
         expect(emitMock, 'a rename never navigates the message row').not.toHaveBeenCalled()
         view.unmount()
       }
@@ -763,7 +765,7 @@ describe('TopicSegmentLine group boundary', () => {
         expect(popoverState.props!.open, 'confirming closes the surface').toBe(false)
         if (expected) {
           await waitFor(() => expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(1))
-          expect(updateSegmentMetadataMock).toHaveBeenCalledWith('seg-1', expected)
+          expect(updateSegmentMetadataMock).toHaveBeenCalledWith({ segmentId: 'seg-1', name: expected, branchId: null })
         } else {
           // Give the (wrong) write path a chance to run before asserting none.
           await act(async () => {
@@ -809,7 +811,7 @@ describe('TopicSegmentLine group boundary', () => {
       await act(async () => {
         await confirm!.onConfirm?.()
       })
-      await waitFor(() => expect(deleteSegmentMock).toHaveBeenCalledWith('seg-1'))
+      await waitFor(() => expect(deleteSegmentMock).toHaveBeenCalledWith({ segmentId: 'seg-1', branchId: null }))
       view.unmount()
     })
 
@@ -887,7 +889,7 @@ describe('TopicSegmentLine group boundary', () => {
       await act(async () => {
         await surface!.onConfirm?.()
       })
-      await waitFor(() => expect(deleteSegmentMock).toHaveBeenCalledWith('seg-1'))
+      await waitFor(() => expect(deleteSegmentMock).toHaveBeenCalledWith({ segmentId: 'seg-1', branchId: null }))
       view.unmount()
     })
 

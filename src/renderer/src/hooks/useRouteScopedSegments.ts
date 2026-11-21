@@ -4,6 +4,7 @@ import { useAppSelector } from '@renderer/store'
 import { selectHistoryReferenceForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Message } from '@renderer/types/newMessage'
+import type { TopicSegment } from '@renderer/types/topicSegment'
 import { fetchRouteChromeWires } from '@renderer/utils/routeCommittedChrome'
 import type { RouteAuthorityAddress, RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { projectSegmentsOntoRoute } from '@renderer/utils/topicSegmentRoute'
@@ -59,6 +60,49 @@ export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<st
 }
 
 /**
+ * Chrome-relevant identity of a topic's ACCEPTED segment catalog.
+ *
+ * The catalog is the only authority that decides which route rows belong to a
+ * group, so an accepted catalog change (membership, order, display fields, head
+ * identity, head owner) can change THIS route's projection even when the route
+ * itself never moved: a committed paste appends rows that a group gains while
+ * this hook's cached whole-route id set still predates them, and intersecting
+ * the new catalog with those old ids silently drops the new group.
+ *
+ * Value equality is the point: two reads that accept the same catalog produce
+ * the same token, so a repeated/identical publication (including a
+ * qualification-only read, which never writes this slice) triggers nothing and
+ * the refetch cannot feed itself.
+ *
+ * Excluded on purpose:
+ * - `createdAt`/`updatedAt` — materialization timestamps (a wire without them
+ *   synthesizes them per publication); they never describe chrome.
+ * - `firstMessageId`/`lastMessageId`/`messageCount` — derived from the same
+ *   authority membership that is already part of the token.
+ * - `route` — the route-qualified view of whichever route the READER addressed;
+ *   this hook reads its own qualification and never consumes the catalog's.
+ * - `folded` — retired wire-compat field, never live state.
+ */
+export function segmentCatalogChromeToken(segments: readonly TopicSegment[]): string {
+  const parts: string[] = []
+  for (const segment of segments) {
+    parts.push(
+      [
+        segment.id,
+        segment.name,
+        segment.color ?? '',
+        `${segment.sortOrder}`,
+        segment.headerMessageId ?? '',
+        segment.ownerTopicId ?? '',
+        segment.ownerBranchId ?? '',
+        segment.messageIds.join(',')
+      ].join('|')
+    )
+  }
+  return parts.join(';')
+}
+
+/**
  * Derive the Inputbar segment navigation list for the ACTIVE route only.
  *
  * The segment catalog is topic-wide, so this hook NEVER filters or rewrites it
@@ -79,9 +123,17 @@ export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<st
  *   effect runs and while the new snapshot is still pending;
  * - stale async completions are discarded by generation + route identity and
  *   can never backfill the previous route under the new key;
- * - same-route authority changes (topic `updatedAt`, MESSAGE_COMPLETE, and the
- *   resident reference relation for a reference target) coalesce into a
- *   debounced refetch that keeps the current list visible while pending.
+ * - same-route authority changes (topic `updatedAt`, MESSAGE_COMPLETE, the
+ *   resident reference relation for a reference target, and any accepted
+ *   change of this topic's segment catalog) coalesce into a debounced refetch
+ *   that keeps the current list visible while pending. The catalog trigger is
+ *   what makes a committed collection mutation (paste/restore/undo of rows a
+ *   group gains) visible WITHOUT a switch: the projection intersects the NEW
+ *   catalog with this hook's cached route id set, so the catalog must be
+ *   announced after the commit published its rows. The signal is the accepted
+ *   catalog's own content identity — value-equal republication (including a
+ *   qualification-only read, which never writes that slice) triggers nothing,
+ *   so the refetch cannot feed itself.
  */
 export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResult {
   const { orderedSegmentsForTopic } = useTopicSegments(topicId)
@@ -115,6 +167,10 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     : ''
 
   const hasCatalog = orderedSegmentsForTopic.length > 0
+  // Accepted-catalog identity for the same-route refresh trigger (see
+  // `segmentCatalogChromeToken`). Value-based, so an identical accepted catalog
+  // never causes a read.
+  const catalogToken = useMemo(() => segmentCatalogChromeToken(orderedSegmentsForTopic), [orderedSegmentsForTopic])
   const activeRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
 
   const [routeMessageIds, setRouteMessageIds] = useState<readonly string[]>([])
@@ -147,17 +203,20 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   // Baseline for the same-route refresh triggers. It is seeded from the latest
   // rendered values by the route effect (which is the fetch that establishes
   // the baseline), so a legitimate initial `undefined` updatedAt / "no
-  // reference" token never swallows the first real change — including the
-  // catalog-arrival case where only the route effect re-runs.
+  // reference" token / empty catalog token never swallows the first real change
+  // — including the catalog-arrival case where only the route effect re-runs.
   const latestUpdatedAtRef = useRef<string | undefined>(topicUpdatedAt)
   const latestReferenceTokenRef = useRef<string>(referenceToken)
   const updatedAtBaselineRef = useRef<string | undefined>(topicUpdatedAt)
   const referenceBaselineRef = useRef<string>(referenceToken)
+  const latestCatalogTokenRef = useRef<string>(catalogToken)
+  const catalogBaselineRef = useRef<string>(catalogToken)
   topicRef.current = topicId
   branchRef.current = activeBranchId
   hasCatalogRef.current = hasCatalog
   latestUpdatedAtRef.current = topicUpdatedAt
   latestReferenceTokenRef.current = referenceToken
+  latestCatalogTokenRef.current = catalogToken
 
   useEffect(() => {
     mountedRef.current = true
@@ -173,6 +232,13 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
 
   const fetchRouteSnapshot = useCallback(
     async (targetTopicId: string, targetBranchId: string | null, targetRouteKey: string, gen: number) => {
+      // Accepted-catalog identity this read was launched for. The read resolves
+      // the route's rows, so it may only be adopted while the catalog it will be
+      // intersected with is still the accepted one: a later commit that changed
+      // group membership (and published its rows) has already scheduled a newer
+      // read, and adopting this one would intersect the NEW catalog with rows
+      // that predate it — the new group silently missing until a switch.
+      const startedCatalogToken = latestCatalogTokenRef.current
       try {
         const [snap, wires] = await Promise.all([
           loadWholeTopicSnapshot(targetTopicId, targetBranchId),
@@ -184,6 +250,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
         ])
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
+        if (startedCatalogToken !== latestCatalogTokenRef.current) return
         setRouteMessageIds(snap.messages.map((message) => message.id))
         setRouteTurnMap(deriveRouteTurnMap(snap.messages))
         setSnapshotKey(targetRouteKey)
@@ -237,6 +304,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   useEffect(() => {
     updatedAtBaselineRef.current = latestUpdatedAtRef.current
     referenceBaselineRef.current = latestReferenceTokenRef.current
+    catalogBaselineRef.current = latestCatalogTokenRef.current
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = undefined
@@ -274,6 +342,22 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     referenceBaselineRef.current = referenceToken
     scheduleDebouncedRefetch()
   }, [topicId, referenceToken, scheduleDebouncedRefetch])
+
+  // 2c) accepted segment catalog changed for THIS topic: the collection
+  // authority that decides which route rows belong to a group just moved (a
+  // committed paste/restore/undo added rows a group — possibly a brand-new
+  // group — gains). The cached whole-route id set predates those rows, so a
+  // projection of the new catalog against it would drop the new group until a
+  // switch. Re-read the route after the commit published its rows and its
+  // catalog. Value-equal republication never reaches here, and neither read
+  // (whole-route snapshot, route qualification) writes the catalog, so this
+  // cannot feed itself.
+  useEffect(() => {
+    if (!topicId) return
+    if (catalogToken === catalogBaselineRef.current) return
+    catalogBaselineRef.current = catalogToken
+    scheduleDebouncedRefetch()
+  }, [topicId, catalogToken, scheduleDebouncedRefetch])
 
   // 3) terminal streaming: MESSAGE_COMPLETE (filtered by topicId) coalesces
   // into the same same-route refetch.

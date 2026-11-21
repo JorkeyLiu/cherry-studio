@@ -360,7 +360,14 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
   // topic, so stale blocks cannot leak via direct block-ID selectors and
   // block memory stays bounded. Stable-ID reuse preserved:
   // blocks referenced by the new route are never removed.
-  if (action?.type === 'newMessages/rebaseRouteMessages' || action?.type === 'newMessages/messagesWindowMerged') {
+  // Tree clipboard projection commits belong to the same family: their
+  // in-place removals must drop blocks exclusive to the removed rows in the
+  // same dispatch, exactly like a route rebase or a window merge.
+  if (
+    action?.type === 'newMessages/rebaseRouteMessages' ||
+    action?.type === 'newMessages/messagesWindowMerged' ||
+    action?.type === 'newMessages/applyClipboardTreeProjection'
+  ) {
     const topicId = (action.payload as { topicId?: string })?.topicId
     if (typeof topicId === 'string' && topicId.length > 0) {
       const prevMessageIds: string[] = (state as any)?.messages?.messageIdsByTopic?.[topicId] ?? []

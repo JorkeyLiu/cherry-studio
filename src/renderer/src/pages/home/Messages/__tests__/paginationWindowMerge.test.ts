@@ -210,7 +210,10 @@ describe('Messages pagination orchestration wiring', () => {
     expect(slice).toMatch(
       /direction === 'older' \? currentWindow\?\.oldestMessageId : currentWindow\?\.newestMessageId/
     )
-    expect(slice).toMatch(/derivePaginationWindow\(\{/)
+    expect(slice).toMatch(/applyWindowTransition\(\{\s*kind: 'paginate'/)
+    // The legacy pure helper stays available for compat but production routes
+    // through the single typed intent entry above.
+    expect(slice).not.toMatch(/derivePaginationWindow\(\{/)
     expect((source.match(/const startWindowPageLoad/g) ?? []).length).toBe(1)
   })
 

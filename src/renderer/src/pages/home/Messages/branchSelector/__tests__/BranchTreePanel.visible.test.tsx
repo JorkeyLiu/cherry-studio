@@ -135,6 +135,8 @@ const renderPanel = (
     onSelectRoute: vi.fn(),
     onCommitRename: vi.fn(),
     onConfirmDelete: vi.fn(),
+    onCopyBranch: vi.fn(),
+    copyingBranchId: null,
     onDeleteConfirmChange: vi.fn()
   }
 

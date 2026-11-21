@@ -1,8 +1,8 @@
 import ConfirmPopover from '@renderer/components/ConfirmPopover'
 import type { TopicBranchWire } from '@renderer/services/db/types'
-import { Button, Input, Tree } from 'antd'
+import { Button, Input, Tooltip, Tree } from 'antd'
 import type { DataNode } from 'antd/es/tree'
-import { Pencil, Trash2 } from 'lucide-react'
+import { Copy, Pencil, Trash2 } from 'lucide-react'
 import type { Key, ReactNode } from 'react'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -52,10 +52,12 @@ import {
  *   all" keeps only that ancestor chain open (nothing on the main route, so the
  *   root folds too); a catalog refresh drops expansion keys whose branch is
  *   gone.
- * - non-root rows manage themselves in place: rename and delete are two direct
- *   icons revealed on hover or keyboard focus only, rename edits inline in the
- *   name column, delete confirms through a small popconfirm with a loading
- *   state, and neither of them switches the route.
+ * - non-root rows manage themselves in place: copy, rename and delete are three
+ *   direct icons revealed on hover or keyboard focus only — copy takes that row's
+ *   OWN branch tree (its own trunk plus its descendant branches) into the
+ *   clipboard without switching the route, rename edits inline in the name
+ *   column, delete confirms through a small popconfirm with a loading state, and
+ *   none of them switches the route.
  * - the panel is measured inside its layout pass, so the rows that are about to
  *   be painted and their connectors are committed in the same frame; a panel
  *   mounted but not yet laid out yields no boxes and commits nothing.
@@ -101,6 +103,13 @@ export interface BranchTreePanelProps {
   /** Row whose delete is in flight, so only that row's control shows a spinner. */
   deletingBranchId: string | null
   /**
+   * Branch copy of a non-root row: that branch's OWN rows as the trunk plus every
+   * descendant branch's OWN rows (copy only, never a cut).
+   */
+  onCopyBranch: (branchId: string) => void | Promise<void>
+  /** Row whose branch copy is in flight, so only that row's control spins. */
+  copyingBranchId: string | null
+  /**
    * Reports whether a row's delete confirmation is open. The confirmation lives
    * in the popup layer, so its own press reaches the surrounding popover as an
    * outside click; the owner uses this to keep the tree open across it.
@@ -122,7 +131,9 @@ export const BranchTreePanel = ({
   onSelectRoute,
   onCommitRename,
   onConfirmDelete,
+  onCopyBranch,
   deletingBranchId,
+  copyingBranchId,
   onDeleteConfirmChange,
   maxWidth
 }: BranchTreePanelProps) => {
@@ -451,6 +462,22 @@ export const BranchTreePanel = ({
             <RowActions>
               {isEditing ? null : (
                 <>
+                  {/* Branch copy: this row's own trunk plus its descendant
+                      branches, never a route switch. */}
+                  <Tooltip title={t('chat.topics.branch.copy_tree')} mouseEnterDelay={0.6}>
+                    <RowIconButton
+                      type="text"
+                      data-testid={`branch-copy-btn-${key}`}
+                      aria-label={t('chat.topics.branch.copy_tree')}
+                      loading={copyingBranchId === key}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void onCopyBranch(key)
+                      }}
+                      onMouseDown={(event) => event.stopPropagation()}>
+                      <Copy size={13} />
+                    </RowIconButton>
+                  </Tooltip>
                   <RowIconButton
                     type="text"
                     data-testid={`branch-rename-btn-${key}`}
@@ -489,11 +516,13 @@ export const BranchTreePanel = ({
       activeKey,
       changeDraft,
       commitRename,
+      copyingBranchId,
       deletingBranchId,
       draft,
       index,
       labelOf,
       onConfirmDelete,
+      onCopyBranch,
       onDeleteConfirmChange,
       renameInput,
       renamingKey,
@@ -898,7 +927,7 @@ const RowActions = styled.span`
 `
 
 /**
- * Row action control (rename / delete).
+ * Row action control (copy / rename / delete).
  *
  * The action area keeps its width at all times, so revealing it never shifts
  * the name column. The controls themselves stay invisible until the row is

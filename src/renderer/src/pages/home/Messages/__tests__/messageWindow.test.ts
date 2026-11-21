@@ -109,17 +109,90 @@ describe('messageWindow', () => {
     expect(newer.hasMoreNewer).toBe(false)
   })
 
-  it('keeps capacity and follows appended groups when reconciling a latest window', () => {
+  it('retains the displayed oldest boundary and extends to the new tail when reconciling a parked latest window', () => {
     const previous = users(6)
     const current = createLatestMessageWindow(previous, 3)
     const next = [...previous, message('m6'), message('m7')]
     const reconciled = reconcileMessageWindow(next, previous, current)
 
-    expect(ids(reconciled)).toEqual(['m7', 'm6', 'm5'])
-    expect(reconciled.groupCapacity).toBe(3)
-    expect(reconciled.groupCount).toBe(3)
+    // The loaded old end stays mounted instead of leaving the window: the
+    // same commit carries the appended tail, and capacity grows with the
+    // retained range.
+    expect(ids(reconciled)).toEqual(['m7', 'm6', 'm5', 'm4', 'm3'])
+    expect(reconciled.groupCapacity).toBe(5)
+    expect(reconciled.groupCount).toBe(5)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 3, newestGroupIndex: 7 })
     expect(reconciled.hasMoreOlder).toBe(true)
     expect(reconciled.hasMoreNewer).toBe(false)
+  })
+
+  it('grows a parked latest window across staged appends without moving the displayed oldest row', () => {
+    // 14 loaded groups behind a newest-10 window, then two staged appends:
+    // the old end never drifts while capacity ratchets with the range.
+    const loaded14 = users(14)
+    const window14 = createLatestMessageWindow(loaded14, 10)
+    expect(window14.range).toEqual({ oldestGroupIndex: 4, newestGroupIndex: 13 })
+
+    const loaded16 = [...loaded14, message('m14'), message('m15')]
+    const window16 = reconcileMessageWindow(loaded16, loaded14, window14)
+    expect(window16.range).toEqual({ oldestGroupIndex: 4, newestGroupIndex: 15 })
+    expect(window16.groupCapacity).toBe(12)
+    expect(ids(window16)[ids(window16).length - 1]).toBe('m4')
+    expect(window16.hasMoreOlder).toBe(true)
+    expect(window16.hasMoreNewer).toBe(false)
+
+    const loaded18 = [...loaded16, message('m16'), message('m17')]
+    const window18 = reconcileMessageWindow(loaded18, loaded16, window16)
+    expect(window18.range).toEqual({ oldestGroupIndex: 4, newestGroupIndex: 17 })
+    expect(window18.groupCapacity).toBe(14)
+    expect(ids(window18)[ids(window18).length - 1]).toBe('m4')
+    expect(window18.hasMoreOlder).toBe(true)
+    expect(window18.hasMoreNewer).toBe(false)
+    expect(window18.edge).toBe('latest')
+    expect(window18.paginationTarget).toBeUndefined()
+  })
+
+  it('keeps an identical window for same-group streaming updates (no tail growth)', () => {
+    const previous = users(6)
+    const current = createLatestMessageWindow(previous, 3)
+    // Same ids, refreshed content objects (streaming chunks in the same group).
+    const streamed = previous.map((m) => (m.id === 'm5' ? { ...m, blocks: [] } : m))
+    const reconciled = reconcileMessageWindow(streamed, previous, current)
+
+    expect(ids(reconciled)).toEqual(ids(current))
+    expect(reconciled.range).toEqual(current.range)
+    expect(reconciled.groupCapacity).toBe(current.groupCapacity)
+  })
+
+  it('trims only the older edge once the retained range itself passes the explicit bound', () => {
+    const loaded10 = users(10)
+    const parked = createLatestMessageWindow(loaded10, 10)
+    expect(parked.range).toEqual({ oldestGroupIndex: 0, newestGroupIndex: 9 })
+    // One bulk append pushing the retained range past the 200-group bound.
+    const loaded210 = [...loaded10, ...Array.from({ length: 200 }, (_, i) => message(`n${i}`))]
+    const expanded = reconcileMessageWindow(loaded210, loaded10, parked)
+
+    expect(expanded.groupCapacity).toBe(200)
+    expect(expanded.range).toEqual({ oldestGroupIndex: 10, newestGroupIndex: 209 })
+    expect(expanded.boundedViewportObservability?.didTrim).toBe(true)
+    expect(expanded.boundedViewportObservability?.trimmedEdge).toBe('older')
+    expect(expanded.boundedViewportObservability?.trimmedGroups).toBe(10)
+    expect(expanded.hasMoreOlder).toBe(true)
+    expect(expanded.hasMoreNewer).toBe(false)
+
+    // A further append keeps trimming the older edge by exactly the growth.
+    const loaded215 = [...loaded210, ...Array.from({ length: 5 }, (_, i) => message(`p${i}`))]
+    const again = reconcileMessageWindow(loaded215, loaded210, expanded)
+    expect(again.range).toEqual({ oldestGroupIndex: 15, newestGroupIndex: 214 })
+    expect(again.groupCapacity).toBe(200)
+    expect(again.boundedViewportObservability?.trimmedGroups).toBe(5)
+  })
+
+  it('an explicit latest construction still slices the newest-N range (goLatest semantics)', () => {
+    const loaded = users(18)
+    const latest = createLatestMessageWindow(loaded, 10)
+    expect(latest.range).toEqual({ oldestGroupIndex: 8, newestGroupIndex: 17 })
+    expect(latest.edge).toBe('latest')
   })
 
   it('refreshes a historical range without following appended groups', () => {

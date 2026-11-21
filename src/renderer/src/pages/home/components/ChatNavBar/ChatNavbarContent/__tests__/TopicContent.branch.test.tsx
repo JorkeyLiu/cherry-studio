@@ -48,6 +48,7 @@ const {
   dispatchMock,
   renameBranchMock,
   deleteBranchSubtreeMock,
+  copyBranchTreeMock,
   requestBranchesMock,
   mockTree,
   popoverProps,
@@ -56,6 +57,7 @@ const {
   dispatchMock: vi.fn(),
   renameBranchMock: vi.fn(),
   deleteBranchSubtreeMock: vi.fn(),
+  copyBranchTreeMock: vi.fn(),
   requestBranchesMock: vi.fn(),
   popoverProps: [] as Array<{ align?: unknown; placement?: unknown }>,
   popconfirmProps: [] as Array<{ okText?: string; cancelText?: string }>,
@@ -114,6 +116,10 @@ vi.mock('@renderer/services/db/branchSubtree', () => ({
   deleteBranchSubtree: (...args: unknown[]) => deleteBranchSubtreeMock(...args)
 }))
 
+vi.mock('@renderer/services/ClipboardService', () => ({
+  copyBranchTree: (...args: unknown[]) => copyBranchTreeMock(...args)
+}))
+
 vi.mock('@renderer/services/db/DbService', () => ({
   dbService: {
     renameBranch: (...args: unknown[]) => renameBranchMock(...args)
@@ -136,10 +142,12 @@ vi.mock('react-i18next', () => ({
         'chat.topics.branch.delete': 'Delete branch',
         'chat.topics.branch.delete_confirm': 'Delete this branch and all its descendants?',
         'chat.topics.branch.deleted': 'Branch deleted',
+        'chat.edit.copied': `Copied ${options?.count ?? 0} message(s)`,
         'chat.topics.branch.current': 'Current',
         'chat.topics.branch.tag': 'Branches',
         'chat.topics.branch.collapse_all': 'Collapse all',
         'chat.topics.branch.expand': 'Expand branch',
+        'chat.topics.branch.copy_tree': 'Copy branch',
         'chat.topics.branch.children_here': `Branches here: ${options?.count ?? 0}`,
         'common.rename': 'Rename',
         'common.delete': 'Delete',
@@ -1152,5 +1160,103 @@ describe('TopicContent unified branch selector', () => {
     expect(css).not.toMatch(/\[data-current='true'\][^{}]*\{[^{}]*background:\s*var\(--color-primary-mute\)/)
     // The plate wraps the path only: the tool group is outside it.
     expect(plate?.contains(screen.getByTestId('navbar-tools-right'))).toBe(false)
+  })
+})
+
+/**
+ * Branch-row copy from the selector.
+ *
+ * One press copies the row it was pressed on — never the active route — through
+ * the single ClipboardService entry, reports the captured count with the
+ * existing toast, and keeps the selector open. A refusal (Main rejected the
+ * capture, or the branch owns no rows) surfaces the existing error wording and
+ * still changes nothing about the route.
+ */
+describe('TopicContent branch-row copy', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(window as unknown as { toast: { success: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> } }).toast = {
+      success: vi.fn(),
+      error: vi.fn()
+    }
+    setTree([], [], null)
+  })
+
+  const toastSuccess = (): ReturnType<typeof vi.fn> =>
+    (window as unknown as { toast: { success: ReturnType<typeof vi.fn> } }).toast.success
+  const toastError = (): ReturnType<typeof vi.fn> =>
+    (window as unknown as { toast: { error: ReturnType<typeof vi.fn> } }).toast.error
+
+  it('copies the pressed branch — not the active route — and reports the captured count', async () => {
+    // b-2 is the active route; the press lands on b-1's own row.
+    setTree([b1(), b2()], [b2()], 'b-2')
+    copyBranchTreeMock.mockResolvedValue(4)
+    renderTopicContent()
+    await openSelector()
+
+    fireEvent.click(screen.getByTestId('branch-copy-btn-b-1'))
+
+    await waitFor(() => expect(copyBranchTreeMock).toHaveBeenCalledTimes(1))
+    // The clicked row is the source, explicitly — no dependence on the active route.
+    expect(copyBranchTreeMock.mock.calls[0].slice(1)).toEqual(['t-1', 'b-1'])
+    expect(toastSuccess()).toHaveBeenCalledWith('Copied 4 message(s)')
+    expect(toastError()).not.toHaveBeenCalled()
+    // Copying is a row action on the open tree: no route switch, no dismissal.
+    expect(routeDispatches()).toHaveLength(0)
+    expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
+  })
+
+  it('spins only the pressed row while the capture is in flight', async () => {
+    setTree([b1(), b2()], [b2()], 'b-2')
+    let resolveCopy: ((count: number) => void) | undefined
+    copyBranchTreeMock.mockReturnValue(
+      new Promise<number>((resolve) => {
+        resolveCopy = resolve
+      })
+    )
+    renderTopicContent()
+    await openSelector()
+
+    fireEvent.click(screen.getByTestId('branch-copy-btn-b-1'))
+
+    await waitFor(() => expect(screen.getByTestId('branch-copy-btn-b-1').className).toContain('ant-btn-loading'))
+    // The other branch row keeps its idle control, and the route is untouched.
+    expect(screen.getByTestId('branch-copy-btn-b-2').className).not.toContain('ant-btn-loading')
+    expect(routeDispatches()).toHaveLength(0)
+
+    await act(async () => {
+      resolveCopy?.(2)
+    })
+    await waitFor(() => expect(screen.getByTestId('branch-copy-btn-b-1').className).not.toContain('ant-btn-loading'))
+  })
+
+  it('surfaces the existing error wording when nothing was published', async () => {
+    setTree([b1()], [b1()], 'b-1')
+    // Main refused (empty own trunk, dangling descendant anchor, …): count 0.
+    copyBranchTreeMock.mockResolvedValue(0)
+    renderTopicContent()
+    await openSelector()
+
+    fireEvent.click(screen.getByTestId('branch-copy-btn-b-1'))
+
+    await waitFor(() => expect(toastError()).toHaveBeenCalledWith('Error'))
+    expect(toastSuccess()).not.toHaveBeenCalled()
+    expect(routeDispatches()).toHaveLength(0)
+    expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
+  })
+
+  it('surfaces the same error wording when the read rejects', async () => {
+    setTree([b1()], [b1()], 'b-1')
+    copyBranchTreeMock.mockRejectedValue(new Error('read failed'))
+    renderTopicContent()
+    await openSelector()
+
+    fireEvent.click(screen.getByTestId('branch-copy-btn-b-1'))
+
+    await waitFor(() => expect(toastError()).toHaveBeenCalledWith('Error'))
+    expect(toastSuccess()).not.toHaveBeenCalled()
+    expect(routeDispatches()).toHaveLength(0)
+    // The row control returns to idle so the copy can be retried.
+    await waitFor(() => expect(screen.getByTestId('branch-copy-btn-b-1').className).not.toContain('ant-btn-loading'))
   })
 })

@@ -1,4 +1,5 @@
 import { loggerService } from '@logger'
+import { convergeAfterClipboardTreeWrite } from '@renderer/services/clipboardTreeProjection'
 import { dbService } from '@renderer/services/db'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { publishInsertMessageGroupsAck } from '@renderer/services/insertGroupsAck'
@@ -30,6 +31,7 @@ import {
 import { beginHistoryReplay, commitRedoAction, commitUndoAction, endHistoryReplay } from '@renderer/store/undoStack'
 import type {
   BranchUndoAction,
+  ClipboardTreeUndoAction,
   CutPasteUndoAction,
   DeleteUndoAction,
   GroupAnchor,
@@ -295,6 +297,54 @@ async function replayBranchOperation(
   await convergeAfterBranchReplay(dispatch, getState, topicId, reason)
 }
 
+/**
+ * Replay one recorded tree copy/cut through Main authority: ONE transaction in
+ * either direction, then projection convergence of both affected topics.
+ *
+ * Main compares the current affected state with the recorded snapshot first and
+ * rejects with zero writes on any divergence, so an unrelated later edit is
+ * never overwritten. A Main rejection keeps the action on its stack for retry;
+ * a convergence failure after the commit surfaces as the typed committed marker
+ * the history cursor already understands, so the already-committed replay is
+ * never issued a second time.
+ */
+async function replayClipboardTreeAction(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  action: ClipboardTreeUndoAction,
+  direction: 'undo' | 'redo'
+): Promise<void> {
+  let response: Awaited<ReturnType<typeof dbService.replayClipboardTree>>
+  try {
+    response = await dbService.replayClipboardTree({ direction, snapshot: action.snapshot })
+  } catch (error) {
+    logger.error(`[${direction}:clipboard_tree] Main refused the replay; action retained for retry`, error as Error)
+    throw error
+  }
+
+  // File reference lifecycle of the replayed rows (restores re-add references,
+  // removed rows may free a file), consumed exactly once after the commit.
+  await consumeFileCleanupResult(response)
+
+  // Projection convergence for both affected topics: branch topology and the
+  // segment catalog are re-read from Main, while each affected route's window is
+  // committed in place from the replay's own transaction-scoped deltas. Undo
+  // removes the target run and puts the source run back where authority had it;
+  // redo does the same in the opposite direction. Either way the displayed route
+  // keeps the pages it already loaded.
+  await convergeAfterClipboardTreeWrite(
+    dispatch,
+    getState,
+    [response.targetTopicId, response.sourceTopicId],
+    `${direction}:clipboard_tree`,
+    response.projections
+  )
+
+  logger.info(
+    `[${direction}:clipboard_tree] ${response.mode}: removed ${response.removedMessageIds.length} messages / ${response.removedBranchIds.length} branches, restored ${response.restoredMessageIds.length} messages / ${response.restoredBranchIds.length} branches`
+  )
+}
+
 async function applyUndoAction(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
   switch (action.type) {
     case 'delete':
@@ -305,6 +355,9 @@ async function applyUndoAction(dispatch: AppDispatch, getState: () => RootState,
       return
     case 'cut_paste':
       await undoCutPaste(dispatch, getState, action)
+      return
+    case 'clipboard_tree':
+      await replayClipboardTreeAction(dispatch, getState, action, 'undo')
       return
     case 'branch_create':
     case 'branch_rename':
@@ -336,6 +389,9 @@ async function applyRedoAction(dispatch: AppDispatch, getState: () => RootState,
       return
     case 'cut_paste':
       await redoCutPaste(dispatch, getState, action)
+      return
+    case 'clipboard_tree':
+      await replayClipboardTreeAction(dispatch, getState, action, 'redo')
       return
     case 'branch_create':
     case 'branch_rename':
@@ -561,7 +617,7 @@ async function undoPaste(
   let pendingConvergence: unknown = null
   if (targetSegmentSnapshots.length > 0) {
     try {
-      await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots, getState)
+      await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots, targetRoute, getState)
     } catch (error) {
       if (isSegmentCatalogConvergenceError(error)) {
         pendingConvergence = error

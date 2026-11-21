@@ -216,7 +216,9 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
     ])
 
     const segId = `seg-${uid('s')}`
-    expect(agg.upsertSegment(segId, topicId, 'Seg', [ids.u1, ids.a1], undefined).ok).toBe(true)
+    expect(
+      agg.upsertSegment({ segmentId: segId, topicId, name: 'Seg', messageIds: [ids.u1, ids.a1], branchId: null }).ok
+    ).toBe(true)
 
     return { topicId, assistantId, ids, branchL1, branchL2, branchS1, segId }
   }
@@ -1162,7 +1164,15 @@ describe('topic-data JSON exchange — referenced-history snapshot materializati
     const tb0 = makeMessageJson(target, { id: `m-${uid('m')}`, content: 'tb0' })
     append(target, tb0, [makeBlockJson(tb0.id as string, 'main_text', { content: 'text-tb0' })], tbId)
     const segId = `seg-${uid('s')}`
-    expect(agg.upsertSegment(segId, target, 'Seg', [t0.id as string, t1.id as string], undefined).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: segId,
+        topicId: target,
+        name: 'Seg',
+        messageIds: [t0.id as string, t1.id as string],
+        branchId: null
+      }).ok
+    ).toBe(true)
 
     const payload = exportPayload(target)
     // Own main rows shifted after the materialized prefix; branch rows unshifted.

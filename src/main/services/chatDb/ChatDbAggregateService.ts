@@ -37,7 +37,17 @@ import type {
   BranchOperationDirection,
   BranchOperationSnapshot,
   BranchRenameSnapshot,
+  ClipboardTreeIdMapRow,
+  ClipboardTreeInsertedRows,
+  ClipboardTreePayload,
+  ClipboardTreePlacement,
+  ClipboardTreeProjectionRun,
+  ClipboardTreeRouteProjection,
+  ClipboardTreeSnapshot,
+  ClipboardTreeSourceRemoval,
   CreateReferencedTopicResponse,
+  DeleteClipboardTreeRequest,
+  DeleteClipboardTreeResponse,
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
@@ -47,6 +57,9 @@ import type {
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
   FetchClipboardGroupsResponse,
+  FetchClipboardTreeBranchOwnedRequest,
+  FetchClipboardTreeRequest,
+  FetchClipboardTreeResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
@@ -76,9 +89,13 @@ import type {
   MessageBlockEntry,
   MoveContextAnchorInheritanceInput,
   MoveSourceContextAnchorTransfer,
+  PasteClipboardTreeRequest,
+  PasteClipboardTreeResponse,
   PurgeExpiredTopicsResponse,
   ReorderAnswerGroupResponse,
   ReplayBranchOperationResponse,
+  ReplayClipboardTreeRequest,
+  ReplayClipboardTreeResponse,
   ResendAttemptMapping,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
@@ -98,6 +115,12 @@ import type {
 import type { UpdateMessageResult, UpdateMessageUsageResult, UpdateMessageUsageSource } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
+import type {
+  DeleteSegmentRequest,
+  ReplaceSegmentMembershipRequest,
+  UpdateSegmentMetadataRequest,
+  UpsertSegmentRequest
+} from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
 import { applyTopicSyncDefaults } from '@shared/sync'
@@ -166,6 +189,62 @@ export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[]
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type FetchClipboardGroupsResult = FetchClipboardGroupsResponse
+export type FetchClipboardTreeResult = FetchClipboardTreeResponse
+export type PasteClipboardTreeResult = PasteClipboardTreeResponse
+export type ReplayClipboardTreeResult = ReplayClipboardTreeResponse
+
+/**
+ * One included child branch of a clipboard closure, with the depth measured
+ * from the source route (1 = direct child).
+ */
+interface ClipboardTreeClosureBranch {
+  data: TopicBranchData
+  depth: number
+}
+
+/** One fully-contained topic segment of a clipboard closure. */
+interface ClipboardTreeClosureSegment {
+  data: TopicSegmentData
+  memberIds: string[]
+}
+
+/**
+ * Main-derived clipboard closure: the selected complete groups of the source
+ * active route (roots) plus every included child-branch subtree's OWNED rows.
+ *
+ * `ownedByBranch` follows `branches` order (breadth-first, parents before
+ * children) so a restore can insert rows parent-first. `segments` contains only
+ * segments whose complete membership is inside `capturedMessages`.
+ */
+interface ClipboardTreeClosure {
+  topicId: string
+  branchId: string | null
+  resolvedGroups: Array<{ groupId: string; rows: MessageData[] }>
+  rootRows: MessageData[]
+  ownedRootMessageIds: string[]
+  inheritedRootMessageIds: string[]
+  branches: ClipboardTreeClosureBranch[]
+  ownedByBranch: Array<{ branchId: string; rows: MessageData[] }>
+  capturedMessages: MessageData[]
+  capturedMessageIds: Set<string>
+  segments: ClipboardTreeClosureSegment[]
+}
+
+/**
+ * Fully-remapped target insert plan shared by the paste and the redo replay:
+ * every row already carries its generated ID, target owner, and target order,
+ * so ONE insert implementation writes both paths identically.
+ */
+interface ClipboardTreeInsertPlan {
+  targetTopicId: string
+  targetRoute: string | null
+  placement: ClipboardTreePlacement
+  rootRows: MessageData[]
+  rootWires: Map<string, JsonObject>
+  branches: Array<{ branch: TopicBranchData; rows: MessageData[]; wires: Map<string, JsonObject> }>
+  blocks: MessageBlockData[]
+  segments: Array<{ row: TopicSegmentData; memberIds: string[] }>
+}
 export type FetchContextClosureResult = FetchContextClosureResponse
 export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
@@ -178,6 +257,18 @@ export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
  * omitted rather than looping or failing the read.
  */
 const MAX_REFERENCE_DEPTH = 32
+
+/**
+ * Narrow a clipboard-tree request to its branch-owned capture shape.
+ *
+ * The discriminant is the exact `capture` field: the selection shape carries
+ * `groupIds` instead, so the two capture kinds can never be mixed.
+ */
+function isBranchOwnedClipboardTreeRequest(
+  request: FetchClipboardTreeRequest
+): request is FetchClipboardTreeBranchOwnedRequest {
+  return (request as { capture?: unknown }).capture === 'branch-owned'
+}
 
 /** Result of resolving the foreign reference base of a topic. */
 type ReferenceBaseResolution = {
@@ -446,6 +537,20 @@ function toFileReferenceHistoryRow(reference: FileReferenceData): BranchHistoryF
   }
 }
 
+/**
+ * Deterministic JSON used by the clipboard-tree compare-and-set guards.
+ *
+ * Object keys are sorted recursively so two representations of the same stored
+ * row (a captured wire DTO and a row read back from SQLite) compare equal
+ * regardless of key insertion order.
+ */
+function clipboardStableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map((item) => clipboardStableJson(item)).join(',')}]`
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${clipboardStableJson(record[key])}`).join(',')}}`
+}
 /** Row identities a branch replay wrote (removed or restored). */
 type ReplayBranchRows = {
   branchIds: string[]
@@ -3006,6 +3111,2643 @@ export class ChatDbAggregateService {
       },
       `fetchClipboardGroups(${request.topicId}, ${request.groupIds?.length ?? 0} groups)`
     )
+  }
+  /**
+   * Bounded authority READ of one clipboard closure (opt-in "include child
+   * branches").
+   *
+   * ONE Main SQLite transaction resolves the requested stable group keys on
+   * the source ACTIVE route (shared prefix + owned suffix), then includes
+   * every direct child branch of that route whose anchor is one of the
+   * selected root messages, each with its complete subtree and ONLY the rows
+   * those branches own. Unrelated ancestors, sibling branches and shared
+   * prefixes are never pulled in: a descendant contributes its own rows and
+   * never re-materializes an ancestor prefix.
+   *
+   * Complete rows are read from SQLite (never the loaded window). An
+   * unresolvable group key, a branch whose anchor is outside the captured
+   * closure, or a depth overflow fails closed with zero payload — a tree
+   * payload never silently drops a selected branch or its content.
+   *
+   * `clipboard.ownedRootMessageIds` are the roots `cut` may delete;
+   * `clipboard.inheritedRootMessageIds` are copy-only roots read through the
+   * route (cutting them fails closed because Main never deletes rows it does
+   * not own).
+   */
+  fetchClipboardTree(request: FetchClipboardTreeRequest): ChatDbResult<FetchClipboardTreeResponse> {
+    const branchOwned = isBranchOwnedClipboardTreeRequest(request)
+    const requestedGroupIds = branchOwned ? [] : Array.isArray(request.groupIds) ? request.groupIds : []
+    return wrapResult(
+      () => {
+        return this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(request.topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+          }
+          const sourceBranchId = this.normalizeBranchId(request.branchId)
+          if (sourceBranchId !== null) {
+            this.requireBranchInTx(repos, request.topicId, sourceBranchId)
+          }
+          const closure = branchOwned
+            ? this.deriveBranchOwnedClipboardTreeClosureInTx(repos, request.topicId, sourceBranchId)
+            : this.deriveClipboardTreeClosureInTx(repos, request.topicId, sourceBranchId, requestedGroupIds)
+          const capturedIds = closure.capturedMessages.map((row) => row.id)
+          const blockMap = repos.blocks.listByMessages(capturedIds)
+          const capturedBlocks: MessageBlockData[] = []
+          for (const id of capturedIds) {
+            capturedBlocks.push(...(blockMap.get(id) ?? []))
+          }
+          const wireBlocks = blocksToWire(capturedBlocks)
+          const wireMessages = reconstructMessageBlockRelations(messagesToWire(closure.capturedMessages), wireBlocks)
+          const roots = closure.resolvedGroups.map((group) => ({
+            groupId: group.groupId,
+            messageIds: group.rows.map((row) => row.id),
+            positionIndex: group.rows[0].sortOrder
+          }))
+          const branches = closure.branches.map((entry) => ({
+            sourceBranchId: entry.data.id,
+            parentSourceBranchId: entry.data.parentBranchId ?? null,
+            anchorMessageId: entry.data.anchorMessageId,
+            name: entry.data.name ?? null,
+            depth: entry.depth,
+            overflow: (entry.data.overflow ?? {}) as JsonObject
+          }))
+          const segments = closure.segments.map((entry) => ({
+            sourceSegmentId: entry.data.id,
+            name: entry.data.name ?? null,
+            sortOrder: entry.data.sortOrder,
+            headerMessageId: entry.data.headerMessageId ?? null,
+            memberIds: entry.memberIds,
+            overflow: (entry.data.overflow ?? {}) as JsonObject
+          }))
+          const firstMessageId = capturedIds.length > 0 ? capturedIds[0] : null
+          const lastMessageId = capturedIds.length > 0 ? capturedIds[capturedIds.length - 1] : null
+          return {
+            tree: {
+              source: { topicId: request.topicId, branchId: sourceBranchId },
+              roots,
+              messages: wireMessages,
+              blocks: wireBlocks,
+              branches,
+              segments
+            },
+            clipboard: {
+              completeness: 'clipboard-tree' as const,
+              topicId: request.topicId,
+              branchId: sourceBranchId,
+              // One trunk for a branch-owned capture; the selected stable keys
+              // for a selection capture.
+              requestedCount: branchOwned ? 1 : requestedGroupIds.length,
+              returnedCount: roots.length,
+              returnedMessageCount: capturedIds.length,
+              returnedBranchCount: branches.length,
+              returnedSegmentCount: segments.length,
+              ownedRootMessageIds: closure.ownedRootMessageIds,
+              inheritedRootMessageIds: closure.inheritedRootMessageIds,
+              firstMessageId,
+              lastMessageId
+            }
+          }
+        })
+      },
+      `fetchClipboardTree(${request.topicId}, ${branchOwned ? 'branch-owned' : `${requestedGroupIds.length} groups`})`
+    )
+  }
+
+  /**
+   * Resolve stable clipboard group keys against ONE effective route.
+   *
+   * Canonical `getMessageGroups` equivalence (identical to the group-scoped
+   * read): a user id keys its user row plus every assistant with that askId, a
+   * non-empty askId keys its (possibly orphan) assistant group, a system id
+   * keys its singleton group. Unlike the legacy read this fails closed: a key
+   * that forms no group would silently lose content from a tree payload.
+   */
+  private resolveClipboardGroupRowsInTx(
+    routeMessages: MessageData[],
+    groupIds: string[]
+  ): Array<{ groupId: string; rows: MessageData[] }> {
+    const byId = new Map<string, MessageData>()
+    const assistantsByAskId = new Map<string, MessageData[]>()
+    for (const message of routeMessages) {
+      byId.set(message.id, message)
+      const askId = message.askId
+      if (message.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
+        const list = assistantsByAskId.get(askId) ?? []
+        list.push(message)
+        assistantsByAskId.set(askId, list)
+      }
+    }
+    const routeIndex = new Map(routeMessages.map((message, index) => [message.id, index]))
+    const resolved: Array<{ groupId: string; rows: MessageData[] }> = []
+    const seen = new Set<string>()
+    for (const groupId of groupIds) {
+      if (typeof groupId !== 'string' || groupId.length === 0) {
+        throw new ChatDbValidationError('groupIds must be a non-empty array of stable group keys')
+      }
+      if (seen.has(groupId)) {
+        throw new ChatDbValidationError('Duplicate groupId in the clipboard-tree request')
+      }
+      seen.add(groupId)
+      const row = byId.get(groupId)
+      if (row && row.role === 'user') {
+        resolved.push({ groupId, rows: [row, ...(assistantsByAskId.get(groupId) ?? [])] })
+        continue
+      }
+      const assistants = assistantsByAskId.get(groupId) ?? []
+      if (assistants.length > 0) {
+        resolved.push({ groupId, rows: [...assistants] })
+        continue
+      }
+      if (row && row.role === 'system') {
+        resolved.push({ groupId, rows: [row] })
+        continue
+      }
+      throw new ChatDbValidationError(
+        `Group ${groupId} does not belong to the addressed source route (unknown key or non-selectable role)`
+      )
+    }
+    resolved.sort((a, b) => {
+      const ai = routeIndex.get(a.rows[0].id) ?? Number.MAX_SAFE_INTEGER
+      const bi = routeIndex.get(b.rows[0].id) ?? Number.MAX_SAFE_INTEGER
+      if (ai !== bi) return ai - bi
+      return a.rows[0].id < b.rows[0].id ? -1 : a.rows[0].id > b.rows[0].id ? 1 : 0
+    })
+    return resolved
+  }
+
+  /**
+   * Derive the clipboard closure of the supplied group keys from authority
+   * rows only (no renderer state, no loaded-window derivation).
+   *
+   * Fail-closed invariants, all evaluated before any caller writes:
+   * - every requested key resolves to a complete group of the source route;
+   * - every included branch's anchor is part of the already-captured closure
+   *   (otherwise the mapped anchor could not exist in the target);
+   * - the included branch forest stays inside `MAX_BRANCH_DEPTH`.
+   */
+  private deriveClipboardTreeClosureInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    sourceBranchId: string | null,
+    groupIds: string[]
+  ): ClipboardTreeClosure {
+    if (!Array.isArray(groupIds) || groupIds.length === 0) {
+      throw new ChatDbValidationError('groupIds must be a non-empty array of stable group keys')
+    }
+    const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, sourceBranchId).messages
+    const routeIndex = new Map(routeMessages.map((message, index) => [message.id, index]))
+    const resolvedGroups = this.resolveClipboardGroupRowsInTx(routeMessages, groupIds)
+    const rootRows: MessageData[] = []
+    const rootIdSet = new Set<string>()
+    for (const group of resolvedGroups) {
+      for (const row of group.rows) {
+        if (rootIdSet.has(row.id)) continue
+        rootIdSet.add(row.id)
+        rootRows.push(row)
+      }
+    }
+    rootRows.sort((a, b) => (routeIndex.get(a.id) ?? 0) - (routeIndex.get(b.id) ?? 0))
+    const ownership = this.splitClipboardTreeRootOwnership(rootRows, topicId, sourceBranchId)
+    const capturedMessages: MessageData[] = [...rootRows]
+    const capturedMessageIds = new Set<string>(rootIdSet)
+    // Branch forest: direct children of the source route whose anchor is one
+    // of the selected root messages, then their complete subtrees.
+    const forest = this.captureClipboardTreeForestInTx(
+      repos,
+      topicId,
+      sourceBranchId,
+      capturedMessages,
+      capturedMessageIds,
+      (children, sortChildren) => sortChildren(children).filter((branch) => rootIdSet.has(branch.anchorMessageId))
+    )
+    return {
+      topicId,
+      branchId: sourceBranchId,
+      resolvedGroups,
+      rootRows,
+      ownedRootMessageIds: ownership.owned,
+      inheritedRootMessageIds: ownership.inherited,
+      branches: forest.branches,
+      ownedByBranch: forest.ownedByBranch,
+      capturedMessages,
+      capturedMessageIds,
+      segments: forest.segments
+    }
+  }
+
+  /**
+   * Branch-owned closure: ONE branch's own rows are the root trunk and every
+   * descendant branch contributes only the rows it owns.
+   *
+   * The branch is addressed explicitly (it may be inactive), so no group has to
+   * be selected first and no inherited parent prefix is read: the payload is the
+   * complete OWNED subtree of that branch. The source branch's own node is never
+   * part of the payload — a paste does not re-create it — while descendant nodes
+   * keep their names, parents and anchors.
+   *
+   * Fail-closed, before any publication:
+   * - the branch owns at least one row (an empty trunk is not a copyable tree);
+   * - every included descendant anchor is inside the captured rows (a repaired
+   *   or dangling anchor pointing at an inherited parent row cannot be preserved
+   *   without inventing the prefix that is deliberately not copied);
+   * - the included forest stays inside `MAX_BRANCH_DEPTH`.
+   */
+  private deriveBranchOwnedClipboardTreeClosureInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    sourceBranchId: string | null
+  ): ClipboardTreeClosure {
+    if (sourceBranchId === null) {
+      throw new ChatDbValidationError('A branch-owned capture requires an explicit branch route')
+    }
+    this.requireBranchInTx(repos, topicId, sourceBranchId)
+    // Own rows only, in authority order; ownership is topic AND branch.
+    const rootRows = repos.messages.listByTopic(topicId, sourceBranchId)
+    if (rootRows.length === 0) {
+      throw new ChatDbValidationError(`Branch ${sourceBranchId} owns no messages, so there is no branch tree to copy`)
+    }
+    const capturedMessages: MessageData[] = [...rootRows]
+    const capturedMessageIds = new Set<string>(rootRows.map((row) => row.id))
+    // The whole owned subtree is included: a descendant is never dropped for
+    // being anchored at a row that was not selected, and the shared forest
+    // capture below still validates every anchor against the captured rows.
+    const forest = this.captureClipboardTreeForestInTx(
+      repos,
+      topicId,
+      sourceBranchId,
+      capturedMessages,
+      capturedMessageIds,
+      (children, sortChildren) => sortChildren(children)
+    )
+    const ownership = this.splitClipboardTreeRootOwnership(rootRows, topicId, sourceBranchId)
+    return {
+      topicId,
+      branchId: sourceBranchId,
+      resolvedGroups: this.groupBranchOwnedClipboardRows(rootRows),
+      rootRows,
+      ownedRootMessageIds: ownership.owned,
+      inheritedRootMessageIds: ownership.inherited,
+      branches: forest.branches,
+      ownedByBranch: forest.ownedByBranch,
+      capturedMessages,
+      capturedMessageIds,
+      segments: forest.segments
+    }
+  }
+
+  /**
+   * Capture the owned rows of one branch forest, plus every segment whose
+   * complete membership is inside the captured rows.
+   *
+   * Shared policy of both clipboard-tree capture shapes: children are visited
+   * breadth-first with parents before children, each branch contributes exactly
+   * the rows it OWNS, every included branch's anchor must already be part of the
+   * captured closure, and the forest must stay inside `MAX_BRANCH_DEPTH`. The
+   * caller only decides WHICH direct children are included.
+   */
+  private captureClipboardTreeForestInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    sourceBranchId: string | null,
+    capturedMessages: MessageData[],
+    capturedMessageIds: Set<string>,
+    selectDirectChildren: (
+      children: TopicBranchData[],
+      sortChildren: (list: TopicBranchData[]) => TopicBranchData[]
+    ) => TopicBranchData[]
+  ): Pick<ClipboardTreeClosure, 'branches' | 'ownedByBranch' | 'segments'> {
+    const allBranches = repos.branches.listByTopic(topicId)
+    const childrenByParent = new Map<string | null, TopicBranchData[]>()
+    for (const branch of allBranches) {
+      const parent = branch.parentBranchId ?? null
+      const list = childrenByParent.get(parent) ?? []
+      list.push(branch)
+      childrenByParent.set(parent, list)
+    }
+    // Anchor order is the captured root order, so a forest lists its branches
+    // the way they appear on the route; ids break ties deterministically.
+    const anchorOrder = new Map(capturedMessages.map((row, index) => [row.id, index]))
+    const sortChildren = (list: TopicBranchData[]): TopicBranchData[] =>
+      [...list].sort((a, b) => {
+        const ai = anchorOrder.get(a.anchorMessageId) ?? Number.MAX_SAFE_INTEGER
+        const bi = anchorOrder.get(b.anchorMessageId) ?? Number.MAX_SAFE_INTEGER
+        if (ai !== bi) return ai - bi
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
+    const branches: ClipboardTreeClosureBranch[] = []
+    const ownedByBranch: Array<{ branchId: string; rows: MessageData[] }> = []
+    const visit = (queue: Array<{ branch: TopicBranchData; depth: number }>): void => {
+      for (const entry of queue) {
+        const { branch, depth } = entry
+        if (depth > MAX_BRANCH_DEPTH) {
+          throw new ChatDbValidationError(
+            `Included child branch ${branch.id} exceeds the maximum branch depth (${MAX_BRANCH_DEPTH})`
+          )
+        }
+        if (!capturedMessageIds.has(branch.anchorMessageId)) {
+          throw new ChatDbValidationError(
+            `Included child branch ${branch.id} anchors at message ${branch.anchorMessageId}, which is outside the captured closure`
+          )
+        }
+        const rows = repos.messages.listByTopic(topicId, branch.id)
+        branches.push({ data: branch, depth })
+        ownedByBranch.push({ branchId: branch.id, rows })
+        for (const row of rows) {
+          if (capturedMessageIds.has(row.id)) continue
+          capturedMessageIds.add(row.id)
+          capturedMessages.push(row)
+        }
+        visit(sortChildren(childrenByParent.get(branch.id) ?? []).map((child) => ({ branch: child, depth: depth + 1 })))
+      }
+    }
+    visit(
+      selectDirectChildren(childrenByParent.get(sourceBranchId) ?? [], sortChildren).map((branch) => ({
+        branch,
+        depth: 1
+      }))
+    )
+    // Segments: only fully-contained membership (never a partial slice).
+    const segments: ClipboardTreeClosureSegment[] = []
+    for (const segment of repos.segments.listByTopic(topicId)) {
+      const memberIds = repos.segments.getMessageIds(segment.id)
+      if (memberIds.length === 0) continue
+      if (!memberIds.every((id) => capturedMessageIds.has(id))) continue
+      const header = segment.headerMessageId ?? null
+      if (header !== null && !memberIds.includes(header)) continue
+      segments.push({ data: segment, memberIds })
+    }
+    return { branches, ownedByBranch, segments }
+  }
+
+  /**
+   * Split captured root rows into the ones this route OWNS (deletable by a cut)
+   * and the ones it merely reads through (copy-only).
+   *
+   * Owner = the addressing topic AND the addressed route. A cross-topic
+   * reference prefix materialized into this route keeps its OWN topicId while
+   * carrying `branchId = null`, so a branch-only comparison would report live
+   * foreign prefix rows as mutable roots here and hand them to the cut capture
+   * even though every write path rejects them. Same owner predicate as
+   * `insertMessageGroups`.
+   */
+  private splitClipboardTreeRootOwnership(
+    rootRows: MessageData[],
+    topicId: string,
+    route: string | null
+  ): { owned: string[]; inherited: string[] } {
+    const owned: string[] = []
+    const inherited: string[] = []
+    for (const row of rootRows) {
+      if ((row.branchId ?? null) === route && row.topicId === topicId) owned.push(row.id)
+      else inherited.push(row.id)
+    }
+    return { owned, inherited }
+  }
+
+  /**
+   * Group one branch's OWN rows into clipboard groups (no renderer grouping).
+   *
+   * A user row keys its own group; an assistant joins the group of the OWN user
+   * row its `askId` points at. An assistant whose ask resolves to no own user row
+   * (the branch was forked from an inherited question) still belongs to this
+   * branch's trunk: it is keyed by a stable own key — the first such answer of
+   * that ask, so sibling answers stay together — and keeps its wire `askId`,
+   * which the paste plan turns into an orphan assistant group instead of
+   * inventing the parent row this capture deliberately does not contain. A
+   * system row is its own singleton group.
+   */
+  private groupBranchOwnedClipboardRows(rows: MessageData[]): Array<{ groupId: string; rows: MessageData[] }> {
+    const groups: Array<{ groupId: string; rows: MessageData[] }> = []
+    const groupByUserId = new Map<string, { groupId: string; rows: MessageData[] }>()
+    const groupByForeignAskId = new Map<string, { groupId: string; rows: MessageData[] }>()
+    const addGroup = (groupId: string, row: MessageData): { groupId: string; rows: MessageData[] } => {
+      const group = { groupId, rows: [row] }
+      groups.push(group)
+      return group
+    }
+    for (const row of rows) {
+      if (row.role === 'user') {
+        groupByUserId.set(row.id, addGroup(row.id, row))
+        continue
+      }
+      if (row.role === 'assistant') {
+        const askId = typeof row.askId === 'string' && row.askId.length > 0 ? row.askId : null
+        if (askId !== null) {
+          const ownUserGroup = groupByUserId.get(askId)
+          if (ownUserGroup) {
+            ownUserGroup.rows.push(row)
+            continue
+          }
+          const foreignAskGroup = groupByForeignAskId.get(askId)
+          if (foreignAskGroup) {
+            foreignAskGroup.rows.push(row)
+            continue
+          }
+          groupByForeignAskId.set(askId, addGroup(row.id, row))
+          continue
+        }
+      }
+      // System rows (and a standalone assistant without an ask): a stable
+      // singleton group keyed by the row itself.
+      addGroup(row.id, row)
+    }
+    return groups
+  }
+
+  /**
+   * Resolve the root-run insertion index of a tree paste against ONE explicit
+   * target route.
+   *
+   * Owner-order intent resolution (same semantics as the group insert
+   * command): `topic-tail` appends to the route owner's rows; an OWNED anchor
+   * uses the answer-group tail (`after-group-tail`) or the exact preceding
+   * index (`before-message`); an INHERITED anchor stays read-only except for
+   * the single inherited boundary the addressed route may extend. For a branch
+   * route that boundary is the branch fork anchor (the run goes to the owner
+   * head; `before-message` keeps its legacy owner-tail semantics). For the main
+   * route it is the cross-topic reference endpoint — the endpoint row itself,
+   * or its resolved group tail for `after-group-tail` — and nothing else: an
+   * older foreign prefix row, and any `before-message` on a row this owner does
+   * not hold, fails closed before any write, exactly as the ordinary group
+   * insertion does. Ownership is topic AND branch; a reference prefix keeps its
+   * own topicId while addressing `branchId = null`.
+   */
+  private resolveClipboardTreeInsertIndexInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    route: string | null,
+    intent: Record<string, unknown>
+  ): { ownerIndex: number; ownerStart: MessageData[] } {
+    const resolvedRoute = this.resolveRouteMessagesInTx(repos, topicId, route)
+    const routeStart = resolvedRoute.messages
+    const forkBoundaryIndex = resolvedRoute.forkBoundaryIndex
+    const ownerStart = repos.messages.listByTopic(topicId, route)
+    const ownerIndexById = new Map<string, number>()
+    for (let i = 0; i < ownerStart.length; i++) ownerIndexById.set(ownerStart[i].id, i)
+    const kind = intent?.kind
+    if (kind !== 'after-group-tail' && kind !== 'before-message' && kind !== 'topic-tail') {
+      throw new ChatDbValidationError('target.intent.kind must be a stable intent kind')
+    }
+    if (kind === 'topic-tail') return { ownerIndex: ownerStart.length, ownerStart }
+    const messageId = intent?.messageId
+    if (typeof messageId !== 'string' || messageId.length === 0) {
+      throw new ChatDbValidationError('target.intent.messageId must be a non-empty string')
+    }
+    const anchor = routeStart.find((message) => message.id === messageId)
+    if (!anchor) {
+      throw new ChatDbNotFoundError(`Anchor message ${messageId} does not belong to topic ${topicId}`)
+    }
+    if ((anchor.branchId ?? null) !== route || anchor.topicId !== topicId) {
+      // Inherited anchor: read-only through this route except its single
+      // boundary. Ownership is topic AND branch — a reference prefix keeps its
+      // own topicId while addressing `branchId = null`, so a branch-only
+      // comparison would treat a live foreign row as an owned anchor and place
+      // the run at an index this owner never resolved.
+      if (route === null) {
+        // Cross-topic reference fork boundary: only the exact foreign endpoint
+        // (the reference anchor, or its resolved group tail for
+        // `after-group-tail`) may receive insertions at the START of the
+        // target's own suffix. Older prefix rows are read-only, and so is any
+        // `before-message` on a row this owner does not hold — ordinary group
+        // insertion rejects both rather than inventing a position.
+        const ref = repos.topicReferences.getByTarget(topicId)
+        let isReferenceFork = ref.found && ref.data.anchorMessageId === messageId
+        if (!isReferenceFork && ref.found && kind === 'after-group-tail') {
+          const tailPlusOne = this.resolveAfterGroupTailFullIndex(routeStart, anchor)
+          isReferenceFork = routeStart[tailPlusOne - 1]?.id === ref.data.anchorMessageId
+        }
+        if (!isReferenceFork) {
+          throw new ChatDbValidationError(
+            `Anchor message ${messageId} is not owned by this route and insertion is read-only`
+          )
+        }
+        return { ownerIndex: 0, ownerStart }
+      }
+      // Branch route: `before-message` keeps its legacy owner-tail semantics.
+      if (kind === 'before-message') return { ownerIndex: ownerStart.length, ownerStart }
+      const tailPlusOne = this.resolveAfterGroupTailFullIndex(routeStart, anchor)
+      const tailIdx = tailPlusOne - 1
+      const tailId = routeStart[tailIdx]?.id ?? null
+      const forkId = this.requireBranchInTx(repos, topicId, route).anchorMessageId
+      if (tailId !== forkId || tailIdx !== forkBoundaryIndex - 1) {
+        throw new ChatDbValidationError(
+          `Anchor message ${messageId} is an ancestor reference and is read-only through this route`
+        )
+      }
+      return { ownerIndex: 0, ownerStart }
+    }
+    const ownerIndex =
+      kind === 'before-message'
+        ? (ownerIndexById.get(messageId) as number)
+        : this.resolveAfterGroupTailFullIndex(ownerStart, anchor)
+    return { ownerIndex, ownerStart }
+  }
+
+  /**
+   * Build the fully-remapped target insert plan of one clipboard payload.
+   *
+   * Every captured row gets an INDEPENDENT fresh ID; `askId`, block references,
+   * branch parents/anchors, and segment membership/header all point at the new
+   * IDs. Roots land on the chosen target route (the caller's explicit route)
+   * and branch-owned rows on their generated branch, so no shared prefix,
+   * ancestor or sibling topology is ever re-created.
+   */
+  private buildClipboardTreePlanFromPayload(
+    repos: ChatDbRepositories,
+    payload: ClipboardTreePayload,
+    targetTopicId: string,
+    targetRoute: string | null,
+    placement: ClipboardTreePlacement
+  ): {
+    plan: ClipboardTreeInsertPlan
+    idMap: ClipboardTreeIdMapRow[]
+    sourceRootMessageIds: string[]
+    insertedRootMessageIds: string[]
+  } {
+    const sourceBranchId = payload.source.branchId ?? null
+    const messageWires = payload.messages as unknown as Array<Record<string, unknown>>
+    const blockWires = payload.blocks as unknown as Array<Record<string, unknown>>
+    const rootIdSet = new Set<string>()
+    const sourceRootMessageIds: string[] = []
+    for (const root of payload.roots) {
+      for (const id of root.messageIds) {
+        if (rootIdSet.has(id)) continue
+        rootIdSet.add(id)
+        sourceRootMessageIds.push(id)
+      }
+    }
+    if (rootIdSet.size === 0) {
+      throw new ChatDbValidationError('Clipboard tree payload carries no selected root messages')
+    }
+    const messageIdMap = new Map<string, string>()
+    for (const wire of messageWires) messageIdMap.set(String(wire.id), randomUUID())
+    const blockIdMap = new Map<string, string>()
+    for (const wire of blockWires) blockIdMap.set(String(wire.id), randomUUID())
+    const branchIdMap = new Map<string, string>()
+    for (const branch of payload.branches) branchIdMap.set(branch.sourceBranchId, randomUUID())
+    const sourceOwnerById = new Map<string, string | null>()
+    for (const wire of messageWires) sourceOwnerById.set(String(wire.id), (wire.branchId ?? null) as string | null)
+    const targetOwnerFor = (sourceId: string): string | null => {
+      if (rootIdSet.has(sourceId)) return targetRoute
+      const sourceOwner = sourceOwnerById.get(sourceId) ?? null
+      if (sourceOwner === null) {
+        throw new ChatDbValidationError(
+          `Message ${sourceId} is neither a selected root nor owned by an included branch`
+        )
+      }
+      const mapped = branchIdMap.get(sourceOwner)
+      if (mapped === undefined) {
+        throw new ChatDbValidationError(
+          `Message ${sourceId} is owned by branch ${sourceOwner}, which is not part of the captured branch set`
+        )
+      }
+      return mapped
+    }
+    const rootRows: MessageData[] = []
+    const rootWires = new Map<string, JsonObject>()
+    const branchRowsById = new Map<string, MessageData[]>()
+    const branchWiresById = new Map<string, Map<string, JsonObject>>()
+    for (const branch of payload.branches) {
+      const generated = branchIdMap.get(branch.sourceBranchId) as string
+      branchRowsById.set(generated, [])
+      branchWiresById.set(generated, new Map())
+    }
+    for (const wire of messageWires) {
+      const sourceId = String(wire.id)
+      const newId = messageIdMap.get(sourceId) as string
+      const ownerTarget = targetOwnerFor(sourceId)
+      const wireCopy = { ...wire } as JsonObject
+      const declaredBlocks = Array.isArray(wire.blocks) ? (wire.blocks as unknown[]).map((id) => String(id)) : []
+      const mappedBlocks = declaredBlocks
+        .map((id) => blockIdMap.get(id))
+        .filter((id): id is string => typeof id === 'string')
+      delete (wireCopy as Record<string, unknown>).blocks
+      const row = wireToMessage(wireCopy)
+      row.id = newId
+      row.topicId = targetTopicId
+      row.branchId = ownerTarget
+      row.sortOrder = 0
+      const sourceAskId = typeof wire.askId === 'string' && wire.askId.length > 0 ? wire.askId : null
+      if (row.role === 'assistant' && sourceAskId !== null) {
+        // Only a captured target remaps; an ask outside the closure becomes an
+        // orphan assistant group instead of a dangling cross-topic reference.
+        row.askId = messageIdMap.get(sourceAskId) ?? null
+      }
+      const wireForOrder = { ...(wireCopy as Record<string, unknown>), blocks: mappedBlocks } as unknown as JsonObject
+      if (rootIdSet.has(sourceId) && ownerTarget === targetRoute) {
+        rootRows.push(row)
+        rootWires.set(newId, wireForOrder)
+      } else {
+        if (ownerTarget === null) {
+          throw new ChatDbValidationError(`Message ${sourceId} has no resolvable target owner`)
+        }
+        const targetRows = branchRowsById.get(ownerTarget)
+        const targetWires = branchWiresById.get(ownerTarget)
+        if (!targetRows || !targetWires) {
+          throw new ChatDbValidationError(`Message ${sourceId} owns to an unknown branch ${ownerTarget}`)
+        }
+        targetRows.push(row)
+        targetWires.set(newId, wireForOrder)
+      }
+    }
+    const blocksByMessage = new Map<string, MessageBlockData[]>()
+    const planBlocks: MessageBlockData[] = []
+    for (const wire of blockWires) {
+      const sourceBlockId = String(wire.id)
+      const newBlockId = blockIdMap.get(sourceBlockId) as string
+      const sourceParent = String(wire.messageId)
+      const parent = messageIdMap.get(sourceParent)
+      if (parent === undefined) {
+        throw new ChatDbValidationError(
+          `Block ${sourceBlockId} belongs to message ${sourceParent}, which is not part of the captured closure`
+        )
+      }
+      const blockRow = wireToBlock({ ...wire, id: newBlockId, messageId: parent } as unknown as JsonObject)
+      blockRow.id = newBlockId
+      blockRow.messageId = parent
+      planBlocks.push(blockRow)
+      const list = blocksByMessage.get(parent) ?? []
+      list.push(blockRow)
+      blocksByMessage.set(parent, list)
+    }
+    for (const [messageId, wire] of rootWires) {
+      this.assignAuthoritativeBlockOrder(wire, blocksByMessage.get(messageId) ?? [])
+    }
+    const planBranches: ClipboardTreeInsertPlan['branches'] = []
+    for (const branch of payload.branches) {
+      const generatedId = branchIdMap.get(branch.sourceBranchId) as string
+      const isDirectChild = (branch.parentSourceBranchId ?? null) === sourceBranchId
+      let parentBranchId: string | null = targetRoute
+      if (!isDirectChild) {
+        const mappedParent = branchIdMap.get(branch.parentSourceBranchId as string)
+        if (mappedParent === undefined) {
+          throw new ChatDbValidationError(
+            `Included branch ${branch.sourceBranchId} has parent ${String(branch.parentSourceBranchId)}, which is not part of the captured branch set`
+          )
+        }
+        parentBranchId = mappedParent
+      }
+      const anchorMessageId = messageIdMap.get(branch.anchorMessageId)
+      if (anchorMessageId === undefined) {
+        throw new ChatDbValidationError(
+          `Included branch ${branch.sourceBranchId} anchors at ${branch.anchorMessageId}, which is not part of the captured closure`
+        )
+      }
+      planBranches.push({
+        branch: {
+          id: generatedId,
+          topicId: targetTopicId,
+          parentBranchId,
+          anchorMessageId,
+          name: branch.name ?? null,
+          createdAt: null,
+          updatedAt: null,
+          overflow: branch.overflow ?? {}
+        },
+        rows: branchRowsById.get(generatedId) ?? [],
+        wires: branchWiresById.get(generatedId) ?? new Map()
+      })
+    }
+    const segmentBase = repos.segments.listByTopic(targetTopicId).length
+    const planSegments = payload.segments.map((segment, index) => {
+      const generatedId = randomUUID()
+      const memberIds = segment.memberIds.map((id) => {
+        const mapped = messageIdMap.get(id)
+        if (mapped === undefined) {
+          throw new ChatDbValidationError(
+            `Captured segment ${segment.sourceSegmentId} member ${id} is not part of the captured closure`
+          )
+        }
+        return mapped
+      })
+      let headerMessageId: string | null = null
+      if (segment.headerMessageId !== null) {
+        const mappedHeader = messageIdMap.get(segment.headerMessageId)
+        if (mappedHeader === undefined) {
+          throw new ChatDbValidationError(
+            `Captured segment ${segment.sourceSegmentId} header ${segment.headerMessageId} is not part of the captured closure`
+          )
+        }
+        headerMessageId = mappedHeader
+      }
+      return {
+        row: {
+          id: generatedId,
+          topicId: targetTopicId,
+          name: segment.name ?? null,
+          createdAt: null,
+          updatedAt: null,
+          sortOrder: segmentBase + index,
+          headerMessageId,
+          overflow: segment.overflow ?? {}
+        },
+        memberIds
+      }
+    })
+    const idMap: ClipboardTreeIdMapRow[] = [
+      ...[...messageIdMap].map(([sourceId, targetId]) => ({ kind: 'message' as const, sourceId, targetId })),
+      ...[...blockIdMap].map(([sourceId, targetId]) => ({ kind: 'block' as const, sourceId, targetId })),
+      ...[...branchIdMap].map(([sourceId, targetId]) => ({ kind: 'branch' as const, sourceId, targetId })),
+      ...payload.segments.map((segment, index) => ({
+        kind: 'segment' as const,
+        sourceId: segment.sourceSegmentId,
+        targetId: planSegments[index].row.id
+      }))
+    ]
+    return {
+      plan: {
+        targetTopicId,
+        targetRoute,
+        placement,
+        rootRows,
+        rootWires,
+        branches: planBranches,
+        blocks: planBlocks,
+        segments: planSegments
+      },
+      idMap,
+      sourceRootMessageIds,
+      insertedRootMessageIds: rootRows.map((row) => row.id)
+    }
+  }
+
+  /**
+   * Rebuild the same insert plan from a Main-produced snapshot (redo path).
+   *
+   * The recorded wires already carry the generated IDs and target owners, so a
+   * redo re-inserts byte-identical rows: stable IDs, same branch topology, same
+   * block order, same segment membership.
+   */
+  private buildClipboardTreePlanFromSnapshot(snapshot: ClipboardTreeSnapshot): ClipboardTreeInsertPlan {
+    const targetTopicId = snapshot.placement.topicId
+    const targetRoute = snapshot.placement.branchId ?? null
+    const branchIds = new Set(snapshot.inserted.branches.map((branch) => branch.id))
+    const messageWires = snapshot.inserted.messages as unknown as Array<Record<string, unknown>>
+    const blockWires = snapshot.inserted.blocks as unknown as Array<Record<string, unknown>>
+    const rootRows: MessageData[] = []
+    const rootWires = new Map<string, JsonObject>()
+    const branchRowsById = new Map<string, MessageData[]>()
+    const branchWiresById = new Map<string, Map<string, JsonObject>>()
+    for (const id of branchIds) {
+      branchRowsById.set(id, [])
+      branchWiresById.set(id, new Map())
+    }
+    for (const wire of messageWires) {
+      const wireCopy = { ...wire } as JsonObject
+      const declaredBlocks = Array.isArray(wire.blocks) ? (wire.blocks as unknown[]).map((id) => String(id)) : []
+      delete (wireCopy as Record<string, unknown>).blocks
+      const row = wireToMessage(wireCopy)
+      row.sortOrder = 0
+      const wireForOrder = { ...(wireCopy as Record<string, unknown>), blocks: declaredBlocks } as unknown as JsonObject
+      const owner = row.branchId ?? null
+      if (owner !== null && branchIds.has(owner)) {
+        const targetRows = branchRowsById.get(owner) as MessageData[]
+        targetRows.push(row)
+        ;(branchWiresById.get(owner) as Map<string, JsonObject>).set(row.id, wireForOrder)
+      } else if (owner === targetRoute) {
+        rootRows.push(row)
+        rootWires.set(row.id, wireForOrder)
+      } else {
+        throw new ChatDbValidationError(
+          `Snapshot message ${row.id} has owner ${String(owner)}, which is neither the placement route nor a recorded branch`
+        )
+      }
+    }
+    const blocksByMessage = new Map<string, MessageBlockData[]>()
+    const blocks: MessageBlockData[] = []
+    for (const wire of blockWires) {
+      const row = wireToBlock({ ...wire } as unknown as JsonObject)
+      blocks.push(row)
+      const list = blocksByMessage.get(row.messageId) ?? []
+      list.push(row)
+      blocksByMessage.set(row.messageId, list)
+    }
+    for (const [messageId, wire] of rootWires) {
+      this.assignAuthoritativeBlockOrder(wire, blocksByMessage.get(messageId) ?? [])
+    }
+    for (const wires of branchWiresById.values()) {
+      for (const [messageId, wire] of wires) {
+        this.assignAuthoritativeBlockOrder(wire, blocksByMessage.get(messageId) ?? [])
+      }
+    }
+    const planBranches: ClipboardTreeInsertPlan['branches'] = snapshot.inserted.branches.map((branch) => ({
+      branch: {
+        id: branch.id,
+        topicId: targetTopicId,
+        parentBranchId: branch.parentBranchId ?? null,
+        anchorMessageId: branch.anchorMessageId,
+        name: branch.name ?? null,
+        createdAt: branch.createdAt ?? null,
+        updatedAt: branch.updatedAt ?? null,
+        overflow: branch.overflow ?? {}
+      },
+      rows: branchRowsById.get(branch.id) ?? [],
+      wires: branchWiresById.get(branch.id) ?? new Map()
+    }))
+    return {
+      targetTopicId,
+      targetRoute,
+      placement: snapshot.placement,
+      rootRows,
+      rootWires,
+      branches: planBranches,
+      blocks,
+      segments: snapshot.inserted.segments.map((segment) => ({
+        row: {
+          id: segment.id,
+          topicId: targetTopicId,
+          name: segment.name ?? null,
+          createdAt: segment.createdAt ?? null,
+          updatedAt: segment.updatedAt ?? null,
+          sortOrder: segment.sortOrder,
+          headerMessageId: segment.headerMessageId ?? null,
+          overflow: segment.overflow ?? {}
+        },
+        memberIds: segment.memberIds
+      }))
+    }
+  }
+
+  /**
+   * Reject a captured forest that would be unresolvable under the target route.
+   *
+   * A captured tree is depth-valid only relative to the route it was cut from:
+   * the same two-level closure pasted under a route that already sits 30
+   * ancestors deep would create branches whose ancestry `ancestorsOf` can no
+   * longer walk, silently truncating route composition. The capacity is
+   * `MAX_BRANCH_DEPTH - 1` ancestors for the same reason documented on the
+   * re-parent guard in `moveSelectedTurnsToNewBranch`. The check runs before the
+   * first write so a rejection leaves the transaction untouched.
+   */
+  private assertClipboardTreeTargetDepthInTx(
+    repos: ChatDbRepositories,
+    targetRoute: string | null,
+    plan: ClipboardTreeInsertPlan
+  ): void {
+    if (plan.branches.length === 0) return
+    const maxResolvableAncestors = MAX_BRANCH_DEPTH - 1
+    const targetAncestors = targetRoute === null ? 0 : repos.branches.ancestorsOf(targetRoute).length
+    // Generated branch ids never collide with an existing route, so a parent that
+    // is absent from this map is the placement route itself.
+    const parentById = new Map<string, string | null>(
+      plan.branches.map((entry) => [entry.branch.id, entry.branch.parentBranchId ?? null])
+    )
+    const depthCache = new Map<string, number>()
+    const relativeDepthOf = (branchId: string, seen: Set<string>): number => {
+      const cached = depthCache.get(branchId)
+      if (cached !== undefined) return cached
+      if (seen.has(branchId)) {
+        throw new ChatDbValidationError(`Clipboard tree branch ${branchId} has a cyclic parent chain`)
+      }
+      seen.add(branchId)
+      const parent = parentById.get(branchId) ?? null
+      const depth = parent !== null && parentById.has(parent) ? relativeDepthOf(parent, seen) + 1 : 1
+      seen.delete(branchId)
+      depthCache.set(branchId, depth)
+      return depth
+    }
+    for (const entry of plan.branches) {
+      const ancestors = targetAncestors + relativeDepthOf(entry.branch.id, new Set())
+      if (ancestors > maxResolvableAncestors) {
+        throw new ChatDbValidationError(
+          `Placing branch ${entry.branch.id} at the target route would exceed the maximum resolvable branch depth (${maxResolvableAncestors} ancestors)`
+        )
+      }
+    }
+  }
+
+  /**
+   * Write one remapped tree plan into the target topic inside the caller's
+   * transaction, reusing the established creation patterns: per-owner ordered
+   * message inserts, block upsert + file-reference sync, segment creation with
+   * remapped membership/header, and existing sync capture/frame refresh for
+   * newly included rows. Branch-owned rows stay local-only because the route
+   * context is null for a branch target, and reference-target topics stay
+   * local-only through `syncCtxForTopic`.
+   */
+  private insertClipboardTreePlanInTx(
+    repos: ChatDbRepositories,
+    stx: SyncTxExecutor,
+    ctx: { deviceId: string; ts: number } | null,
+    plan: ClipboardTreeInsertPlan
+  ): { notify: boolean; unsupportedBlockIds: string[] } {
+    // A captured forest is depth-valid only relative to its own source route; the
+    // very same tree pasted under a deep target route can still overflow. Reject
+    // before the first write of the whole transaction.
+    this.assertClipboardTreeTargetDepthInTx(repos, plan.targetRoute, plan)
+    for (const entry of plan.branches) {
+      repos.branches.create(entry.branch)
+    }
+    if (plan.rootRows.length > 0) {
+      repos.messages.insertManyAt(plan.rootRows, plan.placement.ownerIndex)
+    }
+    for (const entry of plan.branches) {
+      if (entry.rows.length > 0) repos.messages.insertManyAt(entry.rows, 0)
+    }
+    if (plan.blocks.length > 0) {
+      repos.blocks.upsertMany(plan.blocks)
+      this.syncFileReferences(repos, plan.blocks)
+    }
+    if (plan.segments.length > 0) {
+      repos.segments.createMany(plan.segments.map((segment) => segment.row))
+      for (const segment of plan.segments) {
+        if (segment.memberIds.length > 0) repos.segments.addMessages(segment.row.id, segment.memberIds)
+        repos.segments.setHeaderMessageId(segment.row.id, segment.row.headerMessageId ?? null)
+      }
+    }
+    const allRows = [...plan.rootRows, ...plan.branches.flatMap((entry) => entry.rows)]
+    const unsupportedBlockIds: string[] = []
+    let notify = false
+    if (ctx) {
+      let tsOffset = 0
+      const nextTs = (): number => ctx.ts + tsOffset++
+      let hasNewInclusion = false
+      for (const row of allRows) {
+        const post = repos.messages.getById(row.id)
+        if (!post.found) throw new Error(`clipboard tree insert message ${row.id} missing in transaction`)
+        // Branch-owned rows are local-only: they live on a generated branch and
+        // never mint message upsert intent or a membership clock. Only the block
+        // frame is marked dirty, mirroring importTopicData's branch skip.
+        if ((post.data.branchId ?? null) !== null) {
+          syncService.invalidateParentFrameInTx(stx, 'messageBlock', row.id)
+          continue
+        }
+        if (!isStableMessageStatus(post.data.status)) continue
+        hasNewInclusion = true
+        if (!this.shouldCaptureMessageCreate(post.data)) continue
+        const opTs = nextTs()
+        this.ensureTopicClosureInTx(stx, plan.targetTopicId, opTs, ctx.deviceId)
+        const full = this.syncMessagePayloadFull(post.data)
+        delete full.sortOrder
+        const opId = syncService.enqueueUpsertInTx(stx, 'message', row.id, full, opTs, ctx.deviceId)
+        syncService.setMembershipClockInTx(stx, 'message', row.id, post.data.topicId, opTs, opId)
+        notify = true
+      }
+      for (const block of plan.blocks) {
+        const postBlock = repos.blocks.getById(block.id)
+        if (!postBlock.found) throw new Error(`clipboard tree insert block ${block.id} missing in transaction`)
+        const parent = repos.messages.getById(postBlock.data.messageId)
+        if (!parent.found || !isStableMessageStatus(parent.data.status)) continue
+        if ((parent.data.branchId ?? null) !== null) {
+          syncService.invalidateParentFrameInTx(stx, 'messageBlock', parent.data.id)
+          continue
+        }
+        if (!isStableBlockStatus(postBlock.data.status)) continue
+        if (this.isUnsupportedBlock(postBlock.data)) {
+          unsupportedBlockIds.push(block.id)
+          continue
+        }
+        const opTs = nextTs()
+        this.ensureBlockParentClosureInTx(stx, block.id, opTs, ctx.deviceId)
+        const full = this.syncBlockPayloadFull(postBlock.data)
+        delete full.sortOrder
+        const opId = syncService.enqueueUpsertInTx(stx, 'message_block', block.id, full, opTs, ctx.deviceId)
+        syncService.setMembershipClockInTx(stx, 'message_block', block.id, postBlock.data.messageId, opTs, opId)
+        notify = true
+      }
+      if (hasNewInclusion) {
+        if (
+          syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, plan.targetTopicId, ctx.deviceId) === 'refreshed'
+        ) {
+          notify = true
+        }
+      }
+      for (const row of allRows) {
+        if ((row.branchId ?? null) !== null) {
+          syncService.invalidateParentFrameInTx(stx, 'messageBlock', row.id)
+          continue
+        }
+        if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, row.id, ctx.deviceId) === 'refreshed') {
+          notify = true
+        }
+      }
+    } else {
+      syncService.invalidateParentFrameInTx(stx, 'topicMessage', plan.targetTopicId)
+      for (const row of allRows) {
+        syncService.invalidateParentFrameInTx(stx, 'messageBlock', row.id)
+      }
+    }
+    return { notify, unsupportedBlockIds }
+  }
+  /**
+   * Capture the complete authority preimage of one cut BEFORE any write.
+   *
+   * Recorded rows are the captured roots plus the OWNED rows of the included
+   * branches, together with the affected owners' complete pre-cut row orders
+   * (ids only), the touched segment state, and the affected file ids. Capturing
+   * before the target insert keeps the preimage exact even when a cut pastes
+   * back into its own topic.
+   */
+  private captureClipboardTreeSourceRemovalInTx(
+    repos: ChatDbRepositories,
+    source: { topicId: string; branchId: string | null; branchIds: string[]; ownedMessageIds: string[] }
+  ): { removal: ClipboardTreeSourceRemoval; affectedFileIds: string[] } {
+    const capturedIds = new Set(source.ownedMessageIds)
+    const ownerOrders: ClipboardTreeSourceRemoval['ownerOrders'] = []
+    const ownedMessages: MessageData[] = []
+    const seenOwned = new Set<string>()
+    for (const owner of [source.branchId, ...source.branchIds]) {
+      const rows = repos.messages.listByTopic(source.topicId, owner)
+      ownerOrders.push({ branchId: owner, orderedIds: rows.map((row) => row.id) })
+      for (const row of rows) {
+        if (!capturedIds.has(row.id)) continue
+        seenOwned.add(row.id)
+        ownedMessages.push(row)
+      }
+    }
+    const missing = source.ownedMessageIds.filter((id) => !seenOwned.has(id))
+    if (missing.length > 0) {
+      throw new ChatDbNotFoundError(
+        `Captured source message ${missing[0]} is no longer owned by the source route; the cut cannot be applied`
+      )
+    }
+    const ownedMessageIds = ownedMessages.map((row) => row.id)
+    const ownedSet = new Set(ownedMessageIds)
+    const blockMap = repos.blocks.listByMessages(ownedMessageIds)
+    const ownedBlocks: MessageBlockData[] = []
+    for (const id of ownedMessageIds) {
+      ownedBlocks.push(...(blockMap.get(id) ?? []))
+    }
+    const refsBeforeDelete = repos.fileRefs.listByMessages(ownedMessageIds)
+    const segmentsBefore = repos.segments.listByTopic(source.topicId)
+    const touchedSegments: BranchHistorySegmentRow[] = []
+    for (const segment of segmentsBefore) {
+      const memberIds = repos.segments.getMessageIds(segment.id)
+      if (!memberIds.some((id) => ownedSet.has(id))) continue
+      touchedSegments.push({
+        id: segment.id,
+        name: segment.name ?? null,
+        createdAt: segment.createdAt ?? null,
+        updatedAt: segment.updatedAt ?? null,
+        sortOrder: segment.sortOrder,
+        headerMessageId: segment.headerMessageId ?? null,
+        overflow: (segment.overflow ?? {}) as JsonObject,
+        memberIds
+      })
+    }
+    const removal: ClipboardTreeSourceRemoval = {
+      topicId: source.topicId,
+      branchId: source.branchId,
+      // Included branches are recorded parents-first, so a restore can create
+      // ancestry in order.
+      branches: source.branchIds.map((id) => {
+        const row = repos.branches.getById(id)
+        if (!row.found) {
+          throw new ChatDbNotFoundError(`Branch ${id} does not exist in topic ${source.topicId}`)
+        }
+        return toBranchHistoryRow(row.data)
+      }),
+      messages: ownedMessages.map(toMessageHistoryRow),
+      blocks: ownedBlocks.map(toBlockHistoryRow),
+      fileReferences: refsBeforeDelete.map(toFileReferenceHistoryRow),
+      segments: touchedSegments,
+      segmentsAfter: [],
+      segmentOrder: segmentsBefore.map((segment) => segment.id),
+      ownerOrders,
+      boundaries: []
+    }
+    return { removal, affectedFileIds: collectAffectedFileIds(refsBeforeDelete) }
+  }
+
+  /**
+   * Apply one captured cut inside the caller's transaction.
+   *
+   * Deletion reuses the bulk owned-row core (`deleteOwnedMessagesCoreInTx`:
+   * segment membership, boundary advance, frames, sync deletes), so a cut
+   * removes exactly the captured roots plus the OWNED rows of the included
+   * branches — never an unselected dependent, never a cross-route row. The
+   * returned removal additionally records the state the delete left behind,
+   * which undo still has to find in place.
+   */
+  private applyClipboardTreeSourceRemovalInTx(
+    repos: ChatDbRepositories,
+    tx: unknown,
+    stx: SyncTxExecutor,
+    ctx: { deviceId: string; ts: number } | null,
+    removal: ClipboardTreeSourceRemoval
+  ): { removal: ClipboardTreeSourceRemoval; notify: boolean } {
+    const ownedMessageIds = removal.messages.map((row) => row.id)
+    const notifyRef = { value: false }
+    const boundaries: InheritanceBoundarySnapshot[] = []
+    // Captured child-branch suffixes are local-only: their rows never entered
+    // the outbox, so their removal carries no delete intent even when the source
+    // route itself is syncable.
+    this.deleteOwnedMessagesCoreInTx(
+      tx,
+      repos,
+      stx,
+      ctx,
+      removal.topicId,
+      ownedMessageIds,
+      notifyRef,
+      boundaries,
+      removal.messages.filter((row) => (row.branchId ?? null) !== (removal.branchId ?? null)).map((row) => row.id)
+    )
+    const segmentsAfter = removal.segments.map((segment): BranchHistorySegmentStateRow => {
+      const live = repos.segments.getById(segment.id)
+      if (!live.found) {
+        return { id: segment.id, exists: false, name: null, sortOrder: null, headerMessageId: null, memberIds: [] }
+      }
+      return {
+        id: segment.id,
+        exists: true,
+        name: live.data.name ?? null,
+        sortOrder: live.data.sortOrder,
+        headerMessageId: live.data.headerMessageId ?? null,
+        memberIds: repos.segments.getMessageIds(segment.id)
+      }
+    })
+    if (removal.branches.length > 0) {
+      repos.branches.deleteSubtreeRows(removal.branches.map((row) => row.id))
+    }
+    return { removal: { ...removal, boundaries, segmentsAfter }, notify: notifyRef.value }
+  }
+
+  /**
+   * Restore the source rows a cut removed (undo direction).
+   *
+   * Every recorded identity must be gone and every touched segment must still
+   * hold the state the cut left, so a restore never overwrites live work. Rows
+   * come back with their recorded identity, content, blocks, file references and
+   * per-owner positions (the recorded pre-cut owner orders), so a restored root
+   * returns to its former place instead of landing at the tail.
+   */
+  private restoreClipboardTreeSourceInTx(
+    repos: ChatDbRepositories,
+    tx: unknown,
+    removal: ClipboardTreeSourceRemoval
+  ): { restoredMessageIds: string[]; restoredBranchIds: string[]; affectedFileIds: string[] } {
+    const branches = removal.branches ?? []
+    const messages = removal.messages ?? []
+    const blocks = removal.blocks ?? []
+    const fileReferences = removal.fileReferences ?? []
+    const segments = removal.segments ?? []
+    const segmentsAfter = removal.segmentsAfter ?? []
+    const restoredBranchIds = branches.map((row) => row.id)
+    const restoredBranchIdSet = new Set(restoredBranchIds)
+    for (const row of branches) {
+      if (repos.branches.exists(row.id)) {
+        throw new ChatDbConflictError(`Branch ${row.id} already exists; the cut can no longer be undone`)
+      }
+    }
+    for (const row of branches) {
+      if (
+        row.parentBranchId !== null &&
+        !restoredBranchIdSet.has(row.parentBranchId) &&
+        !repos.branches.exists(row.parentBranchId)
+      ) {
+        throw new ChatDbConflictError(
+          `Parent branch ${row.parentBranchId} of ${row.id} no longer exists; the cut can no longer be undone`
+        )
+      }
+    }
+    for (const row of messages) {
+      if (repos.messages.getById(row.id).found) {
+        throw new ChatDbConflictError(`Message ${row.id} already exists; the cut can no longer be undone`)
+      }
+    }
+    for (const row of blocks) {
+      if (repos.blocks.getById(row.id).found) {
+        throw new ChatDbConflictError(`Block ${row.id} already exists; the cut can no longer be undone`)
+      }
+    }
+    for (const row of fileReferences) {
+      if (repos.fileRefs.getById(row.id).found) {
+        throw new ChatDbConflictError(`File reference ${row.id} already exists; the cut can no longer be undone`)
+      }
+    }
+    this.assertSegmentPostDeleteStateInTx(repos, segmentsAfter)
+    // 1. Branch rows first: a parent always precedes its children in the
+    //    recorded order, so ancestry and anchors re-compose exactly.
+    for (const row of branches) {
+      repos.branches.create({
+        id: row.id,
+        topicId: removal.topicId,
+        parentBranchId: row.parentBranchId ?? null,
+        anchorMessageId: row.anchorMessageId,
+        name: row.name ?? null,
+        createdAt: row.createdAt ?? null,
+        updatedAt: row.updatedAt ?? null,
+        overflow: row.overflow ?? {}
+      })
+    }
+    // 2. Owned rows verbatim, then the exact former positions per owner.
+    if (messages.length > 0) {
+      repos.messages.createMany(messages.map((row) => ({ ...row })))
+    }
+    const restoredMessageIds = messages.map((row) => row.id)
+    const restoredMessageIdSet = new Set(restoredMessageIds)
+    for (const owner of removal.ownerOrders ?? []) {
+      const recordedIds = owner.orderedIds ?? []
+      const recordedSet = new Set(recordedIds)
+      const liveIds = repos.messages.listByTopic(removal.topicId, owner.branchId).map((row) => row.id)
+      for (const id of liveIds) {
+        if (!recordedSet.has(id)) {
+          throw new ChatDbConflictError(
+            `Route ${owner.branchId ?? 'main'} gained message ${id} after the cut; the cut can no longer be undone`
+          )
+        }
+      }
+      const liveSurvivors = liveIds.filter((id) => !restoredMessageIdSet.has(id))
+      const recordedSurvivors = recordedIds.filter((id) => !restoredMessageIdSet.has(id))
+      if (
+        liveSurvivors.length !== recordedSurvivors.length ||
+        liveSurvivors.some((id, index) => id !== recordedSurvivors[index])
+      ) {
+        throw new ChatDbConflictError(
+          `Route ${owner.branchId ?? 'main'} changed after the cut; the cut can no longer be undone`
+        )
+      }
+      if (recordedIds.length > 0) {
+        repos.messages.replaceOrder(removal.topicId, recordedIds, owner.branchId)
+      }
+    }
+    if (blocks.length > 0) {
+      repos.blocks.createMany(blocks.map((row) => ({ ...row })))
+    }
+    if (fileReferences.length > 0) {
+      repos.fileRefs.createMany(fileReferences.map((row) => ({ ...row })))
+    }
+    // 3. Segments: an emptied segment is re-created, every touched segment gets
+    //    its recorded membership and head back, and the catalog order is
+    //    re-pinned around the re-created segments.
+    for (const segment of segments) {
+      if (!repos.segments.getById(segment.id).found) {
+        repos.segments.create({
+          id: segment.id,
+          topicId: removal.topicId,
+          name: segment.name ?? null,
+          createdAt: segment.createdAt ?? null,
+          updatedAt: segment.updatedAt ?? null,
+          sortOrder: segment.sortOrder,
+          headerMessageId: segment.headerMessageId ?? null,
+          overflow: segment.overflow ?? {}
+        })
+      }
+      repos.segments.replaceMessageIds(segment.id, segment.memberIds ?? [])
+      repos.segments.setHeaderMessageId(segment.id, segment.headerMessageId ?? null)
+    }
+    if (segments.length > 0) {
+      const liveSegmentIds = repos.segments.listByTopic(removal.topicId).map((row) => row.id)
+      const recordedIndex = new Map((removal.segmentOrder ?? []).map((id, index) => [id, index]))
+      const orderOf = (id: string): number => recordedIndex.get(id) ?? Number.MAX_SAFE_INTEGER
+      const recreatedSegmentIds = segmentsAfter.filter((row) => !row.exists).map((row) => row.id)
+      const recreatedSegmentIdSet = new Set(recreatedSegmentIds)
+      const orderedSegmentIds = liveSegmentIds.filter((id) => !recreatedSegmentIdSet.has(id))
+      for (const id of recreatedSegmentIds) {
+        const insertAt = orderedSegmentIds.findIndex((live) => orderOf(live) > orderOf(id))
+        orderedSegmentIds.splice(insertAt === -1 ? orderedSegmentIds.length : insertAt, 0, id)
+      }
+      const changed =
+        orderedSegmentIds.length !== liveSegmentIds.length ||
+        orderedSegmentIds.some((id, index) => id !== liveSegmentIds[index])
+      if (changed) this.assignSegmentOrdersInTx(tx, orderedSegmentIds)
+    }
+    // 4. Boundaries this cut advanced, compare-and-set against the restored
+    //    route only.
+    this.restoreInheritanceBoundariesInTx(
+      repos,
+      removal.topicId,
+      removal.boundaries ?? [],
+      restoredMessageIdSet,
+      removal.branchId
+    )
+    return {
+      restoredMessageIds,
+      restoredBranchIds,
+      affectedFileIds: collectAffectedFileIds(fileReferences)
+    }
+  }
+
+  /**
+   * Remove exactly the rows a tree paste inserted (undo direction).
+   *
+   * The guard is a compare-and-set against the recorded snapshot: the recorded
+   * branch forest must still hold the recorded parents/anchors/names, no branch
+   * may have been created on a pasted row, every owner's row set must still be
+   * exactly the recorded one, and message/block/segment content must be
+   * unchanged. Anything newer fails closed with zero writes, so an undo never
+   * cascades into work the paste did not create.
+   */
+  private removeClipboardTreeTargetInTx(
+    repos: ChatDbRepositories,
+    tx: unknown,
+    stx: SyncTxExecutor,
+    ctx: { deviceId: string; ts: number } | null,
+    snapshot: ClipboardTreeSnapshot
+  ): { removedMessageIds: string[]; removedBranchIds: string[]; affectedFileIds: string[]; notify: boolean } {
+    const placement = snapshot.placement
+    const topicId = placement.topicId
+    const route = placement.branchId ?? null
+    const branchRows = snapshot.inserted.branches ?? []
+    const messageWires = snapshot.inserted.messages as unknown as Array<Record<string, unknown>>
+    const blockWires = snapshot.inserted.blocks as unknown as Array<Record<string, unknown>>
+    const segmentRows = snapshot.inserted.segments ?? []
+    const recordedBranchIds = branchRows.map((row) => row.id)
+    const recordedBranchIdSet = new Set(recordedBranchIds)
+    for (const row of branchRows) {
+      const live = repos.branches.getById(row.id)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Branch ${row.id} no longer exists; the paste can no longer be undone`)
+      }
+      if (live.data.topicId !== topicId) {
+        throw new ChatDbValidationError(`Branch ${row.id} does not belong to topic ${topicId}`)
+      }
+      if (
+        (live.data.parentBranchId ?? null) !== (row.parentBranchId ?? null) ||
+        live.data.anchorMessageId !== row.anchorMessageId ||
+        (live.data.name ?? null) !== (row.name ?? null)
+      ) {
+        throw new ChatDbConflictError(`Branch ${row.id} changed after the paste; it can no longer be undone`)
+      }
+    }
+    const recordedMessageIds: string[] = []
+    const ownerByMessage = new Map<string, string | null>()
+    for (const wire of messageWires) {
+      const id = String(wire.id)
+      recordedMessageIds.push(id)
+      ownerByMessage.set(id, typeof wire.branchId === 'string' ? wire.branchId : null)
+    }
+    const recordedMessageIdSet = new Set(recordedMessageIds)
+    // No branch may have been created on top of pasted rows: deleting them
+    // would cascade into work the paste never wrote.
+    for (const live of repos.branches.listByTopic(topicId)) {
+      if (recordedBranchIdSet.has(live.id)) continue
+      const parent = live.parentBranchId ?? null
+      if (parent !== null && recordedBranchIdSet.has(parent)) {
+        throw new ChatDbConflictError(
+          `Branch ${live.id} was created under pasted branch ${parent} after the paste; it can no longer be undone`
+        )
+      }
+      if (parent === route && recordedMessageIdSet.has(live.anchorMessageId)) {
+        throw new ChatDbConflictError(
+          `Branch ${live.id} was anchored on a pasted message after the paste; it can no longer be undone`
+        )
+      }
+    }
+    for (const id of recordedMessageIds) {
+      const live = repos.messages.getInTopic(id, topicId)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Message ${id} no longer exists; the paste can no longer be undone`)
+      }
+      if ((live.data.branchId ?? null) !== (ownerByMessage.get(id) ?? null)) {
+        throw new ChatDbConflictError(`Message ${id} changed owner after the paste; it can no longer be undone`)
+      }
+      const recordedWire = messageWires.find((wire) => String(wire.id) === id) as Record<string, unknown>
+      if (
+        this.clipboardTreeMessageFacts(toMessageHistoryRow(live.data)) !==
+        this.clipboardTreeWireMessageFacts(recordedWire)
+      ) {
+        throw new ChatDbConflictError(`Message ${id} changed after the paste; it can no longer be undone`)
+      }
+    }
+    // Owner row sets: the recorded rows are still the complete set of their
+    // owner, so no message written after the paste leaves with them.
+    //
+    // A same-topic cut pasted back into its own source route is the single case
+    // where the placement owner legitimately still holds unrelated rows: the
+    // survivors the cut left behind. Those are not post-paste additions, and a
+    // strict set comparison would make a perfectly valid undo impossible. The
+    // relaxation is bounded — the placement-owner check becomes "the recorded
+    // rows are present, and the survivors still hold exactly their pre-cut
+    // order" — so anything written or reordered after the cut still fails
+    // closed. Any other route (including one kept branch of the same topic)
+    // keeps the strict comparison.
+    const sharedOwnerSurvivors = this.clipboardTreeSharedOwnerSurvivors(snapshot, topicId, route, recordedMessageIdSet)
+    for (const owner of [route, ...recordedBranchIds]) {
+      const liveIds = repos.messages.listByTopic(topicId, owner).map((row) => row.id)
+      const recordedForOwner = recordedMessageIds.filter((id) => (ownerByMessage.get(id) ?? null) === owner)
+      if (owner === route) {
+        this.assertClipboardTreePlacementScope(snapshot.placement, liveIds, recordedForOwner, sharedOwnerSurvivors)
+        continue
+      }
+      this.assertClipboardTreeSameIdSet(liveIds, recordedForOwner, `the rows of route ${owner ?? 'main'}`)
+    }
+    const liveBlockMap = repos.blocks.listByMessages(recordedMessageIds)
+    const liveBlockIds: string[] = []
+    for (const id of recordedMessageIds) {
+      for (const block of liveBlockMap.get(id) ?? []) liveBlockIds.push(block.id)
+    }
+    this.assertClipboardTreeSameIdSet(
+      liveBlockIds,
+      blockWires.map((wire) => String(wire.id)),
+      'the blocks written by the paste'
+    )
+    for (const wire of blockWires) {
+      const live = repos.blocks.getById(String(wire.id))
+      if (!live.found) {
+        throw new ChatDbConflictError(`Block ${String(wire.id)} no longer exists; the paste can no longer be undone`)
+      }
+      if (this.clipboardTreeBlockFacts(toBlockHistoryRow(live.data)) !== this.clipboardTreeWireBlockFacts(wire)) {
+        throw new ChatDbConflictError(`Block ${String(wire.id)} changed after the paste; it can no longer be undone`)
+      }
+    }
+    for (const row of segmentRows) {
+      const live = repos.segments.getById(row.id)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Segment ${row.id} no longer exists; the paste can no longer be undone`)
+      }
+      const liveMembers = repos.segments.getMessageIds(row.id)
+      const recordedMembers = row.memberIds ?? []
+      if (
+        (live.data.headerMessageId ?? null) !== (row.headerMessageId ?? null) ||
+        (live.data.name ?? null) !== (row.name ?? null) ||
+        liveMembers.length !== recordedMembers.length ||
+        liveMembers.some((id, index) => id !== recordedMembers[index])
+      ) {
+        throw new ChatDbConflictError(`Segment ${row.id} changed after the paste; it can no longer be undone`)
+      }
+    }
+    const affectedFileIds = collectAffectedFileIds(repos.fileRefs.listByMessages(recordedMessageIds))
+    const notifyRef = { value: false }
+    this.deleteOwnedMessagesCoreInTx(
+      tx,
+      repos,
+      stx,
+      ctx,
+      topicId,
+      recordedMessageIds,
+      notifyRef,
+      undefined,
+      recordedMessageIds.filter((id) => {
+        const owner = ownerByMessage.get(id) ?? null
+        return owner !== null && owner !== route
+      })
+    )
+    if (recordedBranchIds.length > 0) {
+      repos.branches.deleteSubtreeRows(recordedBranchIds)
+    }
+    const recordedSegmentIds = segmentRows.map((row) => row.id)
+    if (recordedSegmentIds.length > 0) {
+      repos.segments.deleteMany(recordedSegmentIds)
+    }
+    return {
+      removedMessageIds: recordedMessageIds,
+      removedBranchIds: recordedBranchIds,
+      affectedFileIds,
+      notify: notifyRef.value
+    }
+  }
+
+  /**
+   * Rebuild the exact rows one paste wrote (redo preimage / undo guard input).
+   *
+   * Messages keep their canonical wire shape (generated ids, remapped refs, and
+   * their authoritative block id order), so a redo re-inserts byte-identical
+   * rows with the same generated IDs.
+   */
+  private buildClipboardTreeInsertedRowsInTx(
+    repos: ChatDbRepositories,
+    plan: ClipboardTreeInsertPlan
+  ): ClipboardTreeInsertedRows {
+    const orderedIds = [
+      ...plan.rootRows.map((row) => row.id),
+      ...plan.branches.flatMap((entry) => entry.rows.map((row) => row.id))
+    ]
+    const messages: MessageData[] = []
+    for (const id of orderedIds) {
+      const live = repos.messages.getById(id)
+      if (!live.found) throw new Error(`clipboard tree inserted message ${id} missing in transaction`)
+      messages.push(live.data)
+    }
+    const blocks: MessageBlockData[] = []
+    for (const block of plan.blocks) {
+      const live = repos.blocks.getById(block.id)
+      if (!live.found) throw new Error(`clipboard tree inserted block ${block.id} missing in transaction`)
+      blocks.push(live.data)
+    }
+    const branches: BranchHistoryRow[] = []
+    for (const entry of plan.branches) {
+      const live = repos.branches.getById(entry.branch.id)
+      if (!live.found) throw new Error(`clipboard tree inserted branch ${entry.branch.id} missing in transaction`)
+      branches.push(toBranchHistoryRow(live.data))
+    }
+    const segments: BranchHistorySegmentRow[] = []
+    for (const entry of plan.segments) {
+      const live = repos.segments.getById(entry.row.id)
+      if (!live.found) throw new Error(`clipboard tree inserted segment ${entry.row.id} missing in transaction`)
+      segments.push({
+        id: live.data.id,
+        name: live.data.name ?? null,
+        createdAt: live.data.createdAt ?? null,
+        updatedAt: live.data.updatedAt ?? null,
+        sortOrder: live.data.sortOrder,
+        headerMessageId: live.data.headerMessageId ?? null,
+        overflow: (live.data.overflow ?? {}) as JsonObject,
+        memberIds: repos.segments.getMessageIds(live.data.id)
+      })
+    }
+    return {
+      messages: reconstructMessageBlockRelations(messagesToWire(messages), blocksToWire(blocks)),
+      blocks: blocksToWire(blocks),
+      branches,
+      segments
+    }
+  }
+
+  /**
+   * Compare a captured clipboard payload with the topic's CURRENT authority
+   * state, before any cut write.
+   *
+   * The payload is self-contained, so this is the guard that a `cut` never
+   * deletes rows the user has since changed: selected groups, included child
+   * branches, captured message/block facts, per-message block order, per-owner
+   * row order, and fully-contained segment membership must all still match.
+   * Any divergence fails closed (CONFLICT) with zero writes.
+   */
+  private assertClipboardTreePayloadMatchesClosureInTx(
+    repos: ChatDbRepositories,
+    payload: ClipboardTreePayload,
+    closure: ClipboardTreeClosure
+  ): void {
+    /**
+     * Declared as a nested function (not a const arrow) so TypeScript's control
+     * flow analysis narrows after every `if (!live) conflict(...)` guard.
+     */
+    function conflict(detail: string): never {
+      throw new ChatDbConflictError(`The captured clipboard tree no longer matches the source topic: ${detail}`)
+    }
+    if (payload.roots.length !== closure.resolvedGroups.length) {
+      conflict('the selected group set changed')
+    }
+    for (let i = 0; i < payload.roots.length; i++) {
+      const capturedRoot = payload.roots[i]
+      const liveGroup = closure.resolvedGroups[i]
+      if (capturedRoot.groupId !== liveGroup.groupId) {
+        conflict(`group ${capturedRoot.groupId} is no longer part of the source route`)
+      }
+      const liveIds = liveGroup.rows.map((row) => row.id)
+      if (
+        capturedRoot.messageIds.length !== liveIds.length ||
+        capturedRoot.messageIds.some((id, index) => id !== liveIds[index])
+      ) {
+        conflict(`group ${capturedRoot.groupId} changed`)
+      }
+    }
+    const liveBranchById = new Map(closure.branches.map((entry) => [entry.data.id, entry.data]))
+    if (payload.branches.length !== liveBranchById.size) {
+      conflict('the included child branches changed')
+    }
+    for (const branch of payload.branches) {
+      const live = liveBranchById.get(branch.sourceBranchId)
+      if (!live) {
+        conflict(`child branch ${branch.sourceBranchId} is no longer included`)
+      }
+      if (
+        (live.parentBranchId ?? null) !== (branch.parentSourceBranchId ?? null) ||
+        live.anchorMessageId !== branch.anchorMessageId ||
+        (live.name ?? null) !== (branch.name ?? null)
+      ) {
+        conflict(`child branch ${branch.sourceBranchId} changed`)
+      }
+    }
+    const liveMessageById = new Map(closure.capturedMessages.map((row) => [row.id, row]))
+    if (payload.messages.length !== liveMessageById.size) {
+      conflict('the captured message set changed')
+    }
+    const capturedIds = [...closure.capturedMessageIds]
+    const liveBlockMap = repos.blocks.listByMessages(capturedIds)
+    const liveBlockById = new Map<string, MessageBlockData>()
+    for (const id of capturedIds) {
+      for (const block of liveBlockMap.get(id) ?? []) liveBlockById.set(block.id, block)
+    }
+    if (payload.blocks.length !== liveBlockById.size) {
+      conflict('the captured block set changed')
+    }
+    for (const wire of payload.blocks as unknown as Array<Record<string, unknown>>) {
+      const live = liveBlockById.get(String(wire.id))
+      if (!live) {
+        conflict(`block ${String(wire.id)} is no longer captured`)
+      }
+      if (this.clipboardTreeBlockFacts(toBlockHistoryRow(live)) !== this.clipboardTreeWireBlockFacts(wire)) {
+        conflict(`block ${String(wire.id)} changed`)
+      }
+    }
+    const payloadOrderByOwner = new Map<string, string[]>()
+    for (const wire of payload.messages as unknown as Array<Record<string, unknown>>) {
+      const id = String(wire.id)
+      const live = liveMessageById.get(id)
+      if (!live) {
+        conflict(`message ${id} is no longer captured`)
+      }
+      if (this.clipboardTreeMessageFacts(toMessageHistoryRow(live)) !== this.clipboardTreeWireMessageFacts(wire)) {
+        conflict(`message ${id} changed`)
+      }
+      const recordedBlockIds = Array.isArray(wire.blocks)
+        ? (wire.blocks as unknown[]).map((value) => String(value))
+        : []
+      const liveBlockOrder = (liveBlockMap.get(id) ?? []).map((block) => block.id)
+      if (
+        recordedBlockIds.length !== liveBlockOrder.length ||
+        recordedBlockIds.some((blockId, index) => blockId !== liveBlockOrder[index])
+      ) {
+        conflict(`the blocks of message ${id} changed`)
+      }
+      const ownerKey = typeof wire.branchId === 'string' ? wire.branchId : ''
+      const order = payloadOrderByOwner.get(ownerKey) ?? []
+      order.push(id)
+      payloadOrderByOwner.set(ownerKey, order)
+    }
+    const ownerIds: Array<string | null> = [closure.branchId, ...closure.branches.map((entry) => entry.data.id)]
+    for (const owner of ownerIds) {
+      const liveOrder = repos.messages
+        .listByTopic(closure.topicId, owner)
+        .map((row) => row.id)
+        .filter((id) => closure.capturedMessageIds.has(id))
+      const recordedOrder = payloadOrderByOwner.get(owner ?? '') ?? []
+      if (liveOrder.length !== recordedOrder.length || liveOrder.some((id, index) => id !== recordedOrder[index])) {
+        conflict(`the captured rows of route ${owner ?? 'main'} changed order`)
+      }
+    }
+    const liveSegmentById = new Map(closure.segments.map((entry) => [entry.data.id, entry]))
+    if (payload.segments.length !== liveSegmentById.size) {
+      conflict('the captured segment set changed')
+    }
+    for (const segment of payload.segments) {
+      const live = liveSegmentById.get(segment.sourceSegmentId)
+      if (!live) {
+        conflict(`segment ${segment.sourceSegmentId} is no longer captured`)
+      }
+      if (
+        (live.data.headerMessageId ?? null) !== (segment.headerMessageId ?? null) ||
+        (live.data.name ?? null) !== (segment.name ?? null)
+      ) {
+        conflict(`segment ${segment.sourceSegmentId} changed`)
+      }
+      if (
+        live.memberIds.length !== segment.memberIds.length ||
+        live.memberIds.some((id, index) => id !== segment.memberIds[index])
+      ) {
+        conflict(`the membership of segment ${segment.sourceSegmentId} changed`)
+      }
+    }
+  }
+
+  /**
+   * Verify the source rows a captured cut removes are still exactly what the
+   * snapshot recorded (redo direction), so a replay never deletes rows that were
+   * changed or re-created after the operation.
+   */
+  private assertClipboardTreeSourceRemovalCurrentInTx(
+    repos: ChatDbRepositories,
+    removal: ClipboardTreeSourceRemoval
+  ): void {
+    const topic = repos.topics.getById(removal.topicId)
+    if (!topic.found) {
+      throw new ChatDbNotFoundError(`Topic ${removal.topicId} does not exist`)
+    }
+    if (topic.data.deletedAt != null) {
+      throw new ChatDbValidationError(`Topic ${removal.topicId} is in the trash; the cut can no longer be replayed`)
+    }
+    const capturedBranchIds = new Set(removal.branches.map((row) => row.id))
+    for (const row of removal.branches) {
+      const live = repos.branches.getById(row.id)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Branch ${row.id} is missing; the cut can no longer be replayed`)
+      }
+      if (
+        (live.data.parentBranchId ?? null) !== (row.parentBranchId ?? null) ||
+        live.data.anchorMessageId !== row.anchorMessageId ||
+        (live.data.name ?? null) !== (row.name ?? null)
+      ) {
+        throw new ChatDbConflictError(`Branch ${row.id} changed; the cut can no longer be replayed`)
+      }
+    }
+    for (const live of repos.branches.listByTopic(removal.topicId)) {
+      if (capturedBranchIds.has(live.id)) continue
+      const parent = live.parentBranchId ?? null
+      if (parent !== null && capturedBranchIds.has(parent)) {
+        throw new ChatDbConflictError(
+          `Branch ${live.id} was created under captured branch ${parent}; the cut can no longer be replayed`
+        )
+      }
+    }
+    for (const row of removal.messages) {
+      const live = repos.messages.getInTopic(row.id, removal.topicId)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Message ${row.id} is missing; the cut can no longer be replayed`)
+      }
+      if ((live.data.branchId ?? null) !== (row.branchId ?? null)) {
+        throw new ChatDbConflictError(`Message ${row.id} changed owner; the cut can no longer be replayed`)
+      }
+      if (this.clipboardTreeMessageFacts(toMessageHistoryRow(live.data)) !== this.clipboardTreeMessageFacts(row)) {
+        throw new ChatDbConflictError(`Message ${row.id} changed; the cut can no longer be replayed`)
+      }
+    }
+    const liveBlockMap = repos.blocks.listByMessages(removal.messages.map((row) => row.id))
+    const liveBlockIds: string[] = []
+    for (const row of removal.messages) {
+      for (const block of liveBlockMap.get(row.id) ?? []) liveBlockIds.push(block.id)
+    }
+    this.assertClipboardTreeSameIdSet(
+      liveBlockIds,
+      removal.blocks.map((row) => row.id),
+      'the blocks of the captured rows'
+    )
+    for (const row of removal.blocks) {
+      const live = repos.blocks.getById(row.id)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Block ${row.id} is missing; the cut can no longer be replayed`)
+      }
+      if (this.clipboardTreeBlockFacts(toBlockHistoryRow(live.data)) !== this.clipboardTreeBlockFacts(row)) {
+        throw new ChatDbConflictError(`Block ${row.id} changed; the cut can no longer be replayed`)
+      }
+    }
+    this.assertClipboardTreeSameIdSet(
+      repos.fileRefs.listByMessages(removal.messages.map((row) => row.id)).map((row) => row.id),
+      removal.fileReferences.map((row) => row.id),
+      'the file references of the captured rows'
+    )
+    for (const segment of removal.segments) {
+      const live = repos.segments.getById(segment.id)
+      if (!live.found) {
+        throw new ChatDbConflictError(`Segment ${segment.id} is missing; the cut can no longer be replayed`)
+      }
+      const liveMembers = repos.segments.getMessageIds(segment.id)
+      const recordedMembers = segment.memberIds ?? []
+      if (
+        (live.data.headerMessageId ?? null) !== (segment.headerMessageId ?? null) ||
+        (live.data.name ?? null) !== (segment.name ?? null) ||
+        liveMembers.length !== recordedMembers.length ||
+        liveMembers.some((id, index) => id !== recordedMembers[index])
+      ) {
+        throw new ChatDbConflictError(`Segment ${segment.id} changed; the cut can no longer be replayed`)
+      }
+    }
+    const capturedMessageIdSet = new Set(removal.messages.map((row) => row.id))
+    for (const owner of removal.ownerOrders ?? []) {
+      const recordedIds = owner.orderedIds ?? []
+      const recordedSet = new Set(recordedIds)
+      const liveIds = repos.messages.listByTopic(removal.topicId, owner.branchId).map((row) => row.id)
+      for (const id of recordedIds) {
+        if (!capturedMessageIdSet.has(id)) continue
+        if (!liveIds.includes(id)) {
+          throw new ChatDbConflictError(`Message ${id} is missing; the cut can no longer be replayed`)
+        }
+      }
+      const liveSurvivors = liveIds.filter((id) => !capturedMessageIdSet.has(id))
+      const recordedSurvivors = recordedIds.filter((id) => !capturedMessageIdSet.has(id) && recordedSet.has(id))
+      if (
+        liveSurvivors.length !== recordedSurvivors.length ||
+        liveSurvivors.some((id, index) => id !== recordedSurvivors[index])
+      ) {
+        throw new ChatDbConflictError(`Route ${owner.branchId ?? 'main'} changed; the cut can no longer be replayed`)
+      }
+    }
+  }
+
+  /** Reject a redo while any row the paste wrote is still present. */
+  private assertClipboardTreeInsertAbsentInTx(repos: ChatDbRepositories, snapshot: ClipboardTreeSnapshot): void {
+    for (const wire of snapshot.inserted.messages as unknown as Array<Record<string, unknown>>) {
+      if (repos.messages.getById(String(wire.id)).found) {
+        throw new ChatDbConflictError(`Message ${String(wire.id)} already exists; the paste can no longer be redone`)
+      }
+    }
+    for (const wire of snapshot.inserted.blocks as unknown as Array<Record<string, unknown>>) {
+      if (repos.blocks.getById(String(wire.id)).found) {
+        throw new ChatDbConflictError(`Block ${String(wire.id)} already exists; the paste can no longer be redone`)
+      }
+    }
+    for (const row of snapshot.inserted.branches) {
+      if (repos.branches.exists(row.id)) {
+        throw new ChatDbConflictError(`Branch ${row.id} already exists; the paste can no longer be redone`)
+      }
+    }
+    for (const row of snapshot.inserted.segments) {
+      if (repos.segments.getById(row.id).found) {
+        throw new ChatDbConflictError(`Segment ${row.id} already exists; the paste can no longer be redone`)
+      }
+    }
+  }
+
+  /**
+   * Resolve the redo insertion index from the recorded neighbours.
+   *
+   * The recorded `prevOwnerMessageId`/`nextOwnerMessageId` still have to be
+   * adjacent in the target route's owner order; any later insert in between is
+   * newer state and rejects the redo instead of overwriting it.
+   *
+   * A delete snapshot carries no insert, so there is no index to resolve: the
+   * redo guard is the source-removal currency check and the index is vacuous.
+   */
+  private resolveClipboardTreeReplayIndexInTx(repos: ChatDbRepositories, snapshot: ClipboardTreeSnapshot): number {
+    const placement = snapshot.placement
+    if (snapshot.mode === 'delete') return 0
+    const ownerRows = repos.messages.listByTopic(placement.topicId, placement.branchId ?? null)
+    const prev = placement.prevOwnerMessageId ?? null
+    const next = placement.nextOwnerMessageId ?? null
+    if (prev === null) {
+      const first = ownerRows[0]?.id ?? null
+      if (first !== next) {
+        throw new ChatDbConflictError('The target route changed; the paste can no longer be redone')
+      }
+      return 0
+    }
+    const index = ownerRows.findIndex((row) => row.id === prev)
+    if (index === -1) {
+      throw new ChatDbConflictError('The target route changed; the paste can no longer be redone')
+    }
+    const actualNext = ownerRows[index + 1]?.id ?? null
+    if (actualNext !== next) {
+      throw new ChatDbConflictError('The target route changed; the paste can no longer be redone')
+    }
+    return index + 1
+  }
+
+  /**
+   * Pre-cut survivor order of the placement owner, or null when the snapshot is
+   * not a same-topic cut whose source route is the placement route.
+   *
+   * Only that case leaves unrelated rows inside the owner the paste wrote into,
+   * so `removeClipboardTreeTargetInTx` relaxes its strict owner-set comparison
+   * to "recorded rows present + survivors unchanged in order" exactly there.
+   */
+  private clipboardTreeSharedOwnerSurvivors(
+    snapshot: ClipboardTreeSnapshot,
+    topicId: string,
+    route: string | null,
+    recordedMessageIdSet: Set<string>
+  ): string[] | null {
+    const removal = snapshot.sourceRemoved
+    if (removal === null) return null
+    if (removal.topicId !== topicId) return null
+    if ((removal.branchId ?? null) !== route) return null
+    const ownerOrder = removal.ownerOrders.find((entry) => (entry.branchId ?? null) === route)
+    if (ownerOrder === undefined) return null
+    const captured = new Set(removal.messages.map((row) => row.id))
+    return ownerOrder.orderedIds.filter((id) => !captured.has(id) && !recordedMessageIdSet.has(id))
+  }
+
+  /**
+   * Undo guard for the placement route itself.
+   *
+   * The placement route is the one owner that legitimately already held rows
+   * before the operation — a copy into a populated topic/route, or a cut whose
+   * source is a different topic. Requiring the route to contain nothing but the
+   * pasted run would make every such undo impossible, while comparing the whole
+   * route would reject unrelated later work. The guard is therefore scoped to
+   * exactly what the operation wrote: every recorded row is still live, still in
+   * the recorded order, still one contiguous run, and still flanked by the
+   * recorded neighbours. A later insert between a neighbour and the run, a
+   * deletion of a recorded row or a reorder inside the run all break that and
+   * fail closed before any write; pre-existing rows outside the run are never
+   * required to be unchanged.
+   *
+   * A same-topic cut pasted back into its own source route additionally holds
+   * the survivors the cut left behind, so that case keeps the stricter pre-cut
+   * survivor-order comparison supplied by `sharedOwnerSurvivors`.
+   */
+  private assertClipboardTreePlacementScope(
+    placement: ClipboardTreePlacement,
+    liveIds: string[],
+    recordedForOwner: string[],
+    sharedOwnerSurvivors: string[] | null
+  ): void {
+    const routeLabel = placement.branchId ?? 'main'
+    const recordedSet = new Set(recordedForOwner)
+    const livePasted = liveIds.filter((id) => recordedSet.has(id))
+    this.assertClipboardTreeSameIdSet(livePasted, recordedForOwner, `the rows the paste wrote into route ${routeLabel}`)
+    if (sharedOwnerSurvivors !== null) {
+      const liveSurvivors = liveIds.filter((id) => !recordedSet.has(id))
+      if (
+        liveSurvivors.length !== sharedOwnerSurvivors.length ||
+        liveSurvivors.some((id, index) => id !== sharedOwnerSurvivors[index])
+      ) {
+        throw new ChatDbConflictError(`Route ${routeLabel} changed after the cut; it can no longer be undone`)
+      }
+      return
+    }
+    const indexes: number[] = []
+    for (let index = 0; index < liveIds.length; index++) {
+      if (recordedSet.has(liveIds[index])) indexes.push(index)
+    }
+    const first = indexes[0] ?? -1
+    const last = indexes[indexes.length - 1] ?? -1
+    const contiguous = indexes.every((index, offset) => index === first + offset)
+    const ordered = indexes.every((index, offset) => liveIds[index] === recordedForOwner[offset])
+    const actualPrev = first > 0 ? liveIds[first - 1] : null
+    const actualNext = last >= 0 && last + 1 < liveIds.length ? liveIds[last + 1] : null
+    // The head-side neighbour pins where the run sits, so a newer row written
+    // between it and the run is drift. The tail side only pins the run when the
+    // paste landed before an existing row: a run at the route tail may be
+    // followed by newer rows, which the undo never touches.
+    const expectedNext = placement.nextOwnerMessageId ?? null
+    if (
+      !contiguous ||
+      !ordered ||
+      actualPrev !== (placement.prevOwnerMessageId ?? null) ||
+      (expectedNext !== null && actualNext !== expectedNext)
+    ) {
+      throw new ChatDbConflictError(`Route ${routeLabel} changed after the paste; it can no longer be undone`)
+    }
+  }
+
+  private assertClipboardTreeSameIdSet(actual: string[], expected: string[], what: string): void {
+    const actualSet = new Set(actual)
+    const expectedSet = new Set(expected)
+    let same = actualSet.size === expectedSet.size
+    if (same) {
+      for (const id of expectedSet) {
+        if (!actualSet.has(id)) {
+          same = false
+          break
+        }
+      }
+    }
+    if (!same) {
+      throw new ChatDbConflictError(`${what} changed since the operation; it can no longer be replayed`)
+    }
+  }
+
+  private clipboardTreeMessageFacts(row: BranchHistoryMessageRow): string {
+    // `sortOrder` is deliberately excluded: an unrelated insert elsewhere in the
+    // same route renumbers it without changing the row, and the owner-order
+    // guards cover real reordering.
+    //
+    // The `blocks` key inside `overflow` is the renderer's derived block-id echo
+    // (`message.blocks`), never authority: an ordinary group insert persists it
+    // into `messages.extra`, while a tree paste writes the relational rows only
+    // and never re-emits it, so a raw comparison would report an untouched
+    // source row as changed. It is stripped on BOTH sides here (live rows and
+    // captured wires both funnel through this one projection) so the facts stay
+    // comparable. Real block drift is still guarded — block rows are compared
+    // field-by-field, and each message's block ORDER is compared against the
+    // live relation separately.
+    const overflow: Record<string, unknown> = { ...((row.overflow ?? {}) as Record<string, unknown>) }
+    delete overflow.blocks
+    return clipboardStableJson({
+      id: row.id,
+      topicId: row.topicId,
+      branchId: row.branchId ?? null,
+      role: row.role ?? null,
+      content: row.content ?? null,
+      status: row.status ?? null,
+      askId: row.askId ?? null,
+      model: row.model ?? null,
+      modelId: row.modelId ?? null,
+      assistantId: row.assistantId ?? null,
+      createdAt: row.createdAt ?? null,
+      updatedAt: row.updatedAt ?? null,
+      overflow
+    })
+  }
+
+  private clipboardTreeWireMessageFacts(wire: Record<string, unknown>): string {
+    const copy = { ...wire }
+    delete copy.blocks
+    return this.clipboardTreeMessageFacts(toMessageHistoryRow(wireToMessage(copy as JsonObject)))
+  }
+
+  private clipboardTreeBlockFacts(row: BranchHistoryBlockRow): string {
+    return clipboardStableJson({
+      id: row.id,
+      messageId: row.messageId,
+      type: row.type ?? null,
+      content: row.content ?? null,
+      status: row.status ?? null,
+      createdAt: row.createdAt ?? null,
+      updatedAt: row.updatedAt ?? null,
+      overflow: row.overflow ?? {}
+    })
+  }
+
+  private clipboardTreeWireBlockFacts(wire: Record<string, unknown>): string {
+    return this.clipboardTreeBlockFacts(toBlockHistoryRow(wireToBlock({ ...wire } as JsonObject)))
+  }
+
+  /**
+   * Route-scoped projection delta of ONE run of rows this transaction installed.
+   *
+   * The wires are the canonical rows already built for the command response (or
+   * read back inside the same transaction), so the delta never re-derives row
+   * content: `messages`/`blocks` are restricted to the run's own rows, and
+   * `mutableMessageIds` is the subset of the run that this route OWNS (a run row
+   * owned by another route is visible only through inheritance and is therefore
+   * not mutable through `branchId`). A consumer merges the run into the window
+   * of that route it already holds; nothing here is a whole-route image.
+   */
+  private clipboardTreeInsertProjection(args: {
+    topicId: string
+    branchId: string | null
+    runMessageIds: readonly string[]
+    beforeMessageId: string | null
+    nextMessageId: string | null
+    messages: readonly JsonObject[]
+    blocks: readonly JsonObject[]
+  }): ClipboardTreeRouteProjection | null {
+    const runIds: string[] = []
+    for (const id of args.runMessageIds) {
+      if (typeof id === 'string' && id.length > 0 && !runIds.includes(id)) runIds.push(id)
+    }
+    if (runIds.length === 0) return null
+    const runSet = new Set(runIds)
+    const owner = this.normalizeBranchId(args.branchId)
+    const messages: JsonObject[] = []
+    const mutableMessageIds: string[] = []
+    for (const wire of args.messages) {
+      const row = wire as Record<string, unknown>
+      const id = typeof row.id === 'string' ? row.id : ''
+      if (!runSet.has(id)) continue
+      messages.push(wire)
+      if (this.normalizeBranchId(row.branchId as string | null | undefined) === owner) mutableMessageIds.push(id)
+    }
+    if (messages.length === 0) return null
+    const blocks = args.blocks.filter((wire) => {
+      const row = wire as Record<string, unknown>
+      return typeof row.messageId === 'string' && runSet.has(row.messageId)
+    })
+    return {
+      topicId: args.topicId,
+      branchId: owner,
+      removedMessageIds: [],
+      insertedRuns: [
+        {
+          messageIds: runIds,
+          beforeMessageId: args.beforeMessageId,
+          nextMessageId: args.nextMessageId
+        }
+      ],
+      mutableMessageIds,
+      messages,
+      blocks
+    }
+  }
+
+  /**
+   * Owner-scoped removal deltas of ONE command: one delta per route that lost
+   * rows of its OWN order. Rows of a removed branch belong to that branch, not
+   * to the route the cut was captured from, so a consumer displaying a
+   * descendant route intersects exactly the rows authority no longer has while
+   * its own surviving prefix stays untouched.
+   */
+  private clipboardTreeRemovalProjections(
+    topicId: string,
+    rows: ReadonlyArray<{ id: string; branchId?: string | null }>
+  ): ClipboardTreeRouteProjection[] {
+    const byOwner = new Map<string | null, string[]>()
+    for (const row of rows) {
+      const id = typeof row?.id === 'string' ? row.id : ''
+      if (id.length === 0) continue
+      const owner = this.normalizeBranchId(row.branchId ?? null)
+      const ids = byOwner.get(owner)
+      if (ids) ids.push(id)
+      else byOwner.set(owner, [id])
+    }
+    const projections: ClipboardTreeRouteProjection[] = []
+    for (const [branchId, removedMessageIds] of byOwner) {
+      projections.push({
+        topicId,
+        branchId,
+        removedMessageIds,
+        insertedRuns: [],
+        mutableMessageIds: [],
+        messages: [],
+        blocks: []
+      })
+    }
+    return projections
+  }
+
+  /**
+   * Restore runs of ONE owner order: every maximal consecutive run of restored
+   * ids, with the recorded surviving neighbours it sat between (`null` = that
+   * owner's head/tail). The recorded order is the pre-removal authority order,
+   * so a consumer holding a window of that owner's route can place the run
+   * exactly where authority put it back and never by a numeric index.
+   */
+  private clipboardTreeRestoreRuns(
+    ownerOrders: ReadonlyArray<{ branchId: string | null; orderedIds: string[] }>,
+    restoredIds: ReadonlySet<string>
+  ): Map<string | null, ClipboardTreeProjectionRun[]> {
+    const runsByOwner = new Map<string | null, ClipboardTreeProjectionRun[]>()
+    for (const owner of ownerOrders) {
+      const ownerKey = this.normalizeBranchId(owner.branchId)
+      const ordered = Array.isArray(owner.orderedIds) ? owner.orderedIds : []
+      const runs: ClipboardTreeProjectionRun[] = []
+      let current: ClipboardTreeProjectionRun | null = null
+      for (let index = 0; index < ordered.length; index++) {
+        const id = ordered[index]
+        if (typeof id === 'string' && restoredIds.has(id)) {
+          if (current === null) {
+            const previous = index > 0 ? ordered[index - 1] : null
+            current = {
+              messageIds: [id],
+              beforeMessageId: typeof previous === 'string' && previous.length > 0 ? previous : null,
+              nextMessageId: null
+            }
+          } else {
+            current.messageIds.push(id)
+          }
+          continue
+        }
+        if (current !== null) {
+          current.nextMessageId = typeof id === 'string' && id.length > 0 ? id : null
+          runs.push(current)
+          current = null
+        }
+      }
+      if (current !== null) runs.push(current)
+      if (runs.length > 0) runsByOwner.set(ownerKey, runs)
+    }
+    return runsByOwner
+  }
+
+  /**
+   * Canonical wires (rows plus their block wires) of exactly these message ids,
+   * read back inside the transaction that just restored/inserted them. Used when
+   * the delta's rows are not carried by the command's own insert plan (a replay
+   * restore), so a consumer never re-derives row content.
+   */
+  private clipboardTreeWiresInTx(
+    repos: ChatDbRepositories,
+    messageIds: readonly string[]
+  ): { messages: JsonObject[]; blocks: JsonObject[] } {
+    const ids: string[] = []
+    for (const id of messageIds) {
+      if (typeof id === 'string' && id.length > 0 && !ids.includes(id)) ids.push(id)
+    }
+    if (ids.length === 0) return { messages: [], blocks: [] }
+    const byId = new Map(repos.messages.findByIds(ids).map((row) => [row.id, row]))
+    const rows: MessageData[] = []
+    for (const id of ids) {
+      const row = byId.get(id)
+      if (row) rows.push(row)
+    }
+    if (rows.length === 0) return { messages: [], blocks: [] }
+    const blocksByMessage = repos.blocks.listByMessages(rows.map((row) => row.id))
+    const blockRows: MessageBlockData[] = []
+    for (const row of rows) blockRows.push(...(blocksByMessage.get(row.id) ?? []))
+    const blockWires = blocksToWire(blockRows)
+    return { messages: reconstructMessageBlockRelations(messagesToWire(rows), blockWires), blocks: blockWires }
+  }
+
+  /**
+   * Paste one captured clipboard tree.
+   *
+   * ONE root transaction: target insert (roots on the caller's explicit route,
+   * each included child branch as a fresh branch whose anchor is the mapped
+   * root) plus, for `cut`, the source removal — so a failed insert leaves the
+   * source untouched and a stale source leaves the target untouched. Every
+   * captured row gets an independent fresh ID; `askId`, block references,
+   * branch parents/anchors and segment membership/header all point at the new
+   * IDs, and no shared prefix, ancestor or sibling branch is materialized.
+   *
+   * `cut` fails closed (before any write) when the payload contains an
+   * inherited root (Main never deletes rows it does not own), when the source
+   * topology/content no longer matches the capture, or when the target route
+   * lies inside the removed subtree.
+   */
+  pasteClipboardTree(request: PasteClipboardTreeRequest): ChatDbResult<PasteClipboardTreeResponse> {
+    return wrapResult(() => {
+      const payload = request.payload
+      const targetTopicId = request.target.topicId
+      const targetRoute = this.normalizeBranchId(request.target.branchId)
+      const sourceTopicId = payload.source.topicId
+      const sourceRoute = this.normalizeBranchId(payload.source.branchId)
+      const targetCtx = this.syncCtxForTopic('pasteClipboardTree', targetTopicId, targetRoute)
+      const sourceCtx =
+        request.mode === 'cut' ? this.syncCtxForTopic('pasteClipboardTree', sourceTopicId, sourceRoute) : null
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: PasteClipboardTreeResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const targetTopic = repos.topics.getById(targetTopicId)
+          if (!targetTopic.found) {
+            throw new ChatDbNotFoundError(`Topic ${targetTopicId} does not exist`)
+          }
+          if (targetTopic.data.deletedAt != null) {
+            throw new ChatDbValidationError(`Topic ${targetTopicId} is in the trash and cannot receive a pasted tree`)
+          }
+          if (targetRoute !== null) {
+            this.requireBranchInTx(repos, targetTopicId, targetRoute)
+          }
+          // Source authority state, only for `cut` (a copy is self-contained and
+          // pastes exactly what was captured).
+          let closure: ClipboardTreeClosure | null = null
+          if (request.mode === 'cut') {
+            closure = this.deriveClipboardTreeClosureInTx(
+              repos,
+              sourceTopicId,
+              sourceRoute,
+              payload.roots.map((root) => root.groupId)
+            )
+            if (closure.inheritedRootMessageIds.length > 0) {
+              throw new ChatDbValidationError(
+                `Inherited root message ${closure.inheritedRootMessageIds[0]} is copy-only and cannot be cut`
+              )
+            }
+            this.assertClipboardTreePayloadMatchesClosureInTx(repos, payload, closure)
+            if (sourceTopicId === targetTopicId && targetRoute !== null) {
+              for (const entry of closure.branches) {
+                if (entry.data.id === targetRoute) {
+                  throw new ChatDbValidationError(
+                    `Target branch ${targetRoute} is part of the cut subtree and cannot receive the paste`
+                  )
+                }
+              }
+            }
+          }
+          // Cut preimage is captured BEFORE the target insert so a same-topic cut
+          // still records the pre-operation positions.
+          const capturedSource = closure
+            ? this.captureClipboardTreeSourceRemovalInTx(repos, {
+                topicId: sourceTopicId,
+                branchId: sourceRoute,
+                branchIds: closure.branches.map((entry) => entry.data.id),
+                ownedMessageIds: [
+                  ...closure.rootRows.map((row) => row.id),
+                  ...closure.ownedByBranch.flatMap((entry) => entry.rows.map((row) => row.id))
+                ]
+              })
+            : null
+          const { ownerIndex, ownerStart } = this.resolveClipboardTreeInsertIndexInTx(
+            repos,
+            targetTopicId,
+            targetRoute,
+            request.target.intent as unknown as Record<string, unknown>
+          )
+          const placement: ClipboardTreePlacement = {
+            topicId: targetTopicId,
+            branchId: targetRoute,
+            intent: request.target.intent,
+            ownerIndex,
+            prevOwnerMessageId: ownerIndex > 0 ? (ownerStart[ownerIndex - 1]?.id ?? null) : null,
+            nextOwnerMessageId: ownerStart[ownerIndex]?.id ?? null
+          }
+          const built = this.buildClipboardTreePlanFromPayload(repos, payload, targetTopicId, targetRoute, placement)
+          const insertedOutcome = this.insertClipboardTreePlanInTx(repos, stx, targetCtx, built.plan)
+          if (insertedOutcome.notify) syncNotify = true
+          unsupportedBlockIds.push(...insertedOutcome.unsupportedBlockIds)
+          const inserted = this.buildClipboardTreeInsertedRowsInTx(repos, built.plan)
+          let appliedRemoval: ClipboardTreeSourceRemoval | null = null
+          let sourceFileIds: string[] = []
+          if (capturedSource) {
+            const applied = this.applyClipboardTreeSourceRemovalInTx(repos, tx, stx, sourceCtx, capturedSource.removal)
+            appliedRemoval = applied.removal
+            sourceFileIds = capturedSource.affectedFileIds
+            if (applied.notify) syncNotify = true
+          }
+          // Target route delta: the root run this transaction placed. The wires
+          // are the canonical rows of the same commit; ownership decides the
+          // route-scoped capability the renderer may publish.
+          const targetInsertProjection = this.clipboardTreeInsertProjection({
+            topicId: targetTopicId,
+            branchId: targetRoute,
+            runMessageIds: built.insertedRootMessageIds,
+            beforeMessageId: placement.prevOwnerMessageId,
+            nextMessageId: placement.nextOwnerMessageId,
+            messages: inserted.messages,
+            blocks: inserted.blocks
+          })
+          return {
+            ...buildFileCleanupResult(repos, sourceFileIds),
+            mode: request.mode,
+            targetTopicId,
+            targetBranchId: targetRoute,
+            sourceTopicId,
+            sourceBranchId: sourceRoute,
+            insertedMessageIds: [
+              ...built.plan.rootRows.map((row) => row.id),
+              ...built.plan.branches.flatMap((entry) => entry.rows.map((row) => row.id))
+            ],
+            insertedRootMessageIds: built.insertedRootMessageIds,
+            insertedBranchIds: built.plan.branches.map((entry) => entry.branch.id),
+            insertedSegmentIds: built.plan.segments.map((entry) => entry.row.id),
+            beforeMessageId: placement.prevOwnerMessageId,
+            nextMessageId: placement.nextOwnerMessageId,
+            deletedSourceMessageIds: appliedRemoval?.messages.map((row) => row.id) ?? [],
+            deletedSourceBranchIds: appliedRemoval?.branches.map((row) => row.id) ?? [],
+            idMap: built.idMap,
+            // Projection deltas of THIS transaction, per affected route: the
+            // target route's placed root run (with Main's own ownership fact as
+            // capability) plus every route that lost rows of its own order.
+            projections: [
+              ...(targetInsertProjection ? [targetInsertProjection] : []),
+              ...this.clipboardTreeRemovalProjections(sourceTopicId, appliedRemoval?.messages ?? [])
+            ],
+            snapshot: {
+              kind: 'clipboard-tree',
+              mode: request.mode,
+              idMap: built.idMap,
+              placement,
+              inserted,
+              sourceRemoved: appliedRemoval
+            }
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('pasteClipboardTree', targetCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('pasteClipboardTree', unsupportedBlockIds)
+      return result
+    }, `pasteClipboardTree(${request.target.topicId}, ${request.payload.roots.length} roots, ${request.mode})`)
+  }
+
+  /**
+   * Delete the selected owned messages of ONE explicit route together with the
+   * branch subtrees anchored on them — the same source scope a tree cut would
+   * remove, but with no target insert, no clipboard write and no paste.
+   *
+   * ONE root transaction: resolve the selection closure, capture the removal
+   * preimage, then apply the removal — so any refusal (unknown topic/branch,
+   * inherited root, a non-included branch anchored on the doomed rows) leaves
+   * zero writes. The delete snapshot (`mode: 'delete'`, empty insert) replays
+   * through the existing cut machinery: undo restores the removed rows at
+   * their recorded positions, redo removes them again.
+   */
+  deleteClipboardTree(request: DeleteClipboardTreeRequest): ChatDbResult<DeleteClipboardTreeResponse> {
+    return wrapResult(() => {
+      const topicId = request.topicId
+      const route = this.normalizeBranchId(request.branchId)
+      const sourceCtx = this.syncCtxForTopic('deleteClipboardTree', topicId, route)
+      let syncNotify = false
+      let result: DeleteClipboardTreeResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          if (topic.data.deletedAt != null) {
+            throw new ChatDbValidationError(`Topic ${topicId} is in the trash and cannot be deleted from`)
+          }
+          if (route !== null) {
+            this.requireBranchInTx(repos, topicId, route)
+          }
+          const closure = this.deriveClipboardTreeClosureInTx(repos, topicId, route, request.groupIds)
+          if (closure.inheritedRootMessageIds.length > 0) {
+            throw new ChatDbValidationError(
+              `Inherited root message ${closure.inheritedRootMessageIds[0]} is copy-only and cannot be deleted`
+            )
+          }
+          // A branch outside the doomed forest must never lose its anchor: any
+          // non-included branch still anchored on a captured row refuses the
+          // delete before the first write.
+          const includedBranchIds = new Set(closure.branches.map((entry) => entry.data.id))
+          for (const branch of repos.branches.listByTopic(topicId)) {
+            if (includedBranchIds.has(branch.id)) continue
+            if (closure.capturedMessageIds.has(branch.anchorMessageId)) {
+              throw new ChatDbValidationError(
+                `Branch ${branch.id} anchors on a message this delete would remove; it is outside the deleted subtree`
+              )
+            }
+          }
+          const capturedSource = this.captureClipboardTreeSourceRemovalInTx(repos, {
+            topicId,
+            branchId: route,
+            branchIds: closure.branches.map((entry) => entry.data.id),
+            ownedMessageIds: [
+              ...closure.rootRows.map((row) => row.id),
+              ...closure.ownedByBranch.flatMap((entry) => entry.rows.map((row) => row.id))
+            ]
+          })
+          // Placement pins the doomed span inside its own pre-delete owner
+          // order: the survivors flanking the removed rows. Undo compares the
+          // post-delete route against the recorded survivors; redo of a delete
+          // carries no insert so the index is vacuous.
+          const ownerOrder = capturedSource.removal.ownerOrders.find((entry) => (entry.branchId ?? null) === route)
+          const orderedIds = ownerOrder?.orderedIds ?? []
+          const removedIds = new Set(capturedSource.removal.messages.map((row) => row.id))
+          let ownerIndex = orderedIds.length
+          for (let index = 0; index < orderedIds.length; index++) {
+            if (removedIds.has(orderedIds[index])) {
+              ownerIndex = index
+              break
+            }
+          }
+          let prevOwnerMessageId: string | null = null
+          let nextOwnerMessageId: string | null = null
+          for (let index = ownerIndex - 1; index >= 0; index--) {
+            if (!removedIds.has(orderedIds[index])) {
+              prevOwnerMessageId = orderedIds[index]
+              break
+            }
+          }
+          for (let index = ownerIndex; index < orderedIds.length; index++) {
+            if (!removedIds.has(orderedIds[index])) {
+              nextOwnerMessageId = orderedIds[index]
+              break
+            }
+          }
+          const placement: ClipboardTreePlacement = {
+            topicId,
+            branchId: route,
+            intent: { kind: 'topic-tail' },
+            ownerIndex,
+            prevOwnerMessageId,
+            nextOwnerMessageId
+          }
+          const applied = this.applyClipboardTreeSourceRemovalInTx(repos, tx, stx, sourceCtx, capturedSource.removal)
+          if (applied.notify) syncNotify = true
+          const deletedMessageIds = applied.removal.messages.map((row) => row.id)
+          const deletedBranchIds = applied.removal.branches.map((row) => row.id)
+          const snapshot: ClipboardTreeSnapshot = {
+            kind: 'clipboard-tree',
+            mode: 'delete',
+            idMap: [],
+            placement,
+            inserted: { messages: [], blocks: [], branches: [], segments: [] },
+            sourceRemoved: applied.removal
+          }
+          return {
+            ...buildFileCleanupResult(repos, capturedSource.affectedFileIds),
+            topicId,
+            branchId: route,
+            deletedMessageIds,
+            deletedBranchIds,
+            snapshot,
+            // Route-scoped removal deltas of THIS transaction, owner-scoped
+            // from the removed snapshot rows.
+            projections: this.clipboardTreeRemovalProjections(topicId, applied.removal.messages)
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteClipboardTree', sourceCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      return result
+    }, `deleteClipboardTree(${request.topicId}, ${request.groupIds.length} groups)`)
+  }
+
+  /**
+   * Replay one tree copy/cut: ONE undo entry covering both the target insert and
+   * (for cut) the source removal.
+   *
+   * `undo` removes exactly the recorded target rows and restores the recorded
+   * source rows; `redo` re-inserts the same generated IDs at the recorded
+   * neighbours and removes the source rows again. Both directions compare the
+   * CURRENT affected state with the snapshot first and fail closed with zero
+   * writes on any divergence, so a newer unrelated edit is never overwritten and
+   * an undo never cascades into rows the operation did not create.
+   */
+  replayClipboardTree(request: ReplayClipboardTreeRequest): ChatDbResult<ReplayClipboardTreeResponse> {
+    return wrapResult(() => {
+      const snapshot = request.snapshot
+      const targetTopicId = snapshot.placement.topicId
+      const targetRoute = this.normalizeBranchId(snapshot.placement.branchId)
+      const sourceTopicId = snapshot.sourceRemoved?.topicId ?? null
+      const sourceRoute = snapshot.sourceRemoved ? this.normalizeBranchId(snapshot.sourceRemoved.branchId) : null
+      const targetCtx = this.syncCtxForTopic('replayClipboardTree', targetTopicId, targetRoute)
+      const sourceCtx =
+        sourceTopicId !== null ? this.syncCtxForTopic('replayClipboardTree', sourceTopicId, sourceRoute) : null
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: ReplayClipboardTreeResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const targetTopic = repos.topics.getById(targetTopicId)
+          if (!targetTopic.found) {
+            throw new ChatDbNotFoundError(`Topic ${targetTopicId} does not exist`)
+          }
+          if (request.direction === 'undo') {
+            const removed = this.removeClipboardTreeTargetInTx(repos, tx, stx, targetCtx, snapshot)
+            if (removed.notify) syncNotify = true
+            let restored: { restoredMessageIds: string[]; restoredBranchIds: string[]; affectedFileIds: string[] } = {
+              restoredMessageIds: [],
+              restoredBranchIds: [],
+              affectedFileIds: []
+            }
+            if (snapshot.sourceRemoved) {
+              const sourceTopic = repos.topics.getById(snapshot.sourceRemoved.topicId)
+              if (!sourceTopic.found) {
+                throw new ChatDbNotFoundError(`Topic ${snapshot.sourceRemoved.topicId} does not exist`)
+              }
+              restored = this.restoreClipboardTreeSourceInTx(repos, tx, snapshot.sourceRemoved)
+            }
+            // Projection deltas of THIS transaction: the target rows this undo
+            // removed (owner-scoped, from the recorded wires of the same rows)
+            // plus, per owner, the runs the restore put back at the recorded
+            // positions of that owner's order.
+            const undoneIdSet = new Set(removed.removedMessageIds)
+            const undoneRows = (snapshot.inserted.messages as unknown as Array<Record<string, unknown>>)
+              .map((wire) => ({
+                id: typeof wire.id === 'string' ? wire.id : '',
+                branchId: (wire.branchId ?? null) as string | null
+              }))
+              .filter((row) => row.id.length > 0 && undoneIdSet.has(row.id))
+            const projections: ClipboardTreeRouteProjection[] = [
+              ...this.clipboardTreeRemovalProjections(targetTopicId, undoneRows)
+            ]
+            if (snapshot.sourceRemoved && restored.restoredMessageIds.length > 0) {
+              const restoreWires = this.clipboardTreeWiresInTx(repos, restored.restoredMessageIds)
+              const runsByOwner = this.clipboardTreeRestoreRuns(
+                snapshot.sourceRemoved.ownerOrders ?? [],
+                new Set(restored.restoredMessageIds)
+              )
+              for (const [owner, runs] of runsByOwner) {
+                for (const run of runs) {
+                  const projection = this.clipboardTreeInsertProjection({
+                    topicId: snapshot.sourceRemoved.topicId,
+                    branchId: owner,
+                    runMessageIds: run.messageIds,
+                    beforeMessageId: run.beforeMessageId,
+                    nextMessageId: run.nextMessageId,
+                    messages: restoreWires.messages,
+                    blocks: restoreWires.blocks
+                  })
+                  if (projection) projections.push(projection)
+                }
+              }
+            }
+            return {
+              ...buildFileCleanupResult(repos, [...removed.affectedFileIds, ...restored.affectedFileIds]),
+              direction: 'undo' as const,
+              mode: snapshot.mode,
+              targetTopicId,
+              sourceTopicId,
+              removedMessageIds: removed.removedMessageIds,
+              removedBranchIds: removed.removedBranchIds,
+              restoredMessageIds: restored.restoredMessageIds,
+              restoredBranchIds: restored.restoredBranchIds,
+              projections
+            }
+          }
+          if (targetTopic.data.deletedAt != null) {
+            throw new ChatDbValidationError(`Topic ${targetTopicId} is in the trash and cannot receive a pasted tree`)
+          }
+          if (targetRoute !== null) {
+            this.requireBranchInTx(repos, targetTopicId, targetRoute)
+          }
+          this.assertClipboardTreeInsertAbsentInTx(repos, snapshot)
+          const ownerIndex = this.resolveClipboardTreeReplayIndexInTx(repos, snapshot)
+          if (snapshot.sourceRemoved) {
+            this.assertClipboardTreeSourceRemovalCurrentInTx(repos, snapshot.sourceRemoved)
+          }
+          const plan = this.buildClipboardTreePlanFromSnapshot(snapshot)
+          plan.placement = { ...plan.placement, ownerIndex }
+          const insertedOutcome = this.insertClipboardTreePlanInTx(repos, stx, targetCtx, plan)
+          if (insertedOutcome.notify) syncNotify = true
+          unsupportedBlockIds.push(...insertedOutcome.unsupportedBlockIds)
+          let sourceFileIds: string[] = []
+          if (snapshot.sourceRemoved) {
+            const sourceTopic = repos.topics.getById(snapshot.sourceRemoved.topicId)
+            if (!sourceTopic.found) {
+              throw new ChatDbNotFoundError(`Topic ${snapshot.sourceRemoved.topicId} does not exist`)
+            }
+            sourceFileIds = collectAffectedFileIds(
+              repos.fileRefs.listByMessages(snapshot.sourceRemoved.messages.map((row) => row.id))
+            )
+            const applied = this.applyClipboardTreeSourceRemovalInTx(repos, tx, stx, sourceCtx, snapshot.sourceRemoved)
+            if (applied.notify) syncNotify = true
+          }
+          // Projection deltas of THIS transaction: the target route's placed
+          // root run (rows read back from the same commit) plus every route the
+          // repeated cut removed rows from (owner-scoped from the snapshot rows).
+          const redoWires = this.clipboardTreeWiresInTx(
+            repos,
+            plan.rootRows.map((row) => row.id)
+          )
+          const redoInsertProjection = this.clipboardTreeInsertProjection({
+            topicId: targetTopicId,
+            branchId: targetRoute,
+            runMessageIds: plan.rootRows.map((row) => row.id),
+            beforeMessageId: plan.placement.prevOwnerMessageId,
+            nextMessageId: plan.placement.nextOwnerMessageId,
+            messages: redoWires.messages,
+            blocks: redoWires.blocks
+          })
+          const projections: ClipboardTreeRouteProjection[] = [
+            ...(redoInsertProjection ? [redoInsertProjection] : []),
+            ...(snapshot.sourceRemoved
+              ? this.clipboardTreeRemovalProjections(snapshot.sourceRemoved.topicId, snapshot.sourceRemoved.messages)
+              : [])
+          ]
+          return {
+            ...buildFileCleanupResult(repos, sourceFileIds),
+            direction: 'redo' as const,
+            mode: snapshot.mode,
+            targetTopicId,
+            sourceTopicId,
+            removedMessageIds: snapshot.sourceRemoved?.messages.map((row) => row.id) ?? [],
+            removedBranchIds: snapshot.sourceRemoved?.branches.map((row) => row.id) ?? [],
+            restoredMessageIds: [
+              ...plan.rootRows.map((row) => row.id),
+              ...plan.branches.flatMap((entry) => entry.rows.map((row) => row.id))
+            ],
+            restoredBranchIds: plan.branches.map((entry) => entry.branch.id),
+            projections
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('replayClipboardTree', targetCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('replayClipboardTree', unsupportedBlockIds)
+      return result
+    }, `replayClipboardTree(${request.direction} ${request.snapshot.mode})`)
   }
 
   /**
@@ -6823,18 +9565,11 @@ export class ChatDbAggregateService {
    * - Replaces message membership atomically in one transaction.
    * - Empty membership deletes the segment per repository semantics.
    */
-  upsertSegment(
-    segmentId: string,
-    topicId: string,
-    name: string | null | undefined,
-    messageIds: string[],
-    color: string | null | undefined,
-    branchId?: string | null,
-    folded?: boolean | null
-  ): ChatDbResult<SegmentWire> {
+  upsertSegment(request: UpsertSegmentRequest): ChatDbResult<SegmentWire> {
+    const { segmentId, topicId, name, messageIds, color, folded } = request
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('upsertSegment')
-      const route = this.normalizeBranchId(branchId)
+      const route = request.branchId
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -6996,19 +9731,15 @@ export class ChatDbAggregateService {
    * on every write, so a retired group label can never come back.
    *
    * Group metadata authority: the requester route must be the group head's
-   * owner (absent/null = main route). Another route may read and navigate the
-   * group but never rename it; that mutation fails closed with no writes.
+   * owner (`request.branchId`: null = main route). Another route may read and
+   * navigate the group but never rename it; that mutation fails closed with no
+   * writes.
    *
    * Missing segment: throws ChatDbNotFoundError → ERR_NOT_FOUND.
    * Returns the updated segment wire.
    */
-  updateSegmentMetadata(
-    segmentId: string,
-    name: string | null | undefined,
-    color: string | null | undefined,
-    folded?: boolean | null,
-    branchId?: string | null
-  ): ChatDbResult<SegmentWire> {
+  updateSegmentMetadata(request: UpdateSegmentMetadataRequest): ChatDbResult<SegmentWire> {
+    const { segmentId, name, color, folded, branchId } = request
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('updateSegmentMetadata')
       return this.db.transaction((tx) => {
@@ -7055,10 +9786,11 @@ export class ChatDbAggregateService {
    * Delete a segment. Missing: no-op.
    *
    * Group metadata authority: only the route that owns the group head may
-   * delete the group (`branchId` absent/null = main route). Another route may
+   * delete the group (`request.branchId`: null = main route). Another route may
    * read and navigate it; its delete fails closed with no writes.
    */
-  deleteSegment(segmentId: string, branchId?: string | null): ChatDbResult<null> {
+  deleteSegment(request: DeleteSegmentRequest): ChatDbResult<null> {
+    const { segmentId, branchId } = request
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('deleteSegment')
       return this.db.transaction((tx) => {
@@ -7084,14 +9816,11 @@ export class ChatDbAggregateService {
    * member must be owned by the addressed route. Membership changes never move
    * the group head; only the head leaving the group repairs it.
    */
-  replaceSegmentMembership(
-    segmentId: string,
-    messageIds: string[],
-    branchId?: string | null
-  ): ChatDbResult<SegmentWire | null> {
+  replaceSegmentMembership(request: ReplaceSegmentMembershipRequest): ChatDbResult<SegmentWire | null> {
+    const { segmentId, messageIds, branchId } = request
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('replaceSegmentMembership')
-      const route = this.normalizeBranchId(branchId)
+      const route = branchId
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const segment = repos.segments.getById(segmentId)
@@ -12154,9 +14883,18 @@ export class ChatDbAggregateService {
     topicId: string,
     ownedIds: string[],
     notify: { value: boolean },
-    boundarySnapshots?: InheritanceBoundarySnapshot[]
+    boundarySnapshots?: InheritanceBoundarySnapshot[],
+    /**
+     * Rows that must leave the authority local-only even when the caller holds a
+     * sync context: branch-owned suffix rows are never on the wire, so their
+     * removal carries no delete intent.
+     */
+    localOnlyIds?: string[]
   ): string[] {
-    const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
+    const localOnlySet = new Set(localOnlyIds ?? [])
+    const knownIds = ctx
+      ? ownedIds.filter((id) => !localOnlySet.has(id) && syncService.isKnownEntityInTx(stx, 'message', id))
+      : []
     const refs = repos.fileRefs.listByMessages(ownedIds)
     const affectedFileIds = collectAffectedFileIds(refs)
     for (const seg of repos.segments.listByTopic(topicId)) {

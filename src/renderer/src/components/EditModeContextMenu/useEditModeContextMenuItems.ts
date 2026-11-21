@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { useEditMode } from '@renderer/context/EditModeContext'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
+import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { clearSelection, setSelectedGroupIds } from '@renderer/store/editMode'
 import { setTurnFoldsThunk } from '@renderer/store/thunk/turnFold'
@@ -11,6 +12,78 @@ import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 const menuLogger = loggerService.withContext('EditModeMoveToBranch')
+
+/** Stable empty catalog: an unbranched/unknown topic never churns derived memos. */
+const EMPTY_BRANCHES: readonly TopicBranchWire[] = []
+
+/**
+ * Horizontal offset (px) of the copy/cut/delete submenu popups.
+ *
+ * A submenu popup (`rightTop`: popup top-left ↔ title top-right) naturally
+ * lands its outer edge on the title's right edge — about 5px inside the parent
+ * panel's outer edge (4px dropdown-menu padding + hairline panel borders;
+ * measured: parent panel 502..672, natural submenu 667..880). That natural
+ * spot only overlaps the parent's padding, never a row, but it reads as a
+ * notch. The offset moves the popup exactly past the parent's outer edge so
+ * the two outer borders sit flush (0px): no overlap, no visible seam, and the
+ * pointer travels straight from the parent item into the child panel without
+ * crossing a dead zone. There is deliberately no extra gap — a 4px gap was
+ * the visible seam in the user report. The align engine negates the x offset
+ * when it flips to the other side near the viewport edge (@rc-component/trigger
+ * `useAlign` right-to-left branch), so both directions stay flush with the same
+ * constant and no absolute coordinates are involved.
+ */
+const SUBMENU_EDGE_OFFSET_PX = 5
+const SUBMENU_OFFSET: [number, number] = [SUBMENU_EDGE_OFFSET_PX, 0]
+
+/**
+ * "Including child branches" relevance for the current edit selection.
+ *
+ * True when at least one selected turn carries, among its complete member ids,
+ * the anchor message of a DIRECT child branch of the addressed route
+ * (`parentBranchId === activeBranchId`). The complete branch catalog is the only
+ * input, and it is a UI visibility hint: Main still decides the actual capture.
+ * Every unknown fails closed to `false`:
+ *
+ * - the catalog of this topic was never received (loading/unknown);
+ * - the catalog is incomplete/stale (a branch names a parent it does not hold);
+ * - the resident projection belongs to another route (route mismatch);
+ * - a selected turn cannot be resolved to its member ids.
+ *
+ * Child branches of ANCESTOR levels never qualify: their anchor is not a direct
+ * child of the addressed route, so their subtree is out of the capture's scope.
+ */
+export function hasSelectedChildBranchAnchor(params: {
+  branches: readonly TopicBranchWire[]
+  activeBranchId: string | null
+  catalogKnown: boolean
+  /** The resident projection/capability was published for the addressed route. */
+  projectionRouteAligned: boolean
+  selectedGroupIds: readonly string[]
+  selectedGroups: readonly { messages: readonly { id: string }[] }[]
+}): boolean {
+  if (!params.catalogKnown || !params.projectionRouteAligned) return false
+  if (params.selectedGroupIds.length === 0) return false
+  // A partially resolved selection cannot prove its member ids → fail closed.
+  if (params.selectedGroups.length !== params.selectedGroupIds.length) return false
+
+  const knownBranchIds = new Set(params.branches.map((branch) => branch.id))
+  const anchorMessageIds = new Set<string>()
+  for (const branch of params.branches) {
+    const parentBranchId = branch.parentBranchId ?? null
+    if (parentBranchId !== null && !knownBranchIds.has(parentBranchId)) return false
+    if (parentBranchId === (params.activeBranchId ?? null)) anchorMessageIds.add(branch.anchorMessageId)
+  }
+  if (anchorMessageIds.size === 0) return false
+
+  for (const group of params.selectedGroups) {
+    if (group.messages.length === 0) return false
+    for (const message of group.messages) {
+      if (anchorMessageIds.has(message.id)) return true
+    }
+  }
+  return false
+}
 
 /**
  * Edit-mode context menu items for the message list. Extracted from
@@ -23,10 +96,16 @@ export function useEditModeContextMenuItems(topicId: string) {
   const {
     isEnabled,
     selectedGroupIds,
+    // Resolved selection (loaded projection + cross-window range view). Reused
+    // instead of re-resolving group members locally.
+    selectedGroups,
     handleCopy,
     handleCut,
+    handleCopyWithChildren,
+    handleCutWithChildren,
     handlePaste,
     handleDelete,
+    handleDeleteWithChildren,
     handleUndo,
     handleRedo,
     hasClipboard,
@@ -46,6 +125,9 @@ export function useEditModeContextMenuItems(topicId: string) {
   const catalogKnown = useAppSelector((state) =>
     Object.prototype.hasOwnProperty.call(state.topicBranch?.branchesByTopic ?? {}, topicId)
   )
+  // Complete branch catalog of this logical topic. The stored array keeps its
+  // identity, so an unbranched/unknown topic stays on EMPTY_BRANCHES.
+  const branches = useAppSelector((state) => state.topicBranch?.branchesByTopic?.[topicId] ?? EMPTY_BRANCHES)
 
   const getSelectedMessageIds = useCallback((): string[] => {
     if (selectedGroupIds.length === 0) return []
@@ -368,36 +450,122 @@ export function useEditModeContextMenuItems(topicId: string) {
     const allAskIds = groups.map((g) => g.askId)
     dispatch(setSelectedGroupIds(allAskIds))
   }, [dispatch, groups])
+  // "Including child branches" is a right-click option of the copy/cut actions,
+  // and only while it is actually relevant to the selection.
+  const treeCopyRelevant = useMemo(
+    () =>
+      hasSelectedChildBranchAnchor({
+        branches,
+        activeBranchId: activeRoute,
+        catalogKnown,
+        // The resident projection carries the route it was published for; a
+        // mismatch means the selection may address another route → hide.
+        projectionRouteAligned: (mutableRoute ?? null) === (activeRoute ?? null),
+        selectedGroupIds,
+        selectedGroups
+      }),
+    [branches, activeRoute, catalogKnown, mutableRoute, selectedGroupIds, selectedGroups]
+  )
+  // Cut keeps the existing selection-mutability gate: an inherited/non-writable
+  // selection never gets a tree cut it could not execute (ordinary cut stays
+  const treeCutRelevant = treeCopyRelevant && isSelectionMutable
+  // Delete with children is offered on exactly the same relevance terms as the
+  // tree cut: a child-branch anchor on the selection plus a writable selection.
+  // The ordinary delete stays available with its usual disabled state.
+  const treeDeleteRelevant = treeCopyRelevant && isSelectionMutable
 
   const items: MenuProps['items'] = useMemo(() => {
     if (!isEnabled) return []
 
+    // Relevant tree capture turns the action into a submenu: the ordinary action
+    // stays available, the "including child branches" variant is one level in.
+    // The submenu title only expands (no `onClick`): it never performs the action
+    // itself, and its popup sits flush with the parent panel edge (no overlap,
+    // no seam) on either side.
+    const copyItem = treeCopyRelevant
+      ? {
+          key: 'copy',
+          label: t('editMode.contextMenu.copy'),
+          popupOffset: SUBMENU_OFFSET,
+          children: [
+            { key: 'copyOrdinary', label: t('editMode.contextMenu.copy'), onClick: handleCopy },
+            {
+              key: 'copyWithChildren',
+              label: t('chat.edit.copyTreeAction'),
+              onClick: handleCopyWithChildren
+            }
+          ]
+        }
+      : {
+          key: 'copy',
+          label: t('editMode.contextMenu.copy'),
+          onClick: handleCopy
+        }
+
+    const cutItem = treeCutRelevant
+      ? {
+          key: 'cut',
+          label: t('editMode.contextMenu.cut'),
+          popupOffset: SUBMENU_OFFSET,
+          children: [
+            {
+              key: 'cutOrdinary',
+              label: t('editMode.contextMenu.cut'),
+              disabled: !isSelectionMutable,
+              onClick: handleCut
+            },
+            {
+              key: 'cutWithChildren',
+              label: t('chat.edit.cutTreeAction'),
+              onClick: handleCutWithChildren
+            }
+          ]
+        }
+      : {
+          key: 'cut',
+          label: t('editMode.contextMenu.cut'),
+          // BRANCH-12: 选集不可变时剪切禁用（copy 保持允许）。
+          disabled: !isSelectionMutable,
+          onClick: handleCut
+        }
+
+    const deleteItem = treeDeleteRelevant
+      ? {
+          key: 'delete',
+          label: t('editMode.contextMenu.delete'),
+          popupOffset: SUBMENU_OFFSET,
+          children: [
+            {
+              key: 'deleteOrdinary',
+              label: t('editMode.contextMenu.delete'),
+              disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
+              onClick: () => void handleDelete()
+            },
+            {
+              key: 'deleteWithChildren',
+              label: t('chat.edit.deleteTreeAction'),
+              onClick: handleDeleteWithChildren
+            }
+          ]
+        }
+      : {
+          key: 'delete',
+          label: t('editMode.contextMenu.delete'),
+          // BRANCH-12: 空选或选集不可变时删除禁用。
+          disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
+          onClick: () => void handleDelete()
+        }
+
     return [
-      {
-        key: 'copy',
-        label: t('editMode.contextMenu.copy'),
-        onClick: handleCopy
-      },
-      {
-        key: 'cut',
-        label: t('editMode.contextMenu.cut'),
-        // BRANCH-12: 选集不可变时剪切禁用（copy 保持允许）。
-        disabled: !isSelectionMutable,
-        onClick: handleCut
-      },
+      copyItem,
+      cutItem,
       {
         key: 'paste',
         label: t('editMode.contextMenu.paste'),
         disabled: !hasClipboard,
         onClick: () => void handlePaste()
       },
-      {
-        key: 'delete',
-        label: t('editMode.contextMenu.delete'),
-        // BRANCH-12: 空选或选集不可变时删除禁用。
-        disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
-        onClick: () => void handleDelete()
-      },
+      deleteItem,
       { type: 'divider' },
       {
         key: 'toggleFoldSelected',
@@ -477,8 +645,14 @@ export function useEditModeContextMenuItems(topicId: string) {
     t,
     handleCopy,
     handleCut,
+    handleCopyWithChildren,
+    handleCutWithChildren,
+    treeCopyRelevant,
+    treeCutRelevant,
+    treeDeleteRelevant,
     handlePaste,
     handleDelete,
+    handleDeleteWithChildren,
     handleCreateSegment,
     handleMerge,
     handleRemoveFromSegment,

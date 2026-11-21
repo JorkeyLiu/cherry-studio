@@ -204,7 +204,8 @@ async function seedRichTopic(page: any): Promise<SeedPlan> {
           segmentId: `${topicId}-seg`,
           topicId,
           name: 'TD Seg',
-          messageIds: [msgIds.u1, msgIds.a1]
+          messageIds: [msgIds.u1, msgIds.a1],
+          branchId: null
         })
         if (!seg || seg.ok !== true) return { ok: false, err: `upsertSegment ${JSON.stringify(seg)}` }
         return { ok: true, msgIds, branchL1, branchL2, branchS1 }

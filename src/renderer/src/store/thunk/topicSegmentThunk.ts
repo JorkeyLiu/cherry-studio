@@ -8,17 +8,7 @@ import { convergeTopicSegmentCatalog, isSegmentCatalogConvergenceError } from '@
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 
 import store, { type AppDispatch, type RootState } from '../index'
-import { selectActiveBranchId } from '../topicBranch'
-
-/** Active route of a logical topic for segment writes (null = main route). */
-const routeOfTopic = (topicId: string, getState?: () => RootState): string | null => {
-  try {
-    const gs = getState ?? store.getState
-    return selectActiveBranchId(gs(), topicId)
-  } catch {
-    return null
-  }
-}
+import { requireActiveRouteOf } from '../routeAnswerGroup'
 
 export const syncSegmentsAfterMessageDeletion = async (
   dispatch: AppDispatch,
@@ -33,20 +23,24 @@ export const syncSegmentsAfterMessageDeletion = async (
   // cut_paste undo target cleanup); omitted retains the existing live-route
   // behavior for ordinary callers. Never re-reads live selection when pinned,
   // so a route switch mid-cleanup cannot retarget the membership write.
-  const route = typeof addressedRoute === 'undefined' ? routeOfTopic(topicId, getState) : addressedRoute
+  const route = typeof addressedRoute === 'undefined' ? requireActiveRouteOf(getState, topicId) : addressedRoute
   let mutated = false
   for (const segId of segmentIds) {
     const segment = state.topicSegments.segments.entities[segId]
     if (!segment) continue
     const newMessageIds = segment.messageIds.filter((id) => !messageIds.includes(id))
     if (newMessageIds.length === 0) {
-      await dbService.deleteSegment(segId)
+      await dbService.deleteSegment({ segmentId: segId, branchId: route })
       mutated = true
     } else if (newMessageIds.length !== segment.messageIds.length) {
       // DB-first: Main mutation only; Redux converges once below through the
       // preserving catalog publication (no raw per-segment dispatches that
       // would invalidate the resident window).
-      await dbService.replaceSegmentMembership(segId, newMessageIds, route)
+      await dbService.replaceSegmentMembership({
+        segmentId: segId,
+        messageIds: newMessageIds,
+        branchId: route
+      })
       mutated = true
     }
   }
@@ -125,27 +119,40 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
 export const saveTopicSegmentThunk = createAsyncThunk<void, TopicSegment>(
   'topicSegments/save',
   async (segment: TopicSegment) => {
-    await dbService.upsertSegment(
-      segment.id,
-      segment.topicId,
-      segment.name,
-      segment.messageIds,
-      segment.color,
-      routeOfTopic(segment.topicId),
-      segment.folded
-    )
+    await dbService.upsertSegment({
+      segmentId: segment.id,
+      topicId: segment.topicId,
+      name: segment.name,
+      messageIds: segment.messageIds,
+      color: segment.color,
+      branchId: requireActiveRouteOf(store.getState, segment.topicId),
+      folded: segment.folded
+    })
   }
 )
 
 export const deleteTopicSegmentThunk = createAsyncThunk<void, string>(
   'topicSegments/delete',
   async (segmentId: string) => {
-    await dbService.deleteSegment(segmentId)
+    const segment = store.getState().topicSegments.segments.entities[segmentId]
+    if (!segment) {
+      throw new Error(`Segment ${segmentId} is not in the loaded catalog; cannot resolve its addressed route`)
+    }
+    await dbService.deleteSegment({
+      segmentId,
+      branchId: requireActiveRouteOf(store.getState, segment.topicId)
+    })
   }
 )
 
 export const clearTopicSegmentsFromDB = async (topicId: string): Promise<void> => {
-  for (const segment of await dbService.listSegments(topicId)) await dbService.deleteSegment(segment.id)
+  // Each delete states the route it addresses: the topic's addressed route.
+  // Groups owned by another route fail closed at Main instead of being
+  // dissolved from the wrong route.
+  const branchId = requireActiveRouteOf(store.getState, topicId)
+  for (const segment of await dbService.listSegments(topicId)) {
+    await dbService.deleteSegment({ segmentId: segment.id, branchId })
+  }
 }
 
 export const removeMessageFromSegmentsThunk = createAsyncThunk<
@@ -154,6 +161,7 @@ export const removeMessageFromSegmentsThunk = createAsyncThunk<
   { dispatch: AppDispatch; state: RootState }
 >('topicSegments/removeMessage', async ({ topicId, messageId }, { dispatch, getState }) => {
   const state = getState()
+  const branchId = requireActiveRouteOf(getState, topicId)
   const segmentIds = state.topicSegments.segmentsByTopic[topicId] || []
   let mutated = false
   for (const segId of segmentIds) {
@@ -161,10 +169,14 @@ export const removeMessageFromSegmentsThunk = createAsyncThunk<
     if (segment && segment.messageIds.includes(messageId)) {
       const newMessageIds = segment.messageIds.filter((id: string) => id !== messageId)
       if (newMessageIds.length === 0) {
-        await dbService.deleteSegment(segId)
+        await dbService.deleteSegment({ segmentId: segId, branchId })
         mutated = true
       } else {
-        await dbService.replaceSegmentMembership(segId, newMessageIds, routeOfTopic(topicId, getState))
+        await dbService.replaceSegmentMembership({
+          segmentId: segId,
+          messageIds: newMessageIds,
+          branchId
+        })
         mutated = true
       }
     }
@@ -232,25 +244,30 @@ export const restoreSegmentsAfterUndo = async (
       // undo source restore); omitted retains the live-route behavior for
       // ordinary callers. Explicit null addresses main; never re-reads live
       // selection when pinned.
-      const replaceRoute = typeof addressedRoute === 'undefined' ? routeOfTopic(snap.topicId, getState) : addressedRoute
-      await dbService.replaceSegmentMembership(snap.id, snap.messageIds, replaceRoute)
+      const replaceRoute =
+        typeof addressedRoute === 'undefined' ? requireActiveRouteOf(getState, snap.topicId) : addressedRoute
+      await dbService.replaceSegmentMembership({
+        segmentId: snap.id,
+        messageIds: snap.messageIds,
+        branchId: replaceRoute
+      })
     } else {
       // Segment was removed (all messages were deleted) — recreate from snapshot.
       // Authority order/boundaries come from Main, not the snapshot guess.
       // Same pinned-route rule as the replace path above.
-      // Same pinned-route rule as the replace path above.
-      const upsertRoute = typeof addressedRoute === 'undefined' ? routeOfTopic(snap.topicId, getState) : addressedRoute
+      const upsertRoute =
+        typeof addressedRoute === 'undefined' ? requireActiveRouteOf(getState, snap.topicId) : addressedRoute
       // Snapshot folded state is restored with its original semantics: a
       // recreate must not silently re-enable folded request context.
-      await dbService.upsertSegment(
-        snap.id,
-        snap.topicId,
-        snap.name,
-        snap.messageIds,
-        snap.color,
-        upsertRoute,
-        snap.folded
-      )
+      await dbService.upsertSegment({
+        segmentId: snap.id,
+        topicId: snap.topicId,
+        name: snap.name,
+        messageIds: snap.messageIds,
+        color: snap.color,
+        branchId: upsertRoute,
+        folded: snap.folded
+      })
     }
   }
 
@@ -312,11 +329,14 @@ export const collectWholeSelectedSegmentsForClipboard = (
  * Delete segments by their snapshots from DB and Redux.
  * Used by undo to remove target segments that were created during paste.
  * Batch convergence through the preserving catalog publication (no raw
- * per-segment removes that would invalidate the resident window).
+ * per-segment removes that would invalidate the resident window). The delete
+ * carries the addressed route the caller pinned (otherwise the topic's live
+ * route).
  */
 export const deleteSegmentsBySnapshots = async (
   dispatch: AppDispatch,
   snapshots: TopicSegment[],
+  addressedRoute?: string | null,
   getState?: () => RootState
 ): Promise<void> => {
   if (!snapshots || snapshots.length === 0) return
@@ -324,7 +344,10 @@ export const deleteSegmentsBySnapshots = async (
   const affectedTopics = new Set<string>()
   for (const snap of snapshots) {
     affectedTopics.add(snap.topicId)
-    await dbService.deleteSegment(snap.id)
+    // Same pinned-route rule as the restore paths: the route the undo actually
+    // addressed when the caller supplies one, otherwise the topic's live route.
+    const branchId = typeof addressedRoute === 'undefined' ? requireActiveRouteOf(gs, snap.topicId) : addressedRoute
+    await dbService.deleteSegment({ segmentId: snap.id, branchId })
   }
   let pendingConvergence: unknown = null
   for (const topicId of affectedTopics) {
@@ -366,9 +389,17 @@ export const restoreTargetSegments = async (
     // ordinary callers. Explicit null addresses main.
     const gsForRoute = getState ?? store.getState
     const route =
-      typeof addressedRoute === 'undefined' ? routeOfTopic(snap.topicId, gsForRoute as () => RootState) : addressedRoute
+      typeof addressedRoute === 'undefined' ? requireActiveRouteOf(gsForRoute, snap.topicId) : addressedRoute
     // Redo/paste target recreate carries the snapshot's folded state verbatim.
-    await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color, route, snap.folded)
+    await dbService.upsertSegment({
+      segmentId: snap.id,
+      topicId: snap.topicId,
+      name: snap.name,
+      messageIds: snap.messageIds,
+      color: snap.color,
+      branchId: route,
+      folded: snap.folded
+    })
   }
   const gs = (getState ?? store.getState) as () => any
   let pendingConvergence: unknown = null

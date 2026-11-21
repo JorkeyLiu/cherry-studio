@@ -120,7 +120,7 @@ describe('retired group-level collapse (topic_segments.extra.folded)', () => {
     const topicId = `t-${uid()}`
     seedTwoTurns(topicId)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u2', 'a2'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u2', 'a2'], branchId: null }))
     stampLegacySegmentFold(segmentId)
 
     const closure = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
@@ -143,7 +143,7 @@ describe('retired group-level collapse (topic_segments.extra.folded)', () => {
     const topicId = `t-${uid()}`
     seedTwoTurns(topicId)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u2', 'a2'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u2', 'a2'], branchId: null }))
     stampLegacySegmentFold(segmentId)
 
     for (const id of ['u2', 'a2']) {
@@ -165,21 +165,32 @@ describe('retired group-level collapse (topic_segments.extra.folded)', () => {
     const topicId = `t-${uid()}`
     seedTwoTurns(topicId)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u1', 'a1'], undefined, undefined, true))
+    okValue(
+      agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u1', 'a1'], branchId: null, folded: true })
+    )
     const repos = createRepositories(db)
     expect(repos.segments.getById(segmentId).data?.overflow).not.toHaveProperty('folded')
 
     stampLegacySegmentFold(segmentId)
 
     // A metadata write strips the retired key while preserving the rest.
-    okValue(agg.updateSegmentMetadata(segmentId, 'Renamed', '#123456'))
+    okValue(agg.updateSegmentMetadata({ segmentId, name: 'Renamed', color: '#123456', branchId: null }))
     const afterMetadata = repos.segments.getById(segmentId).data!
     expect(afterMetadata.overflow).not.toHaveProperty('folded')
     expect(afterMetadata.overflow.color).toBe('#123456')
     expect(afterMetadata.name).toBe('Renamed')
 
     stampLegacySegmentFold(segmentId)
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group again', ['u1', 'a1'], undefined, undefined, false))
+    okValue(
+      agg.upsertSegment({
+        segmentId,
+        topicId,
+        name: 'Group again',
+        messageIds: ['u1', 'a1'],
+        branchId: null,
+        folded: false
+      })
+    )
     const afterUpsert = repos.segments.getById(segmentId).data!
     expect(afterUpsert.overflow).not.toHaveProperty('folded')
     // Membership is untouched by the retirement.

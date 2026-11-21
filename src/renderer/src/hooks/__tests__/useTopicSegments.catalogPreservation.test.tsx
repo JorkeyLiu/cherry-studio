@@ -140,24 +140,22 @@ describe('useTopicSegments mounted-hook catalog preservation — real root store
     const store = configureStore({ reducer: rootReducer })
     const gen = establishResident(store, topicId, ['m1', 'm2', 'm3'], [seg('seg-old', topicId, 0, ['m1'])])
     let createdId = ''
-    ;(dbService.upsertSegment as any).mockImplementation(
-      (id: string, tid: string, name: string, messageIds: string[], color: string) => {
-        createdId = id
-        return Promise.resolve({
-          id,
-          topicId: tid,
-          name,
-          messageIds: [...messageIds],
-          color,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-          sortOrder: 0,
-          firstMessageId: messageIds[0] ?? null,
-          lastMessageId: messageIds[messageIds.length - 1] ?? null,
-          messageCount: messageIds.length
-        })
-      }
-    )
+    ;(dbService.upsertSegment as any).mockImplementation(({ segmentId, topicId, name, messageIds, color }: any) => {
+      createdId = segmentId
+      return Promise.resolve({
+        id: segmentId,
+        topicId,
+        name,
+        messageIds: [...messageIds],
+        color,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: messageIds[0] ?? null,
+        lastMessageId: messageIds[messageIds.length - 1] ?? null,
+        messageCount: messageIds.length
+      })
+    })
     ;(dbService.listSegments as any).mockImplementation((tid: string) =>
       Promise.resolve([seg(createdId, tid, 0, ['m2', 'm3'], 'New'), seg('seg-old', tid, 1, ['m1'])])
     )

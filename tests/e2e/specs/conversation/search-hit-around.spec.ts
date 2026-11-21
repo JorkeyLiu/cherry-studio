@@ -359,13 +359,20 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
       async ({ topicId, segEarlyId, segLateId, earlyName, lateName, earlyIds, lateIds }: Record<string, any>) => {
         try {
           const api: any = (window as any).api.chatDb
-          const late = await api.upsertSegment({ segmentId: segLateId, topicId, name: lateName, messageIds: lateIds })
+          const late = await api.upsertSegment({
+            segmentId: segLateId,
+            topicId,
+            name: lateName,
+            messageIds: lateIds,
+            branchId: null
+          })
           if (!late?.ok) return { ok: false, err: `late upsert ${JSON.stringify(late)}` }
           const early = await api.upsertSegment({
             segmentId: segEarlyId,
             topicId,
             name: earlyName,
-            messageIds: earlyIds
+            messageIds: earlyIds,
+            branchId: null
           })
           if (!early?.ok) return { ok: false, err: `early upsert ${JSON.stringify(early)}` }
           const listed = await api.listSegments({ topicId })

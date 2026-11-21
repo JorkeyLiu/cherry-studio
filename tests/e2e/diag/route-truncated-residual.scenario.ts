@@ -78,7 +78,7 @@ const FN_SEED_SRC = `function () {
     // outside the child effective route; prefix members (u05..u07 turns) are
     // inherited by the child -> true truncated residual on the child route.
     const members = ['u15','a15','u05','a05','u06','a06','u07','a07'].map((k) => topicId + '-' + k)
-    const seg = await api.upsertSegment({ segmentId: segId, topicId, name: 'diag span', messageIds: members })
+    const seg = await api.upsertSegment({ segmentId: segId, topicId, name: 'diag span', messageIds: members, branchId: null })
     if (!seg || seg.ok !== true) return { ok: false, err: 'upsertSegment ' + JSON.stringify(seg) }
     const headId = topicId + '-u15'
     const firstReach = topicId + '-u05'

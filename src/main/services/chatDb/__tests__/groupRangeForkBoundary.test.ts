@@ -140,10 +140,20 @@ describe('group-level range guard — owner equality only', () => {
   function messagePreimage(topicId: string): string {
     return JSON.stringify(sqlite.prepare('SELECT id, extra FROM messages WHERE topic_id = ? ORDER BY id').all(topicId))
   }
-  function segmentRow(segmentId: string): { extra: string | null; header_message_id: string | null } | undefined {
-    return sqlite.prepare('SELECT extra, header_message_id FROM topic_segments WHERE id = ?').get(segmentId) as
-      | { extra: string | null; header_message_id: string | null }
+  function segmentRow(
+    segmentId: string
+  ): { extra: string | null; name: string | null; header_message_id: string | null } | undefined {
+    return sqlite.prepare('SELECT extra, name, header_message_id FROM topic_segments WHERE id = ?').get(segmentId) as
+      | { extra: string | null; name: string | null; header_message_id: string | null }
       | undefined
+  }
+  /** Whole-topic group snapshot: proves a rejected group mutation wrote nothing. */
+  function segmentPreimage(topicId: string): string {
+    return JSON.stringify(
+      sqlite
+        .prepare('SELECT id, name, extra, header_message_id FROM topic_segments WHERE topic_id = ? ORDER BY id')
+        .all(topicId)
+    )
   }
 
   it('root: a multi-turn fold spanning an existing fork is allowed when every row shares the owner', () => {
@@ -186,19 +196,23 @@ describe('group-level range guard — owner equality only', () => {
 
     // Existing group on the left side of the fork.
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Left', ['u1', 'a1'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Left', messageIds: ['u1', 'a1'], branchId: null }))
     expect(segmentRow(segmentId)?.header_message_id).toBe('u1')
 
     // Create across the fork: same owner, so the group is written in full and
     // its head is the first member at creation.
     const newSegmentId = `seg-${uid()}`
-    const created = okValue(agg.upsertSegment(newSegmentId, topicId, 'Across', ['u1', 'u3'], undefined))
+    const created = okValue(
+      agg.upsertSegment({ segmentId: newSegmentId, topicId, name: 'Across', messageIds: ['u1', 'u3'], branchId: null })
+    )
     expect(created.messageIds).toEqual(['u1', 'u3'])
     expect(created.headerMessageId).toBe('u1')
 
     // Membership replacement across the fork: same owner, so it lands and the
     // head follows the first surviving member deterministically.
-    const replaced = okValue(agg.replaceSegmentMembership(segmentId, ['u1', 'a1', 'u3']))
+    const replaced = okValue(
+      agg.replaceSegmentMembership({ segmentId, messageIds: ['u1', 'a1', 'u3'], branchId: null })
+    )
     expect(replaced?.messageIds).toEqual(['u1', 'a1', 'u3'])
     expect(repos.segments.getMessageIds(segmentId)).toEqual(['u1', 'a1', 'u3'])
   })
@@ -231,7 +245,15 @@ describe('group-level range guard — owner equality only', () => {
 
     // A group spanning the child fork on B is written in full.
     const crossingSegmentId = `seg-${uid()}`
-    const created = okValue(agg.upsertSegment(crossingSegmentId, topicId, 'Across', ['bu1', 'bu2'], undefined, b))
+    const created = okValue(
+      agg.upsertSegment({
+        segmentId: crossingSegmentId,
+        topicId,
+        name: 'Across',
+        messageIds: ['bu1', 'bu2'],
+        branchId: b
+      })
+    )
     expect(created.messageIds).toEqual(['bu1', 'bu2'])
     expect(created.headerMessageId).toBe('bu1')
     expect(created.ownerBranchId).toBe(b)
@@ -250,9 +272,9 @@ describe('group-level range guard — owner equality only', () => {
     const repos = createRepositories(db)
 
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'After', ['bu2', 'ba2'], undefined, b))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'After', messageIds: ['bu2', 'ba2'], branchId: b }))
 
-    const replaced = okValue(agg.replaceSegmentMembership(segmentId, ['bu1', 'bu2'], b))
+    const replaced = okValue(agg.replaceSegmentMembership({ segmentId, messageIds: ['bu1', 'bu2'], branchId: b }))
     expect(replaced?.messageIds).toEqual(['bu1', 'bu2'])
     expect(repos.segments.getMessageIds(segmentId)).toEqual(['bu1', 'bu2'])
   })
@@ -290,18 +312,24 @@ describe('group-level range guard — owner equality only', () => {
     // Create mixing B-owned and main-owned rows on route B rejects, and no
     // segment row appears.
     const crossingSegmentId = `seg-${uid()}`
-    const created = agg.upsertSegment(crossingSegmentId, topicId, 'Across', ['bu1', 'u1'], undefined, b)
+    const created = agg.upsertSegment({
+      segmentId: crossingSegmentId,
+      topicId,
+      name: 'Across',
+      messageIds: ['bu1', 'u1'],
+      branchId: b
+    })
     expect(created.ok).toBe(false)
     expect(errorCode(created)).toBe('VALIDATION_ERROR')
     expect(segmentRow(crossingSegmentId)).toBeUndefined()
 
     // A B-owned group cannot be re-membered onto a main-owned row.
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Mine', ['bu1', 'ba1'], undefined, b))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Mine', messageIds: ['bu1', 'ba1'], branchId: b }))
     const membershipBefore = repos.segments.getMessageIds(segmentId)
     const extraBefore = segmentRow(segmentId)?.extra
 
-    const replaced = agg.replaceSegmentMembership(segmentId, ['bu1', 'u1'], b)
+    const replaced = agg.replaceSegmentMembership({ segmentId, messageIds: ['bu1', 'u1'], branchId: b })
     expect(replaced.ok).toBe(false)
     expect(errorCode(replaced)).toBe('VALIDATION_ERROR')
     expect(repos.segments.getMessageIds(segmentId)).toEqual(membershipBefore)
@@ -322,20 +350,69 @@ describe('group-level range guard — owner equality only', () => {
 
     // Main-owned group: head u1 belongs to the main route.
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Main group', ['u1', 'a1'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Main group', messageIds: ['u1', 'a1'], branchId: null }))
 
     // Route B may list and navigate it, but every mutation rejects.
     const listed = okValue(agg.listSegments(topicId, b)).find((s) => s.id === segmentId)
     expect(listed?.route?.headerInRoute).toBe(true)
     expect(listed?.route?.headerOwnedByRoute).toBe(false)
-    expect(agg.updateSegmentMetadata(segmentId, 'Renamed', undefined, undefined, b).ok).toBe(false)
-    expect(agg.deleteSegment(segmentId, b).ok).toBe(false)
-    expect(agg.replaceSegmentMembership(segmentId, ['u2', 'a2'], b).ok).toBe(false)
+    expect(agg.updateSegmentMetadata({ segmentId, name: 'Renamed', branchId: b }).ok).toBe(false)
+    expect(agg.deleteSegment({ segmentId, branchId: b }).ok).toBe(false)
+    expect(agg.replaceSegmentMembership({ segmentId, messageIds: ['u2', 'a2'], branchId: b }).ok).toBe(false)
 
     // The owning route renames, deletes and re-members the same group.
-    expect(okValue(agg.updateSegmentMetadata(segmentId, 'Renamed', undefined)).name).toBe('Renamed')
-    expect(okValue(agg.replaceSegmentMembership(segmentId, ['u2', 'a2']))?.messageIds).toEqual(['u2', 'a2'])
-    expect(agg.deleteSegment(segmentId).ok).toBe(true)
+    expect(okValue(agg.updateSegmentMetadata({ segmentId, name: 'Renamed', branchId: null })).name).toBe('Renamed')
+    expect(
+      okValue(agg.replaceSegmentMembership({ segmentId, messageIds: ['u2', 'a2'], branchId: null }))?.messageIds
+    ).toEqual(['u2', 'a2'])
+    expect(agg.deleteSegment({ segmentId, branchId: null }).ok).toBe(true)
+  })
+
+  it('branch-owned group metadata: the owner route renames and dissolves, foreign routes reject with zero writes', () => {
+    const topicId = `t-${uid()}`
+    seedRoot(topicId)
+    const owner = fork(topicId, null, 'u2')
+    append(topicId, messageJson('bu1', topicId), owner)
+    append(topicId, messageJson('ba1', topicId, { role: 'assistant', askId: 'bu1' }), owner)
+    // A sibling forks off the group's own branch: it inherits those rows and
+    // is therefore a foreign route for the group.
+    const sibling = fork(topicId, owner, 'ba1')
+
+    const segmentId = `seg-${uid()}`
+    const created = okValue(
+      agg.upsertSegment({ segmentId, topicId, name: 'Branch group', messageIds: ['bu1', 'ba1'], branchId: owner })
+    )
+    expect(created.ownerBranchId).toBe(owner)
+    const before = segmentPreimage(topicId)
+
+    // The main route is a foreign route: it may read the group but neither
+    // rename nor dissolve it, and nothing is written.
+    const mainRename = agg.updateSegmentMetadata({ segmentId, name: 'Hijacked', branchId: null })
+    expect(mainRename.ok).toBe(false)
+    expect(errorCode(mainRename)).toBe('VALIDATION_ERROR')
+    const mainDissolve = agg.deleteSegment({ segmentId, branchId: null })
+    expect(mainDissolve.ok).toBe(false)
+    expect(errorCode(mainDissolve)).toBe('VALIDATION_ERROR')
+
+    // The sibling route is foreign too: rename, dissolve and re-member reject.
+    const siblingRename = agg.updateSegmentMetadata({ segmentId, name: 'Hijacked', branchId: sibling })
+    expect(siblingRename.ok).toBe(false)
+    expect(errorCode(siblingRename)).toBe('VALIDATION_ERROR')
+    const siblingDissolve = agg.deleteSegment({ segmentId, branchId: sibling })
+    expect(siblingDissolve.ok).toBe(false)
+    expect(errorCode(siblingDissolve)).toBe('VALIDATION_ERROR')
+    const siblingReplace = agg.replaceSegmentMembership({ segmentId, messageIds: ['bu1'], branchId: sibling })
+    expect(siblingReplace.ok).toBe(false)
+    expect(errorCode(siblingReplace)).toBe('VALIDATION_ERROR')
+
+    expect(segmentPreimage(topicId)).toBe(before)
+    expect(segmentRow(segmentId)?.name).toBe('Branch group')
+
+    // The owning route renames the branch-owned group and dissolves it.
+    expect(okValue(agg.updateSegmentMetadata({ segmentId, name: 'Renamed', branchId: owner })).name).toBe('Renamed')
+    expect(segmentRow(segmentId)?.name).toBe('Renamed')
+    expect(agg.deleteSegment({ segmentId, branchId: owner }).ok).toBe(true)
+    expect(segmentRow(segmentId)).toBeUndefined()
   })
 
   it('context keeps working across a fork: only the same side changes participation', () => {
@@ -380,7 +457,7 @@ describe('group-level range guard — owner equality only', () => {
     // No fork point lies between the remaining rows, so the ranges are allowed.
     expect(okValue(agg.setTurnFolds(topicId, ['u2'], true)).turns[0].messageIds).toEqual(['u2', 'a2'])
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Whole', ['u2', 'a2'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Whole', messageIds: ['u2', 'a2'], branchId: null }))
     expect(createRepositories(db).segments.getMessageIds(segmentId)).toEqual(['u2', 'a2'])
   })
 })

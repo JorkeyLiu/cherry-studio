@@ -72,15 +72,13 @@ import {
   type MessageViewportScrollToken
 } from '@renderer/pages/home/Messages/messageViewportReducer'
 import {
+  applyWindowTransition,
   canAdvancePaginationWindow,
   clampWindowCount,
-  createLatestMessageWindow,
-  derivePaginationWindow,
   getLatestWindowCompleteness,
   isHistoryHeadLoaded,
   mergeWindowIntoTopic,
-  type MessageWindow,
-  reconcileMessageWindow
+  type MessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { anchorKeyForRoute, ensureTopicAnchorEstablished } from '@renderer/services/anchorService'
@@ -223,12 +221,10 @@ import {
 import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
 import { useCrossMessageSelectionGuard } from './messageSelectionGuard'
 import {
-  buildRouteViewport,
   canonicalSavedAnchorId,
   chooseRouteWindowRequest,
   chooseTopFirstPositionPlan,
   claimLoadedRoute,
-  createTargetMessageWindow,
   decideDividerDoubleFailureRecovery,
   decideExternalDoubleFailureRecovery,
   decideTopRestoreAnchor,
@@ -262,6 +258,7 @@ import {
   isViewportLayoutControlTarget,
   isViewportLayoutResizeKey,
   resolveRetainedViewportMessageId,
+  type RouteRef,
   useOptionalRouteViewport,
   useStableVisualAnchor,
   type ViewportLayoutSettler,
@@ -680,6 +677,39 @@ export const runSendBottomIntent = async (
   }
   deps.notifyViewport()
   return { outcome: 'completed-bottom-adopted', routeKey: out.routeKey }
+}
+
+/**
+ * Same-route geometry consequence of an authoritative append committed at the
+ * true physical bottom (tree clipboard paste/replay, batch insertion).
+ *
+ * The `reconcile` window-transition intent decides to follow and mounts the appended tail; the
+ * pinned bottom itself stays the shared keeper's. The keeper pins the bottom only
+ * while it holds no row anchor, and a retained row anchor — the previous resident
+ * tail an older-page pagination left behind, or a region/reading hold — keeps its
+ * offset through the insertion and strands the appended rows below the fold. At
+ * the measured physical bottom there is no reading position to preserve, so the
+ * commit carries the SAME follow verdict from that single reconcile outcome and
+ * suspends the row keeper to the bottom semantic BEFORE the rows mount, through
+ * the existing explicit-bottom suspension (`beginSendBottom`) — no scroll write,
+ * no new effect, no timeout: the keeper's own layout/mutation hold pins the new
+ * bottom through the insertion that follows.
+ *
+ * Fail-closed and single-owner: an in-flight interaction hold outranks the bottom
+ * (its captured region keeps the frame), and a route transition, non-adoptable
+ * phase, dirty provenance, or route mismatch refuses the suspension — the owning
+ * session, never this path, then decides geometry.
+ */
+export const suspendKeeperForAppendedTailBottom = (controller: RouteViewportController, target: RouteRef): boolean => {
+  try {
+    if (controller.activeInteractionIntent) return false
+    // Nothing to suspend: the keeper already holds the bottom semantic (the
+    // common steady state, e.g. one of many streaming tail commits at bottom).
+    if (!controller.getAnchorFor(target)) return false
+    return controller.beginSendBottom(target)
+  } catch {
+    return false
+  }
 }
 
 interface MessagesContentProps {
@@ -1167,13 +1197,16 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
             display: 'flex',
             flexDirection: 'column',
             // Normal flow: DOM order equals visual order (oldest at the top,
-            // newest at the bottom). A short flow is aligned to the bottom of
-            // the scroll host by `marginBlockStart: auto` — the host takes the
-            // available height and this wrapper is pushed to its end. That
+            // newest at the bottom). The flow starts at the top of the scroll
+            // host with its ordinary margins — there is no auto block-start
+            // margin pushing a short flow to the host's end, so a new or short
+            // conversation reads top-down with its first content (Prompt) at
+            // the top instead of being dropped to the bottom of an empty
+            // scrollport. The host still takes the available height and owns
+            // the overflow, so long content scrolls exactly as before. That
             // replaces both the previous reversed direction and the
             // device-pixel `calc-size` rounding wrapper: growing downward from
             // a stable top needs no fractional-zoom rounding hack.
-            marginBlockStart: 'auto',
             flexShrink: 0
           }}>
           {/* Prompts always render; the persisted showPrompt setting is inert. */}
@@ -3049,7 +3082,13 @@ const Messages = ({
           completeness !== undefined
             ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
             : undefined
-        applyMessageWindow(createLatestMessageWindow(messages, displayCount, authoritative))
+        const initialTransition = applyWindowTransition({
+          kind: 'initial',
+          messages,
+          budget: displayCount,
+          ...(authoritative ? { authoritative } : {})
+        })
+        if (initialTransition.kind === 'window') applyMessageWindow(initialTransition.window)
         return
       }
 
@@ -3086,20 +3125,56 @@ const Messages = ({
       // past that row, unmount it, and let the arriving rows displace the view
       // (the region hold then fails closed with nothing to compensate). Naming
       // the held row keeps it resident inside the same bounded capacity by
-      // trimming the far (newer) edge instead — see `createLatestMessageWindow`.
+      // trimming the far (newer) edge instead (retention in the reconcile intent).
       const retainMessageId = resolveRetainedViewportMessageId(controller)
-      const reconciledWindow = reconcileMessageWindow(
+      // Actual physical bottom of the scroll container, read in the SAME layout
+      // phase as the reconcile (never the 50px snapshot vicinity). It is the only
+      // follow intent a bounded reconcile may consume: at the true bottom an
+      // authoritative same-route append (tree paste/replay, batch insertion)
+      // carries the new tail into this window in its own commit, and the keeper's
+      // existing bottom pin (no row anchor) holds it without any gesture. Reading
+      // anywhere else keeps the committed range and its held row unchanged.
+      let atPhysicalBottom = false
+      try {
+        const container = scrollContainerRef.current
+        if (container) atPhysicalBottom = isExactlyAtNewest(readScrollMetrics(container))
+      } catch {
+        atPhysicalBottom = false
+      }
+      const expansionOptions = {
+        ...(retainMessageId ? { retainMessageId } : {}),
+        atPhysicalBottom
+      }
+      // One commit, one decision: the reconcile intent below derives the window
+      // AND the appended-tail follow verdict from the SAME single-model pass,
+      // so the keeper consequence can never disagree with the derivation.
+      // Geometry consequence of that same decision, resolved before the rows
+      // mount: following only mounts the appended tail, while the pinned bottom
+      // stays the shared keeper's. A keeper that still holds a row anchor (the
+      // previous resident tail an older-page pagination left behind is the
+      // common case) keeps that row's offset through the insertion and leaves
+      // the appended rows below the fold, so at the measured physical bottom —
+      // where there is no reading position to preserve — the commit suspends the
+      // row keeper to the bottom semantic first. Pure controller intent: the
+      // keeper's own layout/mutation hold still owns the scroll write.
+      const reconcileTransition = applyWindowTransition({
+        kind: 'reconcile',
         messages,
-        previousMessagesRef.current,
+        previousMessages: previousMessagesRef.current,
         currentWindow,
-        retainMessageId ? { retainMessageId } : undefined
-      )
+        options: expansionOptions
+      })
+      if (reconcileTransition.kind !== 'reconciled') return
+      const reconciledWindow = reconcileTransition.window
       const newDisplayMessages = reconciledWindow.displayMessages
 
       if (
         !areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages) ||
         currentWindow !== reconciledWindow
       ) {
+        if (reconcileTransition.followsAppendedTail) {
+          suspendKeeperForAppendedTailBottom(controller, { topicId: topic.id, route: routeRef.current })
+        }
         applyMessageWindow(reconciledWindow)
       }
     } finally {
@@ -4221,7 +4296,7 @@ const Messages = ({
     (payload?: { topicId?: string }) => {
       void runSendBottomIntent(payload, topic.id, {
         controller,
-        navigateToBottom: () => navigate({ kind: 'bottom', source: 'imperative' }),
+        navigateToBottom: () => navigate({ kind: 'send-bottom', source: 'imperative' }),
         captureSnapshot,
         commitSnapshot: (routeKey, snapshot) => {
           try {
@@ -4604,7 +4679,14 @@ const Messages = ({
                     }
                   : undefined
                 newRouteAuthoritative = authoritative
-                const latestWindow = createLatestMessageWindow(loaded, displayCount, authoritative)
+                const landingTransition = applyWindowTransition({
+                  kind: 'latest',
+                  messages: loaded,
+                  budget: displayCount,
+                  ...(authoritative ? { authoritative } : {})
+                })
+                if (landingTransition.kind !== 'window') return true
+                const latestWindow = landingTransition.window
                 // New-branch landing (route switch, no fetch-hold session):
                 // provenance-bound rebase with window proof — never a bare
                 // dispatch bypassing rendered. No snapshot write: the fresh
@@ -4654,8 +4736,15 @@ const Messages = ({
                 if (newRouteAuthoritative) {
                   const reloaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
                   if (reloaded.length > 0) {
-                    const repaired = createLatestMessageWindow(reloaded, displayCount, newRouteAuthoritative)
-                    viewportDispatch({ type: 'window/apply', window: repaired })
+                    const repairTransition = applyWindowTransition({
+                      kind: 'latest',
+                      messages: reloaded,
+                      budget: displayCount,
+                      authoritative: newRouteAuthoritative
+                    })
+                    if (repairTransition.kind === 'window') {
+                      viewportDispatch({ type: 'window/apply', window: repairTransition.window })
+                    }
                   }
                 }
               } catch {
@@ -5524,7 +5613,8 @@ const Messages = ({
             // exactly as they are — never a merge commit followed by a dropped
             // row. The bounded restore search observes `lastLoadFailed` and
             // terminates instead of waiting for a commit.
-            const transition = derivePaginationWindow({
+            const pageTransition = applyWindowTransition({
+              kind: 'paginate',
               direction,
               messages: acceptedMessages,
               currentWindow: windowAtCommit,
@@ -5532,6 +5622,10 @@ const Messages = ({
               responseWindow: response.window,
               retainMessageId: precommit?.messageId ?? null
             })
+            const transition =
+              pageTransition.kind === 'paginated'
+                ? pageTransition.transition
+                : { status: 'declined' as const, reason: 'retention-exceeds-bound' as const }
             if (transition.status !== 'accepted') {
               logger.warn(`[windowPage:${direction}] page declined, nothing published: ${transition.reason}`)
               markRestoreLoadFailed()
@@ -7755,13 +7849,15 @@ const Messages = ({
               hasMoreAfter: routeWindow.window.hasMoreAfter
             }
           : undefined
-        const { window: targetWindow } = buildRouteViewport(
+        const dividerRestore = applyWindowTransition({
+          kind: 'restore',
           loaded,
-          [messageAnchorId, sharedVisualMessageId],
-          authoritative,
-          NAVIGATION_VISUALLY_OLDER_GROUPS,
-          NAVIGATION_VISUALLY_NEWER_GROUPS
-        )
+          anchors: [messageAnchorId, sharedVisualMessageId],
+          older: NAVIGATION_VISUALLY_OLDER_GROUPS,
+          newer: NAVIGATION_VISUALLY_NEWER_GROUPS,
+          ...(authoritative ? { authoritative } : {})
+        })
+        const targetWindow = dividerRestore.kind === 'restored' ? dividerRestore.window : null
         if (targetWindow) {
           // Divider-only visible incremental rebase (fast path, never hidden):
           // fork-aligned route semantics — the preserved chain is the current
@@ -7810,13 +7906,15 @@ const Messages = ({
                 const unionForkGroup = unionModel.messageIdToGroup.get(anchorMessageId)
                 const unionForkGroupIndex = unionForkGroup ? unionModel.groups.indexOf(unionForkGroup) : -1
                 if (unionForkGroupIndex >= 0) {
-                  const unionWindow = createTargetMessageWindow(
-                    unionOldestFirst,
-                    anchorMessageId,
-                    unionForkGroupIndex + 1,
-                    unionModel.groups.length - unionForkGroupIndex - 1,
-                    { hasMoreBefore: visiblePlan.hasMoreBefore, hasMoreAfter: visiblePlan.hasMoreAfter }
-                  )
+                  const unionTransition = applyWindowTransition({
+                    kind: 'target',
+                    messages: unionOldestFirst,
+                    targetId: anchorMessageId,
+                    older: unionForkGroupIndex + 1,
+                    newer: unionModel.groups.length - unionForkGroupIndex - 1,
+                    authoritative: { hasMoreBefore: visiblePlan.hasMoreBefore, hasMoreAfter: visiblePlan.hasMoreAfter }
+                  })
+                  const unionWindow = unionTransition.kind === 'window' ? unionTransition.window : null
                   // Fail-closed union gate: the built visible window must
                   // represent every planned ID exactly (no bounded-viewport
                   // trim, no duplicates/missing IDs, group count/capacity
@@ -7824,14 +7922,17 @@ const Messages = ({
                   // the visible path and runs the existing hidden atomic path
                   // unchanged. Uses the exported cap/observability mechanisms
                   // (never a hardcoded second truth).
-                  const unionExact = isDividerVisibleUnionExact({
-                    plan: visiblePlan,
-                    unionOldestFirst,
-                    unionNewestFirst,
-                    unionWindow,
-                    unionModelGroupCount: unionModel.groups.length
-                  })
-                  if (unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
+                  const unionExact =
+                    unionWindow === null
+                      ? false
+                      : isDividerVisibleUnionExact({
+                          plan: visiblePlan,
+                          unionOldestFirst,
+                          unionNewestFirst,
+                          unionWindow,
+                          unionModelGroupCount: unionModel.groups.length
+                        })
+                  if (unionWindow && unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
                     const visibleEpoch = commitDividerVisibleAtomic(
                       fetchEpoch,
                       topicIdAtStart,
@@ -8170,7 +8271,14 @@ const Messages = ({
         // Explicit latest viewport over the full displayCount window (never a
         // snapshot anchor, never a vicinity fallback). Empty fallback routes
         // atomically clear via the same constructor.
-        const latestWindow = createLatestMessageWindow(loaded, displayCount, authoritative)
+        const latestTransition = applyWindowTransition({
+          kind: 'latest',
+          messages: loaded,
+          budget: displayCount,
+          ...(authoritative ? { authoritative } : {})
+        })
+        if (latestTransition.kind !== 'window') return
+        const latestWindow = latestTransition.window
         // Atomic deletion fallback (single entry): provenance-bound commit —
         // stale completions refuse with no dispatch, never disturbing a
         // superseding session. No navigation transaction: the window above
@@ -9051,7 +9159,14 @@ const Messages = ({
         }
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
         try {
-          const emptyWindow = createLatestMessageWindow([], 1, { hasMoreBefore: false, hasMoreAfter: false })
+          const emptyTransition = applyWindowTransition({
+            kind: 'latest',
+            messages: [],
+            budget: 1,
+            authoritative: { hasMoreBefore: false, hasMoreAfter: false }
+          })
+          const emptyWindow = emptyTransition.kind === 'window' ? emptyTransition.window : null
+          if (!emptyWindow) throw new Error('empty route window')
           viewportDispatch({ type: 'window/apply', window: emptyWindow })
           // Failure clear: the DOM no longer belongs to any route — mark
           // rendered unknown (dirty) so no freeze/write can proceed until a
@@ -9136,13 +9251,15 @@ const Messages = ({
                 hasMoreAfter: routeWindow.window.hasMoreAfter
               }
             : undefined
-        const { window: targetWindow } = buildRouteViewport(
+        const restoreTransition = applyWindowTransition({
+          kind: 'restore',
           loaded,
-          [anchor],
-          authoritative,
-          NAVIGATION_VISUALLY_OLDER_GROUPS,
-          NAVIGATION_VISUALLY_NEWER_GROUPS
-        )
+          anchors: [anchor],
+          older: NAVIGATION_VISUALLY_OLDER_GROUPS,
+          newer: NAVIGATION_VISUALLY_NEWER_GROUPS,
+          ...(authoritative ? { authoritative } : {})
+        })
+        const targetWindow = restoreTransition.kind === 'restored' ? restoreTransition.window : null
         let armedTopEpoch: number | null = null
         // Hidden first-position plan, computed BEFORE the visible attempt so
         // the same plan object serves as the single-use hidden fallback
@@ -9216,21 +9333,26 @@ const Messages = ({
                   const unionAnchorGroup = unionModel.messageIdToGroup.get(routeSavedRowAnchor)
                   const unionAnchorGroupIndex = unionAnchorGroup ? unionModel.groups.indexOf(unionAnchorGroup) : -1
                   if (unionAnchorGroupIndex >= 0) {
-                    const unionWindow = createTargetMessageWindow(
-                      unionOldestFirst,
-                      routeSavedRowAnchor,
-                      unionAnchorGroupIndex + 1,
-                      unionModel.groups.length - unionAnchorGroupIndex - 1,
-                      { hasMoreBefore: topPlan.hasMoreBefore, hasMoreAfter: topPlan.hasMoreAfter }
-                    )
-                    const unionExact = isRouteVisibleUnionExact({
-                      plan: topPlan,
-                      unionOldestFirst,
-                      unionNewestFirst,
-                      unionWindow,
-                      unionModelGroupCount: unionModel.groups.length
+                    const unionTransition = applyWindowTransition({
+                      kind: 'target',
+                      messages: unionOldestFirst,
+                      targetId: routeSavedRowAnchor,
+                      older: unionAnchorGroupIndex + 1,
+                      newer: unionModel.groups.length - unionAnchorGroupIndex - 1,
+                      authoritative: { hasMoreBefore: topPlan.hasMoreBefore, hasMoreAfter: topPlan.hasMoreAfter }
                     })
-                    if (unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
+                    const unionWindow = unionTransition.kind === 'window' ? unionTransition.window : null
+                    const unionExact =
+                      unionWindow === null
+                        ? false
+                        : isRouteVisibleUnionExact({
+                            plan: topPlan,
+                            unionOldestFirst,
+                            unionNewestFirst,
+                            unionWindow,
+                            unionModelGroupCount: unionModel.groups.length
+                          })
+                    if (unionWindow && unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
                       const visibleEpoch = commitTopVisibleAtomic(
                         fetchEpoch,
                         topicIdAtEffect,

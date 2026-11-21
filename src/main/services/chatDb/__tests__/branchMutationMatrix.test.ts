@@ -487,10 +487,39 @@ describe('branch mutation guard matrix', () => {
     expect(delOwner.ok).toBe(true)
     expect(contentOf(sqlite, 'm2')).toBeNull()
     // Segment: owned members segmentable even when referenced; ancestor refs reject through child.
-    expect(agg.upsertSegment('seg-owner', t, 'owner', ['u1'], null, null).ok).toBe(true)
-    expect(agg.upsertSegment('seg-child-bad', t, 'bad', ['u1'], null, b1).ok).toBe(false)
-    expect(agg.upsertSegment('seg-child-good', t, 'good', ['c0'], null, b1).ok).toBe(true)
-    expect(agg.replaceSegmentMembership('seg-owner', ['u1', 'a1'], null).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-owner',
+        topicId: t,
+        name: 'owner',
+        messageIds: ['u1'],
+        color: null,
+        branchId: null
+      }).ok
+    ).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-child-bad',
+        topicId: t,
+        name: 'bad',
+        messageIds: ['u1'],
+        color: null,
+        branchId: b1
+      }).ok
+    ).toBe(false)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-child-good',
+        topicId: t,
+        name: 'good',
+        messageIds: ['c0'],
+        color: null,
+        branchId: b1
+      }).ok
+    ).toBe(true)
+    expect(agg.replaceSegmentMembership({ segmentId: 'seg-owner', messageIds: ['u1', 'a1'], branchId: null }).ok).toBe(
+      true
+    )
     const segs = agg.listSegments(t)
     expect(segs.ok).toBe(true)
     if (segs.ok) {

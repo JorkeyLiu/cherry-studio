@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  type ChatDbChannel,
   chatDbContracts,
   getContract,
   MAX_ARRAY_LENGTH,
@@ -90,6 +91,11 @@ describe('chatDbContracts', () => {
     'chatdb:fetch-whole-topic-snapshot',
     // Group-scoped clipboard READ (copy/cut; selected groups only)
     'chatdb:fetch-clipboard-groups',
+    // Tree-preserving clipboard (opt-in include child branches)
+    'chatdb:fetch-clipboard-tree',
+    'chatdb:paste-clipboard-tree',
+    'chatdb:replay-clipboard-tree',
+    'chatdb:delete-clipboard-tree',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity',
@@ -425,7 +431,8 @@ describe('validateChatDbRequest — valid payloads', () => {
       validateChatDbRequest('chatdb:upsert-segment', {
         segmentId: 'seg-1',
         topicId: 'topic-1',
-        messageIds: []
+        messageIds: [],
+        branchId: null
       })
     ).not.toThrow()
   })
@@ -437,7 +444,8 @@ describe('validateChatDbRequest — valid payloads', () => {
         topicId: 'topic-1',
         name: 'My Segment',
         messageIds: ['msg-1', 'msg-2'],
-        color: '#ff0000'
+        color: '#ff0000',
+        branchId: 'branch-1'
       })
     ).not.toThrow()
   })
@@ -445,7 +453,8 @@ describe('validateChatDbRequest — valid payloads', () => {
   it('update-segment-metadata: { segmentId }', () => {
     expect(() =>
       validateChatDbRequest('chatdb:update-segment-metadata', {
-        segmentId: 'seg-1'
+        segmentId: 'seg-1',
+        branchId: null
       })
     ).not.toThrow()
   })
@@ -455,7 +464,8 @@ describe('validateChatDbRequest — valid payloads', () => {
       validateChatDbRequest('chatdb:update-segment-metadata', {
         segmentId: 'seg-1',
         name: 'Updated Name',
-        color: '#00ff00'
+        color: '#00ff00',
+        branchId: 'branch-1'
       })
     ).not.toThrow()
   })
@@ -464,39 +474,47 @@ describe('validateChatDbRequest — valid payloads', () => {
     expect(() =>
       validateChatDbRequest('chatdb:update-segment-metadata', {
         segmentId: 'seg-1',
-        folded: true
+        folded: true,
+        branchId: null
       })
     ).not.toThrow()
     expect(() =>
       validateChatDbRequest('chatdb:update-segment-metadata', {
         segmentId: 'seg-1',
-        folded: false
+        folded: false,
+        branchId: 'branch-1'
       })
     ).not.toThrow()
     expect(() =>
       validateChatDbRequest('chatdb:update-segment-metadata', {
         segmentId: 'seg-1',
-        folded: null
+        folded: null,
+        branchId: null
       })
     ).not.toThrow()
     // Expanding/collapsing is an explicit boolean — never a truthy string.
     expect(() =>
       validateChatDbRequest('chatdb:update-segment-metadata', {
         segmentId: 'seg-1',
-        folded: 'false'
+        folded: 'false',
+        branchId: null
       })
     ).toThrow(ValidationError)
   })
 
-  it('delete-segment: { segmentId }', () => {
-    expect(() => validateChatDbRequest('chatdb:delete-segment', { segmentId: 'seg-1' })).not.toThrow()
+  it('delete-segment: { segmentId, branchId }', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-segment', { segmentId: 'seg-1', branchId: null })).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-segment', { segmentId: 'seg-1', branchId: 'branch-1' })
+    ).not.toThrow()
   })
 
   it('replace-segment-membership: { segmentId, messageIds }', () => {
     expect(() =>
       validateChatDbRequest('chatdb:replace-segment-membership', {
         segmentId: 'seg-1',
-        messageIds: ['msg-1', 'msg-2', 'msg-3']
+        messageIds: ['msg-1', 'msg-2', 'msg-3'],
+        branchId: null
       })
     ).not.toThrow()
   })
@@ -505,9 +523,54 @@ describe('validateChatDbRequest — valid payloads', () => {
     expect(() =>
       validateChatDbRequest('chatdb:replace-segment-membership', {
         segmentId: 'seg-1',
-        messageIds: []
+        messageIds: [],
+        branchId: 'branch-1'
       })
     ).not.toThrow()
+  })
+
+  // Group-mutation writers must state the route they address: `null` is the topic
+  // main route, a non-empty string is that branch's effective route. Omission is
+  // not a route — it is rejected at the contract boundary, so a writer can never
+  // silently fall back to the main route.
+  describe('segment group mutations require an explicit route', () => {
+    const groupMutationRequests: { channel: ChatDbChannel; request: Record<string, unknown> }[] = [
+      {
+        channel: 'chatdb:upsert-segment',
+        request: { segmentId: 'seg-1', topicId: 'topic-1', messageIds: ['msg-1'] }
+      },
+      {
+        channel: 'chatdb:update-segment-metadata',
+        request: { segmentId: 'seg-1', name: 'Renamed' }
+      },
+      { channel: 'chatdb:delete-segment', request: { segmentId: 'seg-1' } },
+      {
+        channel: 'chatdb:replace-segment-membership',
+        request: { segmentId: 'seg-1', messageIds: ['msg-1'] }
+      }
+    ]
+
+    for (const { channel, request } of groupMutationRequests) {
+      it(`${channel}: rejects an absent route`, () => {
+        expect(() => validateChatDbRequest(channel, { ...request })).toThrow(ValidationError)
+      })
+
+      it(`${channel}: rejects an undefined route`, () => {
+        expect(() => validateChatDbRequest(channel, { ...request, branchId: undefined })).toThrow(ValidationError)
+      })
+
+      it(`${channel}: rejects an empty-string route`, () => {
+        expect(() => validateChatDbRequest(channel, { ...request, branchId: '' })).toThrow(ValidationError)
+      })
+
+      it(`${channel}: accepts the explicit main route`, () => {
+        expect(() => validateChatDbRequest(channel, { ...request, branchId: null })).not.toThrow()
+      })
+
+      it(`${channel}: accepts a branch route`, () => {
+        expect(() => validateChatDbRequest(channel, { ...request, branchId: 'branch-1' })).not.toThrow()
+      })
+    }
   })
 
   // Phase 5.1A: message reorder
@@ -4501,6 +4564,11 @@ describe('coverage consistency', () => {
     'chatdb:fetch-whole-topic-snapshot',
     // Group-scoped clipboard READ (copy/cut; selected groups only)
     'chatdb:fetch-clipboard-groups',
+    // Tree-preserving clipboard (opt-in include child branches)
+    'chatdb:fetch-clipboard-tree',
+    'chatdb:paste-clipboard-tree',
+    'chatdb:replay-clipboard-tree',
+    'chatdb:delete-clipboard-tree',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity',
@@ -5585,5 +5653,261 @@ describe('topic-data payload historySnapshot validation', () => {
     expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload: nonObject, assistantId: 'a1' })).toThrow(
       ValidationError
     )
+  })
+})
+
+// ===========================================================================
+// Tree-preserving clipboard (opt-in include child branches)
+// ===========================================================================
+
+describe('tree-preserving clipboard contracts', () => {
+  function messageWire(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id,
+      topicId: 't1',
+      branchId: null,
+      role: 'user',
+      content: `c-${id}`,
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides
+    }
+  }
+
+  function treePayload(): Record<string, unknown> {
+    return {
+      source: { topicId: 't1', branchId: null },
+      roots: [{ groupId: 'uA', messageIds: ['uA'], positionIndex: 0 }],
+      messages: [messageWire('uA')],
+      blocks: [
+        {
+          id: 'b-uA',
+          messageId: 'uA',
+          type: 'main_text',
+          content: 'text',
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      branches: [
+        {
+          sourceBranchId: 'f1',
+          parentSourceBranchId: null,
+          anchorMessageId: 'uA',
+          name: 'Fork',
+          depth: 1,
+          overflow: {}
+        }
+      ],
+      segments: [
+        {
+          sourceSegmentId: 's1',
+          name: null,
+          sortOrder: 0,
+          headerMessageId: 'uA',
+          memberIds: ['uA'],
+          overflow: {}
+        }
+      ]
+    }
+  }
+
+  function clipboardMeta(): Record<string, unknown> {
+    return {
+      completeness: 'clipboard-tree',
+      topicId: 't1',
+      branchId: null,
+      requestedCount: 1,
+      returnedCount: 1,
+      returnedMessageCount: 1,
+      returnedBranchCount: 1,
+      returnedSegmentCount: 1,
+      ownedRootMessageIds: ['uA'],
+      inheritedRootMessageIds: [],
+      firstMessageId: 'uA',
+      lastMessageId: 'uA'
+    }
+  }
+
+  function snapshot(): Record<string, unknown> {
+    return {
+      kind: 'clipboard-tree',
+      mode: 'cut',
+      idMap: [{ kind: 'message', sourceId: 'uA', targetId: 'n-uA' }],
+      placement: {
+        topicId: 't2',
+        branchId: null,
+        intent: { kind: 'topic-tail' },
+        ownerIndex: 0,
+        prevOwnerMessageId: null,
+        nextOwnerMessageId: null
+      },
+      inserted: {
+        messages: [messageWire('n-uA', { topicId: 't2', blocks: ['n-b-uA'] })],
+        blocks: [
+          {
+            id: 'n-b-uA',
+            messageId: 'n-uA',
+            type: 'main_text',
+            content: 'text',
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z'
+          }
+        ],
+        branches: [],
+        segments: []
+      },
+      sourceRemoved: {
+        topicId: 't1',
+        branchId: null,
+        branches: [],
+        messages: [
+          {
+            id: 'uA',
+            topicId: 't1',
+            branchId: null,
+            role: 'user',
+            content: 'c-uA',
+            status: 'success',
+            askId: null,
+            model: null,
+            modelId: null,
+            assistantId: null,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            sortOrder: 0,
+            overflow: {}
+          }
+        ],
+        blocks: [],
+        fileReferences: [],
+        segments: [],
+        segmentsAfter: [],
+        segmentOrder: [],
+        ownerOrders: [{ branchId: null, orderedIds: ['uA'] }],
+        boundaries: []
+      }
+    }
+  }
+
+  const fileCleanup = { affectedFileIds: ['file-1'], remainingReferenceCounts: { 'file-1': 0 } }
+
+  it('fetch accepts a complete closure and rejects a malformed payload', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-tree', { topicId: 't1', branchId: null, groupIds: ['uA'] })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-tree', {
+        ok: true,
+        value: { tree: treePayload(), clipboard: clipboardMeta() }
+      })
+    ).not.toThrow()
+
+    // Request guards.
+    expect(() => validateChatDbRequest('chatdb:fetch-clipboard-tree', { topicId: 't1', groupIds: [] })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-tree', { topicId: 't1', groupIds: ['uA', 'uA'] })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-tree', { topicId: 't1', groupIds: ['uA'], extra: 1 })
+    ).toThrow(ValidationError)
+
+    // Result guards: a tree payload is closed and self-contained.
+    const danglingAnchor = treePayload()
+    ;(danglingAnchor.branches as Record<string, unknown>[])[0].anchorMessageId = 'not-in-payload'
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-tree', {
+        ok: true,
+        value: { tree: danglingAnchor, clipboard: clipboardMeta() }
+      })
+    ).toThrow(ValidationError)
+    const partialSegment = treePayload()
+    ;(partialSegment.segments as Record<string, unknown>[])[0].memberIds = ['uA', 'not-in-payload']
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-tree', {
+        ok: true,
+        value: { tree: partialSegment, clipboard: clipboardMeta() }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-tree', {
+        ok: true,
+        value: { tree: treePayload(), clipboard: { ...clipboardMeta(), completeness: 'window' } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('paste requires an explicit target route and a valid mode', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-clipboard-tree', {
+        mode: 'copy',
+        payload: treePayload(),
+        target: { topicId: 't2', branchId: null, intent: { kind: 'topic-tail' } }
+      })
+    ).not.toThrow()
+    // A tree paste never guesses its destination route.
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-clipboard-tree', {
+        mode: 'copy',
+        payload: treePayload(),
+        target: { topicId: 't2', intent: { kind: 'topic-tail' } }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-clipboard-tree', {
+        mode: 'move',
+        payload: treePayload(),
+        target: { topicId: 't2', branchId: null, intent: { kind: 'topic-tail' } }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-clipboard-tree', {
+        mode: 'copy',
+        payload: treePayload(),
+        target: { topicId: 't2', branchId: null, intent: { kind: 'topic-tail', messageId: 'x' } }
+      })
+    ).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:paste-clipboard-tree', { ok: true, value: fileCleanup })).not.toThrow()
+  })
+
+  it('replay accepts both directions and rejects an inconsistent snapshot', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', { direction: 'undo', snapshot: snapshot() })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', { direction: 'redo', snapshot: snapshot() })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', { direction: 'sideways', snapshot: snapshot() })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', {
+        direction: 'undo',
+        snapshot: { ...snapshot(), kind: 'delete' }
+      })
+    ).toThrow(ValidationError)
+    // A cut snapshot must carry its source removal rows.
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', {
+        direction: 'undo',
+        snapshot: { ...snapshot(), sourceRemoved: null }
+      })
+    ).toThrow(ValidationError)
+    // Post-cut segment state must cover every touched segment.
+    expect(() =>
+      validateChatDbRequest('chatdb:replay-clipboard-tree', {
+        direction: 'undo',
+        snapshot: {
+          ...snapshot(),
+          sourceRemoved: { ...(snapshot().sourceRemoved as Record<string, unknown>), segmentsAfter: [{ id: 's1' }] }
+        }
+      })
+    ).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:replay-clipboard-tree', { ok: true, value: fileCleanup })).not.toThrow()
   })
 })

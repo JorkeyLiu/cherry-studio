@@ -2,6 +2,9 @@ import type {
   BranchDeleteSnapshot,
   BranchHistoryRow,
   BranchMoveSnapshot,
+  ClipboardTreePayload,
+  ClipboardTreeSnapshot,
+  FetchClipboardTreeMeta,
   InheritanceBoundarySnapshot,
   InsertMessageGroupIntent
 } from '@shared/chatDb'
@@ -39,6 +42,24 @@ export interface ClipboardSegmentSnapshot {
    */
   folded?: boolean
   originalMessageIds: string[]
+}
+/**
+ * Tree-preserving clipboard content (opt-in "include child branches").
+ *
+ * `payload` is Main's own complete closure read (selected root groups of the
+ * captured route plus every row the included child-branch subtrees own) and
+ * `meta` the typed read facts of that same closure. It is an ADDITIONAL,
+ * mutually exclusive content kind next to the ordinary
+ * `items`/`segmentSnapshots` shapes: a tree capture is never flattened back
+ * into per-route groups, so a paste can never silently degrade into an
+ * ordinary single-route paste.
+ *
+ * Present only while the clipboard holds a tree capture. A plain copy/cut
+ * clears it (see the clipboard slice).
+ */
+export interface ClipboardTreeCapture {
+  payload: ClipboardTreePayload
+  meta: FetchClipboardTreeMeta
 }
 
 // 剪贴板 state
@@ -82,6 +103,13 @@ export interface ClipboardState {
    * must match `sourceBranchId` exactly when present.
    */
   sourceProjection?: StagedCutSourceProjection | null
+  /**
+   * Opt-in tree capture while the clipboard holds one (undefined otherwise).
+   * Explicit paste discriminator: a tree capture pastes through the tree
+   * command even when `items` is empty, so the two content kinds never
+   * silently substitute for each other.
+   */
+  tree?: ClipboardTreeCapture | null
 }
 
 // 编辑模式 state
@@ -146,6 +174,7 @@ export type UndoActionType =
   | 'branch_rename'
   | 'branch_move'
   | 'branch_delete'
+  | 'clipboard_tree'
 
 /**
  * Fields every history action carries: identity, kind, time, and the topic
@@ -312,6 +341,21 @@ export type BranchUndoAction =
   | BranchMoveUndoAction
   | BranchDeleteUndoAction
 
+/**
+ * One recorded tree copy/cut: a single history action for the WHOLE command,
+ * never N ordinary operations.
+ *
+ * The payload is Main's own replay snapshot — the exact rows the command
+ * inserted, the exact source rows a cut removed, and the placement facts it
+ * validated — so undo/redo replay one authority transaction instead of
+ * reconstructing renderer-side intent. `targetTopicId` is the paste target;
+ * the source topic (for a cut) travels inside the snapshot.
+ */
+export interface ClipboardTreeUndoAction extends BaseUndoAction {
+  type: 'clipboard_tree'
+  snapshot: ClipboardTreeSnapshot
+}
+
 export type UndoAction =
   | DeleteUndoAction
   | PasteUndoAction
@@ -320,6 +364,7 @@ export type UndoAction =
   | BranchRenameUndoAction
   | BranchMoveUndoAction
   | BranchDeleteUndoAction
+  | ClipboardTreeUndoAction
 
 // 撤销栈 state
 export interface UndoStackState {

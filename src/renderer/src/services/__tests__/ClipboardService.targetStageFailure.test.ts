@@ -140,18 +140,18 @@ describe('ClipboardService target stage failure bookkeeping', () => {
       })
     )
     mocks.insertMessageGroups.mockImplementation(async (tid: string, groups: any[]) => ackFor(tid, groups))
-    mocks.upsertSegment.mockImplementation(async (id: string, tid: string, name: string, mids: string[]) => ({
-      id,
-      topicId: tid,
+    mocks.upsertSegment.mockImplementation(async ({ segmentId, topicId, name, messageIds }: any) => ({
+      id: segmentId,
+      topicId,
       name,
-      messageIds: [...mids],
+      messageIds: [...messageIds],
       color: 'c',
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
       sortOrder: 0,
-      firstMessageId: mids[0] ?? null,
-      lastMessageId: mids[mids.length - 1] ?? null,
-      messageCount: mids.length
+      firstMessageId: messageIds[0] ?? null,
+      lastMessageId: messageIds[messageIds.length - 1] ?? null,
+      messageCount: messageIds.length
     }))
     mocks.listSegments.mockRejectedValue(new Error('target list failed'))
 
@@ -193,18 +193,18 @@ describe('ClipboardService target stage failure bookkeeping', () => {
       })
     )
     mocks.insertMessageGroups.mockImplementation(async (tid: string, groups: any[]) => ackFor(tid, groups))
-    mocks.upsertSegment.mockImplementation(async (id: string, tid: string, name: string, mids: string[]) => ({
-      id,
-      topicId: tid,
+    mocks.upsertSegment.mockImplementation(async ({ segmentId, topicId, name, messageIds }: any) => ({
+      id: segmentId,
+      topicId,
       name,
-      messageIds: [...mids],
+      messageIds: [...messageIds],
       color: 'c',
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
       sortOrder: 0,
-      firstMessageId: mids[0] ?? null,
-      lastMessageId: mids[mids.length - 1] ?? null,
-      messageCount: mids.length
+      firstMessageId: messageIds[0] ?? null,
+      lastMessageId: messageIds[messageIds.length - 1] ?? null,
+      messageCount: messageIds.length
     }))
     mocks.listSegments.mockRejectedValue(new Error('target list failed'))
 

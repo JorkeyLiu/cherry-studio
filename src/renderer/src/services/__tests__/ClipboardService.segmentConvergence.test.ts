@@ -211,8 +211,8 @@ describe('ClipboardService segment batch convergence', () => {
       ]
     )
     mockTargetMessages(state)
-    mocks.upsertSegment.mockImplementation((id: string, topicId: string, name: string, messageIds: string[]) =>
-      Promise.resolve(wire(id, topicId, 0, messageIds, name))
+    mocks.upsertSegment.mockImplementation(({ segmentId, topicId, name, messageIds }: any) =>
+      Promise.resolve(wire(segmentId, topicId, 0, messageIds, name))
     )
     mocks.listSegments.mockImplementation((topicId: string) =>
       Promise.resolve([
@@ -259,8 +259,8 @@ describe('ClipboardService segment batch convergence', () => {
       [{ originalSegmentId: 'seg-orig-a', name: 'SegA', color: 'color-a', originalMessageIds: ['orig-a'] }]
     )
     mockTargetMessages(state)
-    mocks.upsertSegment.mockImplementation((id: string, topicId: string, name: string, messageIds: string[]) =>
-      Promise.resolve(wire(id, topicId, 0, messageIds, name))
+    mocks.upsertSegment.mockImplementation(({ segmentId, topicId, name, messageIds }: any) =>
+      Promise.resolve(wire(segmentId, topicId, 0, messageIds, name))
     )
     mocks.listSegments.mockRejectedValue(new Error('list failed'))
 

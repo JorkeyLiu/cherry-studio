@@ -454,7 +454,14 @@ describe('SqliteMessageDataSource', () => {
         messageCount: 1
       }
       api.upsertSegment.mockResolvedValue(successResult(segWire))
-      const wire = await ds.upsertSegment('seg-1', 't1', 'Seg', ['m1'], '#ff0000')
+      const wire = await ds.upsertSegment({
+        segmentId: 'seg-1',
+        topicId: 't1',
+        name: 'Seg',
+        messageIds: ['m1'],
+        color: '#ff0000',
+        branchId: null
+      })
       expect(api.upsertSegment).toHaveBeenCalledOnce()
       const req = api.upsertSegment.mock.calls[0][0]
       expect(req.segmentId).toBe('seg-1')
@@ -485,7 +492,7 @@ describe('SqliteMessageDataSource', () => {
         messageCount: 0
       }
       api.updateSegmentMetadata.mockResolvedValue(successResult(segWire))
-      await ds.updateSegmentMetadata('seg-1', 'Updated', '#00ff00')
+      await ds.updateSegmentMetadata({ segmentId: 'seg-1', name: 'Updated', color: '#00ff00', branchId: null })
       expect(api.updateSegmentMetadata).toHaveBeenCalledOnce()
       const req = api.updateSegmentMetadata.mock.calls[0][0]
       expect(req.segmentId).toBe('seg-1')
@@ -495,9 +502,9 @@ describe('SqliteMessageDataSource', () => {
 
     it('deleteSegment calls api.deleteSegment with segmentId', async () => {
       api.deleteSegment.mockResolvedValue(successResult(null))
-      await ds.deleteSegment('seg-1')
+      await ds.deleteSegment({ segmentId: 'seg-1', branchId: null })
       expect(api.deleteSegment).toHaveBeenCalledOnce()
-      expect(api.deleteSegment).toHaveBeenCalledWith({ segmentId: 'seg-1' })
+      expect(api.deleteSegment).toHaveBeenCalledWith({ segmentId: 'seg-1', branchId: null })
     })
 
     it('replaceSegmentMembership calls api.replaceSegmentMembership', async () => {
@@ -517,7 +524,7 @@ describe('SqliteMessageDataSource', () => {
         messageCount: 2
       }
       api.replaceSegmentMembership.mockResolvedValue(successResult(segWire))
-      await ds.replaceSegmentMembership('seg-1', ['m1', 'm2'])
+      await ds.replaceSegmentMembership({ segmentId: 'seg-1', messageIds: ['m1', 'm2'], branchId: null })
       expect(api.replaceSegmentMembership).toHaveBeenCalledOnce()
       const req = api.replaceSegmentMembership.mock.calls[0][0]
       expect(req.segmentId).toBe('seg-1')
@@ -526,7 +533,7 @@ describe('SqliteMessageDataSource', () => {
 
     it('replaceSegmentMembership handles null result (segment deleted)', async () => {
       api.replaceSegmentMembership.mockResolvedValue(successResult(null))
-      const result = await ds.replaceSegmentMembership('seg-1', [])
+      const result = await ds.replaceSegmentMembership({ segmentId: 'seg-1', messageIds: [], branchId: null })
       expect(result).toBeNull()
     })
 

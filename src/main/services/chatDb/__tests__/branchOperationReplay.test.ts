@@ -322,7 +322,16 @@ describe('replayBranchOperation', () => {
     appendTurn(agg, 't1', 'E', deleted.id)
     // A segment inside the doomed route: the delete empties (and removes) it,
     // so the undo must re-create it with its recorded membership and head.
-    const segment = okValue(agg.upsertSegment('seg-1', 't1', 'Group', ['uE', 'aE'], null, deleted.id))
+    const segment = okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId: 't1',
+        name: 'Group',
+        messageIds: ['uE', 'aE'],
+        color: null,
+        branchId: deleted.id
+      })
+    )
     expect(segment.id).toBe('seg-1')
 
     const result = okValue(agg.deleteBranch('t1', deleted.id))
@@ -417,7 +426,16 @@ describe('replayBranchOperation', () => {
     // A group that spans two routes (a state earlier moves or other paths can
     // leave behind): uC is a member while owned by the branch being deleted.
     const moved = okValue(agg.moveSelectedTurnsToNewBranch('t1', null, ['uC'], 'Moved', ['uC', 'aC']))
-    okValue(agg.upsertSegment('seg-mix', 't1', 'Group', ['uB', 'uD'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-mix',
+        topicId: 't1',
+        name: 'Group',
+        messageIds: ['uB', 'uD'],
+        color: null,
+        branchId: null
+      })
+    )
     sqlite
       .prepare('INSERT INTO topic_segment_messages (segment_id, message_id, sort_order) VALUES (?, ?, ?)')
       .run('seg-mix', 'uC', 2)
@@ -430,7 +448,16 @@ describe('replayBranchOperation', () => {
     )
 
     // The user edits the group afterwards: uD leaves it.
-    okValue(agg.upsertSegment('seg-mix', 't1', 'Group', ['uB'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-mix',
+        topicId: 't1',
+        name: 'Group',
+        messageIds: ['uB'],
+        color: null,
+        branchId: null
+      })
+    )
     const countsBefore = {
       branches: countRows(sqlite, 'topic_branches'),
       messages: countRows(sqlite, 'messages'),
@@ -447,7 +474,16 @@ describe('replayBranchOperation', () => {
 
     // Retryable: once the recorded post-delete state holds again the same
     // snapshot replays cleanly.
-    okValue(agg.upsertSegment('seg-mix', 't1', 'Group', ['uB', 'uD'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-mix',
+        topicId: 't1',
+        name: 'Group',
+        messageIds: ['uB', 'uD'],
+        color: null,
+        branchId: null
+      })
+    )
     okValue(agg.replayBranchOperation('t1', 'undo', snapshot))
     expect(segmentMembers(sqlite, 'seg-mix')).toEqual(['uB', 'uD', 'uC'])
     expect(branchRow(sqlite, moved.branch.id)).toBeDefined()
@@ -456,15 +492,42 @@ describe('replayBranchOperation', () => {
 
   it('still undoes a subtree delete when only an untouched segment changed meanwhile', () => {
     seedABCD(agg, 't1')
-    okValue(agg.upsertSegment('seg-keep', 't1', 'Keep', ['uA'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-keep',
+        topicId: 't1',
+        name: 'Keep',
+        messageIds: ['uA'],
+        color: null,
+        branchId: null
+      })
+    )
     const moved = okValue(agg.moveSelectedTurnsToNewBranch('t1', null, ['uC'], 'Moved', ['uC', 'aC']))
-    okValue(agg.upsertSegment('seg-mix', 't1', 'Group', ['uB', 'uD'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-mix',
+        topicId: 't1',
+        name: 'Group',
+        messageIds: ['uB', 'uD'],
+        color: null,
+        branchId: null
+      })
+    )
     sqlite
       .prepare('INSERT INTO topic_segment_messages (segment_id, message_id, sort_order) VALUES (?, ?, ?)')
       .run('seg-mix', 'uC', 2)
     const deleted = okValue(agg.deleteBranch('t1', moved.branch.id))
     // Unrelated concurrent edit: a segment this delete never touched.
-    okValue(agg.upsertSegment('seg-keep', 't1', 'Renamed', ['uA'], null))
+    okValue(
+      agg.upsertSegment({
+        segmentId: 'seg-keep',
+        topicId: 't1',
+        name: 'Renamed',
+        messageIds: ['uA'],
+        color: null,
+        branchId: null
+      })
+    )
 
     okValue(agg.replayBranchOperation('t1', 'undo', deleted.historySnapshot))
 

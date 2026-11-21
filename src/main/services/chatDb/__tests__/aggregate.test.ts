@@ -807,7 +807,13 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, a2 as any, [])
       agg.appendMessage(topicId, u2 as any, [])
       const segId = `seg-${uid()}`
-      agg.upsertSegment(segId, topicId, 'seg', [u1.id as string, a1.id as string, u2.id as string], undefined)
+      agg.upsertSegment({
+        segmentId: segId,
+        topicId,
+        name: 'seg',
+        messageIds: [u1.id as string, a1.id as string, u2.id as string],
+        branchId: null
+      })
 
       const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
       expect(result.ok).toBe(true)
@@ -922,8 +928,14 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, u2 as any, [])
       const hitId = `seg-${uid()}`
       const missId = `seg-${uid()}`
-      agg.upsertSegment(hitId, topicId, 'hit', [u1.id as string, u2.id as string], undefined)
-      agg.upsertSegment(missId, topicId, 'miss', [u2.id as string], undefined)
+      agg.upsertSegment({
+        segmentId: hitId,
+        topicId,
+        name: 'hit',
+        messageIds: [u1.id as string, u2.id as string],
+        branchId: null
+      })
+      agg.upsertSegment({ segmentId: missId, topicId, name: 'miss', messageIds: [u2.id as string], branchId: null })
 
       const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
       expect(result.ok).toBe(true)
@@ -938,7 +950,7 @@ describe('ChatDbAggregateService', () => {
       const u1 = makeMessageJson(topicId, { role: 'user' })
       agg.appendMessage(topicId, u1 as any, [])
       const segId = `seg-${uid()}`
-      agg.upsertSegment(segId, topicId, 'solo', [u1.id as string], undefined)
+      agg.upsertSegment({ segmentId: segId, topicId, name: 'solo', messageIds: [u1.id as string], branchId: null })
       const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
       expect(result.ok).toBe(true)
       expect(okValue(result).segments).toEqual([])
@@ -1873,8 +1885,22 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, msg1 as any, [])
       agg.appendMessage(topicId, msg2 as any, [])
 
-      agg.upsertSegment('seg-1', topicId, 'Seg1', [msg1.id as string], null)
-      agg.upsertSegment('seg-2', topicId, 'Seg2', [msg2.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg1',
+        messageIds: [msg1.id as string],
+        color: null,
+        branchId: null
+      })
+      agg.upsertSegment({
+        segmentId: 'seg-2',
+        topicId,
+        name: 'Seg2',
+        messageIds: [msg2.id as string],
+        color: null,
+        branchId: null
+      })
 
       const result = agg.listSegments(topicId)
       expect(result.ok).toBe(true)
@@ -1890,7 +1916,14 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Seg1', [msg.id as string], '#ff0000')
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg1',
+        messageIds: [msg.id as string],
+        color: '#ff0000',
+        branchId: null
+      })
 
       const result = agg.listSegments(topicId)
       expect(result.ok).toBe(true)
@@ -1908,7 +1941,14 @@ describe('ChatDbAggregateService', () => {
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
 
-      const result = agg.upsertSegment('seg-1', topicId, 'My Segment', [msg.id as string], '#00ff00')
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'My Segment',
+        messageIds: [msg.id as string],
+        color: '#00ff00',
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       const wire = okValue(result)
       expect(wire.id).toBe('seg-1')
@@ -1920,9 +1960,16 @@ describe('ChatDbAggregateService', () => {
 
     it('updates metadata on existing segment', () => {
       const topicId = `t-${uid()}`
-      agg.upsertSegment('seg-1', topicId, 'Original', [], null)
+      agg.upsertSegment({ segmentId: 'seg-1', topicId, name: 'Original', messageIds: [], color: null, branchId: null })
 
-      const result = agg.upsertSegment('seg-1', topicId, 'Updated', [], '#aabbcc')
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Updated',
+        messageIds: [],
+        color: '#aabbcc',
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       expect(okValue(result).name).toBe('Updated')
       expect(okValue(result).color).toBe('#aabbcc')
@@ -1935,17 +1982,38 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, msg1 as any, [])
       agg.appendMessage(topicId, msg2 as any, [])
 
-      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
-      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [msg2.id as string, msg1.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [msg1.id as string],
+        color: null,
+        branchId: null
+      })
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [msg2.id as string, msg1.id as string],
+        color: null,
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       expect(okValue(result).messageIds).toEqual([msg2.id, msg1.id])
     })
 
     it('empty membership deletes the segment per repository semantics', () => {
       const topicId = `t-${uid()}`
-      agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      agg.upsertSegment({ segmentId: 'seg-1', topicId, name: 'Seg', messageIds: [], color: null, branchId: null })
 
-      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [],
+        color: null,
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       // Segment deleted — wire shows empty
       expect(okValue(result).messageIds).toEqual([])
@@ -1954,14 +2022,28 @@ describe('ChatDbAggregateService', () => {
 
     it('ensures topic exists', () => {
       const topicId = `t-${uid()}`
-      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [],
+        color: null,
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       expect(okValue(agg.topicExists(topicId))).toBe(true)
     })
 
     it('unknown extra fields preserved in overflow round-trip', () => {
       const topicId = `t-${uid()}`
-      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], '#ff0000')
+      const result = agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [],
+        color: '#ff0000',
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       expect(okValue(result).color).toBe('#ff0000')
     })
@@ -1976,9 +2058,21 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Original',
+        messageIds: [msg.id as string],
+        color: null,
+        branchId: null
+      })
 
-      const result = agg.updateSegmentMetadata('seg-1', 'New Name', '#aabbcc')
+      const result = agg.updateSegmentMetadata({
+        segmentId: 'seg-1',
+        name: 'New Name',
+        color: '#aabbcc',
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       const wire = okValue(result)
       expect(wire.name).toBe('New Name')
@@ -1986,7 +2080,7 @@ describe('ChatDbAggregateService', () => {
     })
 
     it('returns ERR_NOT_FOUND for missing segment', () => {
-      const result = agg.updateSegmentMetadata('nonexistent', 'name', null)
+      const result = agg.updateSegmentMetadata({ segmentId: 'nonexistent', name: 'name', color: null, branchId: null })
       expect(result.ok).toBe(false)
       if (!result.ok) {
         expect(result.error.code).toBe('NOT_FOUND')
@@ -1997,9 +2091,16 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], '#ff0000')
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Original',
+        messageIds: [msg.id as string],
+        color: '#ff0000',
+        branchId: null
+      })
 
-      const result = agg.updateSegmentMetadata('seg-1', 'Updated', undefined)
+      const result = agg.updateSegmentMetadata({ segmentId: 'seg-1', name: 'Updated', branchId: null })
       expect(result.ok).toBe(true)
       expect(okValue(result).name).toBe('Updated')
       expect(okValue(result).color).toBe('#ff0000') // unchanged
@@ -2009,9 +2110,16 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Original',
+        messageIds: [msg.id as string],
+        color: null,
+        branchId: null
+      })
 
-      const result = agg.updateSegmentMetadata('seg-1', undefined, '#00ff00')
+      const result = agg.updateSegmentMetadata({ segmentId: 'seg-1', color: '#00ff00', branchId: null })
       expect(result.ok).toBe(true)
       expect(okValue(result).name).toBe('Original') // unchanged
       expect(okValue(result).color).toBe('#00ff00')
@@ -2025,9 +2133,9 @@ describe('ChatDbAggregateService', () => {
   describe('deleteSegment', () => {
     it('deletes an existing segment', () => {
       const topicId = `t-${uid()}`
-      agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      agg.upsertSegment({ segmentId: 'seg-1', topicId, name: 'Seg', messageIds: [], color: null, branchId: null })
 
-      const result = agg.deleteSegment('seg-1')
+      const result = agg.deleteSegment({ segmentId: 'seg-1', branchId: null })
       expect(result.ok).toBe(true)
 
       const listed = agg.listSegments(topicId)
@@ -2035,7 +2143,7 @@ describe('ChatDbAggregateService', () => {
     })
 
     it('no-op for missing segment', () => {
-      const result = agg.deleteSegment('nonexistent')
+      const result = agg.deleteSegment({ segmentId: 'nonexistent', branchId: null })
       expect(result.ok).toBe(true)
     })
   })
@@ -2051,9 +2159,20 @@ describe('ChatDbAggregateService', () => {
       const msg2 = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg1 as any, [])
       agg.appendMessage(topicId, msg2 as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [msg1.id as string],
+        color: null,
+        branchId: null
+      })
 
-      const result = agg.replaceSegmentMembership('seg-1', [msg2.id as string, msg1.id as string])
+      const result = agg.replaceSegmentMembership({
+        segmentId: 'seg-1',
+        messageIds: [msg2.id as string, msg1.id as string],
+        branchId: null
+      })
       expect(result.ok).toBe(true)
       expect(okValue(result)!.messageIds).toEqual([msg2.id, msg1.id])
     })
@@ -2062,9 +2181,16 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Seg', [msg.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [msg.id as string],
+        color: null,
+        branchId: null
+      })
 
-      const result = agg.replaceSegmentMembership('seg-1', [])
+      const result = agg.replaceSegmentMembership({ segmentId: 'seg-1', messageIds: [], branchId: null })
       expect(result.ok).toBe(true)
       expect(okValue(result)).toBeNull()
     })
@@ -2073,10 +2199,21 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const msg1 = makeMessageJson(topicId)
       agg.appendMessage(topicId, msg1 as any, [])
-      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId,
+        name: 'Seg',
+        messageIds: [msg1.id as string],
+        color: null,
+        branchId: null
+      })
 
       // Try to add a message that doesn't belong to the topic — should throw
-      const result = agg.replaceSegmentMembership('seg-1', ['nonexistent-msg'])
+      const result = agg.replaceSegmentMembership({
+        segmentId: 'seg-1',
+        messageIds: ['nonexistent-msg'],
+        branchId: null
+      })
       expect(result.ok).toBe(false)
 
       // Original membership preserved
@@ -2094,7 +2231,16 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, m1 as any, [])
       agg.appendMessage(topicId, m2 as any, [])
       agg.appendMessage(topicId, m3 as any, [])
-      const up = okValue(agg.upsertSegment('seg-a', topicId, 'A', [m1.id as string, m2.id as string], null))
+      const up = okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-a',
+          topicId,
+          name: 'A',
+          messageIds: [m1.id as string, m2.id as string],
+          color: null,
+          branchId: null
+        })
+      )
       expect(up.sortOrder).toBe(0)
       expect(up.firstMessageId).toBe(m1.id)
       expect(up.lastMessageId).toBe(m2.id)
@@ -2104,11 +2250,17 @@ describe('ChatDbAggregateService', () => {
       expect(listed[0].firstMessageId).toBe(m1.id)
       expect(listed[0].lastMessageId).toBe(m2.id)
       expect(listed[0].messageCount).toBe(2)
-      const upd = okValue(agg.updateSegmentMetadata('seg-a', 'A2', undefined))
+      const upd = okValue(agg.updateSegmentMetadata({ segmentId: 'seg-a', name: 'A2', branchId: null }))
       expect(upd.sortOrder).toBe(0)
       expect(upd.firstMessageId).toBe(m1.id)
       expect(upd.messageCount).toBe(2)
-      const rep = okValue(agg.replaceSegmentMembership('seg-a', [m3.id as string, m1.id as string]))
+      const rep = okValue(
+        agg.replaceSegmentMembership({
+          segmentId: 'seg-a',
+          messageIds: [m3.id as string, m1.id as string],
+          branchId: null
+        })
+      )
       expect(rep!.firstMessageId).toBe(m3.id)
       expect(rep!.lastMessageId).toBe(m1.id)
       expect(rep!.messageCount).toBe(2)
@@ -2121,7 +2273,16 @@ describe('ChatDbAggregateService', () => {
 
     it('upsert empty readback is null/null/0 consistent', () => {
       const topicId = `t-${uid()}`
-      const res = okValue(agg.upsertSegment(`seg-${uid()}`, topicId, 'E', [], null))
+      const res = okValue(
+        agg.upsertSegment({
+          segmentId: `seg-${uid()}`,
+          topicId,
+          name: 'E',
+          messageIds: [],
+          color: null,
+          branchId: null
+        })
+      )
       expect(res.messageIds).toEqual([])
       expect(res.firstMessageId).toBeNull()
       expect(res.lastMessageId).toBeNull()
@@ -2140,7 +2301,13 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, a1 as any, [])
       agg.appendMessage(topicId, u2 as any, [])
       const segId = `seg-${uid()}`
-      agg.upsertSegment(segId, topicId, 'seg', [u1.id as string, a1.id as string, u2.id as string], undefined)
+      agg.upsertSegment({
+        segmentId: segId,
+        topicId,
+        name: 'seg',
+        messageIds: [u1.id as string, a1.id as string, u2.id as string],
+        branchId: null
+      })
       const response = okValue(agg.deleteMessagesWithDependents(topicId, [u1.id as string]))
       expect(response.segments).toHaveLength(1)
       expect(response.segments[0].firstMessageId).toBe(u2.id)
@@ -2163,9 +2330,27 @@ describe('ChatDbAggregateService', () => {
       for (const m of msgs) agg.appendMessage(topicId, m as any, [])
       const [m1, m2, m3] = msgs.map((m) => m.id as string)
       // Reverse-lexical ids + reverse creation order: tail created first.
-      const tail = okValue(agg.upsertSegment('seg-zzz-tail', topicId, 'Tail', [m3], null))
+      const tail = okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-zzz-tail',
+          topicId,
+          name: 'Tail',
+          messageIds: [m3],
+          color: null,
+          branchId: null
+        })
+      )
       expect(tail.sortOrder).toBe(0)
-      const head = okValue(agg.upsertSegment('seg-aaa-head', topicId, 'Head', [m1], null))
+      const head = okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-aaa-head',
+          topicId,
+          name: 'Head',
+          messageIds: [m1],
+          color: null,
+          branchId: null
+        })
+      )
       expect(head.sortOrder).toBe(0)
       const listed = okValue(agg.listSegments(topicId))
       expect(listed.map((s) => s.id)).toEqual(['seg-aaa-head', 'seg-zzz-tail'])
@@ -2187,9 +2372,29 @@ describe('ChatDbAggregateService', () => {
       ]
       for (const m of msgs) agg.appendMessage(topicId, m as any, [])
       const [m1, , m3, , m5] = msgs.map((m) => m.id as string)
-      okValue(agg.upsertSegment('seg-head', topicId, 'Head', [m1], null))
-      okValue(agg.upsertSegment('seg-tail', topicId, 'Tail', [m5], null))
-      const mid = okValue(agg.upsertSegment('seg-mid', topicId, 'Mid', [m3], null))
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-head',
+          topicId,
+          name: 'Head',
+          messageIds: [m1],
+          color: null,
+          branchId: null
+        })
+      )
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-tail',
+          topicId,
+          name: 'Tail',
+          messageIds: [m5],
+          color: null,
+          branchId: null
+        })
+      )
+      const mid = okValue(
+        agg.upsertSegment({ segmentId: 'seg-mid', topicId, name: 'Mid', messageIds: [m3], color: null, branchId: null })
+      )
       expect(mid.sortOrder).toBe(1)
       const listed = okValue(agg.listSegments(topicId))
       expect(listed.map((s) => s.id)).toEqual(['seg-head', 'seg-mid', 'seg-tail'])
@@ -2202,9 +2407,29 @@ describe('ChatDbAggregateService', () => {
       const msgs = [makeMessageJson(topicId), makeMessageJson(topicId)]
       for (const m of msgs) agg.appendMessage(topicId, m as any, [])
       const [m1, m2] = msgs.map((m) => m.id as string)
-      okValue(agg.upsertSegment('seg-first', topicId, 'First', [m1], null))
-      okValue(agg.upsertSegment('seg-second', topicId, 'Second', [m2], null))
-      const tie = okValue(agg.upsertSegment('seg-tie', topicId, 'Tie', [m1], null))
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-first',
+          topicId,
+          name: 'First',
+          messageIds: [m1],
+          color: null,
+          branchId: null
+        })
+      )
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-second',
+          topicId,
+          name: 'Second',
+          messageIds: [m2],
+          color: null,
+          branchId: null
+        })
+      )
+      const tie = okValue(
+        agg.upsertSegment({ segmentId: 'seg-tie', topicId, name: 'Tie', messageIds: [m1], color: null, branchId: null })
+      )
       expect(tie.sortOrder).toBe(1)
       const listed = okValue(agg.listSegments(topicId))
       expect(listed.map((s) => s.id)).toEqual(['seg-first', 'seg-tie', 'seg-second'])
@@ -2215,7 +2440,14 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const m1 = makeMessageJson(topicId)
       agg.appendMessage(topicId, m1 as any, [])
-      const bad = agg.upsertSegment('seg-bad', topicId, 'Bad', ['missing-message-id'], null)
+      const bad = agg.upsertSegment({
+        segmentId: 'seg-bad',
+        topicId,
+        name: 'Bad',
+        messageIds: ['missing-message-id'],
+        color: null,
+        branchId: null
+      })
       expect(bad.ok).toBe(false)
       const listed = okValue(agg.listSegments(topicId))
       expect(listed.map((s) => s.id)).not.toContain('seg-bad')
@@ -3667,7 +3899,13 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, msg2 as any, [])
 
       // Create a segment containing both messages
-      agg.upsertSegment(`seg-${uid()}`, topicId, 'seg1', [msg1.id as string, msg2.id as string], undefined)
+      agg.upsertSegment({
+        segmentId: `seg-${uid()}`,
+        topicId,
+        name: 'seg1',
+        messageIds: [msg1.id as string, msg2.id as string],
+        branchId: null
+      })
 
       const result = agg.deleteMessagesWithSegments(topicId, [msg1.id as string])
       expect(result.ok).toBe(true)

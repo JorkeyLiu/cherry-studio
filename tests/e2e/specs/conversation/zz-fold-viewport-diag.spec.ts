@@ -78,7 +78,13 @@ async function seed(page: Page, assistantId: string, topicId: string, groupTurns
       if (ensured?.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
       const pasted = await api.pasteMessagesToTopic({ topicId, entries })
       if (pasted?.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
-      const upserted = await api.upsertSegment({ segmentId, topicId, name: 'Diag Group', messageIds: memberIds })
+      const upserted = await api.upsertSegment({
+        segmentId,
+        topicId,
+        name: 'Diag Group',
+        messageIds: memberIds,
+        branchId: null
+      })
       if (upserted?.ok !== true) return { ok: false, err: `upsert ${JSON.stringify(upserted)}` }
       return { ok: true }
     },

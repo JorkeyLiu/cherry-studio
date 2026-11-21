@@ -364,6 +364,12 @@ export enum IpcChannel {
 
   // Group-scoped clipboard READ for copy/cut (selected groups only, never whole-topic)
   ChatDb_FetchClipboardGroups = 'chatdb:fetch-clipboard-groups',
+  // Tree-preserving clipboard (opt-in include child branches): bounded READ,
+  // one atomic copy/cut paste, one atomic delete, and one snapshotted undo/redo replay.
+  ChatDb_FetchClipboardTree = 'chatdb:fetch-clipboard-tree',
+  ChatDb_PasteClipboardTree = 'chatdb:paste-clipboard-tree',
+  ChatDb_ReplayClipboardTree = 'chatdb:replay-clipboard-tree',
+  ChatDb_DeleteClipboardTree = 'chatdb:delete-clipboard-tree',
 
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   ChatDb_FetchTopicNamingContext = 'chatdb:fetch-topic-naming-context',

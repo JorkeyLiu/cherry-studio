@@ -139,14 +139,16 @@ describe('segment head identity and route qualification', () => {
     const repos = createRepositories(db)
     const segmentId = `seg-${uid()}`
 
-    const created = okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u1', 'a1'], undefined))
+    const created = okValue(
+      agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u1', 'a1'], branchId: null })
+    )
     expect(created.headerMessageId).toBe('u1')
     expect(created.ownerTopicId).toBe(topicId)
     expect(created.ownerBranchId).toBeNull()
     expect(rawHead(segmentId)).toBe('u1')
 
     // Reorder so the head is no longer first: the identity does not move.
-    okValue(agg.replaceSegmentMembership(segmentId, ['a1', 'u1']))
+    okValue(agg.replaceSegmentMembership({ segmentId, messageIds: ['a1', 'u1'], branchId: null }))
     expect(repos.segments.getMessageIds(segmentId)).toEqual(['a1', 'u1'])
     expect(rawHead(segmentId)).toBe('u1')
     expect(okValue(agg.listSegments(topicId)).find((s) => s.id === segmentId)?.headerMessageId).toBe('u1')
@@ -157,12 +159,12 @@ describe('segment head identity and route qualification', () => {
     seedRoot(topicId)
     const repos = createRepositories(db)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u1', 'a1', 'u2'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u1', 'a1', 'u2'], branchId: null }))
 
-    okValue(agg.replaceSegmentMembership(segmentId, ['a1', 'u2']))
+    okValue(agg.replaceSegmentMembership({ segmentId, messageIds: ['a1', 'u2'], branchId: null }))
     expect(rawHead(segmentId)).toBe('a1')
 
-    okValue(agg.replaceSegmentMembership(segmentId, ['u2']))
+    okValue(agg.replaceSegmentMembership({ segmentId, messageIds: ['u2'], branchId: null }))
     expect(rawHead(segmentId)).toBe('u2')
     expect(repos.segments.getMessageIds(segmentId)).toEqual(['u2'])
   })
@@ -174,7 +176,7 @@ describe('segment head identity and route qualification', () => {
     append(topicId, messageJson('m3', topicId))
     const repos = createRepositories(db)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['m1', 'm2', 'm3'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['m1', 'm2', 'm3'], branchId: null }))
     expect(rawHead(segmentId)).toBe('m1')
 
     // Batch delete repairs the persisted head to the first surviving member.
@@ -198,14 +200,16 @@ describe('segment head identity and route qualification', () => {
     const repos = createRepositories(db)
 
     const ghostId = `seg-${uid()}`
-    const ghost = okValue(agg.upsertSegment(ghostId, topicId, 'Ghost', [], undefined))
+    const ghost = okValue(
+      agg.upsertSegment({ segmentId: ghostId, topicId, name: 'Ghost', messageIds: [], branchId: null })
+    )
     expect(ghost.headerMessageId).toBeNull()
     expect(ghost.messageIds).toEqual([])
     expect(repos.segments.getById(ghostId).found).toBe(false)
 
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u1', 'a1'], undefined))
-    agg.replaceSegmentMembership(segmentId, [])
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u1', 'a1'], branchId: null }))
+    agg.replaceSegmentMembership({ segmentId, messageIds: [], branchId: null })
     expect(repos.segments.getById(segmentId).found).toBe(false)
     expect(okValue(agg.listSegments(topicId)).some((s) => s.id === segmentId)).toBe(false)
   })
@@ -218,9 +222,19 @@ describe('segment head identity and route qualification', () => {
     append(topicId, messageJson('ba1', topicId, { role: 'assistant', askId: 'bu1' }), b)
 
     const mainSeg = `seg-${uid()}`
-    okValue(agg.upsertSegment(mainSeg, topicId, 'Main group', ['u1', 'a1'], undefined))
+    okValue(
+      agg.upsertSegment({ segmentId: mainSeg, topicId, name: 'Main group', messageIds: ['u1', 'a1'], branchId: null })
+    )
     const branchSeg = `seg-${uid()}`
-    okValue(agg.upsertSegment(branchSeg, topicId, 'Branch group', ['bu1', 'ba1'], undefined, b))
+    okValue(
+      agg.upsertSegment({
+        segmentId: branchSeg,
+        topicId,
+        name: 'Branch group',
+        messageIds: ['bu1', 'ba1'],
+        branchId: b
+      })
+    )
 
     // Unqualified: full authority membership, no route block to confuse with authority.
     const catalog = okValue(agg.listSegments(topicId))
@@ -271,7 +285,7 @@ describe('segment head identity and route qualification', () => {
     seedRoot(topicId)
     const segmentId = `seg-${uid()}`
     // Catalog membership deliberately out of chronological order.
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['a2', 'u1', 'a1'], undefined))
+    okValue(agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['a2', 'u1', 'a1'], branchId: null }))
     const wire = okValue(agg.listSegments(topicId, null)).find((s) => s.id === segmentId)
     // Route-effective order even though the catalog lists a2 first, so the
     // window co-commit projection and the hook projection agree exactly.

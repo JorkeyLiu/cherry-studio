@@ -45,6 +45,8 @@ import type {
   DeleteBlocksResponse,
   DeleteBranchRequest,
   DeleteBranchResponse,
+  DeleteClipboardTreeRequest,
+  DeleteClipboardTreeResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -61,6 +63,8 @@ import type {
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
   FetchClipboardGroupsResponse,
+  FetchClipboardTreeRequest,
+  FetchClipboardTreeResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesRequest,
@@ -104,6 +108,8 @@ import type {
   MoveContextAnchorInheritanceInput,
   MoveSelectedTurnsToNewBranchRequest,
   MoveSelectedTurnsToNewBranchResponse,
+  PasteClipboardTreeRequest,
+  PasteClipboardTreeResponse,
   PasteMessagesToTopicRequest,
   PasteMessagesToTopicResponse,
   PurgeExpiredTopicsRequest,
@@ -118,6 +124,8 @@ import type {
   ReplaceSegmentMembershipResponse,
   ReplayBranchOperationRequest,
   ReplayBranchOperationResponse,
+  ReplayClipboardTreeRequest,
+  ReplayClipboardTreeResponse,
   ResendUserMessagesRequest,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
@@ -180,6 +188,10 @@ export interface ChatDbApi {
     request: FetchWholeTopicSnapshotRequest
   ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
   fetchClipboardGroups?(request: FetchClipboardGroupsRequest): Promise<ChatDbResult<FetchClipboardGroupsResponse>>
+  fetchClipboardTree?(request: FetchClipboardTreeRequest): Promise<ChatDbResult<FetchClipboardTreeResponse>>
+  pasteClipboardTree?(request: PasteClipboardTreeRequest): Promise<ChatDbResult<PasteClipboardTreeResponse>>
+  replayClipboardTree?(request: ReplayClipboardTreeRequest): Promise<ChatDbResult<ReplayClipboardTreeResponse>>
+  deleteClipboardTree?(request: DeleteClipboardTreeRequest): Promise<ChatDbResult<DeleteClipboardTreeResponse>>
   fetchTopicNamingContext?(
     request: FetchTopicNamingContextRequest
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
@@ -724,60 +736,25 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.listSegments(request))
   }
 
-  async upsertSegment(
-    segmentId: string,
-    topicId: string,
-    name: string | null | undefined,
-    messageIds: string[],
-    color?: string | null,
-    branchId?: string | null,
-    folded?: boolean | null
-  ): Promise<UpsertSegmentResponse> {
-    const request: UpsertSegmentRequest = cloneForWire({
-      segmentId,
-      topicId,
-      branchId: branchId ?? null,
-      name,
-      messageIds,
-      color,
-      folded
-    })
-    return unwrap(await this.api.upsertSegment(request))
+  // Segment group mutations take their request object as-is: the route is a
+  // required part of the contract (`branchId: null` addresses the main route).
+  // cloneForWire preserves an explicit `null` and strips `undefined`, so an
+  // omitted route reaches Main as an absent key and is rejected there instead
+  // of being silently defaulted to the main route.
+  async upsertSegment(request: UpsertSegmentRequest): Promise<UpsertSegmentResponse> {
+    return unwrap(await this.api.upsertSegment(cloneForWire(request)))
   }
 
-  async updateSegmentMetadata(
-    segmentId: string,
-    name: string | null | undefined,
-    color?: string | null,
-    folded?: boolean | null,
-    branchId?: string | null
-  ): Promise<UpdateSegmentMetadataResponse> {
-    const request: UpdateSegmentMetadataRequest = cloneForWire({
-      segmentId,
-      branchId: branchId ?? null,
-      name,
-      color,
-      folded
-    })
-    return unwrap(await this.api.updateSegmentMetadata(request))
+  async updateSegmentMetadata(request: UpdateSegmentMetadataRequest): Promise<UpdateSegmentMetadataResponse> {
+    return unwrap(await this.api.updateSegmentMetadata(cloneForWire(request)))
   }
 
-  async deleteSegment(segmentId: string): Promise<void> {
-    const request: DeleteSegmentRequest = cloneForWire({ segmentId })
-    unwrap(await this.api.deleteSegment(request))
+  async deleteSegment(request: DeleteSegmentRequest): Promise<void> {
+    unwrap(await this.api.deleteSegment(cloneForWire(request)))
   }
 
-  async replaceSegmentMembership(
-    segmentId: string,
-    messageIds: string[],
-    branchId?: string | null
-  ): Promise<ReplaceSegmentMembershipResponse> {
-    const request: ReplaceSegmentMembershipRequest = cloneForWire({
-      segmentId,
-      branchId: branchId ?? null,
-      messageIds
-    })
-    return unwrap(await this.api.replaceSegmentMembership(request))
+  async replaceSegmentMembership(request: ReplaceSegmentMembershipRequest): Promise<ReplaceSegmentMembershipResponse> {
+    return unwrap(await this.api.replaceSegmentMembership(cloneForWire(request)))
   }
 
   // ============ Message Reorder (Phase 5.1A) ============
@@ -1444,6 +1421,82 @@ export class SqliteMessageDataSource implements MessageDataSource {
       groups: result.groups,
       clipboard: result.clipboard
     } as unknown as FetchClipboardGroupsResponse
+  }
+
+  // ============ Tree-preserving clipboard (opt-in include child branches) ============
+  /**
+   * Fetch one clipboard closure: the selected root groups of the source
+   * active route plus every included child branch subtree's owned rows.
+   *
+   * One Main SQLite transaction reads complete authority rows (never a
+   * loaded window). An unresolvable group key fails closed (a tree payload
+   * never silently loses a selected branch). Read-only: no mutation, no
+   * timestamp dispatch. Structured failure throws ChatDbResultError.
+   */
+  async fetchClipboardTree(request: FetchClipboardTreeRequest): Promise<FetchClipboardTreeResponse> {
+    if (!this.api.fetchClipboardTree) {
+      throw new Error('ChatDb API unavailable: clipboard-tree read not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchClipboardTreeRequest
+    const result = unwrap(await this.api.fetchClipboardTree(wireRequest))
+    return {
+      tree: {
+        source: result.tree.source,
+        roots: result.tree.roots,
+        messages: result.tree.messages as unknown as FetchClipboardTreeResponse['tree']['messages'],
+        blocks: result.tree.blocks as unknown as FetchClipboardTreeResponse['tree']['blocks'],
+        branches: result.tree.branches,
+        segments: result.tree.segments
+      },
+      clipboard: result.clipboard
+    } as unknown as FetchClipboardTreeResponse
+  }
+
+  /**
+   * Paste one clipboard closure into an explicit target route.
+   *
+   * ONE Main transaction: target insert with independently generated
+   * message/block/branch/segment IDs (plus source removal for `cut`). Returns
+   * the inserted IDs, file-cleanup facts, and the Main-produced replay
+   * snapshot the caller carries for undo/redo.
+   */
+  async pasteClipboardTree(request: PasteClipboardTreeRequest): Promise<PasteClipboardTreeResponse> {
+    if (!this.api.pasteClipboardTree) {
+      throw new Error('ChatDb API unavailable: clipboard-tree paste not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as PasteClipboardTreeRequest
+    return unwrap(await this.api.pasteClipboardTree(wireRequest)) as unknown as PasteClipboardTreeResponse
+  }
+
+  /**
+   * Undo/redo one tree copy/cut from its Main-produced snapshot.
+   *
+   * One Main transaction covering the target rows and (for cut) the source
+   * removal together; a conflicting current state fails closed with zero
+   * writes.
+   */
+  async replayClipboardTree(request: ReplayClipboardTreeRequest): Promise<ReplayClipboardTreeResponse> {
+    if (!this.api.replayClipboardTree) {
+      throw new Error('ChatDb API unavailable: clipboard-tree replay not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as ReplayClipboardTreeRequest
+    return unwrap(await this.api.replayClipboardTree(wireRequest)) as unknown as ReplayClipboardTreeResponse
+  }
+
+  /**
+   * Delete the selected owned messages of one route with their child-branch
+   * subtrees (same source scope as a tree cut, no insert/clipboard/paste).
+   *
+   * One Main transaction; a conflicting current state fails closed with zero
+   * writes. Convergence (projections, undo entry) is the caller's job —
+   * same as the cut path.
+   */
+  async deleteClipboardTree(request: DeleteClipboardTreeRequest): Promise<DeleteClipboardTreeResponse> {
+    if (!this.api.deleteClipboardTree) {
+      throw new Error('ChatDb API unavailable: clipboard-tree delete not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as DeleteClipboardTreeRequest
+    return unwrap(await this.api.deleteClipboardTree(wireRequest)) as unknown as DeleteClipboardTreeResponse
   }
 
   // ============ Standalone topic JSON data exchange (whole-topic export/import) ============

@@ -758,4 +758,95 @@ describe('send bottom keeper adoption (mounted keeper holds bottom, never the ol
     expect(controller.noteInteractionScrollEnd(token)).toBe(true)
     keeper.unmount()
   })
+
+  it('bottom semantic absorbs passive growth while an input session is live but has not scrolled', async () => {
+    rects.clear()
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    let scrollHeight = 600
+    Object.defineProperty(container, 'clientHeight', { get: () => 600, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { get: () => scrollHeight, configurable: true })
+    document.body.append(container)
+    const ref = { current: container }
+    const keeper = renderKeeper(controller, ref, 0)
+
+    // Explicit send adopts the bottom semantic (no row anchor).
+    const h = buildSequenceHarness(controller)
+    const res = await runSendBottomIntent({ topicId: 't1' }, 't1', h.deps)
+    expect(res).toEqual({ outcome: 'completed-bottom-adopted', routeKey: 'topic-t1::main' })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toBeNull()
+    act(() => {
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // A live gesture session is open (wheel momentum / a press that has not
+    // scrolled yet) when an accepted send's rows arrive. Nothing moved the
+    // scroll position; only the content below got taller. The bottom intent
+    // must still hold, otherwise the inserted rows stay below the fold and the
+    // viewport reads as a jump up.
+    const token = controller.declareUserIntent()
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+    scrollHeight = 690
+    act(() => {
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(90)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toBeNull()
+
+    // The same live session that DID move (its own scroll position is no
+    // longer the one this keeper realized) is never pulled forward.
+    act(() => {
+      container.scrollTop = 40
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(40)
+    expect(controller.noteInteractionScrollEnd(token)).toBe(true)
+    keeper.unmount()
+  })
+
+  it('a closed session still pins through growth, and a foreign route never pins', async () => {
+    rects.clear()
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    let scrollHeight = 600
+    Object.defineProperty(container, 'clientHeight', { get: () => 600, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { get: () => scrollHeight, configurable: true })
+    document.body.append(container)
+    const ref = { current: container }
+    const keeper = renderKeeper(controller, ref, 0)
+
+    const h = buildSequenceHarness(controller)
+    const res = await runSendBottomIntent({ topicId: 't1' }, 't1', h.deps)
+    expect(res).toEqual({ outcome: 'completed-bottom-adopted', routeKey: 'topic-t1::main' })
+    act(() => {
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // No session at all: growth is pinned to the new bottom.
+    scrollHeight = 700
+    act(() => {
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(100)
+
+    // The route this keeper belongs to is superseded: the realized bottom is
+    // provenance of the OLD route, so the new route's geometry is not touched.
+    controller.invalidateAll()
+    scrollHeight = 800
+    act(() => {
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(100)
+    keeper.unmount()
+  })
 })

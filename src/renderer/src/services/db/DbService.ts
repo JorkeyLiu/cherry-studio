@@ -4,10 +4,15 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   BranchOperationDirection,
   BranchOperationSnapshot,
+  DeleteClipboardTreeRequest,
+  DeleteClipboardTreeResponse,
   DeleteMessagesWithDependentsResponse,
+  DeleteSegmentRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
   FetchClipboardGroupsResponse,
+  FetchClipboardTreeRequest,
+  FetchClipboardTreeResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
@@ -22,9 +27,14 @@ import type {
   InsertMessageGroup,
   MessageBlockEntry,
   MoveContextAnchorInheritanceInput,
+  PasteClipboardTreeRequest,
+  PasteClipboardTreeResponse,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
+  ReplaceSegmentMembershipRequest,
   ReplayBranchOperationResponse,
+  ReplayClipboardTreeRequest,
+  ReplayClipboardTreeResponse,
   ResendUserMessagesRequest,
   ResetMessagesForResendResponse,
   ResolveContextClosureRequest,
@@ -35,7 +45,9 @@ import type {
   SetTurnFoldsResponse,
   StreamWriteDiagnostics,
   TopicDataExportPayload,
-  UpdateMessageUsageSource
+  UpdateMessageUsageSource,
+  UpdateSegmentMetadataRequest,
+  UpsertSegmentRequest
 } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
@@ -120,6 +132,22 @@ class DbService implements MessageDataSource {
   fetchClipboardGroups(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse> {
     if (!this.ordinarySource.fetchClipboardGroups) throw new Error('fetchClipboardGroups unavailable')
     return this.ordinarySource.fetchClipboardGroups(request)
+  }
+  fetchClipboardTree(request: FetchClipboardTreeRequest): Promise<FetchClipboardTreeResponse> {
+    if (!this.ordinarySource.fetchClipboardTree) throw new Error('fetchClipboardTree unavailable')
+    return this.ordinarySource.fetchClipboardTree(request)
+  }
+  pasteClipboardTree(request: PasteClipboardTreeRequest): Promise<PasteClipboardTreeResponse> {
+    if (!this.ordinarySource.pasteClipboardTree) throw new Error('pasteClipboardTree unavailable')
+    return this.ordinarySource.pasteClipboardTree(request)
+  }
+  replayClipboardTree(request: ReplayClipboardTreeRequest): Promise<ReplayClipboardTreeResponse> {
+    if (!this.ordinarySource.replayClipboardTree) throw new Error('replayClipboardTree unavailable')
+    return this.ordinarySource.replayClipboardTree(request)
+  }
+  deleteClipboardTree(request: DeleteClipboardTreeRequest): Promise<DeleteClipboardTreeResponse> {
+    if (!this.ordinarySource.deleteClipboardTree) throw new Error('deleteClipboardTree unavailable')
+    return this.ordinarySource.deleteClipboardTree(request)
   }
   fetchTopicNamingContext(
     topicId: string,
@@ -312,22 +340,14 @@ class DbService implements MessageDataSource {
   listSegments(topicId: string, branchId?: string | null) {
     return this.ordinarySource.listSegments(topicId, branchId)
   }
-  upsertSegment(
-    segmentId: string,
-    topicId: string,
-    name: string | null | undefined,
-    messageIds: string[],
-    color?: string | null,
-    branchId?: string | null,
-    folded?: boolean | null
-  ) {
-    return this.ordinarySource.upsertSegment(segmentId, topicId, name, messageIds, color, branchId, folded)
+  upsertSegment(request: UpsertSegmentRequest) {
+    return this.ordinarySource.upsertSegment(request)
   }
-  deleteSegment(segmentId: string) {
-    return this.ordinarySource.deleteSegment(segmentId)
+  deleteSegment(request: DeleteSegmentRequest) {
+    return this.ordinarySource.deleteSegment(request)
   }
-  replaceSegmentMembership(segmentId: string, messageIds: string[], branchId?: string | null) {
-    return this.ordinarySource.replaceSegmentMembership(segmentId, messageIds, branchId)
+  replaceSegmentMembership(request: ReplaceSegmentMembershipRequest) {
+    return this.ordinarySource.replaceSegmentMembership(request)
   }
   reorderMessages(topicId: string, messageIds: string[], branchId?: string | null) {
     return this.ordinarySource.reorderMessages(topicId, messageIds, branchId)
@@ -357,14 +377,8 @@ class DbService implements MessageDataSource {
   countFileRefsByFile(fileId: string) {
     return this.ordinarySource.countFileRefsByFile(fileId)
   }
-  updateSegmentMetadata(
-    segmentId: string,
-    name?: string | null,
-    color?: string | null,
-    folded?: boolean | null,
-    branchId?: string | null
-  ) {
-    return this.ordinarySource.updateSegmentMetadata(segmentId, name, color, folded, branchId)
+  updateSegmentMetadata(request: UpdateSegmentMetadataRequest) {
+    return this.ordinarySource.updateSegmentMetadata(request)
   }
   branchMessagesToTopic(
     sourceTopicId: string,

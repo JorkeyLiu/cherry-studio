@@ -16,6 +16,13 @@ export const MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT = 200
 /** Alias preserving B-06 calibration naming for external reference. */
 export const MESSAGE_WINDOW_BOUNDED_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT =
   MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+/** Single capacity policy: the ONLY place that clamps a group count to the */
+/** hard viewport bound. All construct/expand/reconcile paths delegate here */
+/** so the 200-bound decision lives once; callers keep their own distinct */
+/** budgets (initial displayCount=10, pagination page=20, navigation */
+/** quotas 10/19, request clamp 1..100) and never merge them into this bound. */
+export const clampViewportCapacity = (groupCount: number): number =>
+  Math.min(Math.max(0, Math.floor(groupCount) || 0), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
 
 export interface MessageGroupRange {
   /** Inclusive index of the visually oldest group in chronological source order. */
@@ -102,7 +109,7 @@ const createWindowFromRange = (
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
   observability?: MessageWindow['boundedViewportObservability']
 ): MessageWindow => {
-  const boundedCapacity = Math.min(Math.max(0, groupCapacity), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const boundedCapacity = clampViewportCapacity(groupCapacity)
   const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
   const buildObservability = (
     didTrim: boolean,
@@ -199,7 +206,7 @@ export const createLatestMessageWindow = (
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const rawCapacity = Math.max(0, groupCapacity)
-  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const boundedCapacity = clampViewportCapacity(rawCapacity)
   if (boundedCapacity === 0 || model.groups.length === 0)
     return createWindowFromRange(model, null, boundedCapacity, 'latest', authoritative)
 
@@ -239,7 +246,7 @@ export const createOldestMessageWindow = (
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const rawCapacity = Math.max(0, groupCapacity)
-  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const boundedCapacity = clampViewportCapacity(rawCapacity)
   if (boundedCapacity === 0 || model.groups.length === 0)
     return createWindowFromRange(model, null, boundedCapacity, 'fixed', authoritative)
 
@@ -268,7 +275,7 @@ export const createTargetMessageWindow = (
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const rawCapacity = Math.max(0, visuallyOlderGroupCount) + 1 + Math.max(0, visuallyNewerGroupCount)
-  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const boundedCapacity = clampViewportCapacity(rawCapacity)
   // When raw capacity exceeds bound, newer-first deterministic reduction while preserving anchor.
   let effectiveOlder = Math.max(0, visuallyOlderGroupCount)
   let effectiveNewer = Math.max(0, visuallyNewerGroupCount)
@@ -333,15 +340,22 @@ const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMe
 }
 
 /**
- * Optional constraint for one bounded window expansion: the stable identity the
- * caller must keep resident in the derived window (the live reading row the
- * stable-anchor keeper holds). Resolution is id-keyed against the SAME model the
- * range is derived from, so an identity that left the projection resolves to
- * `null` and degrades to the unconstrained bounded trim (the caller's existing
- * anchor fallback applies).
+ * Optional constraints for one bounded window derivation.
+ *
+ * `retainMessageId` is the stable identity the caller must keep resident (the
+ * live reading row the stable-anchor keeper holds). Resolution is id-keyed
+ * against the SAME model the range is derived from, so an identity that left the
+ * projection resolves to `null` and degrades to the unconstrained bounded trim
+ * (the caller's existing anchor fallback applies).
+ *
+ * `atPhysicalBottom` is the caller-measured fact that the scroll container rests
+ * exactly at its physical bottom (1px rounding tolerance — never the bottom
+ * vicinity threshold and never a snapshot's `isAtBottom`). It is the only
+ * follow-intent input a bounded reconcile consumes; see `reconcileMessageWindow`.
  */
 export interface MessageWindowExpansionOptions {
   retainMessageId?: string | null
+  atPhysicalBottom?: boolean
 }
 
 const resolveRetainedGroupIndex = (
@@ -459,10 +473,7 @@ const expandOlderWindow = (
       paged: true
     }
   }
-  const boundedCapacity = Math.min(
-    currentWindow.groupCapacity + addedCount,
-    MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
-  )
+  const boundedCapacity = clampViewportCapacity(currentWindow.groupCapacity + addedCount)
   const observability: MessageWindow['boundedViewportObservability'] = {
     calibrationDefault,
     boundedCapacity,
@@ -564,10 +575,7 @@ export const expandMessageWindowNewer = (
       observability
     )
   }
-  const boundedCapacity = Math.min(
-    currentWindow.groupCapacity + addedCount,
-    MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
-  )
+  const boundedCapacity = clampViewportCapacity(currentWindow.groupCapacity + addedCount)
   const observability: MessageWindow['boundedViewportObservability'] = {
     calibrationDefault,
     boundedCapacity,
@@ -761,6 +769,76 @@ const resolvePaginationTargetRange = (
   currentWindow.paginationTarget === true ? getRangeFromDisplayMessages(model, currentWindow.displayMessages) : null
 
 /**
+ * Whether THIS commit appended rows after the resident tail the committed window
+ * was showing.
+ *
+ * Read only from the previous/current loaded projections plus the committed
+ * window — no publisher-specific signal, and no order/membership/capability
+ * re-derivation:
+ *
+ * - the previous loaded tail is still resident (so this commit appended rather
+ *   than replaced the route/topic) and the current tail is a different row;
+ * - the committed window's NEWEST row is that previous tail, i.e. the window was
+ *   parked at the resident edge. A window browsing older history keeps its own
+ *   newest row and is therefore never pulled forward by an append elsewhere.
+ */
+const isAppendedTailCommit = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow
+): boolean => {
+  const previousTailId = previousMessages.at(-1)?.id ?? null
+  if (typeof previousTailId !== 'string' || previousTailId.length === 0) return false
+  const currentTailId = messages.at(-1)?.id ?? null
+  if (typeof currentTailId !== 'string' || currentTailId.length === 0) return false
+  if (currentTailId === previousTailId) return false
+  if (!messages.some((message) => message.id === previousTailId)) return false
+  return (currentWindow.displayMessages[0]?.id ?? null) === previousTailId
+}
+
+/**
+ * One follow rule shared by the reconcile and by every caller that must act on
+ * the SAME decision in the SAME layout phase (the keeper's bottom semantic
+ * before the appended rows mount): the commit appended after the resident tail,
+ * the caller measured the exact physical bottom, and the retained row (if any)
+ * is not evicted by the newest-capacity range.
+ */
+const resolveAppendedTailFollow = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  retainedIndex: number | null,
+  latestOldest: number,
+  options?: MessageWindowExpansionOptions
+): boolean =>
+  options?.atPhysicalBottom === true &&
+  isAppendedTailCommit(messages, previousMessages, currentWindow) &&
+  (retainedIndex === null || retainedIndex >= latestOldest)
+
+/**
+ * Compatibility: the same appended-tail follow predicate the `reconcile`
+ * window-transition intent resolves inside its single-model commit
+ * (`resolveAppendedTailFollow` — one rule, no duplicate). Production callers
+ * use the reconcile outcome's `followsAppendedTail` verdict instead of
+ * calling this separately, so the consequence can never disagree with the
+ * derivation.
+ */
+export const followsAppendedTailCommit = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
+): boolean => {
+  if (options?.atPhysicalBottom !== true) return false
+  const boundedCapacity = clampViewportCapacity(currentWindow.groupCapacity)
+  if (boundedCapacity === 0) return false
+  const model = createMessageViewportGroupModel(messages)
+  const retainedIndex = resolveRetainedGroupIndex(model, options)
+  const latestOldest = Math.max(0, model.groups.length - boundedCapacity)
+  return resolveAppendedTailFollow(messages, previousMessages, currentWindow, retainedIndex, latestOldest, options)
+}
+
+/**
  * Refreshes a historical range, or follows the latest edge, at the same group
  * capacity.
  *
@@ -777,15 +855,148 @@ const resolvePaginationTargetRange = (
  * newer edge) instead of being replaced before the next traversal. A pagination
  * that reaches the latest groups again drops the marker and restores ordinary
  * latest-following.
+ *
+ * Boundary retention (same commit, no gesture): a parked pure-tail append —
+ * previous projection id-prefix-stable, tail grew, displayed newest is the
+ * previous tail, no held reading row — retains the displayed oldest boundary
+ * and extends to the new tail instead of re-slicing newest-N, so the loaded
+ * old end never drifts on append. Capacity grows with the retained range up
+ * to the explicit bound; only then does the bounded trim apply (older edge).
+ * A held row suppresses the extension (retention below owns it); reading
+ * without a held row is untouched geometrically (growth mounts below the fold).
+ *
+ * Appended-tail follow (same-route authority commit): when the loaded projection
+ * gained rows AFTER the tail the committed window was showing — a tree clipboard
+ * paste/replay projection publication, a batch insertion acknowledgment — and the
+ * viewport rests at its ACTUAL physical bottom, that commit carries follow
+ * intent, so the newest-capacity range is derived in the same commit and the
+ * appended rows enter the mounted window without a user gesture and without a
+ * command-specific scroll. A committed browsing target is superseded then,
+ * exactly like a pagination that reached the latest groups again: returning to
+ * the bottom outranks a stale local hold. READING is untouched — no physical
+ * bottom, a window that was not at the resident tail, or a held row the
+ * newest-capacity range would evict all keep today's derivation, so the anchor
+ * never jumps. Geometry stays with the shared keeper: this function never
+ * scrolls. Following is a mounted-window decision only — the keeper's pin holds
+ * the new bottom against its live row anchor, so the caller that owns the commit
+ * must resolve `followsAppendedTailCommit` in the same layout phase and suspend a
+ * retained row keeper to the bottom semantic BEFORE the rows mount; that is the
+ * only way a pre-existing row anchor (the previous tail an older-page pagination
+ * left behind) stops outranking the measured bottom.
  */
-export const reconcileMessageWindow = (
+/**
+ * Whether THIS commit purely appended rows at the resident tail (unified,
+ * op-agnostic boundary check): the previous projection's ids form a stable
+ * prefix of the current projection in order, and the projection grew. No
+ * publisher signal is read, and no reorder/replacement can pass: a reorder or
+ * a middle insertion breaks the prefix, a replacement breaks the tail, and a
+ * same-size content update (same-group streaming) does not grow.
+ */
+const isPureTailAppend = (messages: Message[], previousMessages: Message[]): boolean => {
+  if (messages.length <= previousMessages.length) return false
+  for (let index = 0; index < previousMessages.length; index++) {
+    if (messages[index]?.id !== previousMessages[index]?.id) return false
+  }
+  return true
+}
+
+/**
+ * Unified boundary-retention expansion for a parked latest-edge window.
+ *
+ * Same-route pure append with the committed window parked at the resident tail
+ * retains the displayed oldest boundary and extends to the new tail instead of
+ * re-slicing newest-N: the loaded old end stays mounted, the new tail enters in
+ * the same commit, and capacity grows with the retained range (bounded by the
+ * calibration default). Only when the retained range itself exceeds the bound
+ * does the existing bounded trim apply (older edge; the retained index is null
+ * here by construction, so the exact trim applies).
+ *
+ * One rule, no op-type special-casing: anything that is not a parked pure append
+ * (reorder, replacement, middle insertion, deletion, an unparked window) returns
+ * null and keeps today's derivation. A held reading row also returns null —
+ * retention/follow owns it (reading outranks follow), so the anchor can never
+ * be disturbed by an extension.
+ */
+const expandParkedTailWindow = (
+  model: MessageViewportGroupModel,
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  capacity: number,
+  cleanAuth: { hasMoreBefore?: boolean; hasMoreAfter?: boolean } | undefined
+): MessageWindow | null => {
+  if (!isPureTailAppend(messages, previousMessages)) return null
+  const previousTailId = previousMessages.at(-1)?.id ?? null
+  if (typeof previousTailId !== 'string' || previousTailId.length === 0) return null
+  // Parked: the displayed newest row is the previous resident tail.
+  if ((currentWindow.displayMessages[0]?.id ?? null) !== previousTailId) return null
+  const committed = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  if (!committed) return null
+  const lastGroupIndex = model.groups.length - 1
+  const oldest = committed.oldestGroupIndex
+  const count = lastGroupIndex - oldest + 1
+  if (count <= 0) return null
+  const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  if (count <= calibrationDefault) {
+    const boundedCapacity = Math.max(capacity, count)
+    // Inherited omission (same convention as createLatest): groups before the
+    // retained oldest are resident-but-undisplayed, so local older traversal
+    // stays available when store authority is exhausted. Without this the
+    // expansion would report hasMoreOlder=false and break older traversal.
+    const inheritedOmission = oldest > 0
+    return createWindowFromRange(
+      model,
+      { oldestGroupIndex: oldest, newestGroupIndex: lastGroupIndex },
+      boundedCapacity,
+      'latest',
+      cleanAuth,
+      {
+        calibrationDefault,
+        boundedCapacity,
+        didTrim: inheritedOmission,
+        trimmedGroups: inheritedOmission ? oldest : 0,
+        trimmedEdge: inheritedOmission ? 'older' : null
+      }
+    )
+  }
+  const requiredTrim = count - calibrationDefault
+  const observability: MessageWindow['boundedViewportObservability'] = {
+    calibrationDefault,
+    boundedCapacity: calibrationDefault,
+    didTrim: true,
+    trimmedGroups: requiredTrim,
+    trimmedEdge: 'older'
+  }
+  return createWindowFromRange(
+    model,
+    { oldestGroupIndex: oldest + requiredTrim, newestGroupIndex: lastGroupIndex },
+    calibrationDefault,
+    'latest',
+    cleanAuth,
+    observability
+  )
+}
+
+/**
+ * One reconcile commit, decided once: the window to publish plus whether this
+ * same commit follows an appended tail (the keeper-suspend signal). Both come
+ * from a single group-model pass below — never a separate follow predicate
+ * plus a second reconcile derivation.
+ */
+export interface ReconciledWindowOutcome {
+  window: MessageWindow
+  /** True exactly when the keeper must suspend its row hold to the bottom semantic. */
+  followsAppendedTail: boolean
+}
+
+const reconcileInternal = (
   messages: Message[],
   previousMessages: Message[],
   currentWindow: MessageWindow,
   options?: MessageWindowExpansionOptions
-): MessageWindow => {
+): ReconciledWindowOutcome => {
   const rawCapacity = currentWindow.groupCapacity
-  const capacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const capacity = clampViewportCapacity(rawCapacity)
   const auth =
     currentWindow.authoritativeHasMoreBefore !== undefined || currentWindow.authoritativeHasMoreAfter !== undefined
       ? {
@@ -794,11 +1005,32 @@ export const reconcileMessageWindow = (
         }
       : undefined
   const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
-  if (currentWindow.edge === 'latest') {
-    const boundedCapacity = Math.min(Math.max(0, capacity), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
-    const model = boundedCapacity === 0 ? null : createMessageViewportGroupModel(messages)
-    const retainedIndex = model ? resolveRetainedGroupIndex(model, options) : null
-    const latestOldest = model ? Math.max(0, model.groups.length - boundedCapacity) : 0
+  const boundedCapacity = clampViewportCapacity(capacity)
+  // ONE group model per reconcile, built on first use only: both derivations
+  // resolve their range against it and a zero-capacity window never needs it.
+  let groupModel: MessageViewportGroupModel | null = null
+  const getGroupModel = (): MessageViewportGroupModel => (groupModel ??= createMessageViewportGroupModel(messages))
+  const model = boundedCapacity === 0 ? null : getGroupModel()
+  const retainedIndex = model ? resolveRetainedGroupIndex(model, options) : null
+  const latestOldest = model ? Math.max(0, model.groups.length - boundedCapacity) : 0
+  // Follow intent is gated by the SAME retention rule as every latest-edge
+  // reconcile: a held row inside the newest-capacity range is not evicted by
+  // following, so it never vetoes the commit.
+  const followAppendedTail = resolveAppendedTailFollow(
+    messages,
+    previousMessages,
+    currentWindow,
+    retainedIndex,
+    latestOldest,
+    options
+  )
+  // Single-wrap for every return below: the window and the follow decision of
+  // THIS commit, resolved from the same model pass above.
+  const reconciled = (window: MessageWindow): ReconciledWindowOutcome => ({
+    window,
+    followsAppendedTail: followAppendedTail
+  })
+  if (currentWindow.edge === 'latest' || followAppendedTail) {
     // A published ordinary pagination target stays authoritative for the loaded
     // projection it was derived from: rebuilding the newest-capacity range here
     // would slide the window past the page the user just pulled in — dropping
@@ -806,7 +1038,7 @@ export const reconcileMessageWindow = (
     // retained instead, bounded by the same capacity on the NEWER edge, never
     // grown past what it already committed, and never trimmed under the held
     // row.
-    const committedTarget = model ? resolvePaginationTargetRange(model, currentWindow) : null
+    const committedTarget = model && !followAppendedTail ? resolvePaginationTargetRange(model, currentWindow) : null
     if (model && committedTarget) {
       const lastGroupIndex = model.groups.length - 1
       const oldest = Math.min(committedTarget.oldestGroupIndex, lastGroupIndex)
@@ -827,7 +1059,7 @@ export const reconcileMessageWindow = (
               trimmedEdge: 'newer'
             }
           : undefined
-      return {
+      return reconciled({
         ...createWindowFromRange(
           model,
           { oldestGroupIndex: oldest, newestGroupIndex: newest },
@@ -837,10 +1069,19 @@ export const reconcileMessageWindow = (
           observability
         ),
         paginationTarget: true
-      }
+      })
+    }
+    // Boundary retention: a parked pure-tail append retains the displayed oldest
+    // boundary and extends to the new tail (capacity grows bounded) instead of
+    // re-slicing newest-N. A held reading row suppresses the extension —
+    // retention/follow below owns it — and a committed browsing target was
+    // already retained above.
+    if (model && !committedTarget && retainedIndex === null) {
+      const retainedTail = expandParkedTailWindow(model, messages, previousMessages, currentWindow, capacity, cleanAuth)
+      if (retainedTail) return reconciled(retainedTail)
     }
     if (!model || retainedIndex === null || retainedIndex >= latestOldest) {
-      return createLatestMessageWindow(messages, capacity, cleanAuth)
+      return reconciled(createLatestMessageWindow(messages, capacity, cleanAuth))
     }
     // Retention: the newest-capacity range would evict the held row. Keep the
     // older context the current window already shows (never less than the held
@@ -859,27 +1100,29 @@ export const reconcileMessageWindow = (
       trimmedGroups,
       trimmedEdge: 'newer'
     }
-    return createWindowFromRange(
-      model,
-      { oldestGroupIndex: oldest, newestGroupIndex: newest },
-      boundedCapacity,
-      'latest',
-      cleanAuth,
-      observability
+    return reconciled(
+      createWindowFromRange(
+        model,
+        { oldestGroupIndex: oldest, newestGroupIndex: newest },
+        boundedCapacity,
+        'latest',
+        cleanAuth,
+        observability
+      )
     )
   }
 
-  const model = createMessageViewportGroupModel(messages)
+  const fixedModel = model ?? getGroupModel()
   // Same id-keyed resolution used by every other derived range (one group-index
   // lookup built once) instead of a linear group scan per displayed message.
-  const retainedRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  const retainedRange = getRangeFromDisplayMessages(fixedModel, currentWindow.displayMessages)
   if (!retainedRange) {
     const previousRange = currentWindow.range
     // The group builder emits at least one group for every message, so an empty
     // group list is exactly an empty previous projection — no need to build the
     // previous model just to read its group count.
     if (!previousRange || previousMessages.length === 0) {
-      return createWindowFromRange(model, null, capacity, 'fixed', cleanAuth)
+      return reconciled(createWindowFromRange(fixedModel, null, capacity, 'fixed', cleanAuth))
     }
     // Clamp previous range to bounded capacity deterministically (trim newer edge if needed).
     let boundedRange = previousRange
@@ -897,9 +1140,9 @@ export const reconcileMessageWindow = (
         trimmedGroups,
         trimmedEdge: 'newer'
       }
-      return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth, observability)
+      return reconciled(createWindowFromRange(fixedModel, boundedRange, capacity, 'fixed', cleanAuth, observability))
     }
-    return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth)
+    return reconciled(createWindowFromRange(fixedModel, boundedRange, capacity, 'fixed', cleanAuth))
   }
 
   let oldestGroupIndex = retainedRange.oldestGroupIndex
@@ -915,7 +1158,7 @@ export const reconcileMessageWindow = (
     trimmedEdge = 'older'
   }
   const missingCount = Math.max(0, capacity - (newestGroupIndex - oldestGroupIndex + 1))
-  const addedNewer = Math.min(model.groups.length - 1 - newestGroupIndex, missingCount)
+  const addedNewer = Math.min(fixedModel.groups.length - 1 - newestGroupIndex, missingCount)
   newestGroupIndex += addedNewer
   oldestGroupIndex = Math.max(0, oldestGroupIndex - (missingCount - addedNewer))
 
@@ -930,14 +1173,150 @@ export const reconcileMessageWindow = (
         }
       : undefined
 
-  return createWindowFromRange(
-    model,
-    { oldestGroupIndex, newestGroupIndex },
-    capacity,
-    'fixed',
-    cleanAuth,
-    observability
+  return reconciled(
+    createWindowFromRange(
+      fixedModel,
+      { oldestGroupIndex, newestGroupIndex },
+      capacity,
+      'fixed',
+      cleanAuth,
+      observability
+    )
   )
+}
+/**
+ * Compatibility: the pre-unification reconcile entry. Same mechanism as the
+ * `reconcile` window-transition intent (delegates to the single-model
+ * implementation); production callers use `applyWindowTransition` so the
+ * follow decision and the window come from one commit.
+ */
+export const reconcileMessageWindow = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
+): MessageWindow => reconcileInternal(messages, previousMessages, currentWindow, options).window
+
+/**
+ * Compatibility: single-commit reconcile that also reports follow intent.
+ * Same single-model implementation as the `reconcile` intent below.
+ */
+export const reconcileWindowWithOutcome = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
+): ReconciledWindowOutcome => reconcileInternal(messages, previousMessages, currentWindow, options)
+/**
+ * Send-to-bottom tail reveal: extend the CURRENT window's range to the real
+ * tail, pinning the loaded oldest boundary. One group model, same primitives
+ * as every other derivation (`getRangeFromDisplayMessages`,
+ * `clampViewportCapacity`, `createWindowFromRange`, `resolveAppendedTailFollow`
+ * — no parallel mechanism, no new window facts).
+ *
+ * Why this exists next to `reconcile`: an ordinary reconcile retains a
+ * published pagination target and re-slices newest-N at the latest edge, so
+ * it can leave a freshly sent tail unmounted; and the send navigation used
+ * to rebuild the window from the initial budget (explicit go-latest shape),
+ * discarding the expanded range. `append` instead keeps the committed oldest
+ * row mounted and grows the newest edge to the tail. The ONLY trim is the
+ * hard-cap older-edge trim, exactly like the parked-tail expansion.
+ *
+ * Stable for a send that fires before the append lands (messages unchanged:
+ * the range already ends at the tail, so the window is returned as-is) and
+ * for one that fires after (the newest edge grows to the new tail). A
+ * browsing range in the middle keeps its oldest too — the send still goes to
+ * the physical bottom, it just no longer crushes the loaded old end.
+ *
+ * Follow verdict: the SAME rule as reconcile (`resolveAppendedTailFollow`),
+ * with the committed display rows as their own previous edge (newest-first
+ * storage reversed to chronological order — an existing window fact, never a
+ * new one). It answers "the projection grew past the committed newest and
+ * the committed newest is still resident", which is exactly the send's tail
+ * case; the keeper suspension itself stays with the send transaction's
+ * explicit bottom adoption.
+ */
+const appendTailWindow = (
+  messages: Message[],
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
+): ReconciledWindowOutcome => {
+  const model = createMessageViewportGroupModel(messages)
+  const auth =
+    currentWindow.authoritativeHasMoreBefore !== undefined || currentWindow.authoritativeHasMoreAfter !== undefined
+      ? {
+          hasMoreBefore: currentWindow.authoritativeHasMoreBefore,
+          hasMoreAfter: currentWindow.authoritativeHasMoreAfter
+        }
+      : undefined
+  const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
+  const capacity = clampViewportCapacity(currentWindow.groupCapacity)
+  const fallback = (): ReconciledWindowOutcome => ({
+    window: createLatestMessageWindow(messages, capacity, cleanAuth),
+    followsAppendedTail: false
+  })
+  if (model.groups.length === 0 || capacity === 0) return fallback()
+  const committed = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  if (!committed) return fallback()
+  const lastGroupIndex = model.groups.length - 1
+  const oldest = committed.oldestGroupIndex
+  const count = lastGroupIndex - oldest + 1
+  if (count <= 0) return fallback()
+  const hardcap = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  const retainedIndex = resolveRetainedGroupIndex(model, options)
+  // Committed display rows (newest-first) as their own previous edge, in
+  // chronological order: the same follow rule, no duplicate predicate.
+  const committedChronological = currentWindow.displayMessages.slice().reverse()
+  const followAppendedTail = resolveAppendedTailFollow(
+    messages,
+    committedChronological,
+    currentWindow,
+    retainedIndex,
+    Math.max(0, model.groups.length - Math.max(capacity, Math.min(count, hardcap))),
+    options
+  )
+  if (count <= hardcap) {
+    const boundedCapacity = Math.max(capacity, count)
+    // Inherited omission (same convention as the parked-tail expansion):
+    // groups before the retained oldest are resident-but-undisplayed, so
+    // local older traversal stays available.
+    const inheritedOmission = oldest > 0
+    return {
+      window: createWindowFromRange(
+        model,
+        { oldestGroupIndex: oldest, newestGroupIndex: lastGroupIndex },
+        boundedCapacity,
+        'latest',
+        cleanAuth,
+        {
+          calibrationDefault: hardcap,
+          boundedCapacity,
+          didTrim: inheritedOmission,
+          trimmedGroups: inheritedOmission ? oldest : 0,
+          trimmedEdge: inheritedOmission ? 'older' : null
+        }
+      ),
+      followsAppendedTail: followAppendedTail
+    }
+  }
+  const requiredTrim = count - hardcap
+  return {
+    window: createWindowFromRange(
+      model,
+      { oldestGroupIndex: oldest + requiredTrim, newestGroupIndex: lastGroupIndex },
+      hardcap,
+      'latest',
+      cleanAuth,
+      {
+        calibrationDefault: hardcap,
+        boundedCapacity: hardcap,
+        didTrim: true,
+        trimmedGroups: requiredTrim,
+        trimmedEdge: 'older'
+      }
+    ),
+    followsAppendedTail: followAppendedTail
+  }
 }
 
 // --- S6.1 helpers transplanted from Messages.tsx (single production implementation) ---
@@ -1483,4 +1862,131 @@ export function clearLatestWindowCompleteness(topicId: string): void {
 
 export function clearAllLatestWindowCompleteness(): void {
   latestWindowCompletenessByTopic.clear()
+}
+
+/**
+ * Unified window transition: the single typed entry for every viewport-window
+ * derivation. Each intent delegates to the same pure constructors below (no
+ * parallel logic); the legacy named exports stay as thin compatibility
+ * delegates of that same mechanism.
+ *
+ * Boundary vocabulary stays distinct on purpose and is never merged:
+ * - `budget` is the INITIAL display budget (Redux `displayCount`, 10 groups).
+ *   Only `initial` (first load) and `latest` (explicit go-latest/reset) carry
+ *   it. `reconcile` carries no budget: it keeps the CURRENT visible range's
+ *   capacity. `append` carries no budget either: it keeps the CURRENT window's
+ *   oldest boundary and extends to the real tail — a send-to-bottom never
+ *   re-slices the newest-N budget the way an explicit go-latest does.
+ * - The hard viewport bound (200 groups) lives only in
+ *   `clampViewportCapacity`; pagination page size (20), navigation quotas
+ *   (older 10 / newer 19) and the window-request clamp (1..100) live with
+ *   their own callers and are passed through untouched.
+ * - Group identity comes from the route (never the viewport); authority
+ *   flags are carried verbatim, never derived from viewport geometry.
+ */
+export type WindowTransitionAuthority = { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+
+export type WindowTransitionIntent =
+  | { kind: 'initial'; messages: Message[]; budget: number; authoritative?: WindowTransitionAuthority }
+  | { kind: 'latest'; messages: Message[]; budget: number; authoritative?: WindowTransitionAuthority }
+  | { kind: 'top'; messages: Message[]; budget: number; authoritative?: WindowTransitionAuthority }
+  | {
+      kind: 'target'
+      messages: Message[]
+      targetId: string
+      older: number
+      newer: number
+      authoritative?: WindowTransitionAuthority
+    }
+  | {
+      kind: 'restore'
+      loaded: Message[]
+      anchors: readonly (string | null | undefined)[]
+      older: number
+      newer: number
+      authoritative?: { hasMoreBefore: boolean; hasMoreAfter: boolean }
+    }
+  | {
+      kind: 'reconcile'
+      messages: Message[]
+      previousMessages: Message[]
+      currentWindow: MessageWindow
+      options?: MessageWindowExpansionOptions
+    }
+  | {
+      kind: 'append'
+      messages: Message[]
+      currentWindow: MessageWindow
+      options?: MessageWindowExpansionOptions
+    }
+  | {
+      kind: 'paginate'
+      direction: 'older' | 'newer'
+      messages: Message[]
+      currentWindow: MessageWindow
+      additionalGroupCount: number
+      responseWindow: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+      retainMessageId?: string | null
+    }
+
+export type WindowTransitionOutcome =
+  | { kind: 'window'; window: MessageWindow }
+  | { kind: 'reconciled'; window: MessageWindow; followsAppendedTail: boolean }
+  | { kind: 'paginated'; transition: PaginationWindowTransition }
+  | { kind: 'restored'; window: MessageWindow | null; empty: boolean }
+
+/**
+ * Single typed entry for every viewport-window derivation. One group model
+ * per transition at most; the `reconcile` and `append` branches return the
+ * window and its follow decision from the SAME single-model commit (no
+ * repeated predicate, no second derivation).
+ */
+export const applyWindowTransition = (intent: WindowTransitionIntent): WindowTransitionOutcome => {
+  switch (intent.kind) {
+    case 'initial':
+    case 'latest':
+      return { kind: 'window', window: createLatestMessageWindow(intent.messages, intent.budget, intent.authoritative) }
+    case 'top':
+      return { kind: 'window', window: createOldestMessageWindow(intent.messages, intent.budget, intent.authoritative) }
+    case 'target':
+      return {
+        kind: 'window',
+        window: createTargetMessageWindow(
+          intent.messages,
+          intent.targetId,
+          intent.older,
+          intent.newer,
+          intent.authoritative
+        )
+      }
+    case 'restore': {
+      const restored = buildRouteViewport(
+        intent.loaded,
+        intent.anchors,
+        intent.authoritative,
+        intent.older,
+        intent.newer
+      )
+      return { kind: 'restored', window: restored.window, empty: restored.empty }
+    }
+    case 'reconcile': {
+      const outcome = reconcileInternal(intent.messages, intent.previousMessages, intent.currentWindow, intent.options)
+      return { kind: 'reconciled', window: outcome.window, followsAppendedTail: outcome.followsAppendedTail }
+    }
+    case 'append': {
+      const appended = appendTailWindow(intent.messages, intent.currentWindow, intent.options)
+      return { kind: 'reconciled', window: appended.window, followsAppendedTail: appended.followsAppendedTail }
+    }
+    case 'paginate': {
+      const transition = derivePaginationWindow({
+        direction: intent.direction,
+        messages: intent.messages,
+        currentWindow: intent.currentWindow,
+        additionalGroupCount: intent.additionalGroupCount,
+        responseWindow: intent.responseWindow,
+        retainMessageId: intent.retainMessageId
+      })
+      return { kind: 'paginated', transition }
+    }
+  }
 }

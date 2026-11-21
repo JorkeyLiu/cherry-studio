@@ -3,11 +3,13 @@
  *
  * Static source guard for the sole firstElementChild content wrapper inside
  * #messages: same DOM level (no extra wrapper), ordinary DOM order equal to
- * visual order (oldest first), intrinsic content height, and short content
- * bottom-aligned by `marginBlockStart: auto` against a scrollport that takes
- * the available height. That replaces both the previous reversed direction and
- * the device-pixel `calc-size` rounding wrapper: a flow that only grows
- * downward from a stable top needs no fractional-zoom rounding hack. No
+ * visual order (oldest first), intrinsic content height, and no auto block-start
+ * margin — a short flow therefore starts at the top of the scrollport (normal
+ * margins, first content first) instead of being pushed to its end. The
+ * scrollport still takes the available height, so long content keeps scrolling.
+ * That replaces both the previous reversed direction and the device-pixel
+ * `calc-size` rounding wrapper: a flow that only grows downward from a stable
+ * top needs no fractional-zoom rounding hack. No
  * duplicated layout math, no JS number rounding, no timers/observers/hooks, no
  * manual height writes, no order/data change. Unit/static level only: real
  * pixel bounds are proven by the E2E rAF sampler in
@@ -20,7 +22,7 @@ import { describe, expect, it } from 'vitest'
 const messagesSrc = () => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
 
 describe('content-wrapper layout contract', () => {
-  it('sole firstElementChild wrapper keeps levels/order, is bottom-aligned by auto margin, and carries no quantum hack', () => {
+  it('sole firstElementChild wrapper keeps levels/order, starts at the scrollport top with no auto margin, and carries no quantum hack', () => {
     const src = messagesSrc()
     const containerIdx = src.indexOf('id="messages"')
     expect(containerIdx).toBeGreaterThan(-1)
@@ -35,8 +37,9 @@ describe('content-wrapper layout contract', () => {
     expect(slice).toMatch(/data-older-paging/)
     expect(slice).toMatch(/<Prompt/)
     expect(slice.indexOf('<Prompt')).toBeLessThan(slice.indexOf('data-older-paging'))
-    // Short content bottom alignment without a reversed direction.
-    expect(slice).toMatch(/marginBlockStart:\s*'auto'/)
+    // Top-start alignment: no auto block-start margin pushing short content to
+    // the end of the scrollport, and no reversed direction either.
+    expect(slice).not.toMatch(/marginBlockStart/)
     expect(slice).not.toMatch(/justifyContent:\s*'flex-end'/)
     expect(slice).toMatch(/flexShrink:\s*0/)
     // No device-pixel quantum wrapper workaround survives on either side.

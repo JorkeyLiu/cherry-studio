@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范；描述已实现的 durable 语义，并为正在实现的目标语义确立边界）。本文档统一定义话题内分支与跨话题引用的实体、所属、路由、权限与原子性：实体唯一、所属永久、引用只读、owner 完整控制、蝴蝶效应与继承边界前移、Main 权威与 Renderer fail-closed、复合变更的实际写目标与原子性、上下文窗口关系、同步与持久化边界。话题内分支（§5）以继承边界锚点在话题内分叉，并定义目的特定迁移（`moveSelectedTurnsToNewBranch`，“移至新建分支”）与 subtree 删除；跨话题引用（§6）由话题菜单“引用”子菜单创建，历史为经被点击消息捕获的活引用。两域共用同一套实体、路由与权限机制，不建平行子系统。
 > **决策锁**：BRANCH-1 … BRANCH-13（§3 决策索引，durable decision IDs；迁移语义为既有 ID 的 bounded 扩展，跨话题引用为 BRANCH-13 bounded 新 ID，不使用会话 LOCK ID）。
-> **最后更新**：2026-10-31
+> **最后更新**：2026-11-20
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；其余治理域（应用身份、SQLite 聊天权威与 L2 导入、上下文锚点、投影完备性、视口、同步）的边界与链接集中见 §9。
 > **决策状态与实现状态**：BRANCH-1…BRANCH-13 全部 **Locked**——表示治理决策已确定，**不代表已实现或已验证**。除话题内分支的既有 durable 语义外，“移至新建分支”（§5.3）与跨话题引用（§6）是正在实现中的目标语义；本文档只定义合同，不声称代码已完成，也不声称任何测试已通过（验证证据归验证报告）。跨话题引用的持久化与单话题导出/导入、整库备份语义见 §7 唯一定义。已取消的 merge/sync 支持不在本文档范围，分支与引用维持 local-only。
@@ -39,6 +39,7 @@
 | 可变消息集 | mutableMessageIds | Main 随每次窗口响应发布的权威能力：该响应窗口 messages 中 `topicId == addressed topic` **且** `branchId == addressed route` 的精确子集，见 §4.8 |
 | 实际写目标 | actual mutation target | 一条命令实际写/删/重排的消息行；只读引用（user root 读取、组成员读取、segment 成员引用解析）不构成变更，见 §4.6 |
 | 跨话题复制 | cross-topic copy | `branchMessagesToTopic` 的跨话题前缀复制（fresh IDs）；不是话题内分支，“复制”子菜单即此语义，见 §7 |
+| 树保留剪贴板 | clipboard tree | 可选“包含子分支”的复制/剪切载荷：Main 权威捕获的被选根组（源被寻址路由上的完整稳定组）+ 锚定在这些根消息上的直接子分支及其完整 subtree，只含各自自有行；copy 在目标新建独立行，cut 另删源自有行，见 §4.6 |
 | 跨话题引用 | cross-topic reference | “引用”子菜单创建的目标逻辑话题：其历史为经被点击消息捕获的活引用——引用源关系 `(sourceTopicId, sourceBranchId, anchorMessageId)`；源消息/块/文件不复制，目标自有后缀可写、引用前缀只读，见 §6 |
 | 引用源 | reference source | 被引用的源话题（`sourceTopicId`）及其被捕获的源分支（`sourceBranchId`，`null` = 源 main 路由）与端点消息（`anchorMessageId`） |
 | 引用端点 | reference endpoint | 引用冻结的 `(sourceTopicId, sourceBranchId, anchorMessageId)`；端点消息被删除时按 §4.5 同一继承边界规则前移；导航跳转到源话题 + 捕获源分支 + 当前边界消息 |
@@ -158,7 +159,8 @@ owner 完整控制：后代是否引用、引用数量、是否位于后代有�
 | `selectAnswerMessage` / `selectUsefulAnswer` / `reorderAnswerGroup` | 实际写的 assistant 成员（整组原子） | 整组 assistant 成员 owner match；读取 user root 不要求可变；任一非 owner 整批拒绝、无部分写 |
 | `insertMessagesAfterAnchor`（含 append） | 新行（owned 后缀）+ 被 patch 的既有行 | 新行按 route stamping 落后缀；既有行按单行 owner 判权；genuinely new suffix 永不要求既有组可变；自有锚点走组尾，分叉边界（§4.4 唯一例外：分支 `anchorMessageId` 或引用端点）允许并落自有后缀起始，更老祖先/外来源引用以 `VALIDATION_ERROR` 拒绝零写 |
 | `cloneMessagesToTopic` / `pasteMessagesToTopic` | 新行 + 被 patch 的既有行 | 新行落目标 route；既有行 owner 判权；跨话题冲突 fail-closed |
-| `upsertSegment` / `replaceSegmentMembership` | segment 行（成员为引用） | 每成员 `owner == addressed route`（non-owner 拒绝，含祖先引用）；owned 行即使被后代引用仍可 segment；原子替换 |
+| `fetchClipboardTree` / `pasteClipboardTree` / `replayClipboardTree`（树保留剪贴板，见本节下文） | 目标侧全部新行（messages/blocks/branches/segments，全新 ID）+ cut 时源端被选 owned 根行与被删分支 subtree 行 | 捕获为只读（源无需可变）；目标话题存在且非 trash、目标路由存在；插入位置按 §4.4 自有锚点/唯一分叉边界例外解析；cut 要求根全体 `owner == 源被寻址路由`（继承根 copy-only）且捕获仍与源权威一致；一个根事务覆盖目标插入与（cut）源删除，失败零写 |
+| `upsertSegment` / `updateSegmentMetadata` / `deleteSegment` / `replaceSegmentMembership` | segment 行（创建 / 元数据 / 解散）+ 成员引用 | 每成员 `owner == addressed route`（non-owner 拒绝，含祖先引用）；owned 行即使被后代引用仍可 segment；元数据与解散只按组头 owner 判权（非 owner 路由可读可导航但拒绝、零写）；原子替换 |
 | `setTurnFolds`（整 turn 折叠/展开，可多 turn） | 所选 turn 的**完整**成员行（Main 按有效路由解析，与加载窗口/视口无关） | 全体成员 `owner == addressed route`；同一 message group 内只折叠部分 turn 允许（组不是上下文单位）；任一非 owner 整批拒绝、零部分写；同一 owner 的范围跨越未 taken 子分支分叉点仍允许；折叠是 local-only 表现状态，不改 owner、顺序与边界 |
 | `resendUserMessages` | 实际 reset 的 assistants + 新建成员 | user root 仅要求在有效路由可读（不要求可变）；每个实际 reset 的 assistant 须 owned；非 owned 整批拒绝；新建落 owned 后缀 |
 | `regenerateAssistantMessage` | 选中的 assistant | 选中须 owned；user root 仅要求存在可读 |
@@ -169,6 +171,12 @@ owner 完整控制：后代是否引用、引用数量、是否位于后代有�
 | 创建跨话题引用（“引用”子菜单，§6） | 目标话题引用源关系行 + 目标后缀起始 | 见 §6（只读源操作；引用前缀只读 + 目标自有后缀可写） |
 
 所有路径保留：owner/topic/route validation、有效路由 membership、事务原子性、identity-field stripping。**owner 相等性同时比较 `topicId` 与 `branchId`**——跨话题目标行（如引用前缀的源行）`topicId != addressed topic` 一律不可变更、fail-closed；引用前缀只读即由此保证。
+
+message-group 写 API（`upsertSegment` / `updateSegmentMetadata` / `deleteSegment` / `replaceSegmentMembership`）必须在请求中显式给出 `branchId`——`null` 表示 main 路由、非空字符串表示该分支的有效路由，省略 `branchId` 不是一种路由（TypeScript 调用为编译错误，IPC 契约边界以 `VALIDATION_ERROR` 拒绝，写方永不把缺失路由兜底为 main）。该显式要求仅限上述四个组写 API：只读路径与其余写 API（如 `deleteMessages` / `reorderMessages` / `appendMessage`）保持各自既有语义，本文档不改变其 `branchId` 是否可省略；其中 `listSegments` 省略 `branchId` 表示不限定路由的完整目录，显式 `null` 才表示 main 路由。
+
+**树保留剪贴板（可选“包含子分支”的复制/剪切）**：普通复制/剪切语义与既有两步路径不变（§7）。勾选包含子分支时，Main 以 `fetchClipboardTree` 在单事务内捕获源被寻址路由（有效路由）上所选稳定组键的完整组作为根，并纳入锚点恰好是这些根消息的直接子分支及其完整 descendant subtree，只取这些分支自有行；共享前缀、祖先行与 sibling 分支永不进入载荷，也不重物化祖先前缀。捕获是只读能力：`fetchClipboardTree` 的 `branchId` 可省略（沿用既有只读语义，省略/null = main 路由），未知组键、锚点不在闭包内或层级超出可解析上限一律 fail-closed，不静默丢内容。`pasteClipboardTree` 的 `target.branchId` 必须显式（`null` = main 路由）；目标话题须存在且非 trash、目标路由须存在，插入位置按 §4.4 判权（`topic-tail`、自有锚点组尾或精确索引；继承锚点仅允许唯一分叉边界例外，更老祖先 `VALIDATION_ERROR` 零写），放置后祖先层级超过可解析上限（`MAX_BRANCH_DEPTH - 1`）同样零写。每个被捕获实体（message/block/branch/segment）取全新 ID，`askId`、blocks、branch parent/anchor、segment 成员与组头全部重映射，故 copy 是独立快照：无活引用、无 owner 转移、无上下文等 renderer 设置克隆；目标分支行是新建实体，不是既有分支的 reparent，也不属于 §5.3 的锚点随迁例外。cut 在同一根事务内追加源删除：仅当根全体为源路由自有（继承根 copy-only，cut fail-closed）且载荷仍与源权威逐项一致（组、子分支、消息/块、块序、owner 行序、segment 成员与组头）时才删，源删除沿用 §4.5 边界前移与 §5.2 subtree 语义；目标路由落在被删 subtree 内时零写。`replayClipboardTree` 以同一份 Main 生成的快照统一 undo/redo（undo 删插入行并恢复源行，redo 复用同一组生成 ID 与记录邻位重放），两方向先对比当前权威状态与快照，任何冲突（目标邻位变化、源行变化、插入行之上新建分支等）fail-closed 零写。sync 边界维持 §7：目标/源 main 行按既有可同步规则，分支自有行与剪贴板新建分支 local-only。
+
+**分支自有树复制（选择器分支行复制）**：选择器每个分支行的复制动作是上述树保留剪贴板的第二种捕获形状，复用同一个 `fetchClipboardTree` 命令与同一粘贴/重放通道，不新增传输栈：请求 `{ topicId, branchId: 非空, capture: 'branch-owned' }` 与选择形状 `{ topicId, branchId?, groupIds(非空) }` 互斥（同时带 `groupIds`、缺少显式 `branchId` 或未知 `capture` 值一律 `VALIDATION_ERROR`），响应仍为同一 tree/meta。捕获只取被点分支自有行作为根主干，再加其全部 descendant 分支各自自有行：无继承父前缀、无需先选父锚点、不依赖当前活跃路由（可复制任意可见分支行，含非活跃分支），捕获只读且源不受影响。粘贴时源分支节点不重建，自有根行成为显式目标路由的主干，descendant 分支保留名称/父/锚点；不产生新 owner、不 reparent 既有分支。该入口纯 copy：不新增 cut 入口，直接构造的 cut 载荷仍受既有 current-source 闭包守卫约束，歧义即 fail-closed。主干为空、未知分支，或任一 descendant 锚点落在捕获行之外（修复/悬空引用指向继承父行）时 typed fail-closed，零剪贴板发布——绝不静默省略分支、包含父前缀或合成空锚点。
 
 **原子性**：
 
@@ -255,7 +263,7 @@ Renderer 门禁（§4.8）：话题内分支创建仅在自有（owned/mutable�
 
 **复制区分**：`branchMessagesToTopic` 跨话题前缀复制（fresh IDs）是兼容/导出形态，不是话题内分支；“复制”子菜单即此语义、保持不变；既有复制 API 不重命名，但调用方不得将其当作话题内分支权限语义。
 
-**调用者本地读取**：导出/知识/剪贴板组装/命名/活跃度是 caller-local 读取（`whole-topic`/`naming-context`/`topic-activity`），消费后丢弃；剪切的删除另经权威删除路径。
+**调用者本地读取**：导出/知识/剪贴板组装/命名/活跃度是 caller-local 读取（`whole-topic`/`naming-context`/`topic-activity`），消费后丢弃；剪切的删除另经权威删除路径。可选“包含子分支”的树保留剪贴板捕获是独立完备性能力 `'clipboard-tree'`（§4.6）：载荷只由调用方持有至粘贴/重放，不进入普通消息/块驻留投影；其剪切不在渲染侧另行删除，而是与目标插入同属一个 Main 事务。
 
 **持久化与迁移**：跨话题引用对持久化的影响是**增量**的——新增 `topic_references` 表（迁移 `018_topic_references`），每个引用目标话题一行：`target_topic_id` 主键，目标删除时级联清理；`source_topic_id` 为普通列、非外键、不级联，源删除永不删除目标；`source_branch_id` 可空；`anchor_message_id` 为端点稳定 ID（端点删除时由 Main 就地前移到最近存活前驱，仍为非空既有列，无 schema/迁移变化）。既有 legacy 源格式（topics/messages、`branch_id`、`topic_branches` ancestry、既有导入结构）保持不变，既有数据库升级后无引用行、行为不变。L2 ZIP 导入管线与 SQLite schema/迁移 mechanics 由 SQLite migration governance 治理（链接见 §9）。
 
@@ -277,12 +285,13 @@ Renderer 门禁（§4.8）：话题内分支创建仅在自有（owned/mutable�
 - **实时名称与稳定端点导航（§6）**：分隔线跟随源话题实时标题（源重命名后更新）；点击从目标导航到源话题 + 捕获源分支 + 精确端点消息。
 - **链式引用分层分割线（§6）**：`A→B→C` 链上目标 `C` 依次呈现 `A` 消息 → “引用自 A” → `B` 消息 → “引用自 B” → `C` 自有消息；每条分割线点击导航到各自源话题 + 捕获源分支 + 端点；下游端点截断上游历史时不显示该上游线；同一端点上的多层引用关系保留为两条（稳定且不同的 key）；上游边界尚未加载时延后显示而非顶到首部；missing/删除保持既有缺失回退。
 - **删除存活、恢复与组合（§6）**：端点 anchor 删除 → 前缀按同一继承边界缩短；无存活前驱或源话题删除/软删除、源分支删除 → 前缀缺席 + 分隔线显示缺失文案，目标与自有后缀保留且不级联；端点恢复完整后前缀重新可用；递归引用源越界在引用边界 fail-closed 且保留目标后缀；目标话题的话题内分支以引用基座组合、目标内 subtree 删除语义不变。
+- **树保留剪贴板（§4.6）**：包含子分支的 copy/cut 只捕获“所选根 + 锚定其上的直接子分支 subtree”各自自有行（无共享前缀重复、无 sibling/祖先行）；copy 落目标路由且全部实体 fresh ID、与源无活引用、不克隆上下文设置；cut 仅在同根事务内删源 owned 根与被删分支 subtree，继承根/捕获失效/目标路由位于被删 subtree 内零写；目标话题 trash、目标路由缺失、闭包或放置后深度超限零写；undo/redo 以一份 Main 快照覆盖目标插入与源删除，冲突零写拒绝；普通 copy/cut 两步路径不变。
 - **证据层级**：按 `AGENTS.md` 路由；跨组件/IPC/持久化行为以 Playwright E2E 为合同级回归，隔离逻辑以 Vitest 为先；`pnpm ui:observe` 仅诊断；实现验证证据归验证报告，本文档不预断结果。
 
 **验收标准**：
 
 - **AC-1**：本文档完整覆盖 BRANCH-1…BRANCH-13 决策索引（§3，含 §5.3 迁移扩展与 §6 跨话题引用扩展）、术语（§2）、权威模型（§4）、话题内分支（§5）、跨话题引用（§6）、共同边界（§7）、验证与验收（§8）与非目标（§9）。
-- **AC-2**：全文内部一致——同一话题同一消息只有一个权威实体（无复制/COW）；当前路由只能变更 owned 行，owner 权限永不因后代引用收缩；自动 owner 转移永禁、仅 §5.3 显式授权迁移可变 owner；祖先引用对插入/子分支创建只读，唯一例外是 §4.4 分叉边界（分支 `anchorMessageId` 或引用端点）；迁移要求源自有连续整 turn + 前驱存在自有 + 新锚点为稳定前驱（仅在其被删除时按 §4.5 前移），所选含既有分支锚点时迁移照常成功——该分支在同一根事务内改挂到新建分支且 `anchorMessageId` 不变、改挂前后其有效路由逐字相同，其后代分支保留 `parentBranchId` 并靠路由合成跟随；除此随迁重挂外不 reparent/delete 任何既有分支，成环目标或改挂后祖先层级超限则整批拒绝零写，迁移闭包须与显式 `expectedSelectedMessageIds` 精确一致；`mutableMessageIds` 为窗口内同 `topicId`+`branchId` 的 owned 精确子集；缺分支锚点按继承边界前移到其之前最近存活消息、无前驱则空继承，分支与其自有后缀保持可读写；分支锚点与上下文锚点严格区分；`branchMessagesToTopic` 明确不是话题内分支；跨话题引用与话题内 ancestry 严格区分且不建第二子系统，owner 相等性含 `topicId`（源行不可经目标路由变更），引用创建为只读源操作、不授予话题内分支创建/任何变更，引用前缀缺席不级联且目标与后缀保留，递归引用源 bounded cycle/depth 在引用边界 fail-closed；无 branch-from-any-ancestor / insert-after-any-ancestor 授权残留，无通用 owner 转移 API。
+- **AC-2**：全文内部一致——同一话题同一消息只有一个权威实体（无复制/COW）；当前路由只能变更 owned 行，owner 权限永不因后代引用收缩；自动 owner 转移永禁、仅 §5.3 显式授权迁移可变 owner；祖先引用对插入/子分支创建只读，唯一例外是 §4.4 分叉边界（分支 `anchorMessageId` 或引用端点）；迁移要求源自有连续整 turn + 前驱存在自有 + 新锚点为稳定前驱（仅在其被删除时按 §4.5 前移），所选含既有分支锚点时迁移照常成功——该分支在同一根事务内改挂到新建分支且 `anchorMessageId` 不变、改挂前后其有效路由逐字相同，其后代分支保留 `parentBranchId` 并靠路由合成跟随；除此随迁重挂外不 reparent/delete 任何既有分支，成环目标或改挂后祖先层级超限则整批拒绝零写，迁移闭包须与显式 `expectedSelectedMessageIds` 精确一致；`mutableMessageIds` 为窗口内同 `topicId`+`branchId` 的 owned 精确子集；缺分支锚点按继承边界前移到其之前最近存活消息、无前驱则空继承，分支与其自有后缀保持可读写；分支锚点与上下文锚点严格区分；`branchMessagesToTopic` 明确不是话题内分支；跨话题引用与话题内 ancestry 严格区分且不建第二子系统，owner 相等性含 `topicId`（源行不可经目标路由变更），引用创建为只读源操作、不授予话题内分支创建/任何变更，引用前缀缺席不级联且目标与后缀保留，递归引用源 bounded cycle/depth 在引用边界 fail-closed；无 branch-from-any-ancestor / insert-after-any-ancestor 授权残留，无通用 owner 转移 API；树保留剪贴板的 copy 为新建 fresh-ID 独立快照、cut 为同一根事务内的源行删除，二者都不是 owner/身份转移，也不构成既有分支的 reparent 例外。
 - **AC-3**：外部治理文档只链接本文档、不复制其决策表（治理域边界与链接集中见 §9）。
 - **AC-4**：目标命令 `moveSelectedTurnsToNewBranch` 按 §5.3/§4.6/§4.8 实施，“引用”子菜单按 §6 实施而“复制”维持既有 fresh-ID 复制；既有 owner-only + bounded 语义（保护集与 descendant 守卫移除，capability 为 owned 精确子集；插入限自有 + 唯一分叉边界例外；分支创建限父路由自有）保持。本文档只定义合同，不声称代码已完成、也不声称任何测试已通过。
 - **AC-5**：实现验证证据归验证报告（Focused Vitest + 合同级 Playwright E2E）；本文档仅定义合同，不预断通过结果。

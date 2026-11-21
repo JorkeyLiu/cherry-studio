@@ -182,8 +182,8 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
       ackFor(tid, groups, branchId ?? null)
     )
     // Segment restore Main write succeeds, catalog list fails genuinely.
-    mocks.upsertSegment.mockImplementation(async (id: string, tid: string, _n: string, mids: string[]) =>
-      segWire(id, tid, mids)
+    mocks.upsertSegment.mockImplementation(async ({ segmentId, topicId, messageIds }: any) =>
+      segWire(segmentId, topicId, messageIds)
     )
     mocks.listSegments.mockRejectedValue(new Error('list failed'))
 
@@ -265,10 +265,12 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     mocks.insertMessageGroups.mockImplementation(async (tid: string, groups: any[], branchId?: string | null) =>
       ackFor(tid, groups, branchId ?? null)
     )
-    mocks.upsertSegment.mockImplementation(async (id: string, tid: string, _n: string, mids: string[]) =>
-      segWire(id, tid, mids)
+    mocks.upsertSegment.mockImplementation(async ({ segmentId, topicId, messageIds }: any) =>
+      segWire(segmentId, topicId, messageIds)
     )
-    mocks.replaceSegmentMembership.mockImplementation(async (id: string, mids: string[]) => segWire(id, topicId, mids))
+    mocks.replaceSegmentMembership.mockImplementation(async ({ segmentId, messageIds }: any) =>
+      segWire(segmentId, topicId, messageIds)
+    )
     mocks.deleteSegment.mockResolvedValue(undefined as any)
     // Every catalog list fails: both source restore and target cleanup converge
     // as typed projection failures after their Main writes committed.
@@ -409,8 +411,8 @@ describe('UndoService catalog convergence (real store, real helpers)', () => {
     mocks.insertMessageGroups.mockImplementation(async (tid: string, groups: any[], branchId?: string | null) =>
       ackFor(tid, groups, branchId ?? null)
     )
-    mocks.upsertSegment.mockImplementation(async (id: string, tid: string, _n: string, mids: string[]) =>
-      segWire(id, tid, mids)
+    mocks.upsertSegment.mockImplementation(async ({ segmentId, topicId, messageIds }: any) =>
+      segWire(segmentId, topicId, messageIds)
     )
     mocks.listSegments.mockRejectedValue(new Error('list failed'))
 

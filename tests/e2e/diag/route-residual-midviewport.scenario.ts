@@ -108,7 +108,7 @@ const FN_SEED_SRC = `function () {
     // head u04 sits AFTER the fork anchor, the remaining members u03/a03 sit
     // BEFORE it, so the child inherits only the pre-fork part of the group.
     const members = ['u04', 'a04', 'u03', 'a03'].map((k) => topicId + '-' + k)
-    const seg = await api.upsertSegment({ segmentId: segId, topicId, name: 'diag mid group', messageIds: members })
+    const seg = await api.upsertSegment({ segmentId: segId, topicId, name: 'diag mid group', messageIds: members, branchId: null })
     if (!seg || seg.ok !== true) return { ok: false, err: 'upsertSegment ' + JSON.stringify(seg) }
     const qParent = await api.listSegments({ topicId, branchId: null })
     const qChild = await api.listSegments({ topicId, branchId: childId })

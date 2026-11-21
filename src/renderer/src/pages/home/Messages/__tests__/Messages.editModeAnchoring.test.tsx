@@ -661,10 +661,10 @@ describe('Messages edit-mode overlay regression', () => {
 
     const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
     // Short-content contract: the host takes the available wrapper height
-    // (flex: 1 1 auto) so the scrollport height is the visible height, and short
-    // content is bottom-aligned by the content wrapper's auto block-start
-    // margin — never by a reversed direction and never by leaving the host
-    // content-sized (which re-created the blank space above the Prompt).
+    // (flex: 1 1 auto) so the scrollport height is the visible height, and the
+    // content wrapper starts at the top with ordinary margins (no auto
+    // block-start margin) — never a reversed direction and never a
+    // content-sized host (which re-created the blank space above the Prompt).
     expect(containerRules).not.toMatch(/flex:\s*1\s*;/)
     expect(containerRules).toContain('flex: 1 1 auto')
     expect(containerRules).toContain('min-height: 0')
@@ -683,12 +683,12 @@ describe('Messages edit-mode overlay regression', () => {
 
   it('short-content layout contract: host takes the available height, wrapper stays the height boundary, scroll stays on #messages', async () => {
     // jsdom has no real flex geometry, so this asserts the CSS contract that
-    // prevents the short-content regression (1/2/3 messages left blank above
-    // Prompt): wrapper keeps flex:1/min-height:0 as positioning + height
-    // boundary, the host takes that available height (flex:1 1 auto,
-    // min-height:0) so its scrollport is the visible height, and the content
-    // wrapper bottom-aligns short content with `margin-block-start: auto` while
-    // long content still scrolls through the host's own overflow-y:auto.
+    // keeps a short flow top-anchored (1/2/3 messages must start at the top
+    // with the Prompt first, not be pushed to the bottom of an empty port):
+    // wrapper keeps flex:1/min-height:0 as positioning + height boundary, the
+    // host takes that available height (flex:1 1 auto, min-height:0) so its
+    // scrollport is the visible height, and long content still scrolls through
+    // the host's own overflow-y:auto.
     const actualShared = (await vi.importActual('@renderer/pages/home/Messages/shared')) as any
     const wrapperRules: string = (actualShared.MessagesWrapper?.componentStyle?.rules?.join('') ?? '') as string
     const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string

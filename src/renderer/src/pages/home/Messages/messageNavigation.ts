@@ -4,12 +4,7 @@ import { maxScrollTop, readScrollMetrics } from './flowScrollGeometry'
 import { createMessageViewportGroupModel } from './messageGroups'
 import type { MessageViewportNavigationSource, MessageViewportNavigationToken } from './messageViewportReducer'
 import type { MessageViewportState } from './messageViewportReducer'
-import {
-  createLatestMessageWindow,
-  createOldestMessageWindow,
-  createTargetMessageWindow,
-  type MessageWindow
-} from './messageWindow'
+import { applyWindowTransition, type MessageWindow } from './messageWindow'
 // ---------------------------------------------------------------------------
 // Prepare / execute stage contract
 // ---------------------------------------------------------------------------
@@ -121,7 +116,7 @@ export const resolveFlowScrollTarget = (
   resolved: ResolvedMessageNavigation,
   container: FlowScrollContainer | null | undefined
 ): { top: number } | null => {
-  if (resolved.kind === 'bottom') return { top: scrollTravelOf(container) }
+  if (resolved.kind === 'bottom' || resolved.kind === 'send-bottom') return { top: scrollTravelOf(container) }
   if (resolved.kind === 'top') return { top: 0 }
   if (resolved.kind === 'scrollTop') return { top: clampFlowScrollTop(resolved.scrollTop, container) }
   // 'message' kind requires DOM element lookup; handled separately by the caller.
@@ -437,12 +432,16 @@ export type MessageNavigationIntent =
       alignment?: MessageNavigationAlignment
     }
   | { kind: 'bottom'; source: MessageViewportNavigationSource }
+  | {
+      kind: 'send-bottom'
+      source: MessageViewportNavigationSource
+    }
   | { kind: 'top'; source: MessageViewportNavigationSource }
   | { kind: 'scrollTop'; scrollTop: number; source: 'restore' }
-
 export type ResolvedMessageNavigation =
   | { kind: 'message'; targetId: string; alignment: MessageNavigationAlignment; restoreOffset?: number | null }
   | { kind: 'bottom' }
+  | { kind: 'send-bottom' }
   | { kind: 'top' }
   | { kind: 'scrollTop'; scrollTop: number }
 
@@ -624,6 +623,7 @@ export const resolveMessageNavigation = (
   messages: Message[],
   intent: MessageNavigationIntent
 ): ResolvedMessageNavigation | null => {
+  if (intent.kind === 'send-bottom') return { kind: 'send-bottom' }
   if (intent.kind === 'bottom') return { kind: 'bottom' }
   if (intent.kind === 'top') return { kind: 'top' }
   if (intent.kind === 'scrollTop') return { kind: 'scrollTop', scrollTop: intent.scrollTop }
@@ -738,17 +738,46 @@ export const chooseNavigationWindow = (
   resolved: ResolvedMessageNavigation,
   latestGroupCount: number
 ): MessageWindow | null => {
-  if (resolved.kind === 'bottom') return createLatestMessageWindow(messages, latestGroupCount)
-  if (resolved.kind === 'top') return createOldestMessageWindow(messages, latestGroupCount)
-  if (resolved.kind === 'scrollTop') return currentWindow ? null : createLatestMessageWindow(messages, latestGroupCount)
+  // Navigation quotas (older 10 / newer 19) stay distinct from the initial
+  // budget, page size and request clamp; construction goes through the
+  // single window-transition entry (same mechanism, no parallel logic).
+  // Send-to-bottom keeps the send's bottom intent (physical scroll still goes
+  // to the bottom edge) but must NOT reset the window to the initial budget
+  // the way an explicit go-latest does: the CURRENT range is extended to the
+  // real tail with the loaded oldest pinned (hard cap is the only trim).
+  if (resolved.kind === 'send-bottom') {
+    if (!currentWindow) {
+      // No committed range to preserve: same initial-budget latest an
+      // explicit bottom would build. Fail-closed under it stays here.
+      const outcome = applyWindowTransition({ kind: 'latest', messages, budget: latestGroupCount })
+      return outcome.kind === 'window' ? outcome.window : null
+    }
+    const outcome = applyWindowTransition({ kind: 'append', messages, currentWindow })
+    return outcome.kind === 'reconciled' ? outcome.window : null
+  }
+  if (resolved.kind === 'bottom') {
+    const outcome = applyWindowTransition({ kind: 'latest', messages, budget: latestGroupCount })
+    return outcome.kind === 'window' ? outcome.window : null
+  }
+  if (resolved.kind === 'top') {
+    const outcome = applyWindowTransition({ kind: 'top', messages, budget: latestGroupCount })
+    return outcome.kind === 'window' ? outcome.window : null
+  }
+  if (resolved.kind === 'scrollTop') {
+    if (currentWindow) return null
+    const outcome = applyWindowTransition({ kind: 'latest', messages, budget: latestGroupCount })
+    return outcome.kind === 'window' ? outcome.window : null
+  }
   if (currentWindow?.displayMessages.some((message) => message.id === resolved.targetId)) return null
 
-  return createTargetMessageWindow(
+  const outcome = applyWindowTransition({
+    kind: 'target',
     messages,
-    resolved.targetId,
-    NAVIGATION_VISUALLY_OLDER_GROUPS,
-    NAVIGATION_VISUALLY_NEWER_GROUPS
-  )
+    targetId: resolved.targetId,
+    older: NAVIGATION_VISUALLY_OLDER_GROUPS,
+    newer: NAVIGATION_VISUALLY_NEWER_GROUPS
+  })
+  return outcome.kind === 'window' ? outcome.window : null
 }
 
 interface MessageNavigationTransactionDependencies {

@@ -47,6 +47,28 @@ export const activeRouteOf = (getState: (() => RootState) | undefined, topicId: 
 }
 
 /**
+ * Addressed route of a logical topic for an authoritative group mutation
+ * (null = main route). This is the fail-closed counterpart of
+ * `activeRouteOf`: a writer that cannot resolve the route it addresses must
+ * never fall back to the main route, so an unreadable store throws instead of
+ * guessing. A resolved `null` is a real main-route statement, not a default.
+ */
+export const requireActiveRouteOf = (getState: (() => RootState) | undefined, topicId: string): string | null => {
+  if (typeof getState !== 'function') {
+    throw new Error(`Cannot resolve the addressed route of topic ${topicId} for a group mutation`)
+  }
+  try {
+    return selectActiveBranchId(getState(), topicId)
+  } catch (error) {
+    throw new Error(
+      `Cannot resolve the addressed route of topic ${topicId} for a group mutation: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+  }
+}
+
+/**
  * Renderer precheck against the Main-authoritative window capability
  * (mutableMessageIds). Fail-closed: unknown/stale capability, route mismatch,
  * or non-resident IDs are immutable. Never guesses from branchId alone.

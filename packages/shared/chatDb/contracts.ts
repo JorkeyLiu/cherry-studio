@@ -24,6 +24,7 @@ import type {
   CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
+  DeleteClipboardTreeRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -34,6 +35,7 @@ import type {
   ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
+  FetchClipboardTreeRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -53,6 +55,7 @@ import type {
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
+  PasteClipboardTreeRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -61,6 +64,7 @@ import type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplayBranchOperationRequest,
+  ReplayClipboardTreeRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -96,6 +100,7 @@ import {
   validateNonNegativeInteger,
   validateOptionalBranchId,
   validateRequest,
+  validateRequiredBranchId,
   validateResultEnvelope,
   validateStringArray,
   ValidationError
@@ -1266,7 +1271,7 @@ const upsertSegmentContract: ChatDbContract = {
     const req = value as UpsertSegmentRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
     validateNonEmptyString(req.topicId, 'request.topicId')
-    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateRequiredBranchId(req.branchId, 'request.branchId')
     if (req.name !== undefined && req.name !== null) {
       validateNonEmptyString(req.name, 'request.name')
     }
@@ -1291,7 +1296,7 @@ const updateSegmentMetadataContract: ChatDbContract = {
     validateRequest(value, updateSegmentMetadataContract.allowedKeys)
     const req = value as UpdateSegmentMetadataRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
-    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateRequiredBranchId(req.branchId, 'request.branchId')
     if (req.folded !== undefined && req.folded !== null && typeof req.folded !== 'boolean') {
       throw new ValidationError('request.folded', 'Expected boolean|null for folded')
     }
@@ -1300,11 +1305,12 @@ const updateSegmentMetadataContract: ChatDbContract = {
 }
 
 const deleteSegmentContract: ChatDbContract = {
-  allowedKeys: keySet('segmentId'),
+  allowedKeys: keySet('segmentId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, deleteSegmentContract.allowedKeys)
     const req = value as DeleteSegmentRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
+    validateRequiredBranchId(req.branchId, 'request.branchId')
   },
   validateResult: voidResult('chatdb:delete-segment')
 }
@@ -1315,7 +1321,7 @@ const replaceSegmentMembershipContract: ChatDbContract = {
     validateRequest(value, replaceSegmentMembershipContract.allowedKeys)
     const req = value as ReplaceSegmentMembershipRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
-    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateRequiredBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.messageIds)) {
       throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
     }
@@ -5209,6 +5215,490 @@ const fetchClipboardGroupsContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Tree-preserving clipboard — bounded READ, atomic paste, snapshotted replay
+// ---------------------------------------------------------------------------
+//
+// The ordinary copy/cut read+paste channels above are unchanged. These three
+// channels carry ONE closure operation: a Main-produced authority payload, one
+// atomic copy/cut paste, and one snapshot-driven undo/redo. Payload and
+// snapshot shapes are closed (unknown keys rejected) because Main treats every
+// carried ID as authority for what it writes and deletes.
+
+const FETCH_CLIPBOARD_TREE_CHANNEL = 'chatdb:fetch-clipboard-tree'
+const PASTE_CLIPBOARD_TREE_CHANNEL = 'chatdb:paste-clipboard-tree'
+const REPLAY_CLIPBOARD_TREE_CHANNEL = 'chatdb:replay-clipboard-tree'
+const DELETE_CLIPBOARD_TREE_CHANNEL = 'chatdb:delete-clipboard-tree'
+
+const CLIPBOARD_TREE_META_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'branchId',
+  'requestedCount',
+  'returnedCount',
+  'returnedMessageCount',
+  'returnedBranchCount',
+  'returnedSegmentCount',
+  'ownedRootMessageIds',
+  'inheritedRootMessageIds',
+  'firstMessageId',
+  'lastMessageId'
+])
+
+const CLIPBOARD_TREE_ROOT_FIELDS: Record<string, SnapshotFieldKind> = {
+  groupId: 'string',
+  messageIds: 'string-array',
+  positionIndex: 'integer'
+}
+
+const CLIPBOARD_TREE_BRANCH_FIELDS: Record<string, SnapshotFieldKind> = {
+  sourceBranchId: 'string',
+  parentSourceBranchId: 'nullable-string',
+  anchorMessageId: 'string',
+  name: 'nullable-string',
+  depth: 'integer',
+  overflow: 'json'
+}
+
+const CLIPBOARD_TREE_SEGMENT_FIELDS: Record<string, SnapshotFieldKind> = {
+  sourceSegmentId: 'string',
+  name: 'nullable-string',
+  sortOrder: 'integer',
+  headerMessageId: 'nullable-string',
+  memberIds: 'string-array',
+  overflow: 'json'
+}
+
+// Inserted target branch/segment rows are recorded in the same shapes as the
+// branch-history rows (stable IDs, timestamps and overflow included) so a redo
+// re-inserts byte-identical rows.
+
+const CLIPBOARD_TREE_ID_MAP_FIELDS: Record<string, SnapshotFieldKind> = {
+  kind: 'string',
+  sourceId: 'string',
+  targetId: 'string'
+}
+
+const CLIPBOARD_TREE_OWNER_ORDER_FIELDS: Record<string, SnapshotFieldKind> = {
+  branchId: 'nullable-string',
+  orderedIds: 'string-array'
+}
+
+/** Required explicit route: present, null (main) or a non-empty branch id. */
+function validateExplicitBranchRoute(value: unknown, path: string, channel: string): void {
+  if (value === null) return
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ValidationError(path, `[${channel}] Expected an explicit route: null (main) or a non-empty branch id`)
+  }
+}
+
+function validateClipboardTreePayload(value: unknown, path: string, channel: string): void {
+  const rec = validateSnapshotObject(value, path, channel, [
+    'source',
+    'roots',
+    'messages',
+    'blocks',
+    'branches',
+    'segments'
+  ])
+  const source = validateSnapshotObject(rec.source, `${path}.source`, channel, ['topicId', 'branchId'])
+  validateNonEmptyString(source.topicId, `${path}.source.topicId`)
+  validateExplicitBranchRoute(source.branchId, `${path}.source.branchId`, channel)
+  const roots = validateSnapshotRows(rec.roots, `${path}.roots`, channel, CLIPBOARD_TREE_ROOT_FIELDS)
+  if (roots.length === 0) {
+    throw new ValidationError(`${path}.roots`, `[${channel}] Expected at least one selected root group`)
+  }
+  validateJsonObjectArray(rec.messages, `${path}.messages`)
+  validateJsonObjectArrayBlock(rec.blocks, `${path}.blocks`, BLOCK_JSON_PROFILE)
+  const branches = validateSnapshotRows(rec.branches, `${path}.branches`, channel, CLIPBOARD_TREE_BRANCH_FIELDS)
+  const segments = validateSnapshotRows(rec.segments, `${path}.segments`, channel, CLIPBOARD_TREE_SEGMENT_FIELDS)
+  const messageIds = new Set<string>()
+  for (let i = 0; i < (rec.messages as unknown[]).length; i++) {
+    const mid = ((rec.messages as Array<Record<string, unknown>>)[i] ?? {}).id
+    validateNonEmptyString(mid, `${path}.messages[${i}].id`)
+    if (messageIds.has(mid as string)) {
+      throw new ValidationError(`${path}.messages[${i}].id`, `[${channel}] Duplicate message id in payload`)
+    }
+    messageIds.add(mid as string)
+  }
+  const blockIds = new Set<string>()
+  for (let i = 0; i < (rec.blocks as unknown[]).length; i++) {
+    const bid = ((rec.blocks as Array<Record<string, unknown>>)[i] ?? {}).id
+    validateNonEmptyString(bid, `${path}.blocks[${i}].id`)
+    if (blockIds.has(bid as string)) {
+      throw new ValidationError(`${path}.blocks[${i}].id`, `[${channel}] Duplicate block id in payload`)
+    }
+    blockIds.add(bid as string)
+  }
+  const rootMessageIds = new Set<string>()
+  const groupIds = new Set<string>()
+  for (let i = 0; i < roots.length; i++) {
+    const groupId = roots[i].groupId as string
+    if (groupIds.has(groupId)) {
+      throw new ValidationError(`${path}.roots[${i}].groupId`, `[${channel}] Duplicate root group id`)
+    }
+    groupIds.add(groupId)
+    const members = roots[i].messageIds as string[]
+    if (members.length === 0) {
+      throw new ValidationError(`${path}.roots[${i}].messageIds`, `[${channel}] Root group must not be empty`)
+    }
+    for (const mid of members) {
+      if (rootMessageIds.has(mid)) {
+        throw new ValidationError(`${path}.roots[${i}].messageIds`, `[${channel}] Root groups must be disjoint`)
+      }
+      rootMessageIds.add(mid)
+      if (!messageIds.has(mid)) {
+        throw new ValidationError(
+          `${path}.roots[${i}].messageIds`,
+          `[${channel}] Root message ${mid} is missing from the payload messages`
+        )
+      }
+    }
+  }
+  for (let i = 0; i < branches.length; i++) {
+    const anchor = branches[i].anchorMessageId as string
+    if (!messageIds.has(anchor)) {
+      throw new ValidationError(
+        `${path}.branches[${i}].anchorMessageId`,
+        `[${channel}] Branch anchor ${anchor} is missing from the payload messages`
+      )
+    }
+    const depth = branches[i].depth as number
+    if (depth < 1) {
+      throw new ValidationError(`${path}.branches[${i}].depth`, `[${channel}] Branch depth must be at least 1`)
+    }
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const members = segments[i].memberIds as string[]
+    if (members.length === 0) {
+      throw new ValidationError(`${path}.segments[${i}].memberIds`, `[${channel}] Segment membership must not be empty`)
+    }
+    for (const mid of members) {
+      if (!messageIds.has(mid)) {
+        throw new ValidationError(
+          `${path}.segments[${i}].memberIds`,
+          `[${channel}] Segment member ${mid} is missing from the payload messages (segment must be fully contained)`
+        )
+      }
+    }
+    const header = segments[i].headerMessageId
+    if (header !== null && !members.includes(header as string)) {
+      throw new ValidationError(
+        `${path}.segments[${i}].headerMessageId`,
+        `[${channel}] Segment header must be one of its captured members`
+      )
+    }
+  }
+}
+
+/** Validate the Main-produced replay snapshot replayed back into Main. */
+function validateClipboardTreeSnapshot(value: unknown, path: string): void {
+  const channel = REPLAY_CLIPBOARD_TREE_CHANNEL
+  const rec = validateSnapshotObject(value, path, channel, [
+    'kind',
+    'mode',
+    'idMap',
+    'placement',
+    'inserted',
+    'sourceRemoved'
+  ])
+  if (rec.kind !== 'clipboard-tree') {
+    throw new ValidationError(`${path}.kind`, `[${channel}] Expected snapshot kind "clipboard-tree"`)
+  }
+  if (rec.mode !== 'copy' && rec.mode !== 'cut' && rec.mode !== 'delete') {
+    throw new ValidationError(`${path}.mode`, `[${channel}] Expected mode "copy", "cut" or "delete"`)
+  }
+  if (rec.idMap !== undefined) {
+    validateSnapshotRows(rec.idMap, `${path}.idMap`, channel, CLIPBOARD_TREE_ID_MAP_FIELDS)
+  }
+  const placement = validateSnapshotObject(rec.placement, `${path}.placement`, channel, [
+    'topicId',
+    'branchId',
+    'intent',
+    'ownerIndex',
+    'prevOwnerMessageId',
+    'nextOwnerMessageId'
+  ])
+  validateNonEmptyString(placement.topicId, `${path}.placement.topicId`)
+  validateExplicitBranchRoute(placement.branchId, `${path}.placement.branchId`, channel)
+  validateInsertMessageGroupIntent(placement.intent, `${path}.placement.intent`)
+  if (typeof placement.ownerIndex !== 'number' || !Number.isInteger(placement.ownerIndex) || placement.ownerIndex < 0) {
+    throw new ValidationError(`${path}.placement.ownerIndex`, `[${channel}] Expected a non-negative integer index`)
+  }
+  for (const key of ['prevOwnerMessageId', 'nextOwnerMessageId'] as const) {
+    const v = placement[key]
+    if (v !== null && (typeof v !== 'string' || v.length === 0)) {
+      throw new ValidationError(`${path}.placement.${key}`, `[${channel}] Expected null or a non-empty message id`)
+    }
+  }
+  const inserted = validateSnapshotObject(rec.inserted, `${path}.inserted`, channel, [
+    'messages',
+    'blocks',
+    'branches',
+    'segments'
+  ])
+  validateJsonObjectArray(inserted.messages, `${path}.inserted.messages`)
+  validateJsonObjectArrayBlock(inserted.blocks, `${path}.inserted.blocks`, BLOCK_JSON_PROFILE)
+  validateSnapshotRows(inserted.branches, `${path}.inserted.branches`, channel, BRANCH_HISTORY_ROW_FIELDS)
+  validateSnapshotRows(inserted.segments, `${path}.inserted.segments`, channel, BRANCH_HISTORY_SEGMENT_ROW_FIELDS)
+  if (rec.mode === 'delete') {
+    if ((inserted.messages as unknown[]).length !== 0) {
+      throw new ValidationError(`${path}.inserted.messages`, `[${channel}] A tree delete never inserts messages`)
+    }
+  } else if ((inserted.messages as unknown[]).length === 0) {
+    throw new ValidationError(`${path}.inserted.messages`, `[${channel}] A tree paste always inserts messages`)
+  }
+  if (rec.sourceRemoved !== null) {
+    const removed = validateSnapshotObject(rec.sourceRemoved, `${path}.sourceRemoved`, channel, [
+      'topicId',
+      'branchId',
+      'branches',
+      'messages',
+      'blocks',
+      'fileReferences',
+      'segments',
+      'segmentsAfter',
+      'segmentOrder',
+      'ownerOrders',
+      'boundaries'
+    ])
+    validateNonEmptyString(removed.topicId, `${path}.sourceRemoved.topicId`)
+    validateExplicitBranchRoute(removed.branchId, `${path}.sourceRemoved.branchId`, channel)
+    const removedBranches = validateSnapshotRows(
+      removed.branches,
+      `${path}.sourceRemoved.branches`,
+      channel,
+      BRANCH_HISTORY_ROW_FIELDS
+    )
+    validateSnapshotRows(removed.messages, `${path}.sourceRemoved.messages`, channel, BRANCH_HISTORY_MESSAGE_ROW_FIELDS)
+    validateSnapshotRows(removed.blocks, `${path}.sourceRemoved.blocks`, channel, BRANCH_HISTORY_BLOCK_ROW_FIELDS)
+    validateSnapshotRows(
+      removed.fileReferences,
+      `${path}.sourceRemoved.fileReferences`,
+      channel,
+      BRANCH_HISTORY_FILE_REFERENCE_ROW_FIELDS
+    )
+    validateSnapshotRows(removed.segments, `${path}.sourceRemoved.segments`, channel, BRANCH_HISTORY_SEGMENT_ROW_FIELDS)
+    const segmentsAfter = validateSnapshotRows(
+      removed.segmentsAfter,
+      `${path}.sourceRemoved.segmentsAfter`,
+      channel,
+      BRANCH_HISTORY_SEGMENT_STATE_ROW_FIELDS
+    )
+    if (segmentsAfter.length !== (removed.segments as unknown[]).length) {
+      throw new ValidationError(
+        `${path}.sourceRemoved.segmentsAfter`,
+        `[${channel}] Post-cut segment state must cover every touched segment`
+      )
+    }
+    validateStringArray(removed.segmentOrder, `${path}.sourceRemoved.segmentOrder`)
+    validateSnapshotRows(
+      removed.ownerOrders,
+      `${path}.sourceRemoved.ownerOrders`,
+      channel,
+      CLIPBOARD_TREE_OWNER_ORDER_FIELDS
+    )
+    validateInheritanceBoundarySnapshots(removed.boundaries, `${path}.sourceRemoved.boundaries`, channel)
+    // A cut/delete removes at least one row set: branches and/or root messages.
+    if (removedBranches.length === 0 && (removed.messages as unknown[]).length === 0) {
+      throw new ValidationError(
+        `${path}.sourceRemoved`,
+        `[${channel}] A cut/delete snapshot must remove at least one message or branch row`
+      )
+    }
+  } else if (rec.mode === 'cut' || rec.mode === 'delete') {
+    throw new ValidationError(
+      `${path}.sourceRemoved`,
+      `[${channel}] A cut/delete snapshot must carry its source removal rows`
+    )
+  }
+}
+
+const fetchClipboardTreeContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId', 'groupIds', 'capture'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchClipboardTreeContract.allowedKeys)
+    const req = value as FetchClipboardTreeRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    // Two capture shapes, mutually exclusive: the selection shape (stable group
+    // keys) and the branch-owned shape (`capture: 'branch-owned'`). The
+    // discriminant is exact and its own shape is required — a mix of both is
+    // rejected instead of validated permissively.
+    const capture = (req as { capture?: unknown }).capture
+    if (typeof capture !== 'undefined') {
+      if (capture !== 'branch-owned') {
+        throw new ValidationError(
+          'request.capture',
+          `[${FETCH_CLIPBOARD_TREE_CHANNEL}] Expected capture "branch-owned"`
+        )
+      }
+      if (typeof req.branchId !== 'string' || req.branchId.length === 0) {
+        throw new ValidationError(
+          'request.branchId',
+          `[${FETCH_CLIPBOARD_TREE_CHANNEL}] A branch-owned capture requires an explicit non-empty branchId`
+        )
+      }
+      if ((req as { groupIds?: unknown }).groupIds !== undefined) {
+        throw new ValidationError(
+          'request.groupIds',
+          `[${FETCH_CLIPBOARD_TREE_CHANNEL}] A branch-owned capture carries no groupIds`
+        )
+      }
+      return
+    }
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    const groupIds = (req as { groupIds?: unknown }).groupIds
+    if (!Array.isArray(groupIds) || groupIds.length === 0) {
+      throw new ValidationError(
+        'request.groupIds',
+        `[${FETCH_CLIPBOARD_TREE_CHANNEL}] groupIds must be a non-empty array of stable group keys`
+      )
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < groupIds.length; i++) {
+      const id = groupIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.groupIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(
+          `request.groupIds[${i}]`,
+          `[${FETCH_CLIPBOARD_TREE_CHANNEL}] Duplicate groupId at index ${i}`
+        )
+      }
+      seen.add(id)
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, FETCH_CLIPBOARD_TREE_CHANNEL)
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true) return
+    const rec = validateSnapshotObject(obj.value, 'result.value', FETCH_CLIPBOARD_TREE_CHANNEL, ['tree', 'clipboard'])
+    validateClipboardTreePayload(rec.tree, 'result.value.tree', FETCH_CLIPBOARD_TREE_CHANNEL)
+    const meta = validateSnapshotObject(rec.clipboard, 'result.value.clipboard', FETCH_CLIPBOARD_TREE_CHANNEL, [
+      ...CLIPBOARD_TREE_META_KEYS
+    ])
+    if (meta.completeness !== 'clipboard-tree') {
+      throw new ValidationError(
+        'result.value.clipboard.completeness',
+        `[${FETCH_CLIPBOARD_TREE_CHANNEL}] Expected completeness "clipboard-tree"`
+      )
+    }
+    validateNonEmptyString(meta.topicId, 'result.value.clipboard.topicId')
+    validateExplicitBranchRoute(meta.branchId, 'result.value.clipboard.branchId', FETCH_CLIPBOARD_TREE_CHANNEL)
+    for (const key of [
+      'requestedCount',
+      'returnedCount',
+      'returnedMessageCount',
+      'returnedBranchCount',
+      'returnedSegmentCount'
+    ] as const) {
+      if (typeof meta[key] !== 'number' || !Number.isInteger(meta[key]) || meta[key] < 0) {
+        throw new ValidationError(
+          `result.value.clipboard.${key}`,
+          `[${FETCH_CLIPBOARD_TREE_CHANNEL}] Expected a non-negative integer ${key}`
+        )
+      }
+    }
+    validateStringArray(meta.ownedRootMessageIds, 'result.value.clipboard.ownedRootMessageIds')
+    validateStringArray(meta.inheritedRootMessageIds, 'result.value.clipboard.inheritedRootMessageIds')
+    for (const key of ['firstMessageId', 'lastMessageId'] as const) {
+      if (meta[key] !== null) validateNonEmptyString(meta[key], `result.value.clipboard.${key}`)
+    }
+  }
+}
+
+const pasteClipboardTreeContract: ChatDbContract = {
+  allowedKeys: keySet('mode', 'payload', 'target'),
+  validate(value: unknown): void {
+    validateRequest(value, pasteClipboardTreeContract.allowedKeys)
+    const req = value as PasteClipboardTreeRequest
+    if (req.mode !== 'copy' && req.mode !== 'cut') {
+      throw new ValidationError('request.mode', `[${PASTE_CLIPBOARD_TREE_CHANNEL}] Expected "copy" or "cut"`)
+    }
+    validateClipboardTreePayload(req.payload, 'request.payload', PASTE_CLIPBOARD_TREE_CHANNEL)
+    const target = validateSnapshotObject(req.target, 'request.target', PASTE_CLIPBOARD_TREE_CHANNEL, [
+      'topicId',
+      'branchId',
+      'intent'
+    ])
+    validateNonEmptyString(target.topicId, 'request.target.topicId')
+    validateExplicitBranchRoute(target.branchId, 'request.target.branchId', PASTE_CLIPBOARD_TREE_CHANNEL)
+    validateInsertMessageGroupIntent(target.intent, 'request.target.intent')
+  },
+  validateResult: fileCleanupResultValidator(PASTE_CLIPBOARD_TREE_CHANNEL)
+}
+
+const replayClipboardTreeContract: ChatDbContract = {
+  allowedKeys: keySet('direction', 'snapshot'),
+  validate(value: unknown): void {
+    validateRequest(value, replayClipboardTreeContract.allowedKeys)
+    const req = value as ReplayClipboardTreeRequest
+    if (req.direction !== 'undo' && req.direction !== 'redo') {
+      throw new ValidationError('request.direction', `[${REPLAY_CLIPBOARD_TREE_CHANNEL}] Expected "undo" or "redo"`)
+    }
+    validateClipboardTreeSnapshot(req.snapshot, 'request.snapshot')
+  },
+  validateResult: fileCleanupResultValidator(REPLAY_CLIPBOARD_TREE_CHANNEL)
+}
+
+const deleteClipboardTreeContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId', 'groupIds'),
+  validate(value: unknown): void {
+    validateRequest(value, deleteClipboardTreeContract.allowedKeys)
+    const req = value as DeleteClipboardTreeRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateExplicitBranchRoute(req.branchId, 'request.branchId', DELETE_CLIPBOARD_TREE_CHANNEL)
+    const groupIds = (req as { groupIds?: unknown }).groupIds
+    if (!Array.isArray(groupIds) || groupIds.length === 0) {
+      throw new ValidationError(
+        'request.groupIds',
+        `[${DELETE_CLIPBOARD_TREE_CHANNEL}] groupIds must be a non-empty array of stable group keys`
+      )
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < groupIds.length; i++) {
+      const id = groupIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.groupIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(
+          `request.groupIds[${i}]`,
+          `[${DELETE_CLIPBOARD_TREE_CHANNEL}] Duplicate groupId at index ${i}`
+        )
+      }
+      seen.add(id)
+    }
+  },
+  validateResult(result: unknown): void {
+    fileCleanupResultValidator(DELETE_CLIPBOARD_TREE_CHANNEL)(result)
+    const obj = result as Record<string, unknown>
+    if (obj.ok !== true) return
+    const rec = validateSnapshotObject(obj.value, 'result.value', DELETE_CLIPBOARD_TREE_CHANNEL, [
+      'affectedFileIds',
+      'remainingReferenceCounts',
+      'topicId',
+      'branchId',
+      'deletedMessageIds',
+      'deletedBranchIds',
+      'snapshot',
+      'projections'
+    ])
+    validateNonEmptyString(rec.topicId, 'result.value.topicId')
+    validateExplicitBranchRoute(rec.branchId, 'result.value.branchId', DELETE_CLIPBOARD_TREE_CHANNEL)
+    validateStringArray(rec.deletedMessageIds, 'result.value.deletedMessageIds')
+    validateStringArray(rec.deletedBranchIds, 'result.value.deletedBranchIds')
+    validateClipboardTreeSnapshot(rec.snapshot, 'result.value.snapshot')
+    if (!Array.isArray(rec.projections)) {
+      throw new ValidationError(
+        'result.value.projections',
+        `[${DELETE_CLIPBOARD_TREE_CHANNEL}] Expected an array of route projections`
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bounded naming/activity authority reads — never whole-topic
 // ---------------------------------------------------------------------------
 
@@ -6375,6 +6865,11 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-whole-topic-snapshot': fetchWholeTopicSnapshotContract,
   // Group-scoped clipboard READ (copy/cut; selected groups only)
   'chatdb:fetch-clipboard-groups': fetchClipboardGroupsContract,
+  // Tree-preserving clipboard (opt-in include child branches)
+  'chatdb:fetch-clipboard-tree': fetchClipboardTreeContract,
+  'chatdb:paste-clipboard-tree': pasteClipboardTreeContract,
+  'chatdb:replay-clipboard-tree': replayClipboardTreeContract,
+  'chatdb:delete-clipboard-tree': deleteClipboardTreeContract,
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   'chatdb:fetch-topic-naming-context': fetchTopicNamingContextContract,
   'chatdb:fetch-topic-activity': fetchTopicActivityContract,

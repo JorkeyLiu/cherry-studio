@@ -405,7 +405,8 @@ test.describe('Selected variant delete — no blank interval (real UI, sampled f
             segmentId: segId,
             topicId,
             name: 'seg-sel',
-            messageIds: [u1, a1, a2, u2]
+            messageIds: [u1, a1, a2, u2],
+            branchId: null
           })
           if (!seg?.ok) return { ok: false, err: `segment ${JSON.stringify(seg)}` }
           return { ok: true }

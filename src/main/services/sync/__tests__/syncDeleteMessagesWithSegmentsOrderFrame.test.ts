@@ -129,7 +129,16 @@ describe('deleteMessagesWithSegments: complete membership closes incremental syn
       )
     }
     vi.spyOn(Date, 'now').mockReturnValue(7_000_000_000_001)
-    expect(agg.upsertSegment('seg-1', 't-seg-close', 'Seg', ['m-s1', 'm-s2', 'm-s3'], null).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-1',
+        topicId: 't-seg-close',
+        name: 'Seg',
+        messageIds: ['m-s1', 'm-s2', 'm-s3'],
+        color: null,
+        branchId: null
+      }).ok
+    ).toBe(true)
     const frameBefore = topicFrameOf(sqlite, 't-seg-close')!
     expect(frameBefore.orderedChildIds).toEqual(['m-s1', 'm-s2', 'm-s3'])
     const frameOpsBefore = topicFrameOps(db, 't-seg-close').length
@@ -232,7 +241,16 @@ describe('deleteMessagesWithSegments: missing membership truthfully invalidates'
         `INSERT INTO messages (id, topic_id, role, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?)`
       )
       .run('m-legacy', 't-seg-missing', 'user', 'legacy', 'success', '2026-01-01', '2026-01-01', 2)
-    expect(agg.upsertSegment('seg-miss', 't-seg-missing', 'Seg', ['m-v1', 'm-v2', 'm-legacy'], null).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-miss',
+        topicId: 't-seg-missing',
+        name: 'Seg',
+        messageIds: ['m-v1', 'm-v2', 'm-legacy'],
+        color: null,
+        branchId: null
+      }).ok
+    ).toBe(true)
     const frameOpsBefore = topicFrameOps(db, 't-seg-missing').length
     const outboxBefore = db.select().from(schema.syncOutbox).all().length
 
@@ -267,7 +285,16 @@ describe('deleteMessagesWithSegments: malformed/exhaustion rolls back atomically
       { id: 'm-a2', topicId: 't-seg-mal', role: 'user', content: 'b', status: 'success' } as never,
       []
     )
-    expect(agg.upsertSegment('seg-mal', 't-seg-mal', 'Seg', ['m-a1', 'm-a2'], null).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-mal',
+        topicId: 't-seg-mal',
+        name: 'Seg',
+        messageIds: ['m-a1', 'm-a2'],
+        color: null,
+        branchId: null
+      }).ok
+    ).toBe(true)
     // Corrupt the winning frame payload so the refresh read fails closed.
     // '{}' passes the SQLite json_valid CHECK but fails strict frame validation.
     sqlite
@@ -310,7 +337,16 @@ describe('deleteMessagesWithSegments: malformed/exhaustion rolls back atomically
       { id: 'm-e2', topicId: 't-seg-exh', role: 'user', content: 'b', status: 'success' } as never,
       []
     )
-    expect(agg.upsertSegment('seg-exh', 't-seg-exh', 'Seg', ['m-e1', 'm-e2'], null).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-exh',
+        topicId: 't-seg-exh',
+        name: 'Seg',
+        messageIds: ['m-e1', 'm-e2'],
+        color: null,
+        branchId: null
+      }).ok
+    ).toBe(true)
     const MAX_SAFE = 9007199254740991
     sqlite
       .prepare(`UPDATE sync_membership_clock SET timestamp=? WHERE child_entity_id IN ('m-e1','m-e2')`)
@@ -400,7 +436,16 @@ describe('deleteMessagesWithSegments: dual-profile relay convergence without bas
             []
           )
         }
-        expect(aggA.upsertSegment('seg-dual', 't-dual-seg', 'Seg', ['m-d1', 'm-d2', 'm-d3'], null).ok).toBe(true)
+        expect(
+          aggA.upsertSegment({
+            segmentId: 'seg-dual',
+            topicId: 't-dual-seg',
+            name: 'Seg',
+            messageIds: ['m-d1', 'm-d2', 'm-d3'],
+            color: null,
+            branchId: null
+          }).ok
+        ).toBe(true)
         vi.spyOn(Date, 'now').mockReturnValue(7_500_000_000_010)
         expect(aggA.deleteMessagesWithSegments('t-dual-seg', ['m-d1']).ok).toBe(true)
         const expectedOrder = ['m-d2', 'm-d3']

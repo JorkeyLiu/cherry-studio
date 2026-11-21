@@ -127,14 +127,14 @@ describe('segment catalog preservation — real root store', () => {
 
     mockUpsert.mockResolvedValue(wire('seg-new', 't-create', 0, ['m2', 'm3']))
     mockList.mockResolvedValue([wire('seg-new', 't-create', 0, ['m2', 'm3']), wire('seg-old', 't-create', 1, ['m1'])])
-    await (await import('@renderer/services/db')).dbService.upsertSegment(
-      'seg-new',
-      't-create',
-      'New',
-      ['m2', 'm3'],
-      'color-seg-new',
-      null
-    )
+    await (await import('@renderer/services/db')).dbService.upsertSegment({
+      segmentId: 'seg-new',
+      topicId: 't-create',
+      name: 'New',
+      messageIds: ['m2', 'm3'],
+      color: 'color-seg-new',
+      branchId: null
+    })
     await convergeTopicSegmentCatalog(store.dispatch as any, 't-create', store.getState as any)
     unsub()
 
@@ -166,7 +166,7 @@ describe('segment catalog preservation — real root store', () => {
     )
     mockDelete.mockResolvedValue(undefined)
     mockList.mockResolvedValue([wire('seg-b', 't-dissolve', 0, ['m2'])])
-    await (await import('@renderer/services/db')).dbService.deleteSegment('seg-a')
+    await (await import('@renderer/services/db')).dbService.deleteSegment({ segmentId: 'seg-a', branchId: null })
     await convergeTopicSegmentCatalog(store.dispatch as any, 't-dissolve', store.getState as any)
 
     const entry = (store.getState() as any).residentRegistry.entries['t-dissolve']
@@ -181,7 +181,11 @@ describe('segment catalog preservation — real root store', () => {
     const gen = establishResident(store, 't-member', ['m1', 'm2', 'm3'], [seg('seg-m', 't-member', 0, ['m1', 'm2'])])
     mockReplace.mockResolvedValue(wire('seg-m', 't-member', 0, ['m1', 'm3']))
     mockList.mockResolvedValue([wire('seg-m', 't-member', 0, ['m1', 'm3'])])
-    await (await import('@renderer/services/db')).dbService.replaceSegmentMembership('seg-m', ['m1', 'm3'], null)
+    await (await import('@renderer/services/db')).dbService.replaceSegmentMembership({
+      segmentId: 'seg-m',
+      messageIds: ['m1', 'm3'],
+      branchId: null
+    })
     await convergeTopicSegmentCatalog(store.dispatch as any, 't-member', store.getState as any)
 
     const entry = (store.getState() as any).residentRegistry.entries['t-member']

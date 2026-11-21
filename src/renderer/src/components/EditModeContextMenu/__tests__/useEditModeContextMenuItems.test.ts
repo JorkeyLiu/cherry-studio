@@ -34,7 +34,15 @@ function getI18n(lng: string) {
 
 let activeLanguage = 'zh-CN'
 
-const { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode } = vi.hoisted(() => {
+type MockBranch = {
+  id: string
+  topicId: string
+  parentBranchId: string | null
+  anchorMessageId: string
+  createdAt?: string
+}
+
+const { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode, mockState } = vi.hoisted(() => {
   const dispatched: unknown[] = []
   const setTurnFoldsMock = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => undefined)
   const dispatchMock = vi.fn((action: unknown) => {
@@ -46,10 +54,14 @@ const { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode } = vi.hoisted(
   const mockEditMode = {
     isEnabled: true,
     selectedGroupIds: [] as string[],
+    selectedGroups: [] as any[],
     handleCopy: vi.fn(),
     handleCut: vi.fn(),
+    handleCopyWithChildren: vi.fn(),
+    handleCutWithChildren: vi.fn(),
     handlePaste: vi.fn(),
     handleDelete: vi.fn(),
+    handleDeleteWithChildren: vi.fn(),
     handleUndo: vi.fn(),
     handleRedo: vi.fn(),
     hasClipboard: false,
@@ -61,7 +73,20 @@ const { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode } = vi.hoisted(
     selectionRouteCapability: 'owner' as const,
     isSelectionMutable: true
   }
-  return { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode }
+  // Minimal store projection: tests publish only the slices the hook reads, so
+  // the branch catalog / route capability are set per case.
+  const mockState = {
+    messages: {
+      messageIdsByTopic: {} as Record<string, string[]>,
+      mutableMessageIdsByTopic: {} as Record<string, string[]>,
+      mutableRouteByTopic: {} as Record<string, string | null>
+    },
+    topicBranch: {
+      branchesByTopic: {} as Record<string, MockBranch[]>,
+      activeBranchIdByTopic: {} as Record<string, string | null>
+    }
+  }
+  return { dispatchMock, dispatched, setTurnFoldsMock, mockEditMode, mockState }
 })
 
 vi.mock('@logger', () => ({
@@ -70,14 +95,7 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => dispatchMock,
-  useAppSelector: (selector: any) =>
-    selector({
-      topicBranches: {},
-      messages: {
-        messageIdsByTopic: {},
-        mutableMessageIdsByTopic: {}
-      }
-    })
+  useAppSelector: (selector: any) => selector(mockState)
 }))
 
 // The atomic turn-fold thunk keeps its real call contract; only its effect is
@@ -254,5 +272,300 @@ describe('useEditModeContextMenuItems - folding', () => {
     activeLanguage = 'zh-TW'
     const traditional = renderHook(() => useEditModeContextMenuItems('topic-1'))
     expect(toggleFoldItem(traditional.result.current.items).label).toBe('取消折疊')
+  })
+})
+
+const TOPIC = 'topic-1'
+
+const itemByKey = (items: any[], key: string): any => {
+  for (const item of items) {
+    if (!item) continue
+    if (item.key === key) return item
+    if (Array.isArray(item.children)) {
+      const nested = itemByKey(item.children, key)
+      if (nested) return nested
+    }
+  }
+  return undefined
+}
+
+const labelsOf = (items: any[]): unknown[] =>
+  items.flatMap((item) => (item ? [item.label, ...(Array.isArray(item.children) ? labelsOf(item.children) : [])] : []))
+
+const branchOf = (id: string, parentBranchId: string | null, anchorMessageId: string): MockBranch => ({
+  id,
+  topicId: TOPIC,
+  parentBranchId,
+  anchorMessageId
+})
+
+/**
+ * Publish the minimum projection the relevance hint reads: the complete branch
+ * catalog of the topic, the addressed route, the route the resident projection
+ * belongs to, and the resolved selection. `branches: null` models a catalog that
+ * was never received.
+ */
+function setTreeProjection(params: {
+  branches: MockBranch[] | null
+  activeBranchId?: string | null
+  mutableRoute?: string | null
+  selection?: { askId: string; memberIds: string[] }[]
+  isSelectionMutable?: boolean
+}) {
+  const {
+    branches,
+    activeBranchId = null,
+    mutableRoute = null,
+    selection = [{ askId: 'g1', memberIds: ['m1', 'm2'] }],
+    isSelectionMutable = true
+  } = params
+  mockState.topicBranch.branchesByTopic = {}
+  if (branches !== null) mockState.topicBranch.branchesByTopic[TOPIC] = branches
+  mockState.topicBranch.activeBranchIdByTopic = { [TOPIC]: activeBranchId }
+  mockState.messages.mutableRouteByTopic = { [TOPIC]: mutableRoute }
+  const groups = selection.map(({ askId, memberIds }) => ({
+    askId,
+    messages: memberIds.map((id) => ({ id }))
+  }))
+  mockEditMode.selectedGroupIds = groups.map((group) => group.askId)
+  mockEditMode.groups = groups
+  mockEditMode.selectedGroups = groups
+  mockEditMode.isSelectionMutable = isSelectionMutable
+}
+
+describe('useEditModeContextMenuItems - including child branches', () => {
+  beforeEach(() => {
+    activeLanguage = 'zh-CN'
+    mockEditMode.handleCopy.mockClear()
+    mockEditMode.handleCut.mockClear()
+    mockEditMode.handleCopyWithChildren.mockClear()
+    mockEditMode.handleCutWithChildren.mockClear()
+    mockEditMode.handleDelete.mockClear()
+    mockEditMode.handleDeleteWithChildren.mockClear()
+  })
+
+  it('offers both tree options inside the copy/cut submenus when a selected turn anchors a direct child branch', async () => {
+    // b1 is created on the addressed (main) route at message m2, which belongs
+    // to the selected turn.
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    // The ordinary action keeps its key and stays one level in.
+    expect(itemByKey(items, 'copy').children.map((child: any) => child.key)).toEqual([
+      'copyOrdinary',
+      'copyWithChildren'
+    ])
+    expect(itemByKey(items, 'copy').label).toBe('复制')
+    expect(itemByKey(items, 'copyWithChildren').label).toBe('复制(含子分支)')
+    expect(itemByKey(items, 'cut').children.map((child: any) => child.key)).toEqual(['cutOrdinary', 'cutWithChildren'])
+    expect(itemByKey(items, 'cutWithChildren').label).toBe('剪切(含子分支)')
+    // The submenu title only expands: it must never carry an onClick, so a click
+    // on the parent cannot perform the ordinary copy/cut as a side effect.
+    expect(itemByKey(items, 'copy').onClick).toBeUndefined()
+    expect(itemByKey(items, 'cut').onClick).toBeUndefined()
+    // The popup sits flush with the parent panel edge (no overlap, no seam):
+    // the offset compensates the panel padding + hairline borders only.
+    expect(itemByKey(items, 'copy').popupOffset).toEqual([5, 0])
+    expect(itemByKey(items, 'cut').popupOffset).toEqual([5, 0])
+    // The delete submenu of the same selection shares the identical offset, so
+    // both flip directions stay flush with a single constant.
+    expect(itemByKey(items, 'delete').children).toBeDefined()
+    expect(itemByKey(items, 'delete').popupOffset).toEqual(itemByKey(items, 'copy').popupOffset)
+    // Leaf rows carry no nested offset of their own: popups never stack.
+    for (const leaf of [...itemByKey(items, 'copy').children, ...itemByKey(items, 'cut').children]) {
+      expect(leaf.popupOffset).toBeUndefined()
+    }
+
+    await runClick(itemByKey(items, 'copyOrdinary'))
+    expect(mockEditMode.handleCopy).toHaveBeenCalledTimes(1)
+    expect(mockEditMode.handleCopyWithChildren).not.toHaveBeenCalled()
+    await runClick(itemByKey(items, 'copyWithChildren'))
+    expect(mockEditMode.handleCopyWithChildren).toHaveBeenCalledTimes(1)
+    await runClick(itemByKey(items, 'cutOrdinary'))
+    expect(mockEditMode.handleCut).toHaveBeenCalledTimes(1)
+    await runClick(itemByKey(items, 'cutWithChildren'))
+    expect(mockEditMode.handleCutWithChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps plain single-click copy/cut when the child branch is anchored outside the selection', async () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm9')] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    expect(itemByKey(items, 'copy').children).toBeUndefined()
+    expect(itemByKey(items, 'cut').children).toBeUndefined()
+    expect(itemByKey(items, 'cut').disabled).toBe(false)
+    // The ordinary leaf stays directly clickable and carries no popup offset.
+    expect(itemByKey(items, 'copy').onClick).toBeDefined()
+    expect(itemByKey(items, 'copy').popupOffset).toBeUndefined()
+    expect(labelsOf(items)).not.toContain('chat.edit.copyTreeAction')
+    expect(labelsOf(items)).not.toContain('chat.edit.cutTreeAction')
+    await runClick(itemByKey(items, 'copy'))
+    expect(mockEditMode.handleCopy).toHaveBeenCalledTimes(1)
+    await runClick(itemByKey(items, 'cut'))
+    expect(mockEditMode.handleCut).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides the tree options when the anchor belongs to an ancestor level instead of the addressed route', () => {
+    // Active route b2 sits under b1. The selection anchors m2 — a direct child
+    // of the MAIN route and therefore a sibling of the addressed level — which
+    // must never expose a tree capture of that sibling/ancestor subtree.
+    setTreeProjection({
+      branches: [branchOf('b1', null, 'm2'), branchOf('b2', 'b1', 'm3')],
+      activeBranchId: 'b2',
+      mutableRoute: 'b2',
+      selection: [{ askId: 'g1', memberIds: ['m2'] }]
+    })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    expect(itemByKey(items, 'copy').children).toBeUndefined()
+    expect(itemByKey(items, 'cut').children).toBeUndefined()
+  })
+
+  it('hides the tree options when the addressed route has no child branch at all', () => {
+    setTreeProjection({ branches: [] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(result.current.items as any[], 'copy').children).toBeUndefined()
+  })
+
+  it('hides the tree options when the branch catalog was never received (fail closed)', () => {
+    setTreeProjection({ branches: null })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+    expect(itemByKey(items, 'copy').children).toBeUndefined()
+    expect(labelsOf(items)).not.toContain('chat.edit.copyTreeAction')
+  })
+
+  it('hides the tree options when the catalog is incomplete/stale', () => {
+    // A branch naming a parent the catalog does not hold: the catalog cannot be
+    // trusted as a hint, even though b1 looks relevant.
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2'), branchOf('b2', 'missing', 'm3')] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(result.current.items as any[], 'copy').children).toBeUndefined()
+  })
+
+  it('hides the tree options when the resident projection belongs to another route', () => {
+    setTreeProjection({
+      branches: [branchOf('b1', null, 'm2'), branchOf('b2', 'b1', 'm2')],
+      activeBranchId: 'b1',
+      mutableRoute: 'b2'
+    })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(result.current.items as any[], 'copy').children).toBeUndefined()
+  })
+
+  it('hides the tree options for an unresolved selection', () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')] })
+    // One selected turn did not resolve to member ids.
+    mockEditMode.selectedGroupIds = ['g1', 'g2']
+    mockEditMode.selectedGroups = [{ askId: 'g1', messages: [{ id: 'm1' }, { id: 'm2' }] }]
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(result.current.items as any[], 'copy').children).toBeUndefined()
+  })
+
+  it('never offers a tree cut for a non-writable selection while tree copy stays available', () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')], isSelectionMutable: false })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    expect(itemByKey(items, 'copyWithChildren')).toBeTruthy()
+    // The ordinary cut keeps its usual disabled state and grows no submenu.
+    expect(itemByKey(items, 'cut').children).toBeUndefined()
+    expect(itemByKey(items, 'cut').disabled).toBe(true)
+    expect(itemByKey(items, 'cutWithChildren')).toBeUndefined()
+    expect(labelsOf(items)).not.toContain('chat.edit.cutTreeAction')
+  })
+
+  it('resolves the tree option labels from the real bundles', () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')] })
+
+    activeLanguage = 'en-US'
+    const english = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(english.result.current.items as any[], 'copyWithChildren').label).toBe(
+      'Copy including child branches'
+    )
+    expect(itemByKey(english.result.current.items as any[], 'cutWithChildren').label).toBe(
+      'Cut including child branches'
+    )
+    english.unmount()
+
+    activeLanguage = 'zh-TW'
+    const traditional = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(traditional.result.current.items as any[], 'copyWithChildren').label).toBe('複製(含子分支)')
+    expect(itemByKey(traditional.result.current.items as any[], 'cutWithChildren').label).toBe('剪下(含子分支)')
+  })
+})
+
+describe('useEditModeContextMenuItems - delete including child branches', () => {
+  beforeEach(() => {
+    activeLanguage = 'zh-CN'
+    mockEditMode.handleDelete.mockClear()
+    mockEditMode.handleDeleteWithChildren.mockClear()
+  })
+  it('offers the tree delete inside the delete submenu when a selected turn anchors a direct child branch', async () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    expect(itemByKey(items, 'delete').children.map((child: any) => child.key)).toEqual([
+      'deleteOrdinary',
+      'deleteWithChildren'
+    ])
+    expect(itemByKey(items, 'delete').label).toBe('删除')
+    expect(itemByKey(items, 'deleteWithChildren').label).toBe('删除(含子分支)')
+    // The submenu title only expands: it must never carry an onClick, so a
+    // click on the parent cannot perform the ordinary delete as a side effect.
+    expect(itemByKey(items, 'delete').onClick).toBeUndefined()
+    // The popup sits flush with the parent panel edge (no overlap, no seam).
+    expect(itemByKey(items, 'delete').popupOffset).toEqual([5, 0])
+    // The delete leaf rows carry no nested offset of their own.
+    for (const leaf of itemByKey(items, 'delete').children) {
+      expect(leaf.popupOffset).toBeUndefined()
+    }
+
+    await runClick(itemByKey(items, 'deleteOrdinary'))
+    expect(mockEditMode.handleDelete).toHaveBeenCalledTimes(1)
+    expect(mockEditMode.handleDeleteWithChildren).not.toHaveBeenCalled()
+    await runClick(itemByKey(items, 'deleteWithChildren'))
+    expect(mockEditMode.handleDeleteWithChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps plain single-click delete when the child branch is anchored outside the selection', async () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm9')] })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    expect(itemByKey(items, 'delete').children).toBeUndefined()
+    expect(itemByKey(items, 'delete').onClick).toBeDefined()
+    expect(itemByKey(items, 'delete').popupOffset).toBeUndefined()
+    expect(labelsOf(items)).not.toContain('chat.edit.deleteTreeAction')
+    await runClick(itemByKey(items, 'delete'))
+    expect(mockEditMode.handleDelete).toHaveBeenCalledTimes(1)
+    expect(mockEditMode.handleDeleteWithChildren).not.toHaveBeenCalled()
+  })
+
+  it('never offers a tree delete for a non-writable selection while the ordinary delete stays', async () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')], isSelectionMutable: false })
+    const { result } = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    const items = result.current.items as any[]
+
+    // The ordinary delete keeps its usual disabled state and grows no submenu.
+    expect(itemByKey(items, 'delete').children).toBeUndefined()
+    expect(itemByKey(items, 'delete').disabled).toBe(true)
+    expect(itemByKey(items, 'deleteWithChildren')).toBeUndefined()
+    expect(labelsOf(items)).not.toContain('chat.edit.deleteTreeAction')
+  })
+
+  it('resolves the tree delete label from the real English bundle', () => {
+    setTreeProjection({ branches: [branchOf('b1', null, 'm2')] })
+
+    activeLanguage = 'en-US'
+    const english = renderHook(() => useEditModeContextMenuItems(TOPIC))
+    expect(itemByKey(english.result.current.items as any[], 'deleteWithChildren').label).toBe(
+      'Delete including child branches'
+    )
+    english.unmount()
   })
 })

@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
 > **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
-> **最后更新**：2026-09-28
+> **最后更新**：2026-11-20
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，多端同步收敛由 [Personal Multi-Device Sync](../work/multi-device-sync.md)（现状）与 [Sync Connection & Channel ADR](./sync-connection-channel.md)、[Sync Data Convergence ADR](./sync-data-convergence.md)（目标）治理——本文档不改变、不重述这些治理域的边界。
 
@@ -56,12 +56,12 @@
 |---|---|---|
 | **PROJ-1** | **Main SQLite 是完整 topic 消息、确定性顺序（`sort_order` → `id`）、回答组成员/顺序、变更作用域、Segment 成员/目录、上下文闭包派生的唯一权威**。同一权威事务内验证归属并返回确定性顺序；Renderer 永不以本地推导替代权威解析 | **Locked** |
 | **PROJ-2** | **普通 Renderer Redux 消息状态的完备性恒为 `'loaded-projection'`**。驻留/已加载与显式空投影是已定义的投影；`undefined`（非驻留或无 ID 列表）是未加载，空与未加载不可混同。块实体可能构成更广的缓存，**块的存在不证明消息完备性** | **Locked** |
-| **PROJ-3** | **完备性能力不可互换**：`'window'`、`'answer-group'`、`'context-closure'`、`'whole-topic'`、`'naming-context'`、`'topic-activity'` 与 renderer-only `'loaded-projection'` 各有固定的归属、生命周期与合法消费方（§5）。拼写以代码 token 为准；任何跨能力复用必须经显式派生与同代验证，不得以标签名义隐式满足 | **Locked** |
+| **PROJ-3** | **完备性能力不可互换**：`'window'`、`'answer-group'`、`'context-closure'`、`'whole-topic'`、`'clipboard-tree'`、`'naming-context'`、`'topic-activity'` 与 renderer-only `'loaded-projection'` 各有固定的归属、生命周期与合法消费方（§5）。拼写以代码 token 为准；任何跨能力复用必须经显式派生与同代验证，不得以标签名义隐式满足 | **Locked** |
 | **PROJ-4** | **三种窗口概念严格区分**：Main 窗口读取元数据（权威边界声明）、Renderer 视口 `MessageWindow`（本地有界投影）、本地最新窗口完备性记录（分页边界保留）。**永不合并为含糊的通用 window 字段**；视口派生的 `hasMoreOlder` / `hasMoreNewer` 不得冒充权威 `hasMoreBefore` / `hasMoreAfter` | **Locked** |
 | **PROJ-5** | **窗口外导航是稳定消息 ID 加 `around` 读取**。读取结果按稳定 ID 去重合并、确定性排序后装配，原子合并但**永不隐含完整 topic**；缺席目标是显式的类型化未命中，不是空窗口 | **Locked** |
 | **PROJ-6** | **Main 以稳定 ID 权威意图事务性解析变更**：删除依赖展开/撤销物化、回答选择/重排、稳定插入/分支/重发语义。Renderer 在 Main 成功后提交，且**仅提交已加载交集，永不注入窗口外记录以模拟收敛**；Main 失败则不发布 | **Locked** |
 | **PROJ-7** | **整体快照、上下文闭包、回答组、命名上下文、topic 活跃度读取是调用者本地、短生命周期的能力**。完整消息/块永不进入普通 Redux；调用者消费后丢弃，失败时不发布部分结果 | **Locked** |
-| **PROJ-8** | **上下文、Segment、Clipboard 与视口无关**。上下文锚点属普通 renderer 设置持久化，但有效性/默认位置/继承/闭包派生由 Main 解析；Segment 目录携带权威顺序/边界/计数；Clipboard 复制/剪切从权威派生完整组/块/Segment，剪切删除是语义动作（先复制载荷，后经权威删除路径执行） | **Locked** |
+| **PROJ-8** | **上下文、Segment、Clipboard 与视口无关**。上下文锚点属普通 renderer 设置持久化，但有效性/默认位置/继承/闭包派生由 Main 解析；Segment 目录携带权威顺序/边界/计数；Clipboard 复制/剪切从权威派生完整组/块/Segment，剪切删除是语义动作（先复制载荷，后经权威删除路径执行）；可选“包含子分支”的树保留剪贴板改由 Main 权威捕获（`'clipboard-tree'`）并在单个 Main 事务内完成目标插入与（cut）源删除，以同一份 Main 生成快照统一 undo/redo，普通复制/剪切的两步语义不变 | **Locked** |
 | **PROJ-9** | **重发/重新生成的请求本地执行覆盖随执行存活**，经受 renderer 驱逐；Redux 只是可选镜像，不是执行生命周期权威。执行写入携带不可变执行标识，终态以原子检查点落盘 | **Locked** |
 | **PROJ-10** | **当同级顺序或集合变化时，renderer 必须消费完整权威集合响应或重新读取它；永不从单实体响应推导完整集合**。权威有序 ID 列表/目录/展开是集合收敛的唯一依据 | **Locked** |
 | **PROJ-11** | **暂定已加载候选仅允许三用途**：瞬时展示、请求可用性、用量估算回退。它们**不能**移动持久化锚点、决定权威组/变更作用域、替代新鲜闭包、改变最终持久化 | **Locked** |
@@ -85,7 +85,8 @@
 | `'window'` 能力携带 | Main SQLite 随窗口响应发布 | 随所属窗口响应存活；路由切换/驱逐/删除即失效（恰与窗口同代） | `mutableMessageIds`：精确定义与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-9）唯一治理；本文档仅说明其作为窗口能力携带的生命周期。供 Renderer 对当前 loaded/resident 可解析成员预检与 UI 门禁，窗口外/依赖展开成员由 Main 最终裁决，永不替代 Main 守卫 |
 | `'answer-group'` | Main SQLite 单事务解析（成员集合声明） | 单次响应；变更后必须重新解析 | 回答选择、分支/克隆定位、回答组重排 |
 | `'context-closure'` | Main SQLite 按 renderer 拥有的稳定锚点派生（锚点 turn 至最新，整路由权威） | 单次响应；路由/锚点/语义变更代际任一变化使缓存与请求新鲜度失效并触发后台重验，纯 `latest`/`around`/加载更多视口读取与视口成员/指纹变化永不使有效闭包失效；同路由同锚点的已接受 UI 投影在后台重验期间保留，仅在身份变化或权威无效响应时清除 | 请求上下文构建、锚点建立/重锚定/移动/继承；UI 计数/高亮/分隔线消费同一已接受共享结果（§8/§10 authority-pending 仅限冷路由尚无已接受投影、身份切换或权威无效响应） |
-| `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业；锚点之上触发请求的触发点以上历史前缀（经稳定 ID 裁剪，见 [Context Window Governance](./context-window.md) CW-9） |
+| `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业（树保留剪贴板改走 `'clipboard-tree'`）；锚点之上触发请求的触发点以上历史前缀（经稳定 ID 裁剪，见 [Context Window Governance](./context-window.md) CW-9） |
+| `'clipboard-tree'` | Main SQLite 单事务有界读取：源被寻址路由上所选稳定组键的完整根组 + 锚定其上的直接子分支 subtree 各自自有行 | 单次响应；剪贴板调用方持有至粘贴/重放，消费后丢弃，不进入普通 Redux 消息/块驻留投影 | 树保留剪贴板（可选“包含子分支”的 copy/cut）载荷组装；粘贴与 undo/redo 经各自 Main 事务（[Topic Branches ADR](./topic-branches.md) §4.6） |
 | `'naming-context'` | Main SQLite 有界命名读取（命名元数据、精确计数、首条消息、至多 5 条最新消息及其块） | 调用者本地、短生命周期 | 自动命名 |
 | `'topic-activity'` | Main SQLite 有界活跃度读取（精确计数、最新消息 ID/时间戳，无消息/块） | 调用者本地、短生命周期 | 限流检查等只需活跃度的作业 |
 | `'loaded-projection'`（renderer-only） | Renderer 普通 Redux 消息状态 | 随驻留窗口存活；驱逐/删除/代际变化即失效 | 瞬时展示、请求可用性、用量估算（§8 暂定用途）、已加载交集计算 |
@@ -116,7 +117,7 @@
 - **I-6**：暂定候选不改变持久化、不决定权威、不替代新鲜闭包（PROJ-11）。
 - **I-7**：权威变更请求携带稳定 ID 意图；数字序号只表达本地投影位置，永不作为权威变更坐标（PROJ-12）。
 - **I-8**：`mutableMessageIds` 仅与发布它的窗口同代有效；路由切换原子替换（永不复用旧路由集合）、缺失即清除 fail-closed；Renderer 预检永不替代 Main 守卫。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/9）唯一治理，本文档不定义分支权限。
-- **I-9**：删除的 Undo 必须在**同一 Main 事务**内同时恢复消息与该删除实际前移的继承边界（分支锚点、引用端点）；Renderer 只运输 Main 采集的边界事实，永不自行推导或构造。该恢复后分支目录必须重新读取 Main 投影；重新读取失败仅属投影层问题，不得把已提交的权威恢复变成失败的 Undo。
+- **I-9**：删除的 Undo 必须在**同一 Main 事务**内同时恢复消息与该删除实际前移的继承边界（分支锚点、引用端点）；Renderer 只运输 Main 采集的边界事实，永不自行推导或构造。该恢复后分支目录必须重新读取 Main 投影；重新读取失败仅属投影层问题，不得把已提交的权威恢复变成失败的 Undo。树保留剪贴板 cut 的 undo/redo 同样以同一份 Main 快照一次性覆盖目标插入与源删除（含边界回写），冲突即失败且零写。
 
 ---
 
@@ -132,7 +133,8 @@
 | 加入既有回答组的 append multi-model | 新后缀落 owned 后缀；既有行按实际写目标判权（祖先引用读取不阻断）；权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
 | retry-all/批量重生成 | 已知不可变时整组禁用/零调用；未知成员逐个经 Main 守卫，首败即停，不声称原子。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（逐项 Main 事务） |
 | 编辑选集 cut/delete/segment 写 | 选集能力门禁（当前 loaded 可解析成员须在 Main 能力中；混合整体阻断；路由切换清选择）；窗口外/依赖展开成员由 Main 最终裁决。权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
-| cut-paste 源删除 | 创建 cut clipboard 时预检（服务入口与 UI 调用方双层门禁）；执行经现有 renderer 预检加 Main 最终守卫的权威删除路径。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（Main 事务） |
+| cut-paste 源删除（普通 copy/cut） | 创建 cut clipboard 时预检（服务入口与 UI 调用方双层门禁）；执行经现有 renderer 预检加 Main 最终守卫的权威删除路径。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（Main 事务） |
+| 树保留 copy/cut（含子分支） | `'clipboard-tree'` 捕获后，目标插入与（cut）源删除同属一个 Main 事务并返回一份快照供 undo/redo（冲突零写）；普通 copy/cut 仍走上述预检 + 权威删除路径。权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/6/12）治理 | 是（Main 事务） |
 | undo/redo | 非 owner 目标由 Main 拒绝；redo 删除类路径预检零调用；恢复类路径新建 owned 行、由 Main 裁决 | 是（Main 事务） |
 | 分支创建/删除 | 分支路由能力、bounded 创建锚点（owner-only，继承引用拒绝）与删除语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-3/6/7/9）唯一治理（创建不收缩 owner 权限）；当前路由能力随窗口重发 | 否（能力发布；分支行变更是） |
 | 稳定插入/分支/粘贴 | 稳定锚点意图发往 Main；Main 按 [Topic Branches ADR](./topic-branches.md)（BRANCH-3/7 bounded：自有锚点 + 唯一 fork 边界例外，老祖先拒绝）原子解析位置后写入；Renderer 提交已加载交集 | 是（Main 事务） |
@@ -177,6 +179,7 @@
 ## 11. 测试与证据契约（Test/Evidence Contract）
 
 - **单元测试**：已加载投影判别（`'loaded-projection'`、空与未加载区分）、稳定 ID 合并与确定性排序、回答组选择/重排的已加载交集提交、删除展开的已加载交集与 Segment 目录替换、稳定插入的锚点解析、调用者本地读取不进 Redux、暂定候选三用途边界。
+- **树保留剪贴板**：`'clipboard-tree'` 捕获只含所选根与锚定子分支自有行（无共享前缀/sibling/祖先行）；paste/replay 的 Main 事务性、fresh-ID 映射与快照冲突零写；普通 copy/cut 两步路径不变（权限与原子性由 [Topic Branches ADR](./topic-branches.md) §4.6/§8 治理）。
 - **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§8 验证与验收）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
 - **投影组件测试（Renderer）**：MessageMenubar/ MessageGroup / EditMode / Clipboard 的预检与 UI 门禁行为（能力未知 fail-closed、路由切换清选择、copy 允许而 cut/delete/segment 按能力禁用）仍按投影收敛语义覆盖；分支权限的允许/拒绝语义以 Branch ADR 为准，不在本文档重复矩阵。
 - **组件测试**：窗口装配与分页边界保留、窗口外导航装配、回答选择可见折叠、删除后锚点转移展示。传输中状态不作为回归证据。
@@ -197,8 +200,8 @@
 
 ## 13. 验收标准（Acceptance Criteria）
 
-- **AC-1**：本文档完整覆盖 PROJ-1…PROJ-12 决策表、完备性能力表（§5，七种拼写准确 + `window` 能力携带行，能力定义链接 Branch ADR）、状态与不变量（§6，I-1…I-8）、领域迁移表（§7，分支权限行链接 Branch ADR）、暂定/执行边界（§8）、持久化边界（§9，含路由隔离锚点说明）、一致性（§10）、测试契约（§11，分支矩阵已迁出）、非目标（§12）。
-- **AC-2**：全文内部一致——普通 Redux 消息状态只用 `'loaded-projection'`；`'window'` / `'answer-group'` / `'context-closure'` / `'whole-topic'` / `'naming-context'` / `'topic-activity'` 永不互换；三种窗口概念永不合并为通用 window 字段；数字序号永不作为权威变更坐标；分支变更权限由 [Topic Branches ADR](./topic-branches.md) 唯一治理，本文档无 `private/shared-prefix/owned-unshared/活后代保护` 旧语义与悬空 PROJ-13…PROJ-16 编号；`mutableMessageIds` 永不替代 Main 守卫。
+- **AC-1**：本文档完整覆盖 PROJ-1…PROJ-12 决策表、完备性能力表（§5，八种拼写准确 + `window` 能力携带行，能力定义链接 Branch ADR）、状态与不变量（§6，I-1…I-9）、领域迁移表（§7，分支权限行链接 Branch ADR）、暂定/执行边界（§8）、持久化边界（§9，含路由隔离锚点说明）、一致性（§10）、测试契约（§11，分支矩阵已迁出）、非目标（§12）。
+- **AC-2**：全文内部一致——普通 Redux 消息状态只用 `'loaded-projection'`；`'window'` / `'answer-group'` / `'context-closure'` / `'whole-topic'` / `'clipboard-tree'` / `'naming-context'` / `'topic-activity'` 永不互换；三种窗口概念永不合并为通用 window 字段；数字序号永不作为权威变更坐标；分支变更权限由 [Topic Branches ADR](./topic-branches.md) 唯一治理，本文档无 `private/shared-prefix/owned-unshared/活后代保护` 旧语义与悬空 PROJ-13…PROJ-16 编号；`mutableMessageIds` 永不替代 Main 守卫。
 - **AC-3**：`docs/architecture/architecture.md` 治理段落与 Redux/SQLite/IPC 行链接本文档与 [Topic Branches ADR](./topic-branches.md)，且不复制决策表。
 - **AC-4**：`AGENTS.md` Detailed References 含本文档与 Branch ADR 链接；既有 MUST/NEVER/gate/security 规则零改动；`CLAUDE.md` 仍为 `AGENTS.md` 的符号链接。
 - **AC-5**：本次 true-branch 迁移修改本文档、新增 `docs/adr/topic-branches.md` 并修改 `docs/adr/context-window.md`、`docs/architecture/architecture.md`、`AGENTS.md` 及代码/测试；无提交（按任务要求不 commit）。

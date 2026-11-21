@@ -14,6 +14,7 @@ import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/Br
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { renameBranchWithHistory } from '@renderer/services/branchOperationHistory'
+import { copyBranchTree } from '@renderer/services/ClipboardService'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
@@ -87,6 +88,8 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const [treeVisible, setTreeVisible] = useState(false)
   /** Row whose subtree delete is in flight, so only that row shows a spinner. */
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  /** Row whose branch-tree copy is in flight, so only that row shows a spinner. */
+  const [copyingId, setCopyingId] = useState<string | null>(null)
   /**
    * Whether a row's delete confirmation is open. It is a ref, not state: it
    * guards only the press that dismisses that confirmation and renders
@@ -218,6 +221,31 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
     }
   }
 
+  /**
+   * Branch-row copy, copy-only: the CLICKED row is the source (never the active
+   * route), Main captures that branch's own trunk plus its descendant branches'
+   * own rows, and nothing here switches route or opens edit mode. One copy runs
+   * at a time; the row owns the spinner while it is in flight.
+   */
+  const copyBranch = async (branchId: string): Promise<void> => {
+    if (copyingId !== null) return
+    setCopyingId(branchId)
+    try {
+      const count = await copyBranchTree(dispatch, activeTopic.id, branchId)
+      if (count > 0) {
+        window.toast.success(t('chat.edit.copied', { count }))
+      } else {
+        // Nothing was published (Main refused or the branch owns no rows).
+        window.toast.error(t('common.error'))
+      }
+    } catch (error) {
+      logger.error('[TopicContent] Failed to copy branch tree:', error as Error)
+      window.toast.error(t('common.error'))
+    } finally {
+      setCopyingId(null)
+    }
+  }
+
   // Escape closes the popover. A row editor takes Escape for itself and stops
   // the event, so cancelling an edit never closes the whole selector.
   useEffect(() => {
@@ -241,10 +269,12 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
       activeBranchId={activeBranchId}
       visible={treeVisible}
       deletingBranchId={deletingId}
+      copyingBranchId={copyingId}
       onDeleteConfirmChange={handleDeleteConfirmChange}
       onSelectRoute={switchRoute}
       onCommitRename={commitRename}
       onConfirmDelete={confirmDelete}
+      onCopyBranch={copyBranch}
       maxWidth={panelFit.maxWidth}
     />
   )

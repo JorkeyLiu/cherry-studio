@@ -31,8 +31,9 @@ describe('single scroll-owner contract (#messages)', () => {
     const rules: string = MessagesContainer?.componentStyle?.rules?.join('') ?? ''
     expect(rules).toContain('flex-direction: column')
     expect(rules).not.toContain('column-reverse')
-    // The scrollport owns the available height; the content wrapper bottom-aligns
-    // short content with an auto block-start margin instead of a reversed flow.
+    // The scrollport owns the available height; the content wrapper keeps its
+    // intrinsic height and starts at the top, so short content is not pushed
+    // down to the end of the port and long content still scrolls here.
     expect(rules).toContain('flex: 1 1 auto')
     expect(rules).toContain('overflow-x: hidden')
   })

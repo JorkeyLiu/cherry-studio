@@ -257,7 +257,13 @@ async function seedTopicWithGroup(
         if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
         const pasted = await api.pasteMessagesToTopic({ topicId, entries })
         if (!pasted || pasted.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
-        const upserted = await api.upsertSegment({ segmentId, topicId, name: 'Fold Group', messageIds: memberIds })
+        const upserted = await api.upsertSegment({
+          segmentId,
+          topicId,
+          name: 'Fold Group',
+          messageIds: memberIds,
+          branchId: null
+        })
         if (!upserted || upserted.ok !== true) return { ok: false, err: `upsertSegment ${JSON.stringify(upserted)}` }
         return { ok: true, count: upserted.value?.messageCount ?? null }
       } catch (e) {

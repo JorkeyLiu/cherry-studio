@@ -20,6 +20,7 @@
  */
 import type { ElectronApplication, Page } from '@playwright/test'
 import { _electron as electron } from '@playwright/test'
+import { hideDockAndReadWindowVisibility, isHiddenLaunchRequested, seedHiddenLaunchProfile } from './hidden-launch'
 
 export interface LaunchElectronOptions {
   /** Unique disposable profile dir passed as `--user-data-dir=<dir>`. */
@@ -37,8 +38,16 @@ export interface LaunchElectronOptions {
   extraEnv?: Record<string, string>
 }
 
-/** Launch the built Cherry Chat app with the disposable profile and owned temp env. */
-export function launchElectronApp(options: LaunchElectronOptions): Promise<ElectronApplication> {
+/**
+ * Launch the built Cherry Chat app with the disposable profile and owned temp env.
+ *
+ * The launch is UNSHOWN by default (`tests/e2e/utils/hidden-launch.ts`): the
+ * disposable profile is seeded with the product's own `launchToTray` setting, so
+ * the main window is created hidden and never shown, and no run steals the
+ * developer's focus. `CHERRY_E2E_SHOW=1` opts back into a visible window for
+ * manual debugging. The product is untouched.
+ */
+export async function launchElectronApp(options: LaunchElectronOptions): Promise<ElectronApplication> {
   // Ownership-safe: pass TMPDIR/TMP/TEMP so production os.tmpdir() resolves
   // inside the owned temp root. This ensures all production temp artifacts
   // (cherry-import-*, etc.) land under our owned root for cleanup.
@@ -49,11 +58,24 @@ export function launchElectronApp(options: LaunchElectronOptions): Promise<Elect
     tmpEnv.TEMP = options.ownedTmpRoot
   }
 
-  return electron.launch({
+  // Default-hidden launch: seed the disposable profile only (owned `cherry-e2e-*`
+  // paths are required; a live profile is refused before any write).
+  seedHiddenLaunchProfile(options.userDataDir)
+
+  const electronApp = await electron.launch({
     args: ['.', `--user-data-dir=${options.userDataDir}`, '--no-sandbox', '--disable-gpu'],
     env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '', ...tmpEnv, ...options.extraEnv },
     timeout: 120000
   })
+
+  // Keep the app out of the dock and prove the launch really is unshown.
+  if (isHiddenLaunchRequested()) {
+    const windows = await hideDockAndReadWindowVisibility(electronApp)
+    if (windows.some((window) => window.visible)) {
+      throw new Error(`hidden launch violated: a window became visible ${JSON.stringify(windows)}`)
+    }
+  }
+  return electronApp
 }
 
 /** Wait for the main `Cherry Chat` window with the React root attached. */
@@ -71,6 +93,16 @@ export async function waitForMainElectronWindow(electronApp: ElectronApplication
   })
   await mainWindow.waitForSelector('#root', { state: 'attached', timeout: 60000 })
   await mainWindow.waitForLoadState('domcontentloaded')
+  // Default-hidden launch: the main window must never be visible. Enforced at
+  // this shared entry point (fixture, second-profile helpers, ui:observe) rather
+  // than in each spec; `CHERRY_E2E_SHOW=1` opts back into a visible window.
+  if (isHiddenLaunchRequested()) {
+    const windows = await hideDockAndReadWindowVisibility(electronApp)
+    if (windows.some((window) => window.visible)) {
+      throw new Error(`hidden launch violated: a window became visible ${JSON.stringify(windows)}`)
+    }
+  }
+
   return mainWindow
 }
 

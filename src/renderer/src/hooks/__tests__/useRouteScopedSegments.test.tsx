@@ -32,7 +32,12 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { rootReducer } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
 
-import { deriveRouteTurnMap, useRouteScopedSegments } from '../useRouteScopedSegments'
+import {
+  deriveRouteTurnMap,
+  ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS,
+  segmentCatalogChromeToken,
+  useRouteScopedSegments
+} from '../useRouteScopedSegments'
 
 type Any = any
 
@@ -267,6 +272,105 @@ describe('useRouteScopedSegments route scope and guards', () => {
     await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(2), { timeout: 5000 })
   })
 
+  it('refetches when the accepted catalog gains a group over newly committed route rows', async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-old', 0, ['m5'])])
+    mockLoadSnapshot.mockResolvedValue(snapshot(MAIN))
+
+    setBranch(store, TOPIC, null)
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-old']))
+
+    // A committed collection mutation (tree paste) appends four rows AND a group
+    // that only those rows describe. The group is new-only: intersecting it with
+    // the hook's cached route ids (which predate the rows) drops it entirely —
+    // the reported missing group/rail DOM — until the route is re-read.
+    mockLoadSnapshot.mockResolvedValue(snapshot([...MAIN, 'n1', 'n2', 'n3', 'n4']))
+    act(() => {
+      seedCatalog(store, TOPIC, [seg('s-old', 0, ['m5']), seg('s-new', 1, ['n1', 'n2', 'n3', 'n4'])])
+    })
+
+    // No switch, no MESSAGE_COMPLETE, no updatedAt: only the accepted catalog
+    // moved, and the projection follows it onto the re-read route.
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-old', 's-new']), { timeout: 5000 })
+    expect(result.current.isCurrent).toBe(true)
+    expect(mockLoadSnapshot).toHaveBeenCalledTimes(2)
+    expect(result.current.segments[1].firstMessageId).toBe('n1')
+    expect(result.current.segments[1].messageCount).toBe(4)
+    // The pre-existing group is untouched by the re-read.
+    expect(result.current.segments[0].memberIds).toEqual(['m5'])
+    // The re-read feeds nothing back: its own result never changes the catalog,
+    // so no further read is scheduled (no refetch loop).
+    await new Promise((r) => setTimeout(r, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS + 150))
+    expect(mockLoadSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not adopt a route snapshot read that began before the committed catalog change', async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-old', 0, ['m5'])])
+    const first = deferred<Any>()
+    let call = 0
+    mockLoadSnapshot.mockImplementation(async () => {
+      call += 1
+      if (call === 1) return first.promise
+      return snapshot([...MAIN, 'n1', 'n2', 'n3', 'n4'])
+    })
+
+    setBranch(store, TOPIC, null)
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+
+    // The commit publishes its catalog while the first read is still in flight.
+    act(() => {
+      seedCatalog(store, TOPIC, [seg('s-old', 0, ['m5']), seg('s-new', 1, ['n1', 'n2', 'n3', 'n4'])])
+    })
+    // That read resolves inside the coalescing window, before the re-read is
+    // issued: its route ids predate the commit, so adopting it would intersect
+    // the NEW catalog with OLD rows and hide the new group again.
+    await act(async () => {
+      first.resolve(snapshot(MAIN))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(result.current.isCurrent).toBe(false)
+    expect(result.current.segments).toEqual([])
+
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-old', 's-new']), { timeout: 5000 })
+  })
+
+  it("does not refetch when another topic's catalog changes", async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-prefix', 0, ['m5'])])
+    mockLoadSnapshot.mockResolvedValue(snapshot(MAIN))
+
+    setBranch(store, TOPIC, null)
+    renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      store.dispatch({
+        type: 'topicSegments/replaceSegmentsForTopic',
+        payload: { topicId: 'OTHER', segments: [seg('s-other', 0, ['x1'], { topicId: 'OTHER' })] }
+      })
+    })
+    await new Promise((r) => setTimeout(r, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS + 150))
+    expect(mockLoadSnapshot).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refetch when the same accepted catalog is republished', async () => {
+    const store = makeStore()
+    seedCatalog(store, TOPIC, [seg('s-prefix', 0, ['m5'])])
+    mockLoadSnapshot.mockResolvedValue(snapshot(MAIN))
+
+    setBranch(store, TOPIC, null)
+    renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(mockLoadSnapshot).toHaveBeenCalledTimes(1))
+
+    // An identical read-after convergence (fresh entities, same content) must
+    // not schedule another read: the trigger is value equality, never identity.
+    act(() => seedCatalog(store, TOPIC, [seg('s-prefix', 0, ['m5'])]))
+    await new Promise((r) => setTimeout(r, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS + 150))
+    expect(mockLoadSnapshot).toHaveBeenCalledTimes(1)
+  })
+
   it('refetches when the resident reference relation changes for the topic', async () => {
     const store = makeStore()
     seedCatalog(store, TOPIC, [seg('s-prefix', 0, ['m5'])])
@@ -442,5 +546,23 @@ describe('deriveRouteTurnMap', () => {
     const map = deriveRouteTurnMap([msg('orphan', 'assistant'), msg('u1', 'user')])
     expect(map.has('orphan')).toBe(false)
     expect(map.get('u1')).toBe(0)
+  })
+})
+
+describe('segmentCatalogChromeToken', () => {
+  it('ignores materialization timestamps and per-reader route qualification', () => {
+    const base = seg('s1', 0, ['m1', 'm2'])
+    expect(segmentCatalogChromeToken([{ ...base, createdAt: 'x', updatedAt: 'y' }])).toBe(
+      segmentCatalogChromeToken([{ ...base, createdAt: 'a', updatedAt: 'b' }])
+    )
+  })
+
+  it('changes on membership, order and head identity', () => {
+    const base = seg('s1', 0, ['m1', 'm2'])
+    const token = segmentCatalogChromeToken([base])
+    expect(segmentCatalogChromeToken([seg('s1', 0, ['m1', 'm2', 'n1'])])).not.toBe(token)
+    expect(segmentCatalogChromeToken([seg('s1', 1, ['m1', 'm2'])])).not.toBe(token)
+    expect(segmentCatalogChromeToken([{ ...base, headerMessageId: 'm2' }])).not.toBe(token)
+    expect(segmentCatalogChromeToken([base, seg('s2', 1, ['m3'])])).not.toBe(token)
   })
 })

@@ -609,7 +609,16 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     it('the retired group marker excludes nothing: window, counts and divider stay unchanged', () => {
       const topicId = `t-${uid()}`
       seedTurns(topicId, 3)
-      okValue(agg.upsertSegment('seg-legacy', topicId, 'Legacy', ['u2', 'a2'], null))
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-legacy',
+          topicId,
+          name: 'Legacy',
+          messageIds: ['u2', 'a2'],
+          color: null,
+          branchId: null
+        })
+      )
       stampLegacySegmentFold('seg-legacy')
 
       const v = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u1' }))
@@ -634,7 +643,16 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
       const topicId = `t-${uid()}`
       seedTurns(topicId, 3)
       // A legacy marker on the same group changes nothing either.
-      okValue(agg.upsertSegment('seg-legacy', topicId, 'Legacy', ['u2', 'a2'], null))
+      okValue(
+        agg.upsertSegment({
+          segmentId: 'seg-legacy',
+          topicId,
+          name: 'Legacy',
+          messageIds: ['u2', 'a2'],
+          color: null,
+          branchId: null
+        })
+      )
       stampLegacySegmentFold('seg-legacy')
       foldMessage(topicId, 'u2')
       foldMessage(topicId, 'a2')

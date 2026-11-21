@@ -1998,6 +1998,13 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   // observation of its own for that route + row; never paired with a scroll
   // position read at a different time.
   const publishedSampleRef = useRef<LayoutHoldBaseline | null>(null)
+  // The bottom position this keeper itself last realized for the bottom
+  // semantic (no row anchor), scoped to the route it belongs to. It is the
+  // witness that separates passive growth — same scroll position, taller
+  // content — from genuine user movement, so the pin can absorb growth that
+  // lands while an input gesture is still live without ever pulling the
+  // viewport back to a position the user scrolled away from.
+  const bottomPinRef = useRef<{ routeKey: string; scrollTop: number } | null>(null)
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
   const holdRef = useRef<(reason: string) => void>(() => {})
@@ -3136,6 +3143,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         // at the genuine bottom (a gesture that left the bottom published its own
         // row anchor/offset through its takeover); an absolute scrollTop write
         // must never pull a scrolling user back.
+        const bottomRouteKey = displayedRouteKey(displayed)
         layoutHoldRef.current = null
         let metrics: { scrollTop: number; scrollHeight: number; clientHeight: number }
         let bottomTarget = 0
@@ -3147,13 +3155,33 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {
           return
         }
-        if (vp.controller.hasActiveUserInteraction() && !atBottomNow) return
+        if (atBottomNow) {
+          bottomPinRef.current = { routeKey: bottomRouteKey, scrollTop: metrics.scrollTop }
+          return
+        }
+        // A live gesture owns the viewport, so the pin never pulls a scrolling
+        // user back. The admissible case inside a live session is a bottom this
+        // keeper itself already realized whose scroll position has NOT moved
+        // since: that is passive growth below the pinned bottom (an inserted
+        // row, stream text, group chrome), which the bottom semantic exists to
+        // absorb. Comparing the POST-growth distance instead would read that
+        // growth as user movement and leave the new bottom stranded below the
+        // fold — the accepted send/tail commit then visibly jumps up. A gesture
+        // that really left the bottom adopts its own row anchor, so it never
+        // reaches this branch (the live anchor is then a row, not bottom), and
+        // a session that exists without having scrolled still cannot be pulled
+        // forward past its own realized position.
+        const pinnedBottom = bottomPinRef.current
+        const ownBottomHeld =
+          pinnedBottom !== null &&
+          pinnedBottom.routeKey === bottomRouteKey &&
+          Math.abs(pinnedBottom.scrollTop - metrics.scrollTop) <= 1
+        if (vp.controller.hasActiveUserInteraction() && !ownBottomHeld) return
         try {
-          if (!atBottomNow) {
-            container.scrollTop = bottomTarget
-            compensatingRef.current = { expected: container.scrollTop }
-            recordCompensationWrite(vp.controller, container)
-          }
+          container.scrollTop = bottomTarget
+          compensatingRef.current = { expected: container.scrollTop }
+          recordCompensationWrite(vp.controller, container)
+          bottomPinRef.current = { routeKey: bottomRouteKey, scrollTop: container.scrollTop }
         } catch {}
         return
       }

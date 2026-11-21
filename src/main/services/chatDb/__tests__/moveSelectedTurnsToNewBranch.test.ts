@@ -250,14 +250,26 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(agg.moveSelectedTurnsToNewBranch('t1', b1, ['uB'], 'Bad', ['uB', 'aB']).ok).toBe(false)
     // Through main, branch-owned rows are not resolvable as source-owned turns.
     // Segment cutting through the selection rejects without inventing split policy.
-    const segRes = agg.upsertSegment('seg-1', 't1', 'Seg', ['uB', 'aB', 'uC'], undefined)
+    const segRes = agg.upsertSegment({
+      segmentId: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['uB', 'aB', 'uC'],
+      branchId: null
+    })
     expect(segRes.ok).toBe(true)
     const branchesBefore = okValue(agg.listBranches('t1')).branches.length
     expect(agg.moveSelectedTurnsToNewBranch('t1', null, ['uB'], 'Bad', ['uB', 'aB']).ok).toBe(false)
     expect(okValue(agg.listBranches('t1')).branches.length).toBe(branchesBefore)
     expect(branchOf(sqlite, 'uB')).toBeNull()
     // Wholly-inside segments are preserved untouched.
-    const segFull = agg.upsertSegment('seg-2', 't1', 'Seg2', ['uD', 'aD'], undefined)
+    const segFull = agg.upsertSegment({
+      segmentId: 'seg-2',
+      topicId: 't1',
+      name: 'Seg2',
+      messageIds: ['uD', 'aD'],
+      branchId: null
+    })
     expect(segFull.ok).toBe(true)
     const okRes = agg.moveSelectedTurnsToNewBranch('t1', null, ['uD'], 'Ok', ['uD', 'aD'])
     expect(okRes.ok).toBe(true)
@@ -269,7 +281,15 @@ describe('moveSelectedTurnsToNewBranch', () => {
     seedABCD(agg, 't1')
     // Seed a segment that will cut the selection only after anchor checks pass,
     // proving atomicity: branch row + owner writes roll back together.
-    expect(agg.upsertSegment('seg-cut', 't1', 'Cut', ['uC', 'aC', 'uD'], undefined).ok).toBe(true)
+    expect(
+      agg.upsertSegment({
+        segmentId: 'seg-cut',
+        topicId: 't1',
+        name: 'Cut',
+        messageIds: ['uC', 'aC', 'uD'],
+        branchId: null
+      }).ok
+    ).toBe(true)
     const branchesBefore = okValue(agg.listBranches('t1')).branches.length
     const res = agg.moveSelectedTurnsToNewBranch('t1', null, ['uB', 'uC'], 'Atomic', ['uB', 'aB', 'uC', 'aC'])
     expect(res.ok).toBe(false)

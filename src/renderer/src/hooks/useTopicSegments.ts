@@ -85,14 +85,14 @@ export function useTopicSegments(topicId: string) {
       // reads discard silently — never a fabricated single-wire success.
       const id = uuid()
       const color = getSegmentColor(id)
-      const wire = await dbService.upsertSegment(
-        id,
-        tid,
+      const wire = await dbService.upsertSegment({
+        segmentId: id,
+        topicId: tid,
         name,
         messageIds,
         color,
-        tid === topicId ? activeBranchId : null
-      )
+        branchId: tid === topicId ? activeBranchId : null
+      })
       const segment = mapSegmentWireToTopicSegment(wire)
       await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
       logger.info(`Created segment "${name}" with ${segment.messageCount} messages`)
@@ -110,10 +110,14 @@ export function useTopicSegments(topicId: string) {
       const before = appStore.getState() as any
       const existing = before?.topicSegments?.segments?.entities?.[segmentId]
       const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
-      await dbService.updateSegmentMetadata(segmentId, name)
+      // Group metadata is addressed by the route the caller writes through:
+      // the rename reaches the group through the active route of this topic
+      // (main route when null), exactly like every other segment write. Main
+      // still decides ownership atomically — a non-owner route fails closed.
+      await dbService.updateSegmentMetadata({ segmentId, name, branchId: activeBranchId })
       await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
     },
-    [dispatch, appStore, topicId]
+    [dispatch, appStore, topicId, activeBranchId]
   )
 
   const updateSegmentMessageIds = useCallback(
@@ -126,7 +130,11 @@ export function useTopicSegments(topicId: string) {
       // path (empty membership deletes in Main; the converged list reflects
       // it). No raw update/remove — those would invalidate the resident
       // window and blank until reload.
-      await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
+      await dbService.replaceSegmentMembership({
+        segmentId,
+        messageIds: newMessageIds,
+        branchId: activeBranchId
+      })
       await convergeTopicSegmentCatalog(dispatch, topicId, appStore.getState)
     },
     [dispatch, activeBranchId, routeCapability, topicId, appStore]
@@ -138,11 +146,11 @@ export function useTopicSegments(topicId: string) {
       const before = appStore.getState() as any
       const existing = before?.topicSegments?.segments?.entities?.[segmentId]
       const tid: string = typeof existing?.topicId === 'string' ? existing.topicId : topicId
-      await dbService.deleteSegment(segmentId)
+      await dbService.deleteSegment({ segmentId, branchId: activeBranchId })
       await convergeTopicSegmentCatalog(dispatch, tid, appStore.getState)
       logger.info(`Deleted segment ${segmentId}`)
     },
-    [dispatch, appStore, topicId]
+    [dispatch, appStore, topicId, activeBranchId]
   )
   const getSegmentForMessage = useCallback(
     (messageId: string): TopicSegment | undefined => {

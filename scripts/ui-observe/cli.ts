@@ -76,6 +76,12 @@ options:
                       (default: test-results/ui-observe/<scenario>-<timestamp>)
   --timeout-ms <ms>   scenario body timeout (default: ${DEFAULT_SCENARIO_TIMEOUT_MS})
 
+env:
+  CHERRY_E2E_SHOW=1    launch a VISIBLE window for manual debugging (default:
+                      the app runs UNSHOWN — the disposable profile is seeded
+                      with the product's launch-to-tray setting, so no window
+                      is shown and focus is never taken)
+
 exit codes:
   0  pass (or an explicitly requested --help / --list)
   1  scenario, setup, or cleanup failure

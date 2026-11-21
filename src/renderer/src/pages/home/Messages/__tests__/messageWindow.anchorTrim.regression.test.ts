@@ -916,11 +916,13 @@ describe('ordinary pagination target stays authoritative for its loaded projecti
     expect(fallbackWindow.range).toEqual({ oldestGroupIndex: 200, newestGroupIndex: 219 })
     expect(fallbackWindow.paginationTarget).toBeUndefined()
 
-    // …and the next reconcile stays ordinary latest-following: an appended group
-    // slides the window onto the newest edge instead of retaining the rebuild.
+    // …and the next reconcile stays ordinary latest-following: the parked
+    // fallback window retains its oldest boundary and extends to the new tail
+    // instead of retaining the rebuild — still with no committed target.
     const appended = [...acceptedMessages, message('m200')]
     const reconciled = reconcileMessageWindow(appended, acceptedMessages, fallbackWindow)
-    expect(reconciled.range).toEqual({ oldestGroupIndex: 201, newestGroupIndex: 220 })
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 200, newestGroupIndex: 220 })
+    expect(reconciled.groupCapacity).toBe(21)
     expect(reconciled.paginationTarget).toBeUndefined()
   })
 })

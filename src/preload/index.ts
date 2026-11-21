@@ -12,6 +12,7 @@ import type {
   CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
+  DeleteClipboardTreeRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -22,6 +23,7 @@ import type {
   ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
+  FetchClipboardTreeRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -41,6 +43,7 @@ import type {
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
+  PasteClipboardTreeRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -49,6 +52,7 @@ import type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplayBranchOperationRequest,
+  ReplayClipboardTreeRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -620,6 +624,14 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ImportTopicData, request),
     fetchClipboardGroups: (request: FetchClipboardGroupsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchClipboardGroups, request),
+    fetchClipboardTree: (request: FetchClipboardTreeRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchClipboardTree, request),
+    pasteClipboardTree: (request: PasteClipboardTreeRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_PasteClipboardTree, request),
+    replayClipboardTree: (request: ReplayClipboardTreeRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ReplayClipboardTree, request),
+    deleteClipboardTree: (request: DeleteClipboardTreeRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_DeleteClipboardTree, request),
     fetchTopicNamingContext: (request: FetchTopicNamingContextRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchTopicNamingContext, request),
     fetchTopicActivity: (request: FetchTopicActivityRequest) =>

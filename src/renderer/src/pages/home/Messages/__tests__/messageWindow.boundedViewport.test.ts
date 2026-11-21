@@ -463,14 +463,20 @@ describe('latest window local older omission vs Main authority', () => {
     expect(paged.paginationTarget).toBe(true)
   })
 
-  it('keeps the local older traversability across a latest-edge reconcile', () => {
+  it('retains the displayed old end across a latest-edge append (bounded growth, authority untouched)', () => {
     const tail = createLatestMessageWindow(projection, capacity, exhausted)
     const appended = [...projection, message('m14'), message('m15')]
     const reconciled = reconcileMessageWindow(appended, projection, tail)
 
+    // The loaded old end stays mounted while the new tail enters: capacity
+    // grows with the retained range instead of re-slicing newest-N.
     expect(reconciled.edge).toBe('latest')
-    expect(reconciled.groupCount).toBe(capacity)
-    expect(reconciled.range).toEqual({ oldestGroupIndex: 6, newestGroupIndex: 15 })
+    expect(reconciled.groupCount).toBe(capacity + 2)
+    expect(reconciled.groupCapacity).toBe(capacity + 2)
+    expect(reconciled.range).toEqual({ oldestGroupIndex: 4, newestGroupIndex: 15 })
+    // Local older traversability and the verbatim Main authority are both
+    // preserved — the authority is carried, never confused with the
+    // latest-window completeness store (no write happens here).
     expect(reconciled.authoritativeHasMoreBefore).toBe(false)
     expect(reconciled.hasMoreOlder).toBe(true)
     expect(reconciled.hasMoreNewer).toBe(false)

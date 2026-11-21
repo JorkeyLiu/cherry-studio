@@ -296,7 +296,9 @@ describe('setTurnFolds — turn-level atomic fold', () => {
     const topicId = `t-${uid()}`
     seedTwoturns(topicId)
     const segmentId = `seg-${uid()}`
-    okValue(agg.upsertSegment(segmentId, topicId, 'Group', ['u1', 'a1', 'u2', 'a2'], undefined))
+    okValue(
+      agg.upsertSegment({ segmentId, topicId, name: 'Group', messageIds: ['u1', 'a1', 'u2', 'a2'], branchId: null })
+    )
 
     // Partial-within-group fold is allowed: the group is not a context unit.
     okValue(agg.setTurnFolds(topicId, ['u2'], true))
@@ -326,7 +328,16 @@ describe('setTurnFolds — turn-level atomic fold', () => {
     // Creating a group over hidden/folded messages is a presentation concept,
     // so it is allowed and membership is written in full.
     const segmentId = `seg-${uid()}`
-    const created = okValue(agg.upsertSegment(segmentId, topicId, 'Across fold', ['u1', 'a1', 'u2', 'a2'], '#123456'))
+    const created = okValue(
+      agg.upsertSegment({
+        segmentId,
+        topicId,
+        name: 'Across fold',
+        messageIds: ['u1', 'a1', 'u2', 'a2'],
+        color: '#123456',
+        branchId: null
+      })
+    )
     expect(created.messageIds).toEqual(['u1', 'a1', 'u2', 'a2'])
     const repos = createRepositories(db)
     expect(repos.segments.getMessageIds(segmentId)).toEqual(['u1', 'a1', 'u2', 'a2'])

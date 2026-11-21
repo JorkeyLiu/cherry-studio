@@ -396,6 +396,25 @@ export function validateOptionalBranchId(value: unknown, path: string): void {
 }
 
 /**
+ * Validate a required route branch ID (topic-internal branch model).
+ *
+ * `null` addresses the main route and a non-empty string addresses that
+ * branch's effective route. An absent value is rejected: group mutation
+ * writers must state the route they address instead of relying on a default.
+ *
+ * @param value  The value to validate.
+ * @param path   Dot-separated path for error messages.
+ * @throws {ValidationError} If the value is absent or not a non-empty string.
+ */
+export function validateRequiredBranchId(value: unknown, path: string): void {
+  if (value === null) return
+  if (value === undefined) {
+    throw new ValidationError(path, 'Required: null for the main route, or a branch id')
+  }
+  validateNonEmptyString(value, path)
+}
+
+/**
  * Validate that a string is a canonical ISO 8601 / RFC 3339 timestamp.
  *
  * Accepted format: `YYYY-MM-DDTHH:mm:ss.sssZ` (UTC, Z suffix, millisecond

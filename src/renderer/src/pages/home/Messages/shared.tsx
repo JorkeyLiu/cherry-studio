@@ -55,9 +55,10 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   // The host takes the available wrapper height (flex:1 forces the full fill)
   // and owns the overflow. In normal flow that is exactly what keeps the scroll
   // geometry honest: the scrollport height is the visible height. Short content
-  // is bottom-aligned by the content wrapper's auto block-start margin instead
-  // of by a reversed direction, so the empty space belongs to the scrollport
-  // (above the flow) and never to the scrolled content.
+  // starts at the top of the port with the flow's ordinary margins (the content
+  // wrapper carries no auto block-start margin), so a new conversation's first
+  // content is not dropped to the bottom of an empty port, and the leftover
+  // space belongs to the scrollport (below the flow) rather than being scrolled.
   flex: 1 1 auto;
   min-height: 0;
   // Local layer contract: this scroll host stays position:relative WITHOUT

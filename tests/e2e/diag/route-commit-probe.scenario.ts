@@ -41,7 +41,7 @@ const FN_SEED_SRC = `function () {
     }
     const spanMembers = []
     for (let i = 2; i <= 40; i++) { const p = String(i).padStart(2, '0'); spanMembers.push(topicId + '-u' + p, topicId + '-a' + p) }
-    await api.upsertSegment({ segmentId: topicId + '-seg-span', topicId, name: 'diag span', messageIds: spanMembers })
+    await api.upsertSegment({ segmentId: topicId + '-seg-span', topicId, name: 'diag span', messageIds: spanMembers, branchId: null })
     await api.upsertSegment({ segmentId: topicId + '-seg-child', topicId, branchId: childId, name: 'diag childonly', messageIds: [topicId + '-uc0', topicId + '-ac0', topicId + '-uc1'] })
     return { ok: true, topicId, childId }
   })()

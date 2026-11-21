@@ -148,25 +148,24 @@ describe('useTopicSegments authority catalog', () => {
     } as any)
 
     let capturedId = ''
-    ;(dbService.upsertSegment as any).mockImplementation(
-      (id: string, topicId: string, name: string, messageIds: string[], color: string) =>
-        Promise.resolve({
-          id,
-          topicId,
-          name,
-          messageIds: [...messageIds],
-          color,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-          sortOrder: 0,
-          firstMessageId: messageIds[0] ?? null,
-          lastMessageId: messageIds[messageIds.length - 1] ?? null,
-          messageCount: messageIds.length
-        })
+    ;(dbService.upsertSegment as any).mockImplementation(({ segmentId, topicId, name, messageIds, color }: any) =>
+      Promise.resolve({
+        id: segmentId,
+        topicId,
+        name,
+        messageIds: [...messageIds],
+        color,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: messageIds[0] ?? null,
+        lastMessageId: messageIds[messageIds.length - 1] ?? null,
+        messageCount: messageIds.length
+      })
     )
     ;(dbService.listSegments as any).mockImplementation((topicId: string) => {
       const upsertCall = (dbService.upsertSegment as any).mock.calls[0]
-      capturedId = upsertCall[0]
+      capturedId = upsertCall[0].segmentId
       return Promise.resolve([
         {
           id: capturedId,
@@ -239,7 +238,9 @@ describe('useTopicSegments authority catalog', () => {
       lastMessageId: 'm-new',
       messageCount: 1
     }
-    ;(dbService.upsertSegment as any).mockImplementation((id: string) => Promise.resolve({ ...newWire, id }))
+    ;(dbService.upsertSegment as any).mockImplementation(({ segmentId }: any) =>
+      Promise.resolve({ ...newWire, id: segmentId })
+    )
     ;(dbService.listSegments as any).mockRejectedValue(new Error('list failed'))
 
     const wrapper = ({ children }: { children: React.ReactNode }) => createElement(Provider, { store, children } as any)

@@ -1,5 +1,11 @@
 import { loggerService } from '@logger'
-import { copyMessages, cutMessages, deleteSelectedMessages, pasteMessages } from '@renderer/services/ClipboardService'
+import {
+  copyMessages,
+  cutMessages,
+  deleteSelectedMessages,
+  deleteTreeSelectedMessages,
+  pasteMessages
+} from '@renderer/services/ClipboardService'
 import { executeRedo, executeUndo } from '@renderer/services/UndoService'
 
 const logger = loggerService.withContext('useEditMode')
@@ -57,6 +63,10 @@ export function useCreateEditMode(
   const focusedIndex = useAppSelector((state) => state.editMode.focusedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
+  // Explicit clipboard content kinds (stable scalars for the memo deps).
+  const treeClipboard = clipboard.tree ?? null
+  const hasTreeClipboard = treeClipboard !== null
+  const hasClipboardContent = clipboard.items.length > 0 || hasTreeClipboard
   // Bounded loaded projection: resident topic only. The `?? []` fallback is
   // memoized so the edit-group memo keeps a stable identity while non-resident
   // (`undefined` stays at the API boundary).
@@ -463,13 +473,72 @@ export function useCreateEditMode(
     })()
   }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
 
+  // 复制（连带子分支）— opt-in tree closure. Same selection and same authority
+  // read discipline as the ordinary copy; only the capture kind differs, which
+  // paste honors explicitly.
+  const handleCopyWithChildren = useCallback(() => {
+    if (isProcessing) return
+    if (!isEnabled || selectedGroupIds.length === 0) return
+    dispatch(startProcessing())
+    void (async () => {
+      try {
+        const count = await copyMessages(dispatch, topicId, selectedGroupIds, activeBranchId, {
+          includeChildBranches: true
+        })
+        if (count > 0) {
+          window.toast.success(i18n.t('chat.edit.copied', { count }))
+        }
+      } catch (error) {
+        logger.error('[handleCopyWithChildren] Unexpected tree copy failure', error as Error)
+      } finally {
+        dispatch(finishProcessing())
+      }
+    })()
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
+
+  // 剪切（连带子分支）— same cut permissions as the ordinary cut; the whole
+  // closure is Main-evaluated, and a selection Main reports as inherited
+  // (copy-only) stays uncuttable.
+  const handleCutWithChildren = useCallback(() => {
+    if (isProcessing) return
+    if (!isEnabled || selectedGroupIds.length === 0) return
+    try {
+      requireEditSelectionMutable(store.getState(), topicId, selectedGroupIds)
+    } catch (error) {
+      logger.warn('[handleCutWithChildren] Selection is immutable through this route; cut refused', error as Error)
+      return
+    }
+    dispatch(startProcessing())
+    void (async () => {
+      try {
+        const count = await cutMessages(dispatch, store.getState, topicId, selectedGroupIds, activeBranchId, {
+          includeChildBranches: true
+        })
+        if (count > 0) {
+          window.toast.success(i18n.t('chat.edit.cut', { count }))
+        } else {
+          // Nothing was captured: the closure is copy-only, or the authority
+          // read failed. Report it instead of a silent no-op.
+          window.toast.error(i18n.t('chat.edit.treeCutUnavailable'))
+        }
+      } catch (error) {
+        logger.error('[handleCutWithChildren] Unexpected tree cut failure', error as Error)
+        window.toast.error(i18n.t('chat.edit.treeCutUnavailable'))
+      } finally {
+        dispatch(finishProcessing())
+      }
+    })()
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
+
   // 粘贴
   const handlePaste = useCallback(async () => {
     if (isProcessing) return
     if (!isEnabled) return
     dispatch(startProcessing())
     try {
-      if (clipboard.items.length === 0) {
+      // A tree capture carries no ordinary items but is a complete clipboard
+      // payload; the emptiness gate must honor the explicit content kind.
+      if (!hasClipboardContent) {
         window.toast.info(i18n.t('chat.edit.clipboardEmpty'))
         return
       }
@@ -496,7 +565,7 @@ export function useCreateEditMode(
     } finally {
       dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, isProcessing, topicId, clipboard, selectedGroupIds, groups])
+  }, [dispatch, isEnabled, isProcessing, topicId, hasClipboardContent, selectedGroupIds, groups])
 
   // 删除
   const handleDelete = useCallback(async () => {
@@ -521,6 +590,48 @@ export function useCreateEditMode(
       dispatch(finishProcessing())
     }
   }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
+
+  // 删除（连带子分支）— same delete permissions as the ordinary delete; the
+  // whole closure is Main-evaluated in ONE delete transaction (no clipboard
+  // write, no paste), and a Main refusal surfaces as an error toast.
+  const handleDeleteWithChildren = useCallback(() => {
+    if (isProcessing) return
+    if (!isEnabled || selectedGroupIds.length === 0) return
+    try {
+      requireEditSelectionMutable(store.getState(), topicId, selectedGroupIds)
+    } catch (error) {
+      logger.warn(
+        '[handleDeleteWithChildren] Selection is immutable through this route; delete refused',
+        error as Error
+      )
+      return
+    }
+    dispatch(startProcessing())
+    void (async () => {
+      try {
+        const count = await deleteTreeSelectedMessages(
+          dispatch,
+          store.getState,
+          topicId,
+          selectedGroupIds,
+          activeBranchId
+        )
+        if (count > 0) {
+          window.toast.success(i18n.t('chat.edit.deleted', { count }))
+          dispatch(clearSelection())
+        } else {
+          // Nothing was deleted: the closure is copy-only, the route moved, or
+          // the authority read failed. Report it instead of a silent no-op.
+          window.toast.error(i18n.t('chat.edit.treeDeleteUnavailable'))
+        }
+      } catch (error) {
+        logger.error('[handleDeleteWithChildren] Unexpected tree delete failure', error as Error)
+        window.toast.error(i18n.t('chat.edit.treeDeleteUnavailable'))
+      } finally {
+        dispatch(finishProcessing())
+      }
+    })()
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
 
   // 撤销
   const handleUndo = useCallback(async () => {
@@ -675,7 +786,9 @@ export function useCreateEditMode(
       selectedGroupIds,
       selectedGroups,
       groups,
-      hasClipboard: clipboard.items.length > 0,
+      // Either content kind is a usable clipboard: ordinary groups or one
+      // opt-in tree capture.
+      hasClipboard: hasClipboardContent,
       canUndo: undoStack.undoStack.length > 0,
       canRedo: undoStack.redoStack.length > 0,
       // In-flight history replay: undo/redo controls stay disabled until the
@@ -691,8 +804,11 @@ export function useCreateEditMode(
       handleBlockSelect,
       handleCopy,
       handleCut,
+      handleCopyWithChildren,
+      handleCutWithChildren,
       handlePaste,
       handleDelete,
+      handleDeleteWithChildren,
       handleMoveFocus,
       handleExtendSelection,
       handleClearSelection,
@@ -705,7 +821,7 @@ export function useCreateEditMode(
       selectedGroupIds,
       selectedGroups,
       groups,
-      clipboard.items.length,
+      hasClipboardContent,
       undoStack.undoStack.length,
       undoStack.redoStack.length,
       isProcessing,
@@ -715,8 +831,11 @@ export function useCreateEditMode(
       handleBlockSelect,
       handleCopy,
       handleCut,
+      handleCopyWithChildren,
+      handleCutWithChildren,
       handlePaste,
       handleDelete,
+      handleDeleteWithChildren,
       handleMoveFocus,
       handleExtendSelection,
       handleClearSelection,

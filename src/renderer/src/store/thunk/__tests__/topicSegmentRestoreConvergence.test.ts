@@ -124,7 +124,9 @@ describe('segment restore batch convergence', () => {
       messageCount: 1
     }
     const getState = () => ({ topicSegments: { segments: { entities: {} }, segmentsByTopic: {} } }) as any
-    mockUpsert.mockImplementation((id: string, topicId: string) => Promise.resolve(wire(id, topicId, 0, [`m-${id}`])))
+    mockUpsert.mockImplementation(({ segmentId, topicId }: any) =>
+      Promise.resolve(wire(segmentId, topicId, 0, [`m-${segmentId}`]))
+    )
     mockList.mockImplementation((topicId: string) => Promise.resolve([wire(`seg-${topicId}`, topicId, 0, ['m-x'])]))
 
     const dispatch = vi.fn()
@@ -197,7 +199,9 @@ describe('segment restore batch convergence', () => {
       lastMessageId: 'm-b',
       messageCount: 1
     }
-    mockUpsert.mockImplementation((id: string, topicId: string) => Promise.resolve(wire(id, topicId, 0, ['m-x'])))
+    mockUpsert.mockImplementation(({ segmentId, topicId }: any) =>
+      Promise.resolve(wire(segmentId, topicId, 0, ['m-x']))
+    )
     mockList.mockResolvedValue([wire('seg-a', 't1', 0, ['m-a']), wire('seg-b', 't1', 1, ['m-b'])])
 
     const dispatch = vi.fn()
@@ -251,11 +255,15 @@ describe('segment restore batch convergence', () => {
     await restoreSegmentsAfterUndo(dispatch, getState, [snapA, snapB] as any, 'branch-staged')
 
     expect(mockReplace).toHaveBeenCalledTimes(1)
-    expect(mockReplace).toHaveBeenCalledWith('seg-a', ['m-a'], 'branch-staged')
+    expect(mockReplace).toHaveBeenCalledWith({
+      segmentId: 'seg-a',
+      messageIds: ['m-a'],
+      branchId: 'branch-staged'
+    })
     expect(mockUpsert).toHaveBeenCalledTimes(1)
-    expect(mockUpsert.mock.calls[0][5]).toBe('branch-staged')
+    expect(mockUpsert.mock.calls[0][0].branchId).toBe('branch-staged')
     for (const call of [...mockReplace.mock.calls, ...mockUpsert.mock.calls]) {
-      expect(call[call.length - 1]).not.toBe('branch-live')
+      expect(call[0].branchId).not.toBe('branch-live')
     }
   })
 
@@ -284,7 +292,11 @@ describe('segment restore batch convergence', () => {
     const dispatch = vi.fn()
     await restoreSegmentsAfterUndo(dispatch, getState, [snapA] as any, null)
 
-    expect(mockReplace).toHaveBeenCalledExactlyOnceWith('seg-a', ['m-a'], null)
+    expect(mockReplace).toHaveBeenCalledExactlyOnceWith({
+      segmentId: 'seg-a',
+      messageIds: ['m-a'],
+      branchId: null
+    })
   })
 
   it('restoreSegmentsAfterUndo without a pinned route retains the live-route behavior', async () => {
@@ -312,7 +324,11 @@ describe('segment restore batch convergence', () => {
     const dispatch = vi.fn()
     await restoreSegmentsAfterUndo(dispatch, getState, [snapA] as any)
 
-    expect(mockReplace).toHaveBeenCalledExactlyOnceWith('seg-a', ['m-a'], 'branch-live')
+    expect(mockReplace).toHaveBeenCalledExactlyOnceWith({
+      segmentId: 'seg-a',
+      messageIds: ['m-a'],
+      branchId: 'branch-live'
+    })
   })
 
   it('restoreTargetSegments pins the staged target route; explicit null pins main; omitted keeps live resolution', async () => {
@@ -337,13 +353,13 @@ describe('segment restore batch convergence', () => {
 
     mockUpsert.mockResolvedValue(wire('seg-t', 't1', 0, ['m-t']))
     await restoreTargetSegments(dispatch, [snap] as any, 'branch-tgt')
-    expect(mockUpsert.mock.calls[0][5]).toBe('branch-tgt')
+    expect(mockUpsert.mock.calls[0][0].branchId).toBe('branch-tgt')
 
     vi.clearAllMocks()
     mockUpsert.mockResolvedValue(wire('seg-t', 't1', 0, ['m-t']))
     mockList.mockResolvedValue([wire('seg-t', 't1', 0, ['m-t'])])
     await restoreTargetSegments(dispatch, [snap] as any, null)
-    expect(mockUpsert.mock.calls[0][5]).toBe(null)
+    expect(mockUpsert.mock.calls[0][0].branchId).toBe(null)
 
     // Omitted keeps the existing live-route resolution (store fallback here).
     vi.clearAllMocks()
@@ -352,7 +368,7 @@ describe('segment restore batch convergence', () => {
     await restoreTargetSegments(dispatch, [snap] as any)
     expect(mockUpsert).toHaveBeenCalledTimes(1)
     // Omitted resolves live (store fallback) — never the previously pinned route.
-    expect(mockUpsert.mock.calls[0][5]).not.toBe('branch-tgt')
+    expect(mockUpsert.mock.calls[0][0].branchId).not.toBe('branch-tgt')
   })
 
   it('restoring a snapshot recreates its persisted folded state (no silent context re-enable)', async () => {
@@ -372,19 +388,27 @@ describe('segment restore batch convergence', () => {
     }
     const getState = () => ({ topicSegments: { segments: { entities: {} }, segmentsByTopic: {} } }) as any
 
-    // Undo recreate path: the folded flag travels as the last upsert argument.
+    // Undo recreate path: the folded flag travels with the recreated snapshot.
     mockUpsert.mockResolvedValue(wire('seg-fold', 't1', 0, ['m-f']))
     mockList.mockResolvedValue([wire('seg-fold', 't1', 0, ['m-f'])])
     await restoreSegmentsAfterUndo(vi.fn(), getState, [foldedSnap] as any)
     expect(mockUpsert).toHaveBeenCalledTimes(1)
-    expect(mockUpsert.mock.calls[0].slice(0, 7)).toEqual(['seg-fold', 't1', 'F', ['m-f'], 'color-seg-fold', null, true])
+    expect(mockUpsert.mock.calls[0][0]).toEqual({
+      segmentId: 'seg-fold',
+      topicId: 't1',
+      name: 'F',
+      messageIds: ['m-f'],
+      color: 'color-seg-fold',
+      branchId: null,
+      folded: true
+    })
 
     // Redo/paste target recreate path: same snapshot semantics.
     vi.clearAllMocks()
     mockUpsert.mockResolvedValue(wire('seg-fold', 't1', 0, ['m-f']))
     mockList.mockResolvedValue([wire('seg-fold', 't1', 0, ['m-f'])])
     await restoreTargetSegments(vi.fn(), [foldedSnap] as any, 'branch-tgt', getState)
-    expect(mockUpsert.mock.calls[0][5]).toBe('branch-tgt')
-    expect(mockUpsert.mock.calls[0][6]).toBe(true)
+    expect(mockUpsert.mock.calls[0][0].branchId).toBe('branch-tgt')
+    expect(mockUpsert.mock.calls[0][0].folded).toBe(true)
   })
 })

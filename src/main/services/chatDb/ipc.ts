@@ -36,6 +36,7 @@ import type {
   CreateReferencedTopicRequest,
   DeleteBlocksRequest,
   DeleteBranchRequest,
+  DeleteClipboardTreeRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -46,6 +47,7 @@ import type {
   ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
+  FetchClipboardTreeRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -64,6 +66,7 @@ import type {
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
+  PasteClipboardTreeRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -72,6 +75,7 @@ import type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplayBranchOperationRequest,
+  ReplayClipboardTreeRequest,
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
@@ -491,6 +495,21 @@ export function registerChatDbIpc(): () => void {
     return agg.fetchClipboardGroups(req)
   })
 
+  // 1e2b. Tree-preserving clipboard (opt-in include child branches): bounded
+  // authority read, ONE atomic copy/cut paste, one atomic delete, and one snapshotted replay.
+  handleCommand(IpcChannel.ChatDb_FetchClipboardTree, (agg, req: FetchClipboardTreeRequest) => {
+    return agg.fetchClipboardTree(req)
+  })
+  handleCommand(IpcChannel.ChatDb_PasteClipboardTree, (agg, req: PasteClipboardTreeRequest) => {
+    return agg.pasteClipboardTree(req)
+  })
+  handleCommand(IpcChannel.ChatDb_ReplayClipboardTree, (agg, req: ReplayClipboardTreeRequest) => {
+    return agg.replayClipboardTree(req)
+  })
+  handleCommand(IpcChannel.ChatDb_DeleteClipboardTree, (agg, req: DeleteClipboardTreeRequest) => {
+    return agg.deleteClipboardTree(req)
+  })
+
   // 1f. fetch-topic-naming-context (bounded naming authority; never whole-topic)
   handleCommand(IpcChannel.ChatDb_FetchTopicNamingContext, (agg, req: FetchTopicNamingContextRequest) => {
     return agg.fetchTopicNamingContext(req)
@@ -618,22 +637,22 @@ export function registerChatDbIpc(): () => void {
 
   // 15. upsert-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpsertSegment, (agg, req: UpsertSegmentRequest) => {
-    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color, req.branchId, req.folded)
+    return agg.upsertSegment(req)
   })
 
   // 16. update-segment-metadata (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpdateSegmentMetadata, (agg, req: UpdateSegmentMetadataRequest) => {
-    return agg.updateSegmentMetadata(req.segmentId, req.name, req.color, req.folded, req.branchId)
+    return agg.updateSegmentMetadata(req)
   })
 
   // 17. delete-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_DeleteSegment, (agg, req: DeleteSegmentRequest) => {
-    return agg.deleteSegment(req.segmentId, req.branchId)
+    return agg.deleteSegment(req)
   })
 
   // 18. replace-segment-membership (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReplaceSegmentMembership, (agg, req: ReplaceSegmentMembershipRequest) => {
-    return agg.replaceSegmentMembership(req.segmentId, req.messageIds, req.branchId)
+    return agg.replaceSegmentMembership(req)
   })
 
   // 19. reorder-messages (Phase 5.1A)

@@ -94,6 +94,17 @@ export interface ChatDbError {
  */
 export type BranchRouteId = string | null | undefined
 
+/**
+ * Route context of an authoritative group mutation.
+ *
+ * Unlike reads, a group mutation must state the route it addresses: `null` is
+ * the topic main route, a non-empty string is that branch's effective route.
+ * Omission is never a route — it is a compile error for TypeScript callers and
+ * is rejected at the IPC contract boundary, so a writer can never silently
+ * fall back to the main route.
+ */
+export type RequiredBranchRouteId = string | null
+
 /** @see IpcChannel.ChatDb_FetchMessages */
 export interface FetchMessagesRequest {
   topicId: string
@@ -849,6 +860,417 @@ export interface FetchClipboardGroupsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tree-preserving clipboard DTOs (opt-in "include child branches")
+// ---------------------------------------------------------------------------
+//
+// The ordinary copy/cut path (`fetch-clipboard-groups` + paste) is unchanged.
+// The tree path is a separate, opt-in operation with three capabilities:
+//
+//   fetchClipboardTree   — bounded Main authority READ of one closure
+//   pasteClipboardTree   — ONE Main transaction: target insert (+ source delete
+//                          for `cut`), producing the replay snapshot
+//   replayClipboardTree  — ONE Main transaction undo/redo of that snapshot
+//
+// A closure is: the selected complete message groups of the source active
+// route (the roots) PLUS, for every direct child branch of that route whose
+// `anchorMessageId` is one of the selected root message IDs, that branch's
+// complete subtree and ONLY the rows those branches own. Shared prefixes and
+// sibling/ancestor branches never leak into the payload: a descendant branch
+// contributes its own rows, never a re-materialized ancestor prefix.
+
+/** One selected root turn/group of the source active route. */
+export interface ClipboardTreeRootGroup {
+  /** Stable group key (same values as UI `selectedGroupIds`). */
+  groupId: string
+  /** Complete ordered member message IDs of this group, in authority order. */
+  messageIds: string[]
+  /** Authority position of the group's first message (its `sort_order`). */
+  positionIndex: number
+}
+
+/**
+ * One included child branch (topology only — never a message owner rewrite).
+ *
+ * `parentSourceBranchId` is the source route for a direct child (null = main
+ * route) or another included branch for a deeper node; `depth` is 1 for a
+ * direct child of the source route.
+ */
+export interface ClipboardTreeBranchRow {
+  sourceBranchId: string
+  parentSourceBranchId: string | null
+  /** Branch anchor: a message of the captured closure (a selected root message). */
+  anchorMessageId: string
+  name: string | null
+  depth: number
+  overflow: JsonObject
+}
+
+/** One fully-contained topic segment captured with the closure. */
+export interface ClipboardTreeSegmentRow {
+  sourceSegmentId: string
+  name: string | null
+  sortOrder: number
+  headerMessageId: string | null
+  /** Complete membership; every member is part of the captured closure. */
+  memberIds: string[]
+  overflow: JsonObject
+}
+
+/**
+ * Immutable Main-produced authority snapshot of one clipboard closure.
+ *
+ * `messages` are canonical wires (each carrying its `blocks` id array) and
+ * `blocks` the canonical block wires — complete rows from SQLite, never a
+ * window-derived projection. `branches`/`segments` carry topology and segment
+ * membership only; no renderer-owned settings (context anchor etc.) are part
+ * of a payload.
+ */
+export interface ClipboardTreePayload {
+  source: {
+    topicId: string
+    /** Source route: null = main route. */
+    branchId: string | null
+  }
+  roots: ClipboardTreeRootGroup[]
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  branches: ClipboardTreeBranchRow[]
+  segments: ClipboardTreeSegmentRow[]
+}
+
+/** Typed clipboard-tree metadata — distinct from every other completeness. */
+export interface FetchClipboardTreeMeta {
+  completeness: 'clipboard-tree'
+  topicId: string
+  branchId: string | null
+  requestedCount: number
+  returnedCount: number
+  returnedMessageCount: number
+  returnedBranchCount: number
+  returnedSegmentCount: number
+  /**
+   * Captured root message IDs owned by the source route (deletable on cut).
+   * Inherited prefix roots are copy-only: `cut` fails closed for them.
+   */
+  ownedRootMessageIds: string[]
+  /** Captured root message IDs inherited through the source route (copy-only). */
+  inheritedRootMessageIds: string[]
+  firstMessageId: string | null
+  lastMessageId: string | null
+}
+
+/**
+ * Ordinary tree capture: stable clipboard group keys on one addressed route.
+ *
+ * @see IpcChannel.ChatDb_FetchClipboardTree
+ *
+ * `groupIds` are the same stable clipboard group keys as
+ * `FetchClipboardGroupsRequest`. Unlike the legacy group read, an
+ * unresolvable key fails closed (NOT_FOUND/validation error): a tree payload
+ * must never silently lose a selected branch or its content.
+ */
+export interface FetchClipboardTreeGroupsRequest {
+  topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
+  groupIds: string[]
+}
+
+/**
+ * Branch-owned tree capture: ONE branch's own rows as the root trunk plus every
+ * descendant branch's own rows.
+ *
+ * There is no inherited parent prefix and no group selection: `branchId` is the
+ * explicit branch whose own rows are copied (it may be inactive), and its own
+ * branch node is never re-created on paste — only the descendant branch nodes
+ * are, with their names, parents and anchors preserved. `capture` is the
+ * discriminant, mutually exclusive with `groupIds`, so a request can never mix
+ * the two capture shapes.
+ *
+ * @see IpcChannel.ChatDb_FetchClipboardTree
+ */
+export interface FetchClipboardTreeBranchOwnedRequest {
+  topicId: string
+  /** Required explicit route: the branch whose OWN rows become the root trunk. */
+  branchId: string
+  capture: 'branch-owned'
+}
+
+/**
+ * Discriminated tree-clipboard request: `groupIds` (selection capture) or
+ * `capture: 'branch-owned'` (own-trunk capture), never both.
+ *
+ * @see IpcChannel.ChatDb_FetchClipboardTree
+ */
+export type FetchClipboardTreeRequest = FetchClipboardTreeGroupsRequest | FetchClipboardTreeBranchOwnedRequest
+
+/** @see IpcChannel.ChatDb_FetchClipboardTree */
+export interface FetchClipboardTreeResponse {
+  tree: ClipboardTreePayload
+  clipboard: FetchClipboardTreeMeta
+}
+
+/** Copy (independent fresh rows) or cut (paste plus source removal). */
+export type ClipboardTreeMode = 'copy' | 'cut'
+
+/** Explicit paste destination: topic + route (`null` = main route) + intent. */
+export interface ClipboardTreeTarget {
+  topicId: string
+  /** Required explicit route: null = main route, non-empty string = that branch. */
+  branchId: string | null
+  /** Stable insertion intent of the root run (same shapes as insert-message-groups). */
+  intent: InsertMessageGroupIntent
+}
+
+/** One captured source ID and the fresh ID generated for it. */
+export interface ClipboardTreeIdMapRow {
+  kind: 'message' | 'block' | 'branch' | 'segment'
+  sourceId: string
+  targetId: string
+}
+
+/** One generated target branch row (topology already remapped). */
+export type ClipboardTreeInsertedBranchRow = BranchHistoryRow
+
+/** One generated target segment row (membership/header already remapped). */
+export type ClipboardTreeInsertedSegmentRow = BranchHistorySegmentRow
+
+/**
+ * Exact rows this command inserted into the target topic, in insert order.
+ *
+ * `messages`/`blocks` are canonical wires with the generated IDs, so a redo
+ * re-inserts byte-identical rows (stable IDs) and an undo verifies exactly
+ * what it removes.
+ */
+export interface ClipboardTreeInsertedRows {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  branches: ClipboardTreeInsertedBranchRow[]
+  segments: ClipboardTreeInsertedSegmentRow[]
+}
+
+/**
+ * Exact source rows a `cut` removed from the source topic, in restore order.
+ *
+ * Reuses the branch-delete row shapes: `branches` are forest-root-first (a
+ * parent always precedes its children), `segments` carry their pre-delete
+ * membership/head, `segmentsAfter` the post-delete state the cut left behind
+ * (the undo guard), and `boundaries` the inheritance boundaries it advanced.
+ */
+export interface ClipboardTreeSourceRemoval {
+  topicId: string
+  /** Source route the removed roots were owned by (null = main route). */
+  branchId: string | null
+  branches: BranchHistoryRow[]
+  messages: BranchHistoryMessageRow[]
+  blocks: BranchHistoryBlockRow[]
+  fileReferences: BranchHistoryFileReferenceRow[]
+  segments: BranchHistorySegmentRow[]
+  segmentsAfter: BranchHistorySegmentStateRow[]
+  segmentOrder: string[]
+  /**
+   * Complete PRE-cut row order (ids only) of every affected owner: the source
+   * route plus each removed branch. A restore re-inserts the recorded rows at
+   * their former positions and re-checks that the surviving rows still hold
+   * that order, instead of appending restored rows at the tail.
+   */
+  ownerOrders: Array<{ branchId: string | null; orderedIds: string[] }>
+  boundaries: InheritanceBoundarySnapshot[]
+}
+
+/**
+ * Stable placement facts of the inserted root run.
+ *
+ * `ownerIndex` is the resolved index in the target route's OWN row order and
+ * `prevOwnerMessageId`/`nextOwnerMessageId` the neighbours the insert landed
+ * between (null = owner head/tail). A replay re-inserts only while those
+ * neighbours still hold, so a later unrelated edit is never overwritten.
+ */
+export interface ClipboardTreePlacement {
+  topicId: string
+  branchId: string | null
+  intent: InsertMessageGroupIntent
+  ownerIndex: number
+  prevOwnerMessageId: string | null
+  nextOwnerMessageId: string | null
+}
+
+/**
+ * Mode of one recorded tree operation: a copy, a cut, or a delete.
+ *
+ * `delete` is a tree delete with no insert: it replays through the same cut
+ * machinery with an empty insert (undo restores the removed source rows, redo
+ * re-applies the removal). It never appears as a clipboard publication or a
+ * paste request — copy/cut stay the only clipboard modes.
+ */
+export type ClipboardTreeSnapshotMode = ClipboardTreeMode | 'delete'
+
+/**
+ * Main-produced replay snapshot of one tree copy/cut/delete.
+ *
+ * Bounded by construction: only the rows this operation inserted, the exact
+ * source rows a cut/delete removed, and the affected route placement facts —
+ * never a whole-topic image and never N independent branch operations.
+ */
+export interface ClipboardTreeSnapshot {
+  kind: 'clipboard-tree'
+  mode: ClipboardTreeSnapshotMode
+  idMap: ClipboardTreeIdMapRow[]
+  placement: ClipboardTreePlacement
+  inserted: ClipboardTreeInsertedRows
+  sourceRemoved: ClipboardTreeSourceRemoval | null
+}
+/**
+ * One contiguous run of rows this command placed into ONE route's own row
+ * order, with the stable neighbours it landed between (`null` = that owner's
+ * head/tail).
+ *
+ * A row is always placed relative to stable IDs, never to a numeric index, so a
+ * consumer holding a WINDOW of that route can place the run exactly when a
+ * neighbour is inside its window and place nothing (never guess) when it is not.
+ */
+export interface ClipboardTreeProjectionRun {
+  messageIds: string[]
+  beforeMessageId: string | null
+  nextMessageId: string | null
+}
+
+/**
+ * One route's share of ONE committed tree clipboard command, produced by Main
+ * from the same transaction that committed the rows.
+ *
+ * It is the projection delta of that route only — never a whole-route image:
+ * the exact rows the command removed from that route's own order, the exact
+ * runs it placed there (in route order), the rows that are mutable THROUGH that
+ * route (owned by it, never inherited), and the canonical wires of the rows the
+ * runs install. A consumer merges it into whatever window of that route it
+ * already holds: removed rows leave, runs are spliced at their stable
+ * neighbours, untouched rows stay, and no authority read is needed to keep the
+ * remaining (possibly older) pages valid.
+ *
+ * Rows of another owner are never part of a route's delta even when they are
+ * visible through an inheritance chain — a consumer that displays a descendant
+ * route intersects `removedMessageIds` (those rows really are gone) and places
+ * runs whose owner is on its own inheritance path, while mutability stays bound
+ * to the owning route (`mutableMessageIds` is only meaningful for a consumer
+ * whose displayed route IS `branchId`).
+ */
+export interface ClipboardTreeRouteProjection {
+  topicId: string
+  /** Owner route of this delta: null = main route, otherwise that branch. */
+  branchId: string | null
+  /** Rows of this route's own order that the command removed. */
+  removedMessageIds: string[]
+  /** Runs the command placed into this route's own order, in route order. */
+  insertedRuns: ClipboardTreeProjectionRun[]
+  /** Rows mutable through this route (owned by it) among the installed runs. */
+  mutableMessageIds: string[]
+  /** Canonical wires (with their `blocks` id arrays) of every installed run row. */
+  messages: JsonObject[]
+  /** Canonical block wires of every installed run row. */
+  blocks: JsonObject[]
+}
+
+/**
+ * @see IpcChannel.ChatDb_PasteClipboardTree
+ *
+ * `target.branchId` is explicitly required (null = main route) — a tree paste
+ * never guesses its destination route. `mode: 'cut'` deletes the captured
+ * source roots plus the included branch subtrees in the SAME Main transaction,
+ * so a failed target insert leaves the source untouched.
+ */
+export interface PasteClipboardTreeRequest {
+  mode: ClipboardTreeMode
+  payload: ClipboardTreePayload
+  target: ClipboardTreeTarget
+}
+
+/** @see IpcChannel.ChatDb_PasteClipboardTree */
+export interface PasteClipboardTreeResponse extends FileCleanupResult {
+  mode: ClipboardTreeMode
+  targetTopicId: string
+  targetBranchId: string | null
+  sourceTopicId: string | null
+  sourceBranchId: string | null
+  insertedMessageIds: string[]
+  insertedRootMessageIds: string[]
+  insertedBranchIds: string[]
+  insertedSegmentIds: string[]
+  beforeMessageId: string | null
+  nextMessageId: string | null
+  deletedSourceMessageIds: string[]
+  deletedSourceBranchIds: string[]
+  idMap: ClipboardTreeIdMapRow[]
+  /**
+   * Route-scoped projection deltas of the SAME transaction: the target route's
+   * placed runs (and, for a cut, every route that lost rows). A consumer merges
+   * them into the windows it already holds instead of re-reading the route.
+   */
+  projections: ClipboardTreeRouteProjection[]
+  snapshot: ClipboardTreeSnapshot
+}
+
+/**
+ * @see IpcChannel.ChatDb_ReplayClipboardTree
+ *
+ * One tree copy/cut/delete is ONE undo entry covering both the target insert
+ * (empty for delete) and (for cut/delete) the source removal. `undo` removes
+ * the inserted rows and restores the source rows; `redo` re-inserts the same
+ * generated IDs and removes the source rows again. Both directions compare the
+ * current affected state with the snapshot first and fail closed with zero
+ * writes on any conflict.
+ */
+export interface ReplayClipboardTreeRequest {
+  direction: 'undo' | 'redo'
+  snapshot: ClipboardTreeSnapshot
+}
+
+/** @see IpcChannel.ChatDb_ReplayClipboardTree */
+export interface ReplayClipboardTreeResponse extends FileCleanupResult {
+  direction: 'undo' | 'redo'
+  mode: ClipboardTreeSnapshotMode
+  targetTopicId: string
+  sourceTopicId: string | null
+  removedMessageIds: string[]
+  removedBranchIds: string[]
+  restoredMessageIds: string[]
+  restoredBranchIds: string[]
+  /** Route-scoped projection deltas of the SAME transaction (see the paste response). */
+  projections: ClipboardTreeRouteProjection[]
+}
+
+/**
+ * @see IpcChannel.ChatDb_DeleteClipboardTree
+ *
+ * Delete the selected owned messages of ONE explicit route together with the
+ * branch subtrees anchored on them — the same source scope a tree cut would
+ * remove, but without any target insert, clipboard write, or paste. `branchId`
+ * is explicitly required (null = main route) so Main never guesses the route.
+ * `groupIds` are the selected message IDs of that route.
+ */
+export interface DeleteClipboardTreeRequest {
+  topicId: string
+  branchId: string | null
+  groupIds: string[]
+}
+
+/** @see IpcChannel.ChatDb_DeleteClipboardTree */
+export interface DeleteClipboardTreeResponse extends FileCleanupResult {
+  topicId: string
+  branchId: string | null
+  deletedMessageIds: string[]
+  deletedBranchIds: string[]
+  /**
+   * Replay snapshot of the delete (`mode: 'delete'`, empty insert): undo
+   * restores the removed rows, redo removes them again through the same
+   * cut machinery.
+   */
+  snapshot: ClipboardTreeSnapshot
+  /** Route-scoped projection deltas of the SAME transaction (see the paste response). */
+  projections: ClipboardTreeRouteProjection[]
+}
+
+// ---------------------------------------------------------------------------
 // Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
 // ---------------------------------------------------------------------------
 
@@ -1320,8 +1742,8 @@ export type ListSegmentsResponse = SegmentWire[]
 export interface UpsertSegmentRequest {
   segmentId: string
   topicId: string
-  /** Route validation context: absent/null = main route; membership must resolve inside this route. */
-  branchId?: BranchRouteId
+  /** Addressed route: required, null = main route, non-empty branch id otherwise. */
+  branchId: RequiredBranchRouteId
   name?: string | null
   /** Ordered message IDs for this segment. */
   messageIds: string[]
@@ -1342,11 +1764,11 @@ export type UpsertSegmentResponse = SegmentWire
 export interface UpdateSegmentMetadataRequest {
   segmentId: string
   /**
-   * Route owner of the mutation (absent/null = main route). Authoritative for
-   * `folded` changes: folding changes request context, so Main verifies every
-   * segment member belongs to this route and is mutable.
+   * Addressed route of the mutation: required, null = main route. Main verifies
+   * the group head's owner equals this route inside the same transaction; the
+   * route is never inferred from the head's owner.
    */
-  branchId?: BranchRouteId
+  branchId: RequiredBranchRouteId
   /** Partial metadata patch. Absent keys unchanged, null clears field. */
   name?: string | null
   color?: string | null
@@ -1361,17 +1783,17 @@ export type UpdateSegmentMetadataResponse = SegmentWire
 export interface DeleteSegmentRequest {
   segmentId: string
   /**
-   * Requester route (absent/null = main route). Main verifies it equals the
+   * Addressed route: required, null = main route. Main verifies it equals the
    * group head's owner: a non-owner route may read and navigate the group but
    * never delete it.
    */
-  branchId?: BranchRouteId
+  branchId: RequiredBranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_ReplaceSegmentMembership */
 export interface ReplaceSegmentMembershipRequest {
-  /** Route validation context: absent/null = main route; membership must resolve inside this route. */
-  branchId?: BranchRouteId
+  /** Addressed route: required, null = main route, non-empty branch id otherwise. */
+  branchId: RequiredBranchRouteId
   segmentId: string
   /** Complete ordered message ID list. Empty deletes the segment per repo semantics. */
   messageIds: string[]
@@ -2864,6 +3286,25 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:fetch-clipboard-groups': {
     request: FetchClipboardGroupsRequest
     response: FetchClipboardGroupsResponse
+  }
+  // Tree-preserving clipboard (opt-in include child branches): one Main
+  // authority read, one atomic paste (copy|cut), one snapshotted replay.
+  'chatdb:fetch-clipboard-tree': {
+    request: FetchClipboardTreeRequest
+    response: FetchClipboardTreeResponse
+  }
+  'chatdb:paste-clipboard-tree': {
+    request: PasteClipboardTreeRequest
+    response: PasteClipboardTreeResponse
+  }
+  'chatdb:replay-clipboard-tree': {
+    request: ReplayClipboardTreeRequest
+    response: ReplayClipboardTreeResponse
+  }
+  // Tree delete (same source scope as a tree cut, no insert/clipboard/paste).
+  'chatdb:delete-clipboard-tree': {
+    request: DeleteClipboardTreeRequest
+    response: DeleteClipboardTreeResponse
   }
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   'chatdb:fetch-topic-naming-context': {
