@@ -288,6 +288,29 @@ describe('FoldedSection', () => {
       expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
     })
 
+    it('paints no aggregate outline on the expanded block when fully selected', () => {
+      const { unmount } = renderSection({ isExpanded: true, turnCount: 2, isSelected: true, selectedTurnCount: 2 })
+      const expanded = screen.getByTestId('folded-section-expanded')
+      expect(expanded).toHaveAttribute('data-folded-section-selected', 'false')
+      expect(expanded).toHaveAttribute('data-folded-section-partial', 'false')
+      expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
+      unmount()
+    })
+
+    it('paints no aggregate outline or hint on the expanded block when partially selected', () => {
+      const { unmount } = renderSection({
+        isExpanded: true,
+        turnCount: 3,
+        isPartiallySelected: true,
+        selectedTurnCount: 1
+      })
+      const expanded = screen.getByTestId('folded-section-expanded')
+      expect(expanded).toHaveAttribute('data-folded-section-selected', 'false')
+      expect(expanded).toHaveAttribute('data-folded-section-partial', 'false')
+      expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
+      unmount()
+    })
+
     it('expands on collapsed marker click in edit mode without selecting or writing', () => {
       const onToggleExpand = vi.fn()
       const onSectionSelect = vi.fn()

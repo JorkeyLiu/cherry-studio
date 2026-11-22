@@ -1,6 +1,7 @@
+import { bumpAndInvalidate, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import { MessageBlockType } from '@renderer/types/newMessage'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
@@ -685,6 +686,85 @@ describe('ConversationNavigation whole-route user list', () => {
       blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
     } as never)
     expect(await screen.findByTestId('conversation-nav-item-u2')).toBeTruthy()
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+  })
+
+  it('excludes folded user turns and restores them when they unfold', async () => {
+    resetAllClosureStateForTests()
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer'),
+      textBlock('b3', 'u3', 'Third question about deserts')
+    ]
+    const foldedU2 = { ...(userMsg('u2', ['b2']) as unknown as Record<string, unknown>), folded: true }
+    const foldedA2 = { ...(assistantMsg('a2', ['ba2']) as unknown as Record<string, unknown>), folded: true }
+    // Authority state the fake snapshot source reports: the middle turn is
+    // folded (flag on every member row) until the test unfolds it below.
+    let unfolded = false
+    mocks.loadWholeTopicSnapshot.mockImplementation(async () => {
+      const messages = unfolded
+        ? [userMsg('u1', ['b1']), userMsg('u2', ['b2']), assistantMsg('a2', ['ba2']), userMsg('u3', ['b3'])]
+        : [userMsg('u1', ['b1']), foldedU2, foldedA2, userMsg('u3', ['b3'])]
+      return {
+        messages: messages as never[],
+        blocks,
+        blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+      } as never
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    // The folded turn leaves the outline; the surviving rows stay in
+    // chronological order and the folded assistant never lists either.
+    expect(await screen.findByTestId('conversation-nav-item-u1')).toBeTruthy()
+    expect(await screen.findByTestId('conversation-nav-item-u3')).toBeTruthy()
+    expect(screen.queryByTestId('conversation-nav-item-u2')).toBeNull()
+    expect(screen.queryByTestId('conversation-nav-item-a2')).toBeNull()
+    expect(screen.getAllByTestId(/^conversation-nav-item-/).map((el) => el.getAttribute('data-testid'))).toEqual([
+      'conversation-nav-item-u1',
+      'conversation-nav-item-u3'
+    ])
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    // Unfold: the authority snapshot clears the flag and the turn-fold
+    // thunk's `bumpAndInvalidate` drives the same-route refetch — the topic
+    // timestamp never moves, so only the semantic token can observe it.
+    unfolded = true
+    await act(async () => {
+      bumpAndInvalidate('topic-1', null)
+    })
+    expect(await screen.findByTestId('conversation-nav-item-u2', {}, { timeout: 5000 })).toBeTruthy()
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+    expect(screen.getAllByTestId(/^conversation-nav-item-/).map((el) => el.getAttribute('data-testid'))).toEqual([
+      'conversation-nav-item-u1',
+      'conversation-nav-item-u2',
+      'conversation-nav-item-u3'
+    ])
+  })
+
+  it('ignores closure invalidations from other topics and other branches', async () => {
+    resetAllClosureStateForTests()
+    const blocks = [textBlock('b1', 'u1', 'First question about rivers')]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('u1', ['b1'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    // Neither a foreign topic bump nor a same-topic other-branch bump may
+    // move this route's token: no refetch follows (past the 250ms debounce).
+    await act(async () => {
+      bumpAndInvalidate('topic-2', null)
+    })
+    await act(async () => {
+      bumpAndInvalidate('topic-1', 'b1')
+    })
+    await new Promise((r) => setTimeout(r, 500))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
   })
 

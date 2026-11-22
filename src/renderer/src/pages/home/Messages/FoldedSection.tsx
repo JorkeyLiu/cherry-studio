@@ -1073,15 +1073,19 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
         data-expanded={visualExpanded ? 'true' : 'false'}
         data-fold-nested={isNested ? 'true' : 'false'}
         className="folded-section-shell"
-        data-folded-section-selected={isSelected ? 'true' : 'false'}
-        data-folded-section-partial={isPartiallySelected ? 'true' : 'false'}
+        // Expanded browse expresses selection per turn (see the carried
+        // SelectionBlock runs): the shell never paints an aggregate outline
+        // and never reports one, whether the block is fully or partially
+        // selected. Collapsed keeps the whole-section feedback.
+        data-folded-section-selected={isSelected && !visualExpanded ? 'true' : 'false'}
+        data-folded-section-partial={isPartiallySelected && !visualExpanded ? 'true' : 'false'}
         data-fold-region-active={railActive ? 'true' : 'false'}
         data-folded-group-ids={groupIds.join(' ') || undefined}
         data-folded-message-ids={messageIds.length > 0 ? messageIds.join(' ') : undefined}
         onContextMenu={handleShellContextMenu}
         onClickCapture={handleMenuDismissCapture}
-        $selected={isSelected}
-        $partial={isPartiallySelected}>
+        $selected={isSelected && !visualExpanded}
+        $partial={isPartiallySelected && !visualExpanded}>
         <FoldRailBox
           $nested={isNested}
           className="folded-section-railbox"
@@ -1152,7 +1156,11 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
                   ? t('chat.folded_preview_hint', { count: turnCount })
                   : t('chat.folded_turns_summary', { count: turnCount })}
               </span>
-              {partialHint ? <PartialHint data-testid="folded-section-partial-hint">{partialHint}</PartialHint> : null}
+              {/* Aggregate counts belong to the collapsed whole-section feedback
+                   only: expanded browse already shows each turn's own outline. */}
+              {!visualExpanded && partialHint ? (
+                <PartialHint data-testid="folded-section-partial-hint">{partialHint}</PartialHint>
+              ) : null}
             </FoldSummaryLabel>
           </FoldHeaderRow>
           {/* The turned-off bodies' hosts: group chrome and rail stay mounted,

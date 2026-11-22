@@ -1,11 +1,12 @@
 import { loggerService } from '@logger'
+import { getClosureSemanticToken, subscribeClosureInvalidations } from '@renderer/services/contextClosure'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { FC } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 
@@ -42,6 +43,11 @@ interface ConversationNavigationProps {
  * caller-local whole-topic snapshot (effective active-branch route order).
  * Pure entry for focused tests; production passes the loaded snapshot.
  *
+ * A folded user row (`Message.folded === true`, the Main-authoritative
+ * whole-turn flag present on every member row) drops its entry until it
+ * unfolds — collapsed turns leave the request context and the outline alike.
+ * The flag is read only; this module never writes fold state.
+ *
  * Display rules: a filtered nonempty body shows WITH its attachment kind
  * prefix (sequential labels in original block order, joined directly with
  * the body — no added space/dot/count); a no-body (or quote-only) message
@@ -59,6 +65,9 @@ export const buildConversationNavItems = (
   const items: ConversationNavItem[] = []
   for (const message of messages) {
     if (!message || message.role !== 'user') continue
+    // Folded turns leave the outline until unfolded: Main writes the
+    // whole-turn flag on every member row, so a folded user row drops here.
+    if (message.folded === true) continue
     const preview = summarizeUserMessage(message, blocksById, options)
     const hasAttachment = hasNavigableAttachment(message, blocksById)
     if (preview) {
@@ -136,6 +145,17 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // and the list derives empty — no post-effect flash of old IDs under the
   // new route. Same-route refetches keep the key, so the list stays coherent.
   const activeRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
+  // Fold/context-participation signal for the viewed route. `setTurnFolds`
+  // advances this route's semantic token through `bumpAndInvalidate` without
+  // touching `topic.updatedAt` or emitting MESSAGE_COMPLETE, so neither
+  // existing trigger observes a fold. The token is per-route (`routeGen` for
+  // this route plus the global epoch): unrelated topics/routes keep their
+  // token and bail out without refetch. Same pattern as
+  // `useClosureSemanticSignal`, read directly so this module stays a
+  // caller-local data controller.
+  const closureSignal = useSyncExternalStore(subscribeClosureInvalidations, () =>
+    getClosureSemanticToken(topicId, activeBranchId)
+  )
   const [messages, setMessages] = useState<Message[]>([])
   const [blocksById, setBlocksById] = useState<SnapshotBlockMap>(new Map())
   const [snapshotKey, setSnapshotKey] = useState<string>('')
@@ -152,6 +172,13 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // the first real timestamp that follows is a genuine update, not a baseline.
   const lastUpdatedAtRef = useRef<string | undefined>(undefined)
   const hasUpdatedAtBaselineRef = useRef(false)
+  // Semantic-token baseline for the loaded route, mirroring the updatedAt
+  // baseline above: the first observed token after a route load is whatever
+  // the snapshot already represents, so it becomes the baseline without a
+  // refetch; the first CHANGED token after that is a genuine fold/context
+  // mutation. Presence and value stay separate for the same reason.
+  const lastClosureSignalRef = useRef<string | undefined>(undefined)
+  const hasClosureBaselineRef = useRef(false)
   topicRef.current = topicId
   branchRef.current = activeBranchId
 
@@ -217,6 +244,8 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     const targetRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
     routeRef.current = targetRouteKey
     lastUpdatedAtRef.current = undefined
+    lastClosureSignalRef.current = undefined
+    hasClosureBaselineRef.current = false
     hasUpdatedAtBaselineRef.current = false
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
@@ -286,6 +315,28 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
       unsubscribe()
     }
   }, [topicId, scheduleDebouncedRefetch])
+
+  // 4) fold/context-participation mutation: the semantic token changes only
+  // when THIS route's generation (or the global epoch) advances — the same
+  // `bumpAndInvalidate` the turn-fold thunk already performs — so the same
+  // coalesced refetch re-reads the authoritative snapshot and the folded row
+  // leaves (or rejoins) the list without relying on unrelated activity.
+  // The baseline discipline mirrors (2): the route identity is a dependency
+  // on purpose so the switch commit re-captures the baseline from the newly
+  // loaded snapshot instead of refetching for the switch itself, and the
+  // shared debounce plus the fetch guards keep a stale bump from writing
+  // under a newer route.
+  useEffect(() => {
+    if (!topicId) return
+    if (!hasClosureBaselineRef.current) {
+      hasClosureBaselineRef.current = true
+      lastClosureSignalRef.current = closureSignal
+      return
+    }
+    if (closureSignal === lastClosureSignalRef.current) return
+    lastClosureSignalRef.current = closureSignal
+    scheduleDebouncedRefetch()
+  }, [topicId, activeBranchId, closureSignal, scheduleDebouncedRefetch])
 
   // Caller-local only: derived per snapshot, never a per-token full scan.
   // Route-boundary provenance: whenever the loaded snapshot key differs from

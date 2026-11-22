@@ -651,6 +651,18 @@ export function renderEditFlowNodes({
   const isRunFolded = (run: FlowBodyEntry[]): boolean => {
     return run.length > 0 && run.every((e) => e.isFolded === true)
   }
+  /**
+   * Turn-level selected state for one run, consistent with the folded shell's
+   * own counts. `entry.selected` is per mounted group and can diverge from the
+   * turn identity under segment splits; the shell counts whole turns via
+   * `selectedTurnAskIds`, so expanded browse resolves the same way (the model
+   * is untouched — this only reads the already-provided turn set).
+   */
+  const isTurnRunSelected = (run: FlowBodyEntry[]): boolean => {
+    const askId = run[0]?.turnAskId ?? ''
+    if (selectedTurnAskIds !== undefined) return askId !== '' && selectedTurnAskIds.has(askId)
+    return run[0]?.selected ?? false
+  }
 
   // Group-level chrome composition over the ordered flow, resolved ABOVE the
   // run/selection composition (so it never depends on selection chunking):
@@ -926,9 +938,45 @@ export function renderEditFlowNodes({
           isEditMode={isEditMode}
           isUnfoldAllowed={isUnfoldAllowed}
           onSectionSelect={(modifiers) => onSelectFoldSection?.(turnAskIds, modifiers)}>
-          {/* Every folded run keeps its host and its group chrome; only the
-              bodies leave the flow while the block is collapsed. */}
-          {foldedRuns.map((run) => renderTurnRun(run, run[0]?.selected ?? false, !isExpanded))}
+          {/* Collapsed: bodies leave the flow, so only the shell carries selection.
+               Expanded: every folded run keeps its host and chrome AND its ordinary
+               per-turn selection — contiguous selected runs share one SelectionBlock,
+               exactly as unfolded turns do, so each selected message reads the same
+               inside and outside the browse view. The shell itself carries no
+               aggregate outline in this state (see FoldedSection). */}
+          {isExpanded
+            ? (() => {
+                const body: ReactNode[] = []
+                let runIndex = 0
+                while (runIndex < foldedRuns.length) {
+                  const run = foldedRuns[runIndex]
+                  if (!isTurnRunSelected(run)) {
+                    body.push(renderTurnRun(run, false, false))
+                    runIndex += 1
+                    continue
+                  }
+                  const chunk: FlowBodyEntry[][] = []
+                  while (runIndex < foldedRuns.length && isTurnRunSelected(foldedRuns[runIndex])) {
+                    chunk.push(foldedRuns[runIndex])
+                    runIndex += 1
+                  }
+                  const head = chunk.flat()[0]
+                  const rangeKey = deriveSelectionRangeKey(chunk)
+                  const blockKind = head?.segmentIsLive ? 'live' : 'history'
+                  const blockLayerRunId = head?.layerRunId ?? ''
+                  body.push(
+                    <SelectionBlock
+                      key={deriveSelectionChunkKey(chunk)}
+                      data-layer-kind={blockKind}
+                      data-stable-segment-id={rangeKey}
+                      data-layer-run-id={blockLayerRunId}>
+                      {chunk.map((selectedRun) => renderTurnRun(selectedRun, true, false))}
+                    </SelectionBlock>
+                  )
+                }
+                return body
+              })()
+            : foldedRuns.map((run) => renderTurnRun(run, isTurnRunSelected(run), true))}
         </FoldedSection>
       )
       continue

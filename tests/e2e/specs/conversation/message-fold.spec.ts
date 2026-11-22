@@ -52,6 +52,7 @@
  *   [data-testid="topic-segment-group"][data-segment-id] / topic-segment-label /
  *   topic-segment-count / topic-segment-rail / topic-segment-drawer-trigger /
  *   topic-segment-drawer-row
+ *   [data-testid="conversation-navigation"] / conversation-nav-item-<messageId> (the ordinary resident outline)
  */
 import type { Page } from '@playwright/test'
 
@@ -739,7 +740,7 @@ function unfoldMenuItem(page: Page) {
  * wording.
  */
 function summaryPattern(turns: number): RegExp {
-  return new RegExp(`(?:已折叠\\s*${turns}\\s*轮对话|${turns}\\s*turns? folded)`)
+  return new RegExp(`(?:已折叠\\s*${turns}\\s*轮对话|${turns}\\s*conversations? folded)`)
 }
 
 /**
@@ -769,23 +770,175 @@ async function foldSeededTurns(page: Page, topicId: string, turns: readonly numb
  * Right-click the collapsed block and open its ONE owned menu.
  *
  * Targeted through the block's own summary surface (a locator), never through
- * raw viewport coordinates: the locator scrolls the block into view first, so
- * this stays a real secondary click ON the block even when a scroll (a sent
- * message, a pagination step) left it outside the scrollport.
+ * raw viewport coordinates. The block is first settled explicitly in the
+ * upper part of #messages: the menu anchors at the pointer and opens
+ * downward, so opening low on screen leaves it hanging behind the sticky
+ * composer (the item click then hit-tests the textarea) or forces a
+ * flip/reposition that never stabilizes and closes before the item click.
+ * With room below, the item click needs no scroll that would disturb the
+ * open menu. Still a real secondary click ON the block, no force.
  */
 async function openBlockMenu(page: Page): Promise<void> {
+  await collapsedBlock(page).scrollIntoViewIfNeeded()
+  await page.evaluate(() => {
+    const block = document.querySelector('[data-testid="folded-section-collapsed"]') as HTMLElement | null
+    const scroller = document.getElementById('messages') as HTMLElement | null
+    if (!block || !scroller) return
+    const b = block.getBoundingClientRect()
+    const s = scroller.getBoundingClientRect()
+    scroller.scrollTop += b.top + b.height / 2 - (s.top + s.height * 0.3)
+  })
+  await page.waitForFunction(
+    () => {
+      const block = document.querySelector('[data-testid="folded-section-collapsed"]') as HTMLElement | null
+      const scroller = document.getElementById('messages') as HTMLElement | null
+      if (!block || !scroller) return false
+      const b = block.getBoundingClientRect()
+      const s = scroller.getBoundingClientRect()
+      return b.top >= s.top && b.bottom <= s.bottom
+    },
+    null,
+    { timeout: 15000 }
+  )
   await collapsedBlock(page).locator('[data-testid="folded-section-expand-btn"]').click({ button: 'right' })
+}
+// ---------------------------------------------------------------------------
+// Left outline (ConversationNavigation) + selection-style readers
+// ---------------------------------------------------------------------------
+
+/** Enables the ordinary resident outline (the same store flag the navigation spec uses). */
+async function enableConversationNavigation(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    ;(window as any).store.dispatch({ type: 'settings/setMessageNavigation', payload: true })
+  })
+  const navEnabled = await page.evaluate(() => (window as any).store.getState().settings?.messageNavigation)
+  expect(navEnabled).toBe(true)
+  await expect(page.getByTestId('conversation-navigation')).toBeVisible({ timeout: 20000 })
+}
+
+/** Rendered outline order: stable-ID testids in DOM order (chronological). */
+async function navItemTestIds(page: Page): Promise<string[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-testid^="conversation-nav-item-"]')).map(
+      (el) => (el as HTMLElement).getAttribute('data-testid') || ''
+    )
+  )
+}
+
+/** Outline assertion with the route debounced refetch in mind (auto-retry, exact order). */
+async function expectNavItems(page: Page, expected: string[], timeout = 30000): Promise<void> {
+  await expect.poll(async () => await navItemTestIds(page), { timeout }).toEqual(expected)
+}
+
+const navItemId = (messageId: string): string => `conversation-nav-item-${messageId}`
+
+/** Newest user row of a topic (a real send appends exactly one turn). */
+async function latestUserId(page: Page, topicId: string): Promise<string | null> {
+  return page.evaluate((id: string) => {
+    const s = (window as any).store?.getState()
+    const ids = (s?.messages?.messageIdsByTopic?.[id] ?? []) as string[]
+    const entities = s?.messages?.entities ?? {}
+    for (let k = ids.length - 1; k >= 0; k--) {
+      if (entities[ids[k]]?.role === 'user') return ids[k] as string
+    }
+    return null
+  }, topicId)
+}
+
+/**
+ * Computed box-shadow of the fold shell in the given state. The claim under
+ * test is visual (ring vs no ring), so the evidence is the resolved style,
+ * never the data attribute or the styled-components class.
+ */
+async function foldShellBoxShadow(page: Page, expanded: boolean): Promise<string | null> {
+  return page.evaluate((isExpanded: boolean) => {
+    const shell = document.querySelector(
+      `[data-testid="${isExpanded ? 'folded-section-expanded' : 'folded-section-collapsed'}"]`
+    ) as HTMLElement | null
+    if (!shell) return null
+    return getComputedStyle(shell).boxShadow
+  }, expanded)
+}
+
+/**
+ * Nearest flow ancestor of a message row that paints any box-shadow (the
+ * ordinary per-turn SelectionBlock when the turn is selected, nothing when
+ * it is not). Walks real ancestors and reads resolved styles, so an
+ * unselected inner turn reports null instead of a class name.
+ */
+async function rowOutlineShadow(page: Page, messageId: string): Promise<string | null> {
+  return page.evaluate((mid: string) => {
+    const row = document.querySelector(`#messages [data-message-id="${mid}"]`) as HTMLElement | null
+    if (!row) return null
+    let el = row.parentElement
+    let depth = 0
+    while (el && el.id !== 'messages' && depth < 15) {
+      if (getComputedStyle(el).boxShadow !== 'none') return getComputedStyle(el).boxShadow
+      el = el.parentElement
+      depth += 1
+    }
+    return null
+  }, messageId)
+}
+
+/**
+ * Whole-block select on the collapsed cover through a genuine hit-tested
+ * pointer gesture (no force, no synthetic dispatch). The block is first
+ * centered explicitly in #messages so Playwright's own pre-click scroll is a
+ * no-op and never re-scrolls it under the top-centered floating edit toolbar;
+ * the click lands on the row's right-edge whitespace (past the summary label
+ * and its partial hint, both of which paint above the cover) so the resolved
+ * target is the cover itself. `toggle` holds the platform toggle modifier the
+ * handler reads (ctrlKey || metaKey).
+ */
+async function clickSelectCover(page: Page, toggle = false): Promise<void> {
+  const cover = collapsedBlock(page).locator('[data-testid="folded-section-select-cover"]')
+  await collapsedBlock(page).scrollIntoViewIfNeeded()
+  await page.evaluate(() => {
+    const block = document.querySelector('[data-testid="folded-section-collapsed"]') as HTMLElement | null
+    const scroller = document.getElementById('messages') as HTMLElement | null
+    if (!block || !scroller) return
+    const b = block.getBoundingClientRect()
+    const s = scroller.getBoundingClientRect()
+    scroller.scrollTop += b.top + b.height / 2 - (s.top + s.height * 0.6)
+  })
+  await page.waitForFunction(
+    () => {
+      const block = document.querySelector('[data-testid="folded-section-collapsed"]') as HTMLElement | null
+      const scroller = document.getElementById('messages') as HTMLElement | null
+      if (!block || !scroller) return false
+      const b = block.getBoundingClientRect()
+      const s = scroller.getBoundingClientRect()
+      return b.top >= s.top && b.bottom <= s.bottom
+    },
+    null,
+    { timeout: 15000 }
+  )
+  await expect(cover).toBeVisible({ timeout: 15000 })
+  const box = await cover.boundingBox()
+  if (!box) throw new Error('[E2E] select cover has no bounding box')
+  const position = { x: Math.max(0, Math.floor(box.width - 12)), y: Math.floor(box.height / 2) }
+  if (toggle) {
+    await page.keyboard.down(TOGGLE_MODIFIER)
+    try {
+      await cover.click({ position })
+    } finally {
+      await page.keyboard.up(TOGGLE_MODIFIER)
+    }
+  } else {
+    await cover.click({ position })
+  }
 }
 
 test.describe('Message-level fold — 折叠区块 presentation, participation and navigation', () => {
   test('folding selected turns through the edit menu leaves the real request, drops the counts, and unfolding restores participation in place', async ({
     mainWindow
   }) => {
-    test.setTimeout(420000)
+    test.setTimeout(480000)
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'INTEGRATED: real edit-mode whole-turn range selection (plain + Shift on the turn covers, stable user ids) → real edit menu fold item → ONE atomic turn-level fold command for both turns; the folded rows leave the mounted flow and the real product request (mock provider log), the rendered participating-turn count drops by exactly the folded turns, the collapsed block renders its neutral summary, and the block menu unfolds to restore participation at the original position.'
+        'INTEGRATED: real edit-mode whole-turn range selection (plain + Shift on the turn covers, stable user ids) to ONE atomic turn-level fold command; the folded rows leave the mounted flow and the real product request (mock provider log), the rendered participating-turn count drops by exactly the folded turns, the collapsed block renders its neutral summary; the left outline drops the folded turns (chronological order kept), keeps them out during browse expansion, and restores them in order on unfold; expanded edit-mode partial/full selection paints ordinary per-turn outlines with no aggregate outer ring or hint (resolved-style evidence), while collapsed keeps the whole-block selected/partial feedback; and the block menu unfolds to restore participation at the original position.'
     })
     const page = mainWindow
     await waitForAppReady(page)
@@ -798,6 +951,7 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
     // Baseline: every seeded turn participates (contextCount 10 > 5 turns).
     await expectTokenCount(page, TOTAL_TURNS, TOTAL_TURNS)
     await expect(collapsedBlock(page)).toHaveCount(0)
+    const seedUserIds = [1, 2, 3, 4, 5].map((turn) => turnIds(topicId, turn).user)
 
     const foldedTurnIds = await foldSeededTurns(page, topicId, FOLD_TURNS)
     const foldedRows = FOLD_TURNS.flatMap((turn) => [turnIds(topicId, turn).user, turnIds(topicId, turn).assistant])
@@ -807,9 +961,6 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
     // The fold is a presentation change only: one block states what it hides.
     const collapsedText = (await collapsedBlock(page).innerText()).replace(/\s+/g, ' ')
     expect(collapsedText, 'the block states how many turns it folds').toMatch(summaryPattern(FOLDED_TURNS))
-    expect(collapsedText, 'the block states that it is excluded from context').toMatch(
-      /Excluded from context|不计入上下文/
-    )
     const mountedAfterFold = await mountedMessageIds(page)
     for (const id of foldedRows) {
       expect(mountedAfterFold, `folded row ${id} must leave the flow`).not.toContain(id)
@@ -823,6 +974,13 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
 
     // Participating turns follow the authority definition (folded turns out).
     await expectTokenCount(page, TURNS_WHILE_FOLDED, TURNS_WHILE_FOLDED)
+    // The outline mounts only after the fold gestures: with the outline
+    // mounted, the fold's own cover click is not hit-testable (deterministic
+    // overlap in two runs), while the outline-off spec folds cleanly.
+    await enableConversationNavigation(page)
+    // Authority-folded turns leave the left outline; the rest keep chronological order.
+    const unfoldedUserIds = [1, 2, 5].map((turn) => turnIds(topicId, turn).user)
+    await expectNavItems(page, unfoldedUserIds.map(navItemId))
 
     // ── Real product request while folded ───────────────────────────────────
     const seqFolded = getRequestSequence()
@@ -845,6 +1003,102 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
       expect(foldedAssistantTexts, 'folded assistant body must not leak into the request').not.toContain(body)
     }
     await expectTokenCount(page, TURNS_AFTER_FOLDED_SEND, TURNS_AFTER_FOLDED_SEND)
+    const foldedSendUserId = await latestUserId(page, topicId)
+    expect(foldedSendUserId, 'the folded-state exchange appends one user turn').not.toBeNull()
+
+    // ── Browse the block + edit-mode per-turn selection (resolved-style evidence) ──
+    // Collapsed whole-block selection paints the ordinary full ring: the same
+    // ring the selected turn range uses. Read it as resolved style — it is the
+    // live reference for the inner outlines below.
+    await collapsedBlock(page).locator('[data-testid="folded-section-select-cover"]').click()
+    await expectSelection(page, foldedTurnIds)
+    await expect(collapsedBlock(page)).toHaveAttribute('data-folded-section-selected', 'true', { timeout: 15000 })
+    await expect(page.locator('[data-testid="folded-section-partial-hint"]')).toHaveCount(0)
+    const fullRing = await foldShellBoxShadow(page, false)
+    expect(fullRing, 'collapsed full selection paints the ordinary ring').not.toBeNull()
+    expect(fullRing).not.toBe('none')
+    // Back to no selection through the proven toggle gesture.
+    await page.keyboard.down(TOGGLE_MODIFIER)
+    try {
+      await collapsedBlock(page).locator('[data-testid="folded-section-select-cover"]').click()
+    } finally {
+      await page.keyboard.up(TOGGLE_MODIFIER)
+    }
+    await expectSelection(page, [])
+
+    // Browse (expand) is a normal-mode gesture: leave edit mode first, like the
+    // navigation-reveal case. Browsing is not unfolding.
+    await disableEditMode(page)
+    await collapsedBlock(page).locator('[data-testid="folded-section-expand-btn"]').click()
+    await expect(expandedBlock(page)).toBeVisible({ timeout: 30000 })
+    // Folded turns stay out of the outline while browsing, and participation
+    // is untouched by the browse.
+    await expectNavItems(page, [...unfoldedUserIds, foldedSendUserId as string].map(navItemId))
+    await expectTokenCount(page, TURNS_AFTER_FOLDED_SEND, TURNS_AFTER_FOLDED_SEND)
+
+    // Edit-mode inner selection: one inner turn cover (partial selection of the block).
+    await enableEditMode(page)
+    await clickGroup(page, turnIds(topicId, 3).user)
+    await expectSelection(page, [turnIds(topicId, 3).user])
+    // No aggregate outer ring and no partial hint on the expanded shell ...
+    expect(await foldShellBoxShadow(page, true), 'expanded shell carries no aggregate ring').toBe('none')
+    await expect(page.locator('[data-testid="folded-section-partial-hint"]')).toHaveCount(0)
+    // ... while the selected inner turn shows the ordinary per-turn outline
+    // (identical resolved ring to the collapsed whole-block reference) and the
+    // unselected inner turn paints nothing.
+    expect(await rowOutlineShadow(page, turnIds(topicId, 3).user)).toBe(fullRing)
+    expect(await rowOutlineShadow(page, turnIds(topicId, 3).assistant)).toBe(fullRing)
+    expect(await rowOutlineShadow(page, turnIds(topicId, 4).user)).toBeNull()
+    expect(await rowOutlineShadow(page, turnIds(topicId, 4).assistant)).toBeNull()
+
+    // Collapsing a partial selection keeps the partial whole-block feedback: a
+    // visibly weaker ring (never the full ring, never none) plus the stated
+    // selected/total count.
+    await expandedBlock(page).locator('[data-testid="folded-section-expand-label"]').click()
+    await expect(collapsedBlock(page)).toBeVisible({ timeout: 30000 })
+    await expectSelection(page, [turnIds(topicId, 3).user])
+    await expect(collapsedBlock(page)).toHaveAttribute('data-folded-section-partial', 'true', { timeout: 15000 })
+    const partialRing = await foldShellBoxShadow(page, false)
+    expect(partialRing, 'collapsed partial selection keeps a weaker ring').not.toBeNull()
+    expect(partialRing).not.toBe('none')
+    expect(partialRing, 'partial ring must not impersonate the full ring').not.toBe(fullRing)
+    const partialHint = page.locator('[data-testid="folded-section-partial-hint"]')
+    await expect(partialHint).toBeVisible({ timeout: 15000 })
+    await expect(partialHint).toHaveText(/1.*2/, { timeout: 15000 })
+
+    // Plain block click replaces the partial selection with the whole block;
+    // clearing from the full state reuses the proven toggle cover gesture.
+    await clickSelectCover(page)
+    await expectSelection(page, foldedTurnIds)
+    // Clearing clicks the same cover with the toggle modifier held.
+    await clickSelectCover(page, true)
+    await expectSelection(page, [])
+
+    // Full inner selection through a clean browse: expand in normal mode,
+    // re-enter edit mode, then plain + Shift on the inner covers.
+    await disableEditMode(page)
+    await collapsedBlock(page).locator('[data-testid="folded-section-expand-btn"]').click()
+    await expect(expandedBlock(page)).toBeVisible({ timeout: 30000 })
+    await enableEditMode(page)
+    await clickGroup(page, turnIds(topicId, 3).user)
+    await clickGroup(page, turnIds(topicId, 4).user, { shift: true })
+    await expectSelection(page, foldedTurnIds)
+    // Fully selected expanded block: ordinary per-turn outlines on every inner
+    // turn, still no aggregate outer ring and no hint.
+    expect(await foldShellBoxShadow(page, true), 'expanded full selection carries no aggregate ring').toBe('none')
+    await expect(page.locator('[data-testid="folded-section-partial-hint"]')).toHaveCount(0)
+    for (const row of foldedRows) {
+      expect(await rowOutlineShadow(page, row), `inner row ${row} shows the ordinary per-turn outline`).toBe(fullRing)
+    }
+
+    // Collapsing a full selection keeps the selection; clearing leaves the
+    // existing unfold preconditions (collapsed, no selection).
+    await expandedBlock(page).locator('[data-testid="folded-section-expand-label"]').click()
+    await expect(collapsedBlock(page)).toBeVisible({ timeout: 30000 })
+    await expectSelection(page, foldedTurnIds)
+    // Clearing clicks the same cover with the toggle modifier held.
+    await clickSelectCover(page, true)
+    await expectSelection(page, [])
 
     // ── Real unfold gesture on the block's own menu ────────────────────────
     await openBlockMenu(page)
@@ -864,6 +1118,9 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
       expect.arrayContaining(foldedRows)
     )
     await expectTokenCount(page, TURNS_AFTER_UNFOLD, TURNS_AFTER_UNFOLD)
+    // Unfolded turns rejoin the outline in chronological order, at their
+    // original positions ahead of the folded-state exchange.
+    await expectNavItems(page, [...seedUserIds, foldedSendUserId as string].map(navItemId))
 
     // ── Participation restored in the real request (original position) ─────
     const seqUnfolded = getRequestSequence()
@@ -939,8 +1196,11 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
     expect(blockText).toMatch(summaryPattern(1))
 
     // ── Block selection through the real edit-selection wiring ─────────────
+    // The collapsed selection surface is the row's own whitespace cover: the
+    // rail and the summary text keep the browse toggle in every state and
+    // mode and never select.
     const turnId = turnIds(topicId, 3).user
-    await collapsedBlock(page).locator('[data-testid="folded-section-expand-btn"]').click()
+    await clickSelectCover(page)
     await expectSelection(page, [turnId])
     await expect(collapsedBlock(page)).toHaveAttribute('data-folded-section-selected', 'true', { timeout: 15000 })
     // Selecting never expands: the block is still the collapsed browse object.
@@ -950,12 +1210,7 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
     // Toggle removes the block from the selection. The modifier is the one the
     // platform actually delivers (Command on macOS, where Control+click is the
     // OS secondary click and never reaches the click handler).
-    await page.keyboard.down(TOGGLE_MODIFIER)
-    try {
-      await collapsedBlock(page).locator('[data-testid="folded-section-expand-btn"]').click()
-    } finally {
-      await page.keyboard.up(TOGGLE_MODIFIER)
-    }
+    await clickSelectCover(page, true)
     await expectSelection(page, [])
     await expect(collapsedBlock(page)).toHaveAttribute('data-folded-section-selected', 'false', { timeout: 15000 })
 
@@ -1031,8 +1286,10 @@ test.describe('Message-level fold — 折叠区块 presentation, participation a
     await expect(target, 'the manually revealed folded row must be visible').toBeVisible({ timeout: 15000 })
     await expect(page.locator(`#message-${folded.user}`)).toBeInViewport({ timeout: 15000 })
 
-    // Browsing the block back to collapsed does not restore context.
-    await expandedBlock(page).locator('[data-testid="folded-section-collapse-btn"]').click()
+    // Browsing the block back to collapsed does not restore context. The
+    // browse toggle is the summary label in both states (the rail keeps the
+    // same toggle); there is no separate collapse button.
+    await expandedBlock(page).locator('[data-testid="folded-section-expand-label"]').click()
     // Browsing never restores participation: still 5 − 1.
     await expectTokenCount(page, turnsAfterFold(1), turnsAfterFold(1))
     console.log('[E2E][MessageFold] navigation reveal settled on the collapsed marker without expanding')
