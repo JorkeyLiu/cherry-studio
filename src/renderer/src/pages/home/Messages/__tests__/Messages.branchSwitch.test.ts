@@ -82,8 +82,8 @@ describe('true branch incremental switch (windowed)', () => {
 
   it('divider switch reads around the fork anchor (not history snapshot, not bottom)', () => {
     const slice = sliceDividerHandler(messagesSource)
-    // Production path delegates the fork-anchor around read (+latest fallback) to loadRouteMessagesThunk with deferPublish
-    expect(slice).toMatch(/loadRouteMessagesThunk/)
+    // Production path delegates the fork-anchor around read (+latest fallback) to the deferred-only receipt entry
+    expect(slice).toMatch(/dispatchDeferredRouteWindowRead/)
     expect(slice).toMatch(/deferPublish/)
     expect(slice).toMatch(/kind:\s*'around'/)
     expect(slice).toMatch(/anchorMessageId/)

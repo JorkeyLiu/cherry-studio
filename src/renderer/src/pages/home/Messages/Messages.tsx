@@ -127,9 +127,13 @@ import {
 import { type ResidentWindowCompleteness, selectTopicWindowCompleteness } from '@renderer/store/residentRegistry'
 import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import {
+  type DeferredRouteWindowReceipt,
+  dispatchDeferredRouteWindowRead,
   getPendingRouteRestorePublicationToken,
+  isDeferredRouteWindowReceiptCurrent,
   loadRouteMessagesThunk,
   resolveAdoptedResidentBaseline,
+  toDeferredJointPayload,
   updateMessageAndBlocksThunk
 } from '@renderer/store/thunk/messageThunk'
 import {
@@ -3838,15 +3842,22 @@ const Messages = ({
    * prepare entry run this SAME stage with the SAME publication shape.
    *
    * Bootstrap-PREPARE single flight (`viaRouteThunk: true`): only the
-   * injected around read changes — it is served by the standard
-   * `loadRouteMessagesThunk` (deferred: the thunk publishes nothing, this
-   * stage keeps its merge publication). The thunk's sync prefix registers
+   * injected around read changes — it is served by the unique deferred entry
+   * `dispatchDeferredRouteWindowRead` (the thunk publishes nothing, this
+   * stage keeps its merge publication). The wrapper's sync prefix registers
    * the execution in `pendingRouteRestoreByTopic` BEFORE its first await
    * (map handoff point), so a later same-topic same-route
    * `loadTopicMessagesThunk` adopts the same in-flight read under the
    * shared requestSeq instead of fetching a competing latest — and a
    * completed loadTopic leaves no entry so this fetches fresh. The FULL
    * path omits the flag and keeps the direct window read unchanged.
+   * Joint-resident adoption note: `loadTopicMessagesThunk` adopting the same
+   * pending raw promise is the joint resident-bootstrap authority (its own
+   * `publishResidentComplete` under the dispatch-source publication
+   * generation), not a receipt steal of this stage's merge publish. Both
+   * commits check the same generations; each publishes at most once under
+   * its own authority, sharing the in-flight read without a second fetch,
+   * deadlock, or duplicate publish.
    *
    * Terminal contract (never hangs): `ready` (resident or committed), stale
    * `cancelled`, authoritative missing `not-found` (single toast, same as the
@@ -3861,8 +3872,9 @@ const Messages = ({
       routeAtStart: string | null
       isStale: () => boolean
       // Bootstrap-PREPARE single-flight selector: when true the injected
-      // around read is served by the standard `loadRouteMessagesThunk`
-      // (deferred). The FULL path omits it and keeps the direct read.
+      // around read is served by the unique deferred entry
+      // `dispatchDeferredRouteWindowRead`. The FULL path omits it and keeps
+      // the direct read.
       viaRouteThunk?: boolean
       // Same-request adoption proof: invoked synchronously after the deferred
       // around dispatch (sync prefix already registered the token) and before
@@ -3872,40 +3884,45 @@ const Messages = ({
       onDeferredAroundDispatched?: (dispatchedPromise: unknown) => void
     }): Promise<'ready' | 'cancelled' | 'not-found' | 'error'> => {
       const { targetId, topicIdAtStart, routeAtStart, isStale } = args
+      // Deferred receipt for the PREPARE around read (merge publication only).
+      // The response flows through `ensureMessageLoaded` for its canonical
+      // union/rebase merge (loaded intersection + capability/hasMore
+      // semantics preserved); `toDeferredJointPayload` is NOT used here.
+      // The shared pure checker `isDeferredRouteWindowReceiptCurrent` guards
+      // the final merge commit below.
+      let viaRouteReceipt: DeferredRouteWindowReceipt | null = null
       const ensured = await ensureMessageLoaded(topicIdAtStart, targetId, {
         getExistingMessages: () => messagesRef.current,
         readAroundWindow: async (request) => {
           if (args.viaRouteThunk === true) {
-            // Bootstrap-PREPARE single flight: the around window is fetched
-            // through the standard `loadRouteMessagesThunk` (deferred: this
-            // stage keeps its existing atomic staged-merge publication, the
-            // thunk publishes nothing). Its sync prefix registers the
-            // execution in the shared `pendingRouteRestoreByTopic` map BEFORE
-            // its first await (map handoff point), so a later same-topic
-            // same-route bootstrap latest adopts this around under the shared
-            // requestSeq instead of fetching a competing latest — and a
-            // completed loadTopic leaves no entry so this fetches fresh.
-            // Dispatch first: the thunk sync prefix registers the token before
-            // its first await. Adopt the dispatch-source publication generation
-            // into the local baseline only on same-request proof (promise
-            // identity + route); an unrelated resident change still stales.
-            const dispatchedAround = (dispatch as unknown as (a: unknown) => Promise<unknown>)(
-              loadRouteMessagesThunk(topicIdAtStart, routeAtStart, {
+            // Bootstrap-PREPARE single flight via the unique deferred entry.
+            // Sync hook preserves registration-time promise identity for the
+            // local resident baseline adoption; the receipt binds the same
+            // registration for the final currency check. Merge publication
+            // below stays the staged merge (never the joint rebase payload).
+            const receipt = await dispatchDeferredRouteWindowRead(
+              dispatch,
+              () => store.getState(),
+              topicIdAtStart,
+              routeAtStart,
+              {
                 kind: 'around',
                 anchorMessageId: targetId,
                 before: (request as { before?: number }).before ?? NAVIGATION_VISUALLY_OLDER_GROUPS,
-                after: (request as { after?: number }).after ?? NAVIGATION_VISUALLY_NEWER_GROUPS,
-                deferPublish: true
-              })
+                after: (request as { after?: number }).after ?? NAVIGATION_VISUALLY_NEWER_GROUPS
+              },
+              {
+                onRawDispatched: (rawPromise) => {
+                  try {
+                    args.onDeferredAroundDispatched?.(rawPromise as unknown)
+                  } catch {
+                    // Fail-closed: baseline adoption is best-effort; the stale gate
+                    // below still guards on the originally captured generation.
+                  }
+                }
+              }
             )
-            try {
-              args.onDeferredAroundDispatched?.(dispatchedAround)
-            } catch {
-              // Fail-closed: baseline adoption is best-effort; the stale gate
-              // below still guards on the originally captured generation.
-            }
-            const thunkRes = (await dispatchedAround) as FetchMessagesWindowResponse | void
-            if (!thunkRes || !(thunkRes as unknown as { window?: unknown }).window) {
+            if (!receipt || !(receipt as unknown as { response?: unknown }).response) {
               // Thunk stale discard (superseded / route-moved / current-moved /
               // deleted / generation mismatch): the deferred thunk published
               // nothing — throw so the loader maps it to retryable `error`
@@ -3913,7 +3930,8 @@ const Messages = ({
               // loader's own post-fetch stale gate runs first when it trips.
               throw new Error('around route read discarded as stale')
             }
-            return thunkRes as unknown as FetchMessagesWindowResponse
+            viaRouteReceipt = receipt as unknown as DeferredRouteWindowReceipt
+            return (receipt as unknown as { response: FetchMessagesWindowResponse }).response
           }
           const { dbService } = await import('@renderer/services/db')
           // Navigation reads address the current route (never main by
@@ -3959,6 +3977,17 @@ const Messages = ({
 
       if (isStale()) {
         return 'cancelled'
+      }
+
+      // Final receipt currency gate (PREPARE deferred path only): the same
+      // receipt that carried the around read must still be current against
+      // seq/route/topic/deletion/generation currency. Stale → zero merge
+      // publication, preserving pending. Reuses the shared pure checker;
+      // field building stays the loader's merge (never rebase payload).
+      if (args.viaRouteThunk === true) {
+        if (!viaRouteReceipt || !isDeferredRouteWindowReceiptCurrent(() => store.getState(), viaRouteReceipt)) {
+          return 'cancelled'
+        }
       }
 
       // Atomic staged publication (blocks then merged messages + route
@@ -7722,14 +7751,17 @@ const Messages = ({
       // dropped so stale windows cannot satisfy the new route.
       windowCacheRef.current.clear()
       dispatch(activeBranchSet({ topicId, branchId }))
-      let routeWindow: FetchMessagesWindowResponse
-      // Deferred publish: fetch without dispatching blocks/rebase so the
+      // Deferred receipt: fetch without dispatching blocks/rebase so the
       // Redux projection + viewport window + controller phase commit in ONE
       // React batch (no intermediate paint with new suffix before compensation).
+      // The receipt binds the raw response to its dispatch-source provenance
+      // (topic/route/requestSeq/generations); the joint commit below rejects
+      // expired receipts with zero projection/chrome/window pollution.
       let deferredBlocks: MessageBlock[] = []
       let deferredMessages: Message[] = []
       let deferredMutable: string[] = []
       let deferredReference: HistoryReferenceMeta | null = null
+      let deferredReceipt: DeferredRouteWindowReceipt | null = null
       // Chrome co-commit: target route qualification alongside the window
       // fetch (single-flight shared with the scoped-chrome hook — no second
       // IPC, no bodies). Joined below before any commit so the commit batch
@@ -7744,53 +7776,73 @@ const Messages = ({
       let chromeWires: ListSegmentsResponse | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
-        const loadLatestWindow = async (): Promise<FetchMessagesWindowResponse> => {
-          const latestRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
-            loadRouteMessagesThunk(topicId, branchId, { kind: 'latest', deferPublish: true } as unknown as Parameters<
-              typeof loadRouteMessagesThunk
-            >[2])
-          )) as FetchMessagesWindowResponse | void
-          if (!latestRes || !(latestRes as unknown as { window?: unknown }).window) {
+        const loadLatestWindow = async (): Promise<DeferredRouteWindowReceipt> => {
+          const latestReceipt = await dispatchDeferredRouteWindowRead(
+            dispatch,
+            () => store.getState(),
+            topicId,
+            branchId,
+            {
+              kind: 'latest'
+            }
+          )
+          if (!latestReceipt || !(latestReceipt.response as unknown as { window?: unknown }).window) {
             throw new Error('latest route fallback discarded as stale')
           }
-          return latestRes
+          return latestReceipt
         }
         if (messageAnchorId === null) {
           // Head boundary: no message exists at the fork, so the target window
           // is read from the route itself instead of an anchor query.
-          routeWindow = await loadLatestWindow()
+          deferredReceipt = await loadLatestWindow()
         } else {
-          const aroundOpts = {
-            kind: 'around' as const,
-            anchorMessageId: messageAnchorId,
-            before: NAVIGATION_VISUALLY_OLDER_GROUPS,
-            after: NAVIGATION_VISUALLY_NEWER_GROUPS,
-            deferPublish: true
-          }
           try {
-            const aroundRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
-              loadRouteMessagesThunk(topicId, branchId, aroundOpts)
-            )) as FetchMessagesWindowResponse | void
-            // Thunk returns response directly (not via unwrap); handle both.
-            if (!aroundRes || !(aroundRes as unknown as { window?: unknown }).window) {
+            const aroundReceipt = await dispatchDeferredRouteWindowRead(
+              dispatch,
+              () => store.getState(),
+              topicId,
+              branchId,
+              {
+                kind: 'around',
+                anchorMessageId: messageAnchorId,
+                before: NAVIGATION_VISUALLY_OLDER_GROUPS,
+                after: NAVIGATION_VISUALLY_NEWER_GROUPS
+              }
+            )
+            // Thunk void (superseded/route-moved/deleted/generation mismatch)
+            // carries no identity: map to a retryable error so the caller can
+            // fall back to latest instead of rendering a half state.
+            if (!aroundReceipt || !(aroundReceipt.response as unknown as { window?: unknown }).window) {
               throw new Error('around route read discarded as stale')
             }
-            routeWindow = aroundRes
+            deferredReceipt = aroundReceipt
           } catch (aroundError) {
             if (!isStillTarget()) throw aroundError
-            routeWindow = await loadLatestWindow()
+            deferredReceipt = await loadLatestWindow()
           }
         }
-        deferredBlocks = (routeWindow.blocks as unknown as MessageBlock[]) ?? []
-        deferredMessages = (routeWindow.messages as unknown as Message[]) ?? []
-        deferredMutable = Array.isArray((routeWindow as unknown as { mutableMessageIds?: unknown }).mutableMessageIds)
-          ? ((routeWindow as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-          : []
-        deferredReference = (routeWindow as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
+        // Late receipt gate: a superseding request, route ABA, deletion or
+        // generation advance during the fetch must not publish. Reuse the
+        // shared pure checker (same rule as the top/deletion pipelines); the
+        // controller commit entries layer intent/epoch/phase on top.
+        if (!deferredReceipt || !isDeferredRouteWindowReceiptCurrent(() => store.getState(), deferredReceipt)) {
+          throw new Error('route read discarded as stale')
+        }
+        const joint = toDeferredJointPayload(deferredReceipt)
+        deferredBlocks = joint.blocks
+        deferredMessages = joint.messages
+        deferredMutable = joint.mutableMessageIds
+        deferredReference = joint.reference
         // Join the co-commit qualification: already in flight since before the
         // window fetch (typically resolved first — it carries no bodies), so
         // the commit below publishes window and structure atomically.
         chromeWires = await chromeWiresPromise
+        // Second late gate after the chrome join (no new fetch, same tick
+        // adjacency): an ABA that landed during the join must still refuse
+        // before any dispatch below.
+        if (!isDeferredRouteWindowReceiptCurrent(() => store.getState(), deferredReceipt)) {
+          throw new Error('route read discarded as stale')
+        }
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -7840,8 +7892,8 @@ const Messages = ({
             topicId: topicIdAtStart,
             messages: [...residentMessages] as Message[],
             route: branchId,
-            mutableMessageIds: deferredMutable,
-            reference: deferredReference
+            mutableMessageIds: [...deferredMutable],
+            reference: deferredReference ?? null
           })
         )
       }
@@ -7849,12 +7901,14 @@ const Messages = ({
         // Use the authoritative deferred messages directly (store not yet updated
         // due to deferPublish) so target viewport build is deterministic.
         const loaded = deferredMessages
-        const authoritative = routeWindow.window
-          ? {
-              hasMoreBefore: routeWindow.window.hasMoreBefore,
-              hasMoreAfter: routeWindow.window.hasMoreAfter
-            }
-          : undefined
+        const routeWindow = deferredReceipt !== null ? deferredReceipt.response : null
+        const authoritative =
+          routeWindow && routeWindow.window
+            ? {
+                hasMoreBefore: routeWindow.window.hasMoreBefore,
+                hasMoreAfter: routeWindow.window.hasMoreAfter
+              }
+            : undefined
         const dividerRestore = applyWindowTransition({
           kind: 'restore',
           loaded,
@@ -7883,7 +7937,9 @@ const Messages = ({
               const currentWindow = capturedCurrentWindowAtStart
               const currentIds = currentWindow?.displayMessages?.map((m) => m.id) ?? []
               const targetIds = targetWindow.displayMessages?.map((m) => m.id) ?? []
-              const responseIds = ((routeWindow.messages ?? []) as unknown as Message[]).map((m) => m.id)
+              const responseIds = (
+                ((routeWindow !== null ? routeWindow.messages : []) ?? []) as unknown as Message[]
+              ).map((m) => m.id)
               const toOldestFirst = (newestFirst: string[]): string[] => [...newestFirst].reverse()
               const visiblePlan = planDividerVisibleRebase({
                 currentIdsOldestFirst: toOldestFirst(currentIds),
@@ -8230,9 +8286,20 @@ const Messages = ({
       () => null
     )
     void (async () => {
-      let routeWindow: FetchMessagesWindowResponse | void
+      // Deferred receipt: the fallback read publishes nothing; the joint
+      // commit below publishes blocks + rebase + chrome atomically with the
+      // window (same single-batch rule as divider/top).
+      let deletionReceipt: DeferredRouteWindowReceipt | void
       try {
-        routeWindow = await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, { kind: 'latest' }))
+        deletionReceipt = await dispatchDeferredRouteWindowRead(
+          dispatch,
+          () => store.getState(),
+          topicIdAtEffect,
+          routeAtEffect,
+          {
+            kind: 'latest'
+          }
+        )
       } catch (error) {
         logger.error('[deletionFallback] Failed to reload fallback route with latest:', error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -8251,10 +8318,15 @@ const Messages = ({
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
         return
       }
-      // A stale (superseded/generation-mismatched) latest read publishes
-      // nothing (void): keep the failed marker retryable instead of applying
-      // a half viewport.
-      if (!routeWindow || !routeWindow.window) {
+      // A stale (superseded/route-moved/deleted/generation-mismatched) latest
+      // read resolves to void and publishes nothing (receipt gate below
+      // covers post-fetch ABA): keep the failed marker retryable instead of
+      // applying a half viewport.
+      if (
+        !deletionReceipt ||
+        !(deletionReceipt.response as unknown as { window?: unknown }).window ||
+        !isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)
+      ) {
         failVisibleTransition(deletionFetchEpoch)
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
@@ -8263,15 +8335,24 @@ const Messages = ({
       // Join the co-commit qualification: already in flight since the fetch
       // above, so the fallback commit below carries window and structure.
       const deletionChromeWires = await deletionChromeWiresPromise
+      if (!isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)) {
+        failVisibleTransition(deletionFetchEpoch)
+        loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+        dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
+        return
+      }
       // `deletionEpoch` is assigned exactly when the transition arms; the
       // catch below only fails that same epoch visible (never a newer owner).
       let deletionEpoch: number | null = null
       try {
-        const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtEffect) ?? []) as Message[]
-        const authoritative = routeWindow.window
+        // Build the fallback window from the authoritative deferred response
+        // (never from the store: the deferred read published nothing, so the
+        // store still holds the outgoing route).
+        const deletionJoint = toDeferredJointPayload(deletionReceipt)
+        const authoritative = deletionReceipt.response.window
           ? {
-              hasMoreBefore: routeWindow.window.hasMoreBefore,
-              hasMoreAfter: routeWindow.window.hasMoreAfter
+              hasMoreBefore: deletionReceipt.response.window.hasMoreBefore,
+              hasMoreAfter: deletionReceipt.response.window.hasMoreAfter
             }
           : undefined
         // Explicit latest viewport over the full displayCount window (never a
@@ -8279,12 +8360,33 @@ const Messages = ({
         // atomically clear via the same constructor.
         const latestTransition = applyWindowTransition({
           kind: 'latest',
-          messages: loaded,
+          messages: deletionJoint.messages,
           budget: displayCount,
           ...(authoritative ? { authoritative } : {})
         })
         if (latestTransition.kind !== 'window') return
         const latestWindow = latestTransition.window
+        // Single-use joint publish: blocks + rebase + chrome in the SAME sync
+        // batch as the window commit (the commit entry calls this before
+        // window/apply). Fresh entities per call; failure publishes nothing.
+        let deletionPublished = false
+        const publishDeletionJointProjection = (): void => {
+          if (deletionPublished) return
+          deletionPublished = true
+          publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)
+          if (deletionJoint.blocks.length > 0) {
+            dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deletionJoint.blocks), topicIdAtEffect)))
+          }
+          dispatch(
+            newMessagesActions.rebaseRouteMessages({
+              topicId: topicIdAtEffect,
+              messages: [...deletionJoint.messages] as Message[],
+              route: routeAtEffect,
+              mutableMessageIds: [...deletionJoint.mutableMessageIds],
+              reference: deletionJoint.reference ?? null
+            })
+          )
+        }
         // Atomic deletion fallback (single entry): provenance-bound commit —
         // stale completions refuse with no dispatch, never disturbing a
         // superseding session. No navigation transaction: the window above
@@ -8297,7 +8399,7 @@ const Messages = ({
           {
             kind: 'bottom'
           },
-          () => publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)
+          publishDeletionJointProjection
         )
         if (deletionEpoch === null) {
           failVisibleTransition(deletionFetchEpoch)
@@ -9097,7 +9199,7 @@ const Messages = ({
       // in a successful around response is malformed and fails visible.
       const isNotFoundError = isTopRestoreNotFoundError
       const canonicalAnchor = canonicalSavedAnchorId(saved)
-      let routeWindow: FetchMessagesWindowResponse | void
+      let topReceipt: DeferredRouteWindowReceipt | void
       let snapshotInvalidForRoute = false
       // Chrome co-commit: target route qualification alongside the window
       // fetch (single-flight shared with the scoped-chrome hook — no second
@@ -9113,16 +9215,28 @@ const Messages = ({
       try {
         const choice = chooseRouteWindowRequest(saved)
         if (choice.kind === 'latest') {
-          routeWindow = await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, { kind: 'latest' }))
+          topReceipt = await dispatchDeferredRouteWindowRead(
+            dispatch,
+            () => store.getState(),
+            topicIdAtEffect,
+            routeAtEffect,
+            {
+              kind: 'latest'
+            }
+          )
         } else {
           try {
-            routeWindow = await dispatch(
-              loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, {
+            topReceipt = await dispatchDeferredRouteWindowRead(
+              dispatch,
+              () => store.getState(),
+              topicIdAtEffect,
+              routeAtEffect,
+              {
                 kind: 'around',
                 anchorMessageId: choice.anchorMessageId,
                 before: NAVIGATION_VISUALLY_OLDER_GROUPS,
                 after: NAVIGATION_VISUALLY_NEWER_GROUPS
-              })
+              }
             )
           } catch (aroundError) {
             // Superseded before classification: fail visible, keep snapshot.
@@ -9135,7 +9249,15 @@ const Messages = ({
               // explicit terminal default. The stale snapshot is replaced
               // only by the stable commit of that default below.
               snapshotInvalidForRoute = true
-              routeWindow = await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, { kind: 'latest' }))
+              topReceipt = await dispatchDeferredRouteWindowRead(
+                dispatch,
+                () => store.getState(),
+                topicIdAtEffect,
+                routeAtEffect,
+                {
+                  kind: 'latest'
+                }
+              )
             } else {
               // Environmental/transport failure: preserve the prior snapshot.
               throw aroundError
@@ -9198,35 +9320,62 @@ const Messages = ({
       }
       // Join the co-commit qualification before any commit below: the visible
       // fast path, the hidden atomic path and the single-use hidden fallback
-      // all publish window and structure in one batch. Already in flight
+      // all publish projection and structure in one batch. Already in flight
       // since before the window fetch; a null join keeps prior behavior.
+      // Receipt late gate: a superseding request, route ABA, deletion or
+      // generation advance during the fetch/chrome join must not publish.
       const topChromeWires = await topChromeWiresPromise
-      // Idempotent per-pipeline publish: the first commit wins, later
-      // attempts (fallback retries) republish the identical projection.
-      let topChromePublished = false
-      const publishTopCommittedChrome = (): void => {
-        if (topChromePublished) return
-        topChromePublished = true
+      if (
+        !topReceipt ||
+        !(topReceipt.response as unknown as { window?: unknown }).window ||
+        !isDeferredRouteWindowReceiptCurrent(() => store.getState(), topReceipt)
+      ) {
+        failVisibleTransition(fetchEpoch)
+        loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+        return
+      }
+      // Single-use joint publish: blocks + rebase + chrome in the SAME sync
+      // batch as the window commit (commit entries call this before
+      // window/apply). Fresh entities per call; failure publishes nothing.
+      // The visible union path passes its union order; the hidden path passes
+      // nothing and publishes the authoritative deferred order.
+      const topJoint = toDeferredJointPayload(topReceipt)
+      let topJointPublished = false
+      const publishTopJointProjection = (unionMessages?: readonly Message[]): void => {
+        if (topJointPublished) return
+        topJointPublished = true
         publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeWires)
+        if (topJoint.blocks.length > 0) {
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(topJoint.blocks), topicIdAtEffect)))
+        }
+        dispatch(
+          newMessagesActions.rebaseRouteMessages({
+            topicId: topicIdAtEffect,
+            messages: [...(unionMessages ?? topJoint.messages)] as Message[],
+            route: routeAtEffect,
+            mutableMessageIds: [...topJoint.mutableMessageIds],
+            reference: topJoint.reference ?? null
+          })
+        )
       }
       try {
-        // Superseded/void reads never publish: fail visible, keep snapshot.
-        if (!routeWindow || !routeWindow.window) {
-          failVisibleTransition(fetchEpoch)
-          loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
-          return
-        }
-        const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtEffect) ?? []) as Message[]
+        // Deferred receipt window: build from the authoritative response
+        // (never from the store — the deferred read published nothing, so the
+        // store still holds the outgoing route). Superseded/void reads never
+        // publish: fail visible, keep snapshot.
+        const loaded = topJoint.messages
         const loadedIds = new Set(loaded.map((m) => m.id))
         // Requested-anchor coverage gate: a valid saved anchor must be in
         // both the returned window and the rebased projection. Partial
         // windows are valid only when they cover the anchor; full route
         // materialization is never required.
         if (canonicalAnchor && !snapshotInvalidForRoute) {
-          const windowIds = new Set((routeWindow.messages ?? []).map((m) => (m as { id: string }).id))
+          const windowIds = new Set(
+            (topReceipt.response.messages ?? []).map((m) => (m as unknown as { id: string }).id)
+          )
           if (!windowIds.has(canonicalAnchor) || !loadedIds.has(canonicalAnchor)) {
             logger.error('[routeInvalidation] around window omits the requested anchor', {
-              window: routeWindow.window
+              window: topReceipt.response.window
             } as unknown as Error)
             loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
             failVisibleTransition(fetchEpoch)
@@ -9255,10 +9404,10 @@ const Messages = ({
         }
         const anchor = routeSavedRowAnchor ?? null
         const authoritative =
-          routeWindow && routeWindow.window
+          topReceipt.response && topReceipt.response.window
             ? {
-                hasMoreBefore: routeWindow.window.hasMoreBefore,
-                hasMoreAfter: routeWindow.window.hasMoreAfter
+                hasMoreBefore: topReceipt.response.window.hasMoreBefore,
+                hasMoreAfter: topReceipt.response.window.hasMoreAfter
               }
             : undefined
         const restoreTransition = applyWindowTransition({
@@ -9321,7 +9470,7 @@ const Messages = ({
                 const currentWindow = viewportStateRef.current.window
                 const currentIdsNewestFirst = currentWindow?.displayMessages?.map((m) => m.id) ?? []
                 const targetIdsNewestFirst = targetWindow.displayMessages?.map((m) => m.id) ?? []
-                const responseIds = ((routeWindow.messages ?? []) as unknown as Message[]).map((m) => m.id)
+                const responseIds = ((topReceipt.response.messages ?? []) as unknown as Message[]).map((m) => m.id)
                 const toOldestFirst = (newestFirst: string[]): string[] => [...newestFirst].reverse()
                 const topPlan = planTopVisibleRebase({
                   currentIdsOldestFirst: toOldestFirst(currentIdsNewestFirst),
@@ -9369,7 +9518,7 @@ const Messages = ({
                         routeAtEffect,
                         unionWindow,
                         { anchorMessageId: routeSavedRowAnchor, wantOffset: savedOffset },
-                        publishTopCommittedChrome
+                        () => publishTopJointProjection(unionOldestFirst)
                       )
                       if (visibleEpoch !== null) {
                         // Visible path armed: stash the already-materialized
@@ -9431,7 +9580,7 @@ const Messages = ({
             routeAtEffect,
             targetWindow,
             firstPlan,
-            publishTopCommittedChrome
+            () => publishTopJointProjection()
           )
           if (topRestoreEpoch === null) {
             failVisibleTransition(fetchEpoch)

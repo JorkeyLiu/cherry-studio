@@ -8,12 +8,15 @@ import { describe, expect, it } from 'vitest'
  *
  * `Messages` is not mounted here (no existing harness mounts it), so this file
  * asserts the production source contract that unit tests cannot reach:
- * - every route-window pipeline fetches the lightweight qualification
- *   alongside its window fetch, joins it before any commit, and converts a
- *   fetch failure to a null join (fail-closed: no publish);
- * - every atomic commit entry invokes its `onPublish` synchronously inside
- *   the commit, AFTER the stale guards and BEFORE `window/apply`, so the
- *   first visible frame already hosts the target route's group structure;
+ * - every route-window pipeline reads through a deferred receipt
+ *   (`dispatchDeferredRouteWindowRead`: fetch publishes nothing, the response
+ *   is bound to its dispatch-source provenance), validates the receipt with
+ *   `isDeferredRouteWindowReceiptCurrent` immediately before any commit, and
+ *   refuses stale receipts with zero projection/chrome/window pollution;
+ * - every atomic commit entry invokes its joint `onPublish` (blocks + rebase
+ *   with mutable ids/cleared reference + chrome, synchronously inside the
+ *   commit, AFTER the stale guards and BEFORE `window/apply`), so the first
+ *   visible frame already hosts the target route's groups and structure;
  * - `publishCommittedChrome` itself never publishes on a null/failed fetch
  *   and never throws (retained/hook behavior survives).
  *
@@ -109,18 +112,40 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     expect(source).toMatch(/^\s*publishDeferredProjection$/m)
   })
 
-  it('the top pipeline joins the qualification before any commit and every top commit carries it', () => {
-    expect(source).toContain('const topChromeWires = await topChromeWiresPromise')
+  it('the top pipeline reads through a deferred receipt and every top commit carries the joint publish', () => {
+    // Deferred-only read: publishes nothing; the joint commit below publishes.
+    expect(source).toContain('topReceipt = await dispatchDeferredRouteWindowRead(')
+    // Receipt late gate before any commit: a superseding request, route ABA,
+    // deletion or generation advance refuses with zero pollution.
+    expect(source).toContain('!isDeferredRouteWindowReceiptCurrent(() => store.getState(), topReceipt)')
+    // Success-only window build from the authoritative deferred response
+    // (never from the store — the deferred read published nothing).
+    expect(source).toContain('const loaded = topJoint.messages')
+    expect(source).toContain('const topJoint = toDeferredJointPayload(topReceipt)')
     expect(source).toContain('publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeWires)')
+    expect(source).toContain('mutableMessageIds: [...topJoint.mutableMessageIds]')
+    expect(source).toContain('reference: topJoint.reference ?? null')
     // Visible fast path + hidden restore commit share the idempotent closure;
-    // the single-use hidden fallback publishes from its stashed wires.
-    expect((source.match(/publishTopCommittedChrome/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    // the single-use hidden fallback publishes it bare (authoritative order)
+    // and still carries the joined chrome wires.
+    expect(source).toContain('() => publishTopJointProjection(unionOldestFirst)')
+    expect((source.match(/publishTopJointProjection/g) ?? []).length).toBeGreaterThanOrEqual(3)
     expect(source).toContain('chromeWires: topChromeWires')
   })
 
-  it('the deletion fallback joins its qualification and commits it as onPublish, refusing stale epochs', () => {
-    expect(source).toContain('const deletionChromeWires = await deletionChromeWiresPromise')
+  it('the deletion fallback reads through a deferred receipt and commits it as the joint onPublish, refusing stale epochs', () => {
+    expect(source).toContain('deletionReceipt = await dispatchDeferredRouteWindowRead(')
+    // Double late gate: after the fetch and again after the chrome join (no
+    // new fetch, same-tick adjacency) — an ABA in between still refuses.
+    expect(
+      (source.match(/isDeferredRouteWindowReceiptCurrent\(\(\) => store\.getState\(\), deletionReceipt\)/g) ?? [])
+        .length
+    ).toBeGreaterThanOrEqual(2)
+    expect(source).toContain('const deletionJoint = toDeferredJointPayload(deletionReceipt)')
+    expect(source).toContain('publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)')
+    expect(source).toContain('mutableMessageIds: [...deletionJoint.mutableMessageIds]')
+    expect(source).toContain('reference: deletionJoint.reference ?? null')
     const commit = sliceOf('deletionEpoch = commitRouteWindowAtomic(', 'if (deletionEpoch === null)')
-    expect(commit).toContain('() => publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)')
+    expect(commit).toContain('publishDeletionJointProjection')
   })
 })

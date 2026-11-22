@@ -187,13 +187,21 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     const nextStart = src.indexOf('Top-selector route switch', start)
     expect(nextStart).toBeGreaterThan(start)
     const slice = src.slice(start, nextStart)
-    // Single owner: claim + cancel + windowed latest read + latest viewport
+    // Single owner: claim + cancel + deferred latest receipt read + latest viewport
     // over the full displayCount budget, pinned at bottom via the atomic
     // route-window commit, then consume. The retired createLatestMessageWindow
-    // constructor is superseded by loadRouteMessagesThunk + applyWindowTransition.
+    // constructor is superseded by dispatchDeferredRouteWindowRead receipt +
+    // toDeferredJointPayload + applyWindowTransition with a single-use joint onPublish.
     expect(slice).toMatch(/claimLoadedRoute\(activeBranchId\)/)
     expect(slice).toMatch(/cancelActiveLoads\(\)/)
-    expect(slice).toMatch(/loadRouteMessagesThunk\(topicIdAtEffect,\s*routeAtEffect,\s*\{\s*kind:\s*'latest'/)
+    expect(slice).toMatch(
+      /dispatchDeferredRouteWindowRead\([\s\S]*?topicIdAtEffect,[\s\S]*?routeAtEffect,[\s\S]*?kind:\s*'latest'/
+    )
+    expect(slice).toMatch(/toDeferredJointPayload\(deletionReceipt\)/)
+    expect(slice).toMatch(/isDeferredRouteWindowReceiptCurrent\(/)
+    expect(slice).toMatch(/commitRouteWindowAtomic\(/)
+    expect(slice).toMatch(/publishDeletionJointProjection/)
+    expect(slice).toMatch(/if \(deletionPublished\) return/)
     expect(slice).toMatch(/applyWindowTransition\(\{/)
     expect(slice).toMatch(/kind:\s*'latest'/)
     expect(slice).toMatch(/budget:\s*displayCount/)
@@ -265,7 +273,14 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     const nextStart = src.indexOf('Top-selector route switch', start)
     expect(nextStart).toBeGreaterThan(start)
     const slice = src.slice(start, nextStart)
-    expect(slice).toMatch(/loadRouteMessagesThunk\(topicIdAtEffect,\s*routeAtEffect,\s*\{\s*kind:\s*'latest'/)
+    expect(slice).toMatch(
+      /dispatchDeferredRouteWindowRead\([\s\S]*?topicIdAtEffect,[\s\S]*?routeAtEffect,[\s\S]*?kind:\s*'latest'/
+    )
+    expect(slice).toMatch(/toDeferredJointPayload\(deletionReceipt\)/)
+    expect(slice).toMatch(/isDeferredRouteWindowReceiptCurrent\(/)
+    expect(slice).toMatch(/commitRouteWindowAtomic\(/)
+    expect(slice).toMatch(/publishDeletionJointProjection/)
+    expect(slice).toMatch(/if \(deletionPublished\) return/)
     expect(slice).toMatch(/applyWindowTransition\(\{/)
     expect(slice).toMatch(/kind:\s*'latest'/)
     expect(slice).toMatch(/budget:\s*displayCount/)

@@ -4091,51 +4091,208 @@ export const loadRouteMessagesThunk =
     pendingRouteRestoreByTopic.set(topicId, pendingRestoreEntry)
     return execution
   }
+/**
+ * Deferred route-window receipt (renderer-local provenance, never a shared DTO).
+ *
+ * A deferred `loadRouteMessagesThunk` read publishes nothing; the response
+ * alone carries no identity. The receipt binds that response to the exact
+ * registration it came from: topic + route + request sequence + deletion /
+ * route / resident-applicability generations captured synchronously at
+ * dispatch. Consumers must validate the receipt with
+ * `isDeferredRouteWindowReceiptCurrent` immediately before the joint
+ * commit and publish through `toDeferredJointPayload` (fresh entities,
+ * reference cleared to null). Never read the pending map after the await to
+ * re-identify an old response: the receipt is the only identity.
+ */
+export interface DeferredRouteWindowReceipt {
+  response: FetchMessagesWindowResponse
+  topicId: string
+  route: string | null
+  requestSeq: number
+  deletionGeneration: number
+  routeGeneration: number
+  publicationGeneration: number
+}
+
+export type DeferredRouteWindowReadOpts =
+  | { kind?: 'latest'; limit?: number }
+  | { kind: 'around'; anchorMessageId: string; before?: number; after?: number }
+
+export interface DeferredRouteWindowReadHooks {
+  /**
+   * Sync-prefix adoption hook (renderer-local baseline only).
+   *
+   * Invoked synchronously after the underlying deferred dispatch, before the
+   * first await settles, with the exact raw execution promise. Lets a caller
+   * adopt the dispatch-source publication generation on same-request proof
+   * (promise identity + route) via `resolveAdoptedResidentBaseline` without
+   * touching the pending map itself. Never writes the resident registry.
+   */
+  onRawDispatched?: (rawPromise: Promise<FetchMessagesWindowResponse | void>) => void
+}
 
 /**
- * Divider fork-anchor read with reliable degradation (production path).
- *
- * Tries the fork-anchor `around` window first (preserves the current visual
- * reference; never the target history snapshot, never a bottom jump). When
- * the anchor is no longer on the target route (around rejects / malformed),
- * falls back to a stale-safe `latest` window for the SAME target route and
- * publishes it — the nearest safe view to the existing fork/tail fallback
- * (tail vicinity, authoritative hasMore, raw scroll preserved; still never a
- * bottom jump). When BOTH fail it rethrows: the caller must roll back to the
- * previous route (divider) so the UI never shows "new active route + old
- * route projection" and pagination can never mix routes.
- *
- * Stale safety rides on `loadRouteMessagesThunk`'s own guards (request
- * sequence, active-route match, generations); `isStillTarget` lets the caller
- * abort the fallback when the user already moved on.
+ * Deferred-only entry: dispatches `loadRouteMessagesThunk` with
+ * `deferPublish` and returns the response bound to its dispatch-source
+ * provenance. The default `loadRouteMessagesThunk` return shape
+ * (`FetchMessagesWindowResponse | void`) is unchanged; this wrapper is the
+ * only deferred caller identity. Rejections propagate (anchorNotFound /
+ * transport); stale discards resolve to `void` exactly like the thunk.
  */
-export const loadRouteWindowWithFallback = async (
+export const dispatchDeferredRouteWindowRead = async (
   dispatch: AppDispatch,
+  getState: () => RootState,
   topicId: string,
   branchId: string | null,
-  around: { anchorMessageId: string; before?: number; after?: number },
-  isStillTarget: () => boolean = () => true
-): Promise<{ response: FetchMessagesWindowResponse; fallbackUsed: boolean }> => {
+  opts?: DeferredRouteWindowReadOpts,
+  hooks?: DeferredRouteWindowReadHooks
+): Promise<DeferredRouteWindowReceipt | void> => {
+  const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+  const deletionGeneration = captureDeletionGeneration(topicId)
+  let routeGeneration = 0
   try {
-    const aroundRes = (await dispatch(
-      loadRouteMessagesThunk(topicId, branchId, { kind: 'around', ...around })
-    )) as unknown as FetchMessagesWindowResponse | void
-    if (aroundRes && aroundRes.window) {
-      return { response: aroundRes, fallbackUsed: false }
-    }
-    // Stale discard (void, no throw): propagate as failure so the caller can
-    // decide (rollback / retry) instead of rendering a half state.
-    throw new Error('around route read discarded as stale')
-  } catch (aroundError) {
-    if (!isStillTarget()) throw aroundError
-    const latestRes = (await dispatch(
-      loadRouteMessagesThunk(topicId, branchId, { kind: 'latest' })
-    )) as unknown as FetchMessagesWindowResponse | void
-    if (!latestRes || !latestRes.window) {
-      throw new Error('latest route fallback discarded as stale')
-    }
-    return { response: latestRes, fallbackUsed: true }
+    routeGeneration = selectRouteGeneration(getState(), topicId)
+  } catch {
+    routeGeneration = 0
   }
+  const thunkOpts = (
+    opts && opts.kind === 'around'
+      ? {
+          kind: 'around' as const,
+          anchorMessageId: opts.anchorMessageId,
+          before: opts.before,
+          after: opts.after,
+          deferPublish: true
+        }
+      : {
+          kind: 'latest' as const,
+          ...(opts && 'limit' in opts && typeof opts.limit === 'number' ? { limit: opts.limit } : {}),
+          deferPublish: true
+        }
+  ) as Parameters<typeof loadRouteMessagesThunk>[2]
+  const dispatched = dispatch(
+    loadRouteMessagesThunk(topicId, branchId, thunkOpts)
+  ) as unknown as Promise<FetchMessagesWindowResponse | void>
+  // Sync-prefix adoption handoff (same tick as registration): the thunk
+  // registered its pending entry before its first await, so a caller hook
+  // here observes the exact raw promise with registration-time identity.
+  // Best-effort only; hook failure never breaks the receipt path.
+  try {
+    hooks?.onRawDispatched?.(dispatched)
+  } catch {
+    // fail-closed: baseline adoption stays on the pre-dispatch capture
+  }
+  // Sync-prefix proof: the thunk registers its pending entry before its
+  // first await, so the map entry captured here (same tick) is this exact
+  // registration. Promise identity + route narrow it; anything else is a
+  // fail-closed miss (never adopt a newer token for this response).
+  const token = pendingRouteRestoreByTopic.get(topicId) ?? null
+  const proven = token !== null && token.route === route && (token.promise as unknown) === (dispatched as unknown)
+  const requestSeq = proven ? token.requestSeq : -1
+  const publicationGeneration = proven ? token.publicationGeneration : -1
+  const response = await dispatched
+  if (!response || !(response as unknown as { window?: unknown }).window) {
+    return undefined
+  }
+  if (!proven) {
+    return undefined
+  }
+  return {
+    response,
+    topicId,
+    route,
+    requestSeq,
+    deletionGeneration,
+    routeGeneration,
+    publicationGeneration
+  }
+}
+
+/**
+ * Pure late validator for a deferred receipt against live store currency.
+ *
+ * Covers: newer same-topic request supersession, route ABA (active route no
+ * longer the receipt route), topic switch, deletion during fetch, route
+ * generation advance, resident applicability advance. No store write, no
+ * dispatch, no pending-map read for re-identification (the receipt already
+ * carries its identity; the map is only read for the latest-seq fact).
+ * Controller intent/epoch/phase stays owned by the viewport commit entries;
+ * this checker and those entries are layered, not substitutes.
+ */
+export function isDeferredRouteWindowReceiptCurrent(
+  getState: () => RootState,
+  receipt: DeferredRouteWindowReceipt | null | undefined
+): boolean {
+  try {
+    if (!receipt || !receipt.response || !(receipt.response as unknown as { window?: unknown }).window) {
+      return false
+    }
+    if (latestLoadTopicMessagesRequestByTopic.get(receipt.topicId) !== receipt.requestSeq) {
+      return false
+    }
+    if (activeRouteOf(getState, receipt.topicId) !== receipt.route) {
+      return false
+    }
+    const currentId = getState().messages.currentTopicId
+    if (currentId !== null && currentId !== undefined && currentId !== receipt.topicId) {
+      return false
+    }
+    if (isDeletionStale(receipt.topicId, receipt.deletionGeneration)) {
+      return false
+    }
+    let routeGenNow = 0
+    try {
+      routeGenNow = selectRouteGeneration(getState(), receipt.topicId)
+    } catch {
+      return false
+    }
+    if (routeGenNow !== receipt.routeGeneration) {
+      return false
+    }
+    let publicationGenNow = 0
+    try {
+      publicationGenNow = ((
+        getState() as unknown as {
+          residentRegistry?: { entries?: Record<string, { applicabilityGeneration?: unknown }> }
+        }
+      ).residentRegistry?.entries?.[receipt.topicId]?.applicabilityGeneration ?? 0) as number
+    } catch {
+      return false
+    }
+    if (publicationGenNow !== receipt.publicationGeneration) {
+      return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Joint-publish payload from a validated receipt. Every call builds fresh
+ * entities (`messages` / `mutableMessageIds` copies); `reference` clears to
+ * `null` when absent (never `undefined`), matching the historic prod shape
+ * where absence and `undefined` both mean "no reference".
+ */
+export function toDeferredJointPayload(receipt: DeferredRouteWindowReceipt): {
+  messages: Message[]
+  blocks: MessageBlock[]
+  mutableMessageIds: string[]
+  reference: HistoryReferenceMeta | null
+} {
+  const raw = receipt.response as unknown as {
+    messages?: unknown
+    blocks?: unknown
+    mutableMessageIds?: unknown
+    reference?: unknown
+  }
+  const messages = Array.isArray(raw.messages) ? [...(raw.messages as Message[])] : []
+  const blocks = Array.isArray(raw.blocks) ? [...(raw.blocks as MessageBlock[])] : []
+  const mutableMessageIds = Array.isArray(raw.mutableMessageIds)
+    ? ([...(raw.mutableMessageIds as unknown[] as string[])] as string[])
+    : []
+  const reference = (raw.reference ?? null) as HistoryReferenceMeta | null
+  return { messages, blocks, mutableMessageIds, reference }
 }
 
 /**

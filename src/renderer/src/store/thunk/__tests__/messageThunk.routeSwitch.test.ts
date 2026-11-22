@@ -298,62 +298,8 @@ describe('loadRouteMessagesThunk windowed incremental switch', () => {
   })
 })
 
-describe('loadRouteWindowWithFallback (divider reliable degradation, behavior)', () => {
-  // Executing dispatch: runs thunks like real Redux dispatch so the fallback
-  // helper exercises the production around→latest path (not source text).
-  function execDispatch(getState: () => any) {
-    const seen: any[] = []
-    const exec: any = (action: any) => {
-      seen.push(action)
-      if (typeof action === 'function') return action(exec, getState)
-      return action
-    }
-    return { exec, seen }
-  }
-
-  it('around reject falls back to latest for the SAME target route and publishes it', async () => {
-    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
-      if (req.kind === 'around') throw new Error('anchor not on target route')
-      return makeWindowResponse(req, [{ id: 'u1' }, { id: 'a1' }, { id: 'u2-new' }], {
-        hasMoreBefore: true,
-        hasMoreAfter: false
-      })
-    })
-    const { loadRouteWindowWithFallback } = await import('../messageThunk')
-    const state = baseState()
-    const getState = () => state
-    const { exec, seen } = execDispatch(getState)
-    const out = await loadRouteWindowWithFallback(exec, 't1', 'b-new', {
-      anchorMessageId: 'fork-anchor',
-      before: 10,
-      after: 19
-    })
-    expect(out.fallbackUsed).toBe(true)
-    expect(out.response.window.hasMoreBefore).toBe(true)
-    expect(out.response.window.hasMoreAfter).toBe(false)
-    // Both around (failed) and latest (fallback) addressed the same route.
-    const reqs = mocks.fetchMessagesWindow.mock.calls.map((c) => c[0])
-    expect(reqs.map((r) => r.kind)).toEqual(['around', 'latest'])
-    expect(reqs.every((r) => r.branchId === 'b-new' && r.topicId === 't1')).toBe(true)
-    // Fallback published exactly once via atomic rebase (no full fetch).
-    const rebases = seen.filter((a) => a?.type === 'newMessages/rebaseRouteMessages')
-    expect(rebases.length).toBe(1)
-    expect(mocks.fetchMessages).not.toHaveBeenCalled()
-  })
-
-  it('double failure (around + latest) rethrows and publishes nothing (caller rolls back)', async () => {
-    mocks.fetchMessagesWindow.mockRejectedValue(new Error('transport down'))
-    const { loadRouteWindowWithFallback } = await import('../messageThunk')
-    const state = baseState()
-    const getState = () => state
-    const { exec, seen } = execDispatch(getState)
-    await expect(loadRouteWindowWithFallback(exec, 't1', 'b-new', { anchorMessageId: 'fork' })).rejects.toThrow()
-    // Nothing published: no rebase, so the caller can roll back to the old
-    // route without any mixed projection in the store.
-    expect(seen.filter((a) => a?.type === 'newMessages/rebaseRouteMessages')).toEqual([])
-  })
-
-  it('empty target route publishes [] with authoritative empty flags (atomic clear)', async () => {
+describe('empty target route publishes [] with authoritative empty flags (atomic clear)', () => {
+  it('empty latest publishes [] with authoritative empty flags', async () => {
     mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) =>
       makeWindowResponse(req, [], { hasMoreBefore: false, hasMoreAfter: false })
     )
@@ -369,20 +315,6 @@ describe('loadRouteWindowWithFallback (divider reliable degradation, behavior)',
     expect(res.window.hasMoreBefore).toBe(false)
     expect(res.window.hasMoreAfter).toBe(false)
     expect(mocks.rebaseRouteMessages).toHaveBeenCalledWith(expect.objectContaining({ topicId: 't1', messages: [] }))
-  })
-
-  it('stale fallback is not published when the user already moved on', async () => {
-    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
-      if (req.kind === 'around') throw new Error('anchor not on target route')
-      return makeWindowResponse(req, [{ id: 'late' }])
-    })
-    const { loadRouteWindowWithFallback } = await import('../messageThunk')
-    const state = baseState()
-    const getState = () => state
-    const { exec } = execDispatch(getState)
-    await expect(
-      loadRouteWindowWithFallback(exec, 't1', 'b-new', { anchorMessageId: 'fork' }, () => false)
-    ).rejects.toThrow()
   })
 })
 

@@ -10,19 +10,22 @@ import { describe, expect, it } from 'vitest'
  *
  * - The bootstrap PREPARE entry (`prepareNavigationTarget`) runs the shared
  *   target-load stage with the thunk-owner read (`viaRouteThunk: true`): the
- *   injected around read is served by one standard
- *   `loadRouteMessagesThunk({ kind: 'around', deferPublish: true })` single
- *   flight that registers synchronously in the shared request map (so a
+ *   injected around read is served by the unique deferred entry
+ *   `dispatchDeferredRouteWindowRead({ kind: 'around', ... })` (single
+ *   flight that registers synchronously in the shared request map, so a
  *   later same-topic same-route bootstrap latest adopts it). The thunk
  *   publishes nothing itself; the stage keeps its existing atomic
  *   staged-merge publication (`messagesWindowMerged` + projection commit)
  *   outside the injected read — no second non-atomic cover, no naked DB
- *   read on the thunk rail.
+ *   read on the thunk rail, never the rebase joint payload.
  * - The FULL user-navigation entry keeps the direct caller-merge read (no
  *   `viaRouteThunk` flag): canonical ensure → staged merge.
- * - Same-request adoption is proven by promoting the prepare baseline from
- *   the dispatch-source publication token only after the deferred around
- *   dispatch (never by re-reading the resident registry).
+ * - Same-request adoption is proven by the sync `onRawDispatched` hook
+ *   (registration-time promise identity + route) promoting the prepare
+ *   baseline from the dispatch-source publication token (never by
+ *   re-reading the resident registry, never a second fetch).
+ * - The same receipt that carried the read guards the final merge commit
+ *   via the shared pure checker `isDeferredRouteWindowReceiptCurrent`.
  * - All stale gates stay intact on the thunk rail (topic/navigate/
  *   transition/deletion/resident + route + projection-commit wait).
  *
@@ -86,30 +89,29 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(fullEntry).not.toMatch(/onDeferredAroundDispatched/)
   })
 
-  it('the thunk rail single-flights through the standard route thunk (deferred) and the stage keeps its merge', () => {
+  it('the thunk rail single-flights through the unique deferred entry and the stage keeps its merge', () => {
     // Injection-level branch only: the deferred slice runs before the naked
     // DB import; the direct read below it is the untouched FULL path.
     const deferred = stageSource.slice(railStart, dbImportIdx)
-    // Single flight: standard thunk, around anchored at the target with the
-    // canonical navigation quotas (before=10 / after=19 echo the loader).
-    expect(deferred).toMatch(/loadRouteMessagesThunk\(topicIdAtStart, routeAtStart/)
+    // Single flight: unique deferred entry, around anchored at the target
+    // with the canonical navigation quotas (before/after echo the loader).
+    expect(deferred).toMatch(/dispatchDeferredRouteWindowRead\(/)
     expect(deferred).toMatch(/kind:\s*'around'/)
     expect(deferred).toMatch(/anchorMessageId:\s*targetId/)
     expect(deferred).toMatch(/NAVIGATION_VISUALLY_OLDER_GROUPS/)
     expect(deferred).toMatch(/NAVIGATION_VISUALLY_NEWER_GROUPS/)
-    // Deferred: the thunk publishes nothing; this stage keeps its existing
-    // atomic staged-merge publication below.
-    expect(deferred).toMatch(/deferPublish:\s*true/)
-    // Dispatch first, then the synchronous same-request adoption callback,
-    // then the first await: the token the baseline adopts is the one the
-    // dispatch's sync prefix registered.
-    const dispatchIdx = deferred.indexOf('loadRouteMessagesThunk(')
-    const adoptionIdx = deferred.indexOf('args.onDeferredAroundDispatched?.(dispatchedAround)')
-    const firstAwaitIdx = deferred.indexOf('await dispatchedAround')
-    expect(dispatchIdx).toBeGreaterThanOrEqual(0)
-    expect(adoptionIdx).toBeGreaterThan(dispatchIdx)
-    expect(firstAwaitIdx).toBeGreaterThan(adoptionIdx)
-    // A stale-discarded thunk read (void) throws so the loader maps it to
+    // Deferred: the entry publishes nothing; this stage keeps its existing
+    // atomic staged-merge publication below (never the rebase joint payload).
+    expect(deferred).not.toMatch(/toDeferredJointPayload/)
+    expect(deferred).not.toMatch(/loadRouteMessagesThunk\(topicIdAtStart, routeAtStart/)
+    // Sync hook preserves registration-time promise identity: the wrapper
+    // invokes `onRawDispatched` synchronously after dispatch (before the
+    // first await), and the stage forwards it to the adoption callback.
+    expect(deferred).toMatch(/onRawDispatched/)
+    expect(deferred).toMatch(/args\.onDeferredAroundDispatched\?/)
+    // The receipt binds the same registration for the final currency check.
+    expect(deferred).toMatch(/viaRouteReceipt/)
+    // A stale-discarded deferred read (void) throws so the loader maps it to
     // retryable `error` (stage `cancelled`, pending preserved) — the loader's
     // own post-fetch stale gate runs first when it trips.
     expect(deferred).toMatch(/around route read discarded as stale/)
@@ -127,9 +129,11 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(direct).toMatch(/fetchMessagesWindow/)
     expect(direct).toMatch(/runTopicWindowRead/)
     // The stage merge publication lives outside (after) the injected read and
-    // is unchanged: blocks then merged messages + projection commit.
+    // is unchanged: blocks then merged messages + projection commit, guarded
+    // by the same receipt's final currency check.
     const sharedTail = stageSource.slice(tailStart)
     expect(sharedTail).toMatch(/messagesWindowMerged/)
+    expect(sharedTail).toMatch(/isDeferredRouteWindowReceiptCurrent\(\(\) => store\.getState\(\), viaRouteReceipt\)/)
     expect(sharedTail).toMatch(/waitForProjectionCommit\(targetId, isStale\)/)
   })
 
@@ -139,8 +143,8 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(rail).toMatch(/isStaleBeforeFetch: \(\) => isStale\(\) \|\| routeRef\.current !== routeAtStart/)
     expect(rail).toMatch(/isStaleAfterFetch: \(\) => isStale\(\) \|\| routeRef\.current !== routeAtStart/)
     // The synchronous handoff used for same-request adoption is present on the
-    // rail (dispatch → adoption → await, asserted above).
-    expect(rail).toMatch(/onDeferredAroundDispatched\?\.\(dispatchedAround\)/)
+    // rail (dispatch → sync hook → await).
+    expect(rail).toMatch(/onRawDispatched/)
     // Shared terminal contract after the injected read: resident `ready`,
     // authoritative missing `not-found` with the single toast,
     // transport/unknown/malformed preserve pending via `cancelled`.
@@ -152,8 +156,9 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(sharedTail).toMatch(/return 'cancelled'/)
     // Every check/wait site still consults the live staleness closure: the
     // resident fast path, the authoritative not-found path, the pre-publication
-    // check, and the post-projection-wait check.
+    // check, the receipt final gate, and the post-projection-wait check.
     expect(sharedTail.match(/if \(isStale\(\)\) \{/g) ?? []).toHaveLength(4)
+    expect(sharedTail).toMatch(/if \(args\.viaRouteThunk === true\)/)
     // The projection-commit wait is terminal on timeout (never an infinite
     // hold): an uncommitted projection cancels.
     expect(sharedTail).toMatch(/if \(!committed\) \{\s*return 'cancelled'\s*\}/)

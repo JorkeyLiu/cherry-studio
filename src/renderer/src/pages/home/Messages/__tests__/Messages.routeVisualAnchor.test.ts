@@ -73,9 +73,9 @@ describe('route-switch scroll + footer contract', () => {
       .join('\n')
     expect(handler).toMatch(/dividerVisualAnchorOffset|findViewportTopAnchorWithOffset/)
     expect(handler).toMatch(/dividerKey|dividerVisualAnchor/)
-    // Fork-anchor around read with deferred publish (+latest fallback): around/latest via loadRouteMessagesThunk
-    expect(handler).toMatch(/loadRouteMessagesThunk/)
-    expect(handler).toMatch(/deferPublish/)
+    // Fork-anchor around read with deferred publish (+latest fallback): around/latest via the deferred-only receipt entry
+    expect(handler).toMatch(/dispatchDeferredRouteWindowRead/)
+    expect(handler).toMatch(/deferredReceipt|DeferredRouteWindowReceipt/)
     expect(handler).toMatch(/kind:\s*'around'/)
     expect(handler).toMatch(/anchorMessageId/)
     expect(handler).toMatch(/kind:\s*'latest'/)

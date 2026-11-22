@@ -17,7 +17,7 @@
  */
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import type { RefObject } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -87,8 +87,13 @@ const mocks = vi.hoisted(() => {
   // Mock refs to track (used by the mock factory and tests)
   const scrollContainerRef: { current: HTMLElement | null } = { current: null }
 
+  // Deferred-read seam for the real-receipt mounted proof: per-test impl,
+  // default void (existing transition tests keep the void-read path).
+  const deferredReadImpl = vi.fn(async (..._args: any[]) => undefined)
+
   return {
     getPendingNavigate: vi.fn(() => pendingNavigate),
+    deferredReadImpl,
     clearPendingNavigate: vi.fn(() => true),
     setPendingNavigate: (value: { messageId: string; topicId: string } | null) => {
       pendingNavigate = value
@@ -169,7 +174,7 @@ const mocks = vi.hoisted(() => {
     // NEW_BRANCH inherit path is not exercised here; the null anchor is a
     // no-op that keeps test semantics unchanged.
     resolveContextClosure: vi.fn(async () => ({ resolvedAnchorGroupKey: null }) as any),
-    fetchMessagesWindow: vi.fn(async () => ({ messages: [], blocks: [] }) as any),
+    fetchMessagesWindow: vi.fn(async (..._args: any[]) => ({ messages: [], blocks: [] }) as any),
     // Stable `t` identity (production `t` is stable; a fresh closure per
     // render would re-run `t`-dependent route effects every render).
     t: (key: string): string => key
@@ -373,16 +378,27 @@ vi.mock('@renderer/store/newMessage', async (importOriginal) => {
   }
 })
 
-vi.mock('@renderer/store/thunk/messageThunk', () => ({
-  updateMessageAndBlocksThunk: vi.fn(),
-  // Restore-pipeline loader stubs: the mocked dispatch never executes thunks,
-  // so these only need to be callable. Without them, merely evaluating the
-  // import throws a mock-missing error and the pipeline takes its exceptional
-  // double-failure path (rebase + toast) instead of the normal empty-window
-  // path — a mock-completeness gap, not production behavior.
-  loadRouteMessagesThunk: vi.fn(() => ({ type: 'test/loadRouteMessages' })),
-  loadRouteWindowWithFallback: vi.fn(async () => undefined)
-}))
+vi.mock('@renderer/store/thunk/messageThunk', async (importOriginal) => {
+  const actual = (await importOriginal()) as any
+  return {
+    ...actual,
+    updateMessageAndBlocksThunk: vi.fn(),
+    // Restore-pipeline loader stubs: the mocked dispatch never executes thunks,
+    // so these only need to be callable. Without them, merely evaluating the
+    // import throws a mock-missing error and the pipeline takes its exceptional
+    // double-failure path (rebase + toast) instead of the normal empty-window
+    // path — a mock-completeness gap, not production behavior.
+    loadRouteMessagesThunk: vi.fn(() => ({ type: 'test/loadRouteMessages' })),
+    // Deferred receipt: the route pipelines fetch through
+    // `dispatchDeferredRouteWindowRead` without publishing. The default impl
+    // stays void (fail visible, keep snapshot). Proof tests install
+    // `mocks.deferredReadImpl` to delegate to the REAL entry with an executing
+    // dispatch + controlled state; checker/payload are always production code.
+    dispatchDeferredRouteWindowRead: (...args: any[]) => (mocks as any).deferredReadImpl(...args),
+    isDeferredRouteWindowReceiptCurrent: actual.isDeferredRouteWindowReceiptCurrent,
+    toDeferredJointPayload: actual.toDeferredJointPayload
+  }
+})
 
 vi.mock('@renderer/services/anchorService', () => ({
   buildGroupList: vi.fn(() => []),
@@ -592,17 +608,23 @@ vi.mock('@renderer/components/Scrollbar', () => ({
   )
 }))
 
-vi.mock('@renderer/config/constant', () => ({
-  LOAD_MORE_COUNT: 20,
-  isDev: false
-}))
+vi.mock('@renderer/config/constant', async (importOriginal) => {
+  const actual = (await importOriginal()) as any
+  return {
+    ...actual,
+    LOAD_MORE_COUNT: 20,
+    isDev: false
+  }
+})
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: mocks.t
-  })
+  }),
+  // Mock-completeness: the real messageThunk graph evaluates i18n/index.ts,
+  // which consumes the init plugin object. Shape mirrors the real export.
+  initReactI18next: { type: '3rdParty', init: () => undefined }
 }))
-
 // Keep styled-components real but mock Scrollbar since it depends on
 // renderer-specific DOM APIs. The styled divs (ScrollContainer, etc.)
 // just render as regular divs.
@@ -2124,5 +2146,211 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
 
     expect(mocks.dispatchMock).not.toHaveBeenCalled()
     expect(pendingTransactionResolvers.length).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Deferred top refresh — REAL mounted proof.
+//
+// Unlike the renderer-local harness, these tests render the actual production
+// Messages component and drive its real top-restore pipeline:
+// - the deferred read is the REAL `dispatchDeferredRouteWindowRead` (executing
+//   dispatch + controlled state; I/O seam only `fetchMessagesWindow`), so the
+//   receipt carries a genuine sync-prefix proof and requestSeq;
+// - currency/payload are the REAL `isDeferredRouteWindowReceiptCurrent` and
+//   `toDeferredJointPayload` (suite mock factory spreads the actual module);
+// - the commit is the component's REAL `commitRouteWindowAtomic` with its REAL
+//   `onPublish` (blocks + rebase dispatched from the production callback;
+//   the action creators stay mocked as recorders, the payload is production).
+// What the fixture cannot show (projection/rows are mocked to []) is claimed
+// only as dispatch order + post-commit DOM target state, never as row content.
+// ---------------------------------------------------------------------------
+describe('deferred top refresh — real mounted proof (production receipt/commit)', () => {
+  beforeEach(() => {
+    mocks.deferredReadImpl.mockReset()
+    mocks.deferredReadImpl.mockImplementation(async () => undefined)
+  })
+
+  function validWindowResponse(
+    req: any,
+    ids: string[],
+    opts: { blocks?: unknown[]; mutableMessageIds?: string[]; reference?: unknown } = {}
+  ) {
+    const messages = ids.map((id) => ({ id }))
+    return {
+      messages,
+      blocks: opts.blocks ?? [],
+      window: {
+        kind: req.kind,
+        completeness: 'window',
+        topicId: req.topicId,
+        anchorMessageId: null,
+        requested: { limit: 10 },
+        firstMessageId: messages.length > 0 ? messages[0].id : null,
+        lastMessageId: messages.length > 0 ? messages[messages.length - 1].id : null,
+        returnedCount: messages.length,
+        hasMoreBefore: true,
+        hasMoreAfter: false
+      },
+      ...(opts.mutableMessageIds !== undefined ? { mutableMessageIds: opts.mutableMessageIds } : {}),
+      ...(opts.reference !== undefined ? { reference: opts.reference } : {})
+    }
+  }
+
+  function controlledState(topicId: string) {
+    return {
+      assistants: { assistants: [{ id: 'asst-1', settings: { contextCount: 5 }, topics: [{ id: topicId }] }] },
+      messages: {
+        entities: {},
+        messageIdsByTopic: { [topicId]: [] },
+        loadingByTopic: {},
+        fulfilledByTopic: {},
+        currentTopicId: topicId,
+        displayCount: 10
+      },
+      messageBlocks: { entities: {} },
+      topicBranch: { branchesByTopic: {}, activeBranchIdByTopic: {}, routeGenerationByTopic: {} },
+      residentRegistry: { entries: {} }
+    } as any
+  }
+
+  function installRealDeferredRead(state: any, seen: any[]) {
+    return mocks.deferredReadImpl.mockImplementation(
+      async (_d: any, _g: any, tid: string, route: string | null, readOpts: any, hooks: any) => {
+        const realMod = await vi.importActual<any>('@renderer/store/thunk/messageThunk')
+        const exec: any = (a: any) => {
+          seen.push(a)
+          if (typeof a === 'function') return a(exec, () => state)
+          return a
+        }
+        return realMod.dispatchDeferredRouteWindowRead(exec, () => state, tid, route, readOpts, hooks)
+      }
+    )
+  }
+
+  it('latest success commits exactly once via the production onPublish (real receipt/checker/payload)', async () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+    const state = controlledState(topicB.id)
+    const seen: any[] = []
+    installRealDeferredRead(state, seen)
+    mocks.fetchMessagesWindow.mockImplementation(async (req: any) =>
+      validWindowResponse(req, ['u1', 'a1'], {
+        blocks: [{ id: 'blk-1', messageId: 'a1' }],
+        mutableMessageIds: ['a1'],
+        reference: { kind: 'branch', source: 's1' }
+      })
+    )
+    mocks.topicMessages = [] as any
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    mocks.dispatchMock.mockClear()
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicB}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await waitFor(() => {
+      const rebases = mocks.dispatchMock.mock.calls
+        .map((c) => c[0])
+        .filter((a) => a?.type === 'newMessages/rebaseRouteMessages' && a?.payload?.topicId === topicB.id)
+      expect(rebases.length).toBe(1)
+    })
+    const calls = mocks.dispatchMock.mock.calls.map((c) => c[0])
+    const rebases = calls.filter((a) => a?.type === 'newMessages/rebaseRouteMessages')
+    // Exactly one joint publish, for the new topic only.
+    expect(rebases.length).toBe(1)
+    const payload = rebases[0].payload
+    expect(payload.topicId).toBe(topicB.id)
+    expect(payload.route).toBeNull()
+    expect([...payload.messages.map((m: any) => m.id)].sort()).toEqual(['a1', 'u1'])
+    expect(payload.mutableMessageIds).toEqual(['a1'])
+    expect(payload.reference).toEqual({ kind: 'branch', source: 's1' })
+    // Same-batch order: blocks first, then the rebase (production onPublish).
+    const blockIdx = calls.findIndex((a) => a?.type === 'messageBlocks/upsertMany')
+    const rebaseIdx = calls.findIndex((a) => a?.type === 'newMessages/rebaseRouteMessages')
+    expect(blockIdx).toBeGreaterThanOrEqual(0)
+    expect(rebaseIdx).toBeGreaterThan(blockIdx)
+    // The deferred read itself published nothing: zero store writes on the
+    // executing dispatch path (real deferPublish guarantee).
+    expect(seen.filter((a) => a?.type === 'newMessages/rebaseRouteMessages').length).toBe(0)
+    expect(seen.filter((a) => a?.type === 'messageBlocks/upsertManyBlocks').length).toBe(0)
+    // Post-commit DOM belongs to the new target (projection rows stay mocked).
+    expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicB.id)
+  })
+
+  it('read pending across a topic switch commits nothing for the old response (no old data)', async () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+    const state = controlledState(topicB.id)
+    const seen: any[] = []
+    installRealDeferredRead(state, seen)
+    let resolveRead: ((v: any) => void) | null = null
+    const gated = new Promise<any>((r) => {
+      resolveRead = r
+    })
+    mocks.fetchMessagesWindow.mockImplementationOnce(() => gated)
+    mocks.topicMessages = [] as any
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    mocks.dispatchMock.mockClear()
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicB}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await act(async () => {})
+    // Switch back while the B read is still pending, then resolve it late.
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    await act(async () => {
+      resolveRead?.(validWindowResponse({ kind: 'latest', topicId: topicB.id }, ['stale-b'], {}))
+    })
+    await act(async () => {})
+    const calls = mocks.dispatchMock.mock.calls.map((c) => c[0])
+    const rebases = calls.filter((a) => a?.type === 'newMessages/rebaseRouteMessages')
+    // The late B response committed nothing: no rebase, no stale ids.
+    expect(rebases.length).toBe(0)
+    expect(JSON.stringify(calls)).not.toContain('stale-b')
+    expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicA.id)
   })
 })

@@ -200,7 +200,13 @@ vi.mock('@renderer/store/messageBlock', () => ({
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   updateMessageAndBlocksThunk: vi.fn(),
   loadRouteMessagesThunk: vi.fn(() => ({ type: 'test/loadRouteMessages' })),
-  loadRouteWindowWithFallback: vi.fn(async () => undefined)
+  // Deferred receipt stubs: the route pipelines fetch through
+  // `dispatchDeferredRouteWindowRead` without publishing. A void return
+  // reproduces the void-read path (fail visible, keep snapshot) instead of
+  // the mock-missing exceptional path.
+  dispatchDeferredRouteWindowRead: vi.fn(async () => undefined),
+  isDeferredRouteWindowReceiptCurrent: vi.fn(() => false),
+  toDeferredJointPayload: vi.fn(() => ({ blocks: [], messages: [], mutableMessageIds: [], reference: null }))
 }))
 vi.mock('@renderer/services/anchorService', () => ({
   buildGroupList: vi.fn(() => []),
