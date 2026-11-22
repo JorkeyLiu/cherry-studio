@@ -1,0 +1,32 @@
+diff --git a/es/Dom/dynamicCSS.js b/es/Dom/dynamicCSS.js
+index 8ddec00f7cbb971b1f8267c965cef95f886991a2..9fcb70ecd26e98b2b366c566e62322553a6798c1 100644
+--- a/es/Dom/dynamicCSS.js
++++ b/es/Dom/dynamicCSS.js
+@@ -31,8 +31,9 @@ function getOrder(prepend) {
+  * Find style which inject by rc-util
+  */
+ function findStyles(container) {
+-  return Array.from((containerCache.get(container) || container).children).filter(function (node) {
+-    return node.tagName === 'STYLE';
++  var realContainer = containerCache.get(container) || container;
++  return Array.from(realContainer.querySelectorAll('style')).filter(function (node) {
++    return node.parentNode === realContainer && node.tagName === 'STYLE';
+   });
+ }
+ export function injectCSS(css) {
+diff --git a/lib/Dom/dynamicCSS.js b/lib/Dom/dynamicCSS.js
+index 95a5191f16583aefc5d3e094e7b6560f89b43afa..9a34b2f2c1a8e3f7ce3602828243edb13d70ed97 100644
+--- a/lib/Dom/dynamicCSS.js
++++ b/lib/Dom/dynamicCSS.js
+@@ -41,8 +41,9 @@ function getOrder(prepend) {
+  * Find style which inject by rc-util
+  */
+ function findStyles(container) {
+-  return Array.from((containerCache.get(container) || container).children).filter(function (node) {
+-    return node.tagName === 'STYLE';
++  var realContainer = containerCache.get(container) || container;
++  return Array.from(realContainer.querySelectorAll('style')).filter(function (node) {
++    return node.parentNode === realContainer && node.tagName === 'STYLE';
+   });
+ }
+ function injectCSS(css) {

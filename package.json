@@ -484,7 +484,8 @@
       "@ai-sdk/google@3.0.64": "patches/@ai-sdk__google@3.0.64.patch",
       "@ai-sdk/anthropic": "patches/@ai-sdk__anthropic.patch",
       "@cherrystudio/embedjs-loader-web@0.1.31": "patches/@cherrystudio__embedjs-loader-web@0.1.31.patch",
-      "builder-util@26.8.1": "patches/builder-util@26.8.1.patch"
+      "builder-util@26.8.1": "patches/builder-util@26.8.1.patch",
+      "rc-util@5.44.4": "patches/rc-util@5.44.4.patch"
     },
     "onlyBuiltDependencies": [
       "@j178/prek",
