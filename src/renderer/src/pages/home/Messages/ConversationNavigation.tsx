@@ -52,8 +52,8 @@ interface ConversationNavigationProps {
  * prefix (sequential labels in original block order, joined directly with
  * the body — no added space/dot/count); a no-body (or quote-only) message
  * with attachments keeps a navigable stable-ID row with a meaningful
- * attachment label; quote-only without attachments keeps the localized
- * fallback.
+ * attachment label; quote-only without attachments keeps the bracketed
+ * localized fallback (e.g. `[引用消息]`).
  */
 export const buildConversationNavItems = (
   messages: Message[],
@@ -112,7 +112,9 @@ const resolveOutlineRowId = (
 
 const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, readingAnchor, onNavigate }) => {
   const { t } = useTranslation()
-  const fallback = t('chat.navigation.user_message_fallback')
+  // Bracketed quote-only placeholder (locales stay raw — same wrap-at-call-site
+  // convention as attachment kind labels); mixed text+quote previews pass through.
+  const fallback = `[${t('chat.navigation.user_message_fallback')}]`
   // Localized link word for in-place external-link replacement in body
   // previews (the pure preview module interpolates nothing itself).
   const linkLabel = t('chat.navigation.user_message_link')

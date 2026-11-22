@@ -38,6 +38,7 @@ import styled from 'styled-components'
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
 import ConversationNavigation from './Messages/ConversationNavigation'
+import { NAV_GUTTER_WIDTH_PX } from './Messages/MessageOutline'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
 import Tabs from './Tabs'
 
@@ -62,6 +63,30 @@ const Chat: FC<Props> = (props) => {
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
+  // Gutter-strip wheel: the nav gutter below is this row's own padding (only
+  // while the navigator is mounted), so a wheel parked over the strip
+  // (outside the rail's halo) lands on this host instead of the chat
+  // scroller. Forward it to #messages so the strip keeps the scroll behavior
+  // the full-width message boxes used to give it. Wheels bubbling up from
+  // message content already scrolled natively and are left alone (target
+  // check), so nothing scrolls twice. Pinch-zoom gestures are never
+  // forwarded; line/page wheel modes are normalized to pixels (16px per
+  // line, one viewport per page) and both axes are forwarded.
+  const handleNavGutterWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return
+    if (event.ctrlKey || event.metaKey) return
+    const scroller = event.currentTarget.querySelector('#messages')
+    if (!scroller) return
+    let { deltaX, deltaY } = event
+    if (event.deltaMode === 1) {
+      deltaX *= 16
+      deltaY *= 16
+    } else if (event.deltaMode === 2) {
+      deltaX *= scroller.clientHeight
+      deltaY *= scroller.clientHeight
+    }
+    scroller.scrollBy({ left: deltaX, top: deltaY })
+  }
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
   const [readingAnchor, setReadingAnchor] = useState<ReadingAnchorReport | null>(null)
   // S3.5: ContentSearch is parent-owned lazy activation — zero instance before invocation.
@@ -386,7 +411,29 @@ const Chat: FC<Props> = (props) => {
             <div
               className="flex flex-1 flex-col justify-between"
               style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-              <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+              {/*
+                 Nav/content layer boundary (single contract, no per-component
+                 z-fix). While the navigator is mounted the message column is
+                 offset by the nav gutter as this row's own padding, so no
+                 message box ever covers the rail strip; the overlay nav sorts
+                 before the column with no layer of its own while collapsed, so
+                 sibling order paints all ordinary content above it (overlapping
+                 pixels hit the message, only the exposed rail hovers) and its
+                 expanded panel rises above content by its own rule. The gutter
+                 strip belongs to this host's box (below the overlay), with
+                 wheel forwarded so the strip keeps scrolling the chat. With
+                 navigation off there is no padding and no forwarder: native
+                 content width is restored and no dead indent remains.
+               */}
+              <div
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  flex: 1,
+                  minHeight: 0,
+                  paddingLeft: messageNavigation ? NAV_GUTTER_WIDTH_PX : 0
+                }}
+                onWheel={messageNavigation ? handleNavGutterWheel : undefined}>
                 {messageNavigation && (
                   <ConversationNavigation
                     topicId={props.activeTopic.id}

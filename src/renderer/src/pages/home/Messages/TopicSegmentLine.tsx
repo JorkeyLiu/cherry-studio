@@ -1083,13 +1083,13 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
 const GroupHeaderRow = styled.div`
   position: relative;
   height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
-  // Local layer contract with conversation navigation: the Chat host that
-  // stacks Messages vs nav is a positioned (relative, z-auto) flex row, so
-  // sibling paint order follows this explicit z. The nav body paints at
-  // z999; the group header sits above it (z1000) while staying below antd
-  // portal overlays (popover ~1030); ordinary message bodies (z auto) paint
-  // below it. Geometric hit containment (this row pointer-events:none, only
-  // pill + rail target auto) keeps group hover from entering the nav body.
+  // Local content layer only: this header paints above the ordinary message
+  // rows it labels (z1000, below antd portal overlays ~1030). It takes no
+  // part in the nav contract — the Chat row's sibling order already keeps
+  // all message content above the collapsed nav rail, and the expanded nav
+  // panel covers this header. Geometric hit containment (this row
+  // pointer-events:none, only pill + rail target auto) keeps group hover
+  // tight to its own chrome.
   z-index: 1000;
   pointer-events: none;
   // Out-of-flow paint must not be clipped: the rail spans the group's rows

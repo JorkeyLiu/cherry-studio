@@ -99,13 +99,14 @@ const EXPAND_SETTLE_DELAY_MS = EXPAND_TRANSITION_MS + EXPAND_SETTLE_SLACK_MS
  */
 const RAIL_CONTENT_WIDTH_PX = 18
 /**
- * The navigation gutter the reading area reserves on its left — the chat column
- * and its footer are pushed right by exactly `NAV_GUTTER_WIDTH_PX` — and the
- * container's own inset inside it. The strip is layout only: the thing the
- * pointer answers to is the body's halo below, so the gutter well above or below
- * the rail stays conversation territory.
+ * The navigation gutter the reading area reserves on its left: the Chat
+ * message row owns it as real layout space (its own padding), so the chat
+ * column starts right of it and no message box ever covers the rail strip.
+ * The strip itself belongs to the row host's own box, which paints below
+ * this overlay, so only the exposed rail answers the pointer there. Gutter
+ * regions well above or below the rail stay conversation territory.
  */
-const NAV_GUTTER_WIDTH_PX = 46
+export const NAV_GUTTER_WIDTH_PX = 46
 const NAV_GUTTER_INSET_PX = 10
 /**
  * The outline's hover halo: how far the pointer surface reaches past the body's
@@ -847,6 +848,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   return (
     <MessageOutlineContainer
       data-testid="conversation-navigation"
+      data-expanded={expanded ? 'true' : 'false'}
       onMouseEnter={handleSurfaceMouseEnter}
       onMouseLeave={handleSurfaceMouseLeave}>
       {/*
@@ -951,23 +953,30 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
 
 const MessageOutlineContainer = styled.div`
   position: absolute;
-  // Left-edge inset reserves the segment group-label lane: the label pill
-  // (LineContainer left:-12, TabContainer max-width 280, z1000) sits above
-  // the nav layer (z999), so hover on the pill itself still never expands the
-  // nav. The body's halo reaches back over this inset by its own negative
-  // margin, and only the pill's own box, which is painted above it, is excluded.
+  // Left-edge inset positions the rail clear of the row host's edge; the
+  // body's halo reaches back over this inset by its own negative margin.
+  // The segment group-label pill (content context, later in DOM) paints
+  // above the collapsed rail by sibling order, so hover on the pill itself
+  // still never expands the nav.
   inset: 0 0 0 ${NAV_GUTTER_INSET_PX}px;
-  z-index: 999;
+  // Single boundary layer contract, driven by the same expanded state the
+  // body projects onto data-expanded. The Chat message row stacks this
+  // overlay before its message column with no explicit layer while
+  // collapsed, so sibling paint order puts EVERY ordinary message box above
+  // the rail: overlapping pixels hit the message, and only the exposed rail
+  // strip (kept clear by the row's gutter padding) answers the pointer.
+  // Expanded the container rises to just above message content (z1001,
+  // covering group chrome and fold summaries) while staying below the
+  // drawer layers (1004/1005) and antd portal overlays (popover ~1030).
+  // No per-component raise, no invisible hover plane: the gutter does the
+  // separation, this one rule does the layering.
   pointer-events: none;
   user-select: none;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  & ~ .message-content-container {
-    padding-left: ${NAV_GUTTER_WIDTH_PX}px !important;
-  }
-  & ~ .MessageFooter {
-    margin-left: ${NAV_GUTTER_WIDTH_PX}px !important;
+  &[data-expanded='true'] {
+    z-index: 1001;
   }
 `
 

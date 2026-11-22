@@ -1604,10 +1604,6 @@ describe('MessageOutline navigation hover halo', () => {
       expect(zoneRule).not.toContain(declaration)
     }
     expect(body.getAttribute('data-expanded')).toBe('false')
-    // The chat column and its footer keep the same reserved strip.
-    const norm = normalizedCss()
-    expect(norm).toContain('padding-left:46px!important')
-    expect(norm).toContain('margin-left:46px!important')
   })
 
   it('expands from the halo alone and treats the halo and the panel as one surface', () => {

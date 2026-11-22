@@ -303,10 +303,10 @@ describe('ConversationNavigation whole-route user list', () => {
 
     const quoteItem = await screen.findByTestId('conversation-nav-item-uq')
     const attachItem = await screen.findByTestId('conversation-nav-item-ua')
-    // Quote-only without attachments keeps the localized message fallback;
-    // a typeless file-only row with no classifiable ext reads the generic
-    // fallback — filenames are never shown.
-    expect(quoteItem.textContent).toContain('Quoted message')
+    // Quote-only without attachments keeps the bracketed localized message
+    // fallback; a typeless file-only row with no classifiable ext reads the
+    // generic fallback — filenames are never shown.
+    expect(quoteItem.textContent).toContain('[Quoted message]')
     expect(attachItem.textContent).toContain('[Attachment]')
     expect(attachItem.textContent).not.toContain('doc.pdf')
 
