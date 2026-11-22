@@ -1377,30 +1377,36 @@ export class ChatDbAggregateService {
         // Cross-topic history reference metadata (null for ordinary topics).
         // Resolved once in this same snapshot; drives both the reference-aware
         // route projection (in-memory path) and the response metadata.
+        // Cross-topic history reference metadata (null for ordinary topics).
+        // Resolved once in this same snapshot from the canonical route
+        // structure (point lookups + tuple bounds, no prefix materialization);
+        // drives both the bounded window reads and the response metadata.
+        const windowBranchId = this.normalizeBranchId(request.branchId)
         const referenceChain: ReferenceChainPlan[] = []
-        const referenceBase = this.resolveReferenceBaseInTx(
+        const windowRouteStruct = this.resolveRouteSegmentsInTx(
           repos,
           request.topicId,
+          windowBranchId,
           new Set<string>(),
           0,
           undefined,
           referenceChain
         )
-        let referenceMeta: HistoryReferenceMeta | null = referenceBase.reference
+        let referenceMeta: HistoryReferenceMeta | null = windowRouteStruct.reference
           ? {
-              sourceTopicId: referenceBase.reference.sourceTopicId,
-              sourceBranchId: referenceBase.reference.sourceBranchId,
-              anchorMessageId: referenceBase.reference.anchorMessageId,
-              sourceName: repos.topics.getById(referenceBase.reference.sourceTopicId).found
-                ? (repos.topics.getById(referenceBase.reference.sourceTopicId).data?.name ?? null)
+              sourceTopicId: windowRouteStruct.reference.sourceTopicId,
+              sourceBranchId: windowRouteStruct.reference.sourceBranchId,
+              anchorMessageId: windowRouteStruct.reference.anchorMessageId,
+              sourceName: repos.topics.getById(windowRouteStruct.reference.sourceTopicId).found
+                ? (repos.topics.getById(windowRouteStruct.reference.sourceTopicId).data?.name ?? null)
                 : null,
-              status: referenceBase.status === 'available' ? 'available' : 'missing',
-              // Last materialized foreign-prefix message: the captured endpoint
-              // itself while it composes the source route, otherwise the nearest
-              // surviving predecessor (same inheritance-boundary rule).
+              status: windowRouteStruct.status === 'available' ? 'available' : 'missing',
+              // Nearest-layer boundary without reading the prefix: the depth-0
+              // chain plan carries the same endpoint-or-predecessor boundary
+              // the materialized prefix tail used to report.
               boundaryMessageId:
-                referenceBase.status === 'available' && referenceBase.messages.length > 0
-                  ? referenceBase.messages[referenceBase.messages.length - 1].id
+                windowRouteStruct.status === 'available'
+                  ? (referenceChain.find((p) => p.depth === 0)?.boundaryMessageId ?? null)
                   : null
             }
           : null
@@ -1408,28 +1414,9 @@ export class ChatDbAggregateService {
         type WindowMessage = MessageData
         type WindowGroup = { semanticKey: string; start: number; end: number }
         const WINDOW_SCAN_CHUNK = 256
-        const keyFor = (m: WindowMessage): string => {
-          const askId = (m as unknown as { askId: string | null }).askId
-          if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
-            return `assistant:${askId}`
-          }
-          return `message:${m.role ?? ''}:${m.id}`
-        }
-        const computeGroups = (msgs: WindowMessage[]): WindowGroup[] => {
-          if (msgs.length === 0) return []
-          const groups: WindowGroup[] = []
-          let curKey = keyFor(msgs[0])
-          let curStart = 0
-          for (let i = 1; i < msgs.length; i++) {
-            const k = keyFor(msgs[i])
-            if (k === curKey) continue
-            groups.push({ semanticKey: curKey, start: curStart, end: i - 1 })
-            curKey = k
-            curStart = i
-          }
-          groups.push({ semanticKey: curKey, start: curStart, end: msgs.length - 1 })
-          return groups
-        }
+        const keyFor = (m: WindowMessage): string => this.windowGroupKeyOf(m)
+        const computeGroups = (msgs: WindowMessage[]): WindowGroup[] =>
+          this.computeRouteWindowGroups(msgs) as WindowGroup[]
         const buildWindowResponse = (
           windowMessages: WindowMessage[],
           meta: {
@@ -1477,24 +1464,24 @@ export class ChatDbAggregateService {
           }
         }
 
-        // Branch-route OR reference-target window path: the effective route
-        // (reference base + shared prefix through each anchor + owned suffix)
-        // is resolved once, then windowed in memory with identical group
-        // semantics and completeness contracts. Stable IDs preserved; no
-        // renderer splicing. Ordinary main routes keep the SQL-level path below.
-        const windowBranchId = this.normalizeBranchId(request.branchId)
+        // Branch-route OR reference-target window path: bounded virtual-route
+        // scans over the canonical ordered owner segments (same truncation as
+        // full materialization, no `listByTopic` full reads). Group semantics,
+        // anchor NOT_FOUND, hasMore and metadata contracts match the main
+        // bounded path and the previous in-memory windowing. Stable IDs
+        // preserved; no renderer splicing.
         if (windowBranchId !== null || referenceMeta !== null) {
-          const effective = this.resolveRouteMessagesInTx(repos, request.topicId, windowBranchId).messages
+          const segments = windowRouteStruct.segments
           if (referenceMeta) {
             // Materialized reference layers for the ADDRESSED route: the
             // resolved source chain (nearest relation first) is clipped at the
             // first layer whose own boundary message is not part of this
-            // route's history. A downstream endpoint that truncates an
+            // route's history (segment membership + point lookups, never a
+            // full effective read). A downstream endpoint that truncates an
             // upstream layer therefore reports no divider for it (never a
             // fabricated upstream boundary), while a layer whose boundary is
             // simply outside the returned window stays reported so the
             // renderer can defer it until pagination loads it.
-            const materialized = new Set(effective.map((m) => m.id))
             const chain = [...referenceChain].sort((a, b) => a.depth - b.depth)
             const layers: HistoryReferenceChainLayer[] = [
               {
@@ -1510,7 +1497,7 @@ export class ChatDbAggregateService {
             if (referenceMeta.status === 'available') {
               for (const plan of chain) {
                 if (plan.depth === 0) continue
-                if (!materialized.has(plan.boundaryMessageId)) break
+                if (!this.isMessageInRouteSegmentsInTx(repos, segments, plan.boundaryMessageId)) break
                 layers.push({
                   targetTopicId: plan.targetTopicId,
                   sourceTopicId: plan.sourceTopicId,
@@ -1525,14 +1512,61 @@ export class ChatDbAggregateService {
               // addressed route truncates the whole foreign prefix, the chain
               // is not reported at all (the top-level relation metadata stays
               // authoritative for the renderer's existing fallback placement).
-              if (layers.length > 1 && !materialized.has(layers[0].boundaryMessageId as string)) {
+              if (
+                layers.length > 1 &&
+                (layers[0].boundaryMessageId === null ||
+                  !this.isMessageInRouteSegmentsInTx(repos, segments, layers[0].boundaryMessageId))
+              ) {
                 layers.length = 0
               }
             }
             if (layers.length > 0) referenceMeta = { ...referenceMeta, layers }
           }
           if (request.kind === 'latest') {
-            if (effective.length === 0) {
+            let acc: WindowMessage[] = []
+            let reachedStart = false
+            for (;;) {
+              let page: WindowMessage[]
+              if (acc.length === 0) {
+                page = this.readRouteTailBackwardInTx(repos, segments, WINDOW_SCAN_CHUNK)
+              } else {
+                const head = acc[0]
+                const headSegIdx = this.segmentIndexOfOwner(segments, head.topicId, head.branchId ?? null)
+                if (headSegIdx === -1)
+                  throw new ChatDbNotFoundError(`Anchor message ${head.id} does not belong to topic ${request.topicId}`)
+                page = this.readRouteBackwardBeforeInTx(
+                  repos,
+                  segments,
+                  headSegIdx,
+                  head.sortOrder,
+                  head.id,
+                  WINDOW_SCAN_CHUNK
+                )
+              }
+              if (page.length === 0) {
+                reachedStart = true
+                break
+              }
+              acc = [...page, ...acc]
+              const head = acc[0]
+              const headSegIdx = this.segmentIndexOfOwner(segments, head.topicId, head.branchId ?? null)
+              if (headSegIdx === -1)
+                throw new ChatDbNotFoundError(`Anchor message ${head.id} does not belong to topic ${request.topicId}`)
+              const groups = computeGroups(acc)
+              if (groups.length > request.limit) break
+              if (page.length < WINDOW_SCAN_CHUNK) {
+                reachedStart = true
+                break
+              }
+              if (groups.length < request.limit) continue
+              const pred = this.effectivePredecessorOfInTx(repos, segments, headSegIdx, head.sortOrder, head.id)
+              if (pred === null) {
+                reachedStart = true
+                break
+              }
+              if (keyFor(pred) !== groups[0].semanticKey) break
+            }
+            if (acc.length === 0) {
               return buildWindowResponse([], {
                 kind: 'latest',
                 anchorMessageId: null,
@@ -1541,49 +1575,192 @@ export class ChatDbAggregateService {
                 hasMoreAfter: false
               })
             }
-            const groups = computeGroups(effective)
-            const startGroupIdx = request.limit >= groups.length ? 0 : groups.length - request.limit
-            const windowMessages = effective.slice(groups[startGroupIdx].start)
+            const groups = computeGroups(acc)
+            const totalGroups = groups.length
+            let startGroupIdx: number
+            if (request.limit >= totalGroups) startGroupIdx = 0
+            else startGroupIdx = totalGroups - request.limit
+            const windowMessages = acc.slice(groups[startGroupIdx].start)
+            let hasMoreBefore: boolean
+            if (startGroupIdx > 0) {
+              hasMoreBefore = true
+            } else if (reachedStart) {
+              hasMoreBefore = false
+            } else {
+              const head = acc[0]
+              const headSegIdx = this.segmentIndexOfOwner(segments, head.topicId, head.branchId ?? null)
+              hasMoreBefore =
+                headSegIdx !== -1 &&
+                this.effectivePredecessorOfInTx(repos, segments, headSegIdx, head.sortOrder, head.id) !== null
+            }
             return buildWindowResponse(windowMessages, {
               kind: 'latest',
               anchorMessageId: null,
               requested: { limit: request.limit },
-              hasMoreBefore: startGroupIdx > 0,
+              hasMoreBefore,
               hasMoreAfter: false
             })
           }
-          const anchorIdx = effective.findIndex((m) => m.id === request.anchorMessageId)
-          if (anchorIdx === -1) {
+          const located = this.locateWindowAnchorInTx(repos, segments, request.anchorMessageId)
+          if (located === null) {
             throw new ChatDbNotFoundError(
               `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
             )
           }
-          const anchorMsg = effective[anchorIdx]
+          const anchorMsg = located.anchor
           const anchorKey = keyFor(anchorMsg)
-          const backSlice = effective.slice(0, anchorIdx)
-          const fwdSlice = effective.slice(anchorIdx + 1)
-          const backGroups = computeGroups(backSlice)
+          let backAcc: WindowMessage[] = []
+          let backSegIdx = located.segIdx
+          let backCursor = { sortOrder: anchorMsg.sortOrder, id: anchorMsg.id }
+          let reachedBackStart = false
+          for (;;) {
+            const page = this.readRouteBackwardBeforeInTx(
+              repos,
+              segments,
+              backSegIdx,
+              backCursor.sortOrder,
+              backCursor.id,
+              WINDOW_SCAN_CHUNK
+            )
+            if (page.length === 0) {
+              reachedBackStart = true
+              break
+            }
+            backAcc = [...page, ...backAcc]
+            const head = backAcc[0]
+            const headSegIdx = this.segmentIndexOfOwner(segments, head.topicId, head.branchId ?? null)
+            if (headSegIdx === -1)
+              throw new ChatDbNotFoundError(`Anchor message ${head.id} does not belong to topic ${request.topicId}`)
+            backSegIdx = headSegIdx
+            backCursor = { sortOrder: head.sortOrder, id: head.id }
+            const backGroups = computeGroups(backAcc)
+            const mergedWithAnchor =
+              backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
+            const beyondCount = backGroups.length - (mergedWithAnchor ? 1 : 0)
+            if (beyondCount > request.before) break
+            if (page.length < WINDOW_SCAN_CHUNK) {
+              reachedBackStart = true
+              break
+            }
+            if (beyondCount < request.before) continue
+            const pred = this.effectivePredecessorOfInTx(
+              repos,
+              segments,
+              backSegIdx,
+              backCursor.sortOrder,
+              backCursor.id
+            )
+            if (pred === null) {
+              reachedBackStart = true
+              break
+            }
+            if (keyFor(pred) !== backGroups[0].semanticKey) break
+          }
+          let fwdAcc: WindowMessage[] = []
+          let fwdSegIdx = located.segIdx
+          let fwdCursor = { sortOrder: anchorMsg.sortOrder, id: anchorMsg.id }
+          let reachedFwdEnd = false
+          for (;;) {
+            const page = this.readRouteForwardAfterInTx(
+              repos,
+              segments,
+              fwdSegIdx,
+              fwdCursor.sortOrder,
+              fwdCursor.id,
+              WINDOW_SCAN_CHUNK
+            )
+            if (page.length === 0) {
+              reachedFwdEnd = true
+              break
+            }
+            fwdAcc = [...fwdAcc, ...page]
+            const tail = fwdAcc[fwdAcc.length - 1]
+            const tailSegIdx = this.segmentIndexOfOwner(segments, tail.topicId, tail.branchId ?? null)
+            if (tailSegIdx === -1)
+              throw new ChatDbNotFoundError(`Anchor message ${tail.id} does not belong to topic ${request.topicId}`)
+            fwdSegIdx = tailSegIdx
+            fwdCursor = { sortOrder: tail.sortOrder, id: tail.id }
+            const fwdGroups = computeGroups(fwdAcc)
+            const mergedWithAnchor = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
+            const beyondCount = fwdGroups.length - (mergedWithAnchor ? 1 : 0)
+            if (beyondCount > request.after) break
+            if (page.length < WINDOW_SCAN_CHUNK) {
+              reachedFwdEnd = true
+              break
+            }
+            if (beyondCount < request.after) continue
+            const succ = this.effectiveSuccessorOfInTx(repos, segments, fwdSegIdx, fwdCursor.sortOrder, fwdCursor.id)
+            if (succ === null) {
+              reachedFwdEnd = true
+              break
+            }
+            if (keyFor(succ) !== fwdGroups[fwdGroups.length - 1].semanticKey) break
+          }
+          const backGroups = computeGroups(backAcc)
           const backMerged = backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
           const backBeyond = backMerged ? backGroups.slice(0, -1) : backGroups
           const backStartGroupIdx = Math.max(0, backBeyond.length - request.before)
-          // No beyond group on a side ⇒ every row on that side of the anchor
+          // No beyond group on a side => every row on that side of the anchor
           // belongs to the anchor's own group, so the whole slice must be kept
           // (the anchor group is always returned complete). A non-empty beyond
           // set means the retained frontier group is the first complete
           // beyond-group, never a partial one.
           const backStartMsgIdx = backBeyond.length === 0 ? 0 : backBeyond[backStartGroupIdx].start
-          const fwdGroups = computeGroups(fwdSlice)
+          const fwdGroups = computeGroups(fwdAcc)
           const fwdMerged = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
           const fwdBeyond = fwdMerged ? fwdGroups.slice(1) : fwdGroups
           const fwdEndGroupIdx = Math.min(fwdBeyond.length - 1, request.after - 1)
-          const fwdEndExclusive = fwdBeyond.length === 0 ? fwdSlice.length : fwdBeyond[fwdEndGroupIdx].end + 1
-          const windowMessages = [...backSlice.slice(backStartMsgIdx), anchorMsg, ...fwdSlice.slice(0, fwdEndExclusive)]
+          const fwdEndExclusive = fwdBeyond.length === 0 ? fwdAcc.length : fwdBeyond[fwdEndGroupIdx].end + 1
+          const windowMessages: WindowMessage[] = [
+            ...backAcc.slice(backStartMsgIdx),
+            anchorMsg,
+            ...fwdAcc.slice(0, fwdEndExclusive)
+          ]
+          let hasMoreBefore: boolean
+          if (backBeyond.length > request.before) {
+            hasMoreBefore = true
+          } else if (windowMessages.length === 0) {
+            hasMoreBefore = false
+          } else if (backStartMsgIdx > 0) {
+            hasMoreBefore = true
+          } else if (backAcc.length === 0) {
+            hasMoreBefore =
+              this.effectivePredecessorOfInTx(repos, segments, located.segIdx, anchorMsg.sortOrder, anchorMsg.id) !==
+              null
+          } else if (reachedBackStart) {
+            hasMoreBefore = false
+          } else {
+            const start = windowMessages[0]
+            const startSegIdx = this.segmentIndexOfOwner(segments, start.topicId, start.branchId ?? null)
+            hasMoreBefore =
+              startSegIdx !== -1 &&
+              this.effectivePredecessorOfInTx(repos, segments, startSegIdx, start.sortOrder, start.id) !== null
+          }
+          let hasMoreAfter: boolean
+          if (fwdBeyond.length > request.after) {
+            hasMoreAfter = true
+          } else if (windowMessages.length === 0) {
+            hasMoreAfter = false
+          } else if (fwdEndExclusive < fwdAcc.length) {
+            hasMoreAfter = true
+          } else if (fwdAcc.length === 0) {
+            hasMoreAfter =
+              this.effectiveSuccessorOfInTx(repos, segments, located.segIdx, anchorMsg.sortOrder, anchorMsg.id) !== null
+          } else if (reachedFwdEnd) {
+            hasMoreAfter = false
+          } else {
+            const end = windowMessages[windowMessages.length - 1]
+            const endSegIdx = this.segmentIndexOfOwner(segments, end.topicId, end.branchId ?? null)
+            hasMoreAfter =
+              endSegIdx !== -1 &&
+              this.effectiveSuccessorOfInTx(repos, segments, endSegIdx, end.sortOrder, end.id) !== null
+          }
           return buildWindowResponse(windowMessages, {
             kind: 'around',
             anchorMessageId: request.anchorMessageId,
             requested: { before: request.before, after: request.after },
-            hasMoreBefore: backStartMsgIdx > 0,
-            hasMoreAfter: fwdEndExclusive < fwdSlice.length
+            hasMoreBefore,
+            hasMoreAfter
           })
         }
 
@@ -11305,6 +11482,488 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Canonical effective-route structure (bounded window foundation).
+   *
+   * Minimal algorithm: an effective route is an ORDERED list of owner
+   * segments `(topicId, branchId)` with per-segment tuple upper bounds. Each
+   * owner appears at most once; segment order is route order; rows inside a
+   * segment compose in `(sortOrder, id)` ASC. A `null` upper means the full
+   * owner suffix; a message id upper means the inherited/reference prefix
+   * through that endpoint inclusive. Cross-segment tuples are incomparable —
+   * membership is owner equality plus a within-segment tuple compare only.
+   *
+   * Invariants (single truncation rule, shared by full and window reads):
+   * - Structure is decided by point lookups (branch path, reference rows,
+   *   anchor/getById rows) plus tuple compares — never by `listByTopic`
+   *   full scans. No cross-request cache: segments live for one tx only.
+   * - Truncation (`truncateRouteSegmentsToBoundaryInTx`): a live anchor
+   *   truncates its owner segment to itself and drops later segments; an
+   *   anchor beyond a truncated upper keeps the upper and drops later
+   *   segments; a missing anchor row or an anchor whose owner composes no
+   *   segment yields no boundary (empty inheritance). Anchor-row deletion
+   *   therefore inherits nothing; survival+boundary-advance is owned by the
+   *   existing delete maintenance before rows disappear.
+   * - Owner segments always start at the owner head, so a surviving anchor
+   *   of that owner is never before the segment head; the tuple compare
+   *   alone decides membership. Equal/duplicate legacy `sortOrder` ties
+   *   compare by `(sortOrder, id)` strictly inside one segment.
+   * - Full materialization (`materializeRouteSegmentsInTx`) reads each
+   *   segment through the same bounds (full owner, or `listThrough` prefix),
+   *   so whole/context/answer-group and window reads share one route
+   *   composition. Depth/cycle guards (MAX reference/branch + visited) and
+   *   missing-source (gone/trashed/unresolvable/empty-boundary) prefix
+   *   omission match the previous resolver semantics; metadata `status`
+   *   still reports them.
+   */
+  private compareRouteTuple(aSort: number, aId: string, bSort: number, bId: string): number {
+    if (aSort !== bSort) return aSort < bSort ? -1 : 1
+    if (aId === bId) return 0
+    return aId < bId ? -1 : 1
+  }
+
+  private windowGroupKeyOf(m: MessageData): string {
+    const askId = (m as unknown as { askId: string | null }).askId
+    if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) return `assistant:${askId}`
+    return `message:${m.role ?? ''}:${m.id}`
+  }
+
+  private computeRouteWindowGroups(msgs: MessageData[]): Array<{ semanticKey: string; start: number; end: number }> {
+    if (msgs.length === 0) return []
+    const groups: Array<{ semanticKey: string; start: number; end: number }> = []
+    let curKey = this.windowGroupKeyOf(msgs[0])
+    let curStart = 0
+    for (let i = 1; i < msgs.length; i++) {
+      const k = this.windowGroupKeyOf(msgs[i])
+      if (k === curKey) continue
+      groups.push({ semanticKey: curKey, start: curStart, end: i - 1 })
+      curKey = k
+      curStart = i
+    }
+    groups.push({ semanticKey: curKey, start: curStart, end: msgs.length - 1 })
+    return groups
+  }
+
+  /** One ordered owner slice of an effective route (see block doc above). */
+  private truncateRouteSegmentsToBoundaryInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    anchorMessageId: string
+  ): {
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+    boundaryMessageId: string
+  } | null {
+    const anchorRow = repos.messages.getById(anchorMessageId)
+    if (!anchorRow.found) return null
+    const anchor = anchorRow.data
+    const anchorOwnerTopic = anchor.topicId
+    const anchorOwnerBranch = anchor.branchId ?? null
+    let segIdx = -1
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i].topicId === anchorOwnerTopic && (segments[i].branchId ?? null) === anchorOwnerBranch) {
+        segIdx = i
+        break
+      }
+    }
+    if (segIdx === -1) return null
+    const seg = segments[segIdx]
+    if (seg.upperMessageId === null) {
+      const next = segments.slice(0, segIdx)
+      next.push({ topicId: seg.topicId, branchId: seg.branchId, upperMessageId: anchorMessageId })
+      return { segments: next, boundaryMessageId: anchorMessageId }
+    }
+    const upperRow = repos.messages.getById(seg.upperMessageId)
+    if (!upperRow.found) return null
+    const upper = upperRow.data
+    const cmp = this.compareRouteTuple(anchor.sortOrder, anchor.id, upper.sortOrder, upper.id)
+    if (cmp <= 0) {
+      const next = segments.slice(0, segIdx)
+      next.push({ topicId: seg.topicId, branchId: seg.branchId, upperMessageId: anchorMessageId })
+      return { segments: next, boundaryMessageId: anchorMessageId }
+    }
+    return { segments: segments.slice(0, segIdx + 1), boundaryMessageId: seg.upperMessageId }
+  }
+
+  private resolveReferenceBaseSegmentsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    visited: Set<string>,
+    depth: number,
+    chainMissing?: ReferenceChainMissingFlag,
+    layersOut?: ReferenceChainPlan[]
+  ): {
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+    reference: TopicReferenceData | null
+    status: 'none' | 'available' | 'missing'
+  } {
+    let refRow: { found: boolean; data?: TopicReferenceData }
+    try {
+      refRow = repos.topicReferences.getByTarget(topicId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message))
+        return { segments: [], reference: null, status: 'none' }
+      throw e
+    }
+    if (!refRow.found || !refRow.data) return { segments: [], reference: null, status: 'none' }
+    const ref = refRow.data
+    if (depth >= MAX_REFERENCE_DEPTH || visited.has(topicId)) {
+      if (chainMissing) chainMissing.missing = true
+      return { segments: [], reference: ref, status: 'missing' }
+    }
+    visited.add(topicId)
+    try {
+      const sourceTopic = repos.topics.getById(ref.sourceTopicId)
+      if (!sourceTopic.found || sourceTopic.data.deletedAt != null) {
+        if (chainMissing) chainMissing.missing = true
+        return { segments: [], reference: ref, status: 'missing' }
+      }
+      let sourceSegments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+      try {
+        sourceSegments = this.resolveRouteSegmentsInTx(
+          repos,
+          ref.sourceTopicId,
+          this.normalizeBranchId(ref.sourceBranchId),
+          visited,
+          depth + 1,
+          chainMissing,
+          layersOut
+        ).segments
+      } catch (e) {
+        if (e instanceof ChatDbNotFoundError) {
+          if (chainMissing) chainMissing.missing = true
+          return { segments: [], reference: ref, status: 'missing' }
+        }
+        throw e
+      }
+      const truncated = this.truncateRouteSegmentsToBoundaryInTx(repos, sourceSegments, ref.anchorMessageId)
+      if (truncated === null) {
+        if (chainMissing) chainMissing.missing = true
+        return { segments: [], reference: ref, status: 'missing' }
+      }
+      layersOut?.push({
+        targetTopicId: topicId,
+        sourceTopicId: ref.sourceTopicId,
+        sourceBranchId: ref.sourceBranchId,
+        anchorMessageId: ref.anchorMessageId,
+        sourceName: sourceTopic.data?.name ?? null,
+        boundaryMessageId: truncated.boundaryMessageId,
+        depth
+      })
+      return { segments: truncated.segments, reference: ref, status: 'available' }
+    } finally {
+      visited.delete(topicId)
+    }
+  }
+
+  private resolveRouteSegmentsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null,
+    visited: Set<string>,
+    depth: number,
+    chainMissing?: ReferenceChainMissingFlag,
+    layersOut?: ReferenceChainPlan[]
+  ): {
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+    reference: TopicReferenceData | null
+    status: 'none' | 'available' | 'missing'
+  } {
+    const base = this.resolveReferenceBaseSegmentsInTx(repos, topicId, visited, depth, chainMissing, layersOut)
+    if (depth >= MAX_REFERENCE_DEPTH) {
+      if (chainMissing) chainMissing.missing = true
+      const owner = this.normalizeBranchId(branchId)
+      if (owner === null)
+        return {
+          segments: [{ topicId, branchId: null, upperMessageId: null }],
+          reference: base.reference,
+          status: base.status === 'none' ? 'none' : 'missing'
+        }
+      const path = this.branchPathInTx(repos, owner)
+      const leaf = path.length > 0 ? path[path.length - 1] : null
+      if (!leaf || leaf.topicId !== topicId)
+        throw new ChatDbNotFoundError(`Branch ${owner} does not exist in topic ${topicId}`)
+      let effective: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }> = [
+        { topicId, branchId: null, upperMessageId: null }
+      ]
+      for (const node of path) {
+        const truncated = this.truncateRouteSegmentsToBoundaryInTx(repos, effective, node.anchorMessageId)
+        const inherited = truncated === null ? [] : truncated.segments
+        effective = [...inherited, { topicId, branchId: node.id, upperMessageId: null }]
+      }
+      return { segments: effective, reference: base.reference, status: base.status === 'none' ? 'none' : 'missing' }
+    }
+    const owner = this.normalizeBranchId(branchId)
+    if (owner === null) {
+      return {
+        segments: [...base.segments, { topicId, branchId: null, upperMessageId: null }],
+        reference: base.reference,
+        status: base.status
+      }
+    }
+    const path = this.branchPathInTx(repos, owner)
+    const leaf = path.length > 0 ? path[path.length - 1] : null
+    if (!leaf || leaf.topicId !== topicId)
+      throw new ChatDbNotFoundError(`Branch ${owner} does not exist in topic ${topicId}`)
+    let effective: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }> = [
+      ...base.segments,
+      { topicId, branchId: null, upperMessageId: null }
+    ]
+    for (const node of path) {
+      const truncated = this.truncateRouteSegmentsToBoundaryInTx(repos, effective, node.anchorMessageId)
+      const inherited = truncated === null ? [] : truncated.segments
+      effective = [...inherited, { topicId, branchId: node.id, upperMessageId: null }]
+    }
+    return { segments: effective, reference: base.reference, status: base.status }
+  }
+
+  private materializeRouteSegmentsInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+  ): MessageData[] {
+    const out: MessageData[] = []
+    for (const seg of segments) {
+      if (seg.upperMessageId === null) {
+        out.push(...repos.messages.listByTopic(seg.topicId, seg.branchId))
+      } else {
+        const upperRow = repos.messages.getById(seg.upperMessageId)
+        if (!upperRow.found) continue
+        const upper = upperRow.data
+        out.push(...repos.messages.listThrough(seg.topicId, upper.sortOrder, upper.id, seg.branchId))
+      }
+    }
+    return out
+  }
+
+  private isMessageInRouteSegmentsInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    messageId: string
+  ): boolean {
+    const row = repos.messages.getById(messageId)
+    if (!row.found) return false
+    const m = row.data
+    for (const seg of segments) {
+      if (seg.topicId !== m.topicId || (seg.branchId ?? null) !== (m.branchId ?? null)) continue
+      if (seg.upperMessageId === null) return true
+      const upperRow = repos.messages.getById(seg.upperMessageId)
+      if (!upperRow.found) return false
+      const upper = upperRow.data
+      return this.compareRouteTuple(m.sortOrder, m.id, upper.sortOrder, upper.id) <= 0
+    }
+    return false
+  }
+
+  /**
+   * Bounded virtual-route scans over ordered owner segments.
+   *
+   * Every helper below reads at most its `limit` rows plus one-row probes
+   * (`getById` / `findPredecessor` / `findSuccessor` / head / tail) per
+   * touched segment, over the existing owner + order index. Cost scales with
+   * route depth/segment count + requested window + one whole pathological
+   * group — never with unrelated history length. Empty segments contribute
+   * nothing and are skipped by probe, never by full read.
+   */
+  private routeSegmentTailInTx(
+    repos: ChatDbRepositories,
+    seg: { topicId: string; branchId: string | null; upperMessageId: string | null }
+  ): MessageData | null {
+    if (seg.upperMessageId !== null) {
+      const upperRow = repos.messages.getById(seg.upperMessageId)
+      return upperRow.found ? upperRow.data : null
+    }
+    const tail = repos.messages.getLatestByTopic(seg.topicId, 1, seg.branchId)
+    return tail.length > 0 ? tail[0] : null
+  }
+
+  private routeSegmentHeadInTx(
+    repos: ChatDbRepositories,
+    seg: { topicId: string; branchId: string | null; upperMessageId: string | null }
+  ): MessageData | null {
+    return repos.messages.getFirstByTopic(seg.topicId, seg.branchId)
+  }
+
+  private locateWindowAnchorInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    anchorMessageId: string
+  ): { segIdx: number; anchor: MessageData } | null {
+    const anchorRow = repos.messages.getById(anchorMessageId)
+    if (!anchorRow.found) return null
+    const anchor = anchorRow.data
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
+      if (seg.topicId !== anchor.topicId || (seg.branchId ?? null) !== (anchor.branchId ?? null)) continue
+      if (seg.upperMessageId === null) return { segIdx: i, anchor }
+      const upperRow = repos.messages.getById(seg.upperMessageId)
+      if (!upperRow.found) return null
+      const upper = upperRow.data
+      if (this.compareRouteTuple(anchor.sortOrder, anchor.id, upper.sortOrder, upper.id) <= 0)
+        return { segIdx: i, anchor }
+      return null
+    }
+    return null
+  }
+
+  private effectivePredecessorOfInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    segIdx: number,
+    sortOrder: number,
+    id: string
+  ): MessageData | null {
+    const seg = segments[segIdx]
+    const pred = repos.messages.findPredecessor(seg.topicId, sortOrder, id, seg.branchId)
+    if (pred !== null) return pred
+    for (let j = segIdx - 1; j >= 0; j--) {
+      const tail = this.routeSegmentTailInTx(repos, segments[j])
+      if (tail !== null) return tail
+    }
+    return null
+  }
+
+  private effectiveSuccessorOfInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    segIdx: number,
+    sortOrder: number,
+    id: string
+  ): MessageData | null {
+    const seg = segments[segIdx]
+    const succ = repos.messages.findSuccessor(seg.topicId, sortOrder, id, seg.branchId)
+    if (succ !== null) {
+      if (seg.upperMessageId === null) return succ
+      const upperRow = repos.messages.getById(seg.upperMessageId)
+      if (upperRow.found) {
+        const upper = upperRow.data
+        if (this.compareRouteTuple(succ.sortOrder, succ.id, upper.sortOrder, upper.id) <= 0) return succ
+      }
+    }
+    for (let j = segIdx + 1; j < segments.length; j++) {
+      const head = this.routeSegmentHeadInTx(repos, segments[j])
+      if (head !== null) {
+        if (segments[j].upperMessageId === null) return head
+        const upperRow = repos.messages.getById(segments[j].upperMessageId as string)
+        if (!upperRow.found) continue
+        const upper = upperRow.data
+        if (this.compareRouteTuple(head.sortOrder, head.id, upper.sortOrder, upper.id) <= 0) return head
+      }
+    }
+    return null
+  }
+
+  private segmentIndexOfOwner(
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    topicId: string,
+    branchId: string | null
+  ): number {
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i].topicId === topicId && (segments[i].branchId ?? null) === branchId) return i
+    }
+    return -1
+  }
+
+  private readRouteTailBackwardInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    limit: number
+  ): MessageData[] {
+    if (limit <= 0 || segments.length === 0) return []
+    let remaining = limit
+    let out: MessageData[] = []
+    for (let j = segments.length - 1; j >= 0 && remaining > 0; j--) {
+      const seg = segments[j]
+      let page: MessageData[]
+      if (seg.upperMessageId === null) {
+        page = repos.messages.getLatestByTopic(seg.topicId, remaining, seg.branchId)
+      } else {
+        const upperRow = repos.messages.getById(seg.upperMessageId)
+        if (!upperRow.found) continue
+        const upper = upperRow.data
+        const before = repos.messages.listBefore(seg.topicId, upper.sortOrder, upper.id, remaining - 1, seg.branchId)
+        page = [...before, upper]
+      }
+      if (page.length === 0) continue
+      out = [...page, ...out]
+      remaining -= page.length
+    }
+    return out
+  }
+
+  private readRouteBackwardBeforeInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    segIdx: number,
+    sortOrder: number,
+    id: string,
+    limit: number
+  ): MessageData[] {
+    if (limit <= 0) return []
+    let remaining = limit
+    let out: MessageData[] = []
+    for (let j = segIdx; j >= 0 && remaining > 0; j--) {
+      const seg = segments[j]
+      let page: MessageData[]
+      if (j === segIdx) {
+        page = repos.messages.listBefore(seg.topicId, sortOrder, id, remaining, seg.branchId)
+      } else if (seg.upperMessageId === null) {
+        page = repos.messages.getLatestByTopic(seg.topicId, remaining, seg.branchId)
+      } else {
+        const upperRow = repos.messages.getById(seg.upperMessageId)
+        if (!upperRow.found) continue
+        const upper = upperRow.data
+        const before = repos.messages.listBefore(seg.topicId, upper.sortOrder, upper.id, remaining - 1, seg.branchId)
+        page = [...before, upper]
+      }
+      if (page.length === 0) continue
+      out = [...page, ...out]
+      remaining -= page.length
+    }
+    return out
+  }
+
+  private readRouteForwardAfterInTx(
+    repos: ChatDbRepositories,
+    segments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>,
+    segIdx: number,
+    sortOrder: number,
+    id: string,
+    limit: number
+  ): MessageData[] {
+    if (limit <= 0) return []
+    let remaining = limit
+    const out: MessageData[] = []
+    for (let j = segIdx; j < segments.length && remaining > 0; j++) {
+      const seg = segments[j]
+      let page: MessageData[]
+      if (j === segIdx) {
+        page = repos.messages.listAfter(seg.topicId, sortOrder, id, remaining, seg.branchId)
+      } else {
+        page = repos.messages.listFirst(seg.topicId, remaining, seg.branchId)
+      }
+      if (seg.upperMessageId !== null) {
+        const upperRow = repos.messages.getById(seg.upperMessageId)
+        if (!upperRow.found) continue
+        const upper = upperRow.data
+        const filtered: MessageData[] = []
+        for (const m of page) {
+          if (this.compareRouteTuple(m.sortOrder, m.id, upper.sortOrder, upper.id) <= 0) filtered.push(m)
+          else break
+        }
+        out.push(...filtered)
+        remaining -= filtered.length
+        if (filtered.length < page.length) continue
+        if (page.length < remaining + filtered.length) continue
+        if (remaining <= 0) break
+        continue
+      }
+      out.push(...page)
+      remaining -= page.length
+      if (page.length === 0) continue
+      if (remaining <= 0) break
+    }
+    return out
+  }
+
+  /**
    * Resolve the foreign reference base prefix of a target topic (recursive,
    * cycle/depth-guarded). Returns:
    * - status 'none' when the topic is not a reference target;
@@ -11334,77 +11993,12 @@ export class ChatDbAggregateService {
     chainMissing?: ReferenceChainMissingFlag,
     layersOut?: ReferenceChainPlan[]
   ): ReferenceBaseResolution {
-    let refRow: { found: boolean; data?: TopicReferenceData }
-    try {
-      refRow = repos.topicReferences.getByTarget(topicId)
-    } catch (e) {
-      if (e instanceof Error && /no such table/i.test(e.message)) {
-        return { messages: [], reference: null, status: 'none' }
-      }
-      throw e
-    }
-    if (!refRow.found || !refRow.data) return { messages: [], reference: null, status: 'none' }
-    const ref = refRow.data
-    if (depth >= MAX_REFERENCE_DEPTH || visited.has(topicId)) {
-      if (chainMissing) chainMissing.missing = true
-      return { messages: [], reference: ref, status: 'missing' }
-    }
-    visited.add(topicId)
-    try {
-      const sourceTopic = repos.topics.getById(ref.sourceTopicId)
-      if (!sourceTopic.found || sourceTopic.data.deletedAt != null) {
-        if (chainMissing) chainMissing.missing = true
-        return { messages: [], reference: ref, status: 'missing' }
-      }
-      // A source route whose own branch anchor was removed (source branch
-      // removal) resolves NOT_FOUND in the strict effective-route resolver.
-      // Per the reference model that is a missing reference, not a read
-      // failure: the prefix is omitted while the target and its owned suffix
-      // survive and recovery re-enables it.
-      let sourceRoute: MessageData[]
-      try {
-        sourceRoute = this.resolveRouteMessagesGuardedInTx(
-          repos,
-          ref.sourceTopicId,
-          this.normalizeBranchId(ref.sourceBranchId),
-          visited,
-          depth + 1,
-          chainMissing,
-          layersOut
-        )
-      } catch (e) {
-        if (e instanceof ChatDbNotFoundError) {
-          if (chainMissing) chainMissing.missing = true
-          return { messages: [], reference: ref, status: 'missing' }
-        }
-        throw e
-      }
-      // The captured endpoint shares the branch inheritance boundary rule:
-      // while the endpoint row survives, a route that no longer composes it
-      // still inherits up to the nearest surviving message before it; once the
-      // row is gone nothing is guessed and the prefix is simply absent.
-      const anchorIdx = sourceRoute.findIndex((m) => m.id === ref.anchorMessageId)
-      const boundaryIdx =
-        anchorIdx === -1 ? this.deriveInheritanceBoundaryInTx(repos, sourceRoute, ref.anchorMessageId) : anchorIdx
-      if (boundaryIdx === null) {
-        if (chainMissing) chainMissing.missing = true
-        return { messages: [], reference: ref, status: 'missing' }
-      }
-      // One plan per materialized relation: this relation's own boundary plus
-      // whatever the source route materialized beneath it (pushed deeper-first
-      // by the recursion; consumers order by depth).
-      layersOut?.push({
-        targetTopicId: topicId,
-        sourceTopicId: ref.sourceTopicId,
-        sourceBranchId: ref.sourceBranchId,
-        anchorMessageId: ref.anchorMessageId,
-        sourceName: sourceTopic.data?.name ?? null,
-        boundaryMessageId: sourceRoute[boundaryIdx].id,
-        depth
-      })
-      return { messages: sourceRoute.slice(0, boundaryIdx + 1), reference: ref, status: 'available' }
-    } finally {
-      visited.delete(topicId)
+    const base = this.resolveReferenceBaseSegmentsInTx(repos, topicId, visited, depth, chainMissing, layersOut)
+    if (base.status !== 'available') return { messages: [], reference: base.reference, status: base.status }
+    return {
+      messages: this.materializeRouteSegmentsInTx(repos, base.segments),
+      reference: base.reference,
+      status: base.status
     }
   }
 
@@ -11432,36 +12026,10 @@ export class ChatDbAggregateService {
     chainMissing?: ReferenceChainMissingFlag,
     layersOut?: ReferenceChainPlan[]
   ): MessageData[] {
-    let base: MessageData[]
-    if (depth >= MAX_REFERENCE_DEPTH) {
-      if (chainMissing) chainMissing.missing = true
-      base = []
-    } else {
-      base = this.resolveReferenceBaseInTx(repos, topicId, visited, depth, chainMissing, layersOut).messages
-    }
-    const owner = this.normalizeBranchId(branchId)
-    if (owner === null) {
-      return [...base, ...repos.messages.listByTopic(topicId, null)]
-    }
-    const path = this.branchPathInTx(repos, owner)
-    const leaf = path.length > 0 ? path[path.length - 1] : null
-    if (!leaf || leaf.topicId !== topicId) {
-      throw new ChatDbNotFoundError(`Branch ${owner} does not exist in topic ${topicId}`)
-    }
-    let effective: MessageData[] = [...base, ...repos.messages.listByTopic(topicId, null)]
-    for (const node of path) {
-      // Inheritance boundary: the original fork point while it still composes
-      // the parent route, otherwise the nearest surviving message before it
-      // (empty inherited history when no such predecessor is derivable). The
-      // branch and its own rows stay reachable either way, and history after
-      // the original fork point never enters the child route.
-      const anchorIdx = effective.findIndex((m) => m.id === node.anchorMessageId)
-      const boundaryIdx =
-        anchorIdx === -1 ? this.deriveInheritanceBoundaryInTx(repos, effective, node.anchorMessageId) : anchorIdx
-      const inherited = boundaryIdx === null ? [] : effective.slice(0, boundaryIdx + 1)
-      effective = [...inherited, ...repos.messages.listByTopic(topicId, node.id)]
-    }
-    return effective
+    return this.materializeRouteSegmentsInTx(
+      repos,
+      this.resolveRouteSegmentsInTx(repos, topicId, branchId, visited, depth, chainMissing, layersOut).segments
+    )
   }
 
   /**

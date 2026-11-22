@@ -438,6 +438,51 @@ export class MessagesRepository {
     if (!row) return null
     return fromDrizzleResult<MessageData>(row, 'messages', (row as any).id)
   }
+  /**
+   * Bounded authority read: first N messages in deterministic ASC order.
+   *
+   * Head analog of {@link getLatestByTopic} for forward virtual-route scans
+   * into a new owner segment: reads at most `limit` rows from the owner head
+   * over the existing (topic_id, branch_id, sort_order) authority ordering.
+   * Never materializes the owner.
+   */
+  listFirst(topicId: string, limit: number, branchId: string | null = null): MessageData[] {
+    if (!Number.isInteger(limit) || limit <= 0) return []
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .limit(limit)
+      .all()
+    return rows.map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
+   * Authority prefix read: every row of one owner through a tuple bound.
+   *
+   * Full-prefix materialization for the shared route structure (whole /
+   * context / export callers that legitimately need the complete effective
+   * route): rows of `(topicId, branchId)` with
+   * `(sort_order, id) <= (sortOrder, id)` in authority order. The bound is
+   * the segment's inherited/reference truncation endpoint, so a huge suffix
+   * beyond the endpoint never leaves SQLite even for full reads. Uses the
+   * existing owner + order index; no new index.
+   */
+  listThrough(topicId: string, sortOrder: number, id: string, branchId: string | null = null): MessageData[] {
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          sql`(${messages.sortOrder}, ${messages.id}) <= (${sortOrder}, ${id})`
+        )
+      )
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .all()
+    return rows.map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
 
   /**
    * Bounded authority read: latest N messages in deterministic ASC order.
