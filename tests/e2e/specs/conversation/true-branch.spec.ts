@@ -1597,6 +1597,25 @@ test.describe('Topic-internal branches end-to-end', () => {
     const visualBranches = await listBranches(page, topicId)
     expect(visualBranches).toHaveLength(1)
     const visualBranchId = visualBranches[0].id as string
+    // Ready gate: branch creation resolves through catalog + anchor IPC
+    // after messages land; wait for the route switch to publish before
+    // asserting the active route (never a bare immediate read).
+    const readActiveBranch = (): Promise<string | null> =>
+      page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicId
+      )
+    const waitActiveBranch = async (branchId: string | null): Promise<void> => {
+      await page.waitForFunction(
+        ({ tid, bid }: { tid: string; bid: string | null }) => {
+          const s = (window as any).store.getState()
+          return (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid
+        },
+        { tid: topicId, bid: branchId },
+        { timeout: 30000 }
+      )
+    }
+    await waitActiveBranch(visualBranchId)
     // Precise new-branch contract (never a bare len/bottom claim): the active
     // route is the new branch, the resident is exactly the latest prefix
     // main[0..anchor] with stable IDs, and the tail (fork anchor = newest of
@@ -1621,21 +1640,6 @@ test.describe('Topic-internal branches end-to-end', () => {
       page.evaluate(
         () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       )
-    const readActiveBranch = (): Promise<string | null> =>
-      page.evaluate(
-        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
-        topicId
-      )
-    const waitActiveBranch = async (branchId: string | null): Promise<void> => {
-      await page.waitForFunction(
-        ({ tid, bid }: { tid: string; bid: string | null }) => {
-          const s = (window as any).store.getState()
-          return (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid
-        },
-        { tid: topicId, bid: branchId },
-        { timeout: 30000 }
-      )
-    }
     const waitRouteWindowStable = async (minDom: number): Promise<void> => {
       await page.waitForFunction(
         ({ tid }: { tid: string }) => {
