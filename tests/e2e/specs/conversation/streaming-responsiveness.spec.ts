@@ -563,10 +563,19 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     expect(bottomBox).not.toBeNull()
     await page.mouse.move(bottomBox!.x + bottomBox!.width / 2, bottomBox!.y + bottomBox!.height / 2)
     let bottomState: { atBottom: boolean; hasTail: boolean; bottomEdge: number } | null = null
-    for (let i = 0; i < 12; i++) {
+    // Convergent wheel-down: a fixed 12-iteration budget proved flaky (the
+    // leave/return restore lands the anchor at run-varying offsets, so the
+    // distance to the bottom varies). Keep wheeling while the viewport moves
+    // and stop as soon as the real bottom predicate holds. Two consecutive
+    // identical scrollTop reads mean the container is clamped at a physical
+    // edge — at the true bottom atBottom is definitionally true, so stopping
+    // elsewhere fails honestly instead of burning the remaining budget.
+    let lastScrollTop = -1
+    let settledReads = 0
+    for (let i = 0; i < 40; i++) {
       await page.mouse.wheel(0, 1200)
       await page.waitForTimeout(300)
-      bottomState = await page.evaluate(() => {
+      const read = await page.evaluate(() => {
         const cont = document.querySelector('#messages')
         if (!cont) return null
         const max = cont.scrollHeight - cont.clientHeight
@@ -578,10 +587,20 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
         return {
           atBottom: cont.scrollTop >= max - 100,
           hasTail: (last.textContent || '').includes('tail-marker-END'),
-          bottomEdge: Math.round(r.bottom - vr.bottom)
+          bottomEdge: Math.round(r.bottom - vr.bottom),
+          scrollTop: cont.scrollTop
         }
       })
-      if (bottomState && bottomState.atBottom && bottomState.hasTail && Math.abs(bottomState.bottomEdge) <= 100) break
+      if (!read) continue
+      bottomState = { atBottom: read.atBottom, hasTail: read.hasTail, bottomEdge: read.bottomEdge }
+      if (bottomState.atBottom && bottomState.hasTail && Math.abs(bottomState.bottomEdge) <= 100) break
+      if (read.scrollTop === lastScrollTop) {
+        settledReads += 1
+        if (settledReads >= 2) break
+      } else {
+        settledReads = 0
+      }
+      lastScrollTop = read.scrollTop
     }
     expect(bottomState?.atBottom).toBe(true)
     expect(bottomState?.hasTail).toBe(true)
