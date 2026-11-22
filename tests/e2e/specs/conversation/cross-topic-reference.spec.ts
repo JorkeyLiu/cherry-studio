@@ -1437,41 +1437,80 @@ test.describe('Cross-topic history reference', () => {
     expect(layers[1].sourceTopicId).toBe(topicA)
 
     // --- Two rendered dividers, each at its OWN boundary ------------------
+    // DOM order is chronological (ADR §6: every materialized relation layer
+    // keeps its own divider at its own boundary): the ancestor layer (B→A)
+    // first, the nearest layer (C→B) last. Main reports layers nearest-first
+    // ([C, B]); the flow emitter lands each divider at its own boundary and
+    // reverses once — so DOM order is NOT the Main array order. Every lookup
+    // below keys on the stable relation-target identity, never on Main order.
     const dividers = page.locator('[data-testid="history-reference-divider"]')
     await expect(dividers, 'one divider per materialized layer').toHaveCount(2, { timeout: 15000 })
-    await expect(dividers.nth(0)).toHaveAttribute('data-reference-target-topic', topicC)
-    await expect(dividers.nth(1)).toHaveAttribute('data-reference-target-topic', topicB)
-    await expect(dividers.nth(0)).toHaveAttribute('data-reference-status', 'available')
-    await expect(dividers.nth(1)).toHaveAttribute('data-reference-status', 'available')
+    const ancestorDivider = page.locator(
+      `[data-testid="history-reference-divider"][data-reference-target-topic="${topicB}"]`
+    )
+    const nearestDivider = page.locator(
+      `[data-testid="history-reference-divider"][data-reference-target-topic="${topicC}"]`
+    )
+    await expect(ancestorDivider, 'ancestor layer divider (B→A) must render').toHaveCount(1)
+    await expect(nearestDivider, 'nearest layer divider (C→B) must render').toHaveCount(1)
+    await expect(dividers.nth(0)).toHaveAttribute('data-reference-target-topic', topicB)
+    await expect(dividers.nth(1)).toHaveAttribute('data-reference-target-topic', topicC)
+    await expect(ancestorDivider).toHaveAttribute('data-reference-status', 'available')
+    await expect(nearestDivider).toHaveAttribute('data-reference-status', 'available')
 
     const placement = await page.evaluate(
-      ({ ownBoundary, ancestorBoundary }: { ownBoundary: string; ancestorBoundary: string }) => {
-        const nodes = Array.from(document.querySelectorAll('[data-testid="history-reference-divider"]'))
+      ({
+        targetAncestor,
+        targetNearest,
+        ownBoundary,
+        ancestorBoundary
+      }: {
+        targetAncestor: string
+        targetNearest: string
+        ownBoundary: string
+        ancestorBoundary: string
+      }) => {
+        const divider = (target: string) =>
+          document.querySelector(`[data-testid="history-reference-divider"][data-reference-target-topic="${target}"]`)
         const msg = (id: string) => document.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-        const follows = (a: Element | null, b: Element | null) =>
+        // precedes(a, b): a renders strictly before b in document order.
+        const precedes = (a: Element | null, b: Element | null) =>
           !!a && !!b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-        return nodes.map((node) => ({
-          target: node.getAttribute('data-reference-target-topic'),
-          link: node.querySelector('[data-testid="history-reference-divider-link"]')?.textContent ?? null,
-          beforeOwnBoundary: follows(node, msg(ownBoundary)),
-          beforeAncestorBoundary: follows(node, msg(ancestorBoundary))
-        }))
+        const nodes = Array.from(document.querySelectorAll('[data-testid="history-reference-divider"]'))
+        const ancestorNode = divider(targetAncestor)
+        const nearestNode = divider(targetNearest)
+        const ancestorMsg = msg(ancestorBoundary)
+        const ownMsg = msg(ownBoundary)
+        return {
+          domOrder: nodes.map((node) => node.getAttribute('data-reference-target-topic')),
+          ancestorBelowOwnEndpoint: precedes(ancestorMsg, ancestorNode),
+          ancestorAboveNearerBoundary: precedes(ancestorNode, ownMsg),
+          nearestBelowOwnEndpoint: precedes(ownMsg, nearestNode),
+          ancestorBeforeNearest: precedes(ancestorNode, nearestNode),
+          ancestorLink:
+            ancestorNode?.querySelector('[data-testid="history-reference-divider-link"]')?.textContent ?? null,
+          nearestLink: nearestNode?.querySelector('[data-testid="history-reference-divider-link"]')?.textContent ?? null
+        }
       },
-      { ownBoundary: bAnchorId, ancestorBoundary: aAnchorId }
+      { targetAncestor: topicB, targetNearest: topicC, ownBoundary: bAnchorId, ancestorBoundary: aAnchorId }
     )
-    expect(placement).toHaveLength(2)
-    // Nearest layer (C→B) sits directly below B's last message.
-    expect(placement[0].beforeOwnBoundary, 'own layer divider must sit below its own endpoint').toBe(true)
+    // Chronological DOM: ancestor layer first, nearest layer last.
+    expect(placement.domOrder).toEqual([topicB, topicC])
     // Ancestor layer (B→A) sits directly below A's last message and NEVER at
-    // B's boundary (each layer shows only its own boundary).
-    expect(placement[1].beforeAncestorBoundary, 'ancestor divider must sit below its own endpoint').toBe(true)
-    expect(placement[1].beforeOwnBoundary, 'ancestor divider must not be misplaced at a nearer boundary').toBe(false)
+    // B's nearer boundary (each layer shows only its own boundary).
+    expect(placement.ancestorBelowOwnEndpoint, 'ancestor divider must sit below its own endpoint').toBe(true)
+    expect(placement.ancestorAboveNearerBoundary, 'ancestor divider must not be misplaced at a nearer boundary').toBe(
+      true
+    )
+    expect(placement.ancestorBeforeNearest, 'ancestor divider must render before the nearest divider').toBe(true)
+    // Nearest layer (C→B) sits directly below B's last message.
+    expect(placement.nearestBelowOwnEndpoint, 'own layer divider must sit below its own endpoint').toBe(true)
     // Each divider shows the live title of its OWN source topic.
-    expect(placement[0].link).toContain(nameB)
-    expect(placement[1].link).toContain(nameA)
+    expect(placement.nearestLink).toContain(nameB)
+    expect(placement.ancestorLink).toContain(nameA)
 
     // --- Navigation: each line jumps to its own captured endpoint ---------
-    await dividers.nth(0).locator('[data-testid="history-reference-divider-link"]').click()
+    await nearestDivider.locator('[data-testid="history-reference-divider-link"]').click()
     await page.waitForFunction(
       ({ tid, anchor }: { tid: string; anchor: string }) => {
         const s = (window as any).store.getState()
@@ -1493,7 +1532,7 @@ test.describe('Cross-topic history reference', () => {
     // Back to C, then the ancestor divider must land A's captured endpoint.
     await activateTopicAndWaitLoaded(page, topicC, cExpectedIds.length)
     await expect(dividers).toHaveCount(2, { timeout: 15000 })
-    await dividers.nth(1).locator('[data-testid="history-reference-divider-link"]').click()
+    await ancestorDivider.locator('[data-testid="history-reference-divider-link"]').click()
     await page.waitForFunction(
       ({ tid, anchor }: { tid: string; anchor: string }) => {
         const s = (window as any).store.getState()

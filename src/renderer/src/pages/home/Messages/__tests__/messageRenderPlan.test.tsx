@@ -751,3 +751,86 @@ describe('messageRenderPlan — derivation budgets (no duplicate production deri
     expect(someCalls).toBe(grouped.length)
   })
 })
+
+describe('messageRenderPlan — chained reference FromPlan two-layer DOM order (hardcoded)', () => {
+  it('both resident layers render oldest-first [chain-b, chain-c] through the actual plan path', () => {
+    const chain: Message[] = [
+      message('a-u1', 'user', { topicId: 'chain-a', seq: '01' }),
+      message('a-a1', 'assistant', { askId: 'a-u1', topicId: 'chain-a', seq: '02' }),
+      message('b-u1', 'user', { topicId: 'chain-b', seq: '03' }),
+      message('b-a1', 'assistant', { askId: 'b-u1', topicId: 'chain-b', seq: '04' }),
+      message('c-u1', 'user', { topicId: 'chain-c', seq: '05' }),
+      message('c-a1', 'assistant', { askId: 'c-u1', topicId: 'chain-c', seq: '06' })
+    ]
+    const grouped = project(chain)
+    const layered: HistoryReferenceMeta = reference({
+      sourceTopicId: 'chain-b',
+      anchorMessageId: 'b-a1',
+      sourceName: 'B',
+      boundaryMessageId: 'b-a1',
+      layers: [
+        {
+          targetTopicId: 'chain-c',
+          sourceTopicId: 'chain-b',
+          sourceBranchId: null,
+          anchorMessageId: 'b-a1',
+          sourceName: 'B',
+          status: 'available',
+          boundaryMessageId: 'b-a1'
+        },
+        {
+          targetTopicId: 'chain-b',
+          sourceTopicId: 'chain-a',
+          sourceBranchId: null,
+          anchorMessageId: 'a-a1',
+          sourceName: 'A',
+          status: 'available',
+          boundaryMessageId: 'a-a1'
+        }
+      ]
+    })
+    const plan = buildMessageRenderPlan({
+      groupedMessages: grouped,
+      isEditMode: false,
+      selectedGroupIds: [],
+      segmentsForTopic: [],
+      contextBoundaryMessageId: null,
+      reference: layered,
+      targetTopicId: 'chain-c'
+    })
+    // Main reports layers nearest-first ([C, B]); the plan preserves that input
+    // order in its placements — hardcoded, never derived from legacy parity.
+    expect(plan.referenceDividers.map((d) => d.targetTopicId)).toEqual(['chain-c', 'chain-b'])
+    const nodes = buildMessageFlowNodesFromPlan(plan, {
+      forkDividers: [],
+      branchPath: [],
+      branches: [],
+      topicDisplayName: 'C',
+      renderBody: ({ groupMessages }: MessageFlowBodyArgs) => (
+        <div data-testid={`body-${groupMessages.map((m) => m.id).join('+')}`} />
+      ),
+      renderForkBoundary: forkProbe,
+      renderContextBoundary: contextProbe,
+      renderReferenceDivider: ({ targetTopicId }: { targetTopicId: string }) => (
+        <div data-testid="reference-boundary" data-reference-target-topic={targetTopicId} />
+      )
+    })
+    const boundaryKeys = nodes
+      .filter((n) => n.kind === 'boundary')
+      .map((n) => (n as { entry: { boundaryKey: string } }).entry.boundaryKey)
+    // Flow emission reverses once: chronological DOM order is oldest-first.
+    expect(boundaryKeys).toEqual([referenceDividerKey('chain-b'), referenceDividerKey('chain-c')])
+    const { container } = render(<>{renderEditFlowNodes({ nodes, isEditMode: false })}</>)
+    const dividers = Array.from(container.querySelectorAll('[data-testid="reference-boundary"]'))
+    expect(dividers.map((d) => d.getAttribute('data-reference-target-topic'))).toEqual(['chain-b', 'chain-c'])
+    // Bodies render through the body probe (group testids); locate the groups
+    // holding each boundary message by substring — never by a parity helper.
+    const ancestorMsg = container.querySelector('[data-testid*="a-a1"]') as Element | null
+    const ownMsg = container.querySelector('[data-testid*="b-a1"]') as Element | null
+    expect(ancestorMsg).not.toBeNull()
+    expect(ownMsg).not.toBeNull()
+    expect(ancestorMsg!.compareDocumentPosition(dividers[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(ownMsg!.compareDocumentPosition(dividers[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(dividers[0].compareDocumentPosition(dividers[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})

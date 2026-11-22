@@ -44,8 +44,9 @@
  *     for deterministic setup and anchor identity.
  *   - Selectors use test IDs / roles / structural scoping, never
  *     translation-coupled strings or generated message IDs.
- *   - One scenario with test.step; no slider geometry or unrelated UI
- *     coverage.
+ *   - Two scenarios, no new asset: the step-driven contract above, plus a
+ *     beyond-capacity offscreen case (CW-E2E-2) in the same spec; no slider
+ *     geometry or unrelated UI coverage.
  *
  * Anchor-icon oracle:
  *   - RENDERED-anchor scope (CW-E2E-1): when the anchored turn's user message
@@ -76,6 +77,8 @@
  *     generated ids or the complete provider payload shape.
  */
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
+import { clampViewportCapacity } from '../../../../src/renderer/src/pages/home/Messages/messageWindow'
+import { activateTopic, pad, prepareAssistant, seedSourceTopic } from '../../utils/branch-route-setup'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -122,6 +125,12 @@ async function seedContextConfig(page: import('@playwright/test').Page, contextC
   return assistantId
 }
 
+// Send-draft lifecycle: the production send consumes the draft synchronously
+// (single immediate clear with the dispatch) and schedules no delayed draft
+// clear, so a fill started right after a send is never wiped. No wait or
+// retry belongs in this helper — any timing sensitivity here is a product
+// bug, not a harness concern.
+
 /**
  * Type text into the real textarea and submit via Enter key.
  * Exercises the production InputbarCore → sendMessage → _sendMessage thunk path.
@@ -132,7 +141,7 @@ async function uiSendMessage(page: import('@playwright/test').Page, text: string
 
   // Single atomic fill: Playwright focuses the textarea, sets the full value
   // and dispatches a real input event, which React 19's controlled onChange
-  // (handleTextareaChange → setText) processes.
+  // (handleTextareaChange to setText) processes.
   await textarea.fill(text)
 
   // Deterministic value check before the real Enter submission.
@@ -266,7 +275,9 @@ async function getHighlightedAnchorIds(page: import('@playwright/test').Page): P
     const ids: string[] = []
     const buttons = document.querySelectorAll('[data-testid="context-anchor-btn"][data-context-anchor-active="true"]')
     for (const button of buttons) {
-      const container = button.closest('[data-message-id]')
+      // Tab-strip duplicates carry the same data-message-id; only the message
+      // row owns the anchor projection.
+      const container = button.closest('[data-message-id]:not([data-testid="answer-group-selector"])')
       const id = container?.getAttribute('data-message-id') || ''
       if (id) ids.push(id)
     }
@@ -374,7 +385,11 @@ async function expectAnchorVirtualized(
     if (renderedAnchorButtons === 0) {
       throw new Error('expected the rendered message window to include anchor buttons, got none')
     }
-    const anchorRenderedCount = await page.locator(`[data-message-id="${anchorId}"]`).count()
+    // Exclude tab-strip duplicates: they repeat the same data-message-id
+    // outside the message row and must not count as rendered.
+    const anchorRenderedCount = await page
+      .locator(`[data-message-id="${anchorId}"]:not([data-testid="answer-group-selector"])`)
+      .count()
     if (anchorRenderedCount !== 0) {
       throw new Error(`anchored message ${anchorId} is still rendered; expected it virtualized out of the window`)
     }
@@ -616,14 +631,13 @@ test.describe('Stable Context Window Contract', () => {
 
       await expectTokenCount(page, 6, 6)
       await expect(boundary).toHaveCount(0)
-      // Turn 1 is virtualized out of the rendered window after 12 messages:
-      // zero rendered highlights is valid here (CW-E2E-2). Anchor semantics
-      // are still proven by the persisted anchor below plus TokenCount,
-      // boundary absence, and the exact all-six-turn request subset above.
-      // The exactly-one rendered highlight assertion resumes at Step H once a
-      // rendered turn is re-anchored (CW-E2E-3).
+      // Turn 1 is still rendered here: 6 user + 6 assistant messages form 6
+      // groups, far below the 200-group viewport capacity, and viewport
+      // append retains the oldest groups — nothing trims turn 1 out. The
+      // anchor and its projection stay independent (CW-2): with the anchor
+      // mounted, exactly ONE highlight must resolve to it (CW-E2E-1).
       expect(await getPersistedAnchorGroupKey(page, topicId)).toBe(firstUserId)
-      await expectAnchorVirtualized(page, topicId)
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step G passed: 6/6, full history delivered')
     })
 
@@ -662,5 +676,106 @@ test.describe('Stable Context Window Contract', () => {
       return (window as any).store.getState().messages.messageIdsByTopic[id]?.length || 0
     }, topicId)
     expect(finalMessageCount).toBe(12)
+  })
+  test('viewport-excluded anchor stays authoritative beyond the viewport capacity (CW-E2E-2)', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    const boundary = page.locator('[data-testid="context-boundary"]')
+
+    // Genuine offscreen precondition, derived from production — never a magic
+    // number: the hard viewport bound lives only in `clampViewportCapacity`.
+    const viewportCapacity = clampViewportCapacity(Number.MAX_SAFE_INTEGER)
+    expect(viewportCapacity).toBeGreaterThan(0)
+    const offscreenTurns = viewportCapacity + 10
+
+    // Deterministic setup: bounded loaded window (latest 20) on a fresh
+    // profile, contextCount=3, then a bulk topic seeded straight through the
+    // typed ChatDb API — no network sends.
+    await prepareAssistant(page, 20)
+    await seedContextConfig(page, 3)
+    const { assistantId } = await getActiveContext(page)
+    expect(assistantId).not.toBe('')
+    const bulkTopicId = `ctx-offscreen-${Date.now()}`
+    const bulkIds = await seedSourceTopic(page, {
+      assistantId,
+      topicId: bulkTopicId,
+      name: 'Offscreen Bulk',
+      total: offscreenTurns * 2,
+      messageIdForIndex: (i: number) => `${bulkTopicId}-msg-${pad(i, 5)}`,
+      contentPrefix: 'offscreen-bulk-'
+    })
+    const firstUserId = bulkIds[0]
+    expect(firstUserId).not.toBe('')
+
+    // Persist the anchor at turn 1 (the first-establishment outcome), keeping
+    // contextCount in the same setup write.
+    await page.evaluate(
+      ({ aId, tId, groupKey }: { aId: string; tId: string; groupKey: string }) => {
+        ;(window as any).store.dispatch({
+          type: 'assistants/updateAssistantSettings',
+          payload: {
+            assistantId: aId,
+            settings: {
+              contextCount: 3,
+              contextWindowAnchor: { [tId]: { kind: 'active', groupKey } }
+            }
+          }
+        })
+      },
+      { aId: assistantId, tId: bulkTopicId, groupKey: firstUserId }
+    )
+    expect(await getPersistedAnchorGroupKey(page, bulkTopicId)).toBe(firstUserId)
+
+    // Standard latest navigation: the loaded/rendered window holds only the
+    // newest 20 messages, so the anchored turn 1 is excluded while the
+    // persisted anchor is untouched.
+    await activateTopic(page, bulkTopicId, 20)
+    const loadedIds: string[] = await page.evaluate((id: string) => {
+      return (window as any).store.getState().messages.messageIdsByTopic[id] || []
+    }, bulkTopicId)
+    expect(loadedIds.length).toBe(20)
+    expect(loadedIds).not.toContain(firstUserId)
+
+    // CW-E2E-2: anchored turn absent from the rendered DOM (tab-strip
+    // duplicates excluded), zero highlights — while the persisted anchor and
+    // the closure-derived TokenCount still resolve anchor-to-end.
+    await expectAnchorVirtualized(page, bulkTopicId)
+    await expectTokenCount(page, offscreenTurns, offscreenTurns)
+    await expect(boundary).toHaveCount(0)
+
+    // The provider request still carries the full anchor-to-end subset even
+    // though turn 1 is offscreen: exactly one real send through the mock
+    // provider, no bulk network traffic.
+    const assistantCountBefore: number = await page.evaluate((id: string) => {
+      const state = (window as any).store.getState()
+      const msgIds: string[] = state.messages.messageIdsByTopic[id] || []
+      let count = 0
+      for (const mid of msgIds) {
+        if (state.messages.entities[mid]?.role === 'assistant') count++
+      }
+      return count
+    }, bulkTopicId)
+    const seq = getRequestSequence()
+    await uiSendMessage(page, 'Offscreen probe turn')
+    await waitForAssistantResponseComplete(page, bulkTopicId, assistantCountBefore)
+
+    const productReq = findProductRequestAfter(seq)
+    expect(productReq).not.toBeNull()
+    const expectedPrompts: string[] = []
+    for (let turn = 0; turn < offscreenTurns; turn++) {
+      expectedPrompts.push(`offscreen-bulk-${pad(turn * 2, 5)}`)
+    }
+    expectedPrompts.push('Offscreen probe turn')
+    expect(getRequestUserPrompts(productReq)).toEqual(expectedPrompts)
+
+    // Growth never moves the anchor (CW-3), even while it stays offscreen.
+    await expectTokenCount(page, offscreenTurns + 1, offscreenTurns + 1)
+    expect(await getPersistedAnchorGroupKey(page, bulkTopicId)).toBe(firstUserId)
+    await expectAnchorVirtualized(page, bulkTopicId)
+    console.log(
+      `[E2E][ContextWindow] Offscreen case passed: ${offscreenTurns + 1}/${offscreenTurns + 1}, anchor still turn 1, request anchor-to-end`
+    )
   })
 })

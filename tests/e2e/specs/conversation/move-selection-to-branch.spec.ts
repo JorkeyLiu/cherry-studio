@@ -698,7 +698,13 @@ async function deleteBranchFromFork(page: Page, anchorMessageId: string, branchI
     )
     .first()
   await opener.click()
-  const deleteButton = page.locator(`[data-testid="branch-fork-delete-btn-${branchId}"]`).first()
+  // The fork divider reuses the shared BranchTreePanel inside its own popup
+  // list (`branch-fork-list-*`); the canonical row action is
+  // `branch-delete-btn-*`. Scope to the opened popup so the top tree's
+  // duplicate row action is never matched.
+  const popupList = page.locator(`[data-testid="branch-fork-list-${anchorMessageId}"]`)
+  await expect(popupList).toBeVisible({ timeout: 15000 })
+  const deleteButton = popupList.locator(`[data-testid="branch-delete-btn-${branchId}"]`).first()
   await expect(deleteButton).toBeVisible({ timeout: 15000 })
   await deleteButton.click()
   const confirm = page.locator('.ant-popconfirm button.ant-btn-primary').first()

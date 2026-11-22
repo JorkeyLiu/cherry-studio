@@ -275,9 +275,14 @@ const InputbarInner: FC<InputbarInnerProps> = ({
 
         void dispatch(_sendMessage(message, blocks, assistant, topic.id))
 
+        // The consumed draft is cleared synchronously here. No delayed
+        // clearing timer may touch the draft afterwards: any text typed
+        // after this point belongs to the next composition, and a stale
+        // timer would wipe it (same-topic fast typing and topic-route
+        // switches share this instance — Chat renders Inputbar without a
+        // topic key). The 0ms resize below is layout-only.
         setText('')
         setFiles([])
-        setTimeoutTimer('sendMessage_1', () => setText(''), 500)
         setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
         // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
         focusTextarea()

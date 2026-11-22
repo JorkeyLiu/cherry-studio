@@ -8628,9 +8628,13 @@ const Messages = ({
     const wasActivation = controller.isActivationRequired
     if (!wasActivation) {
       // Terminal no-retry (fail-closed): a released terminal viewport stays
-      // until the next genuine selected/connection trigger.
-      if (controller.currentPhase === 'terminal') return
-      if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) {
+      // until the next genuine selected/connection trigger. An externally
+      // invalidated loaded route (history-reference invalidation marked it
+      // failed) IS such a trigger: the authority changed under the active
+      // target, so reload instead of trusting the stale projection.
+      if (controller.currentPhase === 'terminal') {
+        if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) return
+      } else if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) {
         if (controller.isDomProvenanceClean) return
       }
     }

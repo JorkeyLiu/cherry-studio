@@ -196,3 +196,77 @@ describe('loaded-route tagged state (no magic branch id, behavior)', () => {
     expect(source).not.toMatch(/ROUTE_LOAD_FAILED_MARKER/)
   })
 })
+
+describe('externally invalidated terminal reloads once (route-effect guard behavior)', () => {
+  type Phase = 'terminal' | 'stable' | 'idle' | 'fetch-hold'
+  interface GuardInput {
+    phase: Phase
+    loaded: { route: string | null; loadFailed: boolean }
+    activeRoute: string | null
+    domClean: boolean
+    wasActivation: boolean
+  }
+  // Mirrors the Messages route-effect guard order exactly (terminal current
+  // stops; terminal failed falls through to reload; non-terminal loaded-clean
+  // stops), driven by the REAL production helpers above — never a string flag.
+  const decide = (input: GuardInput): 'stop' | 'reload' => {
+    if (!input.wasActivation) {
+      if (input.phase === 'terminal') {
+        if (isLoadedRouteCurrent(input.loaded, input.activeRoute)) return 'stop'
+      } else if (isLoadedRouteCurrent(input.loaded, input.activeRoute)) {
+        if (input.domClean) return 'stop'
+      }
+    }
+    return 'reload'
+  }
+
+  it('terminal + loaded-current stays (no auto-retry without an explicit trigger)', () => {
+    expect(
+      decide({
+        phase: 'terminal',
+        loaded: claimLoadedRoute('b-main'),
+        activeRoute: 'b-main',
+        domClean: true,
+        wasActivation: false
+      })
+    ).toBe('stop')
+  })
+
+  it('terminal + externally invalidated (failed) reloads once, then the claimed route stops', () => {
+    const activeRoute = 'b-main'
+    // External invalidation marks the loaded route failed while staying on the
+    // same route key: failed is never current, so the terminal guard reloads.
+    const invalidated = markLoadedRouteFailed(activeRoute)
+    expect(isLoadedRouteCurrent(invalidated, activeRoute)).toBe(false)
+    expect(decide({ phase: 'terminal', loaded: invalidated, activeRoute, domClean: false, wasActivation: false })).toBe(
+      'reload'
+    )
+    // The single reload claims the route; the next terminal run is current and
+    // stops — exactly one reread, never a retry loop.
+    const claimed = claimLoadedRoute(activeRoute)
+    expect(isLoadedRouteCurrent(claimed, activeRoute)).toBe(true)
+    expect(decide({ phase: 'terminal', loaded: claimed, activeRoute, domClean: true, wasActivation: false })).toBe(
+      'stop'
+    )
+  })
+
+  it('a failed reread still stops while its session owns the epoch (no retry loop)', () => {
+    const activeRoute = 'b-main'
+    const failed = markLoadedRouteFailed(activeRoute)
+    // Guard alone would reload a failed route; the same-session epoch guard
+    // below owns the in-flight fetch and stops the duplicate run.
+    expect(decide({ phase: 'terminal', loaded: failed, activeRoute, domClean: false, wasActivation: false })).toBe(
+      'reload'
+    )
+    const fetchEpoch = 7
+    let routeFetchEpoch: number | null = fetchEpoch
+    const isSessionCurrent = (epoch: number): boolean => routeFetchEpoch === epoch
+    const duplicateRunStops = routeFetchEpoch !== null && isSessionCurrent(fetchEpoch)
+    expect(duplicateRunStops).toBe(true)
+    // A new target/epoch fails the currency check and proceeds (stale markers
+    // are harmless); the failed route itself never becomes trusted.
+    routeFetchEpoch = 8
+    expect(isSessionCurrent(fetchEpoch)).toBe(false)
+    expect(isLoadedRouteCurrent(failed, activeRoute)).toBe(false)
+  })
+})
