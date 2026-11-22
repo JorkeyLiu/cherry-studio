@@ -2,6 +2,7 @@ import type { Message } from '@renderer/types/newMessage'
 
 import {
   createMessageViewportGroupModel,
+  getMessageGroupSemanticKey,
   type MessageViewportGroup,
   type MessageViewportGroupModel
 } from './messageGroups'
@@ -1069,12 +1070,136 @@ export interface ReconciledWindowOutcome {
   followsAppendedTail: boolean
 }
 
+/**
+ * Entity-only refresh for one reconcile commit (pure, production).
+ *
+ * When the loaded projection carries the SAME ordered message structure as the
+ * previous commit — same length, same ids in order, same per-row grouping
+ * identity (`role` + `askId`, the only inputs `getMessageGroupSemanticKey`
+ * reads) — the committed window's range still addresses the same groups, so
+ * the window is refreshed with the NEW entities in place instead of rebuilding
+ * the full group model: same range/edge/capacity/authority/observability, same
+ * group keys, new refs (blocks/status/usage and every hidden field travel with
+ * the new entity). Zero group-model builds.
+ *
+ * Explicitly conservative: anything that could carry window-coordination intent
+ * or lack provable old structure falls back to the full derivation below
+ * (returns null):
+ * - a held reading row (`retainMessageId`) or a measured physical bottom
+ *   (`atPhysicalBottom`) — retention/follow own those commits;
+ * - a committed pagination target — the target range is re-resolved, never
+ *   assumed;
+ * - any length/id/order/role/askId difference (append/delete/reorder/regroup),
+ *   an empty/rangeless window, duplicate ids, or a committed row that no longer
+ *   resolves in the new projection (route switch/rebase).
+ * No cross-commit state: the id map lives only in this call and never retains
+ * old entities.
+ */
+const tryRefreshWindowEntities = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentWindow: MessageWindow,
+  options?: MessageWindowExpansionOptions
+): MessageWindow | null => {
+  if (typeof options?.retainMessageId === 'string' && options.retainMessageId.length > 0) return null
+  if (options?.atPhysicalBottom === true) return null
+  if (currentWindow.paginationTarget === true) return null
+  // Hold-release coherence: a latest-edge window a previous retention parked
+  // before the tail must re-slice newest-capacity once the hold is gone — the
+  // full derivation below owns that, and this call carries no hold to preserve
+  // it. Only a window already AT the resident tail may refresh in place.
+  // Proved by the newest displayed row identity against the same-structure
+  // tail (never by the hasMoreNewer flag: an authoritative hasMoreAfter=true
+  // also sets it on a tail window). Fixed-edge windows intentionally browse
+  // off-tail, so the gate is latest-only.
+  if (currentWindow.edge === 'latest' && currentWindow.newestMessageId !== messages[messages.length - 1]?.id)
+    return null
+  // Fixed-edge completeness: the fixed derivation fills an under-capacity
+  // range toward newer (and trims an over-capacity one), so only an
+  // at-capacity window is provably stable under a same-structure commit.
+  // Anything else falls back. This conservatively misses cover-all small
+  // fixed windows (whole history under capacity) — extra model builds, never
+  // a semantic change.
+  if (
+    currentWindow.edge === 'fixed' &&
+    currentWindow.displayGroups.length !== clampViewportCapacity(currentWindow.groupCapacity)
+  )
+    return null
+  const range = currentWindow.range
+  if (!range) return null
+  if (currentWindow.displayMessages.length === 0 || currentWindow.displayGroups.length === 0) return null
+  if (messages.length === 0 || messages.length !== previousMessages.length) return null
+  if (currentWindow.displayGroups.length !== range.newestGroupIndex - range.oldestGroupIndex + 1) return null
+  for (let index = 0; index < messages.length; index++) {
+    const next = messages[index]
+    const previous = previousMessages[index]
+    if (!next || !previous) return null
+    if (next.id !== previous.id || next.role !== previous.role) return null
+    if ((next.askId ?? null) !== (previous.askId ?? null)) return null
+  }
+  const byId = new Map<string, Message>()
+  for (const message of messages) {
+    if (byId.has(message.id)) return null
+    byId.set(message.id, message)
+  }
+  const refreshedDisplayMessages: Message[] = []
+  for (const displayed of currentWindow.displayMessages) {
+    const fresh = byId.get(displayed.id)
+    if (!fresh) return null
+    refreshedDisplayMessages.push(fresh)
+  }
+  const refreshedGroups: MessageViewportGroup[] = []
+  const groupedIds = new Set<string>()
+  for (const group of currentWindow.displayGroups) {
+    if (group.messages.length === 0) return null
+    const refreshedMembers: Message[] = []
+    for (const member of group.messages) {
+      const fresh = byId.get(member.id)
+      if (!fresh) return null
+      if (getMessageGroupSemanticKey(fresh) !== group.semanticKey) return null
+      refreshedMembers.push(fresh)
+    }
+    if (`${group.semanticKey}:${refreshedMembers[0]?.id}` !== group.key) return null
+    for (const member of refreshedMembers) {
+      if (groupedIds.has(member.id)) return null
+      groupedIds.add(member.id)
+    }
+    refreshedGroups.push({ ...group, messages: refreshedMembers })
+  }
+  if (groupedIds.size !== refreshedDisplayMessages.length) return null
+  for (const displayed of refreshedDisplayMessages) {
+    if (!groupedIds.has(displayed.id)) return null
+  }
+  // The refreshed display order must be exactly the newest-first reversal of
+  // the refreshed chronological groups — the same order a full rebuild emits.
+  const chronological = refreshedGroups.flatMap((group) => group.messages)
+  if (chronological.length !== refreshedDisplayMessages.length) return null
+  for (let index = 0; index < chronological.length; index++) {
+    if (chronological[chronological.length - 1 - index]?.id !== refreshedDisplayMessages[index]?.id) return null
+  }
+  return {
+    ...currentWindow,
+    displayMessages: refreshedDisplayMessages,
+    displayGroups: refreshedGroups,
+    oldestMessageId: chronological[0]?.id,
+    newestMessageId: chronological.at(-1)?.id
+  }
+}
+
 const reconcileInternal = (
   messages: Message[],
   previousMessages: Message[],
   currentWindow: MessageWindow,
   options?: MessageWindowExpansionOptions
 ): ReconciledWindowOutcome => {
+  // Entity-only fast path: the same ordered ids with the same grouping
+  // identity carry no append/reorder/regroup, so the committed window is
+  // refreshed with the new entities and no group model is built at all. Same
+  // ordered ids also prove the tails are identical, so this commit cannot
+  // follow an appended tail. Anything else falls through to the full
+  // derivation below.
+  const refreshed = tryRefreshWindowEntities(messages, previousMessages, currentWindow, options)
+  if (refreshed) return { window: refreshed, followsAppendedTail: false }
   const rawCapacity = currentWindow.groupCapacity
   const capacity = clampViewportCapacity(rawCapacity)
   const auth =
