@@ -17,8 +17,27 @@
  * window (roughly doubled vs the prior 40ms/~6s cadence) without any live API.
  */
 import { expect, test } from '../../fixtures/electron.fixture'
-import { clearRequestLog, findProductRequest } from '../../fixtures/electron.fixture'
-import { getSlowStreamReply, SLOW_STREAM_MARKER, type MockRequestEntry } from '../../fixtures/mock-openai-server'
+import {
+  clearRequestLog,
+  findProductRequest,
+  findProductRequestAfter,
+  getRequestSequence
+} from '../../fixtures/electron.fixture'
+import {
+  EXTENDED_SLOW_STREAM_MARKER,
+  getExtendedSlowStreamReply,
+  getSlowStreamReply,
+  SLOW_STREAM_MARKER,
+  type MockRequestEntry
+} from '../../fixtures/mock-openai-server'
+import {
+  activateTopic,
+  letterMessageId,
+  pad,
+  prepareAssistant,
+  seedSmallTopic,
+  seedSourceTopic
+} from '../../utils/branch-route-setup'
 
 const MODEL = 'mock-model'
 
@@ -94,6 +113,71 @@ async function findStreamingBlock(page: import('@playwright/test').Page): Promis
     }
     return null
   })
+}
+
+// ---------------------------------------------------------------------------
+// Cross-topic continuity helpers (this behavior only — no shared-harness change)
+// ---------------------------------------------------------------------------
+
+const CONTINUITY_DRAFT = 'DRAFT-A-keep-12345'
+const CONTINUITY_ANCHOR_TOL = 12 // topic-scroll-save-restore OFFSET_TOL geometry
+
+/** Center-viewport stable anchor: the message under the viewport middle plus its intra-row offset. */
+async function readCenterAnchor(page: import('@playwright/test').Page): Promise<{ id: string; offset: number } | null> {
+  return page.evaluate(() => {
+    const cont = document.querySelector('#messages')
+    if (!cont) return null
+    const cr = cont.getBoundingClientRect()
+    const cy = cr.top + cr.height / 2
+    const nodes = Array.from(document.querySelectorAll('[data-message-id]'))
+    for (const node of nodes) {
+      const r = (node as HTMLElement).getBoundingClientRect()
+      if (r.top <= cy && r.bottom >= cy) {
+        return { id: (node as HTMLElement).getAttribute('data-message-id')!, offset: Math.round(r.top - cr.top) }
+      }
+    }
+    return null
+  })
+}
+
+/** Wait until a topic's newest assistant message and all its blocks reach terminal status. */
+async function waitForAssistantTerminal(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  previousAssistantCount: number,
+  timeout = 90000
+): Promise<void> {
+  await page.waitForFunction(
+    ({ tid, prev }: { tid: string; prev: number }) => {
+      const s = (window as any).store?.getState()
+      if (!s) return false
+      const ids = (s.messages.messageIdsByTopic || {})[tid] || []
+      const ents = s.messages.entities || {}
+      let count = 0
+      for (const id of ids) {
+        if (ents[id]?.role === 'assistant') count++
+      }
+      if (count <= prev) return false
+      if ((s.messages.loadingByTopic || {})[tid] === true) return false
+      let latest: any = null
+      for (let i = ids.length - 1; i >= 0; i--) {
+        if (ents[ids[i]]?.role === 'assistant') {
+          latest = ents[ids[i]]
+          break
+        }
+      }
+      if (!latest || (latest.status !== 'success' && latest.status !== 'error')) return false
+      const blocks = latest.blocks || []
+      if (blocks.length === 0) return false
+      const bents = (s.messageBlocks?.entities || {}) as Record<string, any>
+      for (const b of blocks) {
+        if (!bents[b] || (bents[b].status !== 'success' && bents[b].status !== 'error')) return false
+      }
+      return true
+    },
+    { tid: topicId, prev: previousAssistantCount },
+    { timeout }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -291,5 +375,219 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     )
     expect(new Set(finalMessageIds).size).toBe(finalMessageIds.length)
     console.log(`[E2E] Final groups=${finalStableGroups.length} messages=${finalMessageIds.length}`)
+  })
+
+  /**
+   * Streaming cross-topic continuity — the generation belongs to the dialogue.
+   *
+   * A seeded scrollable topic streams an XL reply (~18s deterministic window);
+   * leaving mid-stream for another topic keeps A alive (no cancel/error) while
+   * B stays fully usable, and returning to A restores position + full content.
+   * The shared single-instance Inputbar keeps the A draft across the switch
+   * itself; B's own send consumes the box, so the return shows the post-B-send
+   * state with no B-text leak — per-topic draft restore is NOT claimed.
+   *
+   * Evidence classes: real UI gestures (sidebar clicks, Enter send,
+   * pressSequentially draft, wheel scroll), mock request log (one streaming
+   * product request per send), Redux terminal/block facts, rendered Markdown
+   * tail. Seams only: existing selectors, store introspection, established
+   * seed helpers. No profile/metadata/performance counters.
+   */
+  test('streaming continues across topic leave and return with position and content intact', async ({ mainWindow }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    clearRequestLog()
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 1. SEED — A scrollable (40) + B small (4) via Main authority, real open
+    // ═══════════════════════════════════════════════════════════════════
+    const assistantId = await prepareAssistant(page, 200)
+    const topicA = 'stream-leave-A'
+    const topicB = 'stream-leave-B'
+    const seedA = await seedSourceTopic(page, {
+      assistantId,
+      topicId: topicA,
+      name: 'stream-leave-A',
+      total: 40,
+      messageIdForIndex: (i: number) => letterMessageId(topicA, i),
+      contentPrefix: 'leave-a-body-',
+      contentForIndex: (i: number) => `leave-a-body-${pad(i, 5)} ${'deterministic scrollable filler words '.repeat(40)}`
+    })
+    const seedB = await seedSmallTopic(page, assistantId, topicB, 'stream-leave-B')
+    expect(seedA.length).toBe(40)
+    expect(seedB.length).toBe(4)
+    await activateTopic(page, topicA, 40)
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 2. XL SEND on A — real UI; Enter consumes; keyboard draft right after
+    // ═══════════════════════════════════════════════════════════════════
+    const seqBeforeA = getRequestSequence()
+    await uiSendMessage(page, `xl continuity probe ${EXTENDED_SLOW_STREAM_MARKER}`)
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await expect(textarea).toHaveValue('', { timeout: 10000 })
+    await textarea.click()
+    await textarea.pressSequentially(CONTINUITY_DRAFT, { delay: 15 })
+    await expect(textarea).toHaveValue(CONTINUITY_DRAFT, { timeout: 5000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 3. STREAM START + product request evidence
+    // ═══════════════════════════════════════════════════════════════════
+    await page.waitForFunction(
+      ({ tid, prev }: { tid: string; prev: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages.messageIdsByTopic || {})[tid] || []
+        let count = 0
+        for (const id of ids) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        if (count > prev) return true
+        for (const b of Object.values(s.messageBlocks.entities) as any[]) {
+          if (b?.type === 'main_text' && b?.status === 'streaming') return true
+        }
+        return false
+      },
+      { tid: topicA, prev: 20 },
+      { timeout: 60000 }
+    )
+    const reqA = findProductRequestAfter(seqBeforeA)
+    expect(reqA).not.toBeNull()
+    expect(reqA!.parsed).toEqual(expect.objectContaining({ model: MODEL, stream: true }))
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 4. READ UPWARD — real wheel, center-viewport stable anchor
+    // ═══════════════════════════════════════════════════════════════════
+    const messagesBox = await page.locator('#messages').boundingBox()
+    expect(messagesBox).not.toBeNull()
+    await page.mouse.move(messagesBox!.x + messagesBox!.width / 2, messagesBox!.y + messagesBox!.height / 2)
+    for (let i = 0; i < 3; i++) {
+      await page.mouse.wheel(0, -900)
+      await page.waitForTimeout(300)
+    }
+    const anchor = await readCenterAnchor(page)
+    expect(anchor).not.toBeNull()
+    console.log(`[E2E] Leave anchor: ${anchor!.id} offset=${anchor!.offset}`)
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 5. LEAVE to B — real sidebar; route + DOM + draft preserved by switch
+    // ═══════════════════════════════════════════════════════════════════
+    await activateTopic(page, topicB, 4)
+    await expect(page.locator(`#messages [data-message-id="${seedB[seedB.length - 1]}"]`)).toBeAttached({
+      timeout: 10000
+    })
+    // Single shared Inputbar (no topic key): the A draft survives the switch itself.
+    await expect(textarea).toHaveValue(CONTINUITY_DRAFT, { timeout: 5000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 6. B USABLE — real send + terminal; A still alive in the background
+    // ═══════════════════════════════════════════════════════════════════
+    const seqBeforeB = getRequestSequence()
+    await uiSendMessage(page, 'b-quick-hello')
+    await expect(textarea).toHaveValue('', { timeout: 10000 })
+    await waitForAssistantTerminal(page, topicB, 2)
+    const reqB = findProductRequestAfter(seqBeforeB)
+    expect(reqB).not.toBeNull()
+    expect(reqB!.parsed).toEqual(expect.objectContaining({ model: MODEL, stream: true }))
+    // A mid-absence: still generating (or already complete — both prove no
+    // cancel), content growing/non-empty, never error. Not a loadingByTopic read.
+    const aMid = await page.evaluate((tid: string) => {
+      const s = (window as any).store.getState()
+      const ids = (s.messages.messageIdsByTopic || {})[tid] || []
+      let latest: any = null
+      for (let i = ids.length - 1; i >= 0; i--) {
+        if (s.messages.entities[ids[i]]?.role === 'assistant') {
+          latest = s.messages.entities[ids[i]]
+          break
+        }
+      }
+      if (!latest) return null
+      let len = 0
+      let blockStatus: string | null = null
+      for (const b of latest.blocks || []) {
+        const blk = s.messageBlocks.entities[b]
+        if (blk) {
+          len += (blk.content || '').length
+          blockStatus = blk.status
+        }
+      }
+      return { status: latest.status, blockStatus, len }
+    }, topicA)
+    expect(aMid).not.toBeNull()
+    expect(aMid!.status).not.toBe('error')
+    expect(aMid!.blockStatus).not.toBe('error')
+    expect(aMid!.len).toBeGreaterThan(0)
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 7. RETURN to A — route + DOM + settled gate, anchor drift in tolerance
+    // ═══════════════════════════════════════════════════════════════════
+    await activateTopic(page, topicA, 42)
+    await expect(page.locator(`#messages [data-message-id="${anchor!.id}"]`)).toBeAttached({ timeout: 10000 })
+    const anchorOffsetAfter = await page.evaluate((id: string) => {
+      const cont = document.querySelector('#messages')
+      const node = document.querySelector(`#messages [data-message-id="${id}"]`)
+      if (!cont || !node) return null
+      const cr = cont.getBoundingClientRect()
+      const r = (node as HTMLElement).getBoundingClientRect()
+      return Math.round(r.top - cr.top)
+    }, anchor!.id)
+    expect(anchorOffsetAfter).not.toBeNull()
+    expect(Math.abs(anchorOffsetAfter! - anchor!.offset)).toBeLessThanOrEqual(CONTINUITY_ANCHOR_TOL)
+    // Shared-input semantics: B's own send consumed the box; no B text leaks into A.
+    await expect(textarea).toHaveValue('', { timeout: 5000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 8. A COMPLETES — exact full XL reply in store blocks + rendered tail
+    // ═══════════════════════════════════════════════════════════════════
+    const expectedXL = getExtendedSlowStreamReply(MODEL)
+    await page.waitForFunction(
+      (expected) => {
+        const s = (window as any).store?.getState()
+        if (!s?.messageBlocks?.entities) return false
+        for (const block of Object.values(s.messageBlocks.entities) as any[]) {
+          if (block?.type === 'main_text' && block?.content === expected && block?.status === 'success') {
+            return true
+          }
+        }
+        return false
+      },
+      expectedXL,
+      { timeout: 120000 }
+    )
+    const lastAssistantMarkdown = page.locator('#messages .message-assistant .markdown').last()
+    await expect(lastAssistantMarkdown).toContainText('tail-marker-END', { timeout: 15000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 9. SCROLL TO BOTTOM — final message renders the tail at the bottom
+    // ═══════════════════════════════════════════════════════════════════
+    const bottomBox = await page.locator('#messages').boundingBox()
+    expect(bottomBox).not.toBeNull()
+    await page.mouse.move(bottomBox!.x + bottomBox!.width / 2, bottomBox!.y + bottomBox!.height / 2)
+    let bottomState: { atBottom: boolean; hasTail: boolean; bottomEdge: number } | null = null
+    for (let i = 0; i < 12; i++) {
+      await page.mouse.wheel(0, 1200)
+      await page.waitForTimeout(300)
+      bottomState = await page.evaluate(() => {
+        const cont = document.querySelector('#messages')
+        if (!cont) return null
+        const max = cont.scrollHeight - cont.clientHeight
+        const nodes = Array.from(document.querySelectorAll('#messages .message-assistant .markdown'))
+        if (nodes.length === 0) return null
+        const last = nodes[nodes.length - 1] as HTMLElement
+        const r = last.getBoundingClientRect()
+        const vr = cont.getBoundingClientRect()
+        return {
+          atBottom: cont.scrollTop >= max - 100,
+          hasTail: (last.textContent || '').includes('tail-marker-END'),
+          bottomEdge: Math.round(r.bottom - vr.bottom)
+        }
+      })
+      if (bottomState && bottomState.atBottom && bottomState.hasTail && Math.abs(bottomState.bottomEdge) <= 100) break
+    }
+    expect(bottomState?.atBottom).toBe(true)
+    expect(bottomState?.hasTail).toBe(true)
+    expect(Math.abs(bottomState!.bottomEdge)).toBeLessThanOrEqual(100)
+    console.log(
+      `[E2E] Leave-return continuity: anchor=${anchor!.id} drift<=${CONTINUITY_ANCHOR_TOL}px tail bottom edge=${bottomState!.bottomEdge}px`
+    )
   })
 })

@@ -151,3 +151,10 @@
  - 测试：新增 `src/renderer/src/__tests__/rcUtilDynamicCss.contract.test.ts` 16（ESM/CJS 直导真实安装的 updateCSS/removeCSS × 7 行为 + ShadowRoot isolation × 2），覆盖重用/queue priority/嵌套/SVG/删除重建/容器隔离/内容变更。最终状态复核（本轮）：完整 `pnpm test:renderer` exit 0（footer 226 files / 2713 tests），renderer-lanes 四分片均 exit 0；`pnpm typecheck` 五路（node/web/e2e/e2e-utils/aicore）均 exit 0；`git diff --check` clean。
  - E2E/UI：Electron 四 spec 15/15 原 exit0（ordinary-chat 2、topic-scroll-save-restore 4、streaming-responsiveness 1、true-branch 8）；`pnpm ui:observe` journey exit0。新增仅下层 DOM 契约，复用既有 E2E，无新业务 E2E 资产（已有业务覆盖、本阶段无新增业务语义）。UI 首次恢复门误把启动 light 当 system native 结果，定位 OS dark 后改为 store/source + native resolution 语义门再观察通过；不记生产缺陷。
  - 边界与下一步：本阶段闭合一次实际热点的低风险消耗改善，整体轻量化未结束。尚无整体 latency/FPS/memory baseline；IPC 读取计数不可由 contextBridge wrapper 证明（无新增生产诊断）；未动 token 上下文/markdown/lifecycle 注册，不预设下一缓存 helper。下一方向回到打开可读/发送响应/切走继续/返回延续的整体因果链与稳定交接判断，不默认继续追踪样式 key/profile；本次仅局部改善，整体性能未测。XL 原超时无归因，不记 bug/通过；本节只记本阶段证据边界，不把全部历史诊断揉进正文。
+## 16. 流式跨话题连续性（已实现，有界检查＋1 E2E 资产）
+:
+ - 产品标准：打开可读、发送开始、切走继续、返回接续；本轮有界检查只确认 execution pin route、local state＋DB＋optional projection、receipt 与 viewport 各有 owner，不把必要分离当冗余，无证据拆改主干。
+ - 实际观察与新 E2E 完整 A→B→A：A（40 msgs XL live reply）发送后立即键盘草稿→切走前读上部中心 anchor→B 正常发送→A 流继续至 terminal→返回锚 ≤12px＋exact store content／DOM tail→滚到底尾可见；共享 input 草稿跨 topic 保留、发送消费，非 topic drafts，产品语义不变。
+ - 测试：既有 `streaming-responsiveness.spec.ts` 扩 1 test（现 2 tests pass exit 0）；本轮 `pnpm typecheck` 五路 exit 0，Biome＋`git diff --check` 0；production build 输入未变，复用本 session fresh build（不把旧 §15 或 renderer 2713 当新 2-test 全量）。
+ - 耐久资产价值＝跨话题生成／位置／输入联动；范围不含 branch／cross-window／crash／real network。
+ - 剩余方向：主干现阶段已有完整闭合，无需强行重构；接下来回到用户“打开即可读、输入即可发送”，看进入对话到可交互是否还有真实阻碍（设计 §10 发送 ready 诊断未定，不当 bug）；有真实阻碍才选自然边界，否则允许停；整体性能仍未测。
