@@ -25,10 +25,10 @@ function deferred<T>(): Deferred<T> {
 }
 
 /**
- * Mirrors the Inputbar send preparation shape: an async rate-limit read
- * first, then the user-message build + send dispatch. Counting the rate-limit
- * read and the dispatch separately proves the audit claim (one read AND one
- * send dispatch per rapid double activation).
+ * Mirrors the Inputbar send preparation+handover shape: an async rate-limit
+ * read first, then the user-message build + send dispatch + handover await.
+ * Counting the rate-limit read and the dispatch separately proves the audit
+ * claim (one read AND one send dispatch per rapid double activation).
  */
 function makeSend(rateLimitGate: Deferred<boolean>, onDispatch: () => void, opts?: { blocked?: boolean }) {
   const rateLimitRead = vi.fn(() => rateLimitGate.promise)
@@ -142,7 +142,7 @@ describe('useSendInFlightGuard — Inputbar rapid re-entry', () => {
     expect(dispatchSend).toHaveBeenCalledTimes(1)
   })
 
-  it('sequential sends are not serialized across the streaming lifecycle: a send after completion runs', async () => {
+  it('sequential sends are not serialized across the streaming lifecycle: a send after admission runs', async () => {
     const { result } = renderHook(() => useSendInFlightGuard())
     const dispatchSend = vi.fn()
 
@@ -153,7 +153,7 @@ describe('useSendInFlightGuard — Inputbar rapid re-entry', () => {
       await expect(result.current.runSend(async () => void dispatchSend())).resolves.toBe(true)
     })
 
-    // Both preparations ran; the guard only ever covered one preparation.
+    // Both preparation+handovers ran; the guard only ever covered one preparation+handover.
     expect(dispatchSend).toHaveBeenCalledTimes(2)
   })
 })

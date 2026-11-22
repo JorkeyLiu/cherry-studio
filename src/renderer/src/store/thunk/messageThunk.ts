@@ -1094,33 +1094,57 @@ const loadedBlocksOf = (state: RootState, message: Message | undefined): Message
  * @param assistant 助手对象
  * @param topicId 主题ID
  */
+// SendRoutePin: explicit operation route pin for one send (null = main route).
+// Absent pin (undefined, legacy 4-arg callers) resolves at thunk entry.
+// An explicit pin is never re-resolved inside the send.
+export interface SendRoutePin {
+  route: string | null
+  generation: number
+}
+// SendMessageResult: handover result. accepted reflects only the valid Main
+// ack of the USER append, independent of projection currency. It never
+// represents projection/stream success and never waits for queue/stream.
+export interface SendMessageResult {
+  accepted: boolean
+}
 export const sendMessage =
-  (userMessage: Message, userMessageBlocks: MessageBlock[], assistant: Assistant, topicId: Topic['id']) =>
-  async (dispatch: AppDispatch, getState: () => RootState) => {
+  (
+    userMessage: Message,
+    userMessageBlocks: MessageBlock[],
+    assistant: Assistant,
+    topicId: Topic['id'],
+    routePin?: SendRoutePin
+  ) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<SendMessageResult> => {
     // LOCK-004: one correlation context per send, threaded explicitly through
     // this send's user and assistant append calls. Ordinals are 1 for the user
     // append and 2+ for assistant stubs/multi-model appends of THIS send only;
     // overlapping sends never share or clobber each other's context.
     const sendContext = createSendDiagnosticsContext()
-    // Operation-scoped route capture: every append, anchor/config route,
-    // multi-model queue task, persistence callback, and request context
-    // selection of THIS send addresses this route. Route switches stay
-    // enabled; late publication into another route fails closed below.
-    const sendRoute = activeRouteOf(getState, topicId)
-    let sendGeneration = 0
-    try {
-      sendGeneration = selectRouteGeneration(getState(), topicId)
-    } catch {
-      sendGeneration = 0
+    // Operation-scoped route: an explicit pin is used verbatim (null = main).
+    // Only legacy callers without a pin resolve at thunk entry. Every append,
+    // anchor/config route, multi-model queue task, persistence callback, and
+    // request context selection of THIS send addresses this route. Switches
+    // stay enabled; late publication into another route fails closed below.
+    const sendRoute = routePin !== undefined ? routePin.route : activeRouteOf(getState, topicId)
+    let sendGeneration = routePin !== undefined ? routePin.generation : 0
+    if (routePin === undefined) {
+      try {
+        sendGeneration = selectRouteGeneration(getState(), topicId)
+      } catch {
+        sendGeneration = 0
+      }
     }
     // Set once the user echo was published; the OPTIONAL usage estimate is
-    // scheduled from `finally` only then (nothing authoritative to enrich
-    // otherwise).
+    // scheduled from finally only then (nothing authoritative to enrich otherwise).
     let usageEstimateEligible = false
+    // Authoritative receipt of the user row (Main ack echo). Set once the user
+    // append validates below; every early-return and catch path reports it.
+    let userAccepted = false
     try {
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
-        return
+        return { accepted: false }
       }
 
       const userAck = await saveMessageAndBlocksToDB(
@@ -1131,6 +1155,8 @@ export const sendMessage =
         sendContext,
         sendRoute
       )
+      const userEntryValid = toValidAppendEntry(topicId, userMessage, userAck, sendRoute) !== null
+      userAccepted = userEntryValid
       const userPublished = publishAppendAck(
         dispatch,
         getState,
@@ -1140,28 +1166,24 @@ export const sendMessage =
         sendRoute,
         sendGeneration
       )
+      // Invalid user ack fails closed before any generation: no anchor step,
+      // no assistant stub, no provider queue. Nothing authoritatively received.
+      if (!userEntryValid) {
+        return { accepted: false }
+      }
       // Associated block projection rides the successful row/capability
       // publication only: a rejected/stale ack emits no orphan blocks.
       if (userPublished && userMessageBlocks.length > 0) {
         dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
-      // The OPTIONAL prompt-token estimate is display metadata only: it is never a
-      // request input (request token math derives from message content) and never a
-      // precondition of the authoritative user echo. It is scheduled in `finally`
-      // below — after the user echo, the anchor step, the assistant stub and the
-      // provider queue — on a fresh task, so nothing above waits for it.
+      // OPTIONAL estimate stays display-only and publication-gated (unchanged).
       usageEstimateEligible = userPublished
-
-      // Attachment-only end of send: when every attachment of this message is
-      // provably unavailable on this device and nothing else is left, the top
-      // notice has already explained it once and the send finishes here — like
-      // the empty-send guard above. The user message stays persisted and
-      // visible, but no assistant stub is created, no provider request is
-      // issued, and no failed/inline answer is produced. Text and usable
-      // attachments never reach this branch.
+      // Attachment-only end of send: the user row above is already persisted
+      // and published, so the handover counts as accepted even though no
+      // assistant stub or provider request follows.
       if (await endsWithoutSendableAttachments(userMessage, userMessageBlocks)) {
-        return
+        return { accepted: true }
       }
 
       // First establishment: after the user message is persisted and added to
@@ -1216,7 +1238,8 @@ export const sendMessage =
             topicId,
             messageId: assistantMessage.id
           })
-          return
+          // User row already accepted above; a phantom stub never revokes it.
+          return { accepted: true }
         }
 
         void queue.add(async () => {
@@ -1232,8 +1255,12 @@ export const sendMessage =
           )
         })
       }
+      // Handover completes at admission (queue.add above, never queue idle or
+      // stream). userAccepted is true on every path that reaches here.
+      return { accepted: userAccepted }
     } catch (error) {
       logger.error('Error in sendMessage thunk:', error as Error)
+      return { accepted: userAccepted }
     } finally {
       // The OPTIONAL estimate is scheduled LAST, on its own task: the user echo is
       // published, the anchor step ran, and the assistant stub + provider queue were

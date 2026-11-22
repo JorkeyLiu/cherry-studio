@@ -22,9 +22,10 @@ import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
+import store, { useAppDispatch } from '@renderer/store'
+import type { SendRoutePin } from '@renderer/store/thunk/messageThunk'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
-import { selectActiveBranchId } from '@renderer/store/topicBranch'
+import { selectActiveBranchId, selectRouteGeneration } from '@renderer/store/topicBranch'
 import {
   type Assistant,
   type FileMetadata,
@@ -133,10 +134,14 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const config = getInputbarConfig(scope)
 
   const { files, mentionedModels, selectedKnowledgeBases } = useInputbarToolsState()
-  const { setFiles, setMentionedModels, setSelectedKnowledgeBases } = useInputbarToolsDispatch()
+  const { setFiles, setMentionedModels, setSelectedKnowledgeBases, getFilesRevision } = useInputbarToolsDispatch()
   const { setCouldAddImageFile } = useInputbarToolsInternalDispatch()
 
-  const { text, setText } = useInputText({
+  const {
+    text,
+    setText,
+    getRevision: getTextRevision
+  } = useInputText({
     initialValue: CacheService.get<string>(INPUTBAR_DRAFT_CACHE_KEY) ?? '',
     onChange: (value) => CacheService.set(INPUTBAR_DRAFT_CACHE_KEY, value, DRAFT_CACHE_TTL)
   })
@@ -155,8 +160,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     initialAssistant.id
   )
   const { sendMessageShortcut, includeHistoryMediaContext } = useSettings()
-  // In-chat send path addresses the active route of the logical topic.
-  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+  // Send route is captured synchronously inside sendMessage via the store
+  // (never a render-time selector value), so rate-limit and thunk share one pin.
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
@@ -233,59 +238,82 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   })
 
   const sendMessage = useCallback(() => {
-    // In-flight guard: a repeated activation while the first send is still
-    // awaiting/preparing (rate-limit read, upload, usage estimate) returns
-    // false without creating a second user message/request. `runSend`
-    // acquires before the rate-limit await and releases in a `finally` on
-    // every path (rate-limit block, validation early return, error, and
-    // after dispatch initiation); the dispatch below is fire-and-forget so
-    // the guard never spans the assistant streaming lifecycle.
+    // In-flight guard covers preparation AND handover: acquired before the
+    // rate-limit await, released in a finally once the thunk reports admission.
+    // The guard never spans streaming: the thunk returns after queue admission
+    // (never queue idle or stream), so back-to-back sends stay serialized.
     return runSend(async () => {
-      if (await checkRateLimit(assistant, topic.id, activeBranchId)) {
-        return
-      }
-
-      logger.info('Starting to send message')
-
-      const parent = spanManagerService.startTrace(
-        { topicId: topic.id, name: 'sendMessage', inputs: text },
-        mentionedModels.length > 0 ? mentionedModels : assistant.model ? [assistant.model] : []
-      )
-      void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: topic.id, traceId: parent?.spanContext().traceId })
-
+      // Synchronous snapshot before any await: this send's topic/route,
+      // assistant, content, and draft revisions. Route switches and edits
+      // during the awaits below cannot move this send's write address or
+      // consume the next composition.
+      const sendTopic = topic
+      const sendTopicId = topic.id
+      const sendRoute = selectActiveBranchId(store.getState(), sendTopicId)
+      let sendGeneration = 0
       try {
-        const uploadedFiles = await FileManager.uploadFiles(files)
-
-        const baseUserMessage: MessageInputBaseParams = { assistant, topic, content: text }
+        sendGeneration = selectRouteGeneration(store.getState(), sendTopicId)
+      } catch {
+        sendGeneration = 0
+      }
+      const sendRoutePin: SendRoutePin = { route: sendRoute, generation: sendGeneration }
+      const sendAssistant = assistant
+      const sendText = text
+      const sendFilesSnapshot = files
+      const sendMentionsSnapshot = mentionedModels
+      const expectedTextRevision = getTextRevision()
+      const expectedFilesRevision = getFilesRevision()
+      const parent = spanManagerService.startTrace(
+        { topicId: sendTopicId, name: 'sendMessage', inputs: sendText },
+        sendMentionsSnapshot.length > 0 ? sendMentionsSnapshot : sendAssistant.model ? [sendAssistant.model] : []
+      )
+      void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: sendTopicId, traceId: parent?.spanContext().traceId })
+      try {
+        // Rate-limit reads the pinned route, the same address the thunk writes.
+        if (await checkRateLimit(sendAssistant, sendTopicId, sendRoute)) {
+          return
+        }
+        logger.info('Starting to send message')
+        const uploadedFiles = await FileManager.uploadFiles(sendFilesSnapshot)
+        const baseUserMessage: MessageInputBaseParams = {
+          assistant: sendAssistant,
+          topic: sendTopic,
+          content: sendText
+        }
         if (uploadedFiles) {
           baseUserMessage.files = uploadedFiles
         }
-        if (mentionedModels.length) {
-          baseUserMessage.mentions = mentionedModels
+        if (sendMentionsSnapshot.length) {
+          baseUserMessage.mentions = sendMentionsSnapshot
         }
-
         // The optional prompt-token estimate is NOT computed here: it must never
         // delay the authoritative user echo. The send thunk persists and
-        // publishes the user message first, then fills `usage` as best-effort
-        // display metadata on the pinned route (the message simply carries no
-        // usage until that lands). Files are already uploaded above, so the
-        // deferred estimate still sees stored file metadata.
+        // publishes the user message first, then fills usage as best-effort
+        // display metadata on the pinned route. Files are uploaded above.
         const { message, blocks } = getUserMessage(baseUserMessage)
         message.traceId = parent?.spanContext().traceId
-
-        void dispatch(_sendMessage(message, blocks, assistant, topic.id))
-
-        // The consumed draft is cleared synchronously here. No delayed
-        // clearing timer may touch the draft afterwards: any text typed
-        // after this point belongs to the next composition, and a stale
-        // timer would wipe it (same-topic fast typing and topic-route
-        // switches share this instance — Chat renders Inputbar without a
-        // topic key). The 0ms resize below is layout-only.
-        setText('')
-        setFiles([])
-        setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
-        // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
-        focusTextarea()
+        // Await the handover (admission, never stream): the result reports only
+        // the authoritative user-row receipt. Only an accepted handover with an
+        // unchanged draft consumes it; anything typed or attached meanwhile is
+        // the next composition and is retained.
+        const handover = await dispatch(_sendMessage(message, blocks, sendAssistant, sendTopicId, sendRoutePin))
+        if (handover?.accepted) {
+          let clearedAny = false
+          if (getTextRevision() === expectedTextRevision) {
+            setText('')
+            clearedAny = true
+          }
+          if (getFilesRevision() === expectedFilesRevision) {
+            setFiles([])
+            clearedAny = true
+          }
+          // Layout-only resize runs only when this send actually cleared.
+          if (clearedAny) {
+            setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
+          }
+          // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
+          focusTextarea()
+        }
       } catch (error) {
         logger.warn('Failed to send message:', error as Error)
         parent?.recordException(error as Error)
@@ -300,7 +328,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     files,
     dispatch,
     setText,
+    getTextRevision,
     setFiles,
+    getFilesRevision,
     setTimeoutTimer,
     resizeTextArea,
     focusTextarea
