@@ -110,6 +110,56 @@ beforeEach(() => {
   })
 })
 
+function DefaultLike({ assistantId, topic }: { assistantId: string; topic?: any }) {
+  const { activeTopic } = useActiveTopic(assistantId, topic)
+  return <div data-testid="default-child">{activeTopic?.id ?? ''}</div>
+}
+
+function mockAssistantTopics(assistantId: string, topics: any[]) {
+  useAssistantMock.mockReturnValue({ assistant: { id: assistantId, topics } })
+}
+
+describe('useActiveTopic default selection skips pinned topics', () => {
+  it('initial mount without an explicit topic selects the first ordinary topic', async () => {
+    mockAssistantTopics('assistant-default', [
+      { id: 'pinned-1', name: 'P1', pinned: true },
+      { id: 'ordinary-1', name: 'O1' },
+      { id: 'ordinary-2', name: 'O2' }
+    ])
+    render(<DefaultLike assistantId="assistant-default" />)
+    expect(await screen.findByText('ordinary-1')).toBeInTheDocument()
+    expect(loadTopicMock).toHaveBeenCalledWith('ordinary-1')
+  })
+
+  it('falls back to topics[0] when every topic is pinned', async () => {
+    mockAssistantTopics('assistant-all-pinned', [
+      { id: 'all-pinned-1', name: 'P1', pinned: true },
+      { id: 'all-pinned-2', name: 'P2', pinned: true }
+    ])
+    render(<DefaultLike assistantId="assistant-all-pinned" />)
+    expect(await screen.findByText('all-pinned-1')).toBeInTheDocument()
+    expect(loadTopicMock).toHaveBeenLastCalledWith('all-pinned-1')
+  })
+
+  it('an explicit pinned topic stays selected', async () => {
+    const pinned = { id: 'explicit-pinned', name: 'P', pinned: true }
+    mockAssistantTopics('assistant-explicit', [pinned, { id: 'ordinary-9', name: 'O9' }])
+    render(<DefaultLike assistantId="assistant-explicit" topic={pinned} />)
+    expect(await screen.findByText('explicit-pinned')).toBeInTheDocument()
+    expect(loadTopicMock).toHaveBeenCalledWith('explicit-pinned')
+  })
+
+  it('a stale selection falls back to the first ordinary topic', async () => {
+    mockAssistantTopics('assistant-fresh', [
+      { id: 'fresh-pinned', name: 'P', pinned: true },
+      { id: 'fresh-ordinary', name: 'O' }
+    ])
+    render(<DefaultLike assistantId="assistant-fresh" topic={{ id: 'ghost', name: 'G' }} />)
+    expect(await screen.findByText('fresh-ordinary')).toBeInTheDocument()
+    expect(loadTopicMock).toHaveBeenLastCalledWith('fresh-ordinary')
+  })
+})
+
 describe('useActiveTopic selected-topic identity gate (live ref semantics)', () => {
   it('initial mount dispatches once; same-ID object update does not redispatch', async () => {
     const control: { setActive?: (t: any) => void } = {}

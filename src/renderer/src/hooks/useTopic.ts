@@ -12,6 +12,7 @@ import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { createSnapshotBlockMap, getMainTextSnapshotContent } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { truncateText } from '@renderer/utils/naming'
+import { selectDefaultTopic } from '@renderer/utils/sort'
 import { find, isEmpty } from 'lodash'
 import { type Dispatch, type SetStateAction, useEffect, useRef, useState } from 'react'
 
@@ -23,7 +24,7 @@ let _setActiveTopic: Dispatch<SetStateAction<Topic>>
 
 export function useActiveTopic(assistantId: string, topic?: Topic) {
   const { assistant } = useAssistant(assistantId)
-  const [activeTopic, setActiveTopic] = useState(topic || _activeTopic || assistant?.topics[0])
+  const [activeTopic, setActiveTopic] = useState(topic || _activeTopic || selectDefaultTopic(assistant?.topics))
 
   _activeTopic = activeTopic
   _setActiveTopic = setActiveTopic
@@ -67,7 +68,10 @@ export function useActiveTopic(assistantId: string, topic?: Topic) {
       assistant.topics.length > 0 &&
       !find(assistant.topics, { id: activeTopic?.id })
     ) {
-      setActiveTopic(assistant.topics[0])
+      const fallback = selectDefaultTopic(assistant.topics)
+      if (fallback) {
+        setActiveTopic(fallback)
+      }
     }
   }, [activeTopic?.id, assistant])
 

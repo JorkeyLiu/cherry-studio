@@ -63,3 +63,20 @@ export function reorderTopicsForPin<T extends { id: string; pinned?: boolean }>(
   }
   return [...pinnedTopics, updatedTopic, ...unpinnedTopics]
 }
+/**
+ * LOCK-002: startup/first-open default topic. Returns the first ordinary
+ * (non-pinned) topic in the current order — never re-sorts. Falls back to
+ * topics[0] when every topic is pinned, and to undefined for an empty list.
+ * A still-valid remembered id (including a pinned one) wins when given.
+ */
+export function selectDefaultTopic<T extends { id: string; pinned?: boolean }>(
+  topics: readonly T[] | undefined | null,
+  preferredId?: string | null
+): T | undefined {
+  if (!topics || topics.length === 0) return undefined
+  if (preferredId) {
+    const preferred = topics.find((topic) => topic.id === preferredId)
+    if (preferred) return preferred
+  }
+  return topics.find((topic) => !topic.pinned) ?? topics[0]
+}

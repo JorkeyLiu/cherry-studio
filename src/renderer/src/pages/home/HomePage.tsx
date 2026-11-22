@@ -13,6 +13,7 @@ import { newMessagesActions } from '@renderer/store/newMessage'
 import { setAssistantsWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
+import { selectDefaultTopic } from '@renderer/utils/sort'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { AnimatePresence, motion } from 'motion/react'
 import type { Dispatch, FC, SetStateAction } from 'react'
@@ -125,7 +126,7 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
 
       // 同步更新 active topic，避免不必要的重新渲染
       const lastTopicId = lastTopicByAssistantRef.current[newAssistant.id]
-      const newTopic = newAssistant.topics.find((topic) => topic.id === lastTopicId) ?? newAssistant.topics[0]
+      const newTopic = selectDefaultTopic(newAssistant.topics, lastTopicId) ?? newAssistant.topics[0]
       // An assistant switch also replaces the topic: freeze the outgoing
       // viewport before the transition. Same topic id never freezes.
       if (newTopic?.id !== activeTopic?.id) {
