@@ -201,12 +201,7 @@ import {
  */
 import MessageContextMenu from './MessageContextMenu'
 import { renderEditFlowNodes } from './messageEditSelectionLayout'
-import {
-  buildMessageFlowNodes,
-  resolveContextDividerGroupKey,
-  resolveForkDividers,
-  resolveReferenceDividers
-} from './messageFlowNodes'
+import { buildMessageFlowNodesFromPlan, resolveForkDividers } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { createMessageViewportGroupModel } from './messageGroups'
 import {
@@ -218,7 +213,7 @@ import {
   type SearchMatchLanding,
   type SearchMatchScrollPlan
 } from './messageNavigation'
-import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
+import { buildMessageRenderPlan } from './messageRenderPlan'
 import { useCrossMessageSelectionGuard } from './messageSelectionGuard'
 import {
   canonicalSavedAnchorId,
@@ -843,7 +838,10 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const referenceSourceNames = useAppSelector((state) => selectReferenceSourceNames(state, topic.id))
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick, handleBlockSelect } = useEditMode()
-  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
+  // Segment snapshot: entity-order `segmentsForTopic` (never the sortOrder
+  // catalog). Read-only here — the hook's behavior is unchanged; the plan
+  // builds local per-build indexes from this snapshot each render.
+  const { segmentsForTopic } = useTopicSegments(topic.id)
   // Main route-qualified group entries for the DISPLAYED route (same source the
   // drawer lists): the ONLY mutation-authority input for flow chrome. A group
   // with no entry here gates fail-closed to read-only in TopicSegmentLine.
@@ -982,34 +980,44 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     return result
   }, [displayGroups, displayMessages, viewportRouteKey])
 
-  // S3.3: Stable render layers — edit-mode segmentation runs first,
-  // each segment is then classified live/history, then contiguous runs of
-  // the same kind are merged into layer runs. Selection segments are never
-  // split at a history/live boundary; a mixed segment is live if any group is live.
-  const messageSegments = useMemo(
-    () => buildRenderSegments(groupedMessages, isEditMode, selectedGroupIds),
-    [groupedMessages, isEditMode, selectedGroupIds]
+  // Sixth-slice render plan: one local per-render derivation (no cross-update
+  // cache, no stored old entities) precomputes group identity, message
+  // id→group position, segment attribution/first/last, and the
+  // selected/live/segment/layer tags. Segments, layers, the context divider
+  // key, and reference placements all resolve from those rows; the flow
+  // builder consumes them without re-deriving identities, per-group segment
+  // scans, or divider id rescans. S3.3 merge semantics preserved: stable
+  // render layers — edit-mode segmentation runs first, each segment is then
+  // classified live/history, then contiguous runs of the same kind are merged
+  // into layer runs. Selection segments are never split at a history/live
+  // boundary; a mixed segment is live if any group is live. The legacy key is
+  // retained for divider semantics while stable entity-derived keys are used
+  // for React reconciliation (LOCK-S3.3-007).
+  const renderPlan = useMemo(
+    () =>
+      buildMessageRenderPlan({
+        groupedMessages,
+        isEditMode,
+        selectedGroupIds,
+        segmentsForTopic,
+        contextBoundaryMessageId,
+        reference: historyReference,
+        targetTopicId: topic.id
+      }),
+    [
+      groupedMessages,
+      isEditMode,
+      selectedGroupIds,
+      segmentsForTopic,
+      contextBoundaryMessageId,
+      historyReference,
+      topic.id
+    ]
   )
 
-  const layerRuns = useMemo(() => buildRenderLayers(messageSegments), [messageSegments])
-
-  // Context window boundary: find the legacy projected group key where the boundary message renders.
-  // The legacy key is retained for context-divider semantics while stable entity-derived
-  // keys are used for React reconciliation (LOCK-S3.3-007).
-  const contextDividerGroupKey = useMemo(
-    () => resolveContextDividerGroupKey(groupedMessages, contextBoundaryMessageId),
-    [groupedMessages, contextBoundaryMessageId]
-  )
-
-  // History-reference divider placements (topic-level; empty for ordinary
-  // topics): one per materialized relation layer, each marking the readonly
-  // foreign-prefix / writable target-owned-suffix boundary it actually owns.
-  // Missing sources render at the beginning; deeper layers whose boundary is
-  // not loaded stay deferred rather than promoted to the head.
-  const referenceDividers = useMemo(
-    () => resolveReferenceDividers(groupedMessages, historyReference, topic.id),
-    [groupedMessages, historyReference, topic.id]
-  )
+  // The plan also carries the history-reference placements (one per
+  // materialized relation layer) and the context-window legacy group key —
+  // consumed by the flow builder through the plan, never re-derived here.
 
   // Jump to the captured source endpoint of the clicked divider's OWN relation
   // (each chain layer navigates to its own source topic, branch and anchor).
@@ -1041,18 +1049,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     // capture — liveness stays on the child body nodes.
     // Flow-node construction (group order, fork/context placement, stable
     // identity, askIds, selection, layer identity) is the production builder
-    // in messageFlowNodes; only the React pixels are supplied here.
-    const nodes = buildMessageFlowNodes({
-      layerRuns,
-      contextDividerGroupKey,
-      referenceDividers,
+    // in messageFlowNodes; only the React pixels are supplied here. The plan
+    // supplies precomputed per-group facts — no per-render re-derivation.
+    const nodes = buildMessageFlowNodesFromPlan(renderPlan, {
       forkDividers,
       branchPath: displayBranchTree.path,
       branches: displayBranchTree.branches,
       topicDisplayName,
-      isMessageInSegment,
-      isMessageFirstInSegment,
-      isMessageLastInSegment,
       renderForkBoundary: ({ anchorMessageId, taken, children, parentBranchId, parentLabel, placement }) => (
         <ForkDivider
           topicId={topic.id}

@@ -7,7 +7,17 @@ import type { ReactNode } from 'react'
 import { takenChildAtAnchor } from './BranchDividers'
 import { groupForkChildrenByParent, resolveForkPlacement } from './forkPlacement'
 import { deriveTurnAskId, type FlowNode } from './messageEditSelectionLayout'
-import { deriveStableGroupId, type RenderLayer } from './messageRenderLayers'
+import type { RenderLayer } from './messageRenderLayers'
+import type { MessageRenderPlan } from './messageRenderPlan'
+import {
+  buildMessageIdToGroupIndex,
+  buildSegmentMembershipIndex,
+  deriveStableGroupId,
+  referenceDividerKey as referenceDividerKeyCanonical,
+  resolvePlannedGroups,
+  resolvePlannedReferenceBoundary,
+  resolvePlannedReferenceDividers
+} from './messageRenderPlan'
 import type { MessageViewportProjectedGroup } from './messageViewportProjection'
 
 /**
@@ -125,14 +135,11 @@ export function resolveContextDividerGroupKey(
   groupedMessages: readonly MessageViewportProjectedGroup[],
   contextBoundaryMessageId: string | null
 ): string | null {
+  // Thin delegate: first-hit group via the canonical first-write-wins index.
+  // Boundary message not in the current display window — don't show a divider.
   if (!contextBoundaryMessageId) return null
-  for (const [key, groupMessages] of groupedMessages) {
-    if (groupMessages.some((m) => m.id === contextBoundaryMessageId)) {
-      return key
-    }
-  }
-  // Boundary message not in the current display window — don't show a divider
-  return null
+  const gi = buildMessageIdToGroupIndex(groupedMessages).get(contextBoundaryMessageId)
+  return gi !== undefined ? groupedMessages[gi][0] : null
 }
 
 /**
@@ -176,33 +183,17 @@ export function resolveReferenceBoundary(
     | undefined,
   targetTopicId: string
 ): ReferenceBoundary | null {
+  // Thin delegate: canonical index + precomputed fallback transition (single
+  // implementation lives in the render plan; no second resolver here).
   if (!reference) return null
-  if (reference.status === 'missing') {
-    return { groupKey: null, placement: 'beginning' }
-  }
-  if (reference.boundaryMessageId) {
-    for (const [key, groupMessages] of groupedMessages) {
-      if (groupMessages.some((m) => m.id === reference.boundaryMessageId)) {
-        return { groupKey: key, placement: 'after-boundary' }
-      }
-    }
-  }
-  // Boundary not resident: walk the loaded window newest→oldest. The first
-  // (newest) group holding a foreign-owned message is the newest loaded
-  // foreign group. It is the true prefix/suffix boundary only if the group
-  // immediately newer than it (already visited) is target-owned — a
-  // demonstrable foreign→owned transition. Otherwise the suffix is offscreen
-  // and the divider is deferred rather than misplaced inside the prefix.
-  let newerGroupIsTargetOwned = false
-  for (const [key, groupMessages] of groupedMessages) {
-    if (groupMessages.some((m) => isForeignOwnedMessage(m, targetTopicId))) {
-      return newerGroupIsTargetOwned ? { groupKey: key, placement: 'after-boundary' } : null
-    }
-    newerGroupIsTargetOwned = groupMessages.some((m) => isTargetOwnedMessage(m, targetTopicId))
-  }
-  // No foreign-owned message is loaded: the whole loaded window is the
-  // target's own content. Missing/no-prefix beginning placement stays independent.
-  return { groupKey: null, placement: 'beginning' }
+  const rows = resolvePlannedGroups({
+    groupedMessages,
+    isEditMode: false,
+    selectedGroupIds: [],
+    segmentIndex: buildSegmentMembershipIndex([]),
+    targetTopicId
+  })
+  return resolvePlannedReferenceBoundary(rows, buildMessageIdToGroupIndex(groupedMessages), reference)
 }
 
 /**
@@ -229,9 +220,8 @@ export interface ReferenceDividerPlacement {
  * so the relation target is its identity (same-endpoint relations of different
  * layers stay distinct keyed siblings).
  */
-export function referenceDividerKey(targetTopicId: string): string {
-  return `history-reference-boundary:${targetTopicId}`
-}
+/** Stable unique divider identity (canonical encoding lives in the render plan). */
+export const referenceDividerKey = referenceDividerKeyCanonical
 
 /**
  * Resolve every history-reference divider of the rendered target: one per
@@ -251,73 +241,16 @@ export function resolveReferenceDividers(
   reference: HistoryReferenceMeta | null | undefined,
   targetTopicId: string
 ): ReferenceDividerPlacement[] {
+  // Thin delegate: the canonical layered resolution lives in the render plan.
   if (!reference) return []
-  const layers = reference.layers && reference.layers.length > 0 ? reference.layers : null
-  if (!layers) {
-    const boundary = resolveReferenceBoundary(groupedMessages, reference, targetTopicId)
-    if (!boundary) return []
-    return [
-      {
-        boundaryKey: referenceDividerKey(targetTopicId),
-        reference,
-        targetTopicId,
-        groupKey: boundary.groupKey,
-        placement: boundary.placement
-      }
-    ]
-  }
-  const placements: ReferenceDividerPlacement[] = []
-  for (let index = 0; index < layers.length; index++) {
-    const layer = layers[index]
-    if (index === 0) {
-      const boundary = resolveReferenceBoundary(groupedMessages, layer, targetTopicId)
-      if (!boundary) continue
-      placements.push({
-        boundaryKey: referenceDividerKey(layer.targetTopicId),
-        reference: layer,
-        targetTopicId: layer.targetTopicId,
-        groupKey: boundary.groupKey,
-        placement: boundary.placement
-      })
-      continue
-    }
-    if (layer.status !== 'available' || !layer.boundaryMessageId) continue
-    let groupKey: string | null = null
-    for (const [key, groupMessages] of groupedMessages) {
-      if (groupMessages.some((m) => m.id === layer.boundaryMessageId)) {
-        groupKey = key
-        break
-      }
-    }
-    if (groupKey === null) continue // Boundary outside the loaded window: deferred.
-    placements.push({
-      boundaryKey: referenceDividerKey(layer.targetTopicId),
-      reference: layer,
-      targetTopicId: layer.targetTopicId,
-      groupKey,
-      placement: 'after-boundary'
-    })
-  }
-  return placements
-}
-
-/**
- * A projected message is part of the read-only foreign prefix when it carries
- * an explicit topicId that is not the rendered target topic. Messages without a
- * canonical topicId never count as foreign (fail-closed, never misplace).
- */
-function isForeignOwnedMessage(message: Message, targetTopicId: string): boolean {
-  return typeof message.topicId === 'string' && message.topicId.length > 0 && message.topicId !== targetTopicId
-}
-
-/**
- * A projected message is target-owned (the writable suffix) when its canonical
- * topicId is exactly the rendered target topic. Explicit positive ownership
- * only: an unowned/blank topicId never counts (fail-closed — the fallback then
- * defers instead of placing a divider on an unprovable transition).
- */
-function isTargetOwnedMessage(message: Message, targetTopicId: string): boolean {
-  return message.topicId === targetTopicId
+  const rows = resolvePlannedGroups({
+    groupedMessages,
+    isEditMode: false,
+    selectedGroupIds: [],
+    segmentIndex: buildSegmentMembershipIndex([]),
+    targetTopicId
+  })
+  return resolvePlannedReferenceDividers(rows, buildMessageIdToGroupIndex(groupedMessages), reference, targetTopicId)
 }
 
 /** Resolved per-group topic-segment flags feeding the body injector. */
@@ -373,6 +306,46 @@ export interface BuildMessageFlowNodesInput {
 }
 
 /**
+ * Per-group facts consumed by the node emitter: resolved exactly once per
+ * group per build. The plan path reuses precomputed rows (zero
+ * re-derivation); the compatibility path derives them once from its
+ * callbacks with identical values.
+ */
+export interface FlowGroupFacts {
+  stableGroupId: string
+  segment: TopicSegment | undefined
+  isFirst: boolean
+  isLast: boolean
+  isFolded: boolean
+}
+
+interface EmitFlowNodesInput {
+  layerRuns: readonly RenderLayer[]
+  contextDividerGroupKey: string | null
+  referenceDividers?: readonly ReferenceDividerPlacement[]
+  forkDividers: readonly ForkDividerPlacement[]
+  branchPath: readonly TopicBranchWire[]
+  branches: readonly { id: string; name?: string | null }[]
+  topicDisplayName: string
+  factsByEntry: ReadonlyMap<object, FlowGroupFacts>
+  renderBody: (args: MessageFlowBodyArgs) => ReactNode
+  renderForkBoundary: (args: MessageFlowForkArgs) => ReactNode
+  renderContextBoundary: (legacyKey: string) => ReactNode
+  renderReferenceDivider?: (placement: ReferenceDividerPlacement) => ReactNode
+}
+
+export interface BuildMessageFlowNodesFromPlanInput {
+  forkDividers: readonly ForkDividerPlacement[]
+  branchPath: readonly TopicBranchWire[]
+  branches: readonly { id: string; name?: string | null }[]
+  topicDisplayName: string
+  renderBody: (args: MessageFlowBodyArgs) => ReactNode
+  renderForkBoundary: (args: MessageFlowForkArgs) => ReactNode
+  renderContextBoundary: (legacyKey: string) => ReactNode
+  renderReferenceDivider?: (placement: ReferenceDividerPlacement) => ReactNode
+}
+
+/**
  * Build the mounted message flow in normal-flow DOM order (oldest→newest):
  * iteration below walks the newest→oldest projection, and the collected nodes
  * are reversed ONCE at the very end so the DOM order matches the visual order.
@@ -380,8 +353,14 @@ export interface BuildMessageFlowNodesInput {
  * grouped downstream in renderEditFlowNodes with boundary flush, so a boundary
  * always splits turns (even same askId) and stays outside turn click capture —
  * liveness stays on the child body nodes.
+ *
+ * Single emitter for both entries: `buildMessageFlowNodes` (compatibility —
+ * facts derived once from callbacks) and `buildMessageFlowNodesFromPlan`
+ * (production — facts reused from the precomputed plan). Fork/reference/
+ * context placement, ordering, reversal, and identity attributes are owned
+ * here exactly once.
  */
-export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNode[] {
+function emitFlowNodes(input: EmitFlowNodesInput): FlowNode[] {
   const {
     layerRuns,
     contextDividerGroupKey,
@@ -390,9 +369,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     branchPath,
     branches,
     topicDisplayName,
-    isMessageInSegment,
-    isMessageFirstInSegment,
-    isMessageLastInSegment,
+    factsByEntry,
     renderBody,
     renderForkBoundary,
     renderContextBoundary,
@@ -425,13 +402,19 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   for (const layer of layerRuns) {
     for (const seg of layer.segments) {
       const kind = seg.isLive ? 'live' : 'history'
-      for (const [legacyKey, groupMessages] of seg.items) {
-        const firstMsg = groupMessages[0]
-        const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
-        const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
-        const lastMsg = groupMessages[groupMessages.length - 1]
-        const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
-        const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
+      for (const entry of seg.items) {
+        const legacyKey = entry[0]
+        const groupMessages = entry[1]
+        // Precomputed per-group facts (single resolution per group). The
+        // defensive fallback re-derives for an entry no supplier covered —
+        // unreachable when both entries cover every layered entry.
+        const facts = factsByEntry.get(entry as object)
+        const stableGroupId = facts?.stableGroupId ?? deriveStableGroupId(groupMessages as readonly Message[])
+        const segment = facts?.segment
+        const isFirst = facts?.isFirst ?? false
+        const isLast = facts?.isLast ?? false
+        const isFolded =
+          facts?.isFolded ?? (groupMessages.length > 0 && groupMessages.every((m) => (m as Message).folded === true))
         // Fold is a MESSAGE-LEVEL fact: a turn whose every member row carries
         // its own `folded` flag is presentation-hidden, and a leftover group
         // `folded` flag contributes nothing (group fold is retired).
@@ -533,7 +516,7 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             // Content-only classification is not needed: no group-level fold
             // exists, so a run's body visibility is decided per member row
             // (`isFolded`) and never by a zero-flow shortcut.
-            isFolded: groupMessages.length > 0 && groupMessages.every((m) => m.folded === true),
+            isFolded,
             messageIds: groupMessages.map((m) => (m as Message).id),
             bodyNode
           }
@@ -603,4 +586,96 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
   // order is oldest→newest. Reversing here (never per-push, never in the
   // renderer) keeps every placement rule above intact.
   return [...nodes].reverse()
+}
+
+/**
+ * Compatibility entry: resolves per-group facts once from the segment
+ * callbacks (one identity derivation, one membership/first/last lookup, one
+ * fold scan per group) and emits through the shared emitter. Existing
+ * builder tests pin the observable contract through this entry.
+ */
+export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNode[] {
+  const {
+    layerRuns,
+    contextDividerGroupKey,
+    referenceDividers,
+    forkDividers,
+    branchPath,
+    branches,
+    topicDisplayName,
+    isMessageInSegment,
+    isMessageFirstInSegment,
+    isMessageLastInSegment,
+    renderBody,
+    renderForkBoundary,
+    renderContextBoundary,
+    renderReferenceDivider
+  } = input
+  const factsByEntry = new Map<object, FlowGroupFacts>()
+  for (const layer of layerRuns) {
+    for (const seg of layer.segments) {
+      for (const entry of seg.items) {
+        if (factsByEntry.has(entry as object)) continue
+        const groupMessages = entry[1]
+        const firstMsg = groupMessages[0]
+        const lastMsg = groupMessages.length > 0 ? groupMessages[groupMessages.length - 1] : undefined
+        factsByEntry.set(entry as object, {
+          stableGroupId: deriveStableGroupId(groupMessages as readonly Message[]),
+          segment: firstMsg ? isMessageInSegment(firstMsg.id) : undefined,
+          isFirst: firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false,
+          isLast: lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false,
+          isFolded: groupMessages.length > 0 && groupMessages.every((m) => (m as Message).folded === true)
+        })
+      }
+    }
+  }
+  return emitFlowNodes({
+    layerRuns,
+    contextDividerGroupKey,
+    referenceDividers,
+    forkDividers,
+    branchPath,
+    branches,
+    topicDisplayName,
+    factsByEntry,
+    renderBody,
+    renderForkBoundary,
+    renderContextBoundary,
+    renderReferenceDivider
+  })
+}
+
+/**
+ * Production entry: reuses the precomputed plan rows (zero identity
+ * re-derivation, zero per-group segment scans, zero divider id rescans) and
+ * emits through the same shared emitter.
+ */
+export function buildMessageFlowNodesFromPlan(
+  plan: MessageRenderPlan,
+  input: BuildMessageFlowNodesFromPlanInput
+): FlowNode[] {
+  const factsByEntry = new Map<object, FlowGroupFacts>()
+  for (const [entry, row] of plan.rowByEntry) {
+    factsByEntry.set(entry, {
+      stableGroupId: row.stableGroupId,
+      segment: row.bodySegment,
+      isFirst: row.bodyFirstSegment !== undefined,
+      isLast: row.bodyLastSegment !== undefined,
+      isFolded: row.isFolded
+    })
+  }
+  return emitFlowNodes({
+    layerRuns: plan.layers,
+    contextDividerGroupKey: plan.contextDividerGroupKey,
+    referenceDividers: plan.referenceDividers,
+    forkDividers: input.forkDividers,
+    branchPath: input.branchPath,
+    branches: input.branches,
+    topicDisplayName: input.topicDisplayName,
+    factsByEntry,
+    renderBody: input.renderBody,
+    renderForkBoundary: input.renderForkBoundary,
+    renderContextBoundary: input.renderContextBoundary,
+    renderReferenceDivider: input.renderReferenceDivider
+  })
 }
