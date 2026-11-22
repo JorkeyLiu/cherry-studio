@@ -332,13 +332,26 @@ vi.mock('@renderer/services/MessagesService', () => ({
 
 vi.mock('@renderer/store', () => ({
   default: {
-    getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} }, editMode: { enabled: false } })),
+    getState: vi.fn(() => ({
+      messages: { messageIdsByTopic: {}, entities: {} },
+      editMode: { enabled: false },
+      // Production RootState always carries the resident-registry slice (its
+      // initialState is { entries: {} }); the real selector then reads
+      // undefined = never published, exactly like a fresh production store.
+      residentRegistry: { entries: {} }
+    })),
     subscribe: vi.fn(() => vi.fn())
   },
   useAppDispatch: () => (mocks as any).dispatchMock,
-  useAppSelector: (selector: any) => selector({ editMode: { enabled: false } } as any),
+  useAppSelector: (selector: any) =>
+    selector({ editMode: { enabled: false }, residentRegistry: { entries: {} } } as any),
   useAppStore: () => ({
-    getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} }, editMode: { enabled: false } })),
+    getState: vi.fn(() => ({
+      messages: { messageIdsByTopic: {}, entities: {} },
+      editMode: { enabled: false },
+      // Same production-shape conformance as the default store mock above.
+      residentRegistry: { entries: {} }
+    })),
     subscribe: vi.fn(() => vi.fn())
   })
 }))

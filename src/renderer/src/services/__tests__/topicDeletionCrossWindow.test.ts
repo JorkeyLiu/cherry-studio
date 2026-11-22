@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   getCachedContextClosure,
   resetAllClosureStateForTests,
@@ -14,6 +9,7 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
@@ -47,7 +43,6 @@ describe('topicDeletion cross-window event', () => {
 
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     // reset store topic
@@ -71,7 +66,7 @@ describe('topicDeletion cross-window event', () => {
     const blk = { id: 'b-cross', messageId: 'm-cross', type: 'main_text', content: 'c' } as any
     store.dispatch(newMessagesActions.messagesReceived({ topicId: t, messages: [msg] }))
     store.dispatch(upsertManyBlocks([blk]))
-    setLatestWindowCompleteness(t, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(t, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(t, makeClosure(t), 'fp')
     // subscribe
     const { subscribeTopicDeletionEvents } = await import('@renderer/services/topicDeletionSubscription')
@@ -80,7 +75,7 @@ describe('topicDeletion cross-window event', () => {
     // trigger event as if from Main broadcast (other window's deletion)
     trigger({ deletedTopicIds: [t] })
     expect(getDeletionGeneration(t)).toBe(1)
-    expect(getLatestWindowCompleteness(t)).toBeUndefined()
+    expect(selectWindowBoundary(t)).toBeUndefined()
     expect(getCachedContextClosure(t)).toBeNull()
     const state = store.getState()
     expect(state.messages.entities['m-cross']).toBeUndefined()
@@ -91,10 +86,10 @@ describe('topicDeletion cross-window event', () => {
     const { subscribeTopicDeletionEvents } = await import('@renderer/services/topicDeletionSubscription')
     subscribeTopicDeletionEvents()
     const t = 't-cross-invalid'
-    setLatestWindowCompleteness(t, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(t, { hasMoreBefore: true, hasMoreAfter: false })
     trigger({ deletedTopicIds: [''] } as unknown)
     // should not invalidate
     expect(getDeletionGeneration(t)).toBe(0)
-    expect(getLatestWindowCompleteness(t)).toBeDefined()
+    expect(selectWindowBoundary(t)).toBeDefined()
   })
 })

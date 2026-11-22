@@ -1,0 +1,94 @@
+ # Chat 轻量设计：流式生成生命周期归属（切片 1）与 read-window 边界收归（切片 2）
+
+ - 状态：切片 1、切片 2 均已实现（worktree），未合入、无产品语义变更、无 ADR 变更。
+- 范围锁：只动 `src/renderer` 流式节流/RAF 的所有权；协议、DB schema、Main/aiCore、产品行为、UI、既有 50ms 刷新节奏、attempt 与 pinned route、DB-first、loaded 门控、RAF 不进 barrier 的语义全部保持。
+- 既有 `docs/work/` 三份文档（chat-normal-flow-evaluation、multi-device-sync、pagination-cap-and-browse-render-convergence）与本切片无冲突；ADRs（identity、context-window、projection、branches、viewport、model-metadata）不受影响。
+
+## 1. 目标
+
+聊天链路减熵。终态是让每次生成的全部运行时状态（执行快照、节流器、RAF 任务、写屏障、回调装配）随执行同生共死；删除是唯一合法的跨 execution 操作。本切片只做第一步：流式 throttle/RAF 由 execution 拥有，全局只留下删除所需的显式跨 execution 取消登记。
+
+## 2. 当前 read/send 路径（切片前）
+
+- send：UI → `_sendMessage` → 队列 → `fetchAndProcessAssistantResponseImpl`（`messageThunk.ts`）→ pin `execRoute`（active route 快照）→ 建 `AssistantExecutionState` + `WriteBarrier` + `BlockManager` + callbacks → `transformMessagesAndFetch` 驱动流。
+- 流式写：`BlockManager.smartBlockUpdate` 非终态块走 `throttledBlockUpdate`（50ms lodash + RAF 包 Redux mirror + `updateSingleBlock` 直写 DB），终态/切块走即时 DB + flush；`onComplete` 先 `quiesceWrites`（flush 本执行 touched 块 + `barrier.quiesce()`）再单事务终态持久化（Fix B）。
+- read：`AssistantExecutionState` 是本执行的快照事实；Redux 只是可选 mirror（`isLoaded()` 活查 + `shouldMirrorToRedux` 在 RAF 执行时求值）。
+- 问题：`blockUpdateThrottlers` / `blockUpdateRafs` 是模块级全局 LRU（blockId 为键，跨 execution 共享）。lodash trailing 取 LATEST 调用参数，后一代 execution 的 ctx（attempt/barrier/route/mirror 门）会覆盖前一代同 block 的 pending trailing 写；cancel/flush 只能按裸 blockId 定位，无 execution 维度。
+
+## 3. 三个方向
+
+1. **生成生命周期**（本切片）：throttle + RAF + barrier 的归属从全局 LRU 收归单次执行；`StreamWriteScheduler` 随执行创建、随执行结算释放；删除保留显式跨实例取消。
+2. **窗口到视口交接**（后续）：loaded 窗口切换与视口恢复时，执行快照 → 投影的交接边界（`routeSwitch`、`topicSegment` 相关），不在本切片动。
+3. **渲染派生**（后续）：Redux mirror 与 markdown/usage 等派生计算的去重与节奏，不在本切片动。
+
+## 4. 本次切片
+
+新增 `src/renderer/src/services/messageStreaming/streamWriteScheduler.ts`：
+
+- `StreamWriteScheduler`：per-execution 拥有 per-block throttle 函数 + RAF 句柄；构造时绑定不可变 `resendAttemptId` / `topicId` / `branchId`（pinned route）/ `isLoaded` / `barrier`，以及注入的 `performWrite`（block-only DB 通道）与 `mirrorToRedux`（Redux 分发）。trailing 写在执行时解析 ctx（调用覆盖优先，缺省回退到执行绑定），DB 写被 tracked 到执行 barrier，RAF 回调只做 mirror 门控后分发。`drainMirrors()` 把 withheld 的 mirror 回调内联执行（只动 Redux 投影，不碰 DB、不等 barrier），供终态在 quiesce 之后调用，保证最终投影文本完整。
+- 生命周期：`schedule` / `flush`（不丢弃）/ `cancel` / `drainMirrors` / `dispose`。`dispose` 取消全部 pending throttle timer + RAF（含未执行的 mirror）、从 live registry 注销、此后 `schedule` 直接丢弃（in-flight barrier-tracked DB promise 照常 settle）。任何路径都不允许“dispose 丢尾”：成功路径 `onComplete` 先 `quiesceWrites`（flush 本执行 touched 集合 + `barrier.quiesce()`）再 `drainMirrors` 再单事务终态持久化；abort/error 路径 `onError` 同样先 quiesce + drain 再终态标记与终态持久化；SSE `finally` 与 channel `.finally` 在 `dispose` 之前先 `await blockManager.awaitTerminal()`，从未触发终态时（如 nothing-sendable no-op）立即返回。终态注册遵循 first-wins：成功后再到的 error（或反之）不再二次发布与持久化。
+- `BlockManager` 新增本执行终态账户：`tryStartTerminal` 同步抢占（first-wins，重复终态直接返回）、`trackTerminal` 同步登记（observed 处理，不 fire-and-forget）、`awaitTerminal` 永不拒绝的 join、`drainMirrors` 透传；`quiesceWrites` 语义不变。`createCallbacks` 对 `onComplete`/`onError` 做同步登记包装（dispatcher/adapter 不动，仍是同步 void）；channel 装配后移入 try（同步 throw 即 dispose + loading 复位 + 原错重抛），process 拒绝按既有 `callbacks.onError` 收尾再 join。
+- 测试：`messageThunk.blockWriteRoute.test.ts` 的 throttled 用例改用局部 scheduler 实例（不再引用已删除的全局入口）；`streamWriteScheduler.test.ts` 8 例 + `drainMirrors` 2 例（内联 withheld mirror 不多写 DB、cancel/dispose 后 drain 无副作用）；新增 `terminalJoin.test.ts` 6 例（成功终态 deferred 时 owner 不完成不 dispose、error/abort 50ms 内 pending 落盘且顺序 pending→终态→dispose、重复终态不二次发布、channel reject 走 error 收尾保留文本、channel 同步装配 throw 注册表无残留）。
+
+## 5. 可验证的结构收益（已由测试锁定，非性能承诺）
+
+- 同 block 相邻两代执行的 trailing ctx 覆盖被消除：各执行有独立 throttler，`cancelBlockEverywhere` 按实例扇出而非共享注册表。
+- 删除语义可测试：删除 cancel 跨全部存活实例，后建执行不受影响。
+- 释放语义可测试：`dispose` 后无 timer/RAF 残留、无 registry 泄漏、无后续写；`flush + barrier.quiesce` 顺序由测试锁定；RAF 缺席（occluded 窗口）不阻塞 quiesce；终态 `drainMirrors` 内联补齐投影（DB 不动），abort/error 同样先 quiesce 再终态、owner 先 join 再 dispose。
+- 不变量保持（由既有测试锁定）：attempt 线程化 + Main fail-closed（resendAttempt）、pinned route 永不重解析（blockWriteRoute）、DB-first 单事务终态（messageStreamingFinalAtomic）、loaded 门控（streamCallback/resendRegenerateCleanup/firstChunk/reasoningFallback）。终态幂等（first-wins，不二次发布/持久化）由 `terminalJoin` 锁定。
+
+明确不声称：任何延迟/吞吐/fps/内存/jank、“更轻/更快/更流畅”类性能结论；E2E 响应性断言是功能契约不是 benchmark；`pnpm test:e2e` 与 build 不在本轮跑（由主代理决定后续集成）。
+
+ ## 6. 后续范围（切片 2 落定后更新）
+
+ - ~~切片 2 候选：窗口到视口交接（route switch + segment restore 时执行快照与投影的一致性）。~~已由下面 §8 以“read-window 边界收归 residentRegistry”的有界形式完成；route switch / segment restore 的执行快照交接仍不在范围内。
+ - 切片 3 候选：渲染派生去重（mirror/parse/usage 节奏）。
+ - 任何跨越 ADRs（identity、branches、viewport、model-metadata）或改变删除/resend/分支产品语义的事项，先回主代理决策，不在本设计内自行扩大。
+
+ ## 8. 第二阶段：read-window 边界收归 residentRegistry（已实现）
+
+ - 动机：`pages/home/Messages/messageWindow.ts` 的模块全局 `latestWindowCompletenessByTopic` Map 与 `store/index` rootReducer 写 Map 的 side effect、`topicDeletionInvalidation` / `residentRetention` 的分散 clear，是投影适用性（projection applicability）之外的第二份“谁有最新窗口”的事实来源。收归后：最近一次本地权威读取的窗口边界 metadata 是 renderer 非持久、非 StoreSync 的投影自有（projection-owned）状态，随 `publishResidentComplete` 同次 reducer 交付/拒绝，由投影失效统一清理。不新增抽象层、新 service、新全局 cache；`packages/shared`、IPC/Main/DB/StoreSync 语义、ADR、restore/滚动算法均未动。
+ - 载体：`residentRegistry` 的 `ResidentEntry` 新增可选 `windowCompleteness?: ResidentWindowCompleteness`（`{ hasMoreBefore, hasMoreAfter }`，字段名沿用 Main 声明原样，不 relabel 为 older/newer）。命名与类型边界强调三重“不是”：不是整话题完备性、不是 viewport `MessageWindow`、不代替 viewport 的 `hasMoreOlder/hasMoreNewer`。union latest/around 的 metadata 语义维持既有，Main `hasMoreBefore/After` 只描述其声明的窗口。
+ - 写入：只在 `publishResidentComplete` 同次 reducer 内、同一 generation guard 通过后写；`window` 缺席时不写（与旧 Map “只在 payload.window 存在时 write”一致）；stale/缺 entry 的 joint 拒绝不写。值相同（两字段都不变）时不换引用（Immer 保持原对象引用，与旧 Map 同值行为一致）。
+ - 读取：纯类型化 selector `selectTopicWindowCompleteness(state, topicId)`，`undefined` = 该话题无保留窗口。唯一生产消费点 `Messages` 首载分支用 `store.getState()` 快照读一次，不新增订阅（无每 chunk 重渲染、无 effect 依赖变化）。
+ - 清理对照（旧 Map 事件 → 新行为，无一扩大旧 `hasMore` 有效性）：
+   - joint publish（window 存在）→ 切片内同次写；joint 拒绝（stale/缺 entry）→ 不写（旧 rootReducer 跳过 Map 写）。
+   - `RETENTION_EVICT`（旧 rootReducer + `residentRetention` 双 clear）→ 唯一 `retentionEvict` reducer 丢字段。
+   - 删除（旧 `bumpDeletionGeneration` 直接 clear + 分发失效）→ 仅 `invalidateForDeletion` reducer 丢字段。
+   - 测试 reset（旧 `resetAll/clearAll`）→ `resetAllResidentRegistry`（entries 重置）。
+   - unpaired/fromSync segment invalidation（rootReducer 集中重建）→ 保留 spread（只 fence residency，不碰边界）。
+   - `bumpGeneration` / `markSegmentsLoaded` → 保留（旧 Map 本就不清）。
+ - 已知残留（非语义变更，如实记录）：`clearEntry`/`resetAll` 删除 entry 时连带丢边界（旧 Map 在这些路径下存活；无生产调用方）；`publishSegmentCatalogPublishComplete` 缺 entry/gen-0 分支建空 entry 不带边界（仅 entry 被删后可达，无生产路径）；删掉了零调用方的 `resetAllDeletionStateForTests`。
+ - 可验证的结构收益（测试锁定，非性能承诺）：同次 dispatch 下数据与边界同见（`residentLifecycle` 单 dispatch 断言五者）；stale 发布对边界无副作用；空话题已加载（边界在）vs 未加载（`undefined`）可区分且不断言整话题；删除/retention/segment 失效统一清理且 A/B 话题不串（`topicDeletionPrecise` tDel/tKeep、`residentLifecycle` 双话题异值 around/latest）；同值发布引用稳定（`topicActivationDedup` `toBe`）。
+ - 实际验证结果（worktree HEAD 044ba34848 + 本切片 dirty）：`pnpm test:renderer` 全量串行（`CI=1 --maxWorkers=1 --no-file-parallelism`）672 文件 / 8354 用例 exit 0；`pnpm typecheck` 五通道 exit 0；fresh `pnpm build` exit 0；E2E 7/7 exit 0（`windowed-message-reads` R-02/R-03×2/R-04/R-05、`route-settings-session`、`top-cross-route-provenance`，2.7m）。收尾：spec 空白修平后 `biome format check` 0、`git diff --check` 0、`pnpm typecheck:e2e` exit 0，同 7 E2E 在复用 fresh build（production inputs 零变更已用 `find -newer` 穷举证实）上复验 exit 0（7 passed，2.6m）；renderer 全量未重跑（E2E 格式改动不触 Vitest inputs）。
+ - 本轮两处 test-only 修复，均未改 viewport/controller/生产行为、未删断言/减用例：(1) `Messages.mountedTransition` / `Messages.readingAnchor` 共 38 用例曾因 mock store 缺 `residentRegistry` 在 `Messages.tsx:3083` 首载调用抛错——修复为 fixture 补齐生产形状（`residentRegistry: { entries: {} }`，即 slice `initialState`），真实 selector 读 `undefined` = 未发布；selector 保持严格类型契约（与 `selectResidentEntry` / `selectIsResident` / `selectGeneration` 一致），`shouldDiscardJointPublish` 的既有 `?.` 链仅覆盖 rootReducer 未知 state 场景，不扩展。(2) E2E R-04 夹具漂移：`settings/setmarkdownExportPath` + 读已删除字段改为现有 `settings/setExportPath` / `state.settings.exportPath`（`settings.ts:543`、`migrate.ts:4814-4823` 迁移、`utils/export.ts:421,465` 预设路径分支为锚），断言意图不变；收尾轮已用 targeted `biome format --write` 修平该 spec 本轮新增 6 行缩进，diff 仅限 R-04 三组 fixture 行，无扩散，`biome format check` / `git diff --check` 均为 0。
+ - 限制：结论仅覆盖上述命令与用例集合；未跑全量 E2E；无性能结论。
+ - 明确不声称：任何延迟/吞吐/fps/内存/jank 结论；全量 E2E（除上述 7 用例）未跑。
+
+## 7. E2E 夹具预算修正（仅测试，产品语义不变）
+
+- 现象：`tests/e2e/specs/conversation/streaming-click-pause.spec.ts` 的主暂停用例（`primary content press pauses follow without moving text; resume and controls hold`）在默认 4145 字符 slow-stream 上，`>=3.5s` 逐帧 sampler 结束时已达 3624–3652 字符，而其后要求 `samplerEnd + HOLD_GROWTH(500) = 4124–4152`；一旦 sampler 结束落在 3652 即 `4152 > 4145`，目标在算术上不可达（baseline 时仅剩 21 字符余量）。
+- 修正：该用例的 STREAM B 改用仓库既有 `EXTENDED_SLOW_STREAM_MARKER`（同形状、同 60ms 节奏，300 段 ≈ 8345 字符 / 302 chunks ≈ 18.1s），并把 hold 目标改为对**同一 payload 事实**（`extendedSlowStreamTotalLength()`）判定；`expectedB` 与完成等待同步改用 `getExtendedSlowStreamReply()`。STREAM A 仍用默认 4145 字符 payload，断言未变。
+- 保留不变：streaming 状态断言、sampler ≥500 字符 / ≥2 步增长、1/64 CSS px 量子抖动、post-growth 锚点与距底、resume 及其后续增长、默认 timeout 与全部既有阈值；未改全局 mock server 的 payload，也未改其他 spec。
+- 实测（fresh build 未变，仅测试改动）：单跑该用例 exit 0（`samplerEndLen=3652 target=4152 total=8345 remaining=4693 → finalLen=4156 status=streaming`，sampler `frames=255 dur=3526ms growth=1599 steps=58 pTopRange=0`）；同 spec 的 control 与 wheel 两腿各自 exit 0。原先的失败是该预算算术，不是暂停行为回归。
+- 已知 baseline 失败（非本次修正目标，未重复跑）：zoom 用例（`paused stream holds one quantum at 1.25 effective zoom`）在 `waitForFunction` 于 zoom 收敛处 15s 超时（spec 内 1760 行附近），与本次预算无关。
+
+## 9. 第三阶段：fork-divider 逐组查找收归单次派生索引（已实现）
+
+- 范围（最小切片，仅 `buildMessageFlowNodes` 内）：此前每个 group 执行 `groupMessages.map→new Set` 再对全部 `forkDividers.filter(boundaryMessageId)`（O(G×D) 重复查找）。现改为一次 build 调用内按 `boundaryMessageId` 建 `Map<string, ForkDividerPlacement[]>`（同 boundary 多 divider 保持输入顺序），每组只取相关 divider；同组多边界时按输入序恢复以与原逐组 filter 输出完全一致。注释明确该索引是输入的一次派生 memo，不是第二权威（placement 真值仍在 `resolveForkDividers` + 窗口输入；`head` divider 仍走原独立循环）。
+- 保留语义（未动）：消息分组、viewport/window、route/scroll/anchor、Redux/IPC/DB/authority、Message memo、整体 `buildRenderSegments/layers`；输出节点顺序（normal-flow 反转）、稳定 group/layer/segment IDs、divider push-before/reverse-after、data attrs、MessageGroup keys、hasMoreNewer/BackToTop 均不变。
+- 结构性收益（测试锁定，非性能承诺）：`messageFlowNodes.forkDividerIndex.test.tsx` 5 例——多组多 divider 只归属边界消息、同 boundary 多条保序、无 divider 与无 group、输出节点顺序/稳定字段不变，以及 naive 逐组 matcher 等价对照（混合输入含共享边界/offscreen/head/单组双边界，节点签名全等）。不测试内部 Map、不声称复杂度/性能数字。
+- 未涉及的更大重复链（仍在范围外）：`resolveContextDividerGroupKey` / `resolveReferenceBoundary` / 深层 `resolveReferenceDividers` 的逐组 `some` 扫描、mirror/parse/usage 派生去重（原 §6 切片 3 候选），以及 route switch / segment restore 的执行快照交接。
+- 最终可信结果：独立 bounded 审查 0 findings；`CI=1 pnpm test:renderer --maxWorkers=1 --no-file-parallelism` exit 0（673 files / 8359 tests）；`pnpm build` exit 0；`pnpm test:e2e tests/e2e/specs/conversation/windowed-message-reads.spec.ts tests/e2e/specs/conversation/topic-scroll-save-restore.spec.ts tests/e2e/specs/conversation/top-cross-route-provenance.spec.ts tests/e2e/specs/conversation/window-grouped.spec.ts` exit 0（11 passed）。
+- Scope 界定：本切片仅 divider 索引局部优化；未解决 full grouping / render layer 重建；不承诺任何性能提升。
+ ## 10. 第四阶段：单次分页派生内共享 lazy group model（已实现）
+
+ - 范围（最小切片，仅 `messageWindow.ts` 的 paginate 链路）：`applyWindowTransition` paginate → `derivePaginationWindow` → `canAdvancePaginationWindow`（over-capacity 时建 model）→ `expandOlderWindow` 或 `expandMessageWindowNewer`（又建同 messages model）。此前一次 over-capacity 的 derive 建两次同 messages 的 `createMessageViewportGroupModel`；现改为同一次 derive 操作内共享 lazy `getGroupModel`，最多一次建模；预检 reject 时（under-capacity fast path）零建模，`retention-exceeds-bound` decline 不再进 expand。遵照已有 `reconcileInternal` lazy 单 model 模式（`groupModel ??=`）。
+ - 约束：private internal helpers 接 `getModel`（`PaginationGroupModelProvider`）；public legacy 签名与 intent shape 不变（不对外暴露可混不同 messages 的 model 参数，`expandMessageWindowOlder/Newer`、`canAdvancePaginationWindow` 保持原签名，内部各持单次 lazy provider 兼容 wrapper）。禁止跨 commit/module 缓存、`WeakMap`/new service、保存旧 entity 或结构 memo。预检与 expand 读同 messages 数组；guard 仍可 standalone（`Messages` preflight 在 await 前读旧数组，不能与 post-fetch paginate 复用）。directions/retained anchor/cap200/hasMoreBefore/After/groupRange/key/order 全部不变；不改 viewportController/Messages/restoration 分组语义、Main/IPC/DB 或 phase1 scheduler。
+ - 测试意义：older/newer 达到容量边界、retained anchor 导致 reject 或 opposite-edge trim、同 askId 连续组不被切断；successive calls 同 IDs 但新 entity/status/blocks/askId 变化必须输出 fresh refs 与正确组（不跨 update 复用；Message 本体无 content 字段，以 `status`/`blocks` 为真实字段证据）；同调用 guard+expand 模型只建一次（1 条 Vitest spy 调用计数边界机制测试，`messageWindow.paginationSharedModel.test.ts`——明确结构验收，不扩散到全部 test implementation）；legacy helper 输出等价由 existing suites 复用。无可观察行为更改。
+ - 新增直接证据（tests-only，本轮 production 零改动）：`messageWindow.paginationSharedModel.test.ts` 6 例——(1) over-capacity older 页 guard+expand 共享单 model（spy 计数恰 1，唯一一条实现计数断言）；(2) newer 容量边界 opposite-edge trim，同 askId 三连 assistant 同组不拆（`assistant:qa` 整组、`{50,249}`/200 组/order 全片反转等价、authority 原样）；(3) newer + retained anchor 触发 retention-clamped overshoot（`{10,249}`、`oldestMessageId m10` resident、trim 停在 held row）；(4) 同 IDs successive calls 新 entity：`toBe` 断言输出即新输入 refs（`status ERROR`/`blocks ['b9']`），askId 变更正确重分组（3 组 `[[u1],[a1],[a2]]`，无跨调用 cache）；(5) 空 committed 回退 newest-capacity 重建（`{5,9}`、无 `paginationTarget`、authority/flags/order 边界保持）；(6) retention 冲突 decline 只返回 reason、不碰 committed 窗口的 range/flags/order。结论仅限上述用例集合；不承诺性能与无回归。
+ - 未做：更大 full-regroup/render-layer 未动；不做性能承诺。
+ - E2E诊断与复验（test-only，未改生产/assert/timeout/growth/Enter→IPC）：原5spec/12用例run（windowed-message-reads、topic-scroll-save-restore、top-cross-route-provenance、window-grouped + streaming-responsiveness）exit 1，其中11 pass，唯一失败为本spec `independent anchors survive`在setup首个createNewTopic内`waitForAssistantResponseComplete`60s超时（第几个send未知，trace丢失未判new/flaky；Target closed为teardown次生）。诊断补足后的单用例control复现了同send路径的另一flaky：当前`uiSendMessage:81 toHaveValue`5s超时、value保持""（synthetic fill被renderer重渲染撤销），确证send路径存在可等待的ready-contract缺口。
+ - 一次in-scope夹具修复（`uiSendMessage`为全文件共享helper，改后跑全文件4例）：bounded fill重试（同fill序列重做一遍，同`toHaveValue`断言最终重抛，不吞错）+ Enter后input清空acceptance gate（仍Enter dispatch）；`waitForAssistantResponseComplete`/`createNewTopic`超时catch在teardown关page前附`sendIndex/topicId/role-status/loading/blocks/textarea(valueLength only)`诊断经`test.info().attach`（best-effort，不掩盖原错；无content/API/凭据）。
+ - 真实checks：`biome check`0、`typecheck:e2e`exit 0；生产build复用有效（`out/`mtime新于全部非测试build inputs，`find -newer`证实；本轮仅改`tests/e2e`）；修后全文件4 passed/1.7m exit 0。阶段最终生产门（主代理基线，本轮未重跑全量）：`pnpm test:renderer`全量674 files/8365 tests exit 0、`pnpm build` exit 0。
+ - 剩余限制：原12-run的单失败仍记unexplained（control复现的是另一send-path flake，非同一超时证据链，不抹掉原记录）；未重跑全量12；本轮诊断attach在复验全过时未触发、线上有效性未经失败路径验证；无性能结论。

@@ -1,16 +1,14 @@
+import type * as AssistantsModule from '@renderer/store/assistants'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockDispatch } = vi.hoisted(() => ({ mockDispatch: vi.fn() }))
-vi.mock('@renderer/store', () => ({ default: { dispatch: mockDispatch } }))
-vi.mock('@renderer/store/assistants', () => ({
-  updateTopicUpdatedAt: vi.fn((p: any) => ({ type: 'updateTopicUpdatedAt', payload: p }))
-}))
+vi.mock('@renderer/store/assistants', async (importOriginal) => {
+  const actual = await importOriginal<typeof AssistantsModule>()
+  return {
+    ...actual,
+    updateTopicUpdatedAt: vi.fn((p: any) => ({ type: 'updateTopicUpdatedAt', payload: p }))
+  }
+})
 
-import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
 import {
   clearAllContextClosureCache,
   getCachedContextClosure,
@@ -21,6 +19,7 @@ import {
   getDeletionGeneration,
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 
 import { ChatDbResultError, SqliteMessageDataSource } from '../SqliteMessageDataSource'
@@ -57,7 +56,6 @@ describe('SqliteMessageDataSource deletion invalidation integration', () => {
 
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     api = {
@@ -72,57 +70,56 @@ describe('SqliteMessageDataSource deletion invalidation integration', () => {
 
   it('single hardDelete with authoritative IDs invalidates only that topic after success', async () => {
     const topicId = 't-single'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId), 'fp')
     api.hardDeleteTopic.mockResolvedValue(
       successResult({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [topicId] })
     )
     const result = await ds.hardDeleteTopic(topicId)
     expect(result.deletedTopicIds).toEqual([topicId])
-    expect(getLatestWindowCompleteness(topicId)).toBeUndefined()
+    expect(selectWindowBoundary(topicId)).toBeUndefined()
     expect(getCachedContextClosure(topicId)).toBeNull()
     expect(getDeletionGeneration(topicId)).toBe(1)
   })
 
   it('does not invalidate when hardDelete returns empty deletedTopicIds (absent topic)', async () => {
     const topicId = 't-absent'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     api.hardDeleteTopic.mockResolvedValue(
       successResult({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] })
     )
     await ds.hardDeleteTopic(topicId)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getDeletionGeneration(topicId)).toBe(0)
   })
 
   it('bulk purge invalidates all authoritative IDs', async () => {
     const ids = ['t-purge-1', 't-purge-2']
-    for (const id of ids) setLatestWindowCompleteness(id, { hasMoreBefore: true, hasMoreAfter: true })
+    for (const id of ids) primeWindowBoundary(id, { hasMoreBefore: true, hasMoreAfter: true })
     api.purgeExpiredTopics.mockResolvedValue(
       successResult({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: ids })
     )
     await ds.purgeExpiredTopics(new Date().toISOString())
     for (const id of ids) {
-      expect(getLatestWindowCompleteness(id)).toBeUndefined()
+      expect(selectWindowBoundary(id)).toBeUndefined()
       expect(getDeletionGeneration(id)).toBe(1)
     }
   })
 
   it('emptyTrash bulk invalidates all', async () => {
     const ids = ['t-empty-1', 't-empty-2', 't-empty-3']
-    for (const id of ids) setLatestWindowCompleteness(id, { hasMoreBefore: false, hasMoreAfter: false })
+    for (const id of ids) primeWindowBoundary(id, { hasMoreBefore: false, hasMoreAfter: false })
     api.emptyTrashTopics.mockResolvedValue(
       successResult({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: ids })
     )
     await ds.emptyTrashTopics('assistant-1')
-    for (const id of ids) expect(getLatestWindowCompleteness(id)).toBeUndefined()
+    for (const id of ids) expect(selectWindowBoundary(id)).toBeUndefined()
   })
 
   it('resetAssistant invalidates deleted IDs but not replacement', async () => {
     const deleted = ['t-del-1', 't-del-2']
     const replacement = 't-repl'
-    for (const id of [...deleted, replacement])
-      setLatestWindowCompleteness(id, { hasMoreBefore: true, hasMoreAfter: true })
+    for (const id of [...deleted, replacement]) primeWindowBoundary(id, { hasMoreBefore: true, hasMoreAfter: true })
     api.resetAssistantTopics.mockResolvedValue(
       successResult({
         cleanup: { affectedFileIds: [], remainingReferenceCounts: {} },
@@ -131,37 +128,37 @@ describe('SqliteMessageDataSource deletion invalidation integration', () => {
       })
     )
     await ds.resetAssistantTopics('asst-1', replacement)
-    for (const id of deleted) expect(getLatestWindowCompleteness(id)).toBeUndefined()
-    expect(getLatestWindowCompleteness(replacement)).toBeDefined()
+    for (const id of deleted) expect(selectWindowBoundary(id)).toBeUndefined()
+    expect(selectWindowBoundary(replacement)).toBeDefined()
   })
 
   it('failure retention: hardDelete failure does not invalidate', async () => {
     const topicId = 't-fail-retention'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     api.hardDeleteTopic.mockResolvedValue(failResult())
     await expect(ds.hardDeleteTopic(topicId)).rejects.toBeInstanceOf(ChatDbResultError)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getDeletionGeneration(topicId)).toBe(0)
   })
 
   it('soft-delete preservation: softDelete does not invalidate', async () => {
     const topicId = 't-soft'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId), 'fp')
     api.softDeleteTopic.mockResolvedValue(successResult(null))
     // Call via ds.softDeleteTopic if exists, otherwise directly check helper not called
     // SqliteMessageDataSource softDeleteTopic exists
     await ds.softDeleteTopic(topicId)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
     expect(getDeletionGeneration(topicId)).toBe(0)
   })
 
   it('purge failure retention: no invalidation on failure', async () => {
     const topicId = 't-purge-fail'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     api.purgeExpiredTopics.mockResolvedValue(failResult())
     await expect(ds.purgeExpiredTopics(new Date().toISOString())).rejects.toBeInstanceOf(ChatDbResultError)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
   })
 })

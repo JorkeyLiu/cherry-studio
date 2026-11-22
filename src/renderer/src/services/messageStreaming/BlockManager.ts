@@ -81,6 +81,11 @@ interface BlockManagerDependencies {
    */
   flushThrottledBlockUpdate?: (id: string) => void
   cancelThrottledBlockUpdate: (id: string) => void
+  /**
+   * Run pending Redux-mirror callbacks inline without touching DB writes.
+   * Wired to the execution scheduler drain; absent in legacy/test contexts.
+   */
+  drainMirrors?: () => void
 }
 
 export class BlockManager {
@@ -88,6 +93,15 @@ export class BlockManager {
   private readonly exec: AssistantExecutionState
   /** Block ids this execution sent to the throttler (F2 flush scope). */
   private readonly touchedThrottledBlocks = new Set<string>()
+  /**
+   * Terminal settlement for this execution. The first terminal callback
+   * (onComplete/onError) to run claims the slot; later terminals are
+   * no-ops so success is never overwritten by a trailing error (or the
+   * reverse) and the final publish happens exactly once.
+   */
+  private terminalClaimed = false
+  /** Guarded terminal settlement: resolves when settled, never rejects. */
+  private terminalDone: Promise<void> | null = null
 
   // 简化后的状态管理
   private _activeBlockInfo: ActiveBlockInfo | null = null
@@ -350,6 +364,68 @@ export class BlockManager {
     }
     if (this.deps.barrier) {
       await this.deps.barrier.quiesce()
+    }
+  }
+  /**
+   * Synchronously claim the execution terminal slot. Returns false when a
+   * terminal already claimed it, in which case the caller must skip its
+   * terminal body (no second publish, no second persist).
+   */
+  tryStartTerminal(): boolean {
+    if (this.terminalClaimed) {
+      return false
+    }
+    this.terminalClaimed = true
+    return true
+  }
+  /**
+   * Register the claimed terminal promise. First registration wins; later
+   * ones are ignored. Attaches observed handlers synchronously so a
+   * dispatcher-dropped terminal never surfaces as an unhandled rejection,
+   * and stores a guarded copy that resolves when settled but never rejects
+   * (terminal failures are logged here; the original promise still carries
+   * its own outcome to its direct caller per the existing contract).
+   */
+  trackTerminal(promise: Promise<void> | void): void {
+    if (!this.terminalClaimed || this.terminalDone) {
+      return
+    }
+    if (!isThenable(promise)) {
+      this.terminalDone = Promise.resolve()
+      return
+    }
+    this.terminalDone = promise.then(
+      () => {},
+      (error: unknown) => {
+        logger.error('[terminal] Terminal processing rejected:', error as Error)
+      }
+    )
+  }
+  /**
+   * Resolve after the registered terminal settles. Never rejects; a
+   * terminal that never fired resolves immediately. Owners await this before
+   * disposing scheduler ownership so no pending terminal write is lost.
+   */
+  async awaitTerminal(): Promise<void> {
+    const done = this.terminalDone
+    if (!done) {
+      return
+    }
+    await done
+  }
+  /**
+   * Run pending Redux-mirror callbacks inline (DB writes untouched). No-op
+   * without scheduler wiring. Called by terminal paths after quiescence so
+   * the final projection publishes complete text even when a frame was
+   * withheld and the owner is about to dispose (which cancels RAF).
+   */
+  drainMirrors(): void {
+    if (this.deps.drainMirrors) {
+      try {
+        this.deps.drainMirrors()
+      } catch (error) {
+        logger.warn('[drainMirrors] Failed to drain pending mirrors:', error as Error)
+      }
     }
   }
 }

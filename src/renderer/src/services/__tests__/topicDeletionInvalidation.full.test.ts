@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   getCachedContextClosure,
   resetAllClosureStateForTests,
@@ -17,6 +12,7 @@ import {
   isDeletionStale,
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,7 +38,6 @@ function makeClosure(topicId: string, anchor: string): FetchContextClosureRespon
 describe('topicDeletionInvalidation full coverage §5.10', () => {
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     vi.clearAllMocks()
@@ -50,15 +45,15 @@ describe('topicDeletionInvalidation full coverage §5.10', () => {
 
   it('single hard-delete: authoritative IDs invalidate exact topic projections', () => {
     const topicId = 't-single-hard'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId, 'u1'), 'fp-1')
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
 
     // Simulate successful authoritative hardDelete returning exact ID
     invalidateTopicsDeletion(['t-single-hard'])
 
-    expect(getLatestWindowCompleteness(topicId)).toBeUndefined()
+    expect(selectWindowBoundary(topicId)).toBeUndefined()
     expect(getCachedContextClosure(topicId)).toBeNull()
     expect(getDeletionGeneration(topicId)).toBeGreaterThanOrEqual(1)
   })
@@ -66,12 +61,12 @@ describe('topicDeletionInvalidation full coverage §5.10', () => {
   it('bulk purge: authoritative bulk IDs invalidate all affected topics', () => {
     const ids = ['t-bulk-a', 't-bulk-b', 't-bulk-c']
     for (const id of ids) {
-      setLatestWindowCompleteness(id, { hasMoreBefore: true, hasMoreAfter: true })
+      primeWindowBoundary(id, { hasMoreBefore: true, hasMoreAfter: true })
       setCachedContextClosureWithFingerprint(id, makeClosure(id, 'u1'), 'fp')
     }
     invalidateTopicsDeletion(ids)
     for (const id of ids) {
-      expect(getLatestWindowCompleteness(id)).toBeUndefined()
+      expect(selectWindowBoundary(id)).toBeUndefined()
       expect(getCachedContextClosure(id)).toBeNull()
       expect(getDeletionGeneration(id)).toBeGreaterThanOrEqual(1)
     }
@@ -80,11 +75,11 @@ describe('topicDeletionInvalidation full coverage §5.10', () => {
   it('emptyTrash bulk: same as purge, all emptied IDs invalidated', () => {
     const ids = ['t-empty-1', 't-empty-2']
     for (const id of ids) {
-      setLatestWindowCompleteness(id, { hasMoreBefore: false, hasMoreAfter: false })
+      primeWindowBoundary(id, { hasMoreBefore: false, hasMoreAfter: false })
     }
     invalidateTopicsDeletion(ids)
     for (const id of ids) {
-      expect(getLatestWindowCompleteness(id)).toBeUndefined()
+      expect(selectWindowBoundary(id)).toBeUndefined()
     }
   })
 
@@ -92,40 +87,40 @@ describe('topicDeletionInvalidation full coverage §5.10', () => {
     const deleted = ['t-del-1', 't-del-2', 't-del-3']
     const replacement = 't-replacement'
     for (const id of [...deleted, replacement]) {
-      setLatestWindowCompleteness(id, { hasMoreBefore: true, hasMoreAfter: true })
+      primeWindowBoundary(id, { hasMoreBefore: true, hasMoreAfter: true })
       setCachedContextClosureWithFingerprint(id, makeClosure(id, 'u1'), 'fp')
     }
     // Simulate reset returning deletedTopicIds = deleted (replacement excluded)
     invalidateTopicsDeletion(deleted)
     for (const id of deleted) {
-      expect(getLatestWindowCompleteness(id)).toBeUndefined()
+      expect(selectWindowBoundary(id)).toBeUndefined()
       expect(getCachedContextClosure(id)).toBeNull()
     }
     // Replacement must remain valid (not invalidated)
-    expect(getLatestWindowCompleteness(replacement)).toBeDefined()
+    expect(selectWindowBoundary(replacement)).toBeDefined()
     expect(getCachedContextClosure(replacement)).not.toBeNull()
     expect(getDeletionGeneration(replacement)).toBe(0)
   })
 
   it('failure retention: no bump when deletion fails (no invalidate called)', () => {
     const topicId = 't-fail'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId, 'u1'), 'fp-fail')
     const token = captureDeletionGeneration(topicId)
     // Simulate failure: do NOT call invalidate
     expect(isDeletionStale(topicId, token)).toBe(false)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
     expect(getDeletionGeneration(topicId)).toBe(0)
   })
 
   it('soft-delete preservation: soft delete does not invalidate', () => {
     const topicId = 't-soft-preserve'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId, 'u1'), 'fp-soft')
     // Soft delete must not call invalidate -> generation stays 0, cache remains
     expect(getDeletionGeneration(topicId)).toBe(0)
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
     // Even after capturing, no stale
     const token = captureDeletionGeneration(topicId)
@@ -160,11 +155,11 @@ describe('topicDeletionInvalidation full coverage §5.10', () => {
   it('does not invalidate all topics for per-topic deletion unless authoritative says so', () => {
     const t1 = 't-per-1'
     const t2 = 't-per-2'
-    setLatestWindowCompleteness(t1, { hasMoreBefore: true, hasMoreAfter: true })
-    setLatestWindowCompleteness(t2, { hasMoreBefore: true, hasMoreAfter: true })
+    primeWindowBoundary(t1, { hasMoreBefore: true, hasMoreAfter: true })
+    primeWindowBoundary(t2, { hasMoreBefore: true, hasMoreAfter: true })
     // Per-topic deletion returns only t1
     invalidateTopicsDeletion([t1])
-    expect(getLatestWindowCompleteness(t1)).toBeUndefined()
-    expect(getLatestWindowCompleteness(t2)).toBeDefined()
+    expect(selectWindowBoundary(t1)).toBeUndefined()
+    expect(selectWindowBoundary(t2)).toBeDefined()
   })
 })

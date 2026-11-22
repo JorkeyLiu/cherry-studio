@@ -15,7 +15,6 @@
 
 import { loggerService } from '@logger'
 import type { Store } from '@reduxjs/toolkit'
-import { clearLatestWindowCompleteness } from '@renderer/pages/home/Messages/messageWindow'
 import { clearCachedContextClosure } from '@renderer/services/contextClosure'
 import { setRetentionClearHandler } from '@renderer/services/retentionClearHandler'
 import { retentionEvict } from '@renderer/store/residentRegistry'
@@ -355,13 +354,10 @@ export function enforceRetention(now = Date.now(), storeOverride?: Store): strin
   for (const topicId of plan.victims) {
     const reason = plan.reasonByTopic[topicId]
     try {
-      // Dispatch retention-eviction — advances generation via dedicated retention path and atomically
-      // clears messages/blocks/segments via Redux; window/closure cleared in rootReducer side effect.
+      // Dispatch retention-eviction — advances generation via the dedicated
+      // retention path and atomically clears messages/blocks/segments and the
+      // topic's retained read-window boundary via the same slice reducer.
       store.dispatch(retentionEvict(topicId))
-      // Belt-and-suspenders for non-Redux window/closure Maps (in case rootReducer path not yet wired)
-      try {
-        clearLatestWindowCompleteness(topicId)
-      } catch {}
       try {
         clearCachedContextClosure(topicId)
       } catch {}

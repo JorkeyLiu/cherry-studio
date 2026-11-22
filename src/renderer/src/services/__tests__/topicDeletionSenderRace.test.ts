@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   getCachedContextClosure,
   resetAllClosureStateForTests,
@@ -17,6 +12,7 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
@@ -44,7 +40,6 @@ function makeClosure(topicId: string): FetchContextClosureResponse {
 describe('topicDeletion sender-race and all-window delivery', () => {
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     const state = store.getState()
@@ -70,8 +65,8 @@ describe('topicDeletion sender-race and all-window delivery', () => {
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tSender, messages: [msgSender] }))
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tOther, messages: [msgOther] }))
     store.dispatch(upsertManyBlocks([blkSender, blkOther]))
-    setLatestWindowCompleteness(tSender, { hasMoreBefore: true, hasMoreAfter: false })
-    setLatestWindowCompleteness(tOther, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tSender, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tOther, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(tSender, makeClosure(tSender), 'fp-sender')
     setCachedContextClosureWithFingerprint(tOther, makeClosure(tOther), 'fp-other')
 
@@ -86,10 +81,10 @@ describe('topicDeletion sender-race and all-window delivery', () => {
     // Before stale publication, the in-flight response must be discarded
     expect(isDeletionStale(tSender, capturedSenderGen)).toBe(true)
     expect(getDeletionGeneration(tSender)).toBe(1)
-    expect(getLatestWindowCompleteness(tSender)).toBeUndefined()
+    expect(selectWindowBoundary(tSender)).toBeUndefined()
     expect(getCachedContextClosure(tSender)).toBeNull()
     // Other topic preserved (precise, not global clear)
-    expect(getLatestWindowCompleteness(tOther)).toBeDefined()
+    expect(selectWindowBoundary(tOther)).toBeDefined()
     expect(store.getState().messageBlocks.entities['b-other']).toBeDefined()
     expect(store.getState().messageBlocks.entities['b-sender']).toBeUndefined()
 
@@ -99,8 +94,8 @@ describe('topicDeletion sender-race and all-window delivery', () => {
     invalidateTopicsDeletion([tSender])
     expect(getDeletionGeneration(tSender)).toBe(2)
     expect(isDeletionStale(tSender, capturedSenderGen)).toBe(true) // still stale
-    expect(getLatestWindowCompleteness(tSender)).toBeUndefined()
-    expect(getLatestWindowCompleteness(tOther)).toBeDefined()
+    expect(selectWindowBoundary(tSender)).toBeUndefined()
+    expect(selectWindowBoundary(tOther)).toBeDefined()
     expect(getDeletionGeneration(tOther)).toBe(beforeOtherGen)
     // No exception and second removal is no-op (already removed)
     expect(store.getState().messages.entities['m-sender']).toBeUndefined()
@@ -116,7 +111,7 @@ describe('topicDeletion sender-race and all-window delivery', () => {
     const blk = { id: 'b-all', messageId: 'm-all', type: 'main_text', content: 'c' } as any
     store.dispatch(newMessagesActions.messagesReceived({ topicId: t, messages: [msg] }))
     store.dispatch(upsertManyBlocks([blk]))
-    setLatestWindowCompleteness(t, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(t, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(t, makeClosure(t), 'fp')
 
     // Mock window.api.chatDb.onTopicDeleted for two "windows" (two subscriptions)
@@ -145,10 +140,10 @@ describe('topicDeletion sender-race and all-window delivery', () => {
     // The payload is not filtered for sender, and invalidating again remains idempotent.
     inv(payload.deletedTopicIds) // Window B invalidation (simulating second window's helper)
     expect(getDeletionGeneration(t)).toBe(2)
-    expect(getLatestWindowCompleteness(t)).toBeUndefined()
+    expect(selectWindowBoundary(t)).toBeUndefined()
     // Unrelated topic would remain, proving per-topic precise
     const tUnrelated = 't-unrelated-all'
-    setLatestWindowCompleteness(tUnrelated, { hasMoreBefore: true, hasMoreAfter: false })
-    expect(getLatestWindowCompleteness(tUnrelated)).toBeDefined()
+    primeWindowBoundary(tUnrelated, { hasMoreBefore: true, hasMoreAfter: false })
+    expect(selectWindowBoundary(tUnrelated)).toBeDefined()
   })
 })

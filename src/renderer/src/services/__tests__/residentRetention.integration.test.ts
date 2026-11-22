@@ -5,11 +5,6 @@
 
 import { configureStore } from '@reduxjs/toolkit'
 import {
-  clearLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   computeClosureFingerprint,
   getCachedContextClosure,
   resetAllClosureStateForTests,
@@ -24,6 +19,7 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 import { rootReducer } from '@renderer/store'
+import { selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import {
   bumpGeneration,
@@ -126,7 +122,6 @@ function seedResidentTopic(
       ]
     })
   )
-  setLatestWindowCompleteness(topicId, { hasMoreBefore: false, hasMoreAfter: false })
   const fp = computeClosureFingerprint([{ id: 'u1', role: 'user', topicId, blocks: [] }] as any)
   setCachedContextClosureWithFingerprint(
     topicId,
@@ -167,8 +162,6 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     retention.stopResidentRetention()
     resetAllClosureStateForTests()
     resetAllDeletionGenerationsForTests()
-    clearLatestWindowCompleteness('t-a')
-    clearLatestWindowCompleteness('t-b')
     keyvStore = new Map()
     ;(globalThis as any).window = (globalThis as any).window ?? {}
     ;(globalThis as any).window.keyv = {
@@ -410,7 +403,7 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     const stateBefore = store.getState() as any
     expect(stateBefore.messages.messageIdsByTopic['t-victim']).toBeDefined()
     expect(stateBefore.messageBlocks.entities['b-m-v1']).toBeDefined()
-    expect(getLatestWindowCompleteness('t-victim')).toBeDefined()
+    expect(selectWindowBoundary('t-victim', store)).toBeDefined()
     expect(getCachedContextClosure('t-victim')).not.toBeNull()
     const genBefore = stateBefore.residentRegistry.entries['t-victim'].applicabilityGeneration
     expect(keyvStore.has('scroll:topic-t-victim')).toBe(true)
@@ -428,7 +421,7 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     expect(stateAfter.messages.messageIdsByTopic['t-survivor']).toBeDefined()
     expect(stateAfter.messageBlocks.entities[sharedBlockId]).toBeDefined()
     expect(stateAfter.topicSegments.segmentsByTopic['t-victim']).toBeUndefined()
-    expect(getLatestWindowCompleteness('t-victim')).toBeUndefined()
+    expect(selectWindowBoundary('t-victim', store)).toBeUndefined()
     expect(getCachedContextClosure('t-victim')).toBeNull()
     expect(stateAfter.residentRegistry.entries['t-victim'].residentTopic).toBe(false)
     expect(stateAfter.residentRegistry.entries['t-victim'].applicabilityGeneration).toBe(genBefore + 1)
@@ -500,7 +493,6 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     const gen = globalStore.getState().residentRegistry.entries[testTopic].applicabilityGeneration
     const wr = makeWindowResponse(testTopic, ['m-g-hard'])
     globalStore.dispatch(prc({ topicId: testTopic, generation: gen, windowResponse: wr, segments: [] } as any))
-    setLatestWindowCompleteness(testTopic, { hasMoreBefore: false, hasMoreAfter: false })
     // Set retention lastAccess via retention service (bound to global store if started)
     // Start retention on global store to bind
     retention.stopResidentRetention()
@@ -518,9 +510,6 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     const { clearEntry } = await import('@renderer/store/residentRegistry')
     try {
       globalStore.dispatch(clearEntry(testTopic))
-    } catch {}
-    try {
-      clearLatestWindowCompleteness(testTopic)
     } catch {}
   })
 

@@ -403,6 +403,19 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
     parentBranchId === null ? topicDisplayName : (branches.find((b) => b.id === parentBranchId)?.name ?? parentBranchId)
   const forkBoundaryKey = (anchorMessageId: string, parentBranchId: string | null): string =>
     `branch-fork-${anchorMessageId}-${parentBranchId ?? 'main'}`
+  // Derived-once lookup for fork dividers with a resident message boundary.
+  // This Map is a per-build memo of the `forkDividers` input, not a second
+  // authority: placement truth stays with `resolveForkDividers` + the window
+  // inputs, and `head` dividers still flow through the dedicated loop below.
+  // Lists preserve input order so one boundary with several dividers keeps
+  // its resolved sequence.
+  const forkMessageDividersByBoundary = new Map<string, ForkDividerPlacement[]>()
+  for (const divider of forkDividers) {
+    if (divider.placement !== 'message' || divider.boundaryMessageId === null) continue
+    const existing = forkMessageDividersByBoundary.get(divider.boundaryMessageId)
+    if (existing) existing.push(divider)
+    else forkMessageDividersByBoundary.set(divider.boundaryMessageId, [divider])
+  }
 
   // LOCK-S3.3-FIX-003: no outer React key whose identity changes with layer
   // membership/composition. Groups/selection blocks are stable entity-derived
@@ -432,10 +445,26 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
         // whose menu includes the current route plus children. Placement is
         // the resolved inheritance boundary, so a divider sits where the
         // inheritance actually ends rather than on a fixed anchor row.
-        const groupIdSet = new Set(groupMessages.map((m) => (m as Message).id))
-        const dividersHere = forkDividers.filter(
-          (d) => d.placement === 'message' && d.boundaryMessageId !== null && groupIdSet.has(d.boundaryMessageId)
-        )
+        // Per-group hit: only the dividers whose boundary message renders in
+        // this group, in resolved input order (message ids are unique, so a
+        // group holding several boundary ids is re-sorted to the input order
+        // to match the previous per-group filter exactly).
+        const dividersHere: ForkDividerPlacement[] = []
+        const seenBoundaryMessageId = new Set<string>()
+        for (const member of groupMessages) {
+          const boundaryMessageId = (member as Message).id
+          if (seenBoundaryMessageId.has(boundaryMessageId)) continue
+          seenBoundaryMessageId.add(boundaryMessageId)
+          const indexed = forkMessageDividersByBoundary.get(boundaryMessageId)
+          if (indexed) dividersHere.push(...indexed)
+        }
+        if (dividersHere.length > 1) {
+          const inputOrder = new Map<ForkDividerPlacement, number>()
+          for (let index = 0; index < forkDividers.length; index++) {
+            inputOrder.set(forkDividers[index], index)
+          }
+          dividersHere.sort((a, b) => (inputOrder.get(a) ?? 0) - (inputOrder.get(b) ?? 0))
+        }
         // Fork boundaries are independent siblings pushed before the anchor
         // body (so they land DOM-after it once reversed: visually directly
         // below the anchor). They carry no turn click/hover behavior.

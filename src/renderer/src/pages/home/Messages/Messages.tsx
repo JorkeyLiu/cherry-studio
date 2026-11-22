@@ -75,7 +75,6 @@ import {
   applyWindowTransition,
   canAdvancePaginationWindow,
   clampWindowCount,
-  getLatestWindowCompleteness,
   isHistoryHeadLoaded,
   mergeWindowIntoTopic,
   type MessageWindow
@@ -125,6 +124,7 @@ import {
   selectLoadedMessagesForTopic,
   selectReferenceSourceNames
 } from '@renderer/store/newMessage'
+import { type ResidentWindowCompleteness, selectTopicWindowCompleteness } from '@renderer/store/residentRegistry'
 import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import {
   getPendingRouteRestorePublicationToken,
@@ -3075,10 +3075,13 @@ const Messages = ({
     // next reconcilation.
 
     try {
-      // Scenario 1: First load — authoritative completeness retained from validated latest response
+      // Scenario 1: First load — authoritative completeness retained from the
+      // last validated window publication for this topic (projection-owned
+      // resident-registry metadata, read from the same state that carries the
+      // loaded projection; never a whole-topic claim, never the viewport window).
       if (!viewportStateRef.current.window?.displayMessages.length) {
-        const completeness = getLatestWindowCompleteness(topic.id)
-        const authoritative =
+        const completeness = selectTopicWindowCompleteness(store.getState(), topic.id)
+        const authoritative: ResidentWindowCompleteness | undefined =
           completeness !== undefined
             ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
             : undefined

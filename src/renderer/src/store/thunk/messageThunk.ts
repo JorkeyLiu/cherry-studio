@@ -31,10 +31,11 @@ import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
-import type { BlockWriteRouteContext, BranchRoute } from '@renderer/services/db/types'
+import type { BlockWriteRouteContext } from '@renderer/services/db/types'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
+import { cancelBlockEverywhere, StreamWriteScheduler } from '@renderer/services/messageStreaming/streamWriteScheduler'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
 import {
   notifyUnavailableAttachmentsSkipped,
@@ -93,8 +94,6 @@ import type { HistoryReferenceMeta } from '@shared/chatDb'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
-import { throttle } from 'lodash'
-import { LRUCache } from 'lru-cache'
 
 import { markClosureReadOnly, withClosureTopics } from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
@@ -204,159 +203,6 @@ const updateExistingMessageAndBlocksInDB = async (
     }
   } catch (error) {
     logger.error(`[updateExistingMsg] Failed to update message ${updatedMessage.id}:`, error as Error)
-  }
-}
-
-/**
- * 消息块节流器。
- * 每个消息块有独立节流器，并发更新时不会互相影响
- */
-const blockUpdateThrottlers = new LRUCache<string, ReturnType<typeof throttle>>({
-  max: 100,
-  ttl: 1000 * 60 * 5,
-  updateAgeOnGet: true,
-  dispose: (throttler, id) => {
-    throttler.cancel()
-    const rafId = blockUpdateRafs.get(id)
-    if (rafId) {
-      cancelAnimationFrame(rafId)
-      blockUpdateRafs.delete(id)
-    }
-  }
-})
-
-/**
- * 消息块 RAF 缓存。
- * 用于管理 RAF 请求创建和取消。
- */
-const blockUpdateRafs = new LRUCache<string, number>({
-  max: 100,
-  ttl: 1000 * 60 * 5,
-  updateAgeOnGet: true,
-  dispose: (rafId) => {
-    cancelAnimationFrame(rafId)
-  }
-})
-
-/** Per-call execution context for a throttled block write (F1/F2). */
-export interface ThrottledBlockWriteContext {
-  /** Immutable execution attempt; absent for ordinary writes (carrier omitted). */
-  resendAttemptId?: string
-  /** Execution barrier tracking the produced DB-write promise. */
-  barrier?: WriteBarrier
-  /**
-   * Runtime Redux-mirror gate. Evaluated when the throttled write runs (not at
-   * call time) so a mid-generation topic eviction stops mirroring without
-   * stopping the DB patch. Absent = mirror (legacy/test compat).
-   */
-  shouldMirrorToRedux?: () => boolean
-  /**
-   * Trustworthy topic ownership for scoped closure invalidation (Task A).
-   * Absent = unknown ownership -> deliberate global fallback in middleware.
-   */
-  topicId?: string
-  /**
-   * Addressed route owner for the block-only DB write, paired with `topicId`.
-   * When set, the throttled write carries `{ topicId, branchId }` so Main can
-   * verify the block's parent belongs to the addressed route instead of
-   * inferring it at write time. The source background stream pins its captured
-   * execution route here (never the active route); an explicit null addresses
-   * the main route. Absent = no addressed tuple (canonical parent resolution).
-   */
-  branchId?: BranchRoute
-}
-
-/**
- * 获取或创建消息块专用的节流函数。
- *
- * The trailing invocation reuses the LATEST call args (lodash semantics), so
- * the execution context travels with each call: a trailing write carries the
- * attempt/barrier of the latest update for that block.
- */
-const getBlockThrottler = (id: string) => {
-  if (!blockUpdateThrottlers.has(id)) {
-    const throttler = throttle(async (blockUpdate: any, ctx?: ThrottledBlockWriteContext) => {
-      const existingRAF = blockUpdateRafs.get(id)
-      if (existingRAF) {
-        cancelAnimationFrame(existingRAF)
-      }
-
-      const rafId = requestAnimationFrame(() => {
-        let shouldMirror = true
-        if (ctx?.shouldMirrorToRedux) {
-          try {
-            shouldMirror = ctx.shouldMirrorToRedux()
-          } catch {
-            shouldMirror = false
-          }
-        }
-        if (shouldMirror) {
-          const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
-          // Scoped invalidation when ownership is trustworthy; otherwise the
-          // middleware falls back to global invalidation.
-          store.dispatch(ctx?.topicId ? withClosureTopics(mirrorAction, ctx.topicId) : mirrorAction)
-        }
-        blockUpdateRafs.delete(id)
-      })
-
-      blockUpdateRafs.set(id, rafId)
-
-      // F1/F2: the DB write carries the calling execution's attempt, and the
-      // produced promise is tracked on the calling execution's barrier when
-      // present (flush-triggered trailing writes are therefore awaitable).
-      // The addressed route (when known) travels with the write: the source
-      // background execution pins its captured route, so a mid-stream branch
-      // switch can never redirect the write to the active route.
-      const route = ctx?.topicId ? { topicId: ctx.topicId, branchId: ctx.branchId } : undefined
-      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId, route)
-      if (ctx?.barrier) {
-        await ctx.barrier.track(write)
-      } else {
-        await write
-      }
-    }, BLOCK_UPDATE_THROTTLE_MS)
-
-    blockUpdateThrottlers.set(id, throttler)
-  }
-
-  return blockUpdateThrottlers.get(id)!
-}
-
-/**
- * 更新单个消息块。
- */
-export const throttledBlockUpdate = (id: string, blockUpdate: any, ctx?: ThrottledBlockWriteContext) => {
-  const throttler = getBlockThrottler(id)
-  // store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
-  throttler(blockUpdate, ctx)
-}
-
-/**
- * Flush (never drop) a block's pending throttled trailing write, preserving
- * the last state. Used by F2 finalization quiescence and block completion
- * paths. No-op when nothing is pending.
- */
-export const flushThrottledBlockUpdate = (id: string): void => {
-  const throttler = blockUpdateThrottlers.get(id)
-  if (throttler) {
-    throttler.flush()
-  }
-}
-
-/**
- * 取消单个块的节流更新，移除节流器和 RAF。
- */
-export const cancelThrottledBlockUpdate = (id: string) => {
-  const rafId = blockUpdateRafs.get(id)
-  if (rafId) {
-    cancelAnimationFrame(rafId)
-    blockUpdateRafs.delete(id)
-  }
-
-  const throttler = blockUpdateThrottlers.get(id)
-  if (throttler) {
-    throttler.cancel()
-    blockUpdateThrottlers.delete(id)
   }
 }
 
@@ -878,17 +724,50 @@ const fetchAndProcessAssistantResponseImpl = async (
       execRoute,
       blockIdsToDelete
     )
+  // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
+  const isExecLoaded = () => {
+    try {
+      return !!getState().messages.entities[assistantMsgId]
+    } catch {
+      return false
+    }
+  }
+  // Per-execution owner of streaming throttle + RAF tasks, bound to this
+  // execution's immutable route/attempt and live loaded-gate. Two
+  // executions streaming the same block id can never share a throttler or
+  // overwrite each other's trailing context. Constructed before the try so the
+  // finally below always sees it; construction has no fallible side effect
+  // beyond live-registry registration.
+  const writeScheduler = new StreamWriteScheduler({
+    throttleMs: BLOCK_UPDATE_THROTTLE_MS,
+    resendAttemptId,
+    barrier: writeBarrier,
+    topicId,
+    // Source execution: address the captured execution route explicitly
+    // (never the active route re-resolved at write time).
+    branchId: execRoute,
+    isLoaded: isExecLoaded,
+    performWrite: (id, blockUpdate, target) =>
+      updateSingleBlock(
+        id,
+        blockUpdate,
+        undefined,
+        target.resendAttemptId,
+        target.topicId ? { topicId: target.topicId, branchId: target.branchId } : undefined
+      ),
+    mirrorToRedux: (id, blockUpdate, mirrorTopicId) => {
+      const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
+      // Scoped invalidation when ownership is trustworthy; otherwise the
+      // middleware falls back to global invalidation.
+      store.dispatch(mirrorTopicId ? withClosureTopics(mirrorAction, mirrorTopicId) : mirrorAction)
+    }
+  })
+  // Terminal join owner: the execution BlockManager, visible to the finally
+  // below so disposal waits for the triggered terminal to settle first.
+  let execBlockManager: BlockManager | null = null
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
-    // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
-    const isExecLoaded = () => {
-      try {
-        return !!getState().messages.entities[assistantMsgId]
-      } catch {
-        return false
-      }
-    }
     const blockManager = new BlockManager({
       dispatch,
       getState,
@@ -906,18 +785,16 @@ const fetchAndProcessAssistantResponseImpl = async (
         barrier?: WriteBarrier,
         shouldMirror?: () => boolean
       ) =>
-        throttledBlockUpdate(id, blockUpdate, {
-          resendAttemptId: attemptId ?? resendAttemptId,
-          barrier: barrier ?? writeBarrier,
-          shouldMirrorToRedux: shouldMirror ?? isExecLoaded,
-          topicId,
-          // Source background execution: address the captured execution route
-          // explicitly (never the active route re-resolved at write time).
-          branchId: execRoute
+        writeScheduler.schedule(id, blockUpdate, {
+          resendAttemptId: attemptId,
+          barrier,
+          shouldMirrorToRedux: shouldMirror
         }),
-      flushThrottledBlockUpdate,
-      cancelThrottledBlockUpdate
+      flushThrottledBlockUpdate: (id: string) => writeScheduler.flush(id),
+      cancelThrottledBlockUpdate: (id: string) => writeScheduler.cancel(id),
+      drainMirrors: () => writeScheduler.drainMirrors()
     })
+    execBlockManager = blockManager
 
     // Explicit provisional loaded candidate for the request only; context
     // closure authority stays with the persisted anchor + Main.
@@ -1016,6 +893,24 @@ const fetchAndProcessAssistantResponseImpl = async (
       // 确保无论如何都设置 loading 为 false（onError 回调中已设置，这里是保险）
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
+  } finally {
+    // Terminal join: wait for the triggered terminal (success/error) to
+    // settle before releasing throttle + RAF ownership. A never-fired
+    // terminal (nothing-sendable no-op) resolves immediately. The join
+    // never rejects, so the original throw (if any) is preserved.
+    if (execBlockManager) {
+      try {
+        await execBlockManager.awaitTerminal()
+      } catch (joinError) {
+        logger.error('Error joining terminal before dispose:', joinError as Error)
+      }
+    }
+    // Release this execution's throttle + RAF ownership. The normal path has
+    // already flushed (BlockManager quiescence) and persisted the success
+    // final before settling, so nothing pending is lost; on abort/error
+    // teardown this additionally guarantees no stale trailing write can land
+    // afterwards. In-flight barrier-tracked DB promises still settle.
+    writeScheduler.dispose()
   }
   // No execution-attempt cleanup needed: the attempt lives only in this
   // execution closure (F1) — later ordinary edits never see it, and a
@@ -1557,7 +1452,8 @@ async function executeDeleteCore(
   // as a pre-commit failure (no fresh-copy rollback).
   try {
     // Cancel throttled block updates for the authoritative deleted blocks.
-    response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+    // Cross-execution fan-out: every live scheduler drops this block id.
+    response.deletedBlockIds.forEach((id) => cancelBlockEverywhere(id))
 
     // Consume file cleanup exactly once after commit.
     await consumeFileCleanupResult(response)
@@ -1870,7 +1766,7 @@ export const resendMessageThunk =
       }
       const loadedBlockIds = new Set(Object.keys(getState().messageBlocks.entities ?? {}))
       const blocksToRemove = (response.removedBlockIds ?? []).filter((id) => loadedBlockIds.has(id))
-      blocksToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
+      blocksToRemove.forEach((id) => cancelBlockEverywhere(id))
       if (blocksToRemove.length > 0) {
         dispatch(withClosureTopics(removeManyBlocks(blocksToRemove), topicId))
       }
@@ -2029,7 +1925,7 @@ export const regenerateAssistantResponseThunk =
       await consumeFileCleanupResult(response)
       const loadedBlockIds = new Set(Object.keys(getState().messageBlocks.entities ?? {}))
       const blocksToRemove = (response.removedBlockIds ?? []).filter((id) => loadedBlockIds.has(id))
-      blocksToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
+      blocksToRemove.forEach((id) => cancelBlockEverywhere(id))
       dispatch(
         newMessagesActions.updateMessage({ topicId, messageId: resetAssistantMsg.id, updates: resetAssistantMsg })
       )
@@ -3533,7 +3429,7 @@ export const removeBlocksThunk =
       )
       await consumeFileCleanupResult(cleanup)
       // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
-      blockIdsToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
+      blockIdsToRemove.forEach((id) => cancelBlockEverywhere(id))
 
       dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates: { blocks: updatedBlockIds } }))
 
@@ -3947,8 +3843,8 @@ export const loadTopicMessagesThunk =
 
       const hasRegistry = !!(getState() as any).residentRegistry
       // Authoritative window completeness is committed exactly once, atomically
-      // inside the joint publication (rootReducer side-effect). No direct
-      // setLatestWindowCompleteness here — a second identical commit is skipped.
+      // inside the joint publication (the resident-registry slice reducer writes
+      // it after the same generation guard). No separate write exists here.
       if (hasRegistry) {
         // Single controlled Redux publication consumed by relevant projection slices and registry.
         // Topic activation is interactively complete at this point: bounded latest
@@ -4627,6 +4523,29 @@ export const setupChannelStream = (
     messageUpdates: Partial<Message>,
     blocksToUpdate: MessageBlock[]
   ): Promise<void> => saveUpdatesToDB(messageId, channelTopicId, messageUpdates, blocksToUpdate, undefined, null)
+  // Per-execution owner of streaming throttle + RAF tasks for this channel
+  // stream: ordinary IM channel execution carries no resend attempt (carrier
+  // omitted) and is main-route only (the append above pinned null), but shares
+  // the same quiescence semantics as ordinary chat.
+  const channelScheduler = new StreamWriteScheduler({
+    throttleMs: BLOCK_UPDATE_THROTTLE_MS,
+    barrier: channelBarrier,
+    topicId,
+    branchId: null,
+    isLoaded: channelIsLoaded,
+    performWrite: (id, blockUpdate, target) =>
+      updateSingleBlock(
+        id,
+        blockUpdate,
+        undefined,
+        target.resendAttemptId,
+        target.topicId ? { topicId: target.topicId, branchId: target.branchId } : undefined
+      ),
+    mirrorToRedux: (id, blockUpdate, mirrorTopicId) => {
+      const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
+      store.dispatch(mirrorTopicId ? withClosureTopics(mirrorAction, mirrorTopicId) : mirrorAction)
+    }
+  })
   const blockManager = new BlockManager({
     dispatch,
     getState,
@@ -4642,15 +4561,10 @@ export const setupChannelStream = (
       _attemptId?: string,
       barrier?: WriteBarrier,
       shouldMirror?: () => boolean
-    ) =>
-      throttledBlockUpdate(id, blockUpdate, {
-        barrier: barrier ?? channelBarrier,
-        shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
-        topicId,
-        branchId: null
-      }),
-    flushThrottledBlockUpdate,
-    cancelThrottledBlockUpdate
+    ) => channelScheduler.schedule(id, blockUpdate, { barrier, shouldMirrorToRedux: shouldMirror }),
+    flushThrottledBlockUpdate: (id: string) => channelScheduler.flush(id),
+    cancelThrottledBlockUpdate: (id: string) => channelScheduler.cancel(id),
+    drainMirrors: () => channelScheduler.drainMirrors()
   })
 
   const callbacks = createCallbacks({
@@ -4682,22 +4596,51 @@ export const setupChannelStream = (
       ),
     assistant
   })
-
   const streamProcessorCallbacks = createStreamProcessor(callbacks)
-  streamProcessorCallbacks({ type: ChunkType.LLM_RESPONSE_CREATED })
+  // Synchronous assembly after scheduler construction must not leak
+  // scheduler ownership or leave loading set: dispose + reset and rethrow
+  // the original error.
+  try {
+    streamProcessorCallbacks({ type: ChunkType.LLM_RESPONSE_CREATED })
 
-  const adapter = new AiSdkToChunkAdapter(streamProcessorCallbacks, [], false, false)
-  adapter
-    .processStream({
-      fullStream: stream,
-      text: Promise.resolve('')
-    })
-    .catch((err) => {
-      logger.error('Channel stream processing failed', err as Error)
-    })
-    .finally(() => {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
-    })
+    const adapter = new AiSdkToChunkAdapter(streamProcessorCallbacks, [], false, false)
+    adapter
+      .processStream({
+        fullStream: stream,
+        text: Promise.resolve('')
+      })
+      .catch((err) => {
+        // Existing log contract is kept; the rejection additionally enters
+        // the ordinary error terminal (first-wins: a no-op when the adapter
+        // already emitted its own terminal chunk).
+        logger.error('Channel stream processing failed', err as Error)
+        try {
+          // Observed by BlockManager.trackTerminal (no unhandled rejection).
+          void callbacks.onError?.(err)
+        } catch (callbackError) {
+          logger.error('Error in channel onError callback:', callbackError as Error)
+        }
+      })
+      .finally(async () => {
+        // Terminal join: a triggered terminal (success/error) settles before
+        // the scheduler is disposed. Never rejects, so settle errors never
+        // mask the stream outcome.
+        try {
+          await blockManager.awaitTerminal()
+        } catch (joinError) {
+          logger.error('Error joining channel terminal before dispose:', joinError as Error)
+        }
+        // Release this channel execution's throttle + RAF ownership. Completion
+        // paths share the ordinary quiescence semantics (flush before the final
+        // checkpoint), so nothing pending is lost on settle.
+        channelScheduler.dispose()
+        dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+      })
+  } catch (assemblyError) {
+    channelScheduler.dispose()
+    dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+    throw assemblyError
+  }
 
   return {
     assistantMessageId: assistantMessage.id,

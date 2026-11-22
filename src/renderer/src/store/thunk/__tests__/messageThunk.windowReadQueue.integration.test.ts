@@ -237,8 +237,6 @@ describe('S6.1 real serializer consumer — loadTopicMessagesThunk latest', () =
       }
       return { type: 'resident/jointPublishComplete', payload: p }
     })
-    const { clearAllLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
-    clearAllLatestWindowCompleteness()
   })
 
   it(

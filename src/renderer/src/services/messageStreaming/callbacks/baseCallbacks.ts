@@ -232,6 +232,20 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       if (NoOutputGeneratedError.isInstance(error)) {
         return
       }
+      // First terminal wins: a trailing error after success (or a repeated
+      // error from the dispatcher catch) must not re-publish or re-persist.
+      // Runs synchronously in the dispatch tick, before the first await.
+      if (!blockManager.tryStartTerminal()) {
+        return
+      }
+      // Terminal write ordering: flush every pending trailing write and drain
+      // tracked DB writes BEFORE any terminal block marking, so abort/error
+      // never drops tail content and no stale trailing mirror can land after
+      // (and overwrite) the terminal status below. Withheld Redux mirrors are
+      // drained inline next so the terminal projection publishes complete
+      // text even though the owner is about to dispose (which cancels RAF).
+      await blockManager.quiesceWrites()
+      blockManager.drainMirrors()
       const isErrorTypeAbort = isAbortError(error)
       const isErrorTypeTimeout = isTimeoutError(error)
       const serializableError = serializeError(error)
@@ -433,6 +447,12 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
     },
 
     onComplete: async (status: AssistantMessageStatus, response?: Response) => {
+      // First terminal wins: a trailing error after success (or a repeated
+      // terminal from the dispatcher) must not re-publish or re-persist.
+      // Runs synchronously in the dispatch tick, before the first await.
+      if (!blockManager.tryStartTerminal()) {
+        return
+      }
       // Terminal write ordering: quiesce FIRST, before any terminal block
       // marking or atomic persist. A pre-quiesce smartBlockUpdate(SUCCESS)
       // would dispatch SUCCESS and then let a trailing throttled RAF flushed
@@ -448,6 +468,10 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       // Scoped to this execution's blocks via the BlockManager barrier — no
       // global wait, no cross-message blocking.
       await blockManager.quiesceWrites()
+      // Withheld Redux mirrors (a frame that never fired) are drained inline
+      // so the success-final projection publishes complete text before the
+      // owner disposes (which cancels RAF). DB writes are untouched.
+      blockManager.drainMirrors()
 
       if (response && response.metrics) {
         if (response.metrics.completion_tokens === 0 && response.usage?.completion_tokens) {

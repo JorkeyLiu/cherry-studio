@@ -51,77 +51,218 @@ async function waitForActiveTopic(
   )
 }
 
-async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
+async function uiSendMessage(
+  page: import('@playwright/test').Page,
+  text: string,
+  diag?: { topicId: string; sendIndex: number; sendTotal: number; prevCount: number }
+): Promise<void> {
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
   await textarea.waitFor({ state: 'visible', timeout: 15000 })
-  await textarea.click()
-  await page.evaluate(
-    ({ selector, text }) => {
-      const el = document.querySelector(selector) as HTMLTextAreaElement
-      if (!el) throw new Error('Textarea not found')
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (!nativeSetter) throw new Error('No native textarea setter')
-      nativeSetter.call(el, text)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    { selector: '.inputbar textarea, textarea[placeholder]', text }
-  )
-  await expect(textarea).toHaveValue(text, { timeout: 5000 })
+  // Fill acceptance: the synthetic native-setter fill can be undone by a
+  // renderer re-render (observed: value stayed "" past the 5s poll). Bounded
+  // retry re-applies the identical fill sequence; the final attempt rethrows
+  // the unchanged toHaveValue assertion — never swallowed or weakened.
+  let fillError: unknown = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, text }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, text)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', text }
+    )
+    try {
+      await expect(textarea).toHaveValue(text, { timeout: 5000 })
+      fillError = null
+      break
+    } catch (error) {
+      fillError = error
+    }
+  }
+  if (fillError) throw fillError
   await textarea.press('Enter')
+  // Send acceptance gate (still Enter-based dispatch, never IPC): production
+  // consumes the input on an accepted send. Failing fast here — with the
+  // send index attached — instead of a 60s downstream assistant timeout.
+  try {
+    await expect(textarea).toHaveValue('', { timeout: 10000 })
+  } catch (error) {
+    try {
+      if (diag) {
+        const diagnostic = await collectAssistantResponseDiagnostic(
+          page,
+          diag.topicId,
+          diag.prevCount,
+          'send-acceptance',
+          diag.sendIndex,
+          diag.sendTotal
+        )
+        await test.info().attach(`send-acceptance-send-${diag.sendIndex}.json`, {
+          body: JSON.stringify(diagnostic, null, 2),
+          contentType: 'application/json'
+        })
+      }
+    } catch {
+      // Best-effort diagnostic only; never masks the original failure.
+    }
+    throw error
+  }
+}
+
+async function collectAssistantResponseDiagnostic(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  previousAssistantCount: number,
+  phase: string,
+  sendIndex?: number,
+  sendTotal?: number
+): Promise<Record<string, unknown>> {
+  return page.evaluate(
+    ({
+      tid,
+      prevCount,
+      phaseName,
+      idx,
+      total
+    }: {
+      tid: string
+      prevCount: number
+      phaseName: string
+      idx?: number
+      total?: number
+    }) => {
+      const s = (window as any).store?.getState()
+      const msgIds: string[] = s?.messages?.messageIdsByTopic?.[tid] || []
+      const perMessage = msgIds.map((id: string) => {
+        const m = s?.messages?.entities?.[id]
+        // Roles/statuses only — never message text content.
+        return { role: m?.role ?? null, status: m?.status ?? null }
+      })
+      let assistantSeen = 0
+      for (const m of perMessage) if (m.role === 'assistant') assistantSeen++
+      let latestAssistant: Record<string, unknown> | null = null
+      for (let i = msgIds.length - 1; i >= 0; i--) {
+        const m = s?.messages?.entities?.[msgIds[i]]
+        if (m?.role === 'assistant') {
+          const blockStatuses = ((m.blocks || []) as string[]).map((bid: string) => {
+            const b = s?.messageBlocks?.entities?.[bid]
+            // Block statuses only — never block content.
+            return b?.status ?? null
+          })
+          latestAssistant = { status: m?.status ?? null, blockCount: (m.blocks || []).length, blockStatuses }
+          break
+        }
+      }
+      const ta = document.querySelector('.inputbar textarea, textarea[placeholder]') as HTMLTextAreaElement | null
+      return {
+        phase: phaseName,
+        topicId: tid,
+        previousAssistantCount: prevCount,
+        assistantSeen,
+        sendIndex: idx ?? null,
+        sendTotal: total ?? null,
+        messageCount: msgIds.length,
+        perMessage,
+        loadingByTopic: s?.messages?.loadingByTopic?.[tid] ?? null,
+        currentTopicId: s?.messages?.currentTopicId ?? null,
+        latestAssistant,
+        textarea: ta
+          ? {
+              // Value length only — never the input text.
+              valueLength: ta.value?.length ?? 0,
+              disabled: ta.disabled,
+              focused: document.activeElement === ta
+            }
+          : null
+      }
+    },
+    { tid: topicId, prevCount: previousAssistantCount, phaseName: phase, idx: sendIndex, total: sendTotal }
+  )
 }
 
 async function waitForAssistantResponseComplete(
   page: import('@playwright/test').Page,
   topicId: string,
   previousAssistantCount: number,
-  timeout = 60000
+  timeout = 60000,
+  diag?: { sendIndex?: number; sendTotal?: number }
 ): Promise<number> {
-  await page.waitForFunction(
-    ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
-      const s = (window as any).store?.getState()
-      if (!s) return false
-      const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
-      let count = 0
-      for (const id of msgIds) {
-        const msg = s.messages.entities?.[id]
-        if (msg?.role === 'assistant') count++
-      }
-      return count > prevCount
-    },
-    { topicId, prevCount: previousAssistantCount },
-    { timeout }
-  )
-  await page.waitForFunction(
-    ({ topicId }: { topicId: string }) => {
-      const s = (window as any).store?.getState()
-      if (!s) return false
-      if (s.messages?.loadingByTopic?.[topicId]) return false
-      const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
-      let latestAssistantId: string | null = null
-      for (let i = msgIds.length - 1; i >= 0; i--) {
-        const msg = s.messages.entities?.[msgIds[i]]
-        if (msg?.role === 'assistant') {
-          latestAssistantId = msgIds[i]
-          break
+  try {
+    await page.waitForFunction(
+      ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+        let count = 0
+        for (const id of msgIds) {
+          const msg = s.messages.entities?.[id]
+          if (msg?.role === 'assistant') count++
         }
-      }
-      if (!latestAssistantId) return false
-      const assistantMsg = s.messages.entities[latestAssistantId]
-      const terminalStatuses = ['success', 'error']
-      if (!terminalStatuses.includes(assistantMsg.status)) return false
-      const blocks = assistantMsg.blocks || []
-      if (blocks.length === 0) return false
-      for (const blockId of blocks) {
-        const block = s.messageBlocks?.entities?.[blockId]
-        if (!block) return false
-        if (block.status !== 'success' && block.status !== 'error') return false
-      }
-      return true
-    },
-    { topicId },
-    { timeout }
-  )
+        return count > prevCount
+      },
+      { topicId, prevCount: previousAssistantCount },
+      { timeout }
+    )
+    await page.waitForFunction(
+      ({ topicId }: { topicId: string }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        if (s.messages?.loadingByTopic?.[topicId]) return false
+        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+        let latestAssistantId: string | null = null
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities?.[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            latestAssistantId = msgIds[i]
+            break
+          }
+        }
+        if (!latestAssistantId) return false
+        const assistantMsg = s.messages.entities[latestAssistantId]
+        const terminalStatuses = ['success', 'error']
+        if (!terminalStatuses.includes(assistantMsg.status)) return false
+        const blocks = assistantMsg.blocks || []
+        if (blocks.length === 0) return false
+        for (const blockId of blocks) {
+          const block = s.messageBlocks?.entities?.[blockId]
+          if (!block) return false
+          if (block.status !== 'success' && block.status !== 'error') return false
+        }
+        return true
+      },
+      { topicId },
+      { timeout }
+    )
+  } catch (error) {
+    // Timeout diagnostics captured while the page is still open (before
+    // fixture teardown closes it). Best-effort: never masks the original
+    // failure. No message text, block content, API data, or credentials.
+    try {
+      const phase = error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200)
+      const diagnostic = await collectAssistantResponseDiagnostic(
+        page,
+        topicId,
+        previousAssistantCount,
+        phase,
+        diag?.sendIndex,
+        diag?.sendTotal
+      )
+      const tag = diag?.sendIndex !== undefined ? `send-${diag.sendIndex}` : 'unknown-send'
+      await test.info().attach(`assistant-response-timeout-${tag}.json`, {
+        body: JSON.stringify(diagnostic, null, 2),
+        contentType: 'application/json'
+      })
+    } catch {
+      // Best-effort diagnostic only; never masks the original failure.
+    }
+    throw error
+  }
   return page.evaluate((tid: string) => {
     const s = (window as any).store.getState()
     const msgIds = s.messages.messageIdsByTopic[tid] || []
@@ -161,9 +302,17 @@ async function createNewTopic(page: import('@playwright/test').Page, sendMessage
   }, idsBefore.topicIds)
   if (sendMessages && topicId) {
     let assistantCount = 0
-    for (const msg of sendMessages) {
-      await uiSendMessage(page, msg)
-      assistantCount = await waitForAssistantResponseComplete(page, topicId, assistantCount)
+    for (let sendIndex = 0; sendIndex < sendMessages.length; sendIndex++) {
+      await uiSendMessage(page, sendMessages[sendIndex], {
+        topicId,
+        sendIndex,
+        sendTotal: sendMessages.length,
+        prevCount: assistantCount
+      })
+      assistantCount = await waitForAssistantResponseComplete(page, topicId, assistantCount, 60000, {
+        sendIndex,
+        sendTotal: sendMessages.length
+      })
     }
   }
   if (topicId) await waitForTopicDomActivation(page, topicId)

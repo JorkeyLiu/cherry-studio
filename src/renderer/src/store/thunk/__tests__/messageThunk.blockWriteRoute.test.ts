@@ -215,10 +215,29 @@ describe('block-only write route threading', () => {
   })
 
   it('throttled streaming write carries the execution context route', async () => {
-    const { throttledBlockUpdate, flushThrottledBlockUpdate } = await import('../messageThunk')
-    throttledBlockUpdate('b-throttle-1', { content: 'chunk' }, { topicId: 'topic-1', branchId: 'br-src' })
-    flushThrottledBlockUpdate('b-throttle-1')
+    const { StreamWriteScheduler } = await import('@renderer/services/messageStreaming/streamWriteScheduler')
+    const { updateSingleBlock } = await import('../messageThunk')
+    // Execution-scoped scheduler bound to the pinned source route, mirroring
+    // the SSE construction site (no per-call context needed).
+    const scheduler = new StreamWriteScheduler({
+      throttleMs: 50,
+      topicId: 'topic-1',
+      branchId: 'br-src',
+      isLoaded: () => true,
+      performWrite: (id, blockUpdate, target) =>
+        updateSingleBlock(
+          id,
+          blockUpdate,
+          undefined,
+          target.resendAttemptId,
+          target.topicId ? { topicId: target.topicId, branchId: target.branchId } : undefined
+        ),
+      mirrorToRedux: () => {}
+    })
+    scheduler.schedule('b-throttle-1', { content: 'chunk' })
+    scheduler.flush('b-throttle-1')
     await flushMicrotasks()
+    scheduler.dispose()
 
     expect(mocks.updateSingleBlock).toHaveBeenCalledWith('b-throttle-1', { content: 'chunk' }, undefined, undefined, {
       topicId: 'topic-1',

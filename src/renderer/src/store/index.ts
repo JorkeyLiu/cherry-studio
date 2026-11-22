@@ -22,10 +22,6 @@ import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
-import {
-  clearLatestWindowCompleteness as clearLatestWindowCompletenessFn,
-  setLatestWindowCompleteness
-} from '../pages/home/Messages/messageWindow'
 import { clearCachedContextClosure as clearClosureCache } from '../services/contextClosure'
 import * as closureCache from '../services/contextClosure'
 import {
@@ -218,22 +214,11 @@ function areJointSegmentsIdentical(state: any, topicId: string, incoming: any[])
 export const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
     if (shouldDiscardJointPublish(state, action.payload)) {
-      // stale or missing registry entry — discard joint publication atomically
+      // Stale or missing registry entry — discard joint publication atomically.
+      // The retained read-window boundary rides this same publication (written by
+      // the resident-registry slice only after the generation guard passed), so a
+      // discard leaves the projection state untouched.
       return state as any
-    }
-    try {
-      const windowResponse = action.payload?.windowResponse
-      const topicId = action.payload?.topicId as string
-      if (windowResponse?.window) {
-        // Single atomic completeness commit for the joint publication.
-        // setLatestWindowCompleteness skips identical values — no double commit.
-        setLatestWindowCompleteness(topicId, {
-          hasMoreBefore: !!windowResponse.window.hasMoreBefore,
-          hasMoreAfter: !!windowResponse.window.hasMoreAfter
-        })
-      }
-    } catch {
-      // best-effort window completeness; never break dispatch
     }
   }
 
@@ -282,10 +267,9 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
     const prevBlockEntities = (state as any)?.messageBlocks?.entities ?? {}
     const nextStatePre = appReducer(state, action)
 
-    // Best-effort window/closure clears (Maps outside Redux) — same dispatch atomicity
-    try {
-      clearLatestWindowCompletenessFn(topicId)
-    } catch {}
+    // Best-effort closure-cache clear (Map outside Redux) — same dispatch
+    // atomicity. The retained read-window boundary is cleared by the retention
+    // action's own slice reducer, never from here.
     try {
       clearClosureCache(topicId)
     } catch {}
@@ -463,7 +447,10 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
           chatData: false,
           segments: true,
           residentTopic: false,
-          applicabilityGeneration: nextGen
+          applicabilityGeneration: nextGen,
+          // Unpaired segment invalidation fences residency only: the retained
+          // read-window boundary is not a segment fact and survives it.
+          ...(prev?.windowCompleteness ? { windowCompleteness: prev.windowCompleteness } : {})
         }
       }
       return {

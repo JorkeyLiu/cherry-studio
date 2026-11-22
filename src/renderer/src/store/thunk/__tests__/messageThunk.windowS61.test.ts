@@ -443,8 +443,6 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
     { timeout: 60_000 },
     async () => {
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const { clearAllLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
-      clearAllLatestWindowCompleteness()
       // ensure empty topic — fetch path, not cached early-return
       storeState.messages.messageIdsByTopic = { t1: [] }
       storeState.messages.currentTopicId = 't1'
@@ -544,13 +542,9 @@ describe('S6.1 Messages merge helpers — production path', () => {
   })
 
   it('authoritative completeness propagates through window model and is retained on expand', async () => {
-    const {
-      createLatestMessageWindow,
-      expandMessageWindowOlder,
-      expandMessageWindowNewer,
-      getLatestWindowCompleteness,
-      setLatestWindowCompleteness
-    } = await import('@renderer/pages/home/Messages/messageWindow')
+    const { createLatestMessageWindow, expandMessageWindowOlder, expandMessageWindowNewer } = await import(
+      '@renderer/pages/home/Messages/messageWindow'
+    )
 
     const msgs = Array.from({ length: 20 }, (_, i) => ({
       id: `m${i}`,
@@ -563,8 +557,7 @@ describe('S6.1 Messages merge helpers — production path', () => {
     })) as unknown as Message[]
 
     // Simulate >limit topic: only latest 10 loaded, but Main says hasMoreBefore=true
-    setLatestWindowCompleteness('t1', { hasMoreBefore: true, hasMoreAfter: false })
-    const completeness = getLatestWindowCompleteness('t1')!
+    const completeness = { hasMoreBefore: true, hasMoreAfter: false }
     const latestWindow = createLatestMessageWindow(msgs.slice(10), 10, completeness)
     expect(latestWindow.hasMoreOlder).toBe(true)
     expect(latestWindow.hasMoreNewer).toBe(false)

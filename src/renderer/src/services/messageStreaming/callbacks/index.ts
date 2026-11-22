@@ -112,7 +112,7 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
   })
 
   // 组合所有回调
-  return {
+  const combined = {
     ...baseCallbacks,
     ...textCallbacks,
     ...thinkingCallbacks,
@@ -124,6 +124,26 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     cleanup: () => {
       // 清理由 messageThunk 中的节流函数管理，这里不需要特别处理
       // 如果需要，可以调用 blockManager 的相关清理方法
+    }
+  }
+  // Terminal join: register the claimed terminal promise synchronously in
+  // the dispatch tick so owners can await it before disposing scheduler
+  // ownership. First registration wins inside the BlockManager; duplicate
+  // or no-op terminals resolve to nothing and never re-publish.
+  return {
+    ...combined,
+    onError: (error: Parameters<typeof baseCallbacks.onError>[0]) => {
+      const result = baseCallbacks.onError(error)
+      blockManager.trackTerminal(result)
+      return result
+    },
+    onComplete: (
+      status: Parameters<typeof baseCallbacks.onComplete>[0],
+      response?: Parameters<typeof baseCallbacks.onComplete>[1]
+    ) => {
+      const result = baseCallbacks.onComplete(status, response)
+      blockManager.trackTerminal(result)
+      return result
     }
   }
 }

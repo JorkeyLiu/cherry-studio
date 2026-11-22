@@ -199,12 +199,18 @@ const createWindowFromRange = (
  * `hasMoreBefore === false` says Main has no older page left to read, it never
  * says the local display has no older resident page left to show.
  */
-export const createLatestMessageWindow = (
-  messages: Message[],
+
+/**
+ * Latest-capacity derivation from an already-built group model. Same
+ * construction as `createLatestMessageWindow` minus the model build, so a
+ * single derive operation that already resolved the loaded projection never
+ * builds a second model for its newest-capacity fallback.
+ */
+const createLatestWindowFromModel = (
+  model: MessageViewportGroupModel,
   groupCapacity: number,
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
-  const model = createMessageViewportGroupModel(messages)
   const rawCapacity = Math.max(0, groupCapacity)
   const boundedCapacity = clampViewportCapacity(rawCapacity)
   if (boundedCapacity === 0 || model.groups.length === 0)
@@ -234,6 +240,11 @@ export const createLatestMessageWindow = (
     observability
   )
 }
+export const createLatestMessageWindow = (
+  messages: Message[],
+  groupCapacity: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+): MessageWindow => createLatestWindowFromModel(createMessageViewportGroupModel(messages), groupCapacity, authoritative)
 
 /**
  * Creates a window anchored at the oldest groups in the topic.
@@ -406,15 +417,31 @@ const retentionLimitGroups = (
 const boundedTrimGroups = (required: number, retentionLimit: number | null): number =>
   retentionLimit === null ? required : Math.min(required, Math.max(0, retentionLimit))
 
-const expandOlderWindow = (
-  messages: Message[],
+/**
+ * Lazy group-model provider shared by ONE bounded pagination derivation.
+ * Built on first use only (`??=`), so a guard decline before any
+ * over-capacity derivation builds no model at all, and guard plus expansion
+ * never build separately. Same single-model pattern as `reconcileInternal`
+ * below. Never cached across commits or modules: the closure dies with the
+ * derivation, preflight and expansion always read the same messages array,
+ * and successive calls with fresh entities always build fresh refs.
+ */
+type PaginationGroupModelProvider = () => MessageViewportGroupModel
+
+const expandOlderWindowInternal = (
   currentWindow: MessageWindow,
   additionalGroupCount: number,
-  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
-  options?: MessageWindowExpansionOptions
+  authoritative: { hasMoreBefore?: boolean; hasMoreAfter?: boolean } | undefined,
+  options: MessageWindowExpansionOptions | undefined,
+  getGroupModel: PaginationGroupModelProvider
 ): { window: MessageWindow; paged: boolean } => {
-  const model = createMessageViewportGroupModel(messages)
-  const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  // The committed rows resolve against the SAME model the guard derived
+  // from; an empty display needs no lookup at all (the newest-capacity
+  // fallback below reuses the shared provider instead of building again).
+  const currentRange =
+    currentWindow.displayMessages.length === 0
+      ? null
+      : getRangeFromDisplayMessages(getGroupModel(), currentWindow.displayMessages)
   if (!currentRange) {
     const fallbackAuth = {
       hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
@@ -425,7 +452,7 @@ const expandOlderWindow = (
     // The committed rows do not resolve in the loaded projection, so the
     // requested older page cannot be produced: this is a newest-capacity
     // rebuild, explicitly NOT a paged range.
-    return { window: createLatestMessageWindow(messages, additionalGroupCount, cleanAuth), paged: false }
+    return { window: createLatestWindowFromModel(getGroupModel(), additionalGroupCount, cleanAuth), paged: false }
   }
 
   const addedCount = Math.max(0, additionalGroupCount)
@@ -442,7 +469,7 @@ const expandOlderWindow = (
   const provisionalCount = provisionalNewest - provisionalOldest + 1
   if (provisionalCount > calibrationDefault) {
     const requiredTrim = provisionalCount - calibrationDefault
-    const retainedIndex = resolveRetainedGroupIndex(model, options)
+    const retainedIndex = resolveRetainedGroupIndex(getGroupModel(), options)
     // Growing older trims the NEWER edge: the retained live row stays resident
     // while the trim keeps `boundedNewest >= retainedIndex`. Retention wins —
     // the retained row is never trimmed away here; a state where that would
@@ -463,7 +490,7 @@ const expandOlderWindow = (
     }
     return {
       window: createWindowFromRange(
-        model,
+        getGroupModel(),
         { oldestGroupIndex: provisionalOldest, newestGroupIndex: boundedNewest },
         boundedCapacity,
         currentWindow.edge,
@@ -483,7 +510,7 @@ const expandOlderWindow = (
   }
   return {
     window: createWindowFromRange(
-      model,
+      getGroupModel(),
       { ...currentRange, oldestGroupIndex: desiredOldest },
       boundedCapacity,
       currentWindow.edge,
@@ -492,6 +519,18 @@ const expandOlderWindow = (
     ),
     paged: true
   }
+}
+
+const expandOlderWindow = (
+  messages: Message[],
+  currentWindow: MessageWindow,
+  additionalGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  options?: MessageWindowExpansionOptions
+): { window: MessageWindow; paged: boolean } => {
+  let groupModel: MessageViewportGroupModel | null = null
+  const getGroupModel = (): MessageViewportGroupModel => (groupModel ??= createMessageViewportGroupModel(messages))
+  return expandOlderWindowInternal(currentWindow, additionalGroupCount, authoritative, options, getGroupModel)
 }
 
 /**
@@ -514,15 +553,20 @@ export const expandMessageWindowOlder = (
   options?: MessageWindowExpansionOptions
 ): MessageWindow => expandOlderWindow(messages, currentWindow, additionalGroupCount, authoritative, options).window
 
-export const expandMessageWindowNewer = (
-  messages: Message[],
+const expandMessageWindowNewerInternal = (
   currentWindow: MessageWindow,
   additionalGroupCount: number,
-  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
-  options?: MessageWindowExpansionOptions
+  authoritative: { hasMoreBefore?: boolean; hasMoreAfter?: boolean } | undefined,
+  options: MessageWindowExpansionOptions | undefined,
+  getGroupModel: PaginationGroupModelProvider
 ): MessageWindow => {
-  const model = createMessageViewportGroupModel(messages)
-  const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
+  // Same shared-model discipline as the older direction: the committed rows
+  // resolve against the SAME model the guard derived from, and an empty
+  // display skips the lookup (the fallback reuses the shared provider).
+  const currentRange =
+    currentWindow.displayMessages.length === 0
+      ? null
+      : getRangeFromDisplayMessages(getGroupModel(), currentWindow.displayMessages)
   if (!currentRange) {
     const fallbackAuth = {
       hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
@@ -530,7 +574,7 @@ export const expandMessageWindowNewer = (
     }
     const cleanAuth =
       fallbackAuth.hasMoreBefore === undefined && fallbackAuth.hasMoreAfter === undefined ? undefined : fallbackAuth
-    return createLatestMessageWindow(messages, additionalGroupCount, cleanAuth)
+    return createLatestWindowFromModel(getGroupModel(), additionalGroupCount, cleanAuth)
   }
 
   const addedCount = Math.max(0, additionalGroupCount)
@@ -541,13 +585,13 @@ export const expandMessageWindowNewer = (
   const cleanAuth =
     effectiveAuth.hasMoreBefore === undefined && effectiveAuth.hasMoreAfter === undefined ? undefined : effectiveAuth
   const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
-  const desiredNewest = Math.min(model.groups.length - 1, currentRange.newestGroupIndex + addedCount)
+  const desiredNewest = Math.min(getGroupModel().groups.length - 1, currentRange.newestGroupIndex + addedCount)
   const provisionalOldest = currentRange.oldestGroupIndex
   const provisionalNewest = desiredNewest
   const provisionalCount = provisionalNewest - provisionalOldest + 1
   if (provisionalCount > calibrationDefault) {
     const requiredTrim = provisionalCount - calibrationDefault
-    const retainedIndex = resolveRetainedGroupIndex(model, options)
+    const retainedIndex = resolveRetainedGroupIndex(getGroupModel(), options)
     // Growing newer trims the OLDER edge: the retained live row stays resident
     // while the trim keeps `boundedOldest <= retainedIndex`. Mirror of the older
     // direction: retention wins identically, and a state where retention cannot
@@ -567,7 +611,7 @@ export const expandMessageWindowNewer = (
       retentionClamped: trimmedGroups < requiredTrim
     }
     return createWindowFromRange(
-      model,
+      getGroupModel(),
       { oldestGroupIndex: boundedOldest, newestGroupIndex: provisionalNewest },
       boundedCapacity,
       currentWindow.edge,
@@ -584,7 +628,7 @@ export const expandMessageWindowNewer = (
     trimmedEdge: null
   }
   return createWindowFromRange(
-    model,
+    getGroupModel(),
     {
       ...currentRange,
       newestGroupIndex: desiredNewest
@@ -594,6 +638,18 @@ export const expandMessageWindowNewer = (
     cleanAuth,
     observability
   )
+}
+
+export const expandMessageWindowNewer = (
+  messages: Message[],
+  currentWindow: MessageWindow,
+  additionalGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  options?: MessageWindowExpansionOptions
+): MessageWindow => {
+  let groupModel: MessageViewportGroupModel | null = null
+  const getGroupModel = (): MessageViewportGroupModel => (groupModel ??= createMessageViewportGroupModel(messages))
+  return expandMessageWindowNewerInternal(currentWindow, additionalGroupCount, authoritative, options, getGroupModel)
 }
 
 /**
@@ -630,13 +686,24 @@ export interface PaginationWindowGuardInput {
   retainMessageId?: string | null
 }
 
-export const canAdvancePaginationWindow = (input: PaginationWindowGuardInput): PaginationWindowGuard => {
+/**
+ * Standalone-capable guard that resolves against a caller-owned lazy model.
+ * `Messages` preflight calls the public wrapper below against the pre-read
+ * projection array; it cannot share a post-fetch paginate derivation's model
+ * because the two read different arrays (pre-read vs. merged). Within ONE
+ * `derivePaginationWindow` call both read the same array, so the derivation
+ * below passes its single shared provider here.
+ */
+const canAdvancePaginationWindowInternal = (
+  input: PaginationWindowGuardInput,
+  getGroupModel: PaginationGroupModelProvider
+): PaginationWindowGuard => {
   const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
   const added = Math.max(0, input.additionalGroupCount)
   // Under capacity there is no trim at all: nothing can be unmounted.
   if (input.currentWindow.groupCount + added <= calibrationDefault) return { allowed: true }
 
-  const model = createMessageViewportGroupModel(input.messages)
+  const model = getGroupModel()
   const currentRange = getRangeFromDisplayMessages(model, input.currentWindow.displayMessages)
   // No provable current range (a rebuild from scratch follows): the caller's
   // existing fallback owns it, so this guard has no verdict to add.
@@ -669,6 +736,13 @@ export const canAdvancePaginationWindow = (input: PaginationWindowGuardInput): P
   // Keeping the row (trim ≤ retentionLimit) and staying bounded
   // (trim ≥ minimumTrim) can only hold together in this interval.
   return retentionLimit >= minimumTrim ? { allowed: true } : { allowed: false, reason: 'retention-exceeds-bound' }
+}
+
+export const canAdvancePaginationWindow = (input: PaginationWindowGuardInput): PaginationWindowGuard => {
+  let groupModel: MessageViewportGroupModel | null = null
+  const getGroupModel = (): MessageViewportGroupModel =>
+    (groupModel ??= createMessageViewportGroupModel(input.messages))
+  return canAdvancePaginationWindowInternal(input, getGroupModel)
 }
 
 /**
@@ -705,11 +779,17 @@ export type PaginationWindowTransition =
   | { status: 'declined'; reason: PaginationWindowDeclineReason }
 
 export const derivePaginationWindow = (input: PaginationWindowTransitionInput): PaginationWindowTransition => {
-  // Boundedness and retention are decided BEFORE any derivation: a decline
-  // produces no window at all, so the caller cannot publish a half-state.
-  const guard = canAdvancePaginationWindow(input)
+  // ONE lazy group model for the whole operation: the guard and the
+  // expansion below resolve against the same messages array, so they share
+  // it. Boundedness and retention are decided BEFORE any derivation: a
+  // decline produces no window at all, so the caller cannot publish a
+  // half-state — and an under-capacity fast path never built a model at all.
+  let groupModel: MessageViewportGroupModel | null = null
+  const getGroupModel = (): MessageViewportGroupModel =>
+    (groupModel ??= createMessageViewportGroupModel(input.messages))
+  const guard = canAdvancePaginationWindowInternal(input, getGroupModel)
   if (!guard.allowed) return { status: 'declined', reason: guard.reason }
-  const { direction, messages, currentWindow, additionalGroupCount, responseWindow, retainMessageId } = input
+  const { direction, currentWindow, additionalGroupCount, responseWindow, retainMessageId } = input
   const options: MessageWindowExpansionOptions = { retainMessageId: retainMessageId ?? null }
   // The older expansion reports explicitly whether it produced the requested
   // paged range or fell back to a newest-capacity rebuild (its rows no longer
@@ -719,22 +799,22 @@ export const derivePaginationWindow = (input: PaginationWindowTransitionInput): 
   let window: MessageWindow
   let olderPaged = false
   if (direction === 'older') {
-    const expansion = expandOlderWindow(
-      messages,
+    const expansion = expandOlderWindowInternal(
       currentWindow,
       additionalGroupCount,
       { hasMoreBefore: responseWindow.hasMoreBefore, hasMoreAfter: currentWindow.hasMoreNewer },
-      options
+      options,
+      getGroupModel
     )
     window = expansion.window
     olderPaged = expansion.paged
   } else {
-    window = expandMessageWindowNewer(
-      messages,
+    window = expandMessageWindowNewerInternal(
       currentWindow,
       additionalGroupCount,
       { hasMoreBefore: currentWindow.hasMoreOlder, hasMoreAfter: responseWindow.hasMoreAfter },
-      options
+      options,
+      getGroupModel
     )
   }
   // The committed target marker travels with the window it describes:
@@ -1830,40 +1910,6 @@ export function buildRouteViewport(
   )
   return { window: targetWindow, empty: false }
 }
-
-// Authoritative latest-window completeness store (renderer-only, per-topic.
-// Populated by loadTopicMessagesThunk after validated latest response;
-// consumed by Messages bootstrap to retain hasMoreBefore/hasMoreAfter.)
-const latestWindowCompletenessByTopic = new Map<string, { hasMoreBefore: boolean; hasMoreAfter: boolean }>()
-
-export function setLatestWindowCompleteness(
-  topicId: string,
-  completeness: { hasMoreBefore: boolean; hasMoreAfter: boolean }
-): void {
-  const prev = latestWindowCompletenessByTopic.get(topicId)
-  if (prev && prev.hasMoreBefore === completeness.hasMoreBefore && prev.hasMoreAfter === completeness.hasMoreAfter) {
-    return
-  }
-  latestWindowCompletenessByTopic.set(topicId, {
-    hasMoreBefore: completeness.hasMoreBefore,
-    hasMoreAfter: completeness.hasMoreAfter
-  })
-}
-
-export function getLatestWindowCompleteness(
-  topicId: string
-): { hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined {
-  return latestWindowCompletenessByTopic.get(topicId)
-}
-
-export function clearLatestWindowCompleteness(topicId: string): void {
-  latestWindowCompletenessByTopic.delete(topicId)
-}
-
-export function clearAllLatestWindowCompleteness(): void {
-  latestWindowCompletenessByTopic.clear()
-}
-
 /**
  * Unified window transition: the single typed entry for every viewport-window
  * derivation. Each intent delegates to the same pure constructors below (no

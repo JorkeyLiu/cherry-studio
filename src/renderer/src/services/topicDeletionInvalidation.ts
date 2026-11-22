@@ -6,23 +6,24 @@
  *
  * - Per-topic monotonic generation, bumped only on SUCCESSFUL authoritative
  *   hard deletion / bulk purge / empty-trash / assistant reset.
- * - Bumping atomically clears window completeness and closure cache for that topic
- *   (so no cached hit remains valid) and advances closure generation.
+ * - Bumping also advances the resident lifecycle generation, whose reducer drops
+ *   the topic's retained read-window boundary in the same dispatch (the single
+ *   clearing mechanism for deletion; no service-side Map clear exists).
+ * - Bumping atomically clears the closure cache for that topic (so no cached
+ *   hit remains valid) and advances closure generation.
  * - In-flight fetches capture generation at request start; before any join/action
  *   they compare captured vs current and discard if mismatch (fail-closed).
  * - Soft-delete never bumps; preserves resident projection.
  * - Bulk deletions use authoritative affected IDs from Main result; no guessing.
  * - Permanent deletion also purges resident Redux projections precisely:
  *   message IDs/entities for the deleted topic, blocks referenced only by those
- *   messages, topic segments, window completeness/cache, closure cache/generation,
+ *   messages, topic segments, the retained read-window boundary, closure
+ *   cache/generation, and topic loading/fulfilled markers. Entities belonging
+ *   to other topics are preserved.
  *   and topic loading/fulfilled markers. Entities belonging to other topics are preserved.
  * - Generation is bumped BEFORE Redux removal so in-flight responses discard.
  */
 
-import {
-  clearAllLatestWindowCompleteness,
-  clearLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
 import { bumpAndInvalidate, clearCachedContextClosure } from '@renderer/services/contextClosure'
 import { clearRetentionForTopicIfAvailable } from '@renderer/services/retentionClearHandler'
 import { removeScrollSnapshotsForTopicIds } from '@renderer/services/scrollSnapshotCache'
@@ -104,9 +105,9 @@ export function subscribeDeletionGeneration(topicId: string, listener: (nextGene
 export function bumpDeletionGeneration(topicId: string): number {
   const next = (deletionGenerations.get(topicId) ?? 0) + 1
   deletionGenerations.set(topicId, next)
-  // Invalidate renderer projections for this topic atomically.
-  clearLatestWindowCompleteness(topicId)
-  // Advance resident lifecycle generation and clear completeness before Redux purge
+  // Invalidate renderer projections for this topic atomically: advancing the
+  // resident lifecycle generation drops residency, chat data and the retained
+  // read-window boundary in one dispatch, before the Redux purge below.
   try {
     store.dispatch(invalidateResidentForDeletion(topicId))
   } catch {
@@ -265,19 +266,6 @@ export function resetAllDeletionGenerationsForTests(): void {
     // best-effort
   }
 }
-
-/** For tests/diagnostics: clear all and window/closure (not part of product flow). */
-export function resetAllDeletionStateForTests(): void {
-  deletionGenerations.clear()
-  deletionListeners.clear()
-  clearAllLatestWindowCompleteness()
-  try {
-    store.dispatch(resetAllResidentRegistry())
-  } catch {
-    // best-effort
-  }
-}
-
 /** For tests: reset only the generation subscription state. */
 export function resetDeletionGenerationSubscriptionsForTests(): void {
   deletionListeners.clear()

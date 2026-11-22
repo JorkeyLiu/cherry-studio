@@ -4,11 +4,8 @@
  * the originating residency. Real store modules, no mocks.
  */
 import { configureStore } from '@reduxjs/toolkit'
-import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
 import { rootReducer } from '@renderer/store'
+import { selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { bumpGeneration, publishResidentComplete } from '@renderer/store/residentRegistry'
 import { replaceSegmentsForTopic } from '@renderer/store/topicSegment'
 import { describe, expect, it } from 'vitest'
@@ -35,7 +32,6 @@ function makeWindowResponse(topicId: string, ids: string[]) {
 
 describe('joint publish dedup', () => {
   it('identical follow-up keeps state reference; differing catalog applies', () => {
-    clearAllLatestWindowCompleteness()
     const store = configureStore({ reducer: rootReducer })
     const topicId = 't-dedup'
     store.dispatch(bumpGeneration(topicId))
@@ -54,7 +50,7 @@ describe('joint publish dedup', () => {
       messageCount: 1
     }
     store.dispatch(publishResidentComplete({ topicId, generation: gen, windowResponse: wr, segments: [seg] }))
-    expect(getLatestWindowCompleteness(topicId)).toEqual({ hasMoreBefore: false, hasMoreAfter: false })
+    expect(selectWindowBoundary(topicId, store)).toEqual({ hasMoreBefore: false, hasMoreAfter: false })
     const beforeState = store.getState()
     const beforeIdsRef = (beforeState as any).topicSegments.segmentsByTopic[topicId]
     store.dispatch({
@@ -64,9 +60,10 @@ describe('joint publish dedup', () => {
     const afterIdentical = store.getState()
     expect(afterIdentical).toBe(beforeState)
     expect((afterIdentical as any).topicSegments.segmentsByTopic[topicId]).toBe(beforeIdsRef)
-    const firstCompleteness = getLatestWindowCompleteness(topicId)
+    const firstCompleteness = selectWindowBoundary(topicId, store)
     store.dispatch(publishResidentComplete({ topicId, generation: gen, windowResponse: wr, segments: [{ ...seg }] }))
-    expect(getLatestWindowCompleteness(topicId)).toEqual(firstCompleteness)
+    // Same-value publication keeps the retained boundary reference (no spurious change).
+    expect(selectWindowBoundary(topicId, store)).toBe(firstCompleteness)
 
     const seg2 = { ...seg, id: 'seg-2', messageIds: ['m-1'] }
     store.dispatch({
@@ -78,17 +75,16 @@ describe('joint publish dedup', () => {
     expect(afterDiff.residentRegistry.entries[topicId].residentTopic).toBe(true)
   })
 
-  it('identical window completeness write is a no-op value', () => {
-    clearAllLatestWindowCompleteness()
+  it('identical window completeness write keeps the stored boundary reference', () => {
     const store = configureStore({ reducer: rootReducer })
     const topicId = 't-wc'
     store.dispatch(bumpGeneration(topicId))
     const gen = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration as number
     const wr: any = makeWindowResponse(topicId, ['m-1'])
     store.dispatch(publishResidentComplete({ topicId, generation: gen, windowResponse: wr, segments: [] }))
-    const first = getLatestWindowCompleteness(topicId)
+    const first = selectWindowBoundary(topicId, store)
     expect(first).toEqual({ hasMoreBefore: false, hasMoreAfter: false })
     store.dispatch(publishResidentComplete({ topicId, generation: gen, windowResponse: wr, segments: [] }))
-    expect(getLatestWindowCompleteness(topicId)).toEqual(first)
+    expect(selectWindowBoundary(topicId, store)).toBe(first)
   })
 })

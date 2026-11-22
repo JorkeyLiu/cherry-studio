@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   resetAllClosureStateForTests,
   setCachedContextClosureWithFingerprint
@@ -13,6 +8,7 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
@@ -40,7 +36,6 @@ function makeClosure(topicId: string): FetchContextClosureResponse {
 describe('topicDeletion orphan/partial-projection block cleanup', () => {
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     const state = store.getState()
@@ -72,8 +67,8 @@ describe('topicDeletion orphan/partial-projection block cleanup', () => {
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tDel, messages: [msgDel] }))
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tKeep, messages: [msgKeep, msgKeepShared] }))
     store.dispatch(upsertManyBlocks([blockPresent, blockOrphan, blockKeep, blockShared]))
-    setLatestWindowCompleteness(tDel, { hasMoreBefore: true, hasMoreAfter: false })
-    setLatestWindowCompleteness(tKeep, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tDel, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tKeep, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(tDel, makeClosure(tDel), 'fp-del')
 
     expect(store.getState().messageBlocks.entities['b-orphan']).toBeDefined()
@@ -90,8 +85,8 @@ describe('topicDeletion orphan/partial-projection block cleanup', () => {
     // Shared block must be preserved because surviving topic references it via its message's blocks (exclusive check)
     expect(after.messageBlocks.entities[sharedBlockId]).toBeDefined()
     expect(after.messageBlocks.entities['b-keep']).toBeDefined()
-    expect(getLatestWindowCompleteness(tDel)).toBeUndefined()
-    expect(getLatestWindowCompleteness(tKeep)).toBeDefined()
+    expect(selectWindowBoundary(tDel)).toBeUndefined()
+    expect(selectWindowBoundary(tKeep)).toBeDefined()
   })
 
   it('does not remove blocks for surviving topic when its message projection is partial but block is orphan-referenced via messageId', () => {

@@ -148,12 +148,15 @@ function slowStreamTotalLength(): number {
 }
 
 /**
- * Extended slow-stream budget (wheel/zoom legs only): ~2x default at the same
- * 60ms realistic pacing — 300 paragraphs / 302 chunks (~18120ms, ~8200 chars).
- * Arithmetic: default sampler (3.5s ~= 58 chunks * ~27 chars ~= 1566) + hold
- * 500 + wheel return while active + resume 500 fits with margin; the default
- * 4145-char tail (len 4128/4145) starved the exact-bottom driver. Default
- * stays byte-identical for every other spec.
+ * Extended slow-stream budget (the pause/hold, wheel and zoom legs): ~2x default
+ * at the same 60ms realistic pacing — 300 paragraphs / 302 chunks (~18120ms,
+ * ~8200 chars).
+ * Arithmetic: a >=3.5s every-frame sampler (~58 chunks * ~27 chars ~= 1566)
+ * plus a >=500-char hold is unreachable on the default 4145-char reply once the
+ * sampler ends near the tail (observed 3624-3652 -> target 4124-4152); the XL
+ * budget keeps the wheel return and the resumed +500 hold inside one active
+ * stream too. The default 4145-char reply stays byte-identical for every other
+ * spec.
  */
 function extendedSlowStreamTotalLength(): number {
   return getExtendedSlowStreamReply(MODEL).length
@@ -835,7 +838,14 @@ test.describe('Streaming click-to-pause follow', () => {
     // ═══════════════════════════════════════════════════════════════════
     // STREAM B — pause / selection / controls / resume
     // ═══════════════════════════════════════════════════════════════════
-    await uiSendMessage(page, `second slow stream ${SLOW_STREAM_MARKER}`)
+    // XL budget for this leg: the >=3.5s every-frame sampler consumes ~1500
+    // chars before the +500 hold even begins, so on the 4145-char default
+    // reply sampler end lands near the tail (observed 3624-3652 of 4145) and
+    // samplerEnd + HOLD_GROWTH is arithmetically unreachable (4152 > 4145).
+    // Same payload shape and 60ms pacing, 300 paragraphs (~8200 chars /
+    // 302 chunks ~= 18s), so sampler growth, the 500-char hold, the deep
+    // control pass and the resumed-growth hold all fit inside one turn.
+    await uiSendMessage(page, `second slow stream ${EXTENDED_SLOW_STREAM_MARKER}`)
     const blockB = await waitForStreamingContent(page, 2000)
     await page.waitForFunction(
       (tol: number) => {
@@ -1090,18 +1100,26 @@ test.describe('Streaming click-to-pause follow', () => {
     expect(postAnchor, 'anchor must still resolve immediately after the pause press').not.toBeNull()
     // Continued growth must NOT pull the viewport back to the bottom. Uses the
     // already-observed sampler-end length + HOLD_GROWTH (not lenAtPause+2000):
-    // the >=3.5s sampler already consumed ~1500 chars of the finite 4145-char
-    // budget, so a redundant +2000 from the stale pre-press length is
-    // arithmetically unreachable once lenAtPause exceeds ~2145.
+    // the >=3.5s sampler already consumed ~1500 chars, so a redundant +2000
+    // from the stale pre-press length is arithmetically unreachable once
+    // lenAtPause exceeds ~2145. The target is judged against the SAME XL
+    // payload this leg streams (extendedSlowStreamTotalLength), never a
+    // second hand-computed budget.
     const samplerEndLenB = frames[frames.length - 1].len
     const samplerEndStatusB = frames[frames.length - 1].status
     console.log(
       `[E2E] pause-hold budget: lenAtPause=${lenAtPause} samplerEndLen=${samplerEndLenB} ` +
-        `samplerEndStatus=${samplerEndStatusB} total=${slowStreamTotalLength()} ` +
+        `samplerEndStatus=${samplerEndStatusB} total=${extendedSlowStreamTotalLength()} ` +
         `target=${samplerEndLenB + HOLD_GROWTH}`
     )
     expect(samplerEndStatusB, 'stream still active at sampler end (remaining budget for hold)').toBe('streaming')
-    await waitForBlockGrowthWithBudget(page, blockB, samplerEndLenB + HOLD_GROWTH, 'pause-hold')
+    await waitForBlockGrowthWithBudget(
+      page,
+      blockB,
+      samplerEndLenB + HOLD_GROWTH,
+      'pause-hold',
+      extendedSlowStreamTotalLength()
+    )
     const pausedDist = await readDistBottom(page)
     expect(pausedDist, 'continued growth after pause never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
     const pausedAnchor = await readAnchor(page)
@@ -1208,13 +1226,11 @@ test.describe('Streaming click-to-pause follow', () => {
     await page.mouse.up()
     const clipboardText = await waitForClipboardToContain(page, 'second slow stream')
     expect(clipboardText.includes('second slow stream'), 'copy action still fires while paused').toBe(true)
-    // Hold through completion: by this point the fixed-budget slow stream
-    // (≈4145 chars total) is nearly exhausted (pause probe + selection
-    // consumed it), so a further +800 growth wait is arithmetically
-    // unreachable — the dedicated control test below proves pause through
-    // +2000 ongoing growth instead. Here the press must hold the row
-    // through whatever growth remains until normal completion (same
-    // thresholds, no loosening).
+    // Hold through completion: on this leg's XL budget the stream is still
+    // active here (sampler + hold + selection consumed roughly half of it), so
+    // the press must hold the row through whatever growth remains until normal
+    // completion (same thresholds, no loosening). The dedicated control test
+    // below proves a press early in the stream through +2000 ongoing growth.
     await page.waitForFunction(
       (id: string) => {
         const s = (window as any).store?.getState()
@@ -1274,8 +1290,9 @@ test.describe('Streaming click-to-pause follow', () => {
       expect(await readDistBottom(page), 'resumed follow stays pinned through growth').toBeLessThanOrEqual(BOTTOM_TOL)
     }
 
-    // Stream B completes normally after pause + resume.
-    const expectedB = getSlowStreamReply(MODEL)
+    // Stream B completes normally after pause + resume, exactly matching the
+    // SAME XL payload this leg streamed.
+    const expectedB = getExtendedSlowStreamReply(MODEL)
     await page.waitForFunction(
       (expected: string) => {
         const s = (window as any).store?.getState()
@@ -1290,6 +1307,10 @@ test.describe('Streaming click-to-pause follow', () => {
     )
     const markdownB = assistantMarkdown(page)
     await expect(markdownB).toContainText('tail-marker-END', { timeout: 10000 })
+    // Body-content presence: the FIRST assistant markdown is stream A's reply
+    // (the default payload), so this stays its original paragraph assertion —
+    // unchanged by the XL budget of stream B (whose exact content the
+    // completion wait above already proves).
     await expect(markdownB).toContainText('paragraph-149', { timeout: 10000 })
   })
 

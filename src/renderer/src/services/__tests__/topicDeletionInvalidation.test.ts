@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   getCachedContextClosure,
   getClosureLoadGeneration,
@@ -18,6 +13,7 @@ import {
   isDeletionStale,
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -43,22 +39,21 @@ function makeClosure(topicId: string, anchor: string): FetchContextClosureRespon
 describe('topicDeletionInvalidation', () => {
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
   })
 
   it('hard delete invalidates window completeness and closure cache', () => {
     const topicId = 't-hard-1'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     const closure = makeClosure(topicId, 'u1')
     setCachedContextClosureWithFingerprint(topicId, closure, 'fp-1')
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
 
     invalidateTopicDeletion(topicId)
 
-    expect(getLatestWindowCompleteness(topicId)).toBeUndefined()
+    expect(selectWindowBoundary(topicId)).toBeUndefined()
     expect(getCachedContextClosure(topicId)).toBeNull()
   })
 
@@ -86,12 +81,12 @@ describe('topicDeletionInvalidation', () => {
   it('bulk delete invalidates all affected topics', () => {
     const ids = ['t-bulk-1', 't-bulk-2', 't-bulk-3']
     for (const id of ids) {
-      setLatestWindowCompleteness(id, { hasMoreBefore: true, hasMoreAfter: true })
+      primeWindowBoundary(id, { hasMoreBefore: true, hasMoreAfter: true })
       setCachedContextClosureWithFingerprint(id, makeClosure(id, 'u1'), 'fp')
     }
     invalidateTopicsDeletion(ids)
     for (const id of ids) {
-      expect(getLatestWindowCompleteness(id)).toBeUndefined()
+      expect(selectWindowBoundary(id)).toBeUndefined()
       expect(getCachedContextClosure(id)).toBeNull()
       expect(getDeletionGeneration(id)).toBe(1)
     }
@@ -99,10 +94,10 @@ describe('topicDeletionInvalidation', () => {
 
   it('empty bulk does not invalidate unrelated topics', () => {
     const unrelated = 't-unrelated'
-    setLatestWindowCompleteness(unrelated, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(unrelated, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(unrelated, makeClosure(unrelated, 'u1'), 'fp')
     invalidateTopicsDeletion([])
-    expect(getLatestWindowCompleteness(unrelated)).toBeDefined()
+    expect(selectWindowBoundary(unrelated)).toBeDefined()
     expect(getCachedContextClosure(unrelated)).not.toBeNull()
   })
 
@@ -111,15 +106,15 @@ describe('topicDeletionInvalidation', () => {
     const token = captureDeletionGeneration(topicId)
     // simulate failure: do not call invalidate
     expect(isDeletionStale(topicId, token)).toBe(false)
-    expect(getLatestWindowCompleteness(topicId)).toBeUndefined()
+    expect(selectWindowBoundary(topicId)).toBeUndefined()
   })
 
   it('soft-delete preservation: no invalidation', () => {
     const topicId = 't-soft'
-    setLatestWindowCompleteness(topicId, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(topicId, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(topicId, makeClosure(topicId, 'u1'), 'fp-soft')
     // soft delete does not call invalidate -> cache remains valid
-    expect(getLatestWindowCompleteness(topicId)).toBeDefined()
+    expect(selectWindowBoundary(topicId)).toBeDefined()
     expect(getCachedContextClosure(topicId)).not.toBeNull()
     expect(getDeletionGeneration(topicId)).toBe(0)
   })

@@ -1,9 +1,4 @@
 import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
-import {
   clearAllContextClosureCache,
   getCachedContextClosure,
   resetAllClosureStateForTests,
@@ -16,6 +11,7 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
+import { primeWindowBoundary, selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import { clearSegmentsForTopic, loadSegments } from '@renderer/store/topicSegment'
@@ -44,7 +40,6 @@ function makeClosure(topicId: string, anchor: string): FetchContextClosureRespon
 describe('topicDeletion precise resident cleanup', () => {
   beforeEach(() => {
     resetAllDeletionGenerationsForTests()
-    clearAllLatestWindowCompleteness()
     resetAllClosureStateForTests()
     clearAllContextClosureCache()
     // clear Redux state for tested topics
@@ -77,8 +72,8 @@ describe('topicDeletion precise resident cleanup', () => {
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tDel, messages: [msgDel1, msgDel2] }))
     store.dispatch(newMessagesActions.messagesReceived({ topicId: tKeep, messages: [msgKeep] }))
     store.dispatch(upsertManyBlocks([bDel1, bDel2, bKeep]))
-    setLatestWindowCompleteness(tDel, { hasMoreBefore: true, hasMoreAfter: false })
-    setLatestWindowCompleteness(tKeep, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tDel, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(tKeep, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(tDel, makeClosure(tDel, 'm-del-1'), 'fp-del')
     store.dispatch(loadSegments([{ id: 'seg-1', topicId: tDel, name: 's1', messageIds: ['m-del-1'] } as any]))
     store.dispatch(newMessagesActions.setTopicLoading({ topicId: tDel, loading: true }))
@@ -87,7 +82,7 @@ describe('topicDeletion precise resident cleanup', () => {
     invalidateTopicsDeletion([tDel])
 
     expect(getDeletionGeneration(tDel)).toBe(1)
-    expect(getLatestWindowCompleteness(tDel)).toBeUndefined()
+    expect(selectWindowBoundary(tDel)).toBeUndefined()
     expect(getCachedContextClosure(tDel)).toBeNull()
     const state = store.getState()
     expect(state.messages.messageIdsByTopic[tDel]).toEqual([])
@@ -98,7 +93,7 @@ describe('topicDeletion precise resident cleanup', () => {
     // preserve other topic
     expect(state.messages.messageIdsByTopic[tKeep]).toEqual(['m-keep-1'])
     expect(state.messageBlocks.entities['b-keep-1']).toBeDefined()
-    expect(getLatestWindowCompleteness(tKeep)).toBeDefined()
+    expect(selectWindowBoundary(tKeep)).toBeDefined()
     // segments cleared
     expect(state.topicSegments.segmentsByTopic[tDel]).toBeUndefined()
     expect(state.messages.loadingByTopic[tDel]).toBe(false)
@@ -164,13 +159,13 @@ describe('topicDeletion precise resident cleanup', () => {
     const b = { id: 'b-soft', messageId: 'm-soft', type: 'main_text', content: 'c' } as any
     store.dispatch(newMessagesActions.messagesReceived({ topicId: t, messages: [msg] }))
     store.dispatch(upsertManyBlocks([b]))
-    setLatestWindowCompleteness(t, { hasMoreBefore: true, hasMoreAfter: false })
+    primeWindowBoundary(t, { hasMoreBefore: true, hasMoreAfter: false })
     setCachedContextClosureWithFingerprint(t, makeClosure(t, 'm-soft'), 'fp')
     // no invalidate
     expect(getDeletionGeneration(t)).toBe(0)
     const state = store.getState()
     expect(state.messages.entities['m-soft']).toBeDefined()
-    expect(getLatestWindowCompleteness(t)).toBeDefined()
+    expect(selectWindowBoundary(t)).toBeDefined()
   })
 
   it('in-flight generation stale discards', () => {

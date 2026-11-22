@@ -2,11 +2,43 @@ import { createAction, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import type { FetchMessagesWindowResponse } from '@shared/chatDb'
 
+/**
+ * Renderer-local boundary metadata of the topic's most recently published read
+ * window: the Main-declared `hasMoreBefore` / `hasMoreAfter` of that single
+ * response, retained so viewport assembly keeps its pagination boundary.
+ *
+ * Explicitly distinct from (never merged with, PROJ-4):
+ * - whole-topic completeness — a window boundary never claims a whole topic;
+ * - the viewport `MessageWindow` — no group ranges, display budget or
+ *   `hasMoreOlder` / `hasMoreNewer` derivation lives here;
+ * - the originating `'window'` capability itself — this is a retained
+ *   projection record, not a live Main response.
+ *
+ * Window intent stays verbatim: a `latest` window and an `around` window each
+ * publish their own `hasMoreBefore` / `hasMoreAfter`; these are never relabeled
+ * as older/newer traversal facts.
+ *
+ * Non-persistent and never StoreSync'ed (resident-registry slice contract): a
+ * projection record that is discardable and rebuildable, never a second
+ * authority.
+ */
+export interface ResidentWindowCompleteness {
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+}
+
 export interface ResidentEntry {
   chatData: boolean
   segments: boolean
   residentTopic: boolean
   applicabilityGeneration: number
+  /**
+   * Latest published read-window boundary for this topic (absent = never
+   * published). Written only by the joint resident-complete publication, so a
+   * rejected/discarded publication never writes it, and retained across
+   * residency invalidations exactly like the resident window it bounds.
+   */
+  windowCompleteness?: ResidentWindowCompleteness
 }
 
 export interface ResidentRegistryState {
@@ -241,13 +273,18 @@ const residentRegistrySlice = createSlice({
         chatData: false,
         segments: false,
         residentTopic: false,
-        applicabilityGeneration: nextGen
+        applicabilityGeneration: nextGen,
+        // Residency invalidation never drops the retained read-window boundary;
+        // only deletion and retention eviction do.
+        ...(prev?.windowCompleteness ? { windowCompleteness: prev.windowCompleteness } : {})
       }
     },
     invalidateForDeletion(state, action: PayloadAction<string>) {
       const topicId = action.payload
       const prev = state.entries[topicId]
       const nextGen = (prev?.applicabilityGeneration ?? 0) + 1
+      // Hard deletion is the single clearing mechanism for this topic's
+      // retained read-window boundary: the boundary dies with the topic.
       state.entries[topicId] = {
         chatData: false,
         segments: false,
@@ -283,19 +320,37 @@ const residentRegistrySlice = createSlice({
         chatData: false,
         segments: true,
         residentTopic: false,
-        applicabilityGeneration: nextGen
+        applicabilityGeneration: nextGen,
+        // Standalone segment publications never clear the read-window boundary.
+        ...(entry.windowCompleteness ? { windowCompleteness: entry.windowCompleteness } : {})
       }
     }
   },
   extraReducers: (builder) => {
     builder.addCase(publishResidentComplete, (state, action) => {
-      const { topicId, generation } = action.payload
+      const { topicId, generation, windowResponse } = action.payload
       const entry = state.entries[topicId]
       if (!entry) return
       if (entry.applicabilityGeneration !== generation) return
       entry.chatData = true
       entry.segments = true
       entry.residentTopic = true
+      // The read-window boundary rides the publication that installs the
+      // resident window, so it is written only after the generation guard
+      // passed: a discarded/stale publication never touches it. An absent
+      // window payload leaves the retained boundary untouched (only a present
+      // window response writes). Identical values keep the existing object
+      // reference, so consumers see no spurious change.
+      const window = windowResponse?.window
+      if (window) {
+        const prev = entry.windowCompleteness
+        if (!prev || prev.hasMoreBefore !== !!window.hasMoreBefore || prev.hasMoreAfter !== !!window.hasMoreAfter) {
+          entry.windowCompleteness = {
+            hasMoreBefore: !!window.hasMoreBefore,
+            hasMoreAfter: !!window.hasMoreAfter
+          }
+        }
+      }
     })
     builder.addCase(publishSegmentCatalogComplete, (state, action) => {
       // Slice-local guard (generation only; full window provenance is enforced
@@ -324,6 +379,8 @@ const residentRegistrySlice = createSlice({
       const topicId = action.payload
       const prev = state.entries[topicId]
       const nextGen = (prev?.applicabilityGeneration ?? 0) + 1
+      // Retention eviction is the other explicit clearing mechanism for the
+      // retained read-window boundary (the projection is reclaimed, not fenced).
       state.entries[topicId] = {
         chatData: false,
         segments: false,
@@ -355,6 +412,21 @@ export const selectIsResident = (state: { residentRegistry: ResidentRegistryStat
 
 export const selectGeneration = (state: { residentRegistry: ResidentRegistryState }, topicId: string): number =>
   state.residentRegistry.entries[topicId]?.applicabilityGeneration ?? 0
+
+/**
+ * Pure typed read of the topic's retained read-window boundary.
+ *
+ * `undefined` means "no window response has been published for this topic
+ * since the last clear" — the caller must then fall back to its own default,
+ * never to a whole-topic assumption. An empty topic that was published has
+ * metadata (`hasMoreBefore`/`hasMoreAfter` false), which is not the same fact
+ * as "not loaded". The returned object keeps its identity while the published
+ * values are unchanged, so callers comparing references see no spurious change.
+ */
+export const selectTopicWindowCompleteness = (
+  state: { residentRegistry: ResidentRegistryState },
+  topicId: string
+): ResidentWindowCompleteness | undefined => state.residentRegistry.entries[topicId]?.windowCompleteness
 
 // Helpers for non-Redux contexts (tests) — direct map access is via Redux state
 export const isResidentTopic = (entry: ResidentEntry | undefined): boolean => !!entry?.residentTopic

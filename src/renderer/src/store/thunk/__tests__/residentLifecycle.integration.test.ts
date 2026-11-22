@@ -6,11 +6,7 @@
  *  - stale generation action changes none of them (atomic discard via rootReducer + per-slice guards)
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
-import {
-  clearLatestWindowCompleteness,
-  getLatestWindowCompleteness,
-  setLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
+import { selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import messageBlocksReducer from '@renderer/store/messageBlock'
 import newMessagesReducer from '@renderer/store/newMessage'
 import residentRegistryReducer, {
@@ -21,28 +17,33 @@ import residentRegistryReducer, {
 } from '@renderer/store/residentRegistry'
 import topicSegmentReducer from '@renderer/store/topicSegment'
 import type { FetchMessagesWindowResponse } from '@shared/chatDb'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-function makeWindowResponse(topicId: string, messages: Array<{ id: string }>): FetchMessagesWindowResponse {
+function makeWindowResponse(
+  topicId: string,
+  messages: Array<{ id: string }>,
+  windowOverrides: Partial<{ kind: 'latest' | 'around'; hasMoreBefore: boolean; hasMoreAfter: boolean }> = {}
+): FetchMessagesWindowResponse {
   const returnedCount = messages.length
   const firstMessageId = returnedCount > 0 ? messages[0].id : null
   const lastMessageId = returnedCount > 0 ? messages[returnedCount - 1].id : null
+  const kind = windowOverrides.kind ?? 'latest'
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [
       { id: 'b-1', messageId: messages[0]?.id ?? 'm-0', type: 'main_text', content: 'hi' }
     ] as unknown as FetchMessagesWindowResponse['blocks'],
     window: {
-      kind: 'latest',
+      kind,
       completeness: 'window',
       topicId,
       anchorMessageId: null,
-      requested: { limit: 10 },
+      requested: kind === 'latest' ? { limit: 10 } : { before: 5, after: 5 },
       firstMessageId,
       lastMessageId,
       returnedCount,
-      hasMoreBefore: true,
-      hasMoreAfter: false
+      hasMoreBefore: windowOverrides.hasMoreBefore ?? true,
+      hasMoreAfter: windowOverrides.hasMoreAfter ?? false
     }
   } as unknown as FetchMessagesWindowResponse
 }
@@ -55,31 +56,20 @@ const appReducer = combineReducers({
   topicSegments: topicSegmentReducer,
   residentRegistry: residentRegistryReducer
 })
+// production guarded publication — exercises the same shouldDiscardJointPublish
+// helper used by the real store/index.ts rootReducer, without duplicating the
+// guard. The window-boundary metadata is written by the resident-registry slice
+// reducer itself (same publication), so nothing outside appReducer touches it.
 const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
     if (shouldDiscardJointPublish(state, action.payload)) {
       return state as any
     }
-    try {
-      const windowResponse = action.payload?.windowResponse
-      const topicId = action.payload?.topicId as string
-      if (windowResponse?.window) {
-        setLatestWindowCompleteness(topicId, {
-          hasMoreBefore: !!windowResponse.window.hasMoreBefore,
-          hasMoreAfter: !!windowResponse.window.hasMoreAfter
-        })
-      }
-    } catch {}
   }
   return appReducer(state, action)
 }
 
 describe('resident lifecycle integration — real reducers', () => {
-  beforeEach(() => {
-    clearLatestWindowCompleteness('t-int')
-    clearLatestWindowCompleteness('t-stale')
-  })
-
   it('single joint publication dispatch updates blocks/messages/segments/window-completeness/registry together and stale generation changes none', () => {
     const store = configureStore({ reducer: rootReducer })
 
@@ -87,7 +77,7 @@ describe('resident lifecycle integration — real reducers', () => {
     store.dispatch(bumpGeneration('t-int'))
     const gen = (store.getState() as any).residentRegistry.entries['t-int'].applicabilityGeneration as number
     expect(gen).toBe(1)
-    expect(getLatestWindowCompleteness('t-int')).toBeUndefined()
+    expect(selectWindowBoundary('t-int', store)).toBeUndefined()
 
     const windowResponse = makeWindowResponse('t-int', [{ id: 'm-int-1' }, { id: 'm-int-2' }])
     const segments = [
@@ -115,7 +105,7 @@ describe('resident lifecycle integration — real reducers', () => {
     expect(state.topicSegments.segmentsByTopic['t-int']).toEqual(['seg-int-1'])
     expect(state.topicSegments.segments.entities['seg-int-1']).toBeDefined()
     // window completeness (via rootReducer side effect)
-    expect(getLatestWindowCompleteness('t-int')).toEqual({ hasMoreBefore: true, hasMoreAfter: false })
+    expect(selectWindowBoundary('t-int', store)).toEqual({ hasMoreBefore: true, hasMoreAfter: false })
     // registry
     const entry = state.residentRegistry.entries['t-int']
     expect(entry.chatData).toBe(true)
@@ -138,7 +128,7 @@ describe('resident lifecycle integration — real reducers', () => {
       }
     ] as any[]
     const beforeState = structuredClone(state)
-    const beforeCompleteness = getLatestWindowCompleteness('t-int')
+    const beforeCompleteness = selectWindowBoundary('t-int', store)
 
     store.dispatch(
       publishResidentComplete({
@@ -155,7 +145,7 @@ describe('resident lifecycle integration — real reducers', () => {
     expect(after.messageBlocks.entities['b-1']).toEqual(beforeState.messageBlocks.entities['b-1'])
     expect(after.topicSegments.segmentsByTopic['t-int']).toEqual(beforeState.topicSegments.segmentsByTopic['t-int'])
     expect(after.topicSegments.segments.entities['seg-stale']).toBeUndefined()
-    expect(getLatestWindowCompleteness('t-int')).toEqual(beforeCompleteness)
+    expect(selectWindowBoundary('t-int', store)).toEqual(beforeCompleteness)
     expect(after.residentRegistry.entries['t-int']).toEqual(beforeState.residentRegistry.entries['t-int'])
   })
 
@@ -177,5 +167,41 @@ describe('resident lifecycle integration — real reducers', () => {
     expect(state.residentRegistry.entries['t-empty'].residentTopic).toBe(true)
     expect(state.residentRegistry.entries['t-empty'].chatData).toBe(true)
     expect(state.residentRegistry.entries['t-empty'].segments).toBe(true)
+    // empty but loaded: the published window boundary is retained (not a
+    // whole-topic claim — hasMoreBefore/After are the Main-declared window
+    // flags), while a never-published topic reads as missing (undefined)
+    expect(selectWindowBoundary('t-empty', store)).toEqual({ hasMoreBefore: true, hasMoreAfter: false })
+    expect(selectWindowBoundary('t-never-published', store)).toBeUndefined()
+  })
+
+  it('parallel topic publications keep their own boundaries; around windows write the same boundary shape', () => {
+    const store = configureStore({ reducer: rootReducer })
+    store.dispatch(bumpGeneration('t-a'))
+    store.dispatch(bumpGeneration('t-b'))
+    const genA = (store.getState() as any).residentRegistry.entries['t-a'].applicabilityGeneration as number
+    const genB = (store.getState() as any).residentRegistry.entries['t-b'].applicabilityGeneration as number
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-a',
+        generation: genA,
+        windowResponse: makeWindowResponse('t-a', [{ id: 'm-a' }], { hasMoreBefore: true, hasMoreAfter: false }),
+        segments: []
+      })
+    )
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-b',
+        generation: genB,
+        windowResponse: makeWindowResponse('t-b', [{ id: 'm-b' }], {
+          kind: 'around',
+          hasMoreBefore: false,
+          hasMoreAfter: true
+        }),
+        segments: []
+      })
+    )
+    // each topic reads exactly the boundary its own publication carried — no cross-write
+    expect(selectWindowBoundary('t-a', store)).toEqual({ hasMoreBefore: true, hasMoreAfter: false })
+    expect(selectWindowBoundary('t-b', store)).toEqual({ hasMoreBefore: false, hasMoreAfter: true })
   })
 })

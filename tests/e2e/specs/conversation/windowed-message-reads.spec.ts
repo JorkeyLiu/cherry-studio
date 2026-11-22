@@ -1115,7 +1115,7 @@ test.describe('windowed reads: latest and around', () => {
 
     // Real user-visible action: topic-item context menu → Export submenu →
     // Export as markdown. The production preconfigured-path branch is used:
-    // `settings/markdownExportPath` points at a spec-local dir under the
+    // `settings/exportPath` points at a spec-local dir under the
     // fixture-owned root (no personal files, no native save dialog), so the
     // written file is the whole-topic evidence. Locale-robust: parent
     // `chat.topics.export.title` (导出|Export), child
@@ -1123,9 +1123,9 @@ test.describe('windowed reads: latest and around', () => {
     const exportDir = path.join(ownedTmpRoot, 'r04-export')
     fs.mkdirSync(exportDir, { recursive: true })
     await page.evaluate((dir: string) => {
-      ;(window as any).store.dispatch({ type: 'settings/setmarkdownExportPath', payload: dir })
+      ;(window as any).store.dispatch({ type: 'settings/setExportPath', payload: dir })
     }, exportDir)
-    const exportPathOk = await page.evaluate(() => (window as any).store.getState().settings?.markdownExportPath)
+    const exportPathOk = await page.evaluate(() => (window as any).store.getState().settings?.exportPath)
     expect(exportPathOk).toBe(exportDir)
     await topicItem.scrollIntoViewIfNeeded()
     await topicItem.click({ button: 'right' })

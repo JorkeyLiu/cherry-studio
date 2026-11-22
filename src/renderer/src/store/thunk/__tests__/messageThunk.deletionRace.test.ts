@@ -232,8 +232,6 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
     const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
     resetAllDeletionGenerationsForTests()
     storeState.residentRegistry.entries = {}
-    const { clearAllLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
-    clearAllLatestWindowCompleteness()
   })
 
   it(
@@ -244,10 +242,10 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
       const { bumpDeletionGeneration, getDeletionGeneration } = await import(
         '@renderer/services/topicDeletionInvalidation'
       )
-      const { getLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
+      const { selectTopicWindowCompleteness } = await import('@renderer/store/residentRegistry')
 
       expect(getDeletionGeneration('t1')).toBe(0)
-      expect(getLatestWindowCompleteness('t1')).toBeUndefined()
+      expect(selectTopicWindowCompleteness(storeState, 't1')).toBeUndefined()
 
       let resolveFetch: (v: FetchMessagesWindowResponse) => void
       mocks.fetchMessagesWindow.mockImplementation(
@@ -271,12 +269,15 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
       expect(req.topicId).toBe('t1')
 
       // Authoritative hard deletion before fetch resolves — bumps generation synchronously
-      // and clears window completeness. Real store also purges resident projections;
-      // this test verifies the stale deferred response is discarded/not re-published.
+      // Authoritative hard deletion before fetch resolves — bumps generation
+      // synchronously and drops the topic's retained read-window boundary via the
+      // resident invalidation dispatch (not losslessly mirrored into this fake
+      // projection state); this test verifies the stale deferred response is
+      // discarded/not re-published.
       const genAfterBump = bumpDeletionGeneration('t1')
       expect(genAfterBump).toBe(1)
       expect(getDeletionGeneration('t1')).toBe(1)
-      expect(getLatestWindowCompleteness('t1')).toBeUndefined()
+      expect(selectTopicWindowCompleteness(storeState, 't1')).toBeUndefined()
 
       // Resolve with an otherwise-valid latest window (would have published if not stale)
       const validRes = makeWindowResponse(req, [
@@ -293,7 +294,7 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
       // Fail-closed: stale response discarded/not re-published — no joint publication, no anchor
       expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
-      expect(getLatestWindowCompleteness('t1')).toBeUndefined()
+      expect(selectTopicWindowCompleteness(storeState, 't1')).toBeUndefined()
 
       // Projection remains empty — stale valid payload was discarded/not re-published (no resurrection)
       expect(storeState.messages.messageIdsByTopic['t1']).toEqual([])

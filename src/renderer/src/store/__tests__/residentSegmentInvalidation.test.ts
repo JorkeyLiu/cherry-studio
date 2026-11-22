@@ -12,13 +12,10 @@
  *    invalidate originating, while inbound copy (fromSync) still does.
  */
 import { configureStore } from '@reduxjs/toolkit'
-import {
-  clearAllLatestWindowCompleteness,
-  getLatestWindowCompleteness
-} from '@renderer/pages/home/Messages/messageWindow'
 import { getPhase4BoundScalars, getPhase4Snapshot } from '@renderer/services/phase4Observability'
 import { getResidentDiagnostics, getResidentDiagnosticsFromState } from '@renderer/services/residentDiagnostics'
 import { rootReducer } from '@renderer/store'
+import { selectWindowBoundary } from '@renderer/store/__tests__/helpers/windowCompleteness'
 import {
   bumpGeneration,
   clearEntry as clearResidentEntry,
@@ -172,7 +169,6 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
   })
 
   it('inbound identical fromSync replace is state-identity no-op (generation/flags/completeness unchanged)', () => {
-    clearAllLatestWindowCompleteness()
     const gen = establishResident('t-sync-ident')
     const beforeState = store.getState() as any
     const beforeEntry = beforeState.residentRegistry.entries['t-sync-ident']
@@ -180,7 +176,7 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     expect(beforeEntry.chatData).toBe(true)
     expect(beforeEntry.segments).toBe(true)
     const beforeSegIdsRef = beforeState.topicSegments.segmentsByTopic['t-sync-ident']
-    const beforeCompleteness = getLatestWindowCompleteness('t-sync-ident')
+    const beforeCompleteness = selectWindowBoundary('t-sync-ident', store)
     // Build field-identical incoming catalog from the current projection
     const entities = beforeState.topicSegments.segments.entities as Record<string, any>
     const identicalCatalog = (beforeSegIdsRef as string[]).map((id) => ({ ...entities[id] }))
@@ -199,12 +195,11 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     expect(afterEntry.residentTopic).toBe(true)
     expect(afterEntry.chatData).toBe(true)
     expect(afterEntry.segments).toBe(true)
-    expect(getLatestWindowCompleteness('t-sync-ident')).toEqual(beforeCompleteness)
+    expect(selectWindowBoundary('t-sync-ident', store)).toBe(beforeCompleteness)
     void gen
   })
 
   it('inbound identical fromSync+isJointFollowUp is no-op while differing still invalidates', () => {
-    clearAllLatestWindowCompleteness()
     establishResident('t-sync-joint')
     const beforeState = store.getState() as any
     const beforeEntry = beforeState.residentRegistry.entries['t-sync-joint']
@@ -244,7 +239,6 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
   })
 
   it('inbound differing fromSync replace bumps generation, invalidates resident/chatData, applies new catalog', () => {
-    clearAllLatestWindowCompleteness()
     const gen = establishResident('t-sync-diff')
     const beforeState = store.getState() as any
     const diffSeg = makeSegment('seg-sync-diff-new', 't-sync-diff', ['m-new'])
