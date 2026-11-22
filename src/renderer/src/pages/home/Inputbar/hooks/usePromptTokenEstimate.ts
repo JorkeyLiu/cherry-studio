@@ -2,6 +2,7 @@ import { estimateDraftTokens, type LocalTokenEstimate } from '@renderer/services
 import { combineHistoryAndDraftTokens, estimateHistoryTokens } from '@renderer/services/TokenService'
 import type { Assistant, FileMetadata } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { debounce } from 'lodash'
 import { useEffect, useRef, useState } from 'react'
 
@@ -13,9 +14,21 @@ import { useEffect, useRef, useState } from 'react'
 export const PROMPT_TOKEN_ESTIMATE_DEBOUNCE_MS = 200
 
 /** Injectable history estimator (defaults to TokenService). */
-export type EstimateHistoryFn = (assistant: Assistant, messages: Message[]) => Promise<number>
+export type EstimateHistoryFn = (
+  assistant: Assistant,
+  messages: Message[],
+  snapshotBlocks?: SnapshotBlockMap
+) => Promise<number>
 /** Injectable draft estimator (defaults to LocalTokenEstimator). */
 export type EstimateDraftFn = (params: { content?: string; files?: FileMetadata[] }) => Promise<LocalTokenEstimate>
+
+/**
+ * Stable default history estimator: adapts the TokenService options-object
+ * signature to the hook's positional snapshot-pairing contract. Module-level
+ * so the hook's effect dependency stays referentially stable.
+ */
+const defaultEstimateHistory: EstimateHistoryFn = (assistant, messages, snapshotBlocks) =>
+  estimateHistoryTokens(assistant, messages, { snapshotBlocks })
 
 export interface UsePromptTokenEstimateOptions {
   /** Assistant supplying the system-prompt token estimate. */
@@ -26,6 +39,13 @@ export interface UsePromptTokenEstimateOptions {
    * re-window or re-filter — it estimates over exactly what it receives.
    */
   tokenEstimationMessages: Message[]
+  /**
+   * Explicit block snapshot paired with `tokenEstimationMessages` (the
+   * `blockSnapshot` from the shared context derivation). The debounced pass
+   * captures this pair together so a later store change cannot re-read new
+   * block content under old messages.
+   */
+  blockSnapshot?: SnapshotBlockMap
   /** Current draft text for the next request. */
   text: string
   /** Current draft attachments for the next request. */
@@ -56,10 +76,11 @@ export interface UsePromptTokenEstimateOptions {
 export function usePromptTokenEstimate({
   assistant,
   tokenEstimationMessages,
+  blockSnapshot,
   text,
   files,
   debounceMs = PROMPT_TOKEN_ESTIMATE_DEBOUNCE_MS,
-  estimateHistory = estimateHistoryTokens,
+  estimateHistory = defaultEstimateHistory,
   estimateDraft = estimateDraftTokens
 }: UsePromptTokenEstimateOptions): number {
   const [estimateTokenCount, setEstimateTokenCount] = useState(0)
@@ -76,7 +97,10 @@ export function usePromptTokenEstimate({
 
     const run = debounce(
       () => {
-        Promise.all([estimateHistory(assistant, tokenEstimationMessages), estimateDraft({ content: text, files })])
+        Promise.all([
+          estimateHistory(assistant, tokenEstimationMessages, blockSnapshot),
+          estimateDraft({ content: text, files })
+        ])
           .then(([historyTokens, draftEstimate]) => {
             if (!isCurrent()) {
               return
@@ -98,7 +122,7 @@ export function usePromptTokenEstimate({
       cancelled = true
       run.cancel()
     }
-  }, [assistant, tokenEstimationMessages, text, files, debounceMs, estimateHistory, estimateDraft])
+  }, [assistant, tokenEstimationMessages, blockSnapshot, text, files, debounceMs, estimateHistory, estimateDraft])
 
   return estimateTokenCount
 }

@@ -1,5 +1,6 @@
 import type { Assistant, FileMetadata, Usage } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 
 import { estimateDraftTokens, estimateMessageTokens, estimateTextTokens } from './LocalTokenEstimator'
 
@@ -61,7 +62,7 @@ export async function estimateUserPromptUsage({
  */
 export async function estimateMessageUsage(
   message: Partial<Message>,
-  options: { includeMedia?: boolean } = {}
+  options: { includeMedia?: boolean; snapshotBlocks?: SnapshotBlockMap } = {}
 ): Promise<Usage> {
   const estimate = await estimateMessageTokens(message as Message, options)
 
@@ -121,7 +122,7 @@ export async function estimateMessagesUsage({
 export async function estimateHistoryTokens(
   assistant: Assistant,
   messages: Message[],
-  options: { includeMedia?: boolean } = {}
+  options: { includeMedia?: boolean; snapshotBlocks?: SnapshotBlockMap } = {}
 ): Promise<number> {
   let totalTokens = 0
 

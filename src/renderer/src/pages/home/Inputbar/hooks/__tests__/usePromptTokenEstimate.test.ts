@@ -244,4 +244,102 @@ describe('usePromptTokenEstimate', () => {
     expect(historyMock.mock.calls[1][1]).toBe(newMessages)
     expect(draftMock.mock.calls[1][0]).toEqual({ content: 't2', files: [] })
   })
+
+  it('snapshot pairing: rerender inside the debounce window keeps one pass with the latest pair', async () => {
+    const snapA = new Map()
+    const snapB = new Map()
+    const msgsA = [{ id: 'a' }] as unknown as Message[]
+    const msgsB = [{ id: 'b' }] as unknown as Message[]
+    const { result, rerender } = renderHook(
+      (props: { messages: Message[]; snapshot: Map<string, unknown> }) =>
+        usePromptTokenEstimate({
+          assistant: baseAssistant,
+          tokenEstimationMessages: props.messages,
+          blockSnapshot: props.snapshot as never,
+          text: 't',
+          files: [],
+          estimateHistory: historyMock,
+          estimateDraft: draftMock
+        }),
+      { initialProps: { messages: msgsA, snapshot: snapA } }
+    )
+
+    // Rerender before the 200ms debounce fires: the first pass is cancelled,
+    // so the single history call pairs the latest messages with the latest
+    // snapshot instead of re-reading newer blocks under older messages.
+    rerender({ messages: msgsB, snapshot: snapB })
+    await waitFor(() => expect(historyMock).toHaveBeenCalledTimes(1))
+    expect(historyMock.mock.calls[0][0]).toBe(baseAssistant)
+    expect(historyMock.mock.calls[0][1]).toBe(msgsB)
+    expect(historyMock.mock.calls[0][2]).toBe(snapB)
+
+    act(() => {
+      historyDeferred[0].resolve(10)
+      draftDeferred[0].resolve({ textTokens: 0, imageTokens: 0, fileTokens: 0, totalTokens: 2 })
+    })
+    await waitFor(() => expect(result.current).toBe(12))
+  })
+
+  it('stale snapshot pass cannot overwrite the newer paired result', async () => {
+    const snapA = new Map()
+    const snapB = new Map()
+    const msgsA = [{ id: 'a' }] as unknown as Message[]
+    const msgsB = [{ id: 'b' }] as unknown as Message[]
+    const { result, rerender } = renderHook(
+      (props: { messages: Message[]; snapshot: Map<string, unknown> }) =>
+        usePromptTokenEstimate({
+          assistant: baseAssistant,
+          tokenEstimationMessages: props.messages,
+          blockSnapshot: props.snapshot as never,
+          text: 't',
+          files: [],
+          estimateHistory: historyMock,
+          estimateDraft: draftMock
+        }),
+      { initialProps: { messages: msgsA, snapshot: snapA } }
+    )
+
+    await waitFor(() => expect(historyMock).toHaveBeenCalledTimes(1))
+    expect(historyMock.mock.calls[0][1]).toBe(msgsA)
+    expect(historyMock.mock.calls[0][2]).toBe(snapA)
+
+    rerender({ messages: msgsB, snapshot: snapB })
+    await waitFor(() => expect(historyMock).toHaveBeenCalledTimes(2))
+    expect(historyMock.mock.calls[1][1]).toBe(msgsB)
+    expect(historyMock.mock.calls[1][2]).toBe(snapB)
+
+    // Newer pass commits first, stale pass resolves last: no overwrite.
+    act(() => {
+      historyDeferred[1].resolve(99)
+      draftDeferred[1].resolve({ textTokens: 0, imageTokens: 0, fileTokens: 0, totalTokens: 1 })
+    })
+    await waitFor(() => expect(result.current).toBe(100))
+
+    act(() => {
+      historyDeferred[0].resolve(1234)
+      draftDeferred[0].resolve({ textTokens: 0, imageTokens: 0, fileTokens: 0, totalTokens: 1 })
+    })
+    await waitFor(() => expect(result.current).toBe(100))
+  })
+
+  it('history estimator receives the paired snapshot instance', async () => {
+    const snap = new Map()
+    const msgs = [{ id: 'm1' }] as unknown as Message[]
+    renderHook(() =>
+      usePromptTokenEstimate({
+        assistant: baseAssistant,
+        tokenEstimationMessages: msgs,
+        blockSnapshot: snap as never,
+        text: 't',
+        files: [],
+        estimateHistory: historyMock,
+        estimateDraft: draftMock
+      })
+    )
+
+    await waitFor(() => expect(historyMock).toHaveBeenCalledTimes(1))
+    expect(historyMock.mock.calls[0][0]).toBe(baseAssistant)
+    expect(historyMock.mock.calls[0][1]).toBe(msgs)
+    expect(historyMock.mock.calls[0][2]).toBe(snap)
+  })
 })

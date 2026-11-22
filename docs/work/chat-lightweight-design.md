@@ -173,3 +173,13 @@
  - 验证（只记原始 exit，不累加分片）：focused 相关 11 files 291 PASS exit 0（另 context/IPC 散件 43+5 均过）；完整 `pnpm test:main` exit 0；`pnpm typecheck` 五路 exit 0；fresh `pnpm build` exit 0；四 spec E2E 17/17 exit 0。
  - 不声称：全局 latency/FPS/memory 未测；病态 single-askId 整组必须完整读回，是 group 语义允许的代价，不是回归。
  - 下一步（整体判断，非附近问题）：有效路由读取已到 authority 段有界；仍要从数据→状态→呈现判断是否还有“丢掉已知关系后由页面重建”的职责负担，保留必要 loaded/display/completeness 区分，不默认下一个 helper/cache/queue；实际下一实现尚未选，不把未知当承诺。
+## 19. 展示上下文输入收敛：显式 closed block snapshot（已实现）
+:
+ - 承接 §18：authority 有效 route→window 已有清楚 owner 后，审视 state→context→presentation 输入关系；loaded/display/completeness 与 Main/Renderer grouping 为不同职责，不盲合并。
+ - 旧隐式依赖：Chat 显式 messages/settings/route/accepted closure 且订阅 active blocks 仅作 memo 失效，而 filters/find/token helper 从 global store 读；200ms debounce 历史估算可再读另一时刻。
+ - 新关系：Chat 单 active selector 按 fresh closure.messages 的 block IDs（无 closure 时 topic messages IDs）经 `selectMessageBlocksByIds` 读当前 projection（非 closure.blocks 字节），`createSnapshotBlockMap` 建 explicit closed snapshot；同 snapshot 供 context 过滤/成员与 history token 估计配对，缺块即缺失、无 store fallback，实时块变即新 snapshot。
+ - 锚仍分开：closure meta 锚/count/divider 权威不变（UI 列表为空可与非零 count 共存，既有语义）；token history 与 snapshot captured pair 配对，stale estimate 取消保护；legacy 默认与 `ConversationService` partial request overlay store fallback 不动；Main/IPC/DB/请求执行/send/viewport 不动，无 global cache/event bus。
+ - 最终验证（冻结态原始 exit，Node 24.11.1/pnpm 10.27.0，冻结前后同一内容哈希 HASH_MATCH=YES）：完整 `pnpm test:renderer` exit 0（只记完整退出，不累加分片）；`pnpm typecheck` 五路 exit 0；fresh `pnpm build` exit 0；三 spec（context-window-contract/streaming-responsiveness/cross-topic-reference）8/8 exit 0。新增 `contextInfoService.closedSnapshot` + `TokenService.closedSnapshot` + hook additive 及生产 Chat + 真实 blocks selector/derive 挂载的 contract/component 覆盖（Messages/Inputbar 被 stub 记录，不称完整页面集成）；auditor bounded pass 0 findings。早期非冻结/pipe-tail 中间状态不可用，已由冻结 final run 覆盖，不作证据。冻结后另有 5 处 oxlint `no-unnecessary-type-assertion` 擦除断言移除（find.ts×4、Chat.tsx×1，零运行时变更），已补 focused 4 文件 22 项 exit 0 与 `pnpm typecheck` 五路 exit 0。
+ - E2E 回尾 test-only 修复：固定 12 轮 wheel 预算因恢复起点不同不足，改按真实 bottom/tail/progress 停止（40 上限 + 两次无进展停），物理 bottom/tail 100px 断言不放宽；只改 test 不改生产 scroll，同 build 曾 PASS 不排除 production bug，依据为 trace exhausted wheel + rendered tail。
+ - 无 new E2E 资产（既有业务 workflow 复用，下层输入合同新 unit/component 足够）。不把 metadata 权威与 live content 选择合并，不声称发送请求完全快照化（不在 scope）。
+ - 剩余/下一步：本阶段只收敛展示上下文，legacy 请求 overlay 与执行用量默认读取保持兼容、各有用途；下一判断继续跨层看事实消费是否直接、是否存在独立事实需多处维护，不默认接着改全 helper/queue 或建缓存。整体轻量化未完成，latency/FPS/memory 未测。

@@ -18,6 +18,7 @@ import {
   filterUsefulMessages,
   filterUserRoleStartMessages
 } from '@renderer/utils/messageUtils/filters'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 
 /**
@@ -97,6 +98,14 @@ export type ContextInfo = {
    * allowed availability fallback separately and never set this.
    */
   isAuthoritativePending?: boolean
+  /**
+   * The explicit block snapshot this derivation read message content through.
+   * History token estimation MUST pair these same messages with this same
+   * snapshot: a later store change forms a new snapshot and a new result, and
+   * never mutates a derivation already made. Empty (no snapshot supplied)
+   * means the derivation used the legacy store-backed block reads.
+   */
+  blockSnapshot: SnapshotBlockMap
 }
 
 /**
@@ -128,12 +137,13 @@ export type ContextInfo = {
  */
 export function filterContextMessages(
   anchorClippedMessages: Message[],
-  overlay?: BlockOverlay
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
 ): { uiMessages: Message[]; tokenEstimationMessages: Message[] } {
-  const modelCandidates = toModelCandidates(anchorClippedMessages, overlay)
+  const modelCandidates = toModelCandidates(anchorClippedMessages, overlay, snapshotBlocks)
   return {
-    uiMessages: toUiMessages(modelCandidates, overlay),
-    tokenEstimationMessages: toTokenEstimationMessages(modelCandidates, overlay)
+    uiMessages: toUiMessages(modelCandidates, overlay, snapshotBlocks),
+    tokenEstimationMessages: toTokenEstimationMessages(modelCandidates, overlay, snapshotBlocks)
   }
 }
 
@@ -142,26 +152,42 @@ export function filterContextMessages(
  * only this half, so it never builds the token-estimation list it would
  * discard.
  */
-export function filterContextUiMessages(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
-  return toUiMessages(toModelCandidates(anchorClippedMessages, overlay), overlay)
+export function filterContextUiMessages(
+  anchorClippedMessages: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
+  return toUiMessages(toModelCandidates(anchorClippedMessages, overlay, snapshotBlocks), overlay, snapshotBlocks)
 }
 
 /** Shared prefix: retry dedup inside assistant groups, then error-only pairs. */
-function toModelCandidates(anchorClippedMessages: Message[], overlay?: BlockOverlay): Message[] {
-  return filterErrorOnlyMessagesWithRelated(filterUsefulMessages(anchorClippedMessages), overlay)
+function toModelCandidates(
+  anchorClippedMessages: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
+  return filterErrorOnlyMessagesWithRelated(filterUsefulMessages(anchorClippedMessages), overlay, snapshotBlocks)
 }
 
 /** Model-facing branch: drops the trailing assistant before final cleanup. */
-function toUiMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+function toUiMessages(
+  modelCandidates: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
   const withoutTrailingAssistant = filterLastAssistantMessage(modelCandidates)
   const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
-  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay, snapshotBlocks))
 }
 
 /** Token-estimation branch: retains the trailing assistant. */
-function toTokenEstimationMessages(modelCandidates: Message[], overlay?: BlockOverlay): Message[] {
+function toTokenEstimationMessages(
+  modelCandidates: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
   const withoutAdjacentUsers = filterAdjacentUserMessaegs(modelCandidates)
-  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay))
+  return filterUserRoleStartMessages(filterEmptyMessages(withoutAdjacentUsers, overlay, snapshotBlocks))
 }
 
 export function computeContextInfo(
@@ -169,7 +195,8 @@ export function computeContextInfo(
   assistant: Assistant | undefined,
   topicId?: string,
   overlay?: BlockOverlay,
-  branchId?: string | null
+  branchId?: string | null,
+  snapshotBlocks?: SnapshotBlockMap
 ): ContextInfo {
   if (!assistant) {
     return {
@@ -177,7 +204,8 @@ export function computeContextInfo(
       tokenEstimationMessages: [],
       boundaryMessageId: null,
       contextCount: { current: 0, max: null },
-      anchorGroupKey: null
+      anchorGroupKey: null,
+      blockSnapshot: snapshotBlocks ?? new Map()
     }
   }
 
@@ -239,14 +267,15 @@ export function computeContextInfo(
   const expandedMessages = turnsToMessages(selectedRealTurns)
 
   // --- Steps 4-9: The one shared message-level model/token filter pipeline ---
-  const { uiMessages, tokenEstimationMessages } = filterContextMessages(expandedMessages, overlay)
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(expandedMessages, overlay, snapshotBlocks)
 
   return {
     uiMessages,
     tokenEstimationMessages,
     boundaryMessageId,
     contextCount: { current: currentCount, max: maxCount },
-    anchorGroupKey
+    anchorGroupKey,
+    blockSnapshot: snapshotBlocks ?? new Map()
   }
 }
 
@@ -294,10 +323,11 @@ export function resolveSharedContextInfo(
   assistant: Assistant | undefined,
   topicId: string,
   freshClosure: FetchContextClosureResponse | null,
-  branchId?: string | null
+  branchId?: string | null,
+  snapshotBlocks?: SnapshotBlockMap
 ): ContextInfo {
   if (freshClosure) {
-    return { ...deriveContextInfoFromClosure(freshClosure), isAuthoritativePending: false }
+    return { ...deriveContextInfoFromClosure(freshClosure, snapshotBlocks), isAuthoritativePending: false }
   }
   const routeKey = typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
   const persisted =
@@ -314,7 +344,8 @@ export function resolveSharedContextInfo(
       boundaryMessageId: null,
       contextCount: { current: 0, max: null },
       anchorGroupKey: persistedKey,
-      isAuthoritativePending: true
+      isAuthoritativePending: true,
+      blockSnapshot: snapshotBlocks ?? new Map()
     }
   }
   // No persisted anchor. Only an EMPTY route may use the bounded fallback:
@@ -330,29 +361,42 @@ export function resolveSharedContextInfo(
       boundaryMessageId: null,
       contextCount: { current: 0, max: null },
       anchorGroupKey: null,
-      isAuthoritativePending: true
+      isAuthoritativePending: true,
+      blockSnapshot: snapshotBlocks ?? new Map()
     }
   }
   return {
-    ...computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null),
+    ...computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null, snapshotBlocks),
     isAuthoritativePending: false
   }
 }
 
-export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
+export function deriveContextInfoFromClosure(
+  closure: FetchContextClosureResponse,
+  snapshotBlocks?: SnapshotBlockMap
+): ContextInfo {
   // Closure messages are already the authoritative anchor-to-end slice, so only
   // the shared message-level pipeline applies — no turn grouping, no anchor
   // resolution.
   // The fold set is the authority list carried by this closure read, so the
   // token-estimation list and the UI projection consume exactly the set the
-  // authoritative counts describe and the request sends. No overlay is passed
-  // (unchanged): this projection keeps resolving blocks from the store rather
-  // than from closure blocks.
+  // authoritative counts describe and the request sends.
+  // Block reads are closed over the caller-supplied snapshot when one is
+  // provided (a block missing from the snapshot is treated as missing, never
+  // the store). Without a snapshot the legacy store-backed reads apply
+  // (unchanged): projection blocks resolve from the store — note `closureBlocks`
+  // elsewhere means store-selector projection blocks for closure message block
+  // IDs, NOT `freshClosure.blocks` bytes — while closure metadata stays
+  // authoritative.
   const participatingMessages = excludeFoldedMessages(
     closure.messages as unknown as Message[],
     closure.closure.foldedMessageIds
   )
-  const { uiMessages, tokenEstimationMessages } = filterContextMessages(participatingMessages)
+  const { uiMessages, tokenEstimationMessages } = filterContextMessages(
+    participatingMessages,
+    undefined,
+    snapshotBlocks
+  )
 
   return {
     uiMessages,
@@ -360,6 +404,7 @@ export function deriveContextInfoFromClosure(closure: FetchContextClosureRespons
     boundaryMessageId: closure.closure.boundaryMessageId,
     contextCount: { current: closure.closure.selectedTurnCount, max: closure.closure.totalTurnCount },
     anchorGroupKey: closure.closure.anchorGroupKey,
-    isAuthoritativePending: false
+    isAuthoritativePending: false,
+    blockSnapshot: snapshotBlocks ?? new Map()
   }
 }

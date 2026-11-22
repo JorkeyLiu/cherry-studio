@@ -36,6 +36,7 @@ import {
 } from '@renderer/types'
 import type { Message, MessageInputBaseParams } from '@renderer/types/newMessage'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { FC } from 'react'
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
@@ -182,8 +183,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   // re-estimates immediately.
   const includeHistoryMedia = includeHistoryMediaContext !== false
   const estimateHistory = useCallback(
-    (targetAssistant: Assistant, historyMessages: Message[]) =>
-      estimateHistoryTokens(targetAssistant, historyMessages, { includeMedia: includeHistoryMedia }),
+    (targetAssistant: Assistant, historyMessages: Message[], snapshotBlocks?: SnapshotBlockMap) =>
+      estimateHistoryTokens(targetAssistant, historyMessages, { includeMedia: includeHistoryMedia, snapshotBlocks }),
     [includeHistoryMedia]
   )
 
@@ -192,6 +193,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const estimateTokenCount = usePromptTokenEstimate({
     assistant,
     tokenEstimationMessages: previewContextInfo.tokenEstimationMessages,
+    blockSnapshot: previewContextInfo.blockSnapshot,
     text,
     files,
     estimateHistory

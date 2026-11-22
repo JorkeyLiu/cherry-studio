@@ -250,7 +250,8 @@ const topicFixture = (id: string) => ({ id, name: id, type: TopicType.Chat }) as
 const sharedContextInfoFixture = {
   tokenEstimationMessages: [],
   contextCount: 3,
-  isAuthoritativePending: false
+  isAuthoritativePending: false,
+  blockSnapshot: new Map()
 } as any
 
 function renderInputbar(topicId: string) {

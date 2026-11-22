@@ -10,7 +10,7 @@ import { useRouteIdlePreload } from '@renderer/components/useRouteIdlePreload'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
-import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
@@ -25,6 +25,8 @@ import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { setTopicListWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
+import type { Message } from '@renderer/types/newMessage'
+import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { Flex } from 'antd'
 import { debounce } from 'lodash'
 import { AnimatePresence, motion } from 'motion/react'
@@ -109,23 +111,28 @@ const Chat: FC<Props> = (props) => {
   // --- Shared context projection (Phase 2B) ---
   // Both Messages and Inputbar previously computed computeContextInfo independently
   // with identical inputs. This single memo computes once for the shared
-  // [topic messages, topic blocks, assistant, topic id] identity and provides
-  // all fields needed by both consumers. ConversationService/baseCallbacks
+  // [topic messages, explicit block snapshot, assistant, topic id] identity and
+  // provides all fields needed by both consumers. ConversationService/baseCallbacks
   // calls remain independent.
   //
-  // The topic-blocks dependency exists because computeContextInfo reads message
+  // The block-snapshot dependency exists because the derivation reads message
   // blocks through block-dependent filters (filterEmptyMessages /
   // filterErrorOnlyMessagesWithRelated): a block-only Redux update (updateOneBlock)
   // can change the projection without changing the topic message array.
-  // useLoadedTopicReferencedBlocks subscribes only to active-topic referenced blocks
-  // (selectMessageBlocksByIds + shallowEqual), so unrelated block commits do
-  // not invalidate this projection.
+  // A single selectMessageBlocksByIds + shallowEqual subscription covers only
+  // the blocks this derivation actually reads (closure message blocks when the
+  // accepted closure is active, otherwise the loaded topic's referenced blocks),
+  // so unrelated block commits do not invalidate this projection. Content
+  // filtering and history token estimation then read exclusively from the
+  // explicit snapshot — never the live store — so one snapshot decides content
+  // selection, the context message lists, and that pass's history token
+  // estimate together. The rendered divider/count stay authoritative from the
+  // accepted closure metadata.
   // Bounded loaded projection: resident topic only; the `?? []` fallback is
   // memoized so the shared-projection memo keeps a stable identity while the
   // topic is non-resident (`undefined` stays at the API boundary).
   const loadedTopicMessages = useLoadedTopicMessages(props.activeTopic.id)
-  const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as any, [loadedTopicMessages])
-  const topicBlocks = useLoadedTopicReferencedBlocks(props.activeTopic.id)
+  const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as Message[], [loadedTopicMessages])
   // Route-scoped anchor key: branch routes anchor under their own route key
   // (anchorKeyForRoute returns the plain topicId for the main route).
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
@@ -151,30 +158,36 @@ const Chat: FC<Props> = (props) => {
     }
     return acceptedClosure
   }, [acceptedClosure, props.activeTopic.id, anchorGroupKey])
-  // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
-  const closureBlockIds = useMemo(
-    () => (freshClosure ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
-    [freshClosure]
+  // Single active block subscription: the closure message blocks when the
+  // accepted closure is active, otherwise the loaded topic's referenced
+  // blocks. A stream update forms a new snapshot and a new derivation; while
+  // the snapshot is stable, later store changes cannot alter the result.
+  const activeBlockIds = useMemo(
+    () =>
+      freshClosure
+        ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[])
+        : topicMessages.flatMap((m) => m.blocks ?? []),
+    [freshClosure, topicMessages]
   )
-  const closureBlocks = useAppSelector((state) => selectMessageBlocksByIds(state, closureBlockIds), shallowEqual)
-  // Use closure blocks for memo invalidation when closure active; otherwise use viewport blocks
-  const activeBlocksForContext = freshClosure ? closureBlocks : topicBlocks
+  const activeBlocks = useAppSelector((state) => selectMessageBlocksByIds(state, activeBlockIds), shallowEqual)
+  const blockSnapshot = useMemo(() => createSnapshotBlockMap(activeBlocks), [activeBlocks])
   const sharedContextInfo = useMemo(() => {
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; persisted-anchor miss renders authority-pending (no viewport counts); only anchorless (empty/uninitialized) uses the bounded fallback
     // Ordinary preexisting derivation: accepted retain alone solves the blank
     // flicker. No id-only reference freeze here — same-ID updated blocks or
-    // new Message instances must flow through so the token-estimate input
-    // never references stale history. The scalar estimate updates via content
-    // reads; it is never zeroed per chunk.
+    // new Message instances flow through a new snapshot so the token-estimate
+    // input never references stale history. The scalar estimate updates via
+    // content reads; it is never zeroed per chunk.
     const result = resolveSharedContextInfo(
       topicMessages,
       assistant,
       props.activeTopic.id,
       freshClosure as any,
-      activeBranchId
+      activeBranchId,
+      blockSnapshot
     )
     return result
-  }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id, activeBranchId])
+  }, [freshClosure, topicMessages, blockSnapshot, assistant, props.activeTopic.id, activeBranchId])
 
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {

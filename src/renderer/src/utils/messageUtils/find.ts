@@ -15,6 +15,17 @@ import type {
 import { AssistantMessageStatus, MessageBlockType } from '@renderer/types/newMessage'
 
 import { joinMainTextContents } from './mainTextCoalesce'
+import type { SnapshotBlockMap } from './snapshotBlocks'
+
+/**
+ * Optional closed-snapshot block reads.
+ *
+ * The `find*Blocks` / `get*Content` readers below accept a trailing
+ * `snapshotBlocks` map. When provided, block lookups resolve exclusively from
+ * that explicit map — a block missing from the snapshot is treated as missing,
+ * never the global store — so a later store change cannot alter the result.
+ * When absent, the legacy store-backed lookup applies unchanged.
+ */
 
 export const findAllBlocks = (message: Message): MessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
@@ -36,16 +47,17 @@ export const findAllBlocks = (message: Message): MessageBlock[] => {
  * @param message - The message object.
  * @returns An array of MainTextMessageBlocks (empty if none found).
  */
-export const findMainTextBlocks = (message: Message): MainTextMessageBlock[] => {
+export const findMainTextBlocks = (message: Message, snapshotBlocks?: SnapshotBlockMap): MainTextMessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
     return []
   }
   const state = store.getState()
   const textBlocks: MainTextMessageBlock[] = []
   for (const blockId of message.blocks) {
-    const block = messageBlocksSelectors.selectById(state, blockId)
+    const block =
+      snapshotBlocks !== undefined ? snapshotBlocks.get(blockId) : messageBlocksSelectors.selectById(state, blockId)
     if (block && block.type === MessageBlockType.MAIN_TEXT) {
-      textBlocks.push(block as MainTextMessageBlock)
+      textBlocks.push(block)
     }
   }
   return textBlocks
@@ -56,16 +68,17 @@ export const findMainTextBlocks = (message: Message): MainTextMessageBlock[] => 
  * @param message - The message object.
  * @returns An array of ThinkingMessageBlocks (empty if none found).
  */
-export const findThinkingBlocks = (message: Message): ThinkingMessageBlock[] => {
+export const findThinkingBlocks = (message: Message, snapshotBlocks?: SnapshotBlockMap): ThinkingMessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
     return []
   }
   const state = store.getState()
   const thinkingBlocks: ThinkingMessageBlock[] = []
   for (const blockId of message.blocks) {
-    const block = messageBlocksSelectors.selectById(state, blockId)
+    const block =
+      snapshotBlocks !== undefined ? snapshotBlocks.get(blockId) : messageBlocksSelectors.selectById(state, blockId)
     if (block && block.type === MessageBlockType.THINKING) {
-      thinkingBlocks.push(block as ThinkingMessageBlock)
+      thinkingBlocks.push(block)
     }
   }
   return thinkingBlocks
@@ -76,16 +89,17 @@ export const findThinkingBlocks = (message: Message): ThinkingMessageBlock[] => 
  * @param message - The message object.
  * @returns An array of ImageMessageBlocks (empty if none found).
  */
-export const findImageBlocks = (message: Message): ImageMessageBlock[] => {
+export const findImageBlocks = (message: Message, snapshotBlocks?: SnapshotBlockMap): ImageMessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
     return []
   }
   const state = store.getState()
   const imageBlocks: ImageMessageBlock[] = []
   for (const blockId of message.blocks) {
-    const block = messageBlocksSelectors.selectById(state, blockId)
+    const block =
+      snapshotBlocks !== undefined ? snapshotBlocks.get(blockId) : messageBlocksSelectors.selectById(state, blockId)
     if (block && block.type === MessageBlockType.IMAGE) {
-      imageBlocks.push(block as ImageMessageBlock)
+      imageBlocks.push(block)
     }
   }
   return imageBlocks
@@ -96,16 +110,17 @@ export const findImageBlocks = (message: Message): ImageMessageBlock[] => {
  * @param message - The message object.
  * @returns An array of FileMessageBlocks (empty if none found).
  */
-export const findFileBlocks = (message: Message): FileMessageBlock[] => {
+export const findFileBlocks = (message: Message, snapshotBlocks?: SnapshotBlockMap): FileMessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
     return []
   }
   const state = store.getState()
   const fileBlocks: FileMessageBlock[] = []
   for (const blockId of message.blocks) {
-    const block = messageBlocksSelectors.selectById(state, blockId)
+    const block =
+      snapshotBlocks !== undefined ? snapshotBlocks.get(blockId) : messageBlocksSelectors.selectById(state, blockId)
     if (block && block.type === MessageBlockType.FILE) {
-      fileBlocks.push(block as FileMessageBlock)
+      fileBlocks.push(block)
     }
   }
   return fileBlocks
@@ -121,8 +136,8 @@ export { joinMainTextContents }
  * @param message - The message object.
  * @returns The concatenated content string or an empty string if no text blocks are found.
  */
-export const getMainTextContent = (message: Message): string => {
-  const textBlocks = findMainTextBlocks(message)
+export const getMainTextContent = (message: Message, snapshotBlocks?: SnapshotBlockMap): string => {
+  const textBlocks = findMainTextBlocks(message, snapshotBlocks)
   return joinMainTextContents(textBlocks.map((block) => block.content))
 }
 
@@ -161,8 +176,8 @@ export const isAssistantInterruptedThinkingOnlyMessage = (message: Message): boo
  * @param message
  * @returns The concatenated content string or an empty string if no thinking blocks are found.
  */
-export const getThinkingContent = (message: Message): string => {
-  const thinkingBlocks = findThinkingBlocks(message)
+export const getThinkingContent = (message: Message, snapshotBlocks?: SnapshotBlockMap): string => {
+  const thinkingBlocks = findThinkingBlocks(message, snapshotBlocks)
   return thinkingBlocks.map((block) => block.content).join('\n\n')
 }
 

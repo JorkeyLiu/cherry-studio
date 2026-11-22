@@ -4,6 +4,7 @@ import store from '@renderer/store'
 import { messageBlocksSelectors } from '@renderer/store/messageBlock'
 import type { Message } from '@renderer/types/newMessage' // Assuming correct Message type import
 import { MessageBlockType } from '@renderer/types/newMessage'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 // May need Block types if refactoring to use them
 // import type { MessageBlock, MainTextMessageBlock } from '@renderer/types/newMessageTypes';
 import { remove } from 'lodash'
@@ -45,15 +46,27 @@ export function filterUserRoleStartMessages(messages: Message[]): Message[] {
 /**
  * Filters out messages considered "empty" based on block content.
  *
- * Accepts an optional request-local block overlay shadowing Redux for
- * authority IDs (semantic resend/regenerate). Absent overlay = legacy path.
+ * Two mutually exclusive block-read modes:
+ * - Closed UI snapshot (`snapshotBlocks` provided): resolves blocks
+ *   exclusively from the explicit snapshot. A block missing from the snapshot
+ *   is treated as missing — never the global store — so a later store change
+ *   cannot alter this derivation.
+ * - Legacy (absent snapshot): request-local overlay shadowing Redux with a
+ *   store fallback for authority IDs (semantic resend/regenerate). Unchanged.
  */
-export function filterEmptyMessages(messages: Message[], overlay?: BlockOverlay): Message[] {
+export function filterEmptyMessages(
+  messages: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
   return messages.filter((message) => {
     const state = store.getState()
     let hasContent = false
     for (const blockId of message.blocks) {
-      const block = resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId)
+      const block =
+        snapshotBlocks !== undefined
+          ? snapshotBlocks.get(blockId)
+          : (resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId))
       if (!block) continue
       if (block.type === MessageBlockType.MAIN_TEXT && !isEmpty((block as any).content?.trim())) {
         // Type assertion needed
@@ -158,8 +171,17 @@ export function filterAdjacentUserMessaegs(messages: Message[]): Message[] {
 /**
  * Filters out assistant messages that only contain ErrorBlocks and their associated user messages.
  * An assistant message is associated with a user message via the askId field.
+ *
+ * Two mutually exclusive block-read modes, mirroring filterEmptyMessages:
+ * closed UI snapshot (`snapshotBlocks` provided) resolves exclusively from the
+ * explicit snapshot — never the store; legacy (absent snapshot) keeps the
+ * request-local overlay + store fallback.
  */
-export function filterErrorOnlyMessagesWithRelated(messages: Message[], overlay?: BlockOverlay): Message[] {
+export function filterErrorOnlyMessagesWithRelated(
+  messages: Message[],
+  overlay?: BlockOverlay,
+  snapshotBlocks?: SnapshotBlockMap
+): Message[] {
   const state = store.getState()
 
   // Find all assistant messages that only contain ErrorBlocks
@@ -173,7 +195,10 @@ export function filterErrorOnlyMessagesWithRelated(messages: Message[], overlay?
     // Check if this assistant message only contains ErrorBlocks
     let hasNonErrorBlock = false
     for (const blockId of message.blocks) {
-      const block = resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId)
+      const block =
+        snapshotBlocks !== undefined
+          ? snapshotBlocks.get(blockId)
+          : (resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId))
       if (!block) continue
 
       if (block.type !== MessageBlockType.ERROR) {

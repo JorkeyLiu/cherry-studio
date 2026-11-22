@@ -30,6 +30,7 @@ import {
   getMainTextContent,
   getThinkingContent
 } from '@renderer/utils/messageUtils/find'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { estimateTokenCount } from 'tokenx'
 
 const logger = loggerService.withContext('LocalTokenEstimator')
@@ -396,19 +397,19 @@ export async function estimateDraftTokens({
  */
 export async function estimateMessageTokens(
   message: Message,
-  options: { includeMedia?: boolean } = {}
+  options: { includeMedia?: boolean; snapshotBlocks?: SnapshotBlockMap } = {}
 ): Promise<LocalTokenEstimate> {
-  const content = getMainTextContent(message)
-  const reasoningContent = getThinkingContent(message)
+  const content = getMainTextContent(message, options.snapshotBlocks)
+  const reasoningContent = getThinkingContent(message, options.snapshotBlocks)
   const combinedContent = [content, reasoningContent].filter((s) => s !== undefined).join(' ')
   const textTokens = estimateTextTokens(combinedContent)
 
   const includeMedia = options.includeMedia !== false
-  const allFileBlocks = findFileBlocks(message)
+  const allFileBlocks = findFileBlocks(message, options.snapshotBlocks)
   const fileBlocks = includeMedia
     ? allFileBlocks
     : allFileBlocks.filter((block) => !isMediaContextAttachmentBlock(block))
-  const imageBlocks = includeMedia ? findImageBlocks(message) : []
+  const imageBlocks = includeMedia ? findImageBlocks(message, options.snapshotBlocks) : []
 
   const [fileBlockTokens, imageBlockTokens] = await Promise.all([
     Promise.all(fileBlocks.map((block) => estimateFileTokens(block.file))),

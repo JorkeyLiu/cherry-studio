@@ -75,7 +75,8 @@ vi.mock('@renderer/services/contextInfoService', () => ({
     tokenEstimationMessages: [],
     boundaryMessageId: null,
     contextCount: { current: 0, max: null },
-    anchorGroupKey: null
+    anchorGroupKey: null,
+    blockSnapshot: new Map()
   })
 }))
 
