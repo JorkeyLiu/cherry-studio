@@ -9,7 +9,6 @@ import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useLoadedTopicMessages, useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { resolveChromeAuthoritySegment, useRetainedRouteSegments } from '@renderer/hooks/useRetainedRouteSegments'
-import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import useScrollPosition, {
   commitSnapshotForRoute,
   normalizeSaved,
@@ -179,6 +178,7 @@ import { useTranslation } from 'react-i18next'
 import { UNSAFE_NavigationContext } from 'react-router-dom'
 import styled from 'styled-components'
 
+import { useChatRouteStructure } from '../ChatRouteStructure'
 import { displayFrameKey, useAcceptedDisplayFrame, useRouteLocalFoldBrowse } from './acceptedDisplayFrame'
 import { AnchorGroupProvider } from './anchorGroupContext'
 import {
@@ -848,6 +848,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // Main route-qualified group entries for the DISPLAYED route (same source the
   // drawer lists): the ONLY mutation-authority input for flow chrome. A group
   // with no entry here gates fail-closed to read-only in TopicSegmentLine.
+  // The value is the chat surface's ONE route-structure read, shared with the
+  // drawer through ChatRouteStructureProvider — never a second scoped read.
   // Display follows the committed window's route, never the selected key
   // alone: while a route switch is pending the accepted list is intentionally
   // empty for navigation surfaces, and the accepted projection can also land
@@ -861,7 +863,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     segments: routeScopedSegments,
     routeKey: routeProjectionKey,
     isCurrent: isRouteProjectionCurrent
-  } = useRouteScopedSegments(topic.id)
+  } = useChatRouteStructure()
   // Window-commit co-commit (Goal A): the target route's structure published in
   // the SAME sync batch as its window commit (see publishCommittedChrome). The
   // first visible frame of a route switch already hosts the target structure;
@@ -6571,10 +6573,10 @@ const Messages = ({
   // structure in the SAME synchronous batch as its window commit. Every
   // route-window pipeline fetches the lightweight qualification
   // (bundled structure: neutral catalog + Main-computed per-group route
-  // blocks — no message bodies, no full preload, single-flight shared with the
-  // scoped-chrome hook so both derive identical fields) alongside its window
-  // fetch, then calls this inside the commit's own `onPublish` (which runs
-  // synchronously inside the atomic commit, before `window/apply`). React
+  // blocks — no message bodies, no full preload; the bundled structure travels
+  // on the same receipt, so no second/qualification-only IPC is issued) alongside
+  // its window fetch, then calls this inside the commit's own `onPublish` (which
+  // runs synchronously inside the atomic commit, before `window/apply`). React
   // batches both updates into one render: the first visible frame already
   // hosts the target route's headers, and the hook's later acceptance changes
   // nothing visible. Fail-closed: a null/failed fetch or a projection miss

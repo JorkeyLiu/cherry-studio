@@ -305,6 +305,14 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
     orderedSegmentsForTopic: []
   })
 }))
+// Messages reads the chat surface's one route-structure value from its owning
+// provider. This suite mounts Messages alone with an empty segment catalog, so
+// the real read fails closed (no read, no segments, `isCurrent` false); the
+// stub pins that state without pulling the structural read into the suite.
+vi.mock('../../ChatRouteStructure', () => {
+  const routeStructure = { segments: [], routeKey: '', isCurrent: false }
+  return { useChatRouteStructure: () => routeStructure }
+})
 
 vi.mock('@renderer/context/EditModeContext', () => ({
   EditModeProvider: ({ children }: { children: React.ReactNode }) => children,

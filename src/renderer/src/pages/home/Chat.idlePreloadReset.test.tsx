@@ -165,6 +165,11 @@ vi.mock('./Inputbar/Inputbar', () => ({
   default: () => <div data-testid="inputbar-stub" />
 }))
 
+vi.mock('./ChatRouteStructure', () => ({
+  ChatRouteStructureProvider: ({ children }: { children: ReactModule.ReactNode }) => <>{children}</>,
+  useChatRouteStructure: () => ({ segments: [], routeKey: '', isCurrent: false })
+}))
+
 vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))

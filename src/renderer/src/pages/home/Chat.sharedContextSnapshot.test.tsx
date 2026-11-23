@@ -154,6 +154,14 @@ vi.mock('./Inputbar/Inputbar', () => {
   return { default: Stub, __esModule: true }
 })
 
+// The chat surface's route-structure owner is outside this test's subject:
+// a transparent provider keeps Chat's real effect ordering without pulling the
+// structural read (and its store slices) into this snapshot test.
+vi.mock('./ChatRouteStructure', () => ({
+  ChatRouteStructureProvider: ({ children }: { children: ReactModule.ReactNode }) => <>{children}</>,
+  useChatRouteStructure: () => ({ segments: [], routeKey: '', isCurrent: false })
+}))
+
 vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))

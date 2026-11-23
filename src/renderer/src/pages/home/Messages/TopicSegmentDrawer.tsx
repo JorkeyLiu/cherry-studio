@@ -1,4 +1,3 @@
-import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { Popover, type PopoverProps } from 'antd'
@@ -8,11 +7,8 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { useChatRouteStructure } from '../ChatRouteStructure'
 import { COMPOSER_FLOATING_CONTROL_INSET_PX, COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
-
-interface TopicSegmentDrawerProps {
-  topicId: string
-}
 
 /**
  * Floating layer contract for this drawer.
@@ -37,8 +33,10 @@ const DRAWER_POPOVER_Z_INDEX = 1005
 type PopoverWithZIndexProps = PopoverProps & { zIndex?: number }
 const ZIndexPopover = Popover as unknown as React.FC<PopoverWithZIndexProps>
 
-const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
-  // Route-scoped projection of the topic-wide catalog: only the active route's
+const TopicSegmentDrawer: React.FC = () => {
+  // Route-scoped projection of the topic-wide catalog (the chat surface's ONE
+  // structure read, shared with `Messages` through `ChatRouteStructureProvider`):
+  // only the active route's
   // reachable members/counts. A row is listed ONLY when the group's stable head
   // resolves inside the full current route history (`headerInRoute`): a
   // headless residual keeps its members naturally rendered in the rail but gets
@@ -49,7 +47,7 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
   // is not loaded (the unified path loads its window, settling on the fold
   // marker when the head is folded). The projected `firstMessageId` stays the
   // window complement only.
-  const { segments, routeKey } = useRouteScopedSegments(topicId)
+  const { segments, routeKey } = useChatRouteStructure()
   const listedSegments = useMemo(() => segments.filter((segment) => segment.headerInRoute !== false), [segments])
   const { t } = useTranslation()
 

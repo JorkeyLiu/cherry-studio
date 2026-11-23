@@ -99,10 +99,11 @@ export function useRetainedRouteSegments(
   }
   // Window-commit co-commit: the target route's structure published in the
   // SAME batch as its window. It is the accepted projection for its route
-  // (Main-qualified blocks for the addressed route, from the same
-  // single-flight wires the scoped hook accepts) — never mere retention —
-  // so it reads as current once the displayed window and the selected route
-  // both name its route. A later commit for another route overwrites this.
+  // (Main-qualified blocks for the addressed route, from the same bundled
+  // structure the chat surface's one scoped read projects) — never mere
+  // retention — so it reads as current once the displayed window and the
+  // selected route both name its route. A later commit for another route
+  // overwrites this.
   if (committed) {
     retain(committed.routeKey, committed.segments)
     committedKeyRef.current = committed.routeKey

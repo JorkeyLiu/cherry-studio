@@ -520,7 +520,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
       leftToolbar={leftToolbar}
       rightToolbar={rightToolbar}
       topContent={topContent}
-      topRightOverlay={<TopicSegmentDrawer topicId={topic.id} />}
+      topRightOverlay={<TopicSegmentDrawer />}
     />
   )
 }
