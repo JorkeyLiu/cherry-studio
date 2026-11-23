@@ -47,7 +47,17 @@ const { mocks } = vi.hoisted(() => ({
           returnedCount: 0,
           hasMoreBefore: false,
           hasMoreAfter: false
-        }
+        },
+        // Bundled-structure mirror of Main: the fetch path always requests the
+        // structure, and an empty catalog is a valid known-empty signal.
+        ...(req.includeStructure === true
+          ? {
+              structure: {
+                catalog: [],
+                route: { topicId: req.topicId, branchId: req.branchId ?? null, qualifications: [] }
+              }
+            }
+          : {})
       }
     }),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),

@@ -81,6 +81,7 @@ import type {
   DeleteMessagesWithDependentsResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchMessagesWindowStructure,
   FileCleanupResult,
   InheritanceBoundarySnapshot,
   JsonObject,
@@ -3806,7 +3807,8 @@ export const loadTopicMessagesThunk =
         kind: 'latest',
         topicId,
         branchId: adoptionRoute,
-        limit
+        limit,
+        includeStructure: true
       }
       // Adopt the pre-resolved same-route restore (no second map read: no
       // await has run since the pre-lookup, so the entry is unchanged).
@@ -3823,9 +3825,8 @@ export const loadTopicMessagesThunk =
       dispatch(newMessagesActions.registerWindowRead({ topicId, requestSeq }))
       const deletionGenAtStart = captureDeletionGeneration(topicId)
 
-      const segmentsPromise: Promise<any[]> = (
-        dbService.listSegments ? dbService.listSegments(topicId) : Promise.resolve([])
-      ) as Promise<any[]>
+      // Bundled structure only: no independent listSegments read. The segment
+      // catalog rides the window response in the same Main transaction.
 
       let response: FetchMessagesWindowResponse
       let segmentsRaw: any[]
@@ -3839,24 +3840,53 @@ export const loadTopicMessagesThunk =
           } catch {
             adopted = undefined
           }
-          if (!adopted || !adopted.window) {
-            // Underlying restore superseded or failed: only refetch when no
-            // newer same-topic request owns the target now (otherwise this
-            // bootstrap is itself stale and the guards below discard it).
+          // Adoption policy (fail-closed, no catalog backfill): only adopt a
+          // restore whose request carried includeStructure AND whose response
+          // carries the bundled structure. Otherwise the bootstrap refetches
+          // with its own structured request (never a second listSegments).
+          const adoptedStructured =
+            adopted &&
+            adopted.window &&
+            (adoptRestore.request as { includeStructure?: unknown }).includeStructure === true &&
+            (adopted as unknown as { structure?: unknown }).structure !== undefined &&
+            (adopted as unknown as { structure?: unknown }).structure !== null
+              ? adopted
+              : undefined
+          if (!adoptedStructured) {
+            // Underlying restore superseded, failed, or unstructured: only
+            // refetch when no newer same-topic request owns the target now
+            // (otherwise this bootstrap is itself stale and the guards below
+            // discard it).
             if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== adoptRestore.requestSeq) {
               recordResidentReadDiscard('superseded')
               return
             }
             adopted = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
+          } else {
+            adopted = adoptedStructured
           }
           response = adopted
-          segmentsRaw = await segmentsPromise
+          const bundled = (response as unknown as { structure?: { catalog?: unknown } }).structure
+          if (!bundled || !Array.isArray((bundled as { catalog?: unknown }).catalog)) {
+            recordResidentReadDiscard('malformed')
+            logger.error(`[loadTopicMessagesThunk] missing bundled structure for ${topicId}`, {
+              window: (response as unknown as { window?: unknown }).window
+            } as unknown as Error)
+            throw new Error('missing bundled structure')
+          }
+          segmentsRaw = (bundled as { catalog: unknown[] }).catalog as unknown as any[]
         } else {
-          // Stage both latest window and segments under same generation
-          const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
-            dbService.fetchMessagesWindow(request)
-          )
-          ;[response, segmentsRaw] = await Promise.all([windowPromise, segmentsPromise])
+          // Single window+structure IPC (same Main transaction snapshot).
+          response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
+          const bundled = (response as unknown as { structure?: { catalog?: unknown } }).structure
+          if (!bundled || !Array.isArray((bundled as { catalog?: unknown }).catalog)) {
+            recordResidentReadDiscard('malformed')
+            logger.error(`[loadTopicMessagesThunk] missing bundled structure for ${topicId}`, {
+              window: (response as unknown as { window?: unknown }).window
+            } as unknown as Error)
+            throw new Error('missing bundled structure')
+          }
+          segmentsRaw = (bundled as { catalog: unknown[] }).catalog as unknown as any[]
         }
         stagedSuccess = true
       } catch (e) {
@@ -4068,6 +4098,10 @@ export const loadRouteMessagesThunk =
     }
     // Window intent: divider passes around/fork-anchor; top-selector passes
     // latest (isAtBottom) or around (saved anchorId); default is latest.
+    // Deferred route-window reads (the three route pipelines) bundle the
+    // structure in the same Main transaction; direct (non-deferred) route
+    // reads stay lightweight.
+    const deferPublishEarly = !!(opts && (opts as { deferPublish?: boolean }).deferPublish)
     let request: FetchMessagesWindowRequest
     if (opts && opts.kind === 'around') {
       const beforeRaw = typeof opts.before === 'number' ? Math.floor(opts.before) : 10
@@ -4078,7 +4112,8 @@ export const loadRouteMessagesThunk =
         branchId: route,
         anchorMessageId: opts.anchorMessageId,
         before: Math.min(100, Math.max(1, beforeRaw || 10)),
-        after: Math.min(100, Math.max(1, afterRaw || 19))
+        after: Math.min(100, Math.max(1, afterRaw || 19)),
+        ...(deferPublishEarly ? { includeStructure: true as const } : {})
       }
     } else {
       const limitRaw =
@@ -4089,7 +4124,8 @@ export const loadRouteMessagesThunk =
         kind: 'latest',
         topicId,
         branchId: route,
-        limit: clampWindowLimit(limitRaw)
+        limit: clampWindowLimit(limitRaw),
+        ...(deferPublishEarly ? { includeStructure: true as const } : {})
       }
     }
     // Cleanup identity rides on the per-call request token, not the entry
@@ -4375,20 +4411,43 @@ export function toDeferredJointPayload(receipt: DeferredRouteWindowReceipt): {
   blocks: MessageBlock[]
   mutableMessageIds: string[]
   reference: HistoryReferenceMeta | null
+  structure: FetchMessagesWindowStructure | null
 } {
   const raw = receipt.response as unknown as {
     messages?: unknown
     blocks?: unknown
     mutableMessageIds?: unknown
     reference?: unknown
+    structure?: unknown
   }
   const messages = Array.isArray(raw.messages) ? [...(raw.messages as Message[])] : []
   const blocks = Array.isArray(raw.blocks) ? [...(raw.blocks as MessageBlock[])] : []
   const mutableMessageIds = Array.isArray(raw.mutableMessageIds)
     ? ([...(raw.mutableMessageIds as unknown[] as string[])] as string[])
     : []
+  const structure = ((): FetchMessagesWindowStructure | null => {
+    const s = raw.structure as FetchMessagesWindowStructure | null | undefined
+    if (!s || typeof s !== 'object' || !Array.isArray((s as { catalog?: unknown }).catalog)) return null
+    return s
+  })()
   const reference = (raw.reference ?? null) as HistoryReferenceMeta | null
-  return { messages, blocks, mutableMessageIds, reference }
+  return { messages, blocks, mutableMessageIds, reference, structure }
+}
+
+/**
+ * Explicit structure adapter for a validated deferred receipt (fail-closed).
+ *
+ * Returns the bundled structure when the receipt carries it, else null.
+ * Deferred route pipelines must fail closed on null (never backfill via an
+ * independent listSegments read).
+ */
+export function toDeferredChromeStructure(receipt: DeferredRouteWindowReceipt): FetchMessagesWindowStructure | null {
+  const s = (receipt.response as unknown as { structure?: unknown }).structure as
+    | FetchMessagesWindowStructure
+    | null
+    | undefined
+  if (!s || typeof s !== 'object' || !Array.isArray((s as { catalog?: unknown }).catalog)) return null
+  return s
 }
 
 /**

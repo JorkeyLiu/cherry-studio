@@ -128,6 +128,8 @@ function makeWindowResponse(
   ids: string[],
   completeness = { hasMoreBefore: false, hasMoreAfter: false }
 ) {
+  // Bundled-structure mirror of Main: bounded activation always reads with
+  // includeStructure, and an empty catalog is a valid known-empty signal.
   const messages = ids.map((id) => ({ id, topicId, blocks: [] }))
   return {
     messages,
@@ -143,7 +145,9 @@ function makeWindowResponse(
       returnedCount: ids.length,
       hasMoreBefore: completeness.hasMoreBefore,
       hasMoreAfter: completeness.hasMoreAfter
-    }
+    },
+    // Empty bundled catalog (known-empty) for the structured activation read.
+    structure: { catalog: [], route: { topicId, branchId: null, qualifications: [] } }
   } as any
 }
 

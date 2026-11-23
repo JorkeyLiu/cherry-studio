@@ -154,16 +154,14 @@ import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import {
   type CommittedChromeProjection,
-  fetchRouteChromeWires,
-  projectCommittedChromeSegments,
-  selectOrderedSegmentsForTopic
+  projectCommittedChromeFromStructure
 } from '@renderer/utils/routeCommittedChrome'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
-  HistoryReferenceMeta,
-  ListSegmentsResponse
+  FetchMessagesWindowStructure,
+  HistoryReferenceMeta
 } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
@@ -1809,7 +1807,7 @@ const Messages = ({
     anchorMessageId: string
     wantOffset: number
     isAtBottom: boolean
-    chromeWires: ListSegmentsResponse | null
+    chromeStructure: FetchMessagesWindowStructure | null
   } | null>(null)
   const topVisibleRafRef = useRef<number | null>(null)
   const cancelTopVisibleQuiet = useCallback(() => {
@@ -6572,7 +6570,7 @@ const Messages = ({
   // Window-commit chrome co-commit (Goal A): publish the target route's group
   // structure in the SAME synchronous batch as its window commit. Every
   // route-window pipeline fetches the lightweight qualification
-  // (`fetchRouteChromeWires`: segment metadata + Main-computed per-group route
+  // (bundled structure: neutral catalog + Main-computed per-group route
   // blocks — no message bodies, no full preload, single-flight shared with the
   // scoped-chrome hook so both derive identical fields) alongside its window
   // fetch, then calls this inside the commit's own `onPublish` (which runs
@@ -6581,18 +6579,28 @@ const Messages = ({
   // hosts the target route's headers, and the hook's later acceptance changes
   // nothing visible. Fail-closed: a null/failed fetch or a projection miss
   // publishes nothing and the commit proceeds with the retained/hook behavior.
+  // Window-commit chrome co-commit (bundled structure): the target route's
+  // structure rides the window receipt in the same Main transaction — no
+  // second IPC, no store-catalog join. Fail-closed: a missing structure
+  // publishes nothing; an empty projection clears only the same-route
+  // residue (never another route's chrome).
   const publishCommittedChrome = useCallback(
-    (targetTopicId: string, targetBranchId: string | null, wires: ListSegmentsResponse | null): void => {
-      if (!wires) return
+    (targetTopicId: string, targetBranchId: string | null, structure: FetchMessagesWindowStructure | null): void => {
+      if (!structure) return
       try {
-        const catalog = selectOrderedSegmentsForTopic(store.getState(), targetTopicId)
-        const projected = projectCommittedChromeSegments({
+        const projected = projectCommittedChromeFromStructure({
           topicId: targetTopicId,
           branchId: targetBranchId,
-          catalog,
-          wires
+          structure
         })
-        if (projected) setCommittedChrome(projected)
+        if (projected) {
+          setCommittedChrome(projected)
+          return
+        }
+        // Empty projection is known-empty: clear a stale same-route entry so
+        // the previous route's headers cannot linger on an empty route.
+        const targetKey = `${targetTopicId}::${targetBranchId ?? 'main'}`
+        setCommittedChrome((prev) => (prev && prev.routeKey === targetKey ? null : prev))
       } catch {
         // fail-closed: retain the pre-existing retained/hook behavior
       }
@@ -7514,7 +7522,7 @@ const Messages = ({
         return
       }
       const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan, () =>
-        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeWires)
+        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeStructure)
       )
       if (hiddenEpoch === null) {
         topHiddenFallbackRef.current = null
@@ -7763,18 +7771,11 @@ const Messages = ({
       let deferredMutable: string[] = []
       let deferredReference: HistoryReferenceMeta | null = null
       let deferredReceipt: DeferredRouteWindowReceipt | null = null
-      // Chrome co-commit: target route qualification alongside the window
-      // fetch (single-flight shared with the scoped-chrome hook — no second
-      // IPC, no bodies). Joined below before any commit so the commit batch
-      // carries both window and structure; failure publishes nothing.
-      const chromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
-        topicIdAtStart,
-        branchId
-      ).then(
-        (wires) => wires,
-        () => null
-      )
-      let chromeWires: ListSegmentsResponse | null = null
+      // Chrome co-commit: bundled structure rides the window receipt in the
+      // same Main transaction (no second IPC, no store-catalog join). The
+      // joint below carries both window and structure; a missing structure
+      // fails closed with no publish.
+      let deferredStructure: FetchMessagesWindowStructure | null = null
       try {
         const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
         const loadLatestWindow = async (): Promise<DeferredRouteWindowReceipt> => {
@@ -7834,15 +7835,12 @@ const Messages = ({
         deferredMessages = joint.messages
         deferredMutable = joint.mutableMessageIds
         deferredReference = joint.reference
-        // Join the co-commit qualification: already in flight since before the
-        // window fetch (typically resolved first — it carries no bodies), so
-        // the commit below publishes window and structure atomically.
-        chromeWires = await chromeWiresPromise
-        // Second late gate after the chrome join (no new fetch, same tick
-        // adjacency): an ABA that landed during the join must still refuse
-        // before any dispatch below.
-        if (!isDeferredRouteWindowReceiptCurrent(() => store.getState(), deferredReceipt)) {
-          throw new Error('route read discarded as stale')
+        // Bundled structure from the same receipt (explicit adapter, no silent
+        // drop): required for the co-commit; missing fails closed with no
+        // publish and no independent backfill.
+        deferredStructure = joint.structure
+        if (!deferredStructure) {
+          throw new Error('route structure missing in bundled window response')
         }
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
@@ -7873,7 +7871,7 @@ const Messages = ({
         deferredPublished = true
         // Chrome co-commit: target structure in the SAME sync batch as the
         // window commit (the commit entry calls this before window/apply).
-        publishCommittedChrome(topicIdAtStart, branchId, chromeWires)
+        publishCommittedChrome(topicIdAtStart, branchId, deferredStructure)
         // The divider-visible union (preserved trunk prefix through the fork
         // anchor plus the target exclusive suffix) is the published resident
         // order: every preserved row is verified continuous against the
@@ -8276,16 +8274,8 @@ const Messages = ({
     } catch {
       // fail-closed: latest read below still ignores snapshots
     }
-    // Chrome co-commit: fallback-route qualification alongside the latest
-    // fetch (single-flight shared — no second IPC, no bodies). Joined after
-    // the staleness gate; a null join keeps prior behavior.
-    const deletionChromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
-      topicIdAtEffect,
-      routeAtEffect
-    ).then(
-      (wires) => wires,
-      () => null
-    )
+    // Chrome co-commit: bundled structure rides the fallback receipt (no
+    // second IPC). Missing structure fails closed with no publish.
     void (async () => {
       // Deferred receipt: the fallback read publishes nothing; the joint
       // commit below publishes blocks + rebase + chrome atomically with the
@@ -8333,9 +8323,7 @@ const Messages = ({
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
         return
       }
-      // Join the co-commit qualification: already in flight since the fetch
-      // above, so the fallback commit below carries window and structure.
-      const deletionChromeWires = await deletionChromeWiresPromise
+      // Final receipt gate before any publish below (covers post-fetch ABA).
       if (!isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)) {
         failVisibleTransition(deletionFetchEpoch)
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
@@ -8350,6 +8338,13 @@ const Messages = ({
         // (never from the store: the deferred read published nothing, so the
         // store still holds the outgoing route).
         const deletionJoint = toDeferredJointPayload(deletionReceipt)
+        if (!deletionJoint.structure) {
+          failVisibleTransition(deletionFetchEpoch)
+          loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+          dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
+          return
+        }
+        const deletionChromeStructure = deletionJoint.structure
         const authoritative = deletionReceipt.response.window
           ? {
               hasMoreBefore: deletionReceipt.response.window.hasMoreBefore,
@@ -8374,7 +8369,7 @@ const Messages = ({
         const publishDeletionJointProjection = (): void => {
           if (deletionPublished) return
           deletionPublished = true
-          publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeWires)
+          publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeStructure)
           if (deletionJoint.blocks.length > 0) {
             dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deletionJoint.blocks), topicIdAtEffect)))
           }
@@ -9202,17 +9197,8 @@ const Messages = ({
       const canonicalAnchor = canonicalSavedAnchorId(saved)
       let topReceipt: DeferredRouteWindowReceipt | void
       let snapshotInvalidForRoute = false
-      // Chrome co-commit: target route qualification alongside the window
-      // fetch (single-flight shared with the scoped-chrome hook — no second
-      // IPC, no bodies). Joined after the staleness gate; failure publishes
-      // nothing and every commit below proceeds unchanged.
-      const topChromeWiresPromise: Promise<ListSegmentsResponse | null> = fetchRouteChromeWires(
-        topicIdAtEffect,
-        routeAtEffect
-      ).then(
-        (wires) => wires,
-        () => null
-      )
+      // Chrome co-commit: bundled structure rides the top receipt (no second
+      // IPC). Missing structure fails closed with no publish.
       try {
         const choice = chooseRouteWindowRequest(saved)
         if (choice.kind === 'latest') {
@@ -9319,13 +9305,8 @@ const Messages = ({
         failVisibleTransition(fetchEpoch)
         return
       }
-      // Join the co-commit qualification before any commit below: the visible
-      // fast path, the hidden atomic path and the single-use hidden fallback
-      // all publish projection and structure in one batch. Already in flight
-      // since before the window fetch; a null join keeps prior behavior.
-      // Receipt late gate: a superseding request, route ABA, deletion or
-      // generation advance during the fetch/chrome join must not publish.
-      const topChromeWires = await topChromeWiresPromise
+      // Final receipt gate before any commit below: a superseding request,
+      // route ABA, deletion or generation advance must not publish.
       if (
         !topReceipt ||
         !(topReceipt.response as unknown as { window?: unknown }).window ||
@@ -9341,11 +9322,17 @@ const Messages = ({
       // The visible union path passes its union order; the hidden path passes
       // nothing and publishes the authoritative deferred order.
       const topJoint = toDeferredJointPayload(topReceipt)
+      if (!topJoint.structure) {
+        failVisibleTransition(fetchEpoch)
+        loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+        return
+      }
+      const topChromeStructure = topJoint.structure
       let topJointPublished = false
       const publishTopJointProjection = (unionMessages?: readonly Message[]): void => {
         if (topJointPublished) return
         topJointPublished = true
-        publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeWires)
+        publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeStructure)
         if (topJoint.blocks.length > 0) {
           dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(topJoint.blocks), topicIdAtEffect)))
         }
@@ -9539,7 +9526,7 @@ const Messages = ({
                           anchorMessageId: routeSavedRowAnchor,
                           wantOffset: savedOffset,
                           isAtBottom: !!saved?.isAtBottom,
-                          chromeWires: topChromeWires
+                          chromeStructure: topChromeStructure
                         }
                         // Visible path armed: the layout effect applies the
                         // first compensation, then the bounded quiet sequence

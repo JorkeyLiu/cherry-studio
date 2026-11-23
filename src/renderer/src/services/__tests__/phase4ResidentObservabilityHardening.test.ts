@@ -3,7 +3,7 @@
  *
  * Renderer-local, bounded scalar-only, no B-01..B-05, no IPC/preload/shared/persistence/SQLite/schema/StoreSync.
  * Proves in one isolated thunk-driven batch:
- * 1) staged fetch failure (one or both legs) increments staged failed and never discarded, followed by validated stale-generation discard with snapshot invariants and privacy-safe scalars;
+ * 1) staged fetch failure (window read rejects) increments staged failed and never discarded, followed by validated stale-generation discard with snapshot invariants and privacy-safe scalars;
  * 2) resident lifecycle reset/retry through existing local seams: complete -> generation advance/incomplete -> reset -> successful retry with coherent recomputation;
  * 3) malformed vs generation-mismatch through thunk-driven paths with distinct discard counters and no publication.
  *
@@ -101,10 +101,31 @@ vi.mock('i18next', () => ({
   t: (k: string) => k
 }))
 
+function segWire(topicId: string, name: string): Record<string, unknown> {
+  const now = new Date().toISOString()
+  return {
+    id: `seg-${topicId}-sentinel`,
+    topicId,
+    name,
+    messageIds: [],
+    headerMessageId: null,
+    ownerTopicId: topicId,
+    ownerBranchId: null,
+    color: 'blue',
+    createdAt: now,
+    updatedAt: now,
+    sortOrder: 0,
+    firstMessageId: null,
+    lastMessageId: null,
+    messageCount: 0
+  }
+}
+
 function makeWindowResponse(
   request: FetchMessagesWindowRequest,
   messages: Array<{ id: string } & Record<string, unknown>>,
-  overrides: Partial<FetchMessagesWindowResponse['window']> = {}
+  overrides: Partial<FetchMessagesWindowResponse['window']> = {},
+  catalogEntries: Record<string, unknown>[] = []
 ): FetchMessagesWindowResponse {
   const returnedCount = messages.length
   const firstMessageId = returnedCount > 0 ? messages[0].id : null
@@ -121,10 +142,32 @@ function makeWindowResponse(
     hasMoreBefore: false,
     hasMoreAfter: false
   }
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it. Qualifications cover
+  // every catalog entry exactly once (empty catalog is valid known-empty).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: catalogEntries,
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: catalogEntries.map((e) => ({
+                segmentId: e.id,
+                headerInRoute: false,
+                headerOwnedByRoute: false,
+                routeMemberMessageIds: []
+              }))
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
-    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window']
+    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 
@@ -153,24 +196,13 @@ function makeSentinelWindowResponse(
       status: 'success' as const
     }
   ]
-  const resp = makeWindowResponse(request, messages as any)
+  const resp = makeWindowResponse(request, messages as any, {}, [segWire(topicId, sentinel)])
   ;(resp as any).blocks = blocks as any
   return resp
 }
 
 function makeSentinelSegments(topicId: string, sentinel: string) {
-  const now = new Date().toISOString()
-  return [
-    {
-      id: `seg-${topicId}-sentinel`,
-      topicId,
-      name: sentinel,
-      messageIds: [],
-      color: 'blue',
-      createdAt: now,
-      updatedAt: now
-    }
-  ]
+  return [segWire(topicId, sentinel)]
 }
 
 // Privacy sentinels — must never appear in scalar snapshot output
@@ -424,7 +456,7 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
     mocks.ensureTopicAnchorEstablished.mockResolvedValue(undefined)
   })
 
-  it('staged fetch failure (single and both legs) increments stagedFailed never discarded, then stale-generation discard in same isolated state — snapshot/bound invariants and privacy', async () => {
+  it('staged fetch failure (window read rejects) increments stagedFailed never discarded, then stale-generation discard in same isolated state — snapshot/bound invariants and privacy', async () => {
     const topicSingle = 't-hardening-fail-single'
     const topicBoth = 't-hardening-fail-both'
     const topicDiscard = 't-hardening-discard-gen'
@@ -434,17 +466,11 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
 
     const getEntries = () => store.getState().residentRegistry.entries as Record<string, any>
 
-    // Step 1: single-leg failure — window resolves, segment leg rejects
+    // Step 1: single-read failure — the bundled window+structure IPC rejects
+    // (no independent segment leg exists under the bundle). Staged failure
+    // is counted once and never discarded.
     {
-      const windowResp = makeWindowResponse(
-        { kind: 'latest', topicId: topicSingle, limit: 10 } as unknown as FetchMessagesWindowRequest,
-        [{ id: 'm-single', topicId: topicSingle, blocks: [], content: SENTINEL_CONTENT } as any]
-      )
-      ;(windowResp as any).blocks = [
-        { id: 'b-single', messageId: 'm-single', type: 'main_text', content: SENTINEL_CONTENT } as any
-      ]
-      mocks.fetchMessagesWindow.mockImplementationOnce(async () => windowResp)
-      mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
+      mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('window leg failure'))
 
       const before = getResidentReadDiagnostics()
       await (store.dispatch as any)(loadTopicMessagesThunk(topicSingle))
@@ -469,7 +495,7 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
       expect(JSON.stringify(after)).not.toContain(SENTINEL_TOPIC)
       expect(JSON.stringify(after)).not.toContain(SENTINEL_CONTENT)
 
-      // snapshot/bound coherent — sentinel must not leak even though window payload contained it
+      // snapshot/bound coherent — the rejected read carries no payload, so no sentinel can leak
       const snap = getPhase4Snapshot(null, getEntries())
       const scalars = getPhase4BoundScalars(null, getEntries())
       expect(snap.residentRead.stagedCount).toBe(after.stagedCount)
@@ -483,10 +509,9 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
       expect(JSON.stringify(snap.residentRead)).not.toContain(SENTINEL_CONTENT)
     }
 
-    // Step 2: both legs reject — counted once, still never discarded
+    // Step 2: window read rejects — counted once, still never discarded
     {
       mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('window leg failure'))
-      mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
       const before = getResidentReadDiagnostics()
       await (store.dispatch as any)(loadTopicMessagesThunk(topicBoth))
       const after = getResidentReadDiagnostics()
@@ -515,14 +540,10 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
         ]
         return resp
       })
-      mocks.listSegments.mockImplementation(
-        async (topicId: string) => makeSentinelSegments(topicId, SENTINEL_CONTENT) as any
-      )
+      // Single IPC: no segment leg exists under the bundle; the catalog rides the window response.
 
       let resolveW: (v: unknown) => void
-      let resolveS: (v: unknown) => void
       mocks.fetchMessagesWindow.mockImplementationOnce(() => new Promise((resolve) => (resolveW = resolve as any)))
-      mocks.listSegments.mockImplementationOnce(() => new Promise((resolve) => (resolveS = resolve as any)))
 
       const before = getResidentReadDiagnostics()
       const beforeResident = getResidentDiagnostics(getEntries())
@@ -533,10 +554,14 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
       await Promise.resolve()
       // Produce generation mismatch through production generation-advance action while staged reads are pending
       store.dispatch(bumpGeneration(topicDiscard))
-      const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: topicDiscard, limit: 10 } as any
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: topicDiscard,
+        limit: 10,
+        includeStructure: true
+      } as any
       const sentinelResp = makeSentinelWindowResponse(req, topicDiscard, SENTINEL_CONTENT)
       resolveW!(sentinelResp)
-      resolveS!(makeSentinelSegments(topicDiscard, SENTINEL_CONTENT))
       await p
       const after = getResidentReadDiagnostics()
       const afterResident = getResidentDiagnostics(getEntries())
@@ -750,7 +775,7 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
         ;(good as any).window.topicId = 'wrong-topic'
         return good
       })
-      mocks.listSegments.mockResolvedValueOnce(makeSentinelSegments(topicMalformed, SENTINEL_CONTENT) as any)
+      // Single IPC: no segment leg exists under the bundle; the catalog rides the window response.
       await (store.dispatch as any)(loadTopicMessagesThunk(topicMalformed))
       const after = getResidentReadDiagnostics()
       expect(after.stagedCount - before.stagedCount).toBe(1)
@@ -786,17 +811,20 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
       const beforeProjection = captureProjectionSlices(store)
       const beforeJointCount = recordedActions.filter((a) => a?.type === JOINT_PUBLISH_COMPLETE).length
       let resolveW: (v: unknown) => void
-      let resolveS: (v: unknown) => void
+      // Single IPC: no segment leg exists under the bundle.
       mocks.fetchMessagesWindow.mockImplementationOnce(() => new Promise((resolve) => (resolveW = resolve as any)))
-      mocks.listSegments.mockImplementationOnce(() => new Promise((resolve) => (resolveS = resolve as any)))
 
       const p = (store.dispatch as any)(loadTopicMessagesThunk(topicGenMismatch))
       await Promise.resolve()
       await Promise.resolve()
       store.dispatch(bumpGeneration(topicGenMismatch))
-      const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: topicGenMismatch, limit: 10 } as any
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: topicGenMismatch,
+        limit: 10,
+        includeStructure: true
+      } as any
       resolveW!(makeSentinelWindowResponse(req, topicGenMismatch, SENTINEL_CONTENT))
-      resolveS!(makeSentinelSegments(topicGenMismatch, SENTINEL_CONTENT))
       await p
       const after = getResidentReadDiagnostics()
       const afterResident = getResidentDiagnostics(getEntries())

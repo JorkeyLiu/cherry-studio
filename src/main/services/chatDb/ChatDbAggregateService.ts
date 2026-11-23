@@ -64,6 +64,7 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchMessagesWindowStructure,
   FetchTopicActivityRequest,
   FetchTopicActivityResponse,
   FetchTopicMessageTimesEntry,
@@ -1411,6 +1412,18 @@ export class ChatDbAggregateService {
             }
           : null
 
+        // Bundled structure: same-tx single snapshot as the window (no second
+        // transaction, no public nested call). Only when the caller asked with
+        // strict `includeStructure: true`; otherwise the response stays
+        // lightweight (five keys, no catalog). Empty catalog is valid and
+        // means known-empty. Built once from the already-resolved canonical
+        // route segments plus segment membership point lookups — never a full
+        // route materialization.
+        const includeStructure = (request as { includeStructure?: unknown }).includeStructure === true
+        const bundledStructure: FetchMessagesWindowStructure | null = includeStructure
+          ? this.buildWindowStructureInTx(repos, request.topicId, windowBranchId, windowRouteStruct.segments)
+          : null
+
         type WindowMessage = MessageData
         type WindowGroup = { semanticKey: string; start: number; end: number }
         const WINDOW_SCAN_CHUNK = 256
@@ -1449,6 +1462,7 @@ export class ChatDbAggregateService {
             blocks: wireBlocks,
             mutableMessageIds,
             reference: referenceMeta,
+            ...(bundledStructure ? { structure: bundledStructure } : {}),
             window: {
               kind: meta.kind,
               completeness: 'window' as const,
@@ -9646,36 +9660,151 @@ export class ChatDbAggregateService {
   listSegments(topicId: string, branchId?: string | null): ChatDbResult<SegmentWire[]> {
     return wrapResult(() => {
       const repos = this.repos()
-      const qualified = branchId !== undefined
-      const route = qualified ? this.normalizeBranchId(branchId) : null
-      const routeMessageIdsInOrder = qualified
-        ? this.resolveRouteMessagesInTx(repos, topicId, route).messages.map((message) => message.id)
-        : null
-      const routeMessageIds = routeMessageIdsInOrder ? new Set(routeMessageIdsInOrder) : null
+      return this.listSegmentsInTx(repos, topicId, branchId)
+    }, `listSegments(${topicId})`)
+  }
+
+  /**
+   * Single-semantic segment read shared by the standalone `listSegments`
+   * channel and the bundled window `structure` (same-tx snapshot when the
+   * caller passes tx-bound repos).
+   *
+   * - `branchId === undefined` = unqualified catalog (neutral wires only).
+   * - otherwise = qualified catalog: neutral wires plus a `route` block per
+   *   group, where `routeMemberMessageIds` are in route-effective order.
+   * Qualification uses ONLY segment membership plus stable-ID point lookups
+   * (owner/sortOrder + tuple bounds via the canonical route segments) —
+   * never a full route materialization or a topic-wide message scan. When
+   * the catalog is empty no message row is read at all.
+   */
+  private listSegmentsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null | undefined
+  ): SegmentWire[] {
+    const qualified = branchId !== undefined
+    if (!qualified) {
       const segments = repos.segments.listByTopic(topicId)
       return segments.map((segment) => {
         const messageIds = repos.segments.getMessageIds(segment.id)
         const header = this.resolveSegmentHeader(repos, segment, messageIds)
-        const wire = segmentToWire(segment, messageIds, header)
-        if (!routeMessageIds) return wire
-        const memberSet = new Set(messageIds)
-        return {
-          ...wire,
-          route: {
-            topicId,
-            branchId: route,
-            headerInRoute: header.headerMessageId !== null && routeMessageIds.has(header.headerMessageId),
-            headerOwnedByRoute:
-              header.headerMessageId !== null && header.ownerTopicId === topicId && header.ownerBranchId === route,
-            // Members on the addressed route in ROUTE-effective order (not
-            // catalog order): the window co-commit projection filters this
-            // same order and the hook intersects it, so acceptance is
-            // byte-identical and a residual group's stable start never moves.
-            routeMemberMessageIds: (routeMessageIdsInOrder ?? []).filter((id) => memberSet.has(id))
-          }
-        }
+        return segmentToWire(segment, messageIds, header)
       })
-    }, `listSegments(${topicId})`)
+    }
+    const route = this.normalizeBranchId(branchId)
+    const routeSegments = this.resolveRouteSegmentsInTx(repos, topicId, route, new Set<string>(), 0).segments
+    const structure = this.buildWindowStructureInTx(repos, topicId, route, routeSegments)
+    const qualById = new Map<string, FetchMessagesWindowStructure['route']['qualifications'][number]>(
+      structure.route.qualifications.map((q) => [q.segmentId, q] as [string, typeof q])
+    )
+    return structure.catalog.map((wire) => {
+      const q = qualById.get(wire.id)
+      if (!q) return wire
+      return {
+        ...wire,
+        route: {
+          topicId,
+          branchId: route,
+          headerInRoute: q.headerInRoute,
+          headerOwnedByRoute: q.headerOwnedByRoute,
+          // Members on the addressed route in ROUTE-effective order (not
+          // catalog order): the window co-commit projection filters this
+          // same order and the hook intersects it, so acceptance is
+          // byte-identical and a residual group's stable start never moves.
+          routeMemberMessageIds: [...q.routeMemberMessageIds]
+        }
+      }
+    })
+  }
+
+  /**
+   * Bundled window structure for one addressed route, resolved in the
+   * caller's snapshot (tx-bound repos + the already-resolved canonical route
+   * segments — never a second full route read).
+   *
+   * Catalog = complete topic authority (neutral wires, full `messageIds`);
+   * route block = lightweight qualification (no catalog duplication).
+   * Member order is route-effective: primary route-segment index, secondary
+   * intra-segment tuple (sortOrder, id) — never a cross-owner sortOrder
+   * comparison. Reference missing/trashed/deleted/blocked/depth/cycle stay
+   * faithful because the same `routeSegments` that drive the window drive
+   * the qualification, and every member is checked by stable-ID point lookup
+   * plus tuple bounds (the `isMessageInRouteSegmentsInTx` rule without a
+   * second lookup).
+   */
+  private buildWindowStructureInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    route: string | null,
+    routeSegments: Array<{ topicId: string; branchId: string | null; upperMessageId: string | null }>
+  ): FetchMessagesWindowStructure {
+    const segments = repos.segments.listByTopic(topicId)
+    if (segments.length === 0) {
+      return { catalog: [], route: { topicId, branchId: route, qualifications: [] } }
+    }
+    // Cache upper-bound rows once per route segment (point lookups only).
+    const upperCache = new Map<number, { sortOrder: number; id: string } | null>()
+    const upperOf = (segIdx: number): { sortOrder: number; id: string } | null | undefined => {
+      if (upperCache.has(segIdx)) return upperCache.get(segIdx)
+      const seg = routeSegments[segIdx]
+      if (!seg || seg.upperMessageId === null) {
+        upperCache.set(segIdx, undefined as unknown as null)
+        return undefined
+      }
+      const row = repos.messages.getById(seg.upperMessageId)
+      if (!row.found) {
+        upperCache.set(segIdx, null)
+        return null
+      }
+      const val = { sortOrder: row.data.sortOrder, id: row.data.id }
+      upperCache.set(segIdx, val)
+      return val
+    }
+    const catalog: SegmentWire[] = []
+    const qualifications: FetchMessagesWindowStructure['route']['qualifications'] = []
+    for (const segment of segments) {
+      const messageIds = repos.segments.getMessageIds(segment.id)
+      const header = this.resolveSegmentHeader(repos, segment, messageIds)
+      catalog.push(segmentToWire(segment, messageIds, header))
+      if (messageIds.length === 0) {
+        qualifications.push({
+          segmentId: segment.id,
+          headerInRoute: false,
+          headerOwnedByRoute: false,
+          routeMemberMessageIds: []
+        })
+        continue
+      }
+      const ordered: Array<{ id: string; segIdx: number; sortOrder: number }> = []
+      for (const mid of messageIds) {
+        const row = repos.messages.getById(mid)
+        if (!row.found) continue
+        const m = row.data
+        const segIdx = this.segmentIndexOfOwner(routeSegments, m.topicId, m.branchId ?? null)
+        if (segIdx === -1) continue
+        const upper = upperOf(segIdx)
+        if (upper === null) continue
+        if (upper !== undefined) {
+          if (this.compareRouteTuple(m.sortOrder, m.id, upper.sortOrder, upper.id) > 0) continue
+        }
+        ordered.push({ id: mid, segIdx, sortOrder: m.sortOrder })
+      }
+      ordered.sort((a, b) => {
+        if (a.segIdx !== b.segIdx) return a.segIdx - b.segIdx
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder < b.sortOrder ? -1 : 1
+        if (a.id === b.id) return 0
+        return a.id < b.id ? -1 : 1
+      })
+      const inRouteSet = new Set(ordered.map((e) => e.id))
+      qualifications.push({
+        segmentId: segment.id,
+        headerInRoute: header.headerMessageId !== null && inRouteSet.has(header.headerMessageId),
+        headerOwnedByRoute:
+          header.headerMessageId !== null && header.ownerTopicId === topicId && header.ownerBranchId === route,
+        routeMemberMessageIds: ordered.map((e) => e.id)
+      })
+    }
+    return { catalog, route: { topicId, branchId: route, qualifications } }
   }
 
   /**

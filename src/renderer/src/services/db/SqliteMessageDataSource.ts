@@ -1276,6 +1276,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
     const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchMessagesWindowRequest
     const result = unwrap(await this.api.fetchMessagesWindow(wireRequest))
+    const withStructure = result as unknown as Record<string, unknown>
     return {
       messages: result.messages as unknown as Message[],
       blocks: result.blocks as unknown as MessageBlock[],
@@ -1283,7 +1284,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       mutableMessageIds: Array.isArray((result as { mutableMessageIds?: unknown }).mutableMessageIds)
         ? ((result as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
         : [],
-      reference: (result as { reference?: HistoryReferenceMeta | null }).reference ?? null
+      reference: (result as { reference?: HistoryReferenceMeta | null }).reference ?? null,
+      ...('structure' in withStructure ? { structure: withStructure['structure'] as never } : {})
     } as unknown as FetchMessagesWindowResponse
   }
 

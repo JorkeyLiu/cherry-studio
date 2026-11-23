@@ -2178,10 +2178,45 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     mocks.deferredReadImpl.mockImplementation(async () => undefined)
   })
 
+  /**
+   * Real bundled structure for the mocked window (neutral catalog + route
+   * qualification echoing the request route), so a mounted success proves
+   * the production receipt→projection path instead of a structure-less stub.
+   */
+  function structuredBundle(req: any, groups: Array<{ id: string; members: string[] }>) {
+    return {
+      catalog: groups.map((g) => ({
+        id: g.id,
+        topicId: req.topicId,
+        name: `g-${g.id}`,
+        messageIds: g.members,
+        headerMessageId: g.members[0] ?? null,
+        ownerTopicId: req.topicId,
+        ownerBranchId: null,
+        createdAt: null,
+        updatedAt: null,
+        sortOrder: 0,
+        firstMessageId: g.members[0] ?? null,
+        lastMessageId: g.members[g.members.length - 1] ?? null,
+        messageCount: g.members.length
+      })),
+      route: {
+        topicId: req.topicId,
+        branchId: req.branchId ?? null,
+        qualifications: groups.map((g) => ({
+          segmentId: g.id,
+          headerInRoute: true,
+          headerOwnedByRoute: true,
+          routeMemberMessageIds: g.members
+        }))
+      }
+    }
+  }
+
   function validWindowResponse(
     req: any,
     ids: string[],
-    opts: { blocks?: unknown[]; mutableMessageIds?: string[]; reference?: unknown } = {}
+    opts: { blocks?: unknown[]; mutableMessageIds?: string[]; reference?: unknown; structure?: unknown } = {}
   ) {
     const messages = ids.map((id) => ({ id }))
     return {
@@ -2200,7 +2235,8 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
         hasMoreAfter: false
       },
       ...(opts.mutableMessageIds !== undefined ? { mutableMessageIds: opts.mutableMessageIds } : {}),
-      ...(opts.reference !== undefined ? { reference: opts.reference } : {})
+      ...(opts.reference !== undefined ? { reference: opts.reference } : {}),
+      ...(opts.structure !== undefined ? { structure: opts.structure } : {})
     }
   }
 
@@ -2221,7 +2257,7 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     } as any
   }
 
-  function installRealDeferredRead(state: any, seen: any[]) {
+  function installRealDeferredRead(state: any, seen: any[], captured: any[] = []) {
     return mocks.deferredReadImpl.mockImplementation(
       async (_d: any, _g: any, tid: string, route: string | null, readOpts: any, hooks: any) => {
         const realMod = await vi.importActual<any>('@renderer/store/thunk/messageThunk')
@@ -2230,7 +2266,9 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
           if (typeof a === 'function') return a(exec, () => state)
           return a
         }
-        return realMod.dispatchDeferredRouteWindowRead(exec, () => state, tid, route, readOpts, hooks)
+        const receipt = await realMod.dispatchDeferredRouteWindowRead(exec, () => state, tid, route, readOpts, hooks)
+        if (receipt) captured.push(receipt)
+        return receipt
       }
     )
   }
@@ -2241,12 +2279,14 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     const assistant = makeAssistant()
     const state = controlledState(topicB.id)
     const seen: any[] = []
-    installRealDeferredRead(state, seen)
+    const receipts: any[] = []
+    installRealDeferredRead(state, seen, receipts)
     mocks.fetchMessagesWindow.mockImplementation(async (req: any) =>
       validWindowResponse(req, ['u1', 'a1'], {
         blocks: [{ id: 'blk-1', messageId: 'a1' }],
         mutableMessageIds: ['a1'],
-        reference: { kind: 'branch', source: 's1' }
+        reference: { kind: 'branch', source: 's1' },
+        structure: structuredBundle(req, [{ id: 's1', members: ['u1', 'a1'] }])
       })
     )
     mocks.topicMessages = [] as any
@@ -2299,6 +2339,35 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     expect(seen.filter((a) => a?.type === 'messageBlocks/upsertManyBlocks').length).toBe(0)
     // Post-commit DOM belongs to the new target (projection rows stay mocked).
     expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicB.id)
+    // Real response structure → displayed chrome (production receipt seam):
+    // the captured receipt's joint carries the bundled structure, and the
+    // production projection turns it into the target route's chrome with the
+    // same currency the component's onPublish committed via setCommittedChrome.
+    // Evidence tier: receipt→projection equality plus the exactly-once joint
+    // above (dispatch order). Mounted row headers stay mocked-out, so no DOM
+    // header-content claim is made here.
+    const { toDeferredJointPayload } = await vi.importActual<any>('@renderer/store/thunk/messageThunk')
+    const { projectCommittedChromeFromStructure } = await import('@renderer/utils/routeCommittedChrome')
+    const receipt = receipts.find((r) => r?.topicId === topicB.id)
+    expect(receipt).toBeDefined()
+    const joint = toDeferredJointPayload(receipt)
+    expect(joint.structure.route).toEqual({
+      topicId: topicB.id,
+      branchId: null,
+      qualifications: [
+        { segmentId: 's1', headerInRoute: true, headerOwnedByRoute: true, routeMemberMessageIds: ['u1', 'a1'] }
+      ]
+    })
+    expect(joint.structure.catalog.map((c: any) => c.id)).toEqual(['s1'])
+    const projected = projectCommittedChromeFromStructure({
+      topicId: topicB.id,
+      branchId: null,
+      structure: joint.structure
+    })
+    expect(projected?.routeKey).toBe(`${topicB.id}::main`)
+    expect(projected?.segments.map((s) => s.id)).toEqual(['s1'])
+    expect(projected?.segments[0].memberIds).toEqual(['u1', 'a1'])
+    expect(projected?.segments[0].headerInRoute).toBe(true)
   })
 
   it('read pending across a topic switch commits nothing for the old response (no old data)', async () => {
@@ -2307,7 +2376,8 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     const assistant = makeAssistant()
     const state = controlledState(topicB.id)
     const seen: any[] = []
-    installRealDeferredRead(state, seen)
+    const receipts: any[] = []
+    installRealDeferredRead(state, seen, receipts)
     let resolveRead: ((v: any) => void) | null = null
     const gated = new Promise<any>((r) => {
       resolveRead = r
@@ -2350,7 +2420,13 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     })
     mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
     await act(async () => {
-      resolveRead?.(validWindowResponse({ kind: 'latest', topicId: topicB.id }, ['stale-b'], {}))
+      // The late response is a full bundled read (structure included), so the
+      // refusal below proves a structured stale receipt publishes nothing.
+      resolveRead?.(
+        validWindowResponse({ kind: 'latest', topicId: topicB.id }, ['stale-b'], {
+          structure: structuredBundle({ topicId: topicB.id, branchId: null }, [{ id: 's9', members: ['stale-b'] }])
+        })
+      )
     })
     await act(async () => {})
     const calls = mocks.dispatchMock.mock.calls.map((c) => c[0])
@@ -2359,5 +2435,20 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     expect(rebases.length).toBe(0)
     expect(JSON.stringify(calls)).not.toContain('stale-b')
     expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicA.id)
+    // The refused read was bundled (structure requested and delivered), and
+    // its projection was publishable — yet never published: the only chrome
+    // publisher runs inside onPublish inside the guarded commit, which never
+    // ran for this receipt (zero rebases above).
+    const bReq = mocks.fetchMessagesWindow.mock.calls.map((c) => c[0]).find((r: any) => r?.topicId === topicB.id)
+    expect(bReq?.includeStructure).toBe(true)
+    const late = receipts.find((r) => r?.topicId === topicB.id)
+    expect(late).toBeDefined()
+    const { projectCommittedChromeFromStructure } = await import('@renderer/utils/routeCommittedChrome')
+    const refused = projectCommittedChromeFromStructure({
+      topicId: topicB.id,
+      branchId: null,
+      structure: late.response.structure
+    })
+    expect(refused?.segments.map((s) => s.id)).toEqual(['s9'])
   })
 })

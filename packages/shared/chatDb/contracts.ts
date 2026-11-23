@@ -3819,7 +3819,14 @@ function validateBoundedCount(value: unknown, path: string): void {
   }
 }
 
-const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds', 'reference'])
+const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set([
+  'messages',
+  'blocks',
+  'window',
+  'mutableMessageIds',
+  'reference',
+  'structure'
+])
 const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
   'kind',
   'completeness',
@@ -3835,7 +3842,7 @@ const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
 const FETCH_MESSAGES_WINDOW_REQUESTED_KEYS = new Set(['limit', 'before', 'after'])
 
 const fetchMessagesWindowContract: ChatDbContract = {
-  allowedKeys: keySet('kind', 'topicId', 'branchId', 'limit', 'anchorMessageId', 'before', 'after'),
+  allowedKeys: keySet('kind', 'topicId', 'branchId', 'limit', 'anchorMessageId', 'before', 'after', 'includeStructure'),
   validate(value: unknown): void {
     validateRequest(value, fetchMessagesWindowContract.allowedKeys)
     const req = value as FetchMessagesWindowRequest & Record<string, unknown>
@@ -3844,6 +3851,11 @@ const fetchMessagesWindowContract: ChatDbContract = {
     }
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateOptionalBranchId(req.branchId, 'request.branchId')
+    if ('includeStructure' in req && req.includeStructure !== undefined) {
+      if (typeof req.includeStructure !== 'boolean') {
+        throw new ValidationError('request.includeStructure', 'Expected boolean for includeStructure')
+      }
+    }
     if (req.kind === 'latest') {
       if ('anchorMessageId' in req || 'before' in req || 'after' in req) {
         throw new ValidationError('request', 'Latest window must not contain anchorMessageId, before, or after')
@@ -4185,7 +4197,168 @@ const fetchMessagesWindowContract: ChatDbContract = {
           }
         }
       }
+      // Optional bundled structure (present ONLY when includeStructure:true).
+      // Absent/null = lightweight window. Empty catalog is valid (known-empty).
+      if (v.structure !== undefined && v.structure !== null) {
+        validateWindowStructure(v.structure, v.window)
+      }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Window bundled structure validator (neutral catalog + route qualification)
+// ---------------------------------------------------------------------------
+
+const WINDOW_STRUCTURE_KEYS = new Set(['catalog', 'route'])
+const WINDOW_STRUCTURE_ROUTE_KEYS = new Set(['topicId', 'branchId', 'qualifications'])
+const WINDOW_STRUCTURE_QUAL_KEYS = new Set([
+  'segmentId',
+  'headerInRoute',
+  'headerOwnedByRoute',
+  'routeMemberMessageIds'
+])
+const WINDOW_STRUCTURE_CATALOG_KEYS = new Set([
+  'id',
+  'topicId',
+  'name',
+  'messageIds',
+  'headerMessageId',
+  'ownerTopicId',
+  'ownerBranchId',
+  'color',
+  'createdAt',
+  'updatedAt',
+  'sortOrder',
+  'firstMessageId',
+  'lastMessageId',
+  'messageCount'
+])
+
+function validateWindowStructure(structure: unknown, windowMeta: unknown): void {
+  const channel = 'chatdb:fetch-messages-window'
+  if (structure === null || typeof structure !== 'object' || Array.isArray(structure)) {
+    throw new ValidationError('result.value.structure', `[${channel}] Expected structure object`)
+  }
+  const s = structure as Record<string, unknown>
+  for (const key of Object.keys(s)) {
+    if (!WINDOW_STRUCTURE_KEYS.has(key)) {
+      throw new ValidationError(`result.value.structure.${key}`, `[${channel}] Unknown key in structure: "${key}"`)
+    }
+  }
+  if (!Array.isArray(s.catalog)) {
+    throw new ValidationError('result.value.structure.catalog', `[${channel}] Expected catalog array`)
+  }
+  const w = windowMeta as Record<string, unknown>
+  const windowTopicId = w.topicId as string
+  const catalog = s.catalog as unknown[]
+  const seenCatalog = new Set<string>()
+  const catalogById = new Map<string, string[]>()
+  for (let i = 0; i < catalog.length; i++) {
+    const at = `result.value.structure.catalog[${i}]`
+    // Neutral catalog: full SegmentWire body but MUST NOT carry a route block.
+    const sid = validateSegmentWireBody(catalog[i], at, channel, WINDOW_STRUCTURE_CATALOG_KEYS)
+    const rec = catalog[i] as Record<string, unknown>
+    if ('route' in rec) {
+      throw new ValidationError(`${at}.route`, `[${channel}] Catalog entries must be neutral (no route)`)
+    }
+    if (seenCatalog.has(sid)) {
+      throw new ValidationError(`${at}.id`, `[${channel}] Duplicate catalog segment id`)
+    }
+    seenCatalog.add(sid)
+    catalogById.set(sid, (rec.messageIds as string[]).slice())
+  }
+  if (s.route === null || typeof s.route !== 'object' || Array.isArray(s.route)) {
+    throw new ValidationError('result.value.structure.route', `[${channel}] Expected route object`)
+  }
+  const r = s.route as Record<string, unknown>
+  for (const key of Object.keys(r)) {
+    if (!WINDOW_STRUCTURE_ROUTE_KEYS.has(key)) {
+      throw new ValidationError(
+        `result.value.structure.route.${key}`,
+        `[${channel}] Unknown key in structure route: "${key}"`
+      )
+    }
+  }
+  validateNonEmptyString(r.topicId, 'result.value.structure.route.topicId')
+  if (r.topicId !== windowTopicId) {
+    throw new ValidationError(
+      'result.value.structure.route.topicId',
+      `[${channel}] Structure route topicId must echo the window topicId`
+    )
+  }
+  if (r.branchId !== null && (typeof r.branchId !== 'string' || r.branchId.length === 0)) {
+    throw new ValidationError(
+      'result.value.structure.route.branchId',
+      `[${channel}] Expected string|null for structure route branchId`
+    )
+  }
+  if (!Array.isArray(r.qualifications)) {
+    throw new ValidationError(
+      'result.value.structure.route.qualifications',
+      `[${channel}] Expected qualifications array`
+    )
+  }
+  const quals = r.qualifications as unknown[]
+  const seenQual = new Set<string>()
+  for (let i = 0; i < quals.length; i++) {
+    const at = `result.value.structure.route.qualifications[${i}]`
+    const q = quals[i]
+    if (q === null || typeof q !== 'object' || Array.isArray(q)) {
+      throw new ValidationError(at, `[${channel}] Expected qualification object`)
+    }
+    const rec = q as Record<string, unknown>
+    for (const key of Object.keys(rec)) {
+      if (!WINDOW_STRUCTURE_QUAL_KEYS.has(key)) {
+        throw new ValidationError(`${at}.${key}`, `[${channel}] Unknown key in qualification: "${key}"`)
+      }
+    }
+    validateNonEmptyString(rec.segmentId, `${at}.segmentId`)
+    const sid = rec.segmentId as string
+    if (seenQual.has(sid)) {
+      throw new ValidationError(`${at}.segmentId`, `[${channel}] Duplicate qualification segmentId`)
+    }
+    seenQual.add(sid)
+    if (!catalogById.has(sid)) {
+      throw new ValidationError(`${at}.segmentId`, `[${channel}] Qualification must reference the bundled catalog`)
+    }
+    if (typeof rec.headerInRoute !== 'boolean') {
+      throw new ValidationError(`${at}.headerInRoute`, `[${channel}] Expected boolean for headerInRoute`)
+    }
+    if (typeof rec.headerOwnedByRoute !== 'boolean') {
+      throw new ValidationError(`${at}.headerOwnedByRoute`, `[${channel}] Expected boolean for headerOwnedByRoute`)
+    }
+    if (!Array.isArray(rec.routeMemberMessageIds)) {
+      throw new ValidationError(`${at}.routeMemberMessageIds`, `[${channel}] Expected routeMemberMessageIds array`)
+    }
+    const mids = catalogById.get(sid) ?? []
+    const memberSet = new Set(mids)
+    const seen = new Set<string>()
+    const ids = rec.routeMemberMessageIds as unknown[]
+    for (let j = 0; j < ids.length; j++) {
+      const id = ids[j]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`${at}.routeMemberMessageIds[${j}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(`${at}.routeMemberMessageIds[${j}]`, `[${channel}] Duplicate route member`)
+      }
+      seen.add(id)
+      if (!memberSet.has(id)) {
+        throw new ValidationError(
+          `${at}.routeMemberMessageIds[${j}]`,
+          `[${channel}] Route member must occur in the catalog messageIds`
+        )
+      }
+    }
+  }
+  // Foreign check: every catalog group must have exactly one qualification
+  // (no missing, no extra). Empty catalog => zero qualifications.
+  if (seenQual.size !== seenCatalog.size) {
+    throw new ValidationError(
+      'result.value.structure.route.qualifications',
+      `[${channel}] Qualifications must cover every catalog segment exactly once`
+    )
   }
 }
 

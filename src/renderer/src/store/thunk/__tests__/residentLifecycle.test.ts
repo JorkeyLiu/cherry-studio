@@ -124,10 +124,31 @@ vi.mock('@renderer/store/newMessage', async () => {
   }
 })
 
+function segWire(topicId: string): Record<string, unknown> {
+  const now = new Date().toISOString()
+  return {
+    id: 'seg-1',
+    topicId,
+    name: 'S',
+    messageIds: [],
+    headerMessageId: null,
+    ownerTopicId: topicId,
+    ownerBranchId: null,
+    color: 'blue',
+    createdAt: now,
+    updatedAt: now,
+    sortOrder: 0,
+    firstMessageId: null,
+    lastMessageId: null,
+    messageCount: 0
+  }
+}
+
 function makeWindowResponse(
   request: FetchMessagesWindowRequest,
   messages: Array<{ id: string } & Record<string, unknown>>,
-  overrides: Partial<FetchMessagesWindowResponse['window']> = {}
+  overrides: Partial<FetchMessagesWindowResponse['window']> = {},
+  catalogEntries: Record<string, unknown>[] = []
 ): FetchMessagesWindowResponse {
   const returnedCount = messages.length
   const firstMessageId = returnedCount > 0 ? messages[0].id : null
@@ -144,10 +165,32 @@ function makeWindowResponse(
     hasMoreBefore: false,
     hasMoreAfter: false
   }
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it. Qualifications cover
+  // every catalog entry exactly once (empty catalog is valid known-empty).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: catalogEntries,
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: catalogEntries.map((e) => ({
+                segmentId: e.id,
+                headerInRoute: false,
+                headerOwnedByRoute: false,
+                routeMemberMessageIds: []
+              }))
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
-    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window']
+    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 
@@ -187,7 +230,8 @@ describe('resident lifecycle joint publication', () => {
     mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
       const limit = (req as any).limit ?? 10
       const msgs = Array.from({ length: limit }, (_, i) => ({ id: `m-${i}`, topicId: req.topicId, blocks: [] }))
-      return makeWindowResponse(req, msgs)
+      // Single IPC: segments ride the bundled catalog (no independent listSegments read).
+      return makeWindowResponse(req, msgs, {}, [segWire(req.topicId)])
     })
     mocks.listSegments.mockResolvedValue([
       {
@@ -272,8 +316,14 @@ describe('resident lifecycle joint publication', () => {
     expect(storeState.residentRegistry.entries['t1'].chatData).toBe(false)
   })
 
-  it('no residency when segments fail', { timeout: 60_000 }, async () => {
-    mocks.listSegments.mockRejectedValueOnce(new Error('segments fail'))
+  it('no residency when the bundled structure is missing', { timeout: 60_000 }, async () => {
+    // Segments-side failure under the bundle contract: the window resolves
+    // but carries no structure (fail-closed, no independent listSegments backfill).
+    mocks.fetchMessagesWindow.mockImplementationOnce(async (req: FetchMessagesWindowRequest) => {
+      const res = makeWindowResponse(req, [{ id: 'm-0', topicId: req.topicId, blocks: [] }])
+      delete (res as any).structure
+      return res
+    })
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn((action: any) => {
       if (typeof action === 'function') return action(dispatch, () => storeState)
@@ -287,17 +337,12 @@ describe('resident lifecycle joint publication', () => {
 
   it('stale generation discard does not publish', { timeout: 60_000 }, async () => {
     let resolveWindow: (v: any) => void
-    let resolveSegments: (v: any) => void
+    // Single IPC: no segment leg exists under the bundle; the window
+    // carries the catalog, so only the window resolver is needed.
     mocks.fetchMessagesWindow.mockImplementation(
       () =>
         new Promise((resolve) => {
           resolveWindow = resolve
-        })
-    )
-    mocks.listSegments.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveSegments = resolve
         })
     )
     const { loadTopicMessagesThunk } = await import('../messageThunk')
@@ -314,19 +359,10 @@ describe('resident lifecycle joint publication', () => {
     expect(prevGen).toBe(1)
     // manually bump again to stale the captured generation
     storeState.residentRegistry.entries['t1'].applicabilityGeneration = 2
-    const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't1', limit: 10 } as any
+    const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't1', limit: 10, includeStructure: true } as any
+    // Empty bundled catalog (known-empty); the discard under test is driven
+    // by the stale generation/deletion gate, not by segment content.
     resolveWindow!(makeWindowResponse(req, [{ id: 'm-0' }]))
-    resolveSegments!([
-      {
-        id: 'seg-1',
-        topicId: 't1',
-        name: 'S',
-        messageIds: [],
-        color: 'blue',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
-    ])
     await promise
     expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
     expect(storeState.residentRegistry.entries['t1'].residentTopic).toBe(false)
@@ -334,17 +370,12 @@ describe('resident lifecycle joint publication', () => {
 
   it('deletion invalidation between staged reads discards joint publish', { timeout: 60_000 }, async () => {
     let resolveWindow: (v: any) => void
-    let resolveSegments: (v: any) => void
+    // Single IPC: no segment leg exists under the bundle; the window
+    // carries the catalog, so only the window resolver is needed.
     mocks.fetchMessagesWindow.mockImplementation(
       () =>
         new Promise((resolve) => {
           resolveWindow = resolve
-        })
-    )
-    mocks.listSegments.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveSegments = resolve
         })
     )
     const { loadTopicMessagesThunk } = await import('../messageThunk')
@@ -363,19 +394,10 @@ describe('resident lifecycle joint publication', () => {
     const entry = storeState.residentRegistry.entries['t1']
     if (entry) entry.applicabilityGeneration += 1
 
-    const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't1', limit: 10 } as any
+    const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't1', limit: 10, includeStructure: true } as any
+    // Empty bundled catalog (known-empty); the discard under test is driven
+    // by the stale generation/deletion gate, not by segment content.
     resolveWindow!(makeWindowResponse(req, [{ id: 'm-0' }]))
-    resolveSegments!([
-      {
-        id: 'seg-1',
-        topicId: 't1',
-        name: 'S',
-        messageIds: [],
-        color: 'blue',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
-    ])
     await promise
     expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
   })
@@ -394,7 +416,7 @@ describe('resident lifecycle joint publication', () => {
     // fix mocks for retry
     mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
       const msgs = [{ id: 'm-0', topicId: req.topicId, blocks: [] }]
-      return makeWindowResponse(req, msgs)
+      return makeWindowResponse(req, msgs, {}, [segWire(req.topicId)])
     })
     mocks.listSegments.mockResolvedValue([
       {
@@ -489,7 +511,8 @@ describe('resident lifecycle joint publication', () => {
     mocks.listSegments.mockClear()
     await loadTopicMessagesThunk('t1')(dispatch, getState as any)
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
-    expect(mocks.listSegments).toHaveBeenCalledTimes(1)
+    // Single IPC: the miss refetch carries the catalog in-bundle; no independent segment read.
+    expect(mocks.listSegments).not.toHaveBeenCalled()
   })
 
   it('empty complete topic is valid resident cache hit (absent index vs empty array distinction)', async () => {

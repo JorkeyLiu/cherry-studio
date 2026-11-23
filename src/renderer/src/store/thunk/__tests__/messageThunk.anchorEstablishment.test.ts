@@ -93,7 +93,17 @@ vi.mock('@renderer/services/db', () => ({
         returnedCount: 0,
         hasMoreBefore: false,
         hasMoreAfter: false
-      }
+      },
+      // Bundled-structure mirror of Main: the bootstrap always requests the
+      // structure, and an empty catalog is a valid known-empty signal.
+      ...(req.includeStructure === true
+        ? {
+            structure: {
+              catalog: [],
+              route: { topicId: req.topicId, branchId: req.branchId ?? null, qualifications: [] }
+            }
+          }
+        : {})
     })),
     deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
@@ -944,7 +954,9 @@ describe('messageThunk anchor hooks', () => {
           returnedCount: 0,
           hasMoreBefore: false,
           hasMoreAfter: false
-        }
+        },
+        // Bundled empty catalog (known-empty) for the structured bootstrap read.
+        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
       } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')
@@ -1005,7 +1017,9 @@ describe('messageThunk anchor hooks', () => {
           returnedCount: 0,
           hasMoreBefore: false,
           hasMoreAfter: false
-        }
+        },
+        // Bundled empty catalog (known-empty) for the structured bootstrap read.
+        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
       } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')
@@ -1041,7 +1055,9 @@ describe('messageThunk anchor hooks', () => {
           returnedCount: 0,
           hasMoreBefore: false,
           hasMoreAfter: false
-        }
+        },
+        // Bundled empty catalog (known-empty) for the structured bootstrap read.
+        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
       } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')

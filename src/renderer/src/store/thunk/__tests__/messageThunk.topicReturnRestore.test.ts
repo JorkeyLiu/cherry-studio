@@ -147,6 +147,22 @@ function makeWindowResponse(
   overrides: Partial<FetchMessagesWindowResponse['window']> = {}
 ): FetchMessagesWindowResponse {
   const messages = ids.map((id) => ({ id }))
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it (empty catalog is a
+  // valid known-empty signal, never a missing-structure fail-closed).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: [],
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: []
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
@@ -162,7 +178,8 @@ function makeWindowResponse(
       hasMoreBefore: false,
       hasMoreAfter: false,
       ...overrides
-    } as FetchMessagesWindowResponse['window']
+    } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 
@@ -227,7 +244,13 @@ describe('topic-return restore vs bootstrap-latest race (single-flight)', () => 
     // Child-before-parent effect order on topic switch: TOP around first,
     // bootstrap latest second (same topic + route).
     const pAround = exec(
-      loadRouteMessagesThunk('t1', 'b1', { kind: 'around', anchorMessageId: 'm7', before: 10, after: 19 })
+      loadRouteMessagesThunk('t1', 'b1', {
+        kind: 'around',
+        anchorMessageId: 'm7',
+        before: 10,
+        after: 19,
+        deferPublish: true
+      })
     )
     const pBoot = exec(loadTopicMessagesThunk('t1'))
     await Promise.all([pAround, pBoot])
@@ -236,13 +259,13 @@ describe('topic-return restore vs bootstrap-latest race (single-flight)', () => 
     const kinds = mocks.fetchMessagesWindow.mock.calls.map((c) => c[0].kind)
     expect(kinds.filter((k) => k === 'around').length).toBe(1)
     expect(kinds.filter((k) => k === 'latest').length).toBe(0)
-    // The route publication is the anchor-containing around14.
+    // Deferred restore publishes nothing itself; the adopting bootstrap joint
+    // below carries the anchor-containing around14 (single IPC, no listSegments).
     const published = rebasePublications(seen)
-    expect(published.length).toBeGreaterThan(0)
-    expect(published[published.length - 1]).toEqual(AROUND_IDS)
+    expect(published.length).toBe(0)
     // The bootstrap joint publication carries the same adopted around14
     // window (not an anchorless latest) with ready segments.
-    expect(mocks.listSegments).toHaveBeenCalled()
+    expect(mocks.listSegments).not.toHaveBeenCalled()
     const joints = jointPublications(seen)
     expect(joints.length).toBe(1)
     expect(joints[0].messages).toEqual(AROUND_IDS)
@@ -294,15 +317,16 @@ describe('topic-return restore vs bootstrap-latest race (single-flight)', () => 
     const state = baseState()
     const getState = () => state
     const { exec, seen } = execDispatch(getState)
-    const pLatest = exec(loadRouteMessagesThunk('t1', 'b1', { kind: 'latest' }))
+    const pLatest = exec(loadRouteMessagesThunk('t1', 'b1', { kind: 'latest', deferPublish: true }))
     const pBoot = exec(loadTopicMessagesThunk('t1'))
     await Promise.all([pLatest, pBoot])
     // One latest fetch total; both publishers carry the same tail.
     const latestCalls = mocks.fetchMessagesWindow.mock.calls.filter((c) => c[0].kind === 'latest')
     expect(latestCalls.length).toBe(1)
+    // Deferred restore publishes nothing itself; the adopting bootstrap joint
+    // carries the same tail.
     const published = rebasePublications(seen)
-    expect(published.length).toBe(1)
-    expect(published[0]).toEqual(LATEST_IDS)
+    expect(published.length).toBe(0)
     const joints = jointPublications(seen)
     expect(joints.length).toBe(1)
     expect(joints[0].messages).toEqual(LATEST_IDS)
@@ -316,7 +340,7 @@ describe('topic-return restore vs bootstrap-latest race (single-flight)', () => 
     await exec(loadTopicMessagesThunk('t1'))
     const kinds = mocks.fetchMessagesWindow.mock.calls.map((c) => c[0].kind)
     expect(kinds).toEqual(['latest'])
-    expect(mocks.listSegments).toHaveBeenCalledWith('t1')
+    expect(mocks.listSegments).not.toHaveBeenCalled()
     const joints = jointPublications(seen)
     expect(joints.length).toBe(1)
     expect(joints[0].messages).toEqual(LATEST_IDS)

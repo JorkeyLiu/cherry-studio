@@ -149,10 +149,27 @@ function makeWindowResponse(
     hasMoreBefore: false,
     hasMoreAfter: false
   }
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it (empty catalog is a
+  // valid known-empty signal, never a missing-structure fail-closed).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: [],
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: []
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
-    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window']
+    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 
@@ -453,9 +470,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     {
       resetResidentReadDiagnosticsForTests()
       let resolveW1: (v: any) => void
-      let resolveS1: (v: any) => void
       let resolveW2: (v: any) => void
-      let resolveS2: (v: any) => void
       mocks.fetchMessagesWindow.mockImplementation(
         () =>
           new Promise((resolve) => {
@@ -464,13 +479,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
             else resolveW2 = resolve as any
           })
       )
-      mocks.listSegments.mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            if (!resolveS1) resolveS1 = resolve as any
-            else resolveS2 = resolve as any
-          })
-      )
+      // Single IPC: no segment leg under the bundle.
       storeState.messages.messageIdsByTopic['t-super'] = []
       delete storeState.residentRegistry.entries['t-super']
       // Need fresh thunk import to get clean requestSeq? requestSeq is module global, not reset per test
@@ -485,11 +494,21 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       await Promise.resolve()
       await Promise.resolve()
       // resolve both
-      const req1: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-super', limit: 10 } as any
-      const req2: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-super', limit: 10 } as any
+      const req1: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: 't-super',
+        limit: 10,
+        includeStructure: true
+      } as any
+      const req2: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: 't-super',
+        limit: 10,
+        includeStructure: true
+      } as any
       // p1 was first, so after p2 started, p1's requestSeq is stale; resolve p1 first
       resolveW1!(makeWindowResponse(req1, [{ id: 'm-0' }]))
-      resolveS1!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p1
       // p1 should have discarded superseded
       let d = getResidentReadDiagnostics()
@@ -497,7 +516,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       expect(d.discardedCount).toBe(1)
       // now resolve p2 - it should succeed
       resolveW2!(makeWindowResponse(req2, [{ id: 'm-1' }]))
-      resolveS2!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p2
       d = getResidentReadDiagnostics()
       expect(d.discardedSuperseded).toBe(1)
@@ -515,9 +534,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     {
       resetResidentReadDiagnosticsForTests()
       let resolveW: (v: any) => void
-      let resolveS: (v: any) => void
       mocks.fetchMessagesWindow.mockImplementation(() => new Promise((resolve) => (resolveW = resolve as any)))
-      mocks.listSegments.mockImplementation(() => new Promise((resolve) => (resolveS = resolve as any)))
       const dispatch = vi.fn((a: any) => (typeof a === 'function' ? a(dispatch, () => storeState) : a))
       const getState = () => storeState
       storeState.messages.currentTopicId = 't-moved'
@@ -526,9 +543,14 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       await Promise.resolve()
       // simulate topic switch
       storeState.messages.currentTopicId = 'other-topic'
-      const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-moved', limit: 10 } as any
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: 't-moved',
+        limit: 10,
+        includeStructure: true
+      } as any
       resolveW!(makeWindowResponse(req, [{ id: 'm-0' }]))
-      resolveS!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p
       const d = getResidentReadDiagnostics()
       expect(d.discardedCurrentMoved).toBe(1)
@@ -545,9 +567,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     {
       resetResidentReadDiagnosticsForTests()
       let resolveW: (v: any) => void
-      let resolveS: (v: any) => void
       mocks.fetchMessagesWindow.mockImplementation(() => new Promise((resolve) => (resolveW = resolve as any)))
-      mocks.listSegments.mockImplementation(() => new Promise((resolve) => (resolveS = resolve as any)))
       const { bumpDeletionGeneration } = await import('@renderer/services/topicDeletionInvalidation')
       const dispatch = vi.fn((a: any) => (typeof a === 'function' ? a(dispatch, () => storeState) : a))
       const getState = () => storeState
@@ -567,9 +587,14 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
           applicabilityGeneration: 2
         }
       }
-      const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-deleted', limit: 10 } as any
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: 't-deleted',
+        limit: 10,
+        includeStructure: true
+      } as any
       resolveW!(makeWindowResponse(req, [{ id: 'm-0' }]))
-      resolveS!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p
       const d = getResidentReadDiagnostics()
       // deletedDuringFetch is checked before generationMismatch, so this should be counted as deletedDuringFetch
@@ -589,9 +614,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     {
       resetResidentReadDiagnosticsForTests()
       let resolveW: (v: any) => void
-      let resolveS: (v: any) => void
       mocks.fetchMessagesWindow.mockImplementation(() => new Promise((resolve) => (resolveW = resolve as any)))
-      mocks.listSegments.mockImplementation(() => new Promise((resolve) => (resolveS = resolve as any)))
       const dispatch = vi.fn((a: any) => (typeof a === 'function' ? a(dispatch, () => storeState) : a))
       const getState = () => storeState
       const p = loadTopicMessagesThunk('t-gen-mismatch')(dispatch, getState as any)
@@ -600,9 +623,14 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       // bump generation inside registry to stale captured generation
       const entry = storeState.residentRegistry.entries['t-gen-mismatch']
       if (entry) entry.applicabilityGeneration += 1
-      const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-gen-mismatch', limit: 10 } as any
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: 't-gen-mismatch',
+        limit: 10,
+        includeStructure: true
+      } as any
       resolveW!(makeWindowResponse(req, [{ id: 'm-0' }]))
-      resolveS!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p
       const d = getResidentReadDiagnostics()
       expect(d.discardedGenerationMismatch).toBe(1)
@@ -686,18 +714,21 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
 
     // discard via generationMismatch
     let resolveW: (v: any) => void
-    let resolveS: (v: any) => void
     mocks.fetchMessagesWindow.mockImplementationOnce(() => new Promise((resolve) => (resolveW = resolve as any)))
-    mocks.listSegments.mockImplementationOnce(() => new Promise((resolve) => (resolveS = resolve as any)))
     dispatch = vi.fn((a: any) => (typeof a === 'function' ? a(dispatch, () => storeState) : a))
     const p = loadTopicMessagesThunk('t-snap-discard')(dispatch, () => storeState)
     await Promise.resolve()
     await Promise.resolve()
     const entry = storeState.residentRegistry.entries['t-snap-discard']
     if (entry) entry.applicabilityGeneration += 1
-    const req: FetchMessagesWindowRequest = { kind: 'latest', topicId: 't-snap-discard', limit: 10 } as any
+    const req: FetchMessagesWindowRequest = {
+      kind: 'latest',
+      topicId: 't-snap-discard',
+      limit: 10,
+      includeStructure: true
+    } as any
     resolveW!(makeWindowResponse(req, [{ id: 'm-0' }]))
-    resolveS!([])
+    // No segment leg under the bundle: nothing to resolve.
     await p
 
     const snap = getPhase4Snapshot(null)
@@ -747,7 +778,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(snap.resident).toBeDefined()
   })
 
-  it('staged failure when listSegments rejects while window read resolves — counted once, not discarded, no publication, privacy-safe', async () => {
+  it('staged success with missing bundled structure — discarded malformed, not staged failure, no publication, privacy-safe', async () => {
     const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
       '@renderer/services/residentReadDiagnostics'
     )
@@ -762,15 +793,15 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     delete storeState.residentRegistry.entries[topicId]
 
     const before = getResidentReadDiagnostics()
-    // Deterministic Promise.all rejection: window resolves, segment leg rejects.
-    // Order is deterministic — window promise settles before segment rejection;
-    // Promise.all still rejects once via the segment leg. No timing assertions.
+    // Bundle contract: the window resolves but carries no bundled structure
+    // (the segments-side failure mode — no independent listSegments leg exists
+    // to reject). Staged fetch succeeds; validation discards malformed.
     const windowResponse = makeWindowResponse(
-      { kind: 'latest', topicId, limit: 10 } as unknown as FetchMessagesWindowRequest,
+      { kind: 'latest', topicId, limit: 10, includeStructure: true } as unknown as FetchMessagesWindowRequest,
       [{ id: 'm-seg-0', topicId, blocks: [] }]
     )
+    delete (windowResponse as any).structure
     mocks.fetchMessagesWindow.mockImplementationOnce(async () => windowResponse)
-    mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
 
     const dispatch = vi.fn((a: unknown) => {
       if (typeof a === 'function') return (a as any)(dispatch, () => storeState)
@@ -781,12 +812,13 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     await loadTopicMessagesThunk(topicId)(dispatch, getState as any)
 
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
-    expect(mocks.listSegments).toHaveBeenCalledTimes(1)
+    // Single IPC: no independent segment read under the bundle.
+    expect(mocks.listSegments).not.toHaveBeenCalled()
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledWith(expect.objectContaining({ topicId }))
-    expect(mocks.listSegments).toHaveBeenCalledWith(topicId)
 
     const after = getResidentReadDiagnostics()
-    // staged counters increase exactly once per invocation; failure increments, success does not
+    // The bundle check runs inside the staged fetch: a structureless bundle is
+    // a staged failure AND a malformed validation discard (no invented category).
     expect(after.stagedCount - before.stagedCount).toBe(1)
     expect(after.stagedFailedCount - before.stagedFailedCount).toBe(1)
     expect(after.stagedSuccessCount - before.stagedSuccessCount).toBe(0)
@@ -799,15 +831,15 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(Number.isFinite(after.stagedLastMs!)).toBe(true)
     expect(after.stagedLastMs! >= 0).toBe(true)
     expect(after.stagedAvgMs === null || (Number.isFinite(after.stagedAvgMs) && after.stagedAvgMs >= 0)).toBe(true)
-    // discarded counters and per-reason counters remain unchanged; no invented category
-    expect(after.discardedCount - before.discardedCount).toBe(0)
+    // malformed discard for the missing structure; no other reason fires, no invented category
+    expect(after.discardedCount - before.discardedCount).toBe(1)
+    expect(after.discardedMalformed - before.discardedMalformed).toBe(1)
     expect(after.discardedSuperseded - before.discardedSuperseded).toBe(0)
     expect(after.discardedCurrentMoved - before.discardedCurrentMoved).toBe(0)
     expect(after.discardedDeletedDuringFetch - before.discardedDeletedDuringFetch).toBe(0)
     expect(after.discardedGenerationMismatch - before.discardedGenerationMismatch).toBe(0)
-    expect(after.discardedMalformed - before.discardedMalformed).toBe(0)
     expect((after as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
-    // no complete resident publication for the failed topic (LOCK-005 semantics: staged failure, not discarded validation)
+    // no complete resident publication for the structureless topic (fail-closed validation discard)
     const segFailCalls = mocks.publishResidentComplete.mock.calls.filter(
       (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === topicId
     )
@@ -834,7 +866,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     }
   })
 
-  it('staged failure when both window and segment legs reject — counted once, not discarded, no publication, privacy-safe', async () => {
+  it('staged failure when the window read rejects — counted once, not discarded, no publication, privacy-safe', async () => {
     const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
       '@renderer/services/residentReadDiagnostics'
     )
@@ -849,10 +881,9 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     delete storeState.residentRegistry.entries[topicId]
 
     const before = getResidentReadDiagnostics()
-    // Deterministic Promise.all failure: both legs reject. Promise.all rejects on first settled rejection,
-    // still counted exactly once. No timing assertions — both mocks reject immediately.
+    // Bundle contract: a single IPC carries window + structure, so only the
+    // window leg can reject. Counted exactly once. No timing assertions.
     mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('window leg failure'))
-    mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
 
     const dispatch = vi.fn((a: unknown) => {
       if (typeof a === 'function') return (a as any)(dispatch, () => storeState)
@@ -863,9 +894,9 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     await loadTopicMessagesThunk(topicId)(dispatch, getState as any)
 
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
-    expect(mocks.listSegments).toHaveBeenCalledTimes(1)
+    // Single IPC: no independent segment read under the bundle.
+    expect(mocks.listSegments).not.toHaveBeenCalled()
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledWith(expect.objectContaining({ topicId }))
-    expect(mocks.listSegments).toHaveBeenCalledWith(topicId)
 
     const after = getResidentReadDiagnostics()
     expect(after.stagedCount - before.stagedCount).toBe(1)
@@ -1066,12 +1097,9 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       delete storeState.messages.messageIdsByTopic[discardId]
       delete storeState.residentRegistry.entries[discardId]
       let resolveW: (v: unknown) => void
-      let resolveS: (v: unknown) => void
+      // Single IPC: no segment leg under the bundle.
       mocks.fetchMessagesWindow.mockImplementation(
         () => new Promise((resolve) => (resolveW = resolve as unknown as (v: unknown) => void))
-      )
-      mocks.listSegments.mockImplementation(
-        () => new Promise((resolve) => (resolveS = resolve as unknown as (v: unknown) => void))
       )
       mocks.publishResidentComplete.mockClear()
       const p = loadTopicMessagesThunk(discardId)(dispatch, getState as any)
@@ -1083,10 +1111,11 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       const req: FetchMessagesWindowRequest = {
         kind: 'latest',
         topicId: discardId,
-        limit: 10
+        limit: 10,
+        includeStructure: true
       } as unknown as FetchMessagesWindowRequest
       resolveW!(makeWindowResponse(req, [{ id: 'm-0', topicId: discardId, blocks: [] } as any]))
-      resolveS!([])
+      // No segment leg under the bundle: nothing to resolve.
       await p
       {
         const d = getResidentReadDiagnostics()

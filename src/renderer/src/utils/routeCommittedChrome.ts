@@ -2,7 +2,7 @@ import { dbService } from '@renderer/services/db'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { resolvePresentationStartMessageId } from '@renderer/utils/routeGroupPresentation'
 import type { RouteAuthorityAddress, RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
-import type { ListSegmentsResponse, SegmentWire } from '@shared/chatDb'
+import type { FetchMessagesWindowStructure, ListSegmentsResponse, SegmentWire } from '@shared/chatDb'
 
 /**
  * Route-window co-commit chrome (Goal A): the lightweight route qualification
@@ -156,6 +156,58 @@ export function projectCommittedChromeSegments(args: {
       presentationStartMessageId
     }
     if (typeof segment.color === 'string') item.color = segment.color
+    segments.push(item)
+  }
+  if (segments.length === 0) return null
+  return { routeKey, segments }
+}
+
+/**
+ * Project the committed chrome directly from a bundled window structure
+ * (same-transaction catalog + qualification — no store catalog, no second
+ * IPC). The catalog stays neutral: route data never rewrites the topic
+ * catalog. Empty catalog is known-empty; an empty projection returns null so
+ * the caller can apply the same-route clear semantic (never a cross-route
+ * clear).
+ */
+export function projectCommittedChromeFromStructure(args: {
+  topicId: string
+  branchId: string | null
+  structure: FetchMessagesWindowStructure
+}): CommittedChromeProjection | null {
+  const { topicId, branchId, structure } = args
+  // Route echo must match the addressed route; otherwise fail closed (never
+  // project a stale/other-route structure).
+  if (structure.route.topicId !== topicId) return null
+  if ((structure.route.branchId ?? null) !== (branchId ?? null)) return null
+  if (structure.catalog.length === 0) return null
+  if (structure.route.qualifications.length === 0) return null
+  const routeKey = committedChromeRouteKey(topicId, branchId)
+  const qualById = new Map<string, FetchMessagesWindowStructure['route']['qualifications'][number]>(
+    structure.route.qualifications.map((q) => [q.segmentId, q] as [string, typeof q])
+  )
+  const segments: RouteScopedSegment[] = []
+  for (const wire of structure.catalog) {
+    if (wire.messageIds.length === 0) continue
+    const q = qualById.get(wire.id)
+    if (!q) continue
+    const memberIds = [...q.routeMemberMessageIds]
+    if (memberIds.length === 0) continue
+    const headerMessageId = wire.headerMessageId ?? wire.firstMessageId ?? null
+    const presentationStartMessageId = resolvePresentationStartMessageId({ routeMemberIds: memberIds })
+    const item: RouteScopedSegment = {
+      id: wire.id,
+      name: wire.name ?? '',
+      sortOrder: wire.sortOrder,
+      memberIds,
+      messageCount: memberIds.length,
+      firstMessageId: memberIds[0] ?? null,
+      headerMessageId,
+      headerInRoute: q.headerInRoute,
+      headerOwnedByRoute: q.headerOwnedByRoute,
+      presentationStartMessageId
+    }
+    if (typeof wire.color === 'string') item.color = wire.color
     segments.push(item)
   }
   if (segments.length === 0) return null

@@ -523,6 +523,13 @@ export interface FetchMessagesLatestWindowRequest {
   branchId?: BranchRouteId
   /** Number of latest viewport groups to return. Caller-provided, bounded 1..100. */
   limit: number
+  /**
+   * Optional bundled structure flag: when true Main attaches the full neutral
+   * segment catalog plus the route qualification for the addressed route in
+   * the same transaction snapshot. Strict boolean; absent/false = lightweight
+   * window only (five keys, no catalog).
+   */
+  includeStructure?: boolean
 }
 
 /**
@@ -542,6 +549,13 @@ export interface FetchMessagesAroundWindowRequest {
   before: number
   /** Viewport groups after the anchor's group. Caller-provided, bounded 1..100. */
   after: number
+  /**
+   * Optional bundled structure flag: when true Main attaches the full neutral
+   * segment catalog plus the route qualification for the addressed route in
+   * the same transaction snapshot. Strict boolean; absent/false = lightweight
+   * window only.
+   */
+  includeStructure?: boolean
 }
 
 /** Discriminated window request for typed window reads. */
@@ -575,11 +589,55 @@ export interface FetchMessagesWindowMeta {
   hasMoreAfter: boolean
 }
 
+/** One lightweight route qualification for a catalog group (no catalog duplication). */
+export interface FetchMessagesWindowStructureQualification {
+  /** Catalog group id (must occur in the bundled catalog). */
+  segmentId: string
+  /** Group head resolves inside the addressed route's effective sequence. */
+  headerInRoute: boolean
+  /** Group head owned by the addressed route (owner equality). */
+  headerOwnedByRoute: boolean
+  /**
+   * Members of this group on the addressed route's effective sequence, in
+   * route-effective order (never catalog order). Subset of the catalog
+   * messageIds; may be empty when the group has no reachable member.
+   */
+  routeMemberMessageIds: string[]
+}
+
+/** Addressed-route qualification block for the bundled structure. */
+export interface FetchMessagesWindowStructureRoute {
+  /** Echo of the addressed topic (equals window.topicId). */
+  topicId: string
+  /** Addressed route: null = main route, else that branch. */
+  branchId: string | null
+  /** One entry per catalog group that has route state (catalog order). */
+  qualifications: FetchMessagesWindowStructureQualification[]
+}
+
+/**
+ * Bundled window structure: full neutral catalog plus the addressed-route
+ * qualification, resolved in the same Main transaction snapshot as the
+ * window. The catalog is the complete topic authority (neutral SegmentWire
+ * entries without `route`); the route block is the projection. Empty catalog
+ * is valid and means known-empty. Never a whole-topic message capability.
+ */
+export interface FetchMessagesWindowStructure {
+  catalog: SegmentWire[]
+  route: FetchMessagesWindowStructureRoute
+}
+
 /** @see IpcChannel.ChatDb_FetchMessagesWindow */
 export interface FetchMessagesWindowResponse {
   messages: JsonObject[]
   blocks: JsonObject[]
   window: FetchMessagesWindowMeta
+  /**
+   * Bundled structure, present ONLY when the request carried
+   * `includeStructure: true`. Absent otherwise. Renderer required callers
+   * must fail closed when it is missing (never backfill via listSegments).
+   */
+  structure?: FetchMessagesWindowStructure | null
   /**
    * Main-authoritative per-window mutation capability: stable IDs from THIS
    * response's `messages` that are mutable through the requested route

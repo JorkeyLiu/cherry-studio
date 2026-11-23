@@ -187,10 +187,27 @@ function makeWindowResponse(
     hasMoreBefore: false,
     hasMoreAfter: false
   }
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it (empty catalog is a
+  // valid known-empty signal, never a missing-structure fail-closed).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: [],
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: []
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
-    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window']
+    window: { ...baseWindow, ...overrides } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 

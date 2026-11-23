@@ -158,6 +158,22 @@ function makeWindowResponse(
   overrides: Partial<FetchMessagesWindowResponse['window']> = {}
 ): FetchMessagesWindowResponse {
   const messages = ids.map((id) => ({ id }))
+  // Bundled-structure mirror of Main: the window response carries the
+  // structure if and only if the request asked for it (empty catalog is a
+  // valid known-empty signal, never a missing-structure fail-closed).
+  const withStructure =
+    (request as { includeStructure?: unknown }).includeStructure === true
+      ? {
+          structure: {
+            catalog: [],
+            route: {
+              topicId: request.topicId,
+              branchId: (request as { branchId?: string | null }).branchId ?? null,
+              qualifications: []
+            }
+          }
+        }
+      : {}
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
@@ -173,7 +189,8 @@ function makeWindowResponse(
       hasMoreBefore: false,
       hasMoreAfter: false,
       ...overrides
-    } as FetchMessagesWindowResponse['window']
+    } as FetchMessagesWindowResponse['window'],
+    ...withStructure
   } as unknown as FetchMessagesWindowResponse
 }
 
@@ -264,7 +281,7 @@ describe('bootstrap prepare-around ownership vs bootstrap latest', () => {
     expect(rebasePublications(seen).length).toBe(0)
     // The adopting bootstrap latest carries the SAME adopted around14
     // (never an anchorless latest10) with ready segments.
-    expect(mocks.listSegments).toHaveBeenCalledWith('t1')
+    expect(mocks.listSegments).not.toHaveBeenCalled()
     const joints = jointPublications(seen)
     expect(joints.length).toBe(1)
     expect(joints[0].messages).toEqual(AROUND_IDS)
