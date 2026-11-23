@@ -177,6 +177,62 @@ export const messageBlocksSelectors = messageBlocksAdapter.getSelectors<RootStat
 // Stable empty reference so selectors returning no blocks never change identity.
 const EMPTY_MESSAGE_BLOCKS: MessageBlock[] = []
 
+interface BlocksByIdsResultCacheEntry {
+  /** Entity reference per requested position (`undefined` = id not in the store). */
+  blockRefs: readonly (MessageBlock | undefined)[]
+  /** Ordered visible blocks derived from `blockRefs` (absent ids dropped). */
+  blocks: MessageBlock[]
+}
+
+// Keyed by the caller's immutable block-ID array reference (Immer keeps stored
+// arrays stable across unrelated writes; every call site passes a
+// memoized/state-owned array). The weak key ties an entry's lifetime to that ID
+// array's ownership, and an entry references only the entities those IDs
+// resolve to — never the whole historical entity map. Distinct stores use
+// distinct ID arrays, so entries never leak across stores.
+const blocksByIdsCache = new WeakMap<readonly string[], BlocksByIdsResultCacheEntry>()
+
+/**
+ * Bounded result reuse for `selectMessageBlocksByIds`.
+ *
+ * When the entity map object changes but every block referenced by this exact
+ * ID array still resolves to the same entity reference, the previously built
+ * ordered array is returned as-is; only when a difference is seen does the
+ * function build the refs and result arrays. The reference comparison stays
+ * linear in the ID count — this avoids re-allocation, not the per-ID identity
+ * check.
+ */
+function selectBlocksByIdsBounded(
+  entities: Record<string, MessageBlock | undefined>,
+  blockIds: readonly string[]
+): MessageBlock[] {
+  const cached = blocksByIdsCache.get(blockIds)
+  if (cached && cached.blockRefs.length === blockIds.length) {
+    let stable = true
+    for (let i = 0; i < blockIds.length; i++) {
+      if (entities[blockIds[i]] !== cached.blockRefs[i]) {
+        stable = false
+        break
+      }
+    }
+    if (stable) {
+      return cached.blocks
+    }
+  }
+
+  const blockRefs: Array<MessageBlock | undefined> = new Array(blockIds.length)
+  const blocks: MessageBlock[] = []
+  for (let i = 0; i < blockIds.length; i++) {
+    const entity = entities[blockIds[i]]
+    blockRefs[i] = entity
+    if (entity) {
+      blocks.push(entity)
+    }
+  }
+  blocksByIdsCache.set(blockIds, { blockRefs, blocks })
+  return blocks
+}
+
 /**
  * Selector scoped to a specific set of block IDs (e.g. one message's `blocks`).
  *
@@ -184,7 +240,12 @@ const EMPTY_MESSAGE_BLOCKS: MessageBlock[] = []
  * entities for the requested IDs, so consumers can pair it with `shallowEqual`
  * in `useSelector` and avoid re-rendering when an unrelated block (another
  * message's streaming block) is committed to the store. The result array keeps
- * the requested order and drops IDs that are not yet in the store.
+ * the requested order, keeps duplicate ids, and drops IDs that are not yet in
+ * the store.
+ *
+ * Identity contract: the returned array reference means "same visible ordered
+ * entities". When an unrelated entity changes, or the ID array itself changes,
+ * the array is rebuilt; a same-identity array never hides changed content.
  */
 export const selectMessageBlocksByIds = createSelector(
   [
@@ -195,14 +256,7 @@ export const selectMessageBlocksByIds = createSelector(
     if (!blockIds || blockIds.length === 0) {
       return EMPTY_MESSAGE_BLOCKS
     }
-    const result: MessageBlock[] = []
-    for (const blockId of blockIds) {
-      const entity = entities[blockId]
-      if (entity) {
-        result.push(entity)
-      }
-    }
-    return result
+    return selectBlocksByIdsBounded(entities, blockIds)
   }
 )
 
