@@ -83,6 +83,7 @@ describe('move-selected-turns-to-new-branch contract', () => {
           parentBlocks: [],
           messages: [],
           blocks: [],
+          branches: [branch],
           historySnapshot: MOVE_HISTORY_SNAPSHOT
         }
       })
@@ -101,6 +102,42 @@ describe('move-selected-turns-to-new-branch contract', () => {
           extra: 1
         }
       })
+    ).toThrow()
+  })
+
+  it('requires the complete branch catalog', () => {
+    const contract = getContract('chatdb:move-selected-turns-to-new-branch')
+    const branch = {
+      id: 'b1',
+      topicId: 't1',
+      parentBranchId: null,
+      anchorMessageId: 'aA',
+      name: 'Moved',
+      createdAt: null,
+      updatedAt: null
+    }
+    const base = {
+      branch,
+      movedMessageIds: ['uB'],
+      anchorMessageId: 'aA',
+      parentMessages: [],
+      parentBlocks: [],
+      messages: [],
+      blocks: [],
+      historySnapshot: MOVE_HISTORY_SNAPSHOT
+    }
+    // Missing catalog never validates (no silent clear downstream).
+    expect(() => contract.validateResult({ ok: true, value: base })).toThrow()
+    // Cross-topic entries, duplicate ids, and unknown keys all fail closed.
+    expect(() =>
+      contract.validateResult({
+        ok: true,
+        value: { ...base, branches: [{ ...branch, topicId: 't-x' }] }
+      })
+    ).toThrow()
+    expect(() => contract.validateResult({ ok: true, value: { ...base, branches: [branch, branch] } })).toThrow()
+    expect(() =>
+      contract.validateResult({ ok: true, value: { ...base, branches: [{ ...branch, extra: 1 }] } })
     ).toThrow()
   })
 
@@ -143,6 +180,7 @@ describe('move-selected-turns-to-new-branch contract', () => {
       parentBlocks: [],
       messages: [],
       blocks: [],
+      branches: [branch],
       historySnapshot: MOVE_HISTORY_SNAPSHOT
     }
     expect(() => contract.validateResult({ ok: true, value: { ...value } })).not.toThrow()
@@ -177,6 +215,7 @@ describe('move-selected-turns-to-new-branch contract', () => {
       parentBlocks: [],
       messages: [],
       blocks: [],
+      branches: [branch],
       historySnapshot: MOVE_HISTORY_SNAPSHOT,
       resolvedContextAnchorGroupKey: 'uB'
     }

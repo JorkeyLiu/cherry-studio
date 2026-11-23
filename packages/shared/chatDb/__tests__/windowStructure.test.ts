@@ -259,4 +259,46 @@ describe('window bundled structure — result contract', () => {
     })
     expect(() => validateChatDbResult('chatdb:fetch-messages-window', missing)).toThrow(ValidationError)
   })
+  it('accepts the additive optional turnCount and rejects malformed values', () => {
+    const counted = withStructure({
+      structure: {
+        catalog: [seg('s1', ['m1', 'm2'])],
+        route: {
+          topicId: 't1',
+          branchId: null,
+          qualifications: [
+            {
+              segmentId: 's1',
+              headerInRoute: true,
+              headerOwnedByRoute: true,
+              routeMemberMessageIds: ['m1', 'm2'],
+              turnCount: 2
+            }
+          ]
+        }
+      }
+    })
+    expect(() => validateChatDbResult('chatdb:fetch-messages-window', counted)).not.toThrow()
+    for (const bad of [-1, 1.5, '2', null, NaN]) {
+      const res = withStructure({
+        structure: {
+          catalog: [seg('s1', ['m1'])],
+          route: {
+            topicId: 't1',
+            branchId: null,
+            qualifications: [
+              {
+                segmentId: 's1',
+                headerInRoute: true,
+                headerOwnedByRoute: true,
+                routeMemberMessageIds: ['m1'],
+                turnCount: bad
+              }
+            ]
+          }
+        }
+      })
+      expect(() => validateChatDbResult('chatdb:fetch-messages-window', res)).toThrow(ValidationError)
+    }
+  })
 })

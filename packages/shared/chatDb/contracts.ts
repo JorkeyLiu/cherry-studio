@@ -2186,7 +2186,7 @@ function validateBranchCatalog(value: unknown, path: string, channel: string, to
   }
 }
 
-const CREATE_BRANCH_VALUE_KEYS = new Set(['branch', 'messages', 'blocks'])
+const CREATE_BRANCH_VALUE_KEYS = new Set(['branch', 'messages', 'blocks', 'branches'])
 
 const createBranchContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'parentBranchId', 'anchorMessageId', 'name'),
@@ -2227,6 +2227,12 @@ const createBranchContract: ChatDbContract = {
       validateTopicBranchWire(v.branch, 'result.value.branch', 'chatdb:create-branch')
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      validateBranchCatalog(
+        v.branches,
+        'result.value.branches',
+        'chatdb:create-branch',
+        (v.branch as { topicId: string }).topicId
+      )
     }
   }
 }
@@ -2310,6 +2316,8 @@ const renameBranchContract: ChatDbContract = {
 }
 
 const DELETE_BRANCH_VALUE_KEYS = new Set([
+  'topicId',
+  'branches',
   'affectedFileIds',
   'remainingReferenceCounts',
   'deletedBranchIds',
@@ -2350,6 +2358,8 @@ const deleteBranchContract: ChatDbContract = {
       validateStringArray(v.deletedBranchIds, 'result.value.deletedBranchIds')
       validateStringArray(v.deletedMessageIds, 'result.value.deletedMessageIds')
       validateStringArray(v.deletedBlockIds, 'result.value.deletedBlockIds')
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateBranchCatalog(v.branches, 'result.value.branches', 'chatdb:delete-branch', v.topicId as string)
       validateBranchDeleteHistorySnapshot(v.historySnapshot, 'result.value.historySnapshot')
     }
   }
@@ -2363,6 +2373,7 @@ const MOVE_SELECTED_TURNS_VALUE_KEYS = new Set([
   'parentBlocks',
   'messages',
   'blocks',
+  'branches',
   'resolvedContextAnchorGroupKey',
   'sourceContextAnchorTransfer',
   'historySnapshot'
@@ -2498,6 +2509,12 @@ const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
       validateJsonObjectArrayBlock(v.parentBlocks, 'result.value.parentBlocks', BLOCK_JSON_PROFILE)
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      validateBranchCatalog(
+        v.branches,
+        'result.value.branches',
+        'chatdb:move-selected-turns-to-new-branch',
+        (v.branch as { topicId: string }).topicId
+      )
       validateBranchMoveHistorySnapshot(v.historySnapshot, 'result.value.historySnapshot')
       // Optional, explicitly nullable: absent means Main produced no fact.
       const anchor = v.resolvedContextAnchorGroupKey
@@ -4216,7 +4233,8 @@ const WINDOW_STRUCTURE_QUAL_KEYS = new Set([
   'segmentId',
   'headerInRoute',
   'headerOwnedByRoute',
-  'routeMemberMessageIds'
+  'routeMemberMessageIds',
+  'turnCount'
 ])
 const WINDOW_STRUCTURE_CATALOG_KEYS = new Set([
   'id',
@@ -4349,6 +4367,14 @@ function validateWindowStructure(structure: unknown, windowMeta: unknown): void 
           `${at}.routeMemberMessageIds[${j}]`,
           `[${channel}] Route member must occur in the catalog messageIds`
         )
+      }
+    }
+    // Additive optional turn count: absent means unknown (old producers,
+    // all-unmapped members). When present it must be a non-negative
+    // integer turn total — never a fallback to a member count.
+    if (rec.turnCount !== undefined) {
+      if (typeof rec.turnCount !== 'number' || !Number.isInteger(rec.turnCount) || rec.turnCount < 0) {
+        throw new ValidationError(`${at}.turnCount`, `[${channel}] Expected non-negative integer for turnCount`)
       }
     }
   }

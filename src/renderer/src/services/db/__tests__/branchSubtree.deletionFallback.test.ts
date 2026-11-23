@@ -88,14 +88,21 @@ const rootWith = (s: Parameters<typeof reducer>[0]): never => ({ topicBranch: s 
 
 /**
  * Delete result as Main reports it: the branch delete returns its own authority
- * snapshot alongside the removed IDs (branch undo/redo replay payload).
+ * snapshot alongside the removed IDs (branch undo/redo replay payload) plus
+ * the complete post-commit catalog (topicId + branches) from the same
+ * transaction.
  */
-const deleteResult = (deletedBranchIds: string[]) => ({
+const deleteResult = (
+  deletedBranchIds: string[],
+  branches: Array<{ id: string; parentBranchId: string | null; anchorMessageId: string }> = []
+) => ({
+  topicId: 't-1',
   affectedFileIds: [] as string[],
   remainingReferenceCounts: {} as Record<string, number>,
   deletedBranchIds,
   deletedMessageIds: [] as string[],
   deletedBlockIds: [] as string[],
+  branches: branches.map((b) => ({ ...b, topicId: 't-1' })),
   historySnapshot: {
     kind: 'delete' as const,
     rootBranchId: deletedBranchIds[0],
@@ -300,7 +307,7 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     expect(slice).toMatch(/budget:\s*displayCount/)
     expect(slice).toMatch(/kind:\s*'bottom'/)
   })
-  it('atomic handoff: active-fallback switch + intent publish BEFORE the catalog refresh', async () => {
+  it('atomic handoff: active-fallback switch + intent publish BEFORE the ack catalog publish', async () => {
     // Regression for the true-branch subtree-delete stall (Main latest30 vs
     // renderer stale route, active null, empty catalog, loading false): the
     // catalog publish prunes a stale active on arrival. Publishing it before
@@ -309,24 +316,18 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     // read (generation advance); the late intent then stood down on the
     // generic claim and no owner retried. The helper must move the active
     // route (and arm the one-shot intent) first so the prune is a no-op.
-    const seen: string[] = []
-    listBranchesMock.mockImplementation(async () => {
-      seen.push('ipc:listBranches')
-      return { topicId: 't-1', branches: [] }
-    })
-    deleteBranchMock.mockResolvedValue(deleteResult(['b-1', 'b-2']))
+    // The ack catalog rides the same Main transaction: no listBranches read.
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1', 'b-2'], []))
     const result = await deleteBranchSubtree('t-1', 'b-1', 'b-2')
     expect(result.fallbackBranchId).toBeNull()
+    expect(listBranchesMock).not.toHaveBeenCalled()
     const types = dispatchMock.mock.calls.map((c) => (c[0] as { type: string })?.type)
     const resetAt = types.indexOf('topicBranch/activeBranchReset')
     const intentAt = types.indexOf('topicBranch/deletionFallbackRequested')
-    const fetchAt = types.indexOf('topicBranch/catalogFetchStarted')
     const publishedAt = types.indexOf('topicBranch/branchesReceived')
     expect(resetAt).toBeGreaterThanOrEqual(0)
     expect(intentAt).toBeGreaterThan(resetAt)
-    expect(seen).toEqual(['ipc:listBranches'])
-    // The Main read backing the refresh happens only after the handoff.
-    expect(fetchAt).toBeGreaterThan(intentAt)
-    expect(publishedAt).toBeGreaterThan(fetchAt)
+    expect(publishedAt).toBeGreaterThan(intentAt)
+    expect(types).not.toContain('topicBranch/catalogFetchStarted')
   })
 })

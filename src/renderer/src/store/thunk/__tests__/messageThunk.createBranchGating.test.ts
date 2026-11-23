@@ -91,7 +91,12 @@ function branchState(opts: {
 describe('createBranchThunk bounded gating (BRANCH-7)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.createBranch.mockResolvedValue({ branch: { id: 'nb', anchorMessageId: 'c0' }, messages: [], blocks: [] })
+    mocks.createBranch.mockResolvedValue({
+      branch: { id: 'nb', anchorMessageId: 'c0' },
+      messages: [],
+      blocks: [],
+      branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'c0' }]
+    })
     mocks.listBranches.mockResolvedValue({ branches: [] })
   })
 

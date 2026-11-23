@@ -231,6 +231,10 @@ describe('createBranch + effective route reads', () => {
     // Catalog lists the node; topic rename stays logical.
     const catalog = okValue(agg.listBranches('t-root'))
     expect(catalog.branches.map((b) => (b as { id: string }).id)).toEqual([branchId])
+    // The creation ack carries the same post-commit catalog (same
+    // transaction, with the new branch's inherited boundary).
+    expect(created.branches.map((b) => b.id)).toEqual([branchId])
+    expect(created.branches).toEqual(catalog.branches)
   })
 
   it('nested branches require parent-owned anchors; inherited references reject (BRANCH-7)', () => {
@@ -308,6 +312,10 @@ describe('createBranch + effective route reads', () => {
     const del = okValue(agg.deleteBranch('t-root', b1))
     expect(del.deletedBranchIds).toEqual([b1])
     expect(del.deletedMessageIds).toEqual(['m-b1-0'])
+    // The delete ack echoes the topic and carries the post-commit catalog
+    // (same transaction): only the surviving sibling remains.
+    expect(del.topicId).toBe('t-root')
+    expect(del.branches.map((b) => (b as { id: string }).id)).toEqual([b2])
     // Sibling suffix survives; shared prefix survives.
     const main = okValue(agg.fetchMessages('t-root', null))
     expect(main.messages.map((m) => (m as { id: string }).id)).toEqual(['m0', 'm1', 'm2'])

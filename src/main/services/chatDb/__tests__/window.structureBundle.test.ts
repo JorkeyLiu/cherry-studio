@@ -279,6 +279,75 @@ describe('fetchMessagesWindow bundled structure (hand-computed oracles)', () => 
       ]
     })
   })
+  it('qualification turnCount matches legacy turn grouping on main and branch routes, absent when all unmapped', () => {
+    const appendRole = (topic: string, id: string, role: string, askId?: string, branchId?: string): void => {
+      const message: Record<string, unknown> = {
+        id,
+        topicId: topic,
+        role,
+        content: `c-${id}`,
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+      if (askId) message.askId = askId
+      const r = agg.appendMessage(
+        topic,
+        message as never,
+        [blockJson(`b-${id}`, id) as never],
+        undefined,
+        undefined,
+        branchId ? ({ branchId } as never) : undefined
+      )
+      expect(r.ok, `append ${id}`).toBe(true)
+    }
+    // u1 + answer a1 share one turn, u2 is one turn, askId-less a2 is
+    // unmapped, system s1 is one turn, dangling-askId a3 is one turn.
+    expect(agg.ensureTopic('t8', 'a1', 'topic-t8').ok).toBe(true)
+    appendRole('t8', 'u1', 'user')
+    appendRole('t8', 'a1', 'assistant', 'u1')
+    appendRole('t8', 'u2', 'user')
+    appendRole('t8', 'a2', 'assistant')
+    appendRole('t8', 's1', 'system')
+    appendRole('t8', 'a3', 'assistant', 'ghost')
+    upsert('sTurn', 't8', ['u1', 'a1', 'u2', 'a2', 's1', 'a3'], null)
+    upsert('sUnmapped', 't8', ['a2'], null)
+
+    const spies = fullScanSpies()
+    const onMain = okValue(
+      agg.fetchMessagesWindow({ kind: 'latest', topicId: 't8', limit: 10, includeStructure: true })
+    )
+    // Bounded reads only: the count comes from the qualified member rows,
+    // never a whole-route MessageData materialization.
+    expect(spies.listByTopic).not.toHaveBeenCalled()
+    expect(spies.listThrough).not.toHaveBeenCalled()
+    expect(spies.listAll).not.toHaveBeenCalled()
+    restoreSpies(spies)
+
+    const qualOf = (bundle: any, sid: string): any =>
+      bundle.structure.route.qualifications.find((q: any) => q.segmentId === sid)
+    // Legacy grouping over the reachable members: {u1,a1} {u2} {s1}
+    // {ghost} = 4 turns; a2 contributes no key.
+    expect(qualOf(onMain, 'sTurn').routeMemberMessageIds).toEqual(['u1', 'a1', 'u2', 'a2', 's1', 'a3'])
+    expect(qualOf(onMain, 'sTurn').turnCount).toBe(4)
+    // All-unmapped members yield absent — never zero, never a member count.
+    expect(qualOf(onMain, 'sUnmapped').routeMemberMessageIds).toEqual(['a2'])
+    expect('turnCount' in qualOf(onMain, 'sUnmapped')).toBe(false)
+
+    // Branch route: the main-only suffix drops out, so the turn total follows
+    // the reachable intersection (u1 alone = 1 turn).
+    const branchId = okValue(agg.createBranch('t8', null, 'u1', 'b1')).branch.id
+    appendRole('t8', 'ub1', 'user', undefined, branchId)
+    appendRole('t8', 'ab1', 'assistant', 'ub1', branchId)
+    upsert('sB', 't8', ['ub1', 'ab1'], branchId)
+    const onBranch = okValue(
+      agg.fetchMessagesWindow({ kind: 'latest', topicId: 't8', branchId, limit: 10, includeStructure: true })
+    )
+    expect(qualOf(onBranch, 'sTurn').routeMemberMessageIds).toEqual(['u1'])
+    expect(qualOf(onBranch, 'sTurn').turnCount).toBe(1)
+    expect(qualOf(onBranch, 'sB').routeMemberMessageIds).toEqual(['ub1', 'ab1'])
+    expect(qualOf(onBranch, 'sB').turnCount).toBe(1)
+  })
 
   it('route order follows message order, not catalog order (sortOrder tie breaks by id)', () => {
     seedMain('t3', ['tie-c', 'tie-a', 'tie-b'])

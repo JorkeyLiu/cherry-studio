@@ -1,19 +1,17 @@
 /**
- * Post-write catalog reads share one guarded entry.
+ * Mutation acks carry the Main-authoritative branch catalog.
  *
  * `createBranchThunk`, `moveSelectedTurnsToNewBranchThunk`, and
- * `deleteBranchSubtree` used to read `listBranches` and publish unguarded, so
- * a read started before a semantic ack but resolving after it overwrote the
- * newer authority catalog. All three now go through
- * `refreshBranchCatalogGuarded` (same entry as `fetchTopicBranchesThunk`):
- * once a newer authority catalog is accepted, every older in-flight catalog
- * read discards instead of publishing.
+ * `deleteBranchSubtree` publish the same-transaction catalog from the
+ * mutation acknowledgment via `publishBranchCatalogAck` — no follow-up
+ * `listBranches` read. Every accepted ack bumps the catalog revision, so an
+ * older in-flight guarded read (`refreshBranchCatalogGuarded`, the same
+ * entry as `fetchTopicBranchesThunk`) discards instead of overwriting it. A
+ * missing/malformed/foreign/duplicated ack catalog keeps the projection and
+ * never fails the committed mutation.
  *
- * Table-driven over the three entries with one deferred-race runner: gate
- * the read, accept an authority ack mid-await, resolve the stale read, and
- * assert the projection keeps the ack catalog. Real Redux store + real
- * thunks; only the data source (and the history/snapshot side channels) are
- * mocked. No source-text assertions.
+ * Real Redux store + real thunks; only the data source (and the
+ * history/snapshot side channels) are mocked. No source-text assertions.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import store from '@renderer/store'
@@ -108,22 +106,6 @@ const wire = (topicId: string, id: string, anchorMessageId: string) => ({
   updatedAt: '2026-01-01T00:00:00.000Z'
 })
 
-const ackDeleteResponse = (topicId: string, branches: unknown[]) => ({
-  topicId,
-  branchId: null,
-  branches,
-  affectedFileIds: [],
-  remainingReferenceCounts: {},
-  deletedMessageIds: [],
-  deletedBlockIds: [],
-  previousUserMessageIds: [],
-  remainingUserMessageIds: [],
-  segments: [],
-  restoreGroups: [],
-  segmentSnapshots: [],
-  boundarySnapshots: []
-})
-
 function turnEntities(ids: string[]): Record<string, any> {
   const entities: Record<string, any> = {}
   for (let i = 0; i < ids.length; i += 2) {
@@ -164,23 +146,10 @@ function movePreloadedState() {
   } as any
 }
 
-describe('post-write catalog reads share the guarded entry', () => {
+describe('mutation acks publish the catalog with no listBranches follow-up', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.listBranches.mockReset()
-    mocks.createBranch.mockResolvedValue({
-      branch: { id: 'nb', anchorMessageId: 'm0' },
-      messages: [],
-      blocks: []
-    })
-    mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
-      branch: { id: 'nb', anchorMessageId: 'aA' },
-      movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
-      anchorMessageId: 'aA',
-      messages: [],
-      blocks: []
-    })
-    mocks.deleteBranch.mockResolvedValue({ deletedBranchIds: ['b-old'] })
     mocks.fetchMessagesWindow.mockResolvedValue({
       messages: [],
       blocks: [],
@@ -189,94 +158,174 @@ describe('post-write catalog reads share the guarded entry', () => {
     })
   })
 
-  it('createBranchThunk: gated read resolving after an authority ack keeps the ack catalog', async () => {
-    const topicId = 't-create-guard'
+  it('createBranchThunk: publishes the ack catalog with no listBranches follow-up', async () => {
+    const topicId = 't-create-ack'
     const fresh = configureStore({ reducer: rootReducer })
-    const { createBranchThunk, publishDeleteAuthorityCatalog } = await import('../messageThunk')
+    const { createBranchThunk } = await import('../messageThunk')
 
-    const gate = deferred<{ branches: unknown[] }>()
-    mocks.listBranches.mockImplementationOnce(() => gate.promise)
-    const pending = createBranchThunk(topicId, null, 'm0', 'B2')(fresh.dispatch as any, fresh.getState as any)
-    await flush()
-
-    // A semantic ack for the same topic lands while the create read is in flight.
-    publishDeleteAuthorityCatalog(
-      fresh.dispatch as any,
-      topicId,
-      ackDeleteResponse(topicId, [wire(topicId, 'b-ack', 'm-ack')]) as any
-    )
-    gate.resolve({ branches: [wire(topicId, 'b-stale', 'm-stale')] })
-    const res = await pending
+    mocks.createBranch.mockResolvedValueOnce({
+      branch: { id: 'nb', anchorMessageId: 'm0' },
+      messages: [],
+      blocks: [],
+      branches: [wire(topicId, 'nb', 'm0')]
+    })
+    const res = await createBranchThunk(topicId, null, 'm0', 'B2')(fresh.dispatch as any, fresh.getState as any)
 
     expect(res).not.toBeNull()
-    expect(mocks.listBranches).toHaveBeenCalledWith(topicId)
-    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['b-ack'])
+    expect(mocks.listBranches).not.toHaveBeenCalled()
+    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['nb'])
   })
 
-  it('moveSelectedTurnsToNewBranchThunk: gated read resolving after an authority ack keeps the ack catalog', async () => {
+  it('moveSelectedTurnsToNewBranchThunk: publishes the ack catalog with no listBranches follow-up', async () => {
     const topicId = 't-1'
     const fresh = configureStore({ reducer: rootReducer, preloadedState: movePreloadedState() })
-    const { moveSelectedTurnsToNewBranchThunk, publishDeleteAuthorityCatalog } = await import('../messageThunk')
+    const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
 
-    const gate = deferred<{ branches: unknown[] }>()
-    mocks.listBranches.mockImplementationOnce(() => gate.promise)
-    const pending = moveSelectedTurnsToNewBranchThunk(
+    mocks.moveSelectedTurnsToNewBranch.mockResolvedValueOnce({
+      branch: { id: 'nb', anchorMessageId: 'aA' },
+      movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+      anchorMessageId: 'aA',
+      messages: [],
+      blocks: [],
+      branches: [wire(topicId, 'nb', 'aA')],
+      historySnapshot: {
+        kind: 'move',
+        branch: {
+          id: 'nb',
+          parentBranchId: null,
+          anchorMessageId: 'aA',
+          name: 'Moved',
+          createdAt: null,
+          updatedAt: null,
+          overflow: {}
+        },
+        sourceBranchId: null,
+        movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
+        sourceOrderBefore: LOADED,
+        reparented: []
+      }
+    })
+    const res = await moveSelectedTurnsToNewBranchThunk(
       topicId,
       null,
       ['uB', 'uC'],
       'Moved'
     )(fresh.dispatch as any, fresh.getState as any)
-    // Wait until the thunk's guarded read is actually in flight (the thunk
-    // awaits a dynamic import before reaching listBranches): the ack must
-    // land DURING the read await, not before the read starts.
-    for (let i = 0; i < 50 && mocks.listBranches.mock.calls.length === 0; i++) await flush()
-    expect(mocks.listBranches).toHaveBeenCalledWith(topicId)
 
-    // A semantic ack for the same topic lands while the move read is in
-    // flight. The ack bumps only the catalog revision (route generation is
-    // untouched while the active route still resolves), so the committed
-    // move proceeds to its guarded catalog read, which must discard itself.
-    publishDeleteAuthorityCatalog(
-      fresh.dispatch as any,
-      topicId,
-      ackDeleteResponse(topicId, [wire(topicId, 'b-ack', 'm-ack')]) as any
-    )
-    gate.resolve({ branches: [wire(topicId, 'b-stale', 'm-stale')] })
-    const res = await pending
     expect(res).not.toBeNull()
-    expect(mocks.listBranches).toHaveBeenCalledWith(topicId)
-    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['b-ack'])
+    expect(mocks.listBranches).not.toHaveBeenCalled()
+    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['nb'])
   })
 
-  it('deleteBranchSubtree: gated read resolving after an authority ack keeps the ack catalog', async () => {
+  it('deleteBranchSubtree: publishes the ack catalog with no listBranches follow-up', async () => {
     const topicId = 't-guard-sub'
     const { deleteBranchSubtree } = await import('@renderer/services/db/branchSubtree')
-    const { publishDeleteAuthorityCatalog } = await import('../messageThunk')
     try {
       store.dispatch(branchesReceived({ topicId, branches: [wire(topicId, 'b-old', 'm-old')] }) as never)
 
-      const gate = deferred<{ branches: unknown[] }>()
-      mocks.listBranches.mockImplementationOnce(() => gate.promise)
-      const pending = deleteBranchSubtree(topicId, 'b-old', null)
-      await flush()
-
-      // A semantic ack for the same topic lands while the subtree read is in flight.
-      publishDeleteAuthorityCatalog(
-        store.dispatch as any,
+      mocks.deleteBranch.mockResolvedValueOnce({
         topicId,
-        ackDeleteResponse(topicId, [wire(topicId, 'b-ack', 'm-ack')]) as any
-      )
-      gate.resolve({ branches: [wire(topicId, 'b-stale', 'm-stale')] })
-      const res = await pending
+        branches: [wire(topicId, 'b-ack', 'm-ack')],
+        deletedBranchIds: ['b-old'],
+        deletedMessageIds: [],
+        deletedBlockIds: [],
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        historySnapshot: {
+          kind: 'delete',
+          rootBranchId: 'b-old',
+          branches: [],
+          messages: [],
+          blocks: [],
+          fileReferences: [],
+          segments: [],
+          segmentsAfter: [],
+          segmentOrder: [],
+          boundaries: []
+        }
+      })
+      const res = await deleteBranchSubtree(topicId, 'b-old', null)
 
       expect(res).toEqual({ deletedBranchIds: ['b-old'], fallbackBranchId: null })
-      expect(mocks.listBranches).toHaveBeenCalledWith(topicId)
+      expect(mocks.listBranches).not.toHaveBeenCalled()
       expect((store.getState() as any).topicBranch.branchesByTopic[topicId].map((b: { id: string }) => b.id)).toEqual([
         'b-ack'
       ])
     } finally {
       store.dispatch(branchesRemoved({ topicIds: [topicId] }))
     }
+  })
+
+  it('an in-flight guarded read resolving after a mutation ack keeps the ack catalog', async () => {
+    const topicId = 't-ack-wins'
+    const fresh = configureStore({ reducer: rootReducer })
+    const { createBranchThunk, fetchTopicBranchesThunk } = await import('../messageThunk')
+
+    mocks.createBranch.mockResolvedValueOnce({
+      branch: { id: 'nb', anchorMessageId: 'm0' },
+      messages: [],
+      blocks: [],
+      branches: [wire(topicId, 'nb', 'm0')]
+    })
+    const gate = deferred<{ branches: unknown[] }>()
+    mocks.listBranches.mockImplementationOnce(() => gate.promise)
+    const pendingFetch = (fresh.dispatch as any)(fetchTopicBranchesThunk(topicId))
+    await flush()
+    expect(mocks.listBranches).toHaveBeenCalledWith(topicId)
+
+    // The mutation commits while the independent read is in flight: the ack
+    // publish bumps the catalog revision, so the late loser must discard.
+    const res = await createBranchThunk(topicId, null, 'm0', 'B2')(fresh.dispatch as any, fresh.getState as any)
+    expect(res).not.toBeNull()
+
+    gate.resolve({ branches: [wire(topicId, 'b-stale', 'm-stale')] })
+    await pendingFetch
+
+    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['nb'])
+  })
+
+  it('wrong-topic, malformed, missing, and duplicated ack catalogs keep the projection', async () => {
+    const topicId = 't-ack-guard'
+    const fresh = configureStore({ reducer: rootReducer })
+    const { publishBranchCatalogAck } = await import('../messageThunk')
+
+    fresh.dispatch(branchesReceived({ topicId, branches: [wire(topicId, 'b-keep', 'm-keep')] }) as never)
+    const kept = () =>
+      expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['b-keep'])
+
+    // Missing catalog.
+    expect(publishBranchCatalogAck(fresh.dispatch as any, topicId, {})).toBe(false)
+    kept()
+    // Non-array catalog.
+    expect(publishBranchCatalogAck(fresh.dispatch as any, topicId, { branches: 'nope' })).toBe(false)
+    kept()
+    // Foreign entry.
+    expect(
+      publishBranchCatalogAck(fresh.dispatch as any, topicId, { branches: [wire('t-foreign', 'b-x', 'm-x')] })
+    ).toBe(false)
+    kept()
+    // Malformed entry (empty anchor).
+    expect(
+      publishBranchCatalogAck(fresh.dispatch as any, topicId, {
+        branches: [{ id: 'b-x', topicId, parentBranchId: null, anchorMessageId: '' }]
+      })
+    ).toBe(false)
+    kept()
+    // Duplicated id.
+    expect(
+      publishBranchCatalogAck(fresh.dispatch as any, topicId, {
+        branches: [wire(topicId, 'b-x', 'm-x'), wire(topicId, 'b-x', 'm-x')]
+      })
+    ).toBe(false)
+    kept()
+    // Wrong topic echo.
+    expect(publishBranchCatalogAck(fresh.dispatch as any, topicId, { topicId: 't-other', branches: [] })).toBe(false)
+    kept()
+    // A valid ack still publishes after the rejections.
+    expect(
+      publishBranchCatalogAck(fresh.dispatch as any, topicId, { branches: [wire(topicId, 'b-new', 'm-new')] })
+    ).toBe(true)
+    expect(selectTopicBranches(fresh.getState() as any, topicId).map((b: { id: string }) => b.id)).toEqual(['b-new'])
   })
 
   it('fetchTopicBranchesThunk still publishes a fresh read with no concurrent ack', async () => {

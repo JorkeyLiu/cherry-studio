@@ -603,6 +603,16 @@ export interface FetchMessagesWindowStructureQualification {
    * messageIds; may be empty when the group has no reachable member.
    */
   routeMemberMessageIds: string[]
+  /**
+   * Conversation turn count over the route-reachable members, computed in the
+   * same Main transaction from the qualified member rows only (never a
+   * whole-route read): user + same askId answers count as one turn, a system
+   * message is one turn, a dangling askId group is one turn, assistant
+   * messages without askId are unmapped and excluded. Optional and additive:
+   * absent means unknown (renderer hides, never falls back to a member
+   * count); all-unmapped members also yield absent, never zero.
+   */
+  turnCount?: number
 }
 
 /** Addressed-route qualification block for the bundled structure. */
@@ -2194,6 +2204,12 @@ export interface CreateBranchResponse {
   /** Effective wire messages of the new route (shared prefix + empty suffix). */
   messages: JsonObject[]
   blocks: JsonObject[]
+  /**
+   * Complete branch catalog from the same Main transaction (post-commit,
+   * with the new branch's inherited boundary). The renderer publishes it
+   * directly instead of re-reading `listBranches`.
+   */
+  branches: TopicBranchWire[]
 }
 
 /** @see IpcChannel.ChatDb_ListBranches */
@@ -2235,6 +2251,14 @@ export interface DeleteBranchRequest {
 
 /** @see IpcChannel.ChatDb_DeleteBranch */
 export interface DeleteBranchResponse extends FileCleanupResult {
+  /** Echo of the addressed logical topic (fail-closed publish guard). */
+  topicId: string
+  /**
+   * Complete branch catalog from the same Main transaction (post-delete,
+   * with advanced inherited boundaries). The renderer publishes it directly
+   * instead of re-reading `listBranches`.
+   */
+  branches: TopicBranchWire[]
   /** Deleted branch IDs, subtree-root first. */
   deletedBranchIds: string[]
   /** Deleted owned message IDs. */
@@ -2321,6 +2345,12 @@ export interface MoveSelectedTurnsToNewBranchResponse {
   /** Effective wire messages of the new branch route. */
   messages: JsonObject[]
   blocks: JsonObject[]
+  /**
+   * Complete branch catalog from the same Main transaction (post-move, with
+   * the new branch's inherited boundary). The renderer publishes it directly
+   * instead of re-reading `listBranches`.
+   */
+  branches: TopicBranchWire[]
   /**
    * Destination route context-window anchor resolved by Main inside the same
    * atomic move transaction (pre-move inheritance source).

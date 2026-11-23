@@ -344,6 +344,7 @@ export interface MessageDataSource {
     branch: TopicBranchWire
     messages: Message[]
     blocks: MessageBlock[]
+    branches: TopicBranchWire[]
   }>
 
   /**

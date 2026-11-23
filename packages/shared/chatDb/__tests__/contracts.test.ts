@@ -3690,10 +3690,40 @@ describe('create-branch contract (topic-internal branches)', () => {
         value: {
           branch: branchWire,
           messages: [],
-          blocks: []
+          blocks: [],
+          branches: [branchWire]
         }
       })
     ).not.toThrow()
+  })
+
+  it('create-branch: requires the complete branch catalog', () => {
+    const base = {
+      branch: branchWire,
+      messages: [],
+      blocks: []
+    }
+    // Missing catalog never validates (no silent clear downstream).
+    expect(() => validateChatDbResult('chatdb:create-branch', { ok: true, value: base })).toThrow(ValidationError)
+    // Cross-topic entries, duplicate ids, and unknown keys all fail closed.
+    expect(() =>
+      validateChatDbResult('chatdb:create-branch', {
+        ok: true,
+        value: { ...base, branches: [{ ...branchWire, topicId: 't-x' }] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:create-branch', {
+        ok: true,
+        value: { ...base, branches: [branchWire, branchWire] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:create-branch', {
+        ok: true,
+        value: { ...base, branches: [{ ...branchWire, extra: 1 }] }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('create-branch: rejects result with unknown keys', () => {
@@ -3850,6 +3880,8 @@ describe('delete-branch contract (topic-internal branches)', () => {
       validateChatDbResult('chatdb:delete-branch', {
         ok: true,
         value: {
+          topicId: 't-1',
+          branches: [],
           affectedFileIds: [],
           remainingReferenceCounts: {},
           deletedBranchIds: ['b-1'],
@@ -3880,6 +3912,80 @@ describe('delete-branch contract (topic-internal branches)', () => {
         }
       })
     ).not.toThrow()
+  })
+
+  it('delete-branch: requires topic echo plus the complete branch catalog', () => {
+    const deletedBranchWire = {
+      id: 'b-2',
+      topicId: 't-1',
+      parentBranchId: null,
+      anchorMessageId: 'm-0',
+      name: null,
+      createdAt: null,
+      updatedAt: null
+    }
+    const base = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedBranchIds: ['b-1'],
+      deletedMessageIds: [],
+      deletedBlockIds: [],
+      historySnapshot: {
+        kind: 'delete',
+        rootBranchId: 'b-1',
+        branches: [
+          {
+            id: 'b-1',
+            parentBranchId: null,
+            anchorMessageId: 'm-0',
+            name: null,
+            createdAt: null,
+            updatedAt: null,
+            overflow: {}
+          }
+        ],
+        messages: [],
+        blocks: [],
+        fileReferences: [],
+        segments: [],
+        segmentsAfter: [],
+        segmentOrder: [],
+        boundaries: []
+      }
+    }
+    // Populated same-topic catalog validates.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: { ...base, topicId: 't-1', branches: [deletedBranchWire] }
+      })
+    ).not.toThrow()
+    // Missing topic echo or catalog never validates (no silent clear downstream).
+    const noTopic: Record<string, unknown> = { ...base, topicId: 't-1', branches: [] as unknown[] }
+    delete noTopic.topicId
+    expect(() => validateChatDbResult('chatdb:delete-branch', { ok: true, value: noTopic })).toThrow(ValidationError)
+    const noCatalog: Record<string, unknown> = { ...base, topicId: 't-1', branches: [] as unknown[] }
+    delete noCatalog.branches
+    expect(() => validateChatDbResult('chatdb:delete-branch', { ok: true, value: noCatalog })).toThrow(ValidationError)
+    // Cross-topic entries, duplicate ids, and unknown keys all fail closed.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: { ...base, topicId: 't-1', branches: [{ ...deletedBranchWire, topicId: 't-x' }] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: { ...base, topicId: 't-1', branches: [deletedBranchWire, deletedBranchWire] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: { ...base, topicId: 't-1', branches: [{ ...deletedBranchWire, extra: 1 }] }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('delete-branch: rejects result with unknown keys', () => {

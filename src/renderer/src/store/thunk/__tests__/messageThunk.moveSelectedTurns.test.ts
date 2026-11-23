@@ -120,6 +120,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
     vi.clearAllMocks()
     mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
       branch: { id: 'nb', anchorMessageId: 'aA' },
+      branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
       movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
       anchorMessageId: 'aA',
       messages: [],
@@ -374,6 +375,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
     await new Promise<void>((r) => setTimeout(r, 0))
     resolveMove({
       branch: { id: 'nb', anchorMessageId: 'aA' },
+      branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
       movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
       anchorMessageId: 'aA',
       messages: [],
@@ -549,6 +551,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],
@@ -573,6 +576,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],
@@ -643,6 +647,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
         }
         return Promise.resolve({
           branch: { id: 'nb', anchorMessageId: 'aA' },
+          branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
           movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
           anchorMessageId: 'aA',
           messages: [],
@@ -694,6 +699,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       )
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],
@@ -736,6 +742,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],
@@ -762,6 +769,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],
@@ -814,6 +822,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
         }
         return Promise.resolve({
           branch: { id: 'nb', anchorMessageId: 'aA' },
+          branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
           movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
           anchorMessageId: 'aA',
           messages: [],
@@ -846,6 +855,7 @@ describe('moveSelectedTurnsToNewBranchThunk gating', () => {
       const { moveSelectedTurnsToNewBranchThunk } = await import('../messageThunk')
       mocks.moveSelectedTurnsToNewBranch.mockResolvedValue({
         branch: { id: 'nb', anchorMessageId: 'aA' },
+        branches: [{ id: 'nb', topicId: 't-1', parentBranchId: null, anchorMessageId: 'aA' }],
         movedMessageIds: ['uB', 'aB', 'uC', 'aC'],
         anchorMessageId: 'aA',
         messages: [],

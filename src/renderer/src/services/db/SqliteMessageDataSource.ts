@@ -973,6 +973,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     branch: TopicBranchWire
     messages: Message[]
     blocks: MessageBlock[]
+    branches: TopicBranchWire[]
   }> {
     if (!this.api.createBranch) {
       throw new Error('ChatDb API unavailable: createBranch not exposed')
@@ -989,7 +990,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return {
       branch: result.branch,
       messages: result.messages as unknown as Message[],
-      blocks: result.blocks as unknown as MessageBlock[]
+      blocks: result.blocks as unknown as MessageBlock[],
+      branches: result.branches
     }
   }
 

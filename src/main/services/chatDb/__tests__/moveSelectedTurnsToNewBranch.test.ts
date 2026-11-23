@@ -437,6 +437,14 @@ describe('moveSelectedTurnsToNewBranch', () => {
     expect(effIds(agg, 't1', b2)).toEqual(routeB2Before)
     // Only the new branch row was added; nothing deleted.
     expect(okValue(agg.listBranches('t1')).branches.length).toBe(branchesBefore + 1)
+    // The move ack carries the same post-commit catalog (same transaction):
+    // the new branch with its Main-resolved inherited boundary, and Main's
+    // re-parented b1 row.
+    const moved = okValue(res)
+    const ackCatalog = okValue(agg.listBranches('t1')).branches
+    expect(moved.branches).toEqual(ackCatalog)
+    expect(moved.branches.map((b) => b.id).sort()).toEqual([b1, b2, newBranchId].sort())
+    expect(moved.branches.find((b) => b.id === newBranchId)?.anchorMessageId).toBe('aA')
     expect((sqlite.prepare('SELECT COUNT(*) AS n FROM topic_branches').get() as { n: number }).n).toBe(
       branchRowsBefore + 1
     )

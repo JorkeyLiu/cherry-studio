@@ -61,6 +61,11 @@ const {
   mockAggregateDeleteBranch: vi.fn(() => ({
     ok: true as const,
     value: {
+      // Same-transaction ack catalog (slice 2): the real Main delete returns
+      // the topic echo plus the complete post-commit catalog; the IPC
+      // handler validates it via the shared DeleteBranch contract.
+      topicId: 'src-1',
+      branches: [],
       affectedFileIds: [],
       remainingReferenceCounts: {},
       deletedBranchIds: ['branch-1'],

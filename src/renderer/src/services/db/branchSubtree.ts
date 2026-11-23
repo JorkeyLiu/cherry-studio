@@ -1,6 +1,6 @@
 import { loggerService } from '@logger'
 import { handleScrollSnapshotCleared } from '@renderer/services/scrollSnapshotCache'
-import store, { type AppDispatch, type RootState } from '@renderer/store'
+import store, { type AppDispatch } from '@renderer/store'
 import { activeBranchReset, activeBranchSet, deletionFallbackRequested } from '@renderer/store/topicBranch'
 
 import { pushBranchDeleteAction } from '../branchOperationHistory'
@@ -50,7 +50,8 @@ function readCatalog(topicId: string): Array<{ id: string; parentBranchId: strin
  * Delete one branch subtree (selected branch + descendants + only their
  * owned messages/blocks/file references) in one Main transaction, then
  * converge the renderer projection. Shared prefixes and sibling branches
- * survive in Main; the catalog refresh below reflects exactly that.
+ * survive in Main; the same-transaction ack catalog published below reflects
+ * exactly that.
  *
  * The logical topic, sidebar selection, and topic identity are untouched
  * (same topicId throughout). When the active route was deleted, the route
@@ -148,20 +149,13 @@ export async function deleteBranchSubtree(
       store.dispatch(activeBranchReset({ topicId }))
     }
   }
-  // Refresh the Main-authoritative catalog after the handoff above (it prunes
-  // a stale active branch automatically when it no longer exists — a no-op
-  // here since the active route already moved). Guarded like every other
-  // post-write read: a newer authority catalog published during the await
-  // wins and this stale read discards instead of overwriting it.
-  try {
-    const { refreshBranchCatalogGuarded } = await import('@renderer/store/thunk/messageThunk')
-    await refreshBranchCatalogGuarded(
-      store.dispatch as unknown as AppDispatch,
-      store.getState as unknown as () => RootState,
-      topicId
-    )
-  } catch (error) {
-    logger.error(`[deleteBranchSubtree] Failed to refresh branch catalog for ${topicId}:`, error as Error)
-  }
+  // The complete branch catalog rode the same Main delete transaction:
+  // publish it directly instead of re-reading `listBranches`. A wrong-topic
+  // or malformed ack keeps the projection and never fails the committed
+  // delete (the gap converges on the next window read). Every accepted
+  // publish bumps the catalog revision, so an older in-flight guarded read
+  // can never overwrite it.
+  const { publishBranchCatalogAck } = await import('@renderer/store/thunk/messageThunk')
+  publishBranchCatalogAck(store.dispatch as unknown as AppDispatch, topicId, result)
   return { deletedBranchIds: result.deletedBranchIds, fallbackBranchId: fallback }
 }

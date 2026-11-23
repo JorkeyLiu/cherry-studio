@@ -9775,7 +9775,13 @@ export class ChatDbAggregateService {
         })
         continue
       }
-      const ordered: Array<{ id: string; segIdx: number; sortOrder: number }> = []
+      const ordered: Array<{
+        id: string
+        segIdx: number
+        sortOrder: number
+        role: string | null
+        askId: string | null
+      }> = []
       for (const mid of messageIds) {
         const row = repos.messages.getById(mid)
         if (!row.found) continue
@@ -9787,7 +9793,7 @@ export class ChatDbAggregateService {
         if (upper !== undefined) {
           if (this.compareRouteTuple(m.sortOrder, m.id, upper.sortOrder, upper.id) > 0) continue
         }
-        ordered.push({ id: mid, segIdx, sortOrder: m.sortOrder })
+        ordered.push({ id: mid, segIdx, sortOrder: m.sortOrder, role: m.role, askId: m.askId ?? null })
       }
       ordered.sort((a, b) => {
         if (a.segIdx !== b.segIdx) return a.segIdx - b.segIdx
@@ -9795,14 +9801,33 @@ export class ChatDbAggregateService {
         if (a.id === b.id) return 0
         return a.id < b.id ? -1 : 1
       })
+      // Conversation turn keys over the qualified members only, from the
+      // same-tx member rows already read above (point lookups bounded by
+      // catalog membership — never a whole-route read). Keying mirrors
+      // groupEffectiveTurnsInTx exactly (user → own id, assistant + askId →
+      // askId, system → own id, unprefixed so cross-role askId joins merge
+      // the way the legacy map does). Group identity is key equality (not
+      // adjacency), so the distinct-key count over the route-effective
+      // members equals the legacy whole-route turn total. Assistant rows
+      // without askId (and any other role) stay unmapped and are excluded.
+      const turnKeys = new Set<string>()
+      for (const e of ordered) {
+        if (e.role === 'user') turnKeys.add(e.id)
+        else if (e.role === 'assistant' && e.askId) turnKeys.add(e.askId)
+        else if (e.role === 'system') turnKeys.add(e.id)
+      }
       const inRouteSet = new Set(ordered.map((e) => e.id))
-      qualifications.push({
+      const qualification: FetchMessagesWindowStructure['route']['qualifications'][number] = {
         segmentId: segment.id,
         headerInRoute: header.headerMessageId !== null && inRouteSet.has(header.headerMessageId),
         headerOwnedByRoute:
           header.headerMessageId !== null && header.ownerTopicId === topicId && header.ownerBranchId === route,
         routeMemberMessageIds: ordered.map((e) => e.id)
-      })
+      }
+      // All-unmapped members (or none) yield absent — never zero, never the
+      // member count — so the renderer keeps the unknown-hidden semantic.
+      if (turnKeys.size > 0) qualification.turnCount = turnKeys.size
+      qualifications.push(qualification)
     }
     return { catalog, route: { topicId, branchId: route, qualifications } }
   }
@@ -12898,7 +12923,12 @@ export class ChatDbAggregateService {
     parentBranchId: string | null | undefined,
     anchorMessageId: string,
     name?: string
-  ): ChatDbResult<{ branch: TopicBranchWire; messages: JsonObject[]; blocks: JsonObject[] }> {
+  ): ChatDbResult<{
+    branch: TopicBranchWire
+    messages: JsonObject[]
+    blocks: JsonObject[]
+    branches: TopicBranchWire[]
+  }> {
     return wrapResult(
       () => {
         // Publish-barrier quiescence still enforced for branch writes; capture
@@ -12968,7 +12998,8 @@ export class ChatDbAggregateService {
               this.resolveBranchInheritedBoundaryInTx(repos, topicId, created.parentBranchId, created.anchorMessageId)
             ),
             messages: reconstructMessageBlockRelations(wireMessages, wireBlocks),
-            blocks: wireBlocks
+            blocks: wireBlocks,
+            branches: this.listBranchCatalogInTx(repos, topicId)
           }
         })
         return result
@@ -13216,6 +13247,8 @@ export class ChatDbAggregateService {
     topicId: string,
     branchId: string
   ): ChatDbResult<{
+    topicId: string
+    branches: TopicBranchWire[]
     affectedFileIds: string[]
     remainingReferenceCounts: Record<string, number>
     deletedBranchIds: string[]
@@ -13254,6 +13287,8 @@ export class ChatDbAggregateService {
     topicId: string,
     branchId: string
   ): {
+    topicId: string
+    branches: TopicBranchWire[]
     affectedFileIds: string[]
     remainingReferenceCounts: Record<string, number>
     deletedBranchIds: string[]
@@ -13347,6 +13382,8 @@ export class ChatDbAggregateService {
     repos.branches.deleteSubtreeRows(subtreeIds)
     const cleanup = buildFileCleanupResult(repos, affectedFileIds)
     return {
+      topicId,
+      branches: this.listBranchCatalogInTx(repos, topicId),
       affectedFileIds: cleanup.affectedFileIds,
       remainingReferenceCounts: cleanup.remainingReferenceCounts,
       deletedBranchIds: subtreeIds,
@@ -13440,6 +13477,7 @@ export class ChatDbAggregateService {
     parentBlocks: JsonObject[]
     messages: JsonObject[]
     blocks: JsonObject[]
+    branches: TopicBranchWire[]
     resolvedContextAnchorGroupKey?: string | null
     sourceContextAnchorTransfer?: MoveSourceContextAnchorTransfer
     historySnapshot: BranchMoveSnapshot
@@ -13802,6 +13840,7 @@ export class ChatDbAggregateService {
             parentBlocks: parentWireBlocks,
             messages: reconstructMessageBlockRelations(childWireMessages, childWireBlocks),
             blocks: childWireBlocks,
+            branches: this.listBranchCatalogInTx(repos, topicId),
             ...(contextAnchorInheritance ? { resolvedContextAnchorGroupKey } : {}),
             ...(sourceContextAnchorTransfer ? { sourceContextAnchorTransfer } : {}),
             historySnapshot: {

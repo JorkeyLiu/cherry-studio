@@ -91,4 +91,28 @@ describe('projectCommittedChromeFromStructure (bundled receipt)', () => {
     } as any
     expect(projectCommittedChromeFromStructure({ topicId: 't1', branchId: null, structure: noReachable })).toBeNull()
   })
+  it('carries the Main-computed turnCount verbatim, absent stays absent', () => {
+    const structure = {
+      catalog: [wire('s1', ['m1', 'm2']), wire('s2', ['m3'])],
+      route: {
+        topicId: 't1',
+        branchId: null,
+        qualifications: [
+          {
+            segmentId: 's1',
+            headerInRoute: true,
+            headerOwnedByRoute: true,
+            routeMemberMessageIds: ['m1', 'm2'],
+            turnCount: 1
+          },
+          { segmentId: 's2', headerInRoute: true, headerOwnedByRoute: true, routeMemberMessageIds: ['m3'] }
+        ]
+      }
+    } as any
+    const projected = projectCommittedChromeFromStructure({ topicId: 't1', branchId: null, structure })
+    expect(projected).not.toBeNull()
+    expect(projected!.segments.map((s) => s.id)).toEqual(['s1', 's2'])
+    expect(projected!.segments[0].turnCount).toBe(1)
+    expect('turnCount' in projected!.segments[1]).toBe(false)
+  })
 })

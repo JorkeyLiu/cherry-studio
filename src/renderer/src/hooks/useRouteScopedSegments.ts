@@ -1,18 +1,14 @@
 import { loggerService } from '@logger'
+import { dbService } from '@renderer/services/db'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppSelector } from '@renderer/store'
 import { selectHistoryReferenceForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import type { Message } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
-import { fetchRouteChromeWires } from '@renderer/utils/routeCommittedChrome'
-import type { RouteAuthorityAddress, RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
-import { projectSegmentsOntoRoute } from '@renderer/utils/topicSegmentRoute'
-import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
-import type { SegmentRouteQualification } from '@shared/chatDb'
+import { projectCommittedChromeFromStructure } from '@renderer/utils/routeCommittedChrome'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { getMessageGroups } from './useMessageGroup'
 import { useTopicSegments } from './useTopicSegments'
 
 const logger = loggerService.withContext('useRouteScopedSegments')
@@ -20,14 +16,23 @@ const logger = loggerService.withContext('useRouteScopedSegments')
 /** Coalescing window shared with the conversation-navigation refetch pattern. */
 export const ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS = 250
 
+/**
+ * Minimal latest-window size for the caller-local structural read. The window
+ * rows are intentionally ignored (never committed to Redux); only the bundled
+ * same-transaction structure is consumed. `1` requests a single viewport group
+ * and Main still expands a shared askId run whole, so this never splits a
+ * group and never scales with history length.
+ */
+export const ROUTE_STRUCTURE_WINDOW_LIMIT = 1
+
 export interface RouteScopedSegmentsResult {
-  /** Topic-wide catalog projected onto the active route, ordered by first reachable route position. */
+  /** Topic-wide catalog projected onto the active route, in bundled catalog order. */
   segments: RouteScopedSegment[]
   /** Token identifying the route the projection is valid for (`topic::branch`). */
   routeKey: string
   /**
    * Whether `segments` is the accepted projection for `routeKey`
-   * (`snapshotKey === routeKey` with a catalog). While a route switch is
+   * (`structureKey === routeKey` with a catalog). While a route switch is
    * pending this is false and `segments` is intentionally empty so
    * navigation surfaces (drawer) hide rather than list the previous route.
    * In-flow chrome MUST NOT blank on this signal: it must keep rendering
@@ -42,22 +47,6 @@ interface TopicWithUpdatedAt {
   id: string
   updatedAt?: string
 }
-/**
- * Derive message id -> turn index from a whole-route snapshot through
- * `getMessageGroups` length semantics (user + same-askId answers = one turn,
- * a system message = one turn, a dangling askId group = one turn, assistant
- * messages without askId are ignored and map to no turn). Runs over the
- * route-ordered snapshot so group boundaries follow the effective route, and
- * mirrors Main `groupEffectiveTurnsInTx` without a Main/shared change.
- */
-export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<string, number> {
-  const groups = getMessageGroups([...messages])
-  const map = new Map<string, number>()
-  groups.forEach((group, index) => {
-    for (const msg of group.messages) map.set(msg.id, index)
-  })
-  return map
-}
 
 /**
  * Chrome-relevant identity of a topic's ACCEPTED segment catalog.
@@ -66,8 +55,8 @@ export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<st
  * group, so an accepted catalog change (membership, order, display fields, head
  * identity, head owner) can change THIS route's projection even when the route
  * itself never moved: a committed paste appends rows that a group gains while
- * this hook's cached whole-route id set still predates them, and intersecting
- * the new catalog with those old ids silently drops the new group.
+ * this hook's cached structure predates them, and intersecting the new catalog
+ * with those old rows silently drops the new group.
  *
  * Value equality is the point: two reads that accept the same catalog produce
  * the same token, so a repeated/identical publication (including a
@@ -80,7 +69,7 @@ export function deriveRouteTurnMap(messages: readonly Message[]): ReadonlyMap<st
  * - `firstMessageId`/`lastMessageId`/`messageCount` — derived from the same
  *   authority membership that is already part of the token.
  * - `route` — the route-qualified view of whichever route the READER addressed;
- *   this hook reads its own qualification and never consumes the catalog's.
+ *   this hook reads its own bundled structure and never consumes the catalog's.
  * - `folded` — retired wire-compat field, never live state.
  */
 export function segmentCatalogChromeToken(segments: readonly TopicSegment[]): string {
@@ -107,33 +96,34 @@ export function segmentCatalogChromeToken(segments: readonly TopicSegment[]): st
  *
  * The segment catalog is topic-wide, so this hook NEVER filters or rewrites it
  * (the same catalog also drives Messages decoration and segment
- * editing/overlap checks). Instead it reads the caller-local whole-route
- * snapshot (`loadWholeTopicSnapshot`, the same one-shot `whole-topic`
- * capability ConversationNavigation consumes) and projects the catalog onto
- * that route: members in effective-route order, count = intersection,
- * navigation target = first reachable member, 0-intersection segments hidden,
- * and rows ordered by each segment's first reachable route position (catalog
- * `sortOrder`/`id` only breaks equal-position ties) so the list reads
- * top-to-bottom like the conversation. It therefore never misses an off-screen
- * valid member the way a partial loaded window would.
+ * editing/overlap checks). Instead it performs a caller-local minimal latest
+ * window read (`fetchMessagesWindow({ kind: 'latest', limit: 1,
+ * includeStructure: true })`) and projects ONLY the bundled same-transaction
+ * structure (neutral full catalog + Main-computed route qualification) through
+ * `projectCommittedChromeFromStructure`. The returned window rows/blocks are
+ * deliberately ignored: they are never committed to Redux, never replace the
+ * loaded window, and never trigger bootstrap or generation loading — this is a
+ * structural read, not a window read.
+ *
+ * Turn counts ride bundled qualification verbatim when present; absent
+ * remains hidden, never infer from member/catalog count. List order is the
+ * bundled catalog order; the
+ * committed co-commit path derives the identical projection, so the hook's
+ * later acceptance changes nothing visible on the first frame.
  *
  * Refresh/guard mirror the ConversationNavigation pattern:
  * - the route key is derived synchronously every render, so a topic/branch
  *   switch hides the previous route's list on the very first frame, before any
- *   effect runs and while the new snapshot is still pending;
+ *   effect runs and while the new structure is still pending;
  * - stale async completions are discarded by generation + route identity and
  *   can never backfill the previous route under the new key;
  * - same-route authority changes (topic `updatedAt`, MESSAGE_COMPLETE, the
  *   resident reference relation for a reference target, and any accepted
  *   change of this topic's segment catalog) coalesce into a debounced refetch
- *   that keeps the current list visible while pending. The catalog trigger is
- *   what makes a committed collection mutation (paste/restore/undo of rows a
- *   group gains) visible WITHOUT a switch: the projection intersects the NEW
- *   catalog with this hook's cached route id set, so the catalog must be
- *   announced after the commit published its rows. The signal is the accepted
- *   catalog's own content identity — value-equal republication (including a
- *   qualification-only read, which never writes that slice) triggers nothing,
- *   so the refetch cannot feed itself.
+ *   that keeps the current list visible while pending. A missing structure or
+ *   a route-echo mismatch fails closed (the last good projection is kept, no
+ *   independent backfill); a present-but-empty structure is known-empty and
+ *   clears the same route only.
  */
 export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResult {
   const { orderedSegmentsForTopic } = useTopicSegments(topicId)
@@ -173,26 +163,8 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   const catalogToken = useMemo(() => segmentCatalogChromeToken(orderedSegmentsForTopic), [orderedSegmentsForTopic])
   const activeRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
 
-  const [routeMessageIds, setRouteMessageIds] = useState<readonly string[]>([])
-  const [snapshotKey, setSnapshotKey] = useState<string>('')
-  /**
-   * Turn index per message id, derived from the SAME whole-route snapshot as
-   * `routeMessageIds` (keyed by `snapshotKey`, so it can never describe a
-   * route the ids do not). Drives `turnCount` on the projection; unknown
-   * until the snapshot lands, and cleared with the projection on switch.
-   */
-  const [routeTurnMap, setRouteTurnMap] = useState<ReadonlyMap<string, number> | undefined>(undefined)
-  /**
-   * Main-computed route qualification per group id, keyed by the route it was
-   * addressed to. A SEPARATE caller-local read (`listSegments(topic, branch)`)
-   * that never touches the topic-wide authority catalog: the catalog stays
-   * complete and route-independent, and this cache is keyed by routeKey so a
-   * cross-route backfill can never masquerade as the current route's authority.
-   */
-  const [routeBlocks, setRouteBlocks] = useState<ReadonlyMap<string, SegmentRouteQualification>>(
-    () => new Map<string, SegmentRouteQualification>()
-  )
-  const [routeBlocksKey, setRouteBlocksKey] = useState<string>('')
+  const [acceptedSegments, setAcceptedSegments] = useState<RouteScopedSegment[]>([])
+  const [structureKey, setStructureKey] = useState<string>('')
 
   const generationRef = useRef(0)
   const mountedRef = useRef(true)
@@ -230,49 +202,53 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     }
   }, [])
 
-  const fetchRouteSnapshot = useCallback(
+  const fetchRouteStructure = useCallback(
     async (targetTopicId: string, targetBranchId: string | null, targetRouteKey: string, gen: number) => {
-      // Accepted-catalog identity this read was launched for. The read resolves
-      // the route's rows, so it may only be adopted while the catalog it will be
-      // intersected with is still the accepted one: a later commit that changed
-      // group membership (and published its rows) has already scheduled a newer
-      // read, and adopting this one would intersect the NEW catalog with rows
-      // that predate it — the new group silently missing until a switch.
-      const startedCatalogToken = latestCatalogTokenRef.current
       try {
-        const [snap, wires] = await Promise.all([
-          loadWholeTopicSnapshot(targetTopicId, targetBranchId),
-          // Route qualification: the SAME wires the route-window pipelines bind
-          // at commit time (single-flight shared — one IPC for concurrent
-          // hook + commit reads, so both derive identical chrome fields).
-          // Caller-local only — never touches the topic-wide authority catalog.
-          fetchRouteChromeWires(targetTopicId, targetBranchId)
-        ])
+        // Caller-local structural read: a minimal latest window whose rows are
+        // never consumed. Only `structure` (same-transaction neutral catalog +
+        // route qualification) is projected. No Redux commit, no bootstrap or
+        // generation loading is triggered by this direct data-source call.
+        const response = await dbService.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: targetTopicId,
+          branchId: targetBranchId,
+          limit: ROUTE_STRUCTURE_WINDOW_LIMIT,
+          includeStructure: true
+        })
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
-        if (startedCatalogToken !== latestCatalogTokenRef.current) return
-        setRouteMessageIds(snap.messages.map((message) => message.id))
-        setRouteTurnMap(deriveRouteTurnMap(snap.messages))
-        setSnapshotKey(targetRouteKey)
-        const blocks = new Map<string, SegmentRouteQualification>()
-        for (const wire of wires) {
-          // Only the block addressed to THIS route is authority; anything else
-          // is stale cache and the projection ignores it (see freshBlock).
-          if (wire.route && wire.route.topicId === targetTopicId) {
-            blocks.set(wire.id, wire.route)
-          }
+        const structure = response.structure ?? null
+        // Missing structure fails closed: keep the last good projection, no
+        // independent backfill via listSegments/whole-snapshot.
+        if (!structure) return
+        // Route echo must match the addressed route; otherwise fail closed
+        // (never project a stale/other-route structure).
+        if (structure.route.topicId !== targetTopicId) return
+        if ((structure.route.branchId ?? null) !== (targetBranchId ?? null)) return
+        const projected = projectCommittedChromeFromStructure({
+          topicId: targetTopicId,
+          branchId: targetBranchId,
+          structure
+        })
+        if (!mountedRef.current || gen !== generationRef.current) return
+        if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
+        if (projected) {
+          setAcceptedSegments(projected.segments)
+          setStructureKey(targetRouteKey)
+          return
         }
-        setRouteBlocks(blocks)
-        setRouteBlocksKey(targetRouteKey)
+        // Present-but-empty structure is known-empty (empty catalog or zero
+        // reachable members): accept the empty projection so the same route
+        // clears its stale entries instead of lingering.
+        setAcceptedSegments([])
+        setStructureKey(targetRouteKey)
       } catch (error) {
         // Fail-closed: the route-boundary guard has already hidden the old
         // list; a background refetch failure retains the last good projection.
-        // Route blocks keep their keyed cache: without a fresh read the
-        // projection derives authority from catalog metadata instead of
-        // pretending a failed fetch is current.
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
-        logger.warn('Route-scoped segment snapshot read failed', error as Error)
+        logger.warn('Route-scoped segment structure read failed', error as Error)
       }
     },
     []
@@ -293,9 +269,9 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
       if (!hasCatalogRef.current) return
       const gen = generationRef.current + 1
       generationRef.current = gen
-      void fetchRouteSnapshot(targetTopic, targetBranch, targetRouteKey, gen)
+      void fetchRouteStructure(targetTopic, targetBranch, targetRouteKey, gen)
     }, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS)
-  }, [fetchRouteSnapshot])
+  }, [fetchRouteStructure])
 
   // 1) mount / topic or branch switch: drop the previous route's projection at
   // once and load the new route. The synchronous key guard below already hides
@@ -311,17 +287,11 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     }
     const gen = generationRef.current + 1
     generationRef.current = gen
-    setRouteMessageIds([])
-    setRouteTurnMap(undefined)
-    setSnapshotKey('')
-    // Drop the previous route's qualification with its projection: until the
-    // new route's read lands, authority derives from catalog metadata (the
-    // blocks key disagrees, so no stale block can masquerade as current).
-    setRouteBlocks(new Map<string, SegmentRouteQualification>())
-    setRouteBlocksKey('')
+    setAcceptedSegments([])
+    setStructureKey('')
     if (!topicId || !hasCatalog) return
-    void fetchRouteSnapshot(topicId, activeBranchId, `${topicId}::${activeBranchId ?? 'main'}`, gen)
-  }, [topicId, activeBranchId, hasCatalog, fetchRouteSnapshot])
+    void fetchRouteStructure(topicId, activeBranchId, `${topicId}::${activeBranchId ?? 'main'}`, gen)
+  }, [topicId, activeBranchId, hasCatalog, fetchRouteStructure])
 
   // 2) same-route authority mutation metadata: refetch when the current
   // topic's updatedAt changes (baseline seeded by the route effect above).
@@ -346,12 +316,10 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   // 2c) accepted segment catalog changed for THIS topic: the collection
   // authority that decides which route rows belong to a group just moved (a
   // committed paste/restore/undo added rows a group — possibly a brand-new
-  // group — gains). The cached whole-route id set predates those rows, so a
-  // projection of the new catalog against it would drop the new group until a
-  // switch. Re-read the route after the commit published its rows and its
-  // catalog. Value-equal republication never reaches here, and neither read
-  // (whole-route snapshot, route qualification) writes the catalog, so this
-  // cannot feed itself.
+  // group — gains). Re-read the bundled structure after the commit published
+  // its rows and its catalog. Value-equal republication never reaches here,
+  // and the structure read never writes the catalog, so this cannot feed
+  // itself.
   useEffect(() => {
     if (!topicId) return
     if (catalogToken === catalogBaselineRef.current) return
@@ -373,23 +341,8 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     }
   }, [topicId, scheduleDebouncedRefetch])
 
-  const isSnapshotCurrent = snapshotKey === activeRouteKey
-  // Blocks are currency-checked independently: a fresh snapshot with a stale
-  // (or failed) qualification read still projects — authority then derives
-  // from catalog metadata, and the next refresh baseline re-reads both.
-  const isBlocksCurrent = routeBlocksKey === activeRouteKey
-  const authority = useMemo<RouteAuthorityAddress>(
-    () => ({ topicId, branchId: activeBranchId, blocks: isBlocksCurrent ? routeBlocks : undefined }),
-    [topicId, activeBranchId, isBlocksCurrent, routeBlocks]
-  )
-  const isCurrent = isSnapshotCurrent && hasCatalog
-  // The turn map is derived from the same snapshot as the ids and shares its
-  // currency gate: without a fresh snapshot the projection carries no counts.
-  const turnMap = isSnapshotCurrent ? routeTurnMap : undefined
-  const segments = useMemo(
-    () => (isCurrent ? projectSegmentsOntoRoute(routeMessageIds, orderedSegmentsForTopic, authority, turnMap) : []),
-    [isCurrent, routeMessageIds, orderedSegmentsForTopic, authority, turnMap]
-  )
+  const isCurrent = structureKey === activeRouteKey && hasCatalog
+  const segments = useMemo(() => (isCurrent ? acceptedSegments : []), [isCurrent, acceptedSegments])
 
   return useMemo(() => ({ segments, routeKey: activeRouteKey, isCurrent }), [segments, activeRouteKey, isCurrent])
 }

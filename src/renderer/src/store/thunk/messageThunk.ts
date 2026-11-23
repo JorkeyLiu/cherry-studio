@@ -1423,6 +1423,66 @@ export function isDeletePostCommitConvergenceError(error: unknown): error is Del
 }
 
 /**
+ * Publish a same-transaction branch catalog acknowledgment directly.
+ *
+ * Branch mutations (`createBranch`, `moveSelectedTurnsToNewBranch`,
+ * `deleteBranch`) return the complete Main catalog from the same
+ * transaction, so the renderer publishes it without a follow-up
+ * `listBranches` read. Fail-closed: a missing/non-array catalog, a topic
+ * echo mismatch, a malformed entry, a foreign entry, or a duplicate id
+ * keeps the projected catalog — and never fails the committed mutation
+ * (the gap converges on the next window read). Every accepted publish
+ * bumps the catalog revision through `branchesReceived`, so an older
+ * in-flight guarded read can never overwrite the newer authority catalog.
+ *
+ * Returns true when published, false when the projection was kept.
+ */
+export function publishBranchCatalogAck(
+  dispatch: AppDispatch,
+  topicId: string,
+  ack: { topicId?: unknown; branches?: unknown }
+): boolean {
+  if (typeof ack.topicId !== 'undefined' && ack.topicId !== topicId) {
+    logger.error('[publishBranchCatalogAck] Stale topic echo; keeping the projected branch catalog.')
+    return false
+  }
+  const catalog = ack.branches
+  if (!Array.isArray(catalog)) {
+    logger.error('[publishBranchCatalogAck] Ack carries no branch catalog; keeping the projected catalog.')
+    return false
+  }
+  const seen = new Set<string>()
+  for (const entry of catalog) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      logger.error('[publishBranchCatalogAck] Ack catalog entry malformed; keeping the projected catalog.')
+      return false
+    }
+    const rec = entry as Record<string, unknown>
+    if (rec.topicId !== topicId) {
+      logger.error('[publishBranchCatalogAck] Ack catalog entry topic mismatch; keeping the projected catalog.')
+      return false
+    }
+    if (
+      typeof rec.id !== 'string' ||
+      rec.id.length === 0 ||
+      (rec.parentBranchId !== null && typeof rec.parentBranchId !== 'string') ||
+      typeof rec.anchorMessageId !== 'string' ||
+      rec.anchorMessageId.length === 0
+    ) {
+      logger.error('[publishBranchCatalogAck] Ack catalog entry malformed; keeping the projected catalog.')
+      return false
+    }
+    if (seen.has(rec.id)) {
+      logger.error('[publishBranchCatalogAck] Ack catalog entry duplicated; keeping the projected catalog.')
+      return false
+    }
+    seen.add(rec.id)
+  }
+  dispatch(branchesReceived({ topicId, branches: catalog as never }))
+  return true
+}
+
+/**
  * ONE shared authoritative delete acknowledgment: message/block removal plus
  * the complete Main segment catalog from an already-returned
  * `deleteMessagesWithDependents` response. No extra list (the message,
@@ -1462,19 +1522,7 @@ export function publishDeleteAuthorityCatalog(
     logger.error('[publishDeleteAuthorityCatalog] Stale route echo; keeping the projected branch catalog.')
     return
   }
-  const catalog = echo.branches
-  if (!Array.isArray(catalog)) {
-    logger.error('[publishDeleteAuthorityCatalog] Ack carries no branch catalog; keeping the projected catalog.')
-    return
-  }
-  for (const entry of catalog) {
-    const rec = entry as Record<string, unknown>
-    if (rec === null || typeof rec !== 'object' || rec.topicId !== topicId) {
-      logger.error('[publishDeleteAuthorityCatalog] Ack catalog entry topic mismatch; keeping the projected catalog.')
-      return
-    }
-  }
-  dispatch(branchesReceived({ topicId, branches: catalog as never }))
+  publishBranchCatalogAck(dispatch, topicId, { branches: echo.branches })
 }
 
 async function executeDeleteCore(
@@ -2669,11 +2717,12 @@ export const createBranchThunk =
         // invalidate the semantic closure.
         dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId)))
       }
-      try {
-        await refreshBranchCatalogGuarded(dispatch, getState, topicId)
-      } catch (catalogError) {
-        logger.error(`[createBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
-      }
+      // The complete branch catalog rode the same Main transaction: publish
+      // it directly instead of re-reading `listBranches`. Fail-closed (a
+      // malformed ack keeps the projection) and never fails the committed
+      // creation — every accepted publish bumps the catalog revision so an
+      // older in-flight read can never overwrite it.
+      publishBranchCatalogAck(dispatch, topicId, result)
       // Branch catalog change invalidates the current route window/capability:
       // the new route needs its own window. Clear stale
       // capability immediately (fail-closed); the new-route switch reloads the
@@ -2789,8 +2838,9 @@ export const createBranchThunk =
  */
 /**
  * Guarded catalog read+publish shared by every post-write catalog refresh
- * that is NOT itself a same-transaction authority ack (branch creation, move
- * to a new branch, branch-subtree delete, explicit fetch). Reads are
+ * that is NOT itself a same-transaction authority ack (explicit fetch and
+ * any other non-ack post-write path; branch creation, move to a new branch,
+ * and branch-subtree delete publish their ack catalogs directly). Reads are
  * projection-only: the fetch registers an id and captures the catalog
  * revision, then publishes only while it is still the latest request for the
  * topic and no newer authority catalog landed during the await. Older
@@ -2923,8 +2973,9 @@ function persistRouteContextAnchors(
  * supersession (void) preserves the user's current route with no forced
  * navigation. Committed success is returned even when navigation failed.
  *
- * On success: clears the edit selection, refreshes the branch catalog,
- * activates the new branch, and loads its bounded route window with
+ * On success: clears the edit selection, publishes the same-transaction ack
+ * catalog (no follow-up list), activates the new branch, and loads its
+ * bounded route window with
  * mutability through the existing atomic route navigation lifecycle (never a
  * full effective array injection). Context anchor inheritance follows the
  * governed create/route rule.
@@ -2951,6 +3002,16 @@ export const moveSelectedTurnsToNewBranchThunk =
       entryGeneration = 0
     }
     const editSel = await import('../editSelection')
+    // Hoisted before IPC (same execution-time dynamic modules, no new static
+    // cycle): the post-commit path below must run synchronously from the
+    // committed result through `activeBranchSet`, so a catalog observer can
+    // never see the ack-published catalog without the activation that
+    // belongs to the same commit. Pre-IPC gating above already covers these
+    // await boundaries (fresh state + generation recheck before IPC).
+    const [{ activeBranchSet }, { clearSelection }] = await Promise.all([
+      import('../topicBranch'),
+      import('../editMode')
+    ])
     const runMovePrechecks = (
       state: RootState
     ): {
@@ -3172,14 +3233,15 @@ export const moveSelectedTurnsToNewBranchThunk =
         // best-effort block publish; the route load below republishes
       }
     }
-    const { activeBranchSet } = await import('../topicBranch')
-    try {
-      await refreshBranchCatalogGuarded(dispatch, getState, topicId)
-    } catch (catalogError) {
-      logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
-    }
+    // The complete branch catalog rode the same Main transaction: publish
+    // it directly instead of re-reading `listBranches` (fail-closed; never
+    // fails the committed move). Every accepted publish bumps the catalog
+    // revision so an older in-flight read can never overwrite it.
+    publishBranchCatalogAck(dispatch, topicId, result)
+    // `activeBranchSet`/`clearSelection` are hoisted above the IPC: no await
+    // may sit between the ack publish and the activation below.
     // Post-commit route guard: the user may have moved elsewhere during the
-    // commit/catalog awaits. Preserve their route: no forced navigation, and
+    // commit await. Preserve their route: no forced navigation, and
     // invalidate the stale source window only when it is still the resident
     // (never clobber the newly active route's capability).
     {
@@ -3203,7 +3265,6 @@ export const moveSelectedTurnsToNewBranchThunk =
           // best-effort invalidation; never break the committed move
         }
         try {
-          const { clearSelection } = await import('../editMode')
           dispatch(clearSelection())
         } catch {
           // best-effort selection clear; never break the committed move
@@ -3230,7 +3291,6 @@ export const moveSelectedTurnsToNewBranchThunk =
     }
     const newBranchId = result.branch.id
     try {
-      const { clearSelection } = await import('../editMode')
       dispatch(clearSelection())
     } catch {
       // best-effort selection clear; never break the move

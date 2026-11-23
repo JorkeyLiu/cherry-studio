@@ -253,9 +253,10 @@ describe('loadRouteMessagesThunk windowed incremental switch', () => {
 
   it('createBranch inherits parent route anchor per-route (index map, clamp covered by Main)', async () => {
     mocks.createBranch.mockResolvedValue({
-      branch: { id: 'b-new', anchorMessageId: 'u2' },
+      branch: { id: 'b-new', topicId: 't1', anchorMessageId: 'u2' },
       messages: [{ id: 'u1' }, { id: 'u2' }],
-      blocks: []
+      blocks: [],
+      branches: [{ id: 'b-new', topicId: 't1', parentBranchId: null, anchorMessageId: 'u2' }]
     })
     mocks.listBranches.mockResolvedValue({ branches: [] })
     mocks.resolveContextClosure.mockResolvedValue({ resolvedAnchorGroupKey: 'u1', changed: true })
