@@ -170,6 +170,14 @@ vi.mock('./ChatRouteStructure', () => ({
   useChatRouteStructure: () => ({ segments: [], routeKey: '', isCurrent: false })
 }))
 
+// The chat surface's branch-catalog owner asks Main for the topic's branches;
+// this test's subject is the idle-preload window, so it stays transparent here.
+vi.mock('./ChatBranchCatalog', () => ({
+  ChatBranchCatalogProvider: ({ children }: { children: ReactModule.ReactNode }) => <>{children}</>,
+  useChatBranchCatalogTopic: () => null,
+  requestTopicBranches: vi.fn()
+}))
+
 vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))

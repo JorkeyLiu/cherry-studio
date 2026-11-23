@@ -37,6 +37,7 @@ import { useTranslation } from 'react-i18next'
 import { shallowEqual } from 'react-redux'
 import styled from 'styled-components'
 
+import { ChatBranchCatalogProvider } from './ChatBranchCatalog'
 import { ChatRouteStructureProvider } from './ChatRouteStructure'
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
@@ -391,55 +392,60 @@ const Chat: FC<Props> = (props) => {
             flex={1}
             justify="space-between"
             style={{ height: mainHeight, width: '100%' }}>
-            {/* Viewport scope is owned by HomePage (single provider above Navbar/Tabs/Chat). */}
-            <ChatNavbar
-              activeAssistant={props.assistant}
-              activeTopic={props.activeTopic}
-              setActiveTopic={props.setActiveTopic}
-            />
-            <div
-              className="flex flex-1 flex-col justify-between"
-              style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-              <ChatRouteStructureProvider topicId={props.activeTopic.id}>
-                <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
-                  {messageNavigation && (
-                    <ConversationNavigation
-                      topicId={props.activeTopic.id}
-                      readingAnchor={readingAnchor}
-                      onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+            {/* ONE branch catalog request per topic for the chat surface: the
+                navbar's selector, the flow's fork dividers and the navigation
+                list all project the same Redux catalog. */}
+            <ChatBranchCatalogProvider topicId={props.activeTopic.id}>
+              {/* Viewport scope is owned by HomePage (single provider above Navbar/Tabs/Chat). */}
+              <ChatNavbar
+                activeAssistant={props.assistant}
+                activeTopic={props.activeTopic}
+                setActiveTopic={props.setActiveTopic}
+              />
+              <div
+                className="flex flex-1 flex-col justify-between"
+                style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
+                <ChatRouteStructureProvider topicId={props.activeTopic.id}>
+                  <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+                    {messageNavigation && (
+                      <ConversationNavigation
+                        topicId={props.activeTopic.id}
+                        readingAnchor={readingAnchor}
+                        onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                      />
+                    )}
+                    <Messages
+                      ref={messagesRef}
+                      assistant={assistant}
+                      topic={props.activeTopic}
+                      setActiveTopic={props.setActiveTopic}
+                      onComponentUpdate={messagesComponentUpdateHandler}
+                      onFirstUpdate={messagesComponentFirstUpdateHandler}
+                      sharedContextInfo={sharedContextInfo}
+                      onReadingAnchor={setReadingAnchor}
+                    />
+                  </div>
+                  {isContentSearchActive && (
+                    <ContentSearch
+                      ref={contentSearchRef}
+                      searchTarget={mainRef as React.RefObject<HTMLElement>}
+                      filter={contentSearchFilter}
+                      includeUser={filterIncludeUser}
+                      onIncludeUserChange={userOutlinedItemClickHandler}
+                      initialText={pendingSearchText}
+                      onLocateMatch={locateContentSearchMatch}
+                      onClose={disableContentSearch}
                     />
                   )}
-                  <Messages
-                    ref={messagesRef}
+                  <Inputbar
                     assistant={assistant}
-                    topic={props.activeTopic}
                     setActiveTopic={props.setActiveTopic}
-                    onComponentUpdate={messagesComponentUpdateHandler}
-                    onFirstUpdate={messagesComponentFirstUpdateHandler}
+                    topic={props.activeTopic}
                     sharedContextInfo={sharedContextInfo}
-                    onReadingAnchor={setReadingAnchor}
                   />
-                </div>
-                {isContentSearchActive && (
-                  <ContentSearch
-                    ref={contentSearchRef}
-                    searchTarget={mainRef as React.RefObject<HTMLElement>}
-                    filter={contentSearchFilter}
-                    includeUser={filterIncludeUser}
-                    onIncludeUserChange={userOutlinedItemClickHandler}
-                    initialText={pendingSearchText}
-                    onLocateMatch={locateContentSearchMatch}
-                    onClose={disableContentSearch}
-                  />
-                )}
-                <Inputbar
-                  assistant={assistant}
-                  setActiveTopic={props.setActiveTopic}
-                  topic={props.activeTopic}
-                  sharedContextInfo={sharedContextInfo}
-                />
-              </ChatRouteStructureProvider>
-            </div>
+                </ChatRouteStructureProvider>
+              </div>
+            </ChatBranchCatalogProvider>
           </Main>
         </motion.div>
         {showTopics && (

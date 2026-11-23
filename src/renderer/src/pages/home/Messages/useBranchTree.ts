@@ -1,48 +1,31 @@
+import { requestTopicBranches, useChatBranchCatalogTopic } from '@renderer/pages/home/ChatBranchCatalog'
 import type { TopicBranchWire } from '@renderer/services/db/types'
-import type { AppDispatch } from '@renderer/store'
 import type { RootState } from '@renderer/store'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import * as messageThunkModule from '@renderer/store/thunk/messageThunk'
 import { selectRouteGeneration, selectTopicBranches } from '@renderer/store/topicBranch'
 import { useEffect, useMemo } from 'react'
 
-// The branch loader is resolved at runtime with a fail-safe: unit
-// harnesses that stub the thunk module with a partial mock (no branch
-// export) surface a missing-export error on property access — that must not
-// crash the mount. Production always provides the real thunk.
-type BranchLoader = (topicId: string) => (dispatch: AppDispatch) => Promise<void>
-function resolveBranchLoader(): BranchLoader | undefined {
-  try {
-    const fn = (messageThunkModule as unknown as Record<string, unknown>).fetchTopicBranchesThunk
-    return typeof fn === 'function' ? (fn as BranchLoader) : undefined
-  } catch {
-    return undefined
-  }
-}
-const dispatchBranches = (dispatch: AppDispatch, topicId: string): void => {
-  const loadBranches = resolveBranchLoader()
-  if (loadBranches !== undefined) {
-    void dispatch(loadBranches(topicId))
-  }
-}
-
 /**
  * Request a branch catalog refresh for top navigation and fork dividers
- * outside the hook (creation/rename/delete flows). Shares the mount-safe
- * loader resolution above: no-op when the thunk module is partially stubbed.
+ * outside the hook (creation/rename/delete flows). Delegates to the chat
+ * surface's request, which shares the mount-safe loader resolution: a no-op
+ * when the thunk module is partially stubbed. An explicit mutation refresh is
+ * never suppressed by the shell's per-topic request.
  */
-export function requestTopicBranches(dispatch: AppDispatch, topicId: string): void {
-  dispatchBranches(dispatch, topicId)
-}
+export { requestTopicBranches }
 
 /**
  * Branch-tree projection for the currently viewed route.
  *
  * `branchId` is the ACTIVE route (null = main route) — owned by the caller
  * (activeBranchId state), not derived here, so the hook stays a pure
- * projection over the stable catalog reference. All derived values are
- * memoized; the sidebar is untouched (flat logical topics). This feeds only
- * the unified top selector and the fork dividers.
+ * projection over the stable catalog reference. The catalog request does not
+ * live here: the chat shell (`ChatBranchCatalogProvider`) owns the surface's
+ * single request per topic change, and every consumer projects that same
+ * Redux catalog; the hook only requests one itself when no shell covers its
+ * topic. All derived values are memoized; the sidebar is untouched (flat
+ * logical topics). This feeds only the unified top selector and the fork
+ * dividers.
  */
 export function useBranchTree(
   topicId: string,
@@ -70,9 +53,13 @@ export function useBranchTree(
   const branches = useAppSelector((state: RootState) => selectTopicBranches(state, topicId))
   const routeGeneration = useAppSelector((state: RootState) => selectRouteGeneration(state, topicId))
 
+  const shellCatalogTopic = useChatBranchCatalogTopic()
+
   useEffect(() => {
-    dispatchBranches(dispatch, topicId)
-  }, [dispatch, topicId])
+    // Shell-covered topic: its one request per topic change is the read.
+    if (shellCatalogTopic === topicId) return
+    requestTopicBranches(dispatch, topicId)
+  }, [dispatch, shellCatalogTopic, topicId])
 
   return useMemo(() => {
     const byId = new Map(branches.map((b) => [b.id, b]))
