@@ -38,6 +38,33 @@ export const CLOSURE_TOPIC_IDS_META_KEY = 'closureTopicIds' as const
  * keep today's invalidating behavior.
  */
 export const CLOSURE_READ_ONLY_META_KEY = 'closureReadOnly' as const
+/**
+ * Explicit streaming content-mirror marker for closure invalidation, carried
+ * in `action.meta.closureContentMirror`.
+ *
+ * ONLY the per-execution `StreamWriteScheduler` trusted mirror path sets this
+ * marker (throttled existing-block Redux mirror). It never means read-only:
+ * the reducer still applies the content update so store/UI filter/token stay
+ * real-time. The middleware decides exemption centrally via
+ * `isExemptContentMirrorAction` — unmarked/unknown actions always invalidate.
+ */
+export const CLOSURE_CONTENT_MIRROR_META_KEY = 'closureContentMirror' as const
+
+/**
+ * Block fields that provably cannot affect Main closure structure metadata
+ * (counts/boundary/folded/route/anchor). Any other key (id/messageId/type and
+ * everything else) fails closed to structural invalidation. `status` is
+ * further gated to non-terminal values below; terminal SUCCESS/ERROR always
+ * invalidates even with the marker. `type` transitions are never exempt.
+ */
+export const CONTENT_MIRROR_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'content',
+  'status',
+  'thinking_millsec',
+  'citationReferences'
+])
+
+const CONTENT_MIRROR_TERMINAL_STATUSES: ReadonlySet<string> = new Set(['success', 'error'])
 
 /** Single topic, many topics, or unknown (null/undefined/empty -> global fallback). */
 export type ClosureTopicOwnership = string | readonly string[] | null | undefined
@@ -106,4 +133,63 @@ export function markClosureReadOnly<T>(action: T): T {
  */
 export function isClosureReadOnly(action: unknown): boolean {
   return (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[CLOSURE_READ_ONLY_META_KEY] === true
+}
+
+/**
+ * Attach the explicit streaming content-mirror marker to a trusted
+ * `StreamWriteScheduler` mirror action. Preserves existing `meta`.
+ */
+export function markClosureContentMirror<T>(action: T): T {
+  const base = (action ?? {}) as Record<string, any>
+  return {
+    ...base,
+    meta: { ...base.meta, [CLOSURE_CONTENT_MIRROR_META_KEY]: true }
+  } as T
+}
+
+/**
+ * Whether an action carries the trusted streaming content-mirror marker.
+ * Absent/invalid means not a content mirror (safe default: invalidate).
+ * A content mirror is never read-only: both markers set still exempts only
+ * via the content path (read-only already exempts, but the content revision
+ * must still advance so stale hydrations cannot overwrite the new delta).
+ */
+export function isClosureContentMirror(action: unknown): boolean {
+  return (
+    (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[CLOSURE_CONTENT_MIRROR_META_KEY] === true
+  )
+}
+
+/**
+ * Centralized content-mirror exemption predicate (single owner of the rule).
+ *
+ * Exempt ONLY when ALL hold (otherwise fail closed to structural invalidation):
+ * - action type is exactly `messageBlocks/updateOneBlock` (existing-block
+ *   patch; upsert/remove/new-block/type-transition/terminal paths never exempt)
+ * - trusted content-mirror marker present
+ * - explicit non-empty topic ownership present (unmarked/unknown still globals)
+ * - payload `changes` keys are a non-empty subset of CONTENT_MIRROR_ALLOWED_KEYS
+ *   (any `type`/`id`/`messageId`/unknown key rejects; `type` transitions never exempt)
+ * - `status`, when present, is non-terminal (terminal SUCCESS/ERROR rejects)
+ *
+ * Never inspects Redux state. Reducer semantics untouched.
+ */
+export function isExemptContentMirrorAction(action: unknown): boolean {
+  const typed = action as { type?: unknown; payload?: unknown } | null | undefined
+  if (!typed || typed.type !== 'messageBlocks/updateOneBlock') return false
+  if (!isClosureContentMirror(action)) return false
+  if (getClosureTopicIds(action) === null) return false
+  const changes = (typed.payload as { changes?: unknown } | null | undefined)?.changes
+  if (!changes || typeof changes !== 'object') return false
+  const keys = Object.keys(changes as Record<string, unknown>)
+  if (keys.length === 0) return false
+  for (const key of keys) {
+    if (!CONTENT_MIRROR_ALLOWED_KEYS.has(key)) return false
+  }
+  const status = (changes as Record<string, unknown>).status
+  if (status !== undefined) {
+    if (typeof status !== 'string') return false
+    if (CONTENT_MIRROR_TERMINAL_STATUSES.has(status)) return false
+  }
+  return true
 }

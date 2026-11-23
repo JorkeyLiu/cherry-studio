@@ -35,7 +35,7 @@ import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
-import { getClosureTopicIds, isClosureReadOnly } from './closureOwnership'
+import { getClosureTopicIds, isClosureReadOnly, isExemptContentMirrorAction } from './closureOwnership'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -530,8 +530,23 @@ storeSyncService.setOptions({
  *   global fallback). Ownership is never inferred from Redux entities or
  *   projections here. Explicitly marked read-only hydrations
  *   (`meta.closureReadOnly`, see `markClosureReadOnly`) — Main window block
- *   hydration and closure hydration for the same topic — never invalidate.
+ *   hydration and closure hydration for the same topic — never invalidate
+ *   structurally (read-only still advances no generation).
  *   Safe default: absent marker means mutate (invalidate).
+ * - Trusted streaming content mirrors (`meta.closureContentMirror`, see
+ *   `markClosureContentMirror` + `isExemptContentMirrorAction`) for exactly
+ *   `messageBlocks/updateOneBlock` with content-only non-terminal patches
+ *   advance ONLY the content revision (`bumpContentGeneration`) without
+ *   clearing the structural cache and without emitting the semantic signal,
+ *   so continuous same-block text deltas still apply to the store (UI filter
+ *   and token estimate stay real-time) but never invalidate structure or
+ *   trigger an IPC closure refetch. The authoritative closure STRUCTURE stays
+ *   valid and is still accepted; an in-flight fetch that sees this revision
+ *   advanced gap-fills only missing blocks instead of overwriting live bodies
+ *   (`selectClosureBlocksForHydration`). New
+ *   blocks/upserts/removes/type transitions/terminal status/unknown
+ *   keys/unscoped actions fail closed to structural invalidation even with
+ *   the marker. Cached `blocks` bytes are never authoritative fresh bodies.
  * - `messageBlocks/setMessageBlocksLoading|setMessageBlocksError` are not
  *   block-content mutations and never invalidate.
  * - `resident/jointPublishComplete`, `residentRegistry/*`, `retention/*` are
@@ -560,6 +575,21 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
   try {
     const type = typeof action?.type === 'string' ? (action.type as string) : ''
     if (!type) return result
+    // Trusted streaming content mirror: content-only existing-block patch.
+    // Advances ONLY the content revision (no structural clear, no signal) so
+    // the store update stays real-time but structure is not invalidated.
+    // Central predicate owns the rule; unmarked/unknown still invalidates.
+    if (isExemptContentMirrorAction(action)) {
+      const topicIds = getClosureTopicIds(action)
+      if (topicIds !== null) {
+        for (const topicId of topicIds) {
+          closureCache.bumpContentGeneration(topicId)
+        }
+      } else {
+        closureCache.bumpAndInvalidateAll()
+      }
+      return result
+    }
     // Explicit authoritative read-only hydration/publication never invalidates,
     // regardless of slice. Only read sites set this marker.
     if (isClosureReadOnly(action)) return result

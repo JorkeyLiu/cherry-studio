@@ -1,8 +1,11 @@
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { selectClosureBlocksForHydration } from '@renderer/services/closureBlockHydration'
 import {
   ensureClosureGeneration,
+  ensureContentGeneration,
   getClosureLoadGeneration,
+  getContentGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
   isValidContextClosureResponse,
@@ -36,8 +39,12 @@ import { useCallback } from 'react'
  * failures and NOT_FOUND preserve current settings.
  *
  * Closure blocks are hydrated via scoped `withClosureTopics` ownership; the
- * cache publication follows the existing generation/global/deletion freshness
- * guards so stale responses never overwrite newer state. All fallible
+ * cache publication follows the existing generation/global/deletion
+ * structural guards so stale structural responses never overwrite newer
+ * state. A same-block streaming content delta advances only the content
+ * revision, which must NOT abort the resolved anchor: it changes the
+ * hydration strategy instead (`selectClosureBlocksForHydration` gap-fills
+ * missing blocks and never overwrites a live body). All fallible
  * validation/preparation happens before any dispatch; the synchronous
  * publish block (blocks dispatch → cache set → anchor persist, no await
  * between) never leaves a dispatched new anchor without its cache. Anchor
@@ -80,10 +87,10 @@ export function useContextWindowAnchor(
     const contextCount = settings.contextCount ?? null
     // In-flight freshness guards (mirrors useContextClosure): a mutation or
     // hard-deletion during the resolve discards cache publication.
-    // Register route generation at resolve start so a bare-topic mutation
-    // during an uncached branch resolve still bumps this route (init-only).
     ensureClosureGeneration(topicId, route)
+    ensureContentGeneration(topicId, route)
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
+    const contentAtFetch = getContentGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
     let resolved: string | null | undefined
@@ -193,20 +200,30 @@ export function useContextWindowAnchor(
       if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return
+      // Same-block streaming deltas advance ONLY the content revision: the
+      // resolved anchor/closure structure stays authoritative and must still
+      // be published. A content advance changes only the hydration strategy
+      // (gap-fill missing roster blocks, never overwrite a live body that
+      // already carries newer text than this response).
+      const contentAdvanced = getContentGeneration(topicId, route) !== contentAtFetch
+      const publication = selectClosureBlocksForHydration(
+        (Array.isArray(closureResponse.blocks) ? closureResponse.blocks : []) as Array<{ id?: string }>,
+        (id) => Boolean((store.getState() as any)?.messageBlocks?.entities?.[id]),
+        contentAdvanced
+      )
       let blocksAction: unknown = null
       try {
-        if (Array.isArray(closureResponse.blocks) && closureResponse.blocks.length > 0) {
+        if (publication.blocks.length > 0) {
           // Read-only closure hydration for the new anchor: must not
           // invalidate the semantic generation it just snapshotted.
-          blocksAction = markClosureReadOnly(
-            withClosureTopics(upsertManyBlocks(closureResponse.blocks as any), topicId)
-          )
+          blocksAction = markClosureReadOnly(withClosureTopics(upsertManyBlocks(publication.blocks as any), topicId))
         }
       } catch {
         return
       }
-      // Re-read immediately before the synchronous publish (covers races
-      // between validation and publish with no await in between).
+      // Re-read structural freshness immediately before the synchronous
+      // publish (covers races between validation and publish with no await
+      // in between).
       if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return

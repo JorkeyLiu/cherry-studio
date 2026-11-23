@@ -96,7 +96,7 @@ import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
 
-import { markClosureReadOnly, withClosureTopics } from '../closureOwnership'
+import { markClosureContentMirror, markClosureReadOnly, withClosureTopics } from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
@@ -765,9 +765,10 @@ const fetchAndProcessAssistantResponseImpl = async (
         target.topicId ? { topicId: target.topicId, branchId: target.branchId } : undefined
       ),
     mirrorToRedux: (id, blockUpdate, mirrorTopicId) => {
-      const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
-      // Scoped invalidation when ownership is trustworthy; otherwise the
-      // middleware falls back to global invalidation.
+      const mirrorAction = markClosureContentMirror(updateOneBlock({ id, changes: blockUpdate }))
+      // Scoped ownership + trusted content-mirror marker: the centralized
+      // middleware predicate exempts only provably content-only non-terminal
+      // patches; unmarked/unknown still fail closed to structural invalidation.
       store.dispatch(mirrorTopicId ? withClosureTopics(mirrorAction, mirrorTopicId) : mirrorAction)
     }
   })
@@ -4914,7 +4915,7 @@ export const setupChannelStream = (
         target.topicId ? { topicId: target.topicId, branchId: target.branchId } : undefined
       ),
     mirrorToRedux: (id, blockUpdate, mirrorTopicId) => {
-      const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
+      const mirrorAction = markClosureContentMirror(updateOneBlock({ id, changes: blockUpdate }))
       store.dispatch(mirrorTopicId ? withClosureTopics(mirrorAction, mirrorTopicId) : mirrorAction)
     }
   })

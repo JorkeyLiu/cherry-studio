@@ -1,12 +1,15 @@
 import { useLoadedTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { selectClosureBlocksForHydration } from '@renderer/services/closureBlockHydration'
 import {
   bumpAndInvalidate,
   closureKeyForRoute,
   computeClosureFingerprint,
   enforceContextClosureRetention,
   ensureClosureGeneration,
+  ensureContentGeneration,
   getClosureLoadGeneration,
   getClosureSemanticToken,
+  getContentGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
   isValidContextClosureResponse,
@@ -60,6 +63,16 @@ export function useClosureSemanticSignal(topicId: string, branchId?: string | nu
  *   path (null closure → authority-pending in the shared projection); no new
  *   visible placeholder state is introduced.
  *
+ * Content-advance acceptance (cold-race fix): a same-block streaming content
+ * mirror advances ONLY the content revision. Structural guards (generation /
+ * global / deletion / identity / anchor) decide acceptance; a content advance
+ * changes only the HYDRATION strategy (`selectClosureBlocksForHydration`):
+ * the authoritative structure is still accepted and cached (so a cold route
+ * never stays authority-pending), while only roster blocks missing from the
+ * live store are filled — a stale response body never overwrites a newer
+ * delta. No extra fetch, no retry loop: the content revision is not an
+ * invalidation signal.
+ *
  * Viewport-independent: full-route authoritative counts/anchor/boundary are
  * independent of the currently loaded viewport. Pure latest/around/load-more
  * reads never invalidate semantic context and never reject a valid closure
@@ -76,7 +89,7 @@ export function useClosureSemanticSignal(topicId: string, branchId?: string | nu
  *   fingerprint gate, no viewport-newest gate.
  * - Staged publication re-reads generation/global/deletion immediately before
  *   the read-only block hydration and cache publication; discards on mismatch
- *   so stale responses cannot overwrite newer state.
+ *   so stale responses cannot overwrite newer structural state.
  * - No separate persistence, no viewport expansion, no contextCount bound.
  */
 export function useContextClosure(topicId: string, anchorGroupKey: string | null, branchId?: string | null) {
@@ -158,6 +171,10 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     // mutation during an uncached branch fetch still bumps this route
     // (init-only, never invalidates). getFreshValidatedClosure also ensures.
     ensureClosureGeneration(topicId, route)
+    // Content revision baseline for this fetch: a same-block streaming delta
+    // during the fetch bumps content only (no structural invalidation), so
+    // the staged hydrate below must discard when it moves.
+    ensureContentGeneration(topicId, route)
     // Centralized freshness-gated cache read (STRICT, unchanged): structural +
     // route/anchor + generation. Used ONLY to decide accept-vs-background-
     // fetch here — never to clear the accepted UI projection.
@@ -182,6 +199,7 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     // Capture semantic freshness signals at fetch start for the in-flight
     // publication guard (covers uncached topics with active fetches and hard-deletion).
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
+    const contentAtFetch = getContentGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
     setLoading(true)
@@ -214,23 +232,36 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         const currentAnchor = asst?.settings?.contextWindowAnchor?.[routeKey]?.groupKey ?? null
         if (currentAnchor !== anchorGroupKey) return
 
-        // Re-read semantic freshness immediately before staged publication (covers mutations during fetch)
+        // Structural freshness immediately before staged publication (covers
+        // mutations during fetch). Same-block streaming content deltas are NOT
+        // structural: they advance only the content revision, so the
+        // authoritative structure (roster/counts/boundary/fold/anchor) stays
+        // valid and is accepted below — it must not be discarded (that would
+        // leave the projection authority-pending with no accepted closure).
         const curGenNow = getClosureLoadGeneration(topicId, route)
         if (curGenNow !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
-
         // Staged publication: re-read once more immediately before hydration to guard against races
         const genBeforePublish = getClosureLoadGeneration(topicId, route)
         if (genBeforePublish !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
-        if (response.blocks.length > 0) {
+        // A content advance changes only the hydration strategy: gap-fill
+        // missing roster blocks, never overwrite a live body with a body that
+        // predates the deltas mirrored during the fetch.
+        const contentAdvanced = getContentGeneration(topicId, route) !== contentAtFetch
+        const publication = selectClosureBlocksForHydration(
+          response.blocks as unknown as Array<{ id?: string }>,
+          (id) => Boolean((store.getState() as any)?.messageBlocks?.entities?.[id]),
+          contentAdvanced
+        )
+        if (publication.blocks.length > 0) {
           // Closure hydration for this topic only: scoped ownership + explicit
           // read-only marker so this hydration never bumps the semantic
           // generation (no invalidation loop). Other topics' cached closures
           // are never flushed by this publication.
-          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(response.blocks as any), topicId)))
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(publication.blocks as any), topicId)))
         }
         // Cache publication stores snapshot of generation at fetch start (which equals current).
         // Stored fingerprint is closure-derived (authority), never viewport-derived.
