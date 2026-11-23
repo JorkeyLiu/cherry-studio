@@ -1986,6 +1986,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: ['u1', 'a1'],
           deletedBlockIds: ['b1'],
           previousUserMessageIds: ['u1', 'u2'],
@@ -2015,6 +2018,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: ['u1', 'u3'],
           deletedBlockIds: [],
           previousUserMessageIds: ['u1', 'u2', 'u3'],
@@ -2055,6 +2061,64 @@ describe('validateChatDbResult — valid success envelopes', () => {
     ).not.toThrow()
   })
 
+  it('delete-messages-with-dependents: requires the complete branch catalog', () => {
+    const base = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't1',
+      branchId: null,
+      deletedMessageIds: ['m1'],
+      deletedBlockIds: [],
+      previousUserMessageIds: ['m1'],
+      remainingUserMessageIds: [],
+      segments: [],
+      restoreGroups: [{ entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }],
+      segmentSnapshots: [],
+      boundarySnapshots: []
+    }
+    const branch = {
+      id: 'b-1',
+      topicId: 't1',
+      parentBranchId: null,
+      anchorMessageId: 'm0',
+      name: null,
+      createdAt: null,
+      updatedAt: null
+    }
+    // A populated same-topic catalog validates.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, branches: [branch] }
+      })
+    ).not.toThrow()
+    // Missing catalog never validates (no silent clear downstream).
+    const noCatalog: Record<string, unknown> = { ...base, branches: [] as unknown[] }
+    delete noCatalog.branches
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', { ok: true, value: noCatalog })
+    ).toThrow(ValidationError)
+    // Cross-topic entries, duplicate ids, and unknown keys all fail closed.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, branches: [{ ...branch, topicId: 't-x' }] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, branches: [branch, branch] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, branches: [{ ...branch, extra: 1 }] }
+      })
+    ).toThrow(ValidationError)
+  })
+
   it('delete-messages-with-dependents: rejects empty deletedMessageIds', () => {
     expect(() =>
       validateChatDbResult('chatdb:delete-messages-with-dependents', {
@@ -2062,6 +2126,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: [],
           deletedBlockIds: [],
           previousUserMessageIds: ['u1'],
@@ -2082,6 +2149,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: ['m1', 'm1'],
           deletedBlockIds: [],
           previousUserMessageIds: ['m1'],
@@ -2104,6 +2174,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: ['m1'],
           deletedBlockIds: [],
           previousUserMessageIds: ['m1'],
@@ -2123,6 +2196,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
     const base = {
       affectedFileIds: [],
       remainingReferenceCounts: {},
+      topicId: 't1',
+      branchId: null,
+      branches: [],
       deletedMessageIds: ['m1'],
       deletedBlockIds: [],
       previousUserMessageIds: ['m1'],
@@ -2163,6 +2239,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
     const base = {
       affectedFileIds: [],
       remainingReferenceCounts: {},
+      topicId: 't1',
+      branchId: null,
+      branches: [],
       deletedMessageIds: ['m1', 'm2'],
       deletedBlockIds: [],
       previousUserMessageIds: ['m1'],
@@ -2240,6 +2319,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
+          topicId: 't1',
+          branchId: null,
+          branches: [],
           deletedMessageIds: ['m1'],
           deletedBlockIds: [],
           previousUserMessageIds: ['m1'],
@@ -2271,6 +2353,9 @@ describe('validateChatDbResult — valid success envelopes', () => {
     const base = {
       affectedFileIds: [],
       remainingReferenceCounts: {},
+      topicId: 't1',
+      branchId: null,
+      branches: [],
       deletedMessageIds: ['m1'],
       deletedBlockIds: [],
       previousUserMessageIds: ['m1'],

@@ -28,6 +28,18 @@ export interface TopicBranchState {
   /** Monotonic route generation per topic: stale route fetches discard. */
   routeGenerationByTopic: Record<string, number>
   /**
+   * Catalog revision per topic: bumped on every accepted branch-catalog
+   * publish (authority ack or fresh fetch). Fetch currency guard only — never
+   * merged with routeGeneration. Runtime-only, never persisted.
+   */
+  catalogRevisionByTopic: Record<string, number>
+  /**
+   * Latest requested catalog fetch id per topic. A fetch publishes only while
+   * it is still the latest request and no newer catalog publish landed during
+   * its await. Runtime-only, never persisted.
+   */
+  catalogFetchSeqByTopic: Record<string, number>
+  /**
    * One-shot deletion-fallback reload intent per logical topic.
    * Set by `deleteBranchSubtree` together with the active-fallback switch
    * when the active route was deleted; consumed exactly once by the Messages
@@ -44,6 +56,8 @@ const initialState: TopicBranchState = {
   branchesByTopic: {},
   activeBranchIdByTopic: {},
   routeGenerationByTopic: {},
+  catalogRevisionByTopic: {},
+  catalogFetchSeqByTopic: {},
   deletionFallbackByTopic: {}
 }
 
@@ -51,7 +65,10 @@ const initialState: TopicBranchState = {
  * Persisted wire for the topicBranch slice: the one-shot
  * `deletionFallbackByTopic` intent is runtime-only and never reaches storage.
  */
-export type TopicBranchPersistedState = Omit<TopicBranchState, 'deletionFallbackByTopic'>
+export type TopicBranchPersistedState = Omit<
+  TopicBranchState,
+  'deletionFallbackByTopic' | 'catalogRevisionByTopic' | 'catalogFetchSeqByTopic'
+>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -87,6 +104,8 @@ export function topicBranchOutboundFromPersist(stored: unknown): TopicBranchStat
     branchesByTopic,
     activeBranchIdByTopic,
     routeGenerationByTopic,
+    catalogRevisionByTopic: {},
+    catalogFetchSeqByTopic: {},
     deletionFallbackByTopic: {}
   }
 }
@@ -135,11 +154,28 @@ export const topicBranchSlice = createSlice({
       }
       const valid = Array.isArray(branches) ? branches.filter(isValidBranchWire) : []
       state.branchesByTopic[topicId] = valid
+      // Every accepted publish advances the catalog revision so an older
+      // in-flight fetch can never overwrite a newer catalog. Route generation
+      // is untouched here: catalog currency and route currency stay separate.
+      if (!state.catalogRevisionByTopic) state.catalogRevisionByTopic = {}
+      state.catalogRevisionByTopic[topicId] = (state.catalogRevisionByTopic[topicId] ?? 0) + 1
       const active = state.activeBranchIdByTopic[topicId]
       if (typeof active === 'string' && active.length > 0 && !valid.some((b) => b.id === active)) {
         state.activeBranchIdByTopic[topicId] = null
         state.routeGenerationByTopic[topicId] = (state.routeGenerationByTopic[topicId] ?? 0) + 1
       }
+    },
+    /**
+     * Record one catalog fetch request. The fetch publishes only while it is
+     * still the latest request for the topic and the catalog revision is
+     * unchanged since its dispatch (see fetchTopicBranchesThunk).
+     */
+    catalogFetchStarted(state, action: PayloadAction<{ topicId: string; fetchId: number }>) {
+      const { topicId, fetchId } = action.payload
+      if (typeof topicId !== 'string' || topicId.length === 0) return
+      if (typeof fetchId !== 'number' || !Number.isFinite(fetchId)) return
+      if (!state.catalogFetchSeqByTopic) state.catalogFetchSeqByTopic = {}
+      state.catalogFetchSeqByTopic[topicId] = fetchId
     },
     /**
      * Switch the active route of one logical topic. `branchId` null selects
@@ -175,6 +211,8 @@ export const topicBranchSlice = createSlice({
         delete state.branchesByTopic[id]
         delete state.activeBranchIdByTopic[id]
         delete state.routeGenerationByTopic[id]
+        if (state.catalogRevisionByTopic) delete state.catalogRevisionByTopic[id]
+        if (state.catalogFetchSeqByTopic) delete state.catalogFetchSeqByTopic[id]
         // Backward-compatible: persisted states predating the one-shot
         // deletion intent carry no `deletionFallbackByTopic` field.
         if (state.deletionFallbackByTopic) {
@@ -186,6 +224,8 @@ export const topicBranchSlice = createSlice({
       state.branchesByTopic = {}
       state.activeBranchIdByTopic = {}
       state.routeGenerationByTopic = {}
+      state.catalogRevisionByTopic = {}
+      state.catalogFetchSeqByTopic = {}
       state.deletionFallbackByTopic = {}
     },
     /**
@@ -231,6 +271,7 @@ export const topicBranchSlice = createSlice({
 
 export const {
   branchesReceived,
+  catalogFetchStarted,
   activeBranchSet,
   activeBranchReset,
   branchesRemoved,
@@ -254,6 +295,14 @@ export const selectActiveBranchId = (state: RootState, topicId: string): string 
 /** Route generation for stale-fetch guards (0 when never switched). */
 export const selectRouteGeneration = (state: RootState, topicId: string): number =>
   selectTopicBranchState(state).routeGenerationByTopic[topicId] ?? 0
+
+/** Catalog revision for fetch currency (0 when never published). */
+export const selectCatalogRevision = (state: RootState, topicId: string): number =>
+  selectTopicBranchState(state).catalogRevisionByTopic?.[topicId] ?? 0
+
+/** Latest requested catalog fetch id (0 when none requested). */
+export const selectCatalogFetchSeq = (state: RootState, topicId: string): number =>
+  selectTopicBranchState(state).catalogFetchSeqByTopic?.[topicId] ?? 0
 
 /** One-shot deletion-fallback intent for a topic (undefined when none pending). */
 export const selectDeletionFallbackIntent = (

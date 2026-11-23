@@ -105,7 +105,15 @@ import {
   requireAnswerGroupForMember,
   requireLoadedAnswerMembersMutable
 } from '../routeAnswerGroup'
-import { selectActiveBranchId, selectBranchNode, selectRouteGeneration } from '../topicBranch'
+import {
+  branchesReceived,
+  catalogFetchStarted,
+  selectActiveBranchId,
+  selectBranchNode,
+  selectCatalogFetchSeq,
+  selectCatalogRevision,
+  selectRouteGeneration
+} from '../topicBranch'
 import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
 //   bulkAddBlocksV2,
@@ -1416,15 +1424,16 @@ export function isDeletePostCommitConvergenceError(error: unknown): error is Del
 /**
  * ONE shared authoritative delete acknowledgment: message/block removal plus
  * the complete Main segment catalog from an already-returned
- * `deleteMessagesWithDependents` response. No extra list (the response is
- * already the complete catalog per PROJ-10/I-5); the paired
+ * `deleteMessagesWithDependents` response. No extra list (the message,
+ * segment, and branch catalogs all rode the same transaction); the paired
  * `isDeletePairedFollowUp` flag keeps the single atomic commit preserving
  * the valid loaded projection (raw/fromSync invalidation unchanged).
  */
 export function publishDeleteAuthorityCatalog(
   dispatch: AppDispatch,
   topicId: string,
-  response: DeleteMessagesWithDependentsResponse
+  response: DeleteMessagesWithDependentsResponse,
+  expectedRoute?: string | null
 ): void {
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
   if (response.deletedBlockIds.length > 0) {
@@ -1437,6 +1446,34 @@ export function publishDeleteAuthorityCatalog(
     }),
     meta: { isDeletePairedFollowUp: true }
   } as any)
+  // The branch catalog rode the same transaction: publish it as part of this
+  // one acknowledgment instead of re-reading. A missing/non-array catalog or
+  // a stale/foreign echo never clears the projection and never fails the
+  // committed delete — the gap converges on the next window read.
+  const echo = response as unknown as {
+    topicId?: unknown
+    branchId?: unknown
+    branches?: unknown
+  }
+  const echoRoute = (echo.branchId ?? null) as string | null
+  const wantRoute = typeof expectedRoute === 'undefined' ? echoRoute : expectedRoute
+  if (echo.topicId !== topicId || echoRoute !== wantRoute) {
+    logger.error('[publishDeleteAuthorityCatalog] Stale route echo; keeping the projected branch catalog.')
+    return
+  }
+  const catalog = echo.branches
+  if (!Array.isArray(catalog)) {
+    logger.error('[publishDeleteAuthorityCatalog] Ack carries no branch catalog; keeping the projected catalog.')
+    return
+  }
+  for (const entry of catalog) {
+    const rec = entry as Record<string, unknown>
+    if (rec === null || typeof rec !== 'object' || rec.topicId !== topicId) {
+      logger.error('[publishDeleteAuthorityCatalog] Ack catalog entry topic mismatch; keeping the projected catalog.')
+      return
+    }
+  }
+  dispatch(branchesReceived({ topicId, branches: catalog as never }))
 }
 
 async function executeDeleteCore(
@@ -1487,8 +1524,9 @@ async function executeDeleteCore(
 
     // Redux mutations AFTER successful SQLite commit — reducers naturally
     // affect only the loaded intersection, never injecting window-outside entities.
-    // ONE shared delete acknowledgment (no duplicate flags, no extra list).
-    publishDeleteAuthorityCatalog(dispatch, topicId, response)
+    // ONE shared delete acknowledgment (no duplicate flags, no extra list):
+    // the branch catalog rode the same transaction, so no follow-up read.
+    publishDeleteAuthorityCatalog(dispatch, topicId, response, addressedRoute)
 
     // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
     transferAnchorsWithAuthorityGroupKeys(
@@ -1500,12 +1538,9 @@ async function executeDeleteCore(
       addressedRoute
     )
     // A deleted message may be a branch/reference inheritance boundary: Main
-    // moves that boundary to the nearest surviving predecessor inside the same
-    // delete transaction. The branch catalog is a Main projection, so the
-    // renderer copy would keep the removed anchor id — the fork divider then
-    // has no anchor message to attach to and silently disappears. Re-read the
-    // authoritative catalog as part of the same post-commit convergence.
-    await dispatch(fetchTopicBranchesThunk(topicId))
+    // moved that boundary to the nearest surviving predecessor inside the same
+    // delete transaction, and the resulting catalog published above with the
+    // acknowledgment — no follow-up read (the ack is the complete catalog).
   } catch (convergenceError) {
     throw new DeletePostCommitConvergenceError(
       '[executeDeleteCore] Renderer convergence failed after Main commit; source deletion committed',
@@ -2633,10 +2668,8 @@ export const createBranchThunk =
         // invalidate the semantic closure.
         dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId)))
       }
-      const { branchesReceived } = await import('../topicBranch')
       try {
-        const catalog = await dbService.listBranches(topicId)
-        dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+        await refreshBranchCatalogGuarded(dispatch, getState, topicId)
       } catch (catalogError) {
         logger.error(`[createBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
       }
@@ -2753,13 +2786,47 @@ export const createBranchThunk =
  * and fork dividers. Pure read; stores the projection in the topicBranch
  * slice. Missing topics resolve to null (caller keeps previous projection).
  */
+/**
+ * Guarded catalog read+publish shared by every post-write catalog refresh
+ * that is NOT itself a same-transaction authority ack (branch creation, move
+ * to a new branch, branch-subtree delete, explicit fetch). Reads are
+ * projection-only: the fetch registers an id and captures the catalog
+ * revision, then publishes only while it is still the latest request for the
+ * topic and no newer authority catalog landed during the await. Older
+ * in-flight reads discard silently and never overwrite a newer catalog.
+ * Resolves true when published, false when discarded as stale; read failures
+ * throw for the caller to handle (a refresh must never fail the write).
+ */
+export async function refreshBranchCatalogGuarded(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string
+): Promise<boolean> {
+  // Currency guard (catalog-only, never routeGeneration): an authority ack
+  // that publishes a newer catalog during this await — or a newer fetch for
+  // the same topic — makes this response stale, so it must not overwrite the
+  // newer projection. Late losers discard silently (projection-only read).
+  const capturedRevision = selectCatalogRevision(getState(), topicId)
+  const fetchId = selectCatalogFetchSeq(getState(), topicId) + 1
+  dispatch(catalogFetchStarted({ topicId, fetchId }))
+  const catalog = await dbService.listBranches(topicId)
+  const current = getState()
+  if (selectCatalogFetchSeq(current, topicId) !== fetchId) {
+    logger.warn(`[refreshBranchCatalogGuarded] Superseded fetch for ${topicId}; keeping the newer catalog.`)
+    return false
+  }
+  if (selectCatalogRevision(current, topicId) !== capturedRevision) {
+    logger.warn(`[refreshBranchCatalogGuarded] Stale fetch after an authority publish for ${topicId}; discarding.`)
+    return false
+  }
+  dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+  return true
+}
 export const fetchTopicBranchesThunk =
   (topicId: string) =>
-  async (dispatch: AppDispatch, _getState: () => RootState): Promise<void> => {
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
     try {
-      const catalog = await dbService.listBranches(topicId)
-      const { branchesReceived } = await import('../topicBranch')
-      dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+      await refreshBranchCatalogGuarded(dispatch, getState, topicId)
     } catch (error) {
       logger.error(`[fetchTopicBranchesThunk] Failed to load branches for ${topicId}:`, error as Error)
     }
@@ -3104,10 +3171,9 @@ export const moveSelectedTurnsToNewBranchThunk =
         // best-effort block publish; the route load below republishes
       }
     }
-    const { branchesReceived, activeBranchSet } = await import('../topicBranch')
+    const { activeBranchSet } = await import('../topicBranch')
     try {
-      const catalog = await dbService.listBranches(topicId)
-      dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+      await refreshBranchCatalogGuarded(dispatch, getState, topicId)
     } catch (catalogError) {
       logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
     }

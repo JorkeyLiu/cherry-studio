@@ -10,16 +10,30 @@ const { dispatchMock, listBranchesMock, deleteBranchMock } = vi.hoisted(() => ({
 
 vi.mock('@renderer/store', () => ({
   default: {
-    getState: () => ({
-      topicBranch: {
-        branchesByTopic: {
-          't-1': [
-            { id: 'b-1', parentBranchId: null },
-            { id: 'b-2', parentBranchId: 'b-1' }
-          ]
+    // Stateful enough for the guarded refresh: replay catalogFetchStarted
+    // dispatches as the fetch-seq map so the refresh's own fetch stays
+    // latest (the mock dispatch does not reduce state).
+    getState: () => {
+      const seq: Record<string, number> = {}
+      for (const c of dispatchMock.mock.calls) {
+        const a = c[0] as { type?: string; payload?: { topicId?: string; fetchId?: number } }
+        if (a?.type === 'topicBranch/catalogFetchStarted' && typeof a.payload?.topicId === 'string') {
+          seq[a.payload.topicId] = typeof a.payload?.fetchId === 'number' ? a.payload.fetchId : 0
         }
       }
-    }),
+      return {
+        topicBranch: {
+          branchesByTopic: {
+            't-1': [
+              { id: 'b-1', parentBranchId: null },
+              { id: 'b-2', parentBranchId: 'b-1' }
+            ]
+          },
+          catalogFetchSeqByTopic: seq,
+          catalogRevisionByTopic: {}
+        }
+      }
+    },
     dispatch: (...args: unknown[]) => {
       dispatchMock(...args)
       return args[0]
@@ -285,5 +299,34 @@ describe('deletion fallback latest intent (branch subtree removal)', () => {
     expect(slice).toMatch(/kind:\s*'latest'/)
     expect(slice).toMatch(/budget:\s*displayCount/)
     expect(slice).toMatch(/kind:\s*'bottom'/)
+  })
+  it('atomic handoff: active-fallback switch + intent publish BEFORE the catalog refresh', async () => {
+    // Regression for the true-branch subtree-delete stall (Main latest30 vs
+    // renderer stale route, active null, empty catalog, loading false): the
+    // catalog publish prunes a stale active on arrival. Publishing it before
+    // the reset+intent exposed an intent-less active change that the generic
+    // route effect claimed and loaded while the follow-up reset staled that
+    // read (generation advance); the late intent then stood down on the
+    // generic claim and no owner retried. The helper must move the active
+    // route (and arm the one-shot intent) first so the prune is a no-op.
+    const seen: string[] = []
+    listBranchesMock.mockImplementation(async () => {
+      seen.push('ipc:listBranches')
+      return { topicId: 't-1', branches: [] }
+    })
+    deleteBranchMock.mockResolvedValue(deleteResult(['b-1', 'b-2']))
+    const result = await deleteBranchSubtree('t-1', 'b-1', 'b-2')
+    expect(result.fallbackBranchId).toBeNull()
+    const types = dispatchMock.mock.calls.map((c) => (c[0] as { type: string })?.type)
+    const resetAt = types.indexOf('topicBranch/activeBranchReset')
+    const intentAt = types.indexOf('topicBranch/deletionFallbackRequested')
+    const fetchAt = types.indexOf('topicBranch/catalogFetchStarted')
+    const publishedAt = types.indexOf('topicBranch/branchesReceived')
+    expect(resetAt).toBeGreaterThanOrEqual(0)
+    expect(intentAt).toBeGreaterThan(resetAt)
+    expect(seen).toEqual(['ipc:listBranches'])
+    // The Main read backing the refresh happens only after the handoff.
+    expect(fetchAt).toBeGreaterThan(intentAt)
+    expect(publishedAt).toBeGreaterThan(fetchAt)
   })
 })

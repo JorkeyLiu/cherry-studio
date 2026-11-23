@@ -7192,6 +7192,7 @@ export class ChatDbAggregateService {
             ...cleanup,
             topicId,
             branchId: route,
+            branches: this.listBranchCatalogInTx(repos, topicId),
             insertedMessages: messagesWithBlocks,
             insertedBlocks: blocksToWire(durableBlocks),
             insertedMessageIds: insertedIds,
@@ -12982,6 +12983,30 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Same-transaction branch catalog for semantic acknowledgments: every branch
+   * row of the topic plus the inherited boundary Main re-derives from the
+   * effective routes inside this transaction. Empty when never branched.
+   * Tolerates a pre-016 database without the table (empty catalog, never a
+   * throw that would fail the enclosing mutation).
+   */
+  private listBranchCatalogInTx(repos: ChatDbRepositories, topicId: string): TopicBranchWire[] {
+    let rows: TopicBranchData[]
+    try {
+      rows = repos.branches.listByTopic(topicId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return []
+      throw e
+    }
+    const routeCache = new Map<string | null, MessageData[] | null>()
+    return rows.map((b) =>
+      this.branchToWire(
+        b,
+        this.resolveBranchInheritedBoundaryInTx(repos, topicId, b.parentBranchId, b.anchorMessageId, routeCache)
+      )
+    )
+  }
+
+  /**
    * List all branch nodes of one logical topic in (createdAt, id) order.
    * Pure read; missing topic fails. Empty when never branched.
    */
@@ -15750,6 +15775,9 @@ export class ChatDbAggregateService {
           const cleanup = buildFileCleanupResult(repos, affectedFileIds)
           return {
             ...cleanup,
+            topicId,
+            branchId: route,
+            branches: this.listBranchCatalogInTx(repos, topicId),
             deletedMessageIds: ownedIds,
             deletedBlockIds,
             previousUserMessageIds,

@@ -537,14 +537,10 @@ async function undoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   // Restore segment membership
   await restoreSegmentsAfterUndo(dispatch, getState, segmentSnapshots)
 
-  // The restore replaced the authoritative messages in Main, and the branch
-  // catalog is a projection of Main state (both the fork rows and the
-  // inherited boundary Main re-derives from effective routes). Re-read the
-  // addressed topic so the projection converges even when the delete recorded
-  // no moved boundary: a missing former predecessor keeps the boundary id
-  // without publishing a snapshot, yet Main still re-derives the head from the
-  // restored message. Refresh is projection-only and never a second write.
-  await refreshBranchCatalogAfterAuthorityWrite(dispatch, targetTopicId, 'undoDelete')
+  // The branch catalog rode the same insert transaction and published with
+  // the acknowledgment above (even when the delete recorded no moved
+  // boundary: Main still re-derived the head from the restored message) —
+  // no follow-up re-read.
 
   const totalMessages = groupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoDelete] Restored ${totalMessages} messages from ${groupAnchors.length} groups`)
@@ -756,12 +752,10 @@ async function undoCutPaste(
     sourceBoundarySnapshots
   )
 
-  // The source messages were restored in Main, so the source topic's catalog
-  // is stale regardless of whether this cut recorded a moved boundary: Main
-  // re-derives the inherited head from the restored message even when no
-  // surviving predecessor lets it publish a boundary snapshot. Re-read the
-  // source catalog (projection-only, never a second write).
-  await refreshBranchCatalogAfterAuthorityWrite(dispatch, sourceTopicId, 'undoCutPaste')
+  // The source branch catalog rode the same restore transaction and
+  // published with the acknowledgment above (Main re-derives the inherited
+  // head from the restored message even with no boundary snapshot) — no
+  // follow-up re-read of the source catalog.
 
   // Restore source segment membership before removing the copies.
   // Staged cut_paste undo addresses the source route explicitly so the Main
@@ -859,16 +853,9 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
 
   // ONE shared authoritative delete acknowledgment on the already-returned
   // complete catalog (no extra list): preserves the valid loaded projection
-  // like the unified delete path instead of a bare replace that blanks.
-  publishDeleteAuthorityCatalog(dispatch, targetTopicId, response as any)
-
-  // Main maintained the inheritance boundaries / reference endpoints inside
-  // that delete transaction (the unified delete command reports no boundary
-  // payload), and the branch catalog is a Main projection: re-read the topic
-  // this redo deleted from, exactly like the ordinary delete path, instead of
-  // keeping anchors that point at the removed messages. A failed re-read is
-  // projection-only and never turns a committed re-delete into a failure.
-  await refreshBranchCatalogAfterAuthorityWrite(dispatch, targetTopicId, 'redoDelete')
+  // like the unified delete path instead of a bare replace that blanks. The
+  // branch catalog rode the same transaction, so no follow-up re-read.
+  publishDeleteAuthorityCatalog(dispatch, targetTopicId, response as any, redoRoute)
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup

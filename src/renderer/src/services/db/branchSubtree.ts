@@ -1,12 +1,7 @@
 import { loggerService } from '@logger'
 import { handleScrollSnapshotCleared } from '@renderer/services/scrollSnapshotCache'
-import store from '@renderer/store'
-import {
-  activeBranchReset,
-  activeBranchSet,
-  branchesReceived,
-  deletionFallbackRequested
-} from '@renderer/store/topicBranch'
+import store, { type AppDispatch, type RootState } from '@renderer/store'
+import { activeBranchReset, activeBranchSet, deletionFallbackRequested } from '@renderer/store/topicBranch'
 
 import { pushBranchDeleteAction } from '../branchOperationHistory'
 import { dbService } from './DbService'
@@ -80,14 +75,14 @@ export async function deleteBranchSubtree(
   // row the subtree removed plus the boundaries it advanced, so undo restores
   // the whole subtree and redo re-runs the same deterministic delete.
   pushBranchDeleteAction(store.dispatch, topicId, result.historySnapshot)
-  // Refresh the Main-authoritative catalog first (it prunes a stale active
-  // branch automatically when it no longer exists).
-  try {
-    const catalog = await dbService.listBranches(topicId)
-    store.dispatch(branchesReceived({ topicId, branches: catalog.branches }))
-  } catch (error) {
-    logger.error(`[deleteBranchSubtree] Failed to refresh branch catalog for ${topicId}:`, error as Error)
-  }
+  // Atomic handoff: the active-fallback switch and its one-shot intent publish
+  // BEFORE the Main-authoritative catalog refresh below. The refresh prunes a
+  // stale active branch on publish; publishing it first would expose an
+  // intent-less active change that the generic route effect claims and loads
+  // while the follow-up reset stales that read (generation advance) and the
+  // late intent then stands down on the generic claim — leaving the deleted
+  // route resident with no owner retrying. Switching first keeps the prune a
+  // no-op for the active route and the intent owns the fallback reload.
   const wasActiveDeleted = activeBranchId !== null && deleted.has(activeBranchId)
   let fallback: string | null = null
   if (wasActiveDeleted) {
@@ -152,6 +147,21 @@ export async function deleteBranchSubtree(
     if (activeBranchId !== null) {
       store.dispatch(activeBranchReset({ topicId }))
     }
+  }
+  // Refresh the Main-authoritative catalog after the handoff above (it prunes
+  // a stale active branch automatically when it no longer exists — a no-op
+  // here since the active route already moved). Guarded like every other
+  // post-write read: a newer authority catalog published during the await
+  // wins and this stale read discards instead of overwriting it.
+  try {
+    const { refreshBranchCatalogGuarded } = await import('@renderer/store/thunk/messageThunk')
+    await refreshBranchCatalogGuarded(
+      store.dispatch as unknown as AppDispatch,
+      store.getState as unknown as () => RootState,
+      topicId
+    )
+  } catch (error) {
+    logger.error(`[deleteBranchSubtree] Failed to refresh branch catalog for ${topicId}:`, error as Error)
   }
   return { deletedBranchIds: result.deletedBranchIds, fallbackBranchId: fallback }
 }

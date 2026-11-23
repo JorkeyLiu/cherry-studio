@@ -2932,6 +2932,12 @@ export interface InheritanceBoundaryRestoreResult {
  * a window-derived cascade.
  */
 export interface DeleteMessagesWithDependentsResponse extends FileCleanupResult {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
+  /** Complete topic branch catalog after deletion (same transaction; empty when never branched). */
+  branches: TopicBranchWire[]
   /** Actual expanded message IDs deleted (authority order: sort_order ASC, id ASC). */
   deletedMessageIds: string[]
   /** Block IDs owned by the deleted messages (ordered by message then block order). */
@@ -3058,6 +3064,8 @@ export interface InsertMessageGroupsResponse extends FileCleanupResult {
   topicId: string
   /** Normalized addressed route (null = main route). */
   branchId: string | null
+  /** Complete topic branch catalog after insertion (same transaction; empty when never branched). */
+  branches: TopicBranchWire[]
   /** Canonical post-write wire for truly inserted messages (flat request-group order). */
   insertedMessages: JsonObject[]
   /** Canonical post-write wire for blocks under truly inserted messages (authority block order). */

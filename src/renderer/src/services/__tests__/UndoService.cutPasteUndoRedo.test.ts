@@ -844,7 +844,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
       sourceSegmentSnapshots: [],
       targetSegmentSnapshots: [],
       // The source delete moved a boundary, so the restore reverts it and the
-      // source catalog is re-read in the same undo.
+      // source catalog arrives with the same restore ack (no re-read).
       sourceBoundarySnapshots: [
         { kind: 'branch', id: 'branch-src', anchorMessageId: 'src-u', expectedAnchorMessageId: null }
       ],
@@ -861,11 +861,11 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
 
     const { executeUndo } = await import('../UndoService')
     const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
-
     expect(result.status).toBe('success')
-    // Source restore (boundary reverted) then target copy removal (a Main
-    // delete that maintains its own boundaries without reporting them): both
-    // directly affected topics are re-read, and no other topic is touched.
-    expect(readTopics).toEqual(['topic-src', 'topic-tgt'])
+    // Source restore ack carries the source catalog in the same transaction
+    // (no follow-up re-read); only the target copy-removal — a primitive Main
+    // delete that reports no catalog — still re-reads its own topic.
+    // No other topic is touched.
+    expect(readTopics).toEqual(['topic-tgt'])
   })
 })

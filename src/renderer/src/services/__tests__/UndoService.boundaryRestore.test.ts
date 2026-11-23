@@ -1,11 +1,12 @@
 /**
  * Undo snapshot transfer for edit-mode delete / cut: the inheritance
  * boundaries Main reported for the delete travel back with the restore, and
- * the Main-authoritative branch catalog is re-read afterwards.
+ * the Main-authoritative branch catalog arrives with the same acknowledgment
+ * (no follow-up re-read on ack-covered paths).
  *
  * Real Redux store + real UndoService. Only the data source, the segment
  * thunk, and the anchor transfer are mocked: this test asserts WHAT crosses
- * the boundary (snapshot in, catalog refresh out), never a renderer-side
+ * the boundary (snapshot in, ack catalog out), never a renderer-side
  * branch write.
  */
 import { configureStore } from '@reduxjs/toolkit'
@@ -85,12 +86,26 @@ function makeGroupAnchor(): GroupAnchor {
   }
 }
 
-function makeAck(topicId: string, branchId: string | null, boundaryRestores: unknown[]) {
+function branchWire(topicId: string, anchorMessageId: string) {
+  return {
+    id: `${topicId}-branch-1`,
+    topicId,
+    parentBranchId: null,
+    anchorMessageId,
+    inheritedBoundary: { kind: 'message', messageId: anchorMessageId },
+    name: 'B1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
+}
+
+function makeAck(topicId: string, branchId: string | null, boundaryRestores: unknown[], branches: unknown[] = []) {
   return {
     affectedFileIds: [],
     remainingReferenceCounts: {},
     topicId,
     branchId,
+    branches,
     insertedMessages: [{ id: 'm1', topicId, role: 'user', blocks: [] }],
     insertedBlocks: [],
     insertedMessageIds: ['m1'],
@@ -106,6 +121,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     mocks.insertMessageGroups.mockImplementation(async (topicId: string, _groups: unknown, branchId?: string | null) =>
       makeAck(topicId, branchId ?? null, [])
     )
+    mocks.deleteMessagesWithSegments.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} } as never)
     mocks.listBranches.mockResolvedValue({ topicId: 't1', branches: [] })
   })
 
@@ -127,7 +143,12 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     }
     store.dispatch(pushUndoAction(action))
     mocks.insertMessageGroups.mockImplementation(async (topicId: string, _groups: unknown, branchId?: string | null) =>
-      makeAck(topicId, branchId ?? null, [{ kind: 'branch', id: 'branch-1', anchorMessageId: 'm1', restored: true }])
+      makeAck(
+        topicId,
+        branchId ?? null,
+        [{ kind: 'branch', id: 'branch-1', anchorMessageId: 'm1', restored: true }],
+        [branchWire('t1', 'm1')]
+      )
     )
 
     const { executeUndo } = await import('../UndoService')
@@ -137,9 +158,14 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     // Exactly one insertion transaction, carrying the boundary restores.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null, [BOUNDARY])
-    // Main rewrote the boundaries: the branch catalog is re-read (Main is the
-    // only writer of branch anchors; the renderer never patches one locally).
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    // Main rewrote the boundaries and returned the catalog in the same ack
+    // (Main is the only writer of branch anchors; the renderer never patches
+    // one locally): no follow-up re-read.
+    expect(mocks.listBranches).not.toHaveBeenCalled()
+    const { selectTopicBranches } = await import('@renderer/store/topicBranch')
+    expect(
+      selectTopicBranches(store.getState() as any, 't1').map((b: { anchorMessageId: string }) => b.anchorMessageId)
+    ).toEqual(['m1'])
   })
 
   it('a legacy delete action without recorded boundaries keeps the ordinary insertion wire', async () => {
@@ -199,7 +225,10 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null, [
       { ...BOUNDARY, id: 'ref-target', kind: 'reference' }
     ])
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    // Source catalog arrives with the restore ack; only the target primitive
+    // copy-removal still re-reads its own topic.
+    expect(mocks.listBranches).not.toHaveBeenCalledWith('t1')
+    expect(mocks.listBranches).toHaveBeenCalledWith('t2')
   })
 
   it('undoDelete restores onto the route the delete addressed, not the live route', async () => {
@@ -253,6 +282,7 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     mocks.deleteMessagesWithDependents.mockResolvedValue({
       topicId: 't1',
       branchId: 'branch-1',
+      branches: [branchWire('t1', 'm0')],
       deletedMessageIds: ['m1'],
       deletedBlockIds: [],
       affectedFileIds: [],
@@ -265,10 +295,14 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
 
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledWith('t1', ['m1'], 'branch-1')
 
-    // The redo delete moved the same boundaries in Main; the catalog is a
-    // Main projection, so it is re-read for the topic the redo addressed —
-    // the delete command reports no boundary payload of its own.
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    // The redo delete moved the same boundaries in Main and returned the
+    // catalog in the same ack — the delete command reports no boundary
+    // payload of its own and needs no re-read.
+    expect(mocks.listBranches).not.toHaveBeenCalled()
+    const { selectTopicBranches } = await import('@renderer/store/topicBranch')
+    expect(
+      selectTopicBranches(store.getState() as any, 't1').map((b: { anchorMessageId: string }) => b.anchorMessageId)
+    ).toEqual(['m0'])
   })
 
   it('redoDelete keeps the committed re-delete when the catalog re-read fails', async () => {
@@ -291,6 +325,8 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     }
     store.dispatch(pushUndoAction(action))
     store.dispatch(prepareUndo())
+    // Ack without a branch catalog: invalid projection, but the Main delete
+    // committed. History must advance without a fallback fetch or a clear.
     mocks.deleteMessagesWithDependents.mockResolvedValue({
       topicId: 't1',
       branchId: null,
@@ -300,15 +336,15 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
       remainingReferenceCounts: {},
       segments: []
     })
-    mocks.listBranches.mockRejectedValue(new Error('catalog read failed'))
 
     const { executeRedo } = await import('../UndoService')
     const redone = await executeRedo(store.dispatch as any, store.getState as any)
 
-    // Projection failure is never promoted to a transaction failure: Main
-    // already deleted the rows, so history stays advanced.
+    // Invalid catalog is never promoted to a transaction failure and never
+    // clears the projection: Main already deleted the rows, so history stays
+    // advanced with no fallback read.
     expect(redone.status === 'success' ? redone.action.type : null).toBe('delete')
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    expect(mocks.listBranches).not.toHaveBeenCalled()
   })
 
   it('undoDelete completes when Main reports no boundary it could restore (compare-and-set miss)', async () => {
@@ -373,8 +409,9 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     // No restored boundary permission travels: the plain three-argument wire.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null)
-    // The message restore alone makes the projected head stale: re-read it.
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    // The message restore alone re-derives the projected head in Main, and
+    // the ack carries that catalog: no re-read.
+    expect(mocks.listBranches).not.toHaveBeenCalled()
   })
 
   it('undoCutPaste refreshes the source catalog when the cut recorded no boundary snapshot', async () => {
@@ -405,7 +442,9 @@ describe('undo transfers Main inheritance-boundary snapshots and re-reads the ca
     await executeUndo(store.dispatch as any, store.getState as any)
 
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith('t1', expect.any(Array), null)
-    // The restored source message re-derives the source head: re-read it.
-    expect(mocks.listBranches).toHaveBeenCalledWith('t1')
+    // The restored source message re-derives the source head in Main, and the
+    // ack carries that catalog: only the target copy-removal still re-reads.
+    expect(mocks.listBranches).not.toHaveBeenCalledWith('t1')
+    expect(mocks.listBranches).toHaveBeenCalledWith('t2')
   })
 })

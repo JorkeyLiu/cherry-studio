@@ -100,6 +100,7 @@ describe('insert-message-groups request validation', () => {
       remainingReferenceCounts: {},
       topicId: 't-1',
       branchId: null,
+      branches: [],
       insertedMessages: [{ id: 'm-1', topicId: 't-1' }],
       insertedBlocks: [],
       insertedMessageIds: ['m-1'],
@@ -124,5 +125,50 @@ describe('insert-message-groups request validation', () => {
         value: { ...good, groups: [{ insertedMessageIds: ['other'], beforeMessageId: null, nextMessageId: null }] }
       })
     ).toThrow(ValidationError)
+  })
+
+  it('requires the complete branch catalog and rejects foreign/duplicate/unknown entries', () => {
+    const good = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't-1',
+      branchId: null,
+      branches: [],
+      insertedMessages: [{ id: 'm-1', topicId: 't-1' }],
+      insertedBlocks: [],
+      insertedMessageIds: ['m-1'],
+      mutableMessageIds: ['m-1'],
+      groups: [{ insertedMessageIds: ['m-1'], beforeMessageId: null, nextMessageId: null }],
+      boundaryRestores: []
+    }
+    const branch = {
+      id: 'b-1',
+      topicId: 't-1',
+      parentBranchId: null,
+      anchorMessageId: 'm-0',
+      name: null,
+      createdAt: null,
+      updatedAt: null
+    }
+    // Missing catalog never validates (no silent clear downstream).
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { ...good, branches: undefined } })).toThrow(
+      ValidationError
+    )
+    const noCatalog: Record<string, unknown> = { ...good }
+    delete noCatalog.branches
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: noCatalog })).toThrow(ValidationError)
+    // Cross-topic entries, duplicate ids, and unknown keys all fail closed.
+    expect(() =>
+      validateChatDbResult(CHANNEL, { ok: true, value: { ...good, branches: [{ ...branch, topicId: 't-x' }] } })
+    ).toThrow(ValidationError)
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { ...good, branches: [branch, branch] } })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbResult(CHANNEL, { ok: true, value: { ...good, branches: [{ ...branch, extra: 1 }] } })
+    ).toThrow(ValidationError)
+    // Empty and populated same-topic catalogs validate.
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: good })).not.toThrow()
+    expect(() => validateChatDbResult(CHANNEL, { ok: true, value: { ...good, branches: [branch] } })).not.toThrow()
   })
 })

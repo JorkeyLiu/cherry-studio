@@ -12,6 +12,8 @@ import reducer, {
   branchesRemoved,
   selectActiveBranchId,
   selectBranchPath,
+  selectCatalogRevision,
+  selectRouteGeneration,
   type TopicBranchPersistedState,
   topicBranchPersistTransform,
   type TopicBranchState
@@ -33,6 +35,8 @@ function stateWith(overrides: Partial<TopicBranchState> = {}): TopicBranchState 
     branchesByTopic: {},
     activeBranchIdByTopic: {},
     routeGenerationByTopic: {},
+    catalogRevisionByTopic: {},
+    catalogFetchSeqByTopic: {},
     deletionFallbackByTopic: {},
     ...overrides
   }
@@ -111,6 +115,8 @@ describe('topicBranch persist boundary (transform + reconciler)', () => {
     branchesByTopic: { 't-1': [wire('b-1', 'm1', null, 'B1')] },
     activeBranchIdByTopic: { 't-1': 'b-1' },
     routeGenerationByTopic: { 't-1': 2 },
+    catalogRevisionByTopic: { 't-1': 4 },
+    catalogFetchSeqByTopic: { 't-1': 7 },
     deletionFallbackByTopic: { 't-1': { route: null, intentId: 1, deletedBranchIds: ['b-x'] } }
   })
 
@@ -118,6 +124,8 @@ describe('topicBranch persist boundary (transform + reconciler)', () => {
     const live = liveState()
     const stored = topicBranchPersistTransform.in(live, 'topicBranch', { topicBranch: live })
     expect(stored).not.toHaveProperty('deletionFallbackByTopic')
+    expect(stored).not.toHaveProperty('catalogRevisionByTopic')
+    expect(stored).not.toHaveProperty('catalogFetchSeqByTopic')
     expect(stored.branchesByTopic).toEqual(live.branchesByTopic)
     expect(stored.activeBranchIdByTopic).toEqual({ 't-1': 'b-1' })
     expect(stored.routeGenerationByTopic).toEqual({ 't-1': 2 })
@@ -134,7 +142,33 @@ describe('topicBranch persist boundary (transform + reconciler)', () => {
     expect(rehydrated.branchesByTopic).toEqual(live.branchesByTopic)
     expect(rehydrated.activeBranchIdByTopic).toEqual({ 't-1': 'b-1' })
     expect(rehydrated.routeGenerationByTopic).toEqual({ 't-1': 2 })
+    expect(rehydrated.catalogRevisionByTopic).toEqual({})
+    expect(rehydrated.catalogFetchSeqByTopic).toEqual({})
     expect(rehydrated.deletionFallbackByTopic).toEqual({})
+  })
+
+  it('authority catalog publish bumps catalog revision without touching route generation', async () => {
+    const { branchesReceived, catalogFetchStarted } = await import('../topicBranch')
+    let s = stateWith()
+    const beforeGen = 0
+    s = reducer(s, catalogFetchStarted({ topicId: 't-1', fetchId: 1 }))
+    s = reducer(s, branchesReceived({ topicId: 't-1', branches: [wire('b-1', 'm1', null, 'B1')] }))
+    expect(selectCatalogRevision(rootWith(s) as never, 't-1')).toBe(1)
+    expect(selectRouteGeneration(rootWith(s) as never, 't-1')).toBe(beforeGen)
+    // A second publish advances the revision again for the same topic only.
+    s = reducer(s, branchesReceived({ topicId: 't-1', branches: [] }))
+    expect(selectCatalogRevision(rootWith(s) as never, 't-1')).toBe(2)
+    expect(selectCatalogRevision(rootWith(s) as never, 't-2')).toBe(0)
+  })
+
+  it('topic removal drops catalog currency alongside catalog and generation', async () => {
+    const { branchesReceived, branchesRemoved } = await import('../topicBranch')
+    let s = stateWith()
+    s = reducer(s, branchesReceived({ topicId: 't-1', branches: [wire('b-1', 'm1', null, 'B1')] }))
+    s = reducer(s, branchesRemoved({ topicIds: ['t-1'] }))
+    expect(selectCatalogRevision(rootWith(s) as never, 't-1')).toBe(0)
+    expect((s.catalogRevisionByTopic as Record<string, unknown>)['t-1']).toBeUndefined()
+    expect((s.catalogFetchSeqByTopic as Record<string, unknown>)['t-1']).toBeUndefined()
   })
 
   it('tolerates legacy wires missing new maps', () => {
@@ -147,6 +181,8 @@ describe('topicBranch persist boundary (transform + reconciler)', () => {
     expect(rehydrated.branchesByTopic).toEqual({ 't-1': [] })
     expect(rehydrated.activeBranchIdByTopic).toEqual({})
     expect(rehydrated.routeGenerationByTopic).toEqual({})
+    expect(rehydrated.catalogRevisionByTopic).toEqual({})
+    expect(rehydrated.catalogFetchSeqByTopic).toEqual({})
     expect(rehydrated.deletionFallbackByTopic).toEqual({})
   })
 

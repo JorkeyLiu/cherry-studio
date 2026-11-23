@@ -459,3 +459,80 @@ describe('edit-mode undo restores messages and the inheritance boundaries the de
     expect(persistedReferenceAnchor(sqlite, 'C')).toBe('a1')
   })
 })
+
+describe('semantic commands hand over the same-transaction branch catalog', () => {
+  let sqlite: Database.Database
+  let db: BetterSQLite3Database<typeof schema>
+  let agg: ChatDbAggregateService
+  let dir: string
+  beforeEach(() => {
+    configStore.clear()
+    const opened = openDb()
+    sqlite = opened.sqlite
+    db = opened.db
+    dir = opened.dir
+    ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
+    ;(chatDbService as unknown as { db: unknown }).db = db
+    seedRegisteredAttachedSyncService(configStore as never, db)
+    agg = new ChatDbAggregateService(db, sqlite)
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    try {
+      sqlite.close()
+    } catch {}
+    rmrf(dir)
+    ;(chatDbService as never as { sqlite: unknown }).sqlite = null
+    ;(chatDbService as never as { db: unknown }).db = null
+  })
+  it('delete advances the catalog anchor in the returned directory', () => {
+    seedMain(agg, 't1', ['m0', 'm1', 'm2'])
+    const b1 = (okValue(agg.createBranch('t1', null, 'm1', 'B1')).branch as { id: string }).id
+    seedSuffix(agg, 't1', b1, ['c0'])
+
+    const del = deleteResponse(agg, 't1', ['m1'], null)
+    expect(del.topicId).toBe('t1')
+    expect(del.branchId).toBeNull()
+    expect(del.branches).toHaveLength(1)
+    expect(del.branches[0].id).toBe(b1)
+    // Deleting the anchor message moves the persisted anchor back to m0;
+    // the returned catalog reflects the same-transaction post-write state.
+    expect(del.branches[0].anchorMessageId).toBe('m0')
+    expect(del.branches[0].inheritedBoundary).toEqual({ kind: 'message', messageId: 'm0' })
+  })
+
+  it('undo insert restores the catalog anchor in the returned directory', () => {
+    seedMain(agg, 't1', ['m0', 'm1', 'm2'])
+    const b1 = (okValue(agg.createBranch('t1', null, 'm1', 'B1')).branch as { id: string }).id
+    seedSuffix(agg, 't1', b1, ['c0'])
+    const before = routeIds(agg, 't1', b1)
+
+    const del = deleteResponse(agg, 't1', ['m1'], null)
+    const undoAck = okValue(agg.insertMessageGroups('t1', undoGroups(del), null, del.boundarySnapshots))
+    expect(undoAck.topicId).toBe('t1')
+    expect(undoAck.branchId).toBeNull()
+    expect(undoAck.branches).toHaveLength(1)
+    expect(undoAck.branches[0].id).toBe(b1)
+    expect(undoAck.branches[0].inheritedBoundary).toEqual({ kind: 'message', messageId: 'm1' })
+    expect(routeIds(agg, 't1', b1)).toEqual(before)
+  })
+
+  it('empty and no-op catalogs stay consistently empty', () => {
+    seedMain(agg, 't1', ['m0', 'm1'])
+    const del = deleteResponse(agg, 't1', ['m1'], null)
+    expect(del.branches).toEqual([])
+    const undoAck = okValue(agg.insertMessageGroups('t1', undoGroups(del), null, del.boundarySnapshots))
+    expect(undoAck.branches).toEqual([])
+    expect(okValue(agg.listBranches('t1')).branches).toEqual([])
+  })
+
+  it('branch-route commands report the same catalog the main route reads', () => {
+    seedMain(agg, 't1', ['m0', 'm1'])
+    const b1 = (okValue(agg.createBranch('t1', null, 'm1', 'B1')).branch as { id: string }).id
+    seedSuffix(agg, 't1', b1, ['b1-0'])
+    const del = deleteResponse(agg, 't1', ['b1-0'], b1)
+    expect(del.branchId).toBe(b1)
+    expect(del.branches).toHaveLength(1)
+    expect(del.branches[0].inheritedBoundary).toEqual({ kind: 'message', messageId: 'm1' })
+  })
+})

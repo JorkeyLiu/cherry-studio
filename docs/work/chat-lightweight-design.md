@@ -183,3 +183,12 @@
  - E2E 回尾 test-only 修复：固定 12 轮 wheel 预算因恢复起点不同不足，改按真实 bottom/tail/progress 停止（40 上限 + 两次无进展停），物理 bottom/tail 100px 断言不放宽；只改 test 不改生产 scroll，同 build 曾 PASS 不排除 production bug，依据为 trace exhausted wheel + rendered tail。
  - 无 new E2E 资产（既有业务 workflow 复用，下层输入合同新 unit/component 足够）。不把 metadata 权威与 live content 选择合并，不声称发送请求完全快照化（不在 scope）。
  - 剩余/下一步：本阶段只收敛展示上下文，legacy 请求 overlay 与执行用量默认读取保持兼容、各有用途；下一判断继续跨层看事实消费是否直接、是否存在独立事实需多处维护，不默认接着改全 helper/queue 或建缓存。整体轻量化未完成，latency/FPS/memory 未测。
+ ## 20. Mutation 权威 branch catalog 随 ack 同发（已实现）
+ :
+ - 起点：权威变化→Renderer 消费有必要分离；审视发现 semantic delete/insert groups 事务已改变 branch boundary，但 ack 无完整 catalog，多个 callsite 各自补读。
+ - 变化：Main 同事务返回完整 branches＋route echo，经 shared strict validation→统一 ack publish；conditional boundary snapshots 保持；既有 catalog reads 全部加 guard（seq/revision runtime-only），旧读不覆盖新 ack，与 routeGeneration 分离。触及 `contracts/types`、`ChatDbAggregateService`、`insertGroupsAck`、`topicBranch/messageThunk`、`branchSubtree`、`UndoService`＋对应测试；未扩 IPC channel/schema/ADR/provider，primitive mutation 仍独立读取（剩余边界）。
+ - 删子树意图竞争（E2E 暴露）：catalog prune 先暴露 active=null，intent generic load 被后续 reset generation 废弃，迟 intent 被 loaded-current 消费；在 deleteBranchSubtree owner 内先 fallback＋intent 再刷新目录，无 retry/去 gate/viewport 改写。
+ - 测试：guard 迟到、catalog 完整性、delete/undo/redo/cut-paste、atomic handoff；UI 复用既有 E2E，无 new asset。SyncSettings HTTP warning 为 isolations 单独基线修复，不宣称首次 20s timeout 根因已证明。
+ - 最终验证（冻结态原始 exit，Node 24.11.1/pnpm 10.27.0，冻结前后 git hash-object HASH_MATCH=YES）：完整 `pnpm test` exit 0；`pnpm typecheck` 五路 exit 0；fresh `pnpm build` exit 0；`pnpm test:e2e tests/e2e/specs/conversation/inheritance-boundary-undo.spec.ts tests/e2e/specs/conversation/true-branch.spec.ts` exit 0（14/14）。前失败经修复更新证据；整体 latency/FPS/memory 未测，不性能承诺。
+ - 工作树冲突传闻为误观察（改动 hash 存在）。
+ - 下一步：回到聊天事实跨层消费是否直接；不自动接 queue/helper，不沿本次邻近继续；整体轻量化未完成，下一实现尚未选。

@@ -2157,6 +2157,35 @@ function validateTopicBranchWire(value: unknown, path: string, channel: string):
   }
 }
 
+/**
+ * Complete branch catalog validation for semantic acknowledgments.
+ *
+ * The catalog is always present (empty array when never branched). Unknown or
+ * missing catalogs must never silently clear the renderer projection, so the
+ * shape is strict: every entry a valid branch wire of THIS topic, no duplicate
+ * IDs. Completeness beyond shape (all rows present) is a Main transaction
+ * property, asserted by Main tests against the same-transaction read.
+ */
+function validateBranchCatalog(value: unknown, path: string, channel: string, topicId: string): void {
+  if (!Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected branches array`)
+  }
+  const seen = new Set<string>()
+  const arr = value as unknown[]
+  for (let i = 0; i < arr.length; i++) {
+    validateTopicBranchWire(arr[i], `${path}[${i}]`, channel)
+    const rec = arr[i] as Record<string, unknown>
+    if (rec.topicId !== topicId) {
+      throw new ValidationError(`${path}[${i}].topicId`, `[${channel}] Branch catalog entry topic mismatch`)
+    }
+    const id = rec.id as string
+    if (seen.has(id)) {
+      throw new ValidationError(`${path}[${i}].id`, `[${channel}] Duplicate branch id in catalog`)
+    }
+    seen.add(id)
+  }
+}
+
 const CREATE_BRANCH_VALUE_KEYS = new Set(['branch', 'messages', 'blocks'])
 
 const createBranchContract: ChatDbContract = {
@@ -3208,6 +3237,9 @@ const deleteMessagesWithSegmentsContract: ChatDbContract = {
 const DELETE_WITH_DEPENDENTS_VALUE_KEYS = new Set([
   'affectedFileIds',
   'remainingReferenceCounts',
+  'topicId',
+  'branchId',
+  'branches',
   'deletedMessageIds',
   'deletedBlockIds',
   'previousUserMessageIds',
@@ -3363,6 +3395,16 @@ const deleteMessagesWithDependentsContract: ChatDbContract = {
         }
         validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
       }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      if (v.branchId !== null) {
+        validateNonEmptyString(v.branchId, 'result.value.branchId')
+      }
+      validateBranchCatalog(
+        v.branches,
+        'result.value.branches',
+        'chatdb:delete-messages-with-dependents',
+        v.topicId as string
+      )
       // deletedMessageIds: non-empty unique IDs (semantic delete always deletes at least one root).
       if (!Array.isArray(v.deletedMessageIds) || (v.deletedMessageIds as unknown[]).length === 0) {
         throw new ValidationError(
@@ -6276,6 +6318,7 @@ const INSERT_MESSAGE_GROUPS_VALUE_KEYS = new Set([
   'remainingReferenceCounts',
   'topicId',
   'branchId',
+  'branches',
   'insertedMessages',
   'insertedBlocks',
   'insertedMessageIds',
@@ -6334,6 +6377,7 @@ function validateInsertMessageGroupsResult(result: unknown): void {
     if (v.branchId !== null) {
       validateNonEmptyString(v.branchId, 'result.value.branchId')
     }
+    validateBranchCatalog(v.branches, 'result.value.branches', 'chatdb:insert-message-groups', v.topicId as string)
     validateJsonObjectArray(v.insertedMessages, 'result.value.insertedMessages')
     validateJsonObjectArrayBlock(v.insertedBlocks, 'result.value.insertedBlocks', BLOCK_JSON_PROFILE)
     validateStringArray(v.insertedMessageIds, 'result.value.insertedMessageIds')
