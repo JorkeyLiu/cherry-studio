@@ -300,11 +300,9 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
       expect(storeState.messages.messageIdsByTopic['t1']).toEqual([])
       expect(mocks.fetchMessages).not.toHaveBeenCalled()
 
-      // Loading cleanup still runs (finally)
-      const loadingFalse = dispatch.mock.calls.filter(
-        ([a]: any) => a?.type === 'newMessages/setTopicLoading' && a?.payload?.loading === false
-      )
-      expect(loadingFalse.length).toBeGreaterThanOrEqual(1)
+      // Read-busy cleanup still runs (finally) — read no longer writes generation flag
+      const readReleases = dispatch.mock.calls.filter(([a]: any) => a?.type === 'newMessages/completeWindowRead')
+      expect(readReleases.length).toBeGreaterThanOrEqual(1)
     }
   )
 

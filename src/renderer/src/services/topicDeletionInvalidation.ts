@@ -229,8 +229,12 @@ function purgeResidentProjectionsForTopics(deletedTopicIds: string[]): void {
       }
       // Segments
       store.dispatch(clearSegmentsForTopic(topicId))
-      // Loading / fulfilled markers
+      // Generation / window-read / fulfilled markers: clear both busy domains
+      // so a deleted topic never retains generation or pending-read state.
+      // Stale in-flight window finalizers only release their own identity and
+      // therefore no-op after this clear; a rebuilt topic registers new identities.
       store.dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+      store.dispatch(newMessagesActions.clearWindowReads({ topicId }))
       store.dispatch(newMessagesActions.setTopicFulfilled({ topicId, fulfilled: false }))
       // Current topic marker
       if (state.messages.currentTopicId === topicId) {

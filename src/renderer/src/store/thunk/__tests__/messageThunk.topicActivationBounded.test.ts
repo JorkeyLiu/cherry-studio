@@ -204,10 +204,10 @@ describe('bounded topic activation', () => {
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
     expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1)
     expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
-    const loadingFalse = dispatch.mock.calls.filter(
-      ([a]: any) => a?.type === 'newMessages/setTopicLoading' && a?.payload?.loading === false
+    const readReleases = dispatch.mock.calls.filter(
+      ([a]: any) => a?.type === 'newMessages/completeWindowRead' && a?.payload?.topicId === 't1'
     )
-    expect(loadingFalse.length).toBeGreaterThanOrEqual(1)
+    expect(readReleases.length).toBeGreaterThanOrEqual(1)
     // Thunk settled while anchor still pending — anchor never blocked loading.
     resolveAnchor()
   })
@@ -281,11 +281,10 @@ describe('bounded topic activation', () => {
       await pendingWinner
       expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1)
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
-      const loadingFalse = dispatch.mock.calls.filter(
-        ([a]: any) =>
-          a?.type === 'newMessages/setTopicLoading' && a?.payload?.topicId === 't1' && a?.payload?.loading === false
+      const readReleases = dispatch.mock.calls.filter(
+        ([a]: any) => a?.type === 'newMessages/completeWindowRead' && a?.payload?.topicId === 't1'
       )
-      expect(loadingFalse.length).toBeGreaterThanOrEqual(2)
+      expect(readReleases.length).toBeGreaterThanOrEqual(2)
     }
   )
 
@@ -299,11 +298,10 @@ describe('bounded topic activation', () => {
       await loadTopicMessagesThunk('t1')(dispatch, (() => storeState) as any)
       expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
-      const loadingFalse = dispatch.mock.calls.filter(
-        ([a]: any) =>
-          a?.type === 'newMessages/setTopicLoading' && a?.payload?.topicId === 't1' && a?.payload?.loading === false
+      const readReleases = dispatch.mock.calls.filter(
+        ([a]: any) => a?.type === 'newMessages/completeWindowRead' && a?.payload?.topicId === 't1'
       )
-      expect(loadingFalse.length).toBeGreaterThanOrEqual(1)
+      expect(readReleases.length).toBeGreaterThanOrEqual(1)
     }
   )
 
@@ -314,11 +312,10 @@ describe('bounded topic activation', () => {
     await loadTopicMessagesThunk('t1')(dispatch, (() => storeState) as any)
     expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
     expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
-    const loadingFalse = dispatch.mock.calls.filter(
-      ([a]: any) =>
-        a?.type === 'newMessages/setTopicLoading' && a?.payload?.topicId === 't1' && a?.payload?.loading === false
+    const readReleases = dispatch.mock.calls.filter(
+      ([a]: any) => a?.type === 'newMessages/completeWindowRead' && a?.payload?.topicId === 't1'
     )
-    expect(loadingFalse.length).toBeGreaterThanOrEqual(1)
+    expect(readReleases.length).toBeGreaterThanOrEqual(1)
   })
 
   it('switch-away discards staged window without publish or anchor', { timeout: 60_000 }, async () => {

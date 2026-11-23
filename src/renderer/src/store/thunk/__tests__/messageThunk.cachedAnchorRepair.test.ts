@@ -97,18 +97,23 @@ vi.mock('@renderer/store/assistants', () => ({
   updateAssistantSettings: mocks.updateAssistantSettings
 }))
 
-vi.mock('@renderer/store/newMessage', () => ({
-  newMessagesActions: {
-    messagesReceived: mocks.messagesReceived,
-    setTopicLoading: mocks.setTopicLoading,
-    setTopicFulfilled: mocks.setTopicFulfilled,
-    setCurrentTopicId: mocks.setCurrentTopicId
-  },
-  selectLoadedMessagesForTopic: (state: unknown, topicId: string) =>
-    ((state as StoreState).messages.messageIdsByTopic[topicId] ?? [])
-      .map((id: string) => (state as StoreState).messages.entities[id])
-      .filter((m: Message | undefined): m is Message => !!m)
-}))
+vi.mock('@renderer/store/newMessage', async () => {
+  const actual = await vi.importActual<any>('@renderer/store/newMessage')
+  return {
+    ...actual,
+    newMessagesActions: {
+      ...actual.newMessagesActions,
+      messagesReceived: mocks.messagesReceived,
+      setTopicLoading: mocks.setTopicLoading,
+      setTopicFulfilled: mocks.setTopicFulfilled,
+      setCurrentTopicId: mocks.setCurrentTopicId
+    },
+    selectLoadedMessagesForTopic: (state: unknown, topicId: string) =>
+      ((state as StoreState).messages.messageIdsByTopic[topicId] ?? [])
+        .map((id: string) => (state as StoreState).messages.entities[id])
+        .filter((m: Message | undefined): m is Message => !!m)
+  }
+})
 
 vi.mock('@renderer/services/AssistantService', () => ({
   getAssistantSettings: (assistant: { settings?: Record<string, unknown> }) => ({

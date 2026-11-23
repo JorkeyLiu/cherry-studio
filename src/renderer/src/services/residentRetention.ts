@@ -87,6 +87,8 @@ export function isTopicPinned(topicId: string, state: any): boolean {
   try {
     if (state?.messages?.currentTopicId === topicId) return true
     if (state?.messages?.loadingByTopic?.[topicId]) return true
+    const pendingReads = state?.messages?.pendingWindowReadsByTopic?.[topicId]
+    if (Array.isArray(pendingReads) && pendingReads.length > 0) return true
     if (hasTopicPendingRequests(topicId)) return true
     if (getWindowReadQueueDepth(topicId) > 0) return true
   } catch {

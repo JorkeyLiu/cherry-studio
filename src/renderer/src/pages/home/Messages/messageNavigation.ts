@@ -478,7 +478,12 @@ export type BootstrapPhase = 'idle' | 'pending-in-flight' | 'done'
 
 export interface BootstrapDecisionInput {
   phase: BootstrapPhase
-  isTopicLoading: boolean
+  /**
+   * Window-read busy for the bootstrap topic. Generation busy must not gate
+   * bootstrap: a background generation must not block navigation/readiness.
+   * Read-busy only — callers pass the window-read predicate, never generation.
+   */
+  isTopicReadBusy: boolean
   topicId: string
   pending: { messageId: string; topicId: string } | null
   savedPosition: SavedScrollPositionSnapshot | null
@@ -505,9 +510,9 @@ export type BootstrapDecision =
  * Returns the action the caller should take.
  */
 export const resolveBootstrapDecision = (input: BootstrapDecisionInput): BootstrapDecision => {
-  const { phase, isTopicLoading, topicId, pending, savedPosition, savedRestoreHandled } = input
+  const { phase, topicId, pending, savedPosition, savedRestoreHandled, isTopicReadBusy } = input
 
-  if (isTopicLoading) return { action: 'wait' }
+  if (isTopicReadBusy) return { action: 'wait' }
   if (phase === 'done') return { action: 'done' }
   if (phase === 'pending-in-flight') return { action: 'wait' }
 

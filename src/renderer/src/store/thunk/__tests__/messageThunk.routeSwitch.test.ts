@@ -410,9 +410,9 @@ describe('loadRouteMessagesThunk deferPublish contract', () => {
     // store projection + blocks/capability remain unchanged (no dispatch)
     expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
     expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
-    // loading was still toggled, but no projection
-    const loadingCalls = dispatch.mock.calls.filter((c) => c[0]?.type === 'newMessages/setTopicLoading')
-    expect(loadingCalls.length).toBe(2)
+    // read busy was registered and released, but no projection
+    const readCalls = dispatch.mock.calls.filter((c) => String(c[0]?.type ?? '').includes('WindowRead'))
+    expect(readCalls.length).toBe(2)
   })
 
   it('rejected query propagates same error and publishes nothing (both immediate and deferred)', async () => {

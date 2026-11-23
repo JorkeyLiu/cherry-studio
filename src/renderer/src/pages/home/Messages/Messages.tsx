@@ -7,7 +7,7 @@ import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
-import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages, useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { resolveChromeAuthoritySegment, useRetainedRouteSegments } from '@renderer/hooks/useRetainedRouteSegments'
 import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import useScrollPosition, {
@@ -121,6 +121,7 @@ import {
   newMessagesActions,
   readLoadedProjectionMessages,
   selectHistoryReferenceForTopic,
+  selectIsTopicWindowReadBusy,
   selectLoadedMessagesForTopic,
   selectReferenceSourceNames
 } from '@renderer/store/newMessage'
@@ -1466,7 +1467,7 @@ const Messages = ({
   // (`undefined` stays at the API boundary).
   const loadedMessages = useLoadedTopicMessages(topic.id)
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
-  const isTopicLoading = useTopicLoading(topic)
+  const isTopicReadBusy = useAppSelector((state) => selectIsTopicWindowReadBusy(state, topic.id))
   const { displayCount, createTopicBranchByAnchor, createBranch, createReferencedTopicByAnchor } =
     useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
@@ -4901,7 +4902,7 @@ const Messages = ({
   useEffect(() => {
     const decision = resolveBootstrapDecision({
       phase: bootstrapPhaseRef.current,
-      isTopicLoading,
+      isTopicReadBusy,
       topicId: topic.id,
       pending: getPendingNavigate(),
       savedPosition: savedRestoreHandledRef.current ? null : getSavedPosition(),
@@ -5295,7 +5296,7 @@ const Messages = ({
     commitDisplayedStable,
     commitDisplayedStableWithAnchor,
     failVisibleTransition,
-    isTopicLoading,
+    isTopicReadBusy,
     messages,
     prepareNavigationTarget,
     topic.id,

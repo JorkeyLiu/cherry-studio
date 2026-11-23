@@ -46,6 +46,38 @@ export const selectNewTopicLoading = createSelector(
   (messagesState, topicId) => messagesState.loadingByTopic[topicId] || false
 )
 
+/**
+ * Generation busy for one topic (Inputbar send/stop). Backed by
+ * `loadingByTopic`; window reads never set it.
+ */
+export const selectNewTopicGenerating = selectNewTopicLoading
+
+/**
+ * Window-read busy for one topic (Messages bootstrap/navigation).
+ * Backed by `pendingWindowReadsByTopic`; generation never sets it.
+ */
+export const selectNewTopicWindowReadBusy = createSelector(
+  [selectMessagesState, (_, topicId: string) => topicId],
+  (messagesState, topicId) => {
+    const pending = (messagesState as unknown as { pendingWindowReadsByTopic?: Record<string, number[]> })
+      ?.pendingWindowReadsByTopic?.[topicId]
+    return Array.isArray(pending) && pending.length > 0
+  }
+)
+
+/**
+ * Combined busy for retention-style pins: generation OR window read.
+ */
+export const selectNewTopicBusy = createSelector(
+  [selectMessagesState, (_, topicId: string) => topicId],
+  (messagesState, topicId) => {
+    if (messagesState.loadingByTopic[topicId]) return true
+    const pending = (messagesState as unknown as { pendingWindowReadsByTopic?: Record<string, number[]> })
+      ?.pendingWindowReadsByTopic?.[topicId]
+    return Array.isArray(pending) && pending.length > 0
+  }
+)
+
 export const selectNewDisplayCount = createSelector(
   [selectMessagesState],
   (messagesState) => messagesState.displayCount
@@ -627,6 +659,31 @@ export const useLoadedTopicReferencedBlocks = (topicId: string): MessageBlock[] 
   return useAppSelector((state) => selectMessageBlocksByIds(state, topicBlockIds), shallowEqual)
 }
 
+/**
+ * Legacy alias: same generation-busy value as useTopicGenerating.
+ * Kept for existing callers/tests; new code uses useTopicGenerating.
+ */
 export const useTopicLoading = (topic: Topic) => {
   return useAppSelector((state) => selectNewTopicLoading(state, topic.id))
+}
+
+/**
+ * Generation busy hook for Inputbar send/stop. Window reads never set it.
+ */
+export const useTopicGenerating = (topic: Topic) => {
+  return useAppSelector((state) => selectNewTopicGenerating(state, topic.id))
+}
+
+/**
+ * Window-read busy hook for Messages bootstrap/navigation. Generation never sets it.
+ */
+export const useTopicWindowReadBusy = (topic: Topic) => {
+  return useAppSelector((state) => selectNewTopicWindowReadBusy(state, topic.id))
+}
+
+/**
+ * Combined busy hook for retention-style pins: generation OR window read.
+ */
+export const useTopicBusy = (topic: Topic) => {
+  return useAppSelector((state) => selectNewTopicBusy(state, topic.id))
 }

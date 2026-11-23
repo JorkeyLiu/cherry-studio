@@ -517,7 +517,9 @@ storeSyncService.setOptions({
  *   Explicitly enumerated read-only projection publications never invalidate:
  *   `rebaseRouteMessages` / `messagesWindowMerged` / `messagesReceived`
  *   (Main window reads), lifecycle markers (`setCurrentTopicId`,
- *   `setTopicLoading`, `setTopicFulfilled`, `setDisplayCount`), and
+ *   `setTopicLoading` (generation busy), `registerWindowRead` /
+ *   `completeWindowRead` / `clearWindowReads` (window-read busy),
+ *   `setTopicFulfilled`, `setDisplayCount`), and
  *   capability maintenance (`mergeRouteMutability`, `pruneRouteMutability`,
  *   `invalidateRouteMutability`). Unknown `newMessages/*` types keep the safe
  *   default (invalidate).
@@ -544,6 +546,9 @@ const READONLY_NEW_MESSAGES_TYPES = new Set([
   'newMessages/messagesReceived',
   'newMessages/setCurrentTopicId',
   'newMessages/setTopicLoading',
+  'newMessages/registerWindowRead',
+  'newMessages/completeWindowRead',
+  'newMessages/clearWindowReads',
   'newMessages/setTopicFulfilled',
   'newMessages/setDisplayCount',
   'newMessages/mergeRouteMutability',

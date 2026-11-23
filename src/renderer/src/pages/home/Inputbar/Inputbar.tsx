@@ -2,7 +2,7 @@ import { loggerService } from '@logger'
 import { isAutoEnableImageGenerationModel, isGenerateImageModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
-import { useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
+import { useMessageOperations, useTopicGenerating } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTextareaResize } from '@renderer/hooks/useTextareaResize'
@@ -166,7 +166,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
-  const loading = useTopicLoading(topic)
+  const generating = useTopicGenerating(topic)
 
   // --- Token estimation (Inputbar-owned) ---
 
@@ -513,7 +513,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
       onHeightChange={setCustomHeight}
       resizeTextArea={resizeTextArea}
       focusTextarea={focusTextarea}
-      isLoading={loading}
+      isLoading={generating}
       supportedExts={supportedExts}
       onPause={onPause}
       handleSendMessage={sendMessage}

@@ -180,7 +180,10 @@ async function waitForAssistantResponseComplete(
     ({ topicId }: { topicId: string }) => {
       const s = (window as any).store?.getState()
       if (!s) return false
+      // Combined settle gate: generation-terminal (loadingByTopic is
+      // generation-only since the split) plus window-read settle.
       if (s.messages?.loadingByTopic?.[topicId]) return false
+      if (((s.messages?.pendingWindowReadsByTopic || {})[topicId] ?? []).length !== 0) return false
       const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
       let latestAssistantId: string | null = null
       for (let i = msgIds.length - 1; i >= 0; i--) {

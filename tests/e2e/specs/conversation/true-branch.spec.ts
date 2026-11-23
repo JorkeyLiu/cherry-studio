@@ -524,12 +524,22 @@ async function waitRehydratedBranchState(
   }
 }
 
+// Read/generation split convention for every store gate in this file:
+// `loadingByTopic` is generation-only, so a settle gate must ALSO require an
+// empty `pendingWindowReadsByTopic[tid]` (window-read settle, per-request
+// identities drained). Generation clauses are kept where the flow awaits
+// generation end — combined gates stay explicit, never generation-masked.
 async function waitActiveRouteWindowStable(page: any, topicId: string, len: number): Promise<void> {
   await page.waitForFunction(
     ({ tid, n }: { tid: string; n: number }) => {
       const s = (window as any).store.getState()
       const ids = s.messages?.messageIdsByTopic?.[tid]
-      return Array.isArray(ids) && ids.length === n && s.messages?.loadingByTopic?.[tid] !== true
+      return (
+        Array.isArray(ids) &&
+        ids.length === n &&
+        s.messages?.loadingByTopic?.[tid] !== true &&
+        ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+      )
     },
     { tid: topicId, n: len },
     { timeout: 30000 }
@@ -745,7 +755,9 @@ test.describe('Topic-internal branches end-to-end', () => {
             const s = (window as any).store.getState()
             return (
               (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid &&
-              s.messages?.loadingByTopic?.[tid] !== true
+              (s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null) === bid &&
+              s.messages?.loadingByTopic?.[tid] !== true &&
+              ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
             )
           },
           { tid: sourceTopicId, bid: branchId },
@@ -756,7 +768,10 @@ test.describe('Topic-internal branches end-to-end', () => {
             const s = (window as any).store.getState()
             const ids = s.messages?.messageIdsByTopic?.[tid]
             return (
-              Array.isArray(ids) && need.every((id) => ids.includes(id)) && s.messages?.loadingByTopic?.[tid] !== true
+              Array.isArray(ids) &&
+              need.every((id) => ids.includes(id)) &&
+              s.messages?.loadingByTopic?.[tid] !== true &&
+              ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
             )
           },
           { tid: sourceTopicId, need: mustContain },
@@ -913,7 +928,8 @@ test.describe('Topic-internal branches end-to-end', () => {
             Array.isArray(resident) &&
             resident.length === ids.length &&
             resident.every((id: string, i: number) => id === ids[i]) &&
-            s.messages?.loadingByTopic?.[tid] !== true
+            s.messages?.loadingByTopic?.[tid] !== true &&
+            ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
           )
         },
         { tid: sourceTopicId, ids: expectedVisibleUnion },
@@ -1236,7 +1252,11 @@ test.describe('Topic-internal branches end-to-end', () => {
       await page.waitForFunction(
         ({ tid, bid }: { tid: string; bid: string }) => {
           const s = (window as any).store.getState()
-          return s.topicBranch?.activeBranchIdByTopic?.[tid] === bid && s.messages?.loadingByTopic?.[tid] !== true
+          return (
+            s.topicBranch?.activeBranchIdByTopic?.[tid] === bid &&
+            s.messages?.loadingByTopic?.[tid] !== true &&
+            ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+          )
         },
         { tid: sourceTopicId, bid: branch1Id },
         { timeout: 30000 }
@@ -1276,7 +1296,8 @@ test.describe('Topic-internal branches end-to-end', () => {
             s.topicBranch?.activeBranchIdByTopic?.[tid] === bid &&
             Array.isArray(ids) &&
             need.every((id) => ids.includes(id)) &&
-            s.messages?.loadingByTopic?.[tid] !== true
+            s.messages?.loadingByTopic?.[tid] !== true &&
+            ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
           )
         },
         { tid: sourceTopicId, bid: branch2Id, need: [anchorId, l2AnchorId] },
@@ -1327,7 +1348,8 @@ test.describe('Topic-internal branches end-to-end', () => {
           s.topicBranch?.activeBranchIdByTopic?.[tid] === bid &&
           Array.isArray(ids) &&
           need.every((id) => ids.includes(id)) &&
-          s.messages?.loadingByTopic?.[tid] !== true
+          s.messages?.loadingByTopic?.[tid] !== true &&
+          ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
         )
       },
       { tid: sourceTopicId, bid: branch2Id, need: [l2AnchorId] },
@@ -1645,7 +1667,12 @@ test.describe('Topic-internal branches end-to-end', () => {
         ({ tid }: { tid: string }) => {
           const s = (window as any).store.getState()
           const ids = s.messages?.messageIdsByTopic?.[tid]
-          return Array.isArray(ids) && ids.length > 0 && s.messages?.loadingByTopic?.[tid] !== true
+          return (
+            Array.isArray(ids) &&
+            ids.length > 0 &&
+            s.messages?.loadingByTopic?.[tid] !== true &&
+            ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+          )
         },
         { tid: topicId },
         { timeout: 30000 }
@@ -3427,7 +3454,12 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
       ({ tid, len }: { tid: string; len: number }) => {
         const s = (window as any).store.getState()
         const ids = s.messages?.messageIdsByTopic?.[tid]
-        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+        return (
+          Array.isArray(ids) &&
+          ids.length === len &&
+          s.messages?.loadingByTopic?.[tid] !== true &&
+          ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+        )
       },
       { tid: topicId, len: 3 },
       { timeout: 30000 }
@@ -3473,7 +3505,12 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
       ({ tid, len }: { tid: string; len: number }) => {
         const s = (window as any).store.getState()
         const ids = s.messages?.messageIdsByTopic?.[tid]
-        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+        return (
+          Array.isArray(ids) &&
+          ids.length === len &&
+          s.messages?.loadingByTopic?.[tid] !== true &&
+          ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+        )
       },
       { tid: topicId, len: 5 },
       { timeout: 30000 }
@@ -3722,6 +3759,7 @@ test.describe('Ordinary send immediate mutability (no-reload)', () => {
       ({ tid }: { tid: string }) => {
         const s = (window as any).store?.getState()
         if (!s || s.messages?.loadingByTopic?.[tid] === true) return false
+        if (((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length !== 0) return false
         const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
         let latest: string | null = null
         for (let i = ids.length - 1; i >= 0; i--) {
@@ -3895,7 +3933,12 @@ test.describe('Ordinary send immediate mutability (no-reload)', () => {
       ({ tid, len }: { tid: string; len: number }) => {
         const s = (window as any).store.getState()
         const ids = s.messages?.messageIdsByTopic?.[tid]
-        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+        return (
+          Array.isArray(ids) &&
+          ids.length === len &&
+          s.messages?.loadingByTopic?.[tid] !== true &&
+          ((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+        )
       },
       { tid: topicId, len: 2 },
       { timeout: 30000 }
@@ -4100,6 +4143,7 @@ test.describe('Branch-route automatic naming preservation (bounded naming)', () 
       ({ tid }: { tid: string }) => {
         const s = (window as any).store?.getState()
         if (!s || s.messages?.loadingByTopic?.[tid] === true) return false
+        if (((s.messages?.pendingWindowReadsByTopic || {})[tid] ?? []).length !== 0) return false
         const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
         let latest: string | null = null
         for (let i = ids.length - 1; i >= 0; i--) {

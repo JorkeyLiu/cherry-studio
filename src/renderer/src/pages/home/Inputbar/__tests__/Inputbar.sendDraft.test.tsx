@@ -104,7 +104,9 @@ vi.mock('@renderer/hooks/useShortcuts', () => ({
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
   useMessageOperations: () => ({ pauseMessages: vi.fn() }),
-  useTopicLoading: () => false
+  useTopicLoading: () => false,
+  useTopicGenerating: () => false,
+  useTopicWindowReadBusy: () => false
 }))
 
 vi.mock('@renderer/hooks/useRuntime', () => ({

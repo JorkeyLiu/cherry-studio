@@ -158,7 +158,10 @@ async function waitForAssistantTerminal(
         if (ents[id]?.role === 'assistant') count++
       }
       if (count <= prev) return false
+      // Generation-terminal gate: loadingByTopic is generation-only since the
+      // read/generation split; window-read settle is asserted explicitly below.
       if ((s.messages.loadingByTopic || {})[tid] === true) return false
+      if (((s.messages.pendingWindowReadsByTopic || {})[tid] ?? []).length !== 0) return false
       let latest: any = null
       for (let i = ids.length - 1; i >= 0; i--) {
         if (ents[ids[i]]?.role === 'assistant') {
@@ -479,49 +482,73 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     await expect(textarea).toHaveValue(CONTINUITY_DRAFT, { timeout: 5000 })
 
     // ═══════════════════════════════════════════════════════════════════
-    // 6. B USABLE — real send + terminal; A still alive in the background
+    // 6. B SEND — real send; wait only for B streaming START (not terminal):
+    // the overlap claim below needs the early return while A still streams.
     // ═══════════════════════════════════════════════════════════════════
     const seqBeforeB = getRequestSequence()
     await uiSendMessage(page, 'b-quick-hello')
     await expect(textarea).toHaveValue('', { timeout: 10000 })
-    await waitForAssistantTerminal(page, topicB, 2)
+    await page.waitForFunction(
+      ({ tid, prev }: { tid: string; prev: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages.messageIdsByTopic || {})[tid] || []
+        let count = 0
+        for (const id of ids) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count > prev
+      },
+      { tid: topicB, prev: 2 },
+      { timeout: 60000 }
+    )
     const reqB = findProductRequestAfter(seqBeforeB)
     expect(reqB).not.toBeNull()
     expect(reqB!.parsed).toEqual(expect.objectContaining({ model: MODEL, stream: true }))
-    // A mid-absence: still generating (or already complete — both prove no
-    // cancel), content growing/non-empty, never error. Not a loadingByTopic read.
-    const aMid = await page.evaluate((tid: string) => {
-      const s = (window as any).store.getState()
-      const ids = (s.messages.messageIdsByTopic || {})[tid] || []
-      let latest: any = null
-      for (let i = ids.length - 1; i >= 0; i--) {
-        if (s.messages.entities[ids[i]]?.role === 'assistant') {
-          latest = s.messages.entities[ids[i]]
-          break
-        }
-      }
-      if (!latest) return null
-      let len = 0
-      let blockStatus: string | null = null
-      for (const b of latest.blocks || []) {
-        const blk = s.messageBlocks.entities[b]
-        if (blk) {
-          len += (blk.content || '').length
-          blockStatus = blk.status
-        }
-      }
-      return { status: latest.status, blockStatus, len }
-    }, topicA)
-    expect(aMid).not.toBeNull()
-    expect(aMid!.status).not.toBe('error')
-    expect(aMid!.blockStatus).not.toBe('error')
-    expect(aMid!.len).toBeGreaterThan(0)
 
     // ═══════════════════════════════════════════════════════════════════
-    // 7. RETURN to A — route + DOM + settled gate, anchor drift in tolerance
+    // 6b. EARLY RETURN to A while A still streams — read/generation overlap.
+    // Read-settled gate only (never generation): the shared activateTopic
+    // helper waits for generation end, so the route click + explicit gates
+    // are inline here. No fixed sleep: store/DOM predicates only.
     // ═══════════════════════════════════════════════════════════════════
-    await activateTopic(page, topicA, 42)
+    const backToA = page.locator(`[data-testid="topic-item"][data-topic-id="${topicA}"]`).first()
+    await backToA.waitFor({ state: 'visible', timeout: 15000 })
+    await backToA.click()
+    await page.waitForFunction(
+      ({ tid, min }: { tid: string; min: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages.messageIdsByTopic || {})[tid] || []
+        if (!Array.isArray(ids) || ids.length < min) return false
+        // Read settled (pending window-read identities drained) while
+        // generation may still run — the split in one predicate pair.
+        return ((s.messages.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+      },
+      { tid: topicA, min: 42 },
+      { timeout: 30000 }
+    )
     await expect(page.locator(`#messages [data-message-id="${anchor!.id}"]`)).toBeAttached({ timeout: 10000 })
+    // Split assertion on the live store: generation ongoing AND read settled.
+    const overlap = await page.evaluate((tid: string) => {
+      const s = (window as any).store.getState()
+      return {
+        generating: s.messages.loadingByTopic?.[tid] === true,
+        readSettled: ((s.messages.pendingWindowReadsByTopic || {})[tid] ?? []).length === 0
+      }
+    }, topicA)
+    expect(overlap.generating).toBe(true)
+    expect(overlap.readSettled).toBe(true)
+    console.log(`[E2E] Early-return overlap: A generating with read settled`)
+    // DOM readable while generating: seed content present and Stop offered.
+    await expect(page.locator('#messages .message-assistant .markdown').first()).toContainText('leave-a-body-', {
+      timeout: 10000
+    })
+    await expect(page.getByTestId('stop-generation-button')).toBeVisible({ timeout: 15000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 7. RETURN SETTLES — anchor drift in tolerance; B terminal from any route
+    // ═══════════════════════════════════════════════════════════════════
     const anchorOffsetAfter = await page.evaluate((id: string) => {
       const cont = document.querySelector('#messages')
       const node = document.querySelector(`#messages [data-message-id="${id}"]`)
@@ -534,6 +561,8 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     expect(Math.abs(anchorOffsetAfter! - anchor!.offset)).toBeLessThanOrEqual(CONTINUITY_ANCHOR_TOL)
     // Shared-input semantics: B's own send consumed the box; no B text leaks into A.
     await expect(textarea).toHaveValue('', { timeout: 5000 })
+    // B completes in the background (store predicate, route-independent).
+    await waitForAssistantTerminal(page, topicB, 2)
 
     // ═══════════════════════════════════════════════════════════════════
     // 8. A COMPLETES — exact full XL reply in store blocks + rendered tail

@@ -205,19 +205,24 @@ vi.mock('@renderer/store', () => ({
   useAppDispatch: () => vi.fn()
 }))
 
-vi.mock('@renderer/store/newMessage', () => ({
-  newMessagesActions: {
-    addMessage: mocks.addMessage,
-    messagesReceived: mocks.messagesReceived,
-    setTopicLoading: mocks.setTopicLoading,
-    setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicFulfilled', payload: p })),
-    setCurrentTopicId: mocks.setCurrentTopicId,
-    insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
-    applyInsertedMessagesAfterAnchor: mocks.applyInserted,
-    applyAppendAcknowledgment: mocks.applyAppendAck
-  },
-  selectLoadedMessagesForTopic: () => []
-}))
+vi.mock('@renderer/store/newMessage', async () => {
+  const actual = await vi.importActual<any>('@renderer/store/newMessage')
+  return {
+    ...actual,
+    newMessagesActions: {
+      ...actual.newMessagesActions,
+      addMessage: mocks.addMessage,
+      messagesReceived: mocks.messagesReceived,
+      setTopicLoading: mocks.setTopicLoading,
+      setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicFulfilled', payload: p })),
+      setCurrentTopicId: mocks.setCurrentTopicId,
+      insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
+      applyInsertedMessagesAfterAnchor: mocks.applyInserted,
+      applyAppendAcknowledgment: mocks.applyAppendAck
+    },
+    selectLoadedMessagesForTopic: () => []
+  }
+})
 
 // --- Helpers --------------------------------------------------------------
 

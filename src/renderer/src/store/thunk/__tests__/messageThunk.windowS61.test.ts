@@ -513,11 +513,9 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
       expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
 
-      // Loading cleanup still runs for both (finally)
-      const loadingFalseDispatches = dispatch.mock.calls.filter(
-        ([a]: any) => a?.type === 'newMessages/setTopicLoading' && a?.payload?.loading === false
-      )
-      expect(loadingFalseDispatches.length).toBeGreaterThanOrEqual(2)
+      // Read-busy cleanup still runs for both (finally) — read no longer writes generation flag
+      const readReleases = dispatch.mock.calls.filter(([a]: any) => a?.type === 'newMessages/completeWindowRead')
+      expect(readReleases.length).toBeGreaterThanOrEqual(2)
     }
   )
 })

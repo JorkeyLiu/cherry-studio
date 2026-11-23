@@ -537,7 +537,7 @@ describe('computeFlowMessageScrollTop — explicit resident-row geometry', () =>
 
 const baseInput: BootstrapDecisionInput = {
   phase: 'idle',
-  isTopicLoading: false,
+  isTopicReadBusy: false,
   topicId: 'topic-1',
   pending: null,
   savedPosition: null,
@@ -545,8 +545,8 @@ const baseInput: BootstrapDecisionInput = {
 }
 
 describe('resolveBootstrapDecision', () => {
-  it('returns wait when topic is loading', () => {
-    expect(resolveBootstrapDecision({ ...baseInput, isTopicLoading: true })).toEqual({ action: 'wait' })
+  it('returns wait when the window read is busy (read-busy only, never generation)', () => {
+    expect(resolveBootstrapDecision({ ...baseInput, isTopicReadBusy: true })).toEqual({ action: 'wait' })
   })
 
   it('returns done when phase is already done', () => {
@@ -697,22 +697,22 @@ describe('resolveBootstrapDecision', () => {
     })
   })
 
-  it('loading completion allows pending to proceed (wait → pending on next run)', () => {
-    // First call: topic is loading → wait
-    const loading = resolveBootstrapDecision({
+  it('read-busy completion allows pending to proceed (wait → pending on next run)', () => {
+    // First call: window read busy → wait
+    const readBusy = resolveBootstrapDecision({
       ...baseInput,
-      isTopicLoading: true,
+      isTopicReadBusy: true,
       pending: { messageId: 'msg-42', topicId: 'topic-1' }
     })
-    expect(loading).toEqual({ action: 'wait' })
+    expect(readBusy).toEqual({ action: 'wait' })
 
-    // Loading completes → pending is selected
-    const loaded = resolveBootstrapDecision({
+    // Read settles → pending is selected
+    const readSettled = resolveBootstrapDecision({
       ...baseInput,
-      isTopicLoading: false,
+      isTopicReadBusy: false,
       pending: { messageId: 'msg-42', topicId: 'topic-1' }
     })
-    expect(loaded).toEqual({
+    expect(readSettled).toEqual({
       action: 'pending',
       intent: { kind: 'message', targetId: 'msg-42', source: 'pending' }
     })

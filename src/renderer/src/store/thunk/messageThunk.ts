@@ -3777,9 +3777,8 @@ export const loadTopicMessagesThunk =
       }
     }
 
+    let windowReadSeq: number | null = null
     try {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
-
       // Generation ownership with single-flight restore adoption: resolve the
       // same-topic same-route pending restore BEFORE touching the resident
       // applicability generation. An adopted deferred around publishes its
@@ -3820,6 +3819,8 @@ export const loadTopicMessagesThunk =
         requestSeq = ++loadTopicMessagesRequestSeq
         latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
       }
+      windowReadSeq = requestSeq
+      dispatch(newMessagesActions.registerWindowRead({ topicId, requestSeq }))
       const deletionGenAtStart = captureDeletionGeneration(topicId)
 
       const segmentsPromise: Promise<any[]> = (
@@ -4013,7 +4014,9 @@ export const loadTopicMessagesThunk =
     } catch (error) {
       logger.error(`Failed to load messages for topic ${topicId}:`, error as Error)
     } finally {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+      if (windowReadSeq !== null) {
+        dispatch(newMessagesActions.completeWindowRead({ topicId, requestSeq: windowReadSeq }))
+      }
     }
   }
 
@@ -4045,6 +4048,7 @@ export const loadRouteMessagesThunk =
     const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
     const requestSeq = ++loadTopicMessagesRequestSeq
     latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+    dispatch(newMessagesActions.registerWindowRead({ topicId, requestSeq }))
     const deletionGenAtStart = captureDeletionGeneration(topicId)
     let routeGenAtStart = 0
     try {
@@ -4095,7 +4099,6 @@ export const loadRouteMessagesThunk =
     // current. A settled older request therefore never deletes a newer
     // request's entry. `route` narrows the guard to the exact registration.
     const execution = (async (): Promise<FetchMessagesWindowResponse | void> => {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
       try {
         const response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
         if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
@@ -4162,7 +4165,7 @@ export const loadRouteMessagesThunk =
         )
         return response
       } finally {
-        dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+        dispatch(newMessagesActions.completeWindowRead({ topicId, requestSeq }))
         const currentRestore = pendingRouteRestoreByTopic.get(topicId)
         if (
           currentRestore !== undefined &&

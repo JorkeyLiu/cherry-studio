@@ -169,7 +169,7 @@ vi.mock('@renderer/services/MessagesService', () => ({
 vi.mock('@renderer/store', () => ({
   default: {
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {} },
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
       editMode: { enabled: false },
       // Production RootState always carries the resident-registry slice (its
       // initialState is { entries: {} }); the real selector then reads
@@ -181,11 +181,17 @@ vi.mock('@renderer/store', () => ({
   useAppDispatch: () => (mocks as any).dispatchMock,
   // Active branch defaults to main (null); branch-override tests rerender with
   // a selector that returns a branch id (see below).
+  // Read-busy idle: window-read pending identities only (generation never
+  // sets this slice); empty = no outstanding window read.
   useAppSelector: (selector: any) =>
-    selector({ editMode: { enabled: false }, residentRegistry: { entries: {} } } as any),
+    selector({
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
+      editMode: { enabled: false },
+      residentRegistry: { entries: {} }
+    } as any),
   useAppStore: () => ({
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {} },
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
       editMode: { enabled: false },
       // Same production-shape conformance as the default store mock above.
       residentRegistry: { entries: {} }

@@ -34,8 +34,22 @@ const messagesAdapter = createEntityAdapter<Message>()
 export interface MessagesState extends EntityState<Message, string> {
   messageIdsByTopic: Record<string, string[]> // Map: topicId -> ordered message IDs
   currentTopicId: string | null
+  /**
+   * Generation busy only (streaming/generation lifecycle: fetchAndProcess,
+   * queue-idle finish, channel stream, pause/stop). Window reads never write
+   * this flag. E2E generation waits keep reading this field.
+   */
   loadingByTopic: Record<string, boolean>
   fulfilledByTopic: Record<string, boolean>
+  /**
+   * Window-read busy: per-topic pending window-read request identities
+   * (runtime only, never persisted — this slice is blacklisted). Each entry
+   * holds the monotonic `loadTopicMessagesRequestSeq` identities registered
+   * by in-flight `loadTopicMessagesThunk` / `loadRouteMessagesThunk` window
+   * reads. Non-empty = a window read is outstanding. Stale/deleted/evicted
+   * finalizers only release their own identity and never clear a newer read.
+   */
+  pendingWindowReadsByTopic: Record<string, number[]>
   displayCount: number
   /**
    * Main-authoritative per-route mutation capability for the current loaded
@@ -65,6 +79,7 @@ const initialState: MessagesState = messagesAdapter.getInitialState({
   currentTopicId: null,
   loadingByTopic: {},
   fulfilledByTopic: {},
+  pendingWindowReadsByTopic: {},
   displayCount: 10,
   mutableMessageIdsByTopic: {},
   mutableRouteByTopic: {},
@@ -150,10 +165,19 @@ export interface MessagesWindowMergedPayload {
   mutableMessageIds: string[]
 }
 
-// Payload for setting topic loading state
+// Payload for setting topic generation-busy state (generation lifecycle only)
 interface SetTopicLoadingPayload {
   topicId: string
   loading: boolean
+}
+
+// Payload for a window-read identity registration/release.
+// `requestSeq` reuses the monotonic `loadTopicMessagesRequestSeq` identity from
+// the window loaders (no new global clock). Registration and release are
+// identity-scoped so overlapping reads never clear each other.
+export interface WindowReadIdentityPayload {
+  topicId: string
+  requestSeq: number
 }
 
 // Payload for setting topic loading state
@@ -557,6 +581,8 @@ export const messagesSlice = createSlice({
   reducers: {
     setCurrentTopicId(state, action: PayloadAction<string | null>) {
       state.currentTopicId = action.payload
+      // Never clears an active generation or window read: switching the current
+      // marker must not cancel in-flight busy state for any topic.
       if (action.payload && !(action.payload in state.messageIdsByTopic)) {
         state.messageIdsByTopic[action.payload] = []
         state.loadingByTopic[action.payload] = false
@@ -565,6 +591,39 @@ export const messagesSlice = createSlice({
     setTopicLoading(state, action: PayloadAction<SetTopicLoadingPayload>) {
       const { topicId, loading } = action.payload
       state.loadingByTopic[topicId] = loading
+    },
+    registerWindowRead(state, action: PayloadAction<WindowReadIdentityPayload>) {
+      const { topicId, requestSeq } = action.payload
+      if (typeof requestSeq !== 'number' || !Number.isFinite(requestSeq)) return
+      if (!state.pendingWindowReadsByTopic || typeof state.pendingWindowReadsByTopic !== 'object') {
+        state.pendingWindowReadsByTopic = {}
+      }
+      const pending = state.pendingWindowReadsByTopic[topicId] ?? []
+      // Refcounted: adopted single-flight restores share one requestSeq across
+      // two holders (route loader + adopting topic loader). Each registration
+      // pushes one entry so the first finalizer cannot clear the second holder.
+      state.pendingWindowReadsByTopic[topicId] = [...pending, requestSeq]
+    },
+    completeWindowRead(state, action: PayloadAction<WindowReadIdentityPayload>) {
+      const { topicId, requestSeq } = action.payload
+      const map = state.pendingWindowReadsByTopic
+      if (!map || typeof map !== 'object') return
+      const pending = map[topicId]
+      if (!Array.isArray(pending) || pending.length === 0) return
+      const idx = pending.indexOf(requestSeq)
+      if (idx === -1) return
+      if (pending.length === 1) {
+        delete map[topicId]
+      } else {
+        map[topicId] = [...pending.slice(0, idx), ...pending.slice(idx + 1)]
+      }
+    },
+    clearWindowReads(state, action: PayloadAction<{ topicId: string }>) {
+      const { topicId } = action.payload
+      const map = state.pendingWindowReadsByTopic
+      if (map && typeof map === 'object' && map[topicId] !== undefined) {
+        delete map[topicId]
+      }
     },
     setTopicFulfilled(state, action: PayloadAction<SetTopicFulfilledPayload>) {
       const { topicId, fulfilled } = action.payload
@@ -1326,9 +1385,11 @@ export const messagesSlice = createSlice({
         }
         delete state.messageIdsByTopic[topicId]
       }
-      // Clear loading/fulfilled markers for evicted topic; active topic is pinned and never evicted
+      // Clear generation/fulfilled/read markers for evicted topic; active topic is pinned and never evicted
       if (state.loadingByTopic[topicId] !== undefined) delete state.loadingByTopic[topicId]
       if (state.fulfilledByTopic[topicId] !== undefined) delete state.fulfilledByTopic[topicId]
+      if (state.pendingWindowReadsByTopic && state.pendingWindowReadsByTopic[topicId] !== undefined)
+        delete state.pendingWindowReadsByTopic[topicId]
       if (state.currentTopicId === topicId) state.currentTopicId = null
       delete state.mutableRouteByTopic[topicId]
       delete state.mutableMessageIdsByTopic[topicId]
@@ -1349,14 +1410,37 @@ import type { RootState } from './index' // Adjust path if necessary
 // Base selector for the messages slice state
 export const selectMessagesState = (state: RootState) => state.messages
 
+/**
+ * Generation busy for one topic (streaming/generation lifecycle only).
+ * Backed by `loadingByTopic`; window reads never set it.
+ */
+export function selectIsTopicGenerating(state: RootState, topicId: string): boolean {
+  return state.messages.loadingByTopic[topicId] === true
+}
+
+/**
+ * Window-read busy for one topic (pending window-read identities only).
+ * Backed by `pendingWindowReadsByTopic`; generation never sets it.
+ */
+export function selectIsTopicWindowReadBusy(state: RootState, topicId: string): boolean {
+  const pending = state.messages.pendingWindowReadsByTopic?.[topicId]
+  return Array.isArray(pending) && pending.length > 0
+}
+
+/**
+ * Combined busy for retention-style pins: generation OR window read.
+ */
+export function selectIsTopicBusy(state: RootState, topicId: string): boolean {
+  return selectIsTopicGenerating(state, topicId) || selectIsTopicWindowReadBusy(state, topicId)
+}
+
 // Selectors generated by createEntityAdapter
 export const {
-  selectAll: selectAllMessages, // Selects all messages as an array
-  selectById: selectMessageById, // Selects a single message by ID
-  selectIds: selectAllMessageIds, // Selects all message IDs as an array
-  selectEntities: selectMessageEntities // Selects the entity dictionary { id: message }
+  selectAll: selectAllMessages,
+  selectById: selectMessageById,
+  selectIds: selectAllMessageIds,
+  selectEntities: selectMessageEntities
 } = messagesAdapter.getSelectors(selectMessagesState)
-
 // Custom Selectors: explicit bounded loaded projection for a topic.
 // Ordinary renderer Redux message data is a loaded projection of the
 // resident topic window — never the whole topic. `undefined` means the topic
