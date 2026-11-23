@@ -6,8 +6,8 @@
  * non-blocking warning (save stays possible, no encryption is claimed).
  * Loopback HTTP and any HTTPS endpoint must not warn.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -19,6 +19,47 @@ vi.mock('react-i18next', () => ({
 vi.mock('@renderer/context/ThemeProvider', () => ({
   useTheme: () => ({ theme: 'light' })
 }))
+
+// Ownership tracking mirrors SyncSettingsAutosave.test.tsx: every render is
+// unmounted in afterEach (clearing the component's 5s poll interval), RTL
+// state is cleaned, and window.api/window.toast are restored so a
+// timeout/failure never leaks intervals, DOM, or globals into the next case.
+const mounted: Array<{ unmount: () => void }> = []
+let origApiDescriptor: PropertyDescriptor | undefined
+let origToastDescriptor: PropertyDescriptor | undefined
+
+beforeEach(() => {
+  origApiDescriptor = Object.getOwnPropertyDescriptor(window, 'api')
+  origToastDescriptor = Object.getOwnPropertyDescriptor(window, 'toast')
+})
+
+afterEach(() => {
+  for (const m of mounted.splice(0)) {
+    try {
+      m.unmount()
+    } catch {}
+  }
+  cleanup()
+  vi.clearAllMocks()
+  if (origApiDescriptor) {
+    Object.defineProperty(window, 'api', origApiDescriptor)
+  } else {
+    try {
+      // @ts-ignore
+      delete (window as any).api
+    } catch {}
+  }
+  if (origToastDescriptor) {
+    Object.defineProperty(window, 'toast', origToastDescriptor)
+  } else {
+    try {
+      // @ts-ignore
+      delete (window as any).toast
+    } catch {}
+  }
+  origApiDescriptor = undefined
+  origToastDescriptor = undefined
+})
 
 function mockSyncApi(endpoint: string): Record<string, ReturnType<typeof vi.fn>> {
   const api = {
@@ -50,7 +91,7 @@ function mockSyncApi(endpoint: string): Record<string, ReturnType<typeof vi.fn>>
 async function renderWithEndpoint(endpoint: string): Promise<Record<string, ReturnType<typeof vi.fn>>> {
   const api = mockSyncApi(endpoint)
   const { default: SyncSettings } = await import('../SyncSettings')
-  render(<SyncSettings />)
+  mounted.push(render(<SyncSettings />))
   await waitFor(() => {
     expect(screen.getByTestId('sync-endpoint-input')).toHaveValue(endpoint)
   })
