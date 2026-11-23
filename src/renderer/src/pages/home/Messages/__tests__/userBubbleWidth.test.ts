@@ -44,6 +44,19 @@ describe('generic user-bubble width', () => {
     expect(css).toMatch(/max-width:\s*min\(42rem,\s*calc\(100%\s*-\s*91px\),\s*80%\)/)
   })
 
+  it('pairs the group bubble with a max-width CAP only (never an assigned width)', () => {
+    const pairedRule = css.match(/\[data-paired-group='true'\][^{]*\.message-content-container\s*\{([^}]*)\}/)?.[1]
+    expect(pairedRule, 'the paired consumer rule exists').toBeTruthy()
+    // The bubble keeps its own `width: fit-content` + generic cap, so the pair
+    // outcome can only narrow it — pairing can never widen or re-place a short
+    // bubble, and dissolving the group cannot change its rendered box.
+    expect(pairedRule).not.toMatch(/(^|[\s;])width:/)
+    expect(pairedRule).toContain('max-width: min(var(--paired-bubble-max-w), 42rem, calc(100% - 91px), 80%)')
+    expect(pairedRule).toContain('min-width: 0')
+    // The cap variable carries its contract in its name; no fixed-width twin.
+    expect(css).not.toContain('--paired-bubble-w)')
+  })
+
   it('carries no container-query width switch (the reverse-jump source is gone)', () => {
     expect(css).not.toMatch(/calc\(80%\s*-\s*91px\)/)
     expect(css).not.toMatch(/@container[^{]*\{[^}]*message-content-container/)

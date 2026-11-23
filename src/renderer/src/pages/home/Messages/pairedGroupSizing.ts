@@ -24,6 +24,9 @@
  *   cap). Min bubble is 12rem (192 CSSpx at 16px root, root-scaled otherwise);
  *   short content with intrinsic <= min collapses both min/preferred to that
  *   intrinsic so no forced-wide bubble.
+ * - The returned bubble value is a MAX-WIDTH CAP, never an assigned width: the
+ *   consumer keeps the bubble's own `width: fit-content` and the generic cap and
+ *   can only narrow it, so pairing never widens a short bubble's rendered box.
  */
 
 export const PAIRED_GROUP_GAP_PX = 10
@@ -50,7 +53,7 @@ export const PAIRED_BUBBLE_MIN_REM = 12
 export interface PairedWidths {
   /** Applied label width. */
   label: number
-  /** Applied bubble width. */
+  /** Bubble max-width cap (never an assigned width; `fit-content` governs). */
   bubble: number
   /** Applied inter-pair gap (>= 10). */
   gap: number

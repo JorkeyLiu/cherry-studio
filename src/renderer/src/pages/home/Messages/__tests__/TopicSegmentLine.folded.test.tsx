@@ -210,7 +210,7 @@ import topicSegmentReducer from '@renderer/store/topicSegment'
 import type { FlowNode } from '../messageEditSelectionLayout'
 import { renderEditFlowNodes } from '../messageEditSelectionLayout'
 import { SEGMENT_GROUP_HEADER_HEIGHT_PX } from '../SegmentGroupPresentation'
-import TopicSegmentLine from '../TopicSegmentLine'
+import TopicSegmentLine, { createPairMeasureClone } from '../TopicSegmentLine'
 
 /**
  * Store with the route capability the hook reads: `owner` = every loaded member
@@ -584,7 +584,9 @@ describe('TopicSegmentLine group boundary', () => {
       expect(userHost.style.getPropertyValue('--paired-gap-w')).toBe('10px')
       expect(userHost.style.getPropertyValue('--seg-head-pill-w')).toBe(`${L.toFixed(2)}px`)
       expect(userHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe(`${L.toFixed(2)}px`)
-      expect(userHost.style.getPropertyValue('--paired-bubble-w')).toBe(`${B.toFixed(2)}px`)
+      // The published bubble value is a max-width CAP (the stylesheet supplies no
+      // fixed width), so the bubble's own fit-content still decides the render.
+      expect(userHost.style.getPropertyValue('--paired-bubble-max-w')).toBe(`${B.toFixed(2)}px`)
       // No priority: both sides stay strictly above their own minimum and the
       // shared budget closes on the measured axis.
       expect(L).toBeGreaterThan(Lm)
@@ -596,18 +598,22 @@ describe('TopicSegmentLine group boundary', () => {
       // Cleanup clears the pair, never leaving the next group a stale budget.
       expect(userHost.style.getPropertyValue('--seg-head-pill-w')).toBe('')
       expect(userHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe('')
-      expect(userHost.style.getPropertyValue('--paired-bubble-w')).toBe('')
+      expect(userHost.style.getPropertyValue('--paired-bubble-max-w')).toBe('')
       expect(userHost.style.getPropertyValue('--paired-gap-w')).toBe('')
       expect(userHost.getAttribute('data-paired-group')).toBeNull()
-      // Short body: the preferred width is the intrinsic text width, never the
-      // cap — no forced-wide bubble and no shrink at this host width.
+      // Short body: the preferred cap is the intrinsic text width, never the
+      // budget's spare and never an enlargement — pairing cannot widen a bubble
+      // whose natural fit-content width is smaller than the shared frame.
       const shortHost = mountRun('scope-short')
       const shortView = render(tree(makeSegment({ id: 'seg-b1', name: 'Short group' }), 'message message-user', 'hi'), {
         wrapper: wrapper(store),
         container: shortHost
       })
       shortView.rerender(tree(makeSegment({ id: 'seg-b2', name: 'Short group' }), 'message message-user', 'hi'))
-      expect(shortHost.style.getPropertyValue('--paired-bubble-w')).toBe('14.00px')
+      const shortIntrinsic = shortHost.querySelector('.message-content-container')?.textContent?.length ?? 0
+      expect(shortHost.style.getPropertyValue('--paired-bubble-max-w')).toBe('14.00px')
+      // …and the cap never exceeds the measured natural box it constrains.
+      expect(Number.parseFloat(shortHost.style.getPropertyValue('--paired-bubble-max-w'))).toBe(shortIntrinsic * TEXT_W)
       expect(shortHost.style.getPropertyValue('--paired-gap-w')).toBe('10px')
       shortView.unmount()
       // Assistant-first: no pair — the header indents its own row and the
@@ -625,7 +631,7 @@ describe('TopicSegmentLine group boundary', () => {
       )
       expect(asstHost.getAttribute('data-paired-group')).toBeNull()
       expect(asstHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe('')
-      expect(asstHost.style.getPropertyValue('--paired-bubble-w')).toBe('')
+      expect(asstHost.style.getPropertyValue('--paired-bubble-max-w')).toBe('')
       asstView.unmount()
       // Collapsed browse block (no rendered body): same non-paired cap.
       const shutHost = mountRun('scope-shut')
@@ -645,6 +651,58 @@ describe('TopicSegmentLine group boundary', () => {
       })
       document.querySelectorAll('[data-interaction-scope-id]').forEach((el) => el.remove())
     }
+  })
+
+  it('measures the rendered border box: the offscreen clone carries the source box chrome', () => {
+    // A body-level clone loses the ancestor-provided box rules and the live
+    // inline overflow. The rendered user bubble gets 10px/16px padding from
+    // `.message-user`, `box-sizing: border-box` and `overflow-wrap` from the
+    // generic rule, and its `overflowY`/gutter come from styled Scrollbar + the
+    // live `Message` inline style. The measurement clone must carry exactly that
+    // computed box (no duplicated padding constants, no stray reserved gutter),
+    // otherwise a short bubble measures ~20px wider than the box it renders.
+    const source = document.createElement('div')
+    source.className = 'message-content-container'
+    source.style.cssText =
+      'padding:10px 16px;box-sizing:border-box;overflow:visible;scrollbar-gutter:auto;' +
+      'font-size:14px;line-height:21px;letter-spacing:normal;'
+    source.appendChild(document.createElement('span'))
+    const clone = createPairMeasureClone(source)
+    expect(clone.getAttribute('aria-hidden')).toBe('true')
+    // Offscreen, non-interacting, intrinsic: never a layout participant.
+    expect(clone.style.position).toBe('fixed')
+    expect(clone.style.visibility).toBe('hidden')
+    expect(clone.style.whiteSpace).toBe('nowrap')
+    expect(clone.style.maxWidth).toBe('none')
+    // The rendered box chrome, copied from the live computed style.
+    expect(clone.style.getPropertyValue('box-sizing')).toBe('border-box')
+    expect(clone.style.getPropertyValue('padding-top')).toBe('10px')
+    expect(clone.style.getPropertyValue('padding-left')).toBe('16px')
+    // Whether the rendered box reserves a gutter is copied verbatim: `visible`
+    // overflow (the live `Message` inline style) reserves none, so the measured
+    // border box is content + padding and never the old 46px + 6px look-alike.
+    expect(clone.style.getPropertyValue('overflow')).toBe('visible')
+    expect(clone.style.getPropertyValue('scrollbar-gutter')).toBe('auto')
+    // Live typography (the message font setting) survives the cssText reset.
+    expect(clone.style.fontSize).toBe('14px')
+    expect(clone.style.lineHeight).toBe('21px')
+    // A longhand-only declaration is not lost: the scroll offset padding and the
+    // real gutter of the styled Scrollbar are carried the same way.
+    const scroller = document.createElement('div')
+    scroller.style.cssText = 'padding-left:46px;box-sizing:border-box;overflow-y:auto;scrollbar-gutter:stable;'
+    const scrollerClone = createPairMeasureClone(scroller)
+    expect(scrollerClone.style.getPropertyValue('padding-left')).toBe('46px')
+    expect(scrollerClone.style.getPropertyValue('overflow-y')).toBe('auto')
+    expect(scrollerClone.style.getPropertyValue('scrollbar-gutter')).toBe('stable')
+    const intrinsic = createPairMeasureClone(source, (node) => {
+      node.style.width = 'max-content'
+      node.style.maxWidth = 'none'
+      node.style.flex = 'none'
+    })
+    expect(intrinsic.style.width).toBe('max-content')
+    // Measurement owns the clone lifecycle: nothing is left in the document.
+    expect(clone.parentElement).toBeNull()
+    expect(intrinsic.parentElement).toBeNull()
   })
 
   it('renders color dot and 24px pill box', () => {

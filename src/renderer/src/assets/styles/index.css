@@ -176,24 +176,24 @@ ul {
     jump while the reading column resizes: narrow columns approach
     near-full available width (100% - 91px binds below ~455px), wide
     columns settle at the 80% reading proportion, and very wide columns
-    stop at 42rem. Grouped and ungrouped bubbles share this rule, so
-    grouping never changes body width; the group label clamps to the free
-    gap instead (see `TopicSegmentLine`). */
+    stop at 42rem. Grouped and ungrouped bubbles share this rule's `width`
+    and cap; the paired rule below adds only a max-width cap, so grouping
+    can narrow a bubble but never widen or re-place it, and the group label
+    clamps to the free gap instead (see `TopicSegmentLine`). */
   width: fit-content;
   min-width: 0;
   box-sizing: border-box;
   overflow-wrap: break-word;
   max-width: min(42rem, calc(100% - 91px), 80%);
 }
-/* Paired group-first user row: bubble + label come from the SAME shared frame
-    (resolvePairedWidths). Both vars are published together on the run host, so
-    no separate CSS cap may override one side and break the 10px budget. The
-    selector repeats the generic bubble chain plus the paired host so it wins
-    over the generic rule above, which carries four class selectors. All other
-    (ungrouped / assistant-first) bubbles keep the generic rule. */
+/* Paired group-first user row: bubble + label share one measured frame
+   (resolvePairedWidths). The paired result is the bubble's MAX-WIDTH only — the
+   bubble keeps its own `width: fit-content` and the generic cap above, so the
+   budget can narrow a long bubble but never widen or re-place a short one.
+   The generic cap is intersected here (same containing block, same formula)
+   so a column resize keeps clamping the pair to the reading width. */
 .bubble:not(.multi-select-mode) [data-paired-group='true'] .message-user .message-content-container {
-  width: var(--paired-bubble-w);
-  max-width: var(--paired-bubble-w);
+  max-width: min(var(--paired-bubble-max-w), 42rem, calc(100% - 91px), 80%);
   min-width: 0;
 }
 /* Inner containment: code scrolls in its own box, tables/media never exceed

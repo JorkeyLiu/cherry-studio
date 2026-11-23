@@ -479,6 +479,69 @@ const SegmentRenameForm: React.FC<{
   )
 }
 
+/**
+ * Box-chrome families carried from the measured source onto its offscreen clone:
+ * border-box accounting, the per-side padding the rendered box actually has, its
+ * borders, and whether a scrollbar gutter is reserved. `[shorthand, longhands]`:
+ * the shorthand is applied first and the per-side longhands after, so an engine
+ * that resolves only the shorthand still reproduces the rendered box while a
+ * longhand-only declaration (a scroll offset padding, an overflow override) is
+ * never lost. Values come from the source's computed style — no padding or
+ * margin constant is duplicated here.
+ */
+const PAIR_MEASURE_BOX_FAMILIES: readonly (readonly [string, readonly string[]])[] = [
+  ['box-sizing', ['box-sizing']],
+  ['padding', ['padding-top', 'padding-right', 'padding-bottom', 'padding-left']],
+  ['border-width', ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width']],
+  ['border-style', ['border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style']],
+  ['overflow', ['overflow-x', 'overflow-y']],
+  ['scrollbar-gutter', ['scrollbar-gutter']]
+]
+
+/**
+ * Offscreen measurement clone for the paired label+bubble budget.
+ *
+ * The clone is appended to `document.body`, so it has no ancestor chain, and
+ * its inline style block is replaced by the measurement reset below — it
+ * therefore loses both the live inline overrides (`Message` sets `overflowY`, a
+ * non-default message font setting sets `fontSize`) and every ancestor-provided
+ * box rule (the user bubble's `.message-user` padding/box-sizing and the styled
+ * scroll container's `overflow`/`scrollbar-gutter`). A body-level clone that
+ * keeps only the styled-component padding measures a differently-styled
+ * look-alike, not the rendered border box.
+ *
+ * So the SOURCE's own computed box properties are copied onto the clone: the
+ * measured border box is then the rendered border box by construction (no
+ * duplicated padding constants), the same way the live computed font is
+ * re-applied for the message font setting. Returns an unattached clone; the
+ * caller appends, measures and removes it.
+ */
+export const createPairMeasureClone = (source: HTMLElement, mutate?: (clone: HTMLElement) => void): HTMLElement => {
+  const clone = source.cloneNode(true) as HTMLElement
+  clone.setAttribute('aria-hidden', 'true')
+  const sourceStyle = getComputedStyle(source)
+  clone.style.cssText =
+    'position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;' +
+    'width:auto;max-width:none;height:auto;white-space:nowrap;flex:none;'
+  clone.style.font = sourceStyle.font
+  clone.style.fontSize = sourceStyle.fontSize
+  clone.style.lineHeight = sourceStyle.lineHeight
+  clone.style.letterSpacing = sourceStyle.letterSpacing
+  // The box chrome the rendered element actually has, family by family (see
+  // `PAIR_MEASURE_BOX_FAMILIES`).
+  const copyBoxFamily = (shorthand: string, longhands: readonly string[]) => {
+    const shorthandValue = sourceStyle.getPropertyValue(shorthand)
+    if (shorthandValue.length > 0) clone.style.setProperty(shorthand, shorthandValue)
+    for (const longhand of longhands) {
+      const value = sourceStyle.getPropertyValue(longhand)
+      if (value.length > 0) clone.style.setProperty(longhand, value)
+    }
+  }
+  for (const [shorthand, longhands] of PAIR_MEASURE_BOX_FAMILIES) copyBoxFamily(shorthand, longhands)
+  if (mutate) mutate(clone)
+  return clone
+}
+
 interface TopicSegmentLineProps {
   // The one owning group of this mounted flow (presentation facts only).
   segment: TopicSegment
@@ -666,8 +729,10 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
   // never the allocated-width feedback: full pill capped at 280 for Lp, first
   // grapheme + ellipsis + chrome for Lm, first text max-content for the bubble.
   // Both widths come from resolvePairedWidths in the same frame
-  // (--seg-head-pill-w + --seg-head-pill-max-w carry the label, --paired-bubble-w
-  // carries the bubble); no CSS separate-cap override may break the budget.
+  // (--seg-head-pill-w + --seg-head-pill-max-w carry the label,
+  // --paired-bubble-max-w carries the bubble's max-width CAP — never its width,
+  // so the bubble keeps its own fit-content and can only be narrowed); no CSS
+  // separate-cap override may break the budget.
   // Assistant-first keeps its prior indent path and never pairs with a bubble.
   const { reportPairedMin } = usePairedReadingMin()
   useLayoutEffect(() => {
@@ -688,22 +753,11 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
       }
       return Array.from(name)[0] ?? ''
     }
+    // Offscreen border-box measure of the rendered element (see
+    // `createPairMeasureClone`: the clone carries the source's own computed box
+    // chrome, so a detached clone is not a differently-styled look-alike).
     const measureOffscreen = (source: HTMLElement, mutate?: (clone: HTMLElement) => void): number => {
-      const clone = source.cloneNode(true) as HTMLElement
-      clone.setAttribute('aria-hidden', 'true')
-      // cssText below replaces the inline style block, and the user's typography
-      // lives on the SOURCE element as an inline `fontSize` (the message font
-      // setting). Re-apply the live computed font so a non-default setting never
-      // measures at the default size.
-      const sourceStyle = getComputedStyle(source)
-      clone.style.cssText =
-        'position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;' +
-        'width:auto;max-width:none;height:auto;white-space:nowrap;flex:none;'
-      clone.style.font = sourceStyle.font
-      clone.style.fontSize = sourceStyle.fontSize
-      clone.style.lineHeight = sourceStyle.lineHeight
-      clone.style.letterSpacing = sourceStyle.letterSpacing
-      if (mutate) mutate(clone)
+      const clone = createPairMeasureClone(source, mutate)
       document.body.appendChild(clone)
       const w = Math.ceil(clone.getBoundingClientRect().width)
       clone.remove()
@@ -718,11 +772,10 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
           host.style.setProperty('--seg-head-pill-w', fallback)
         }
         // A group that stops being user-first (renamed/reordered/folded, or an
-        // assistant-first turn) must drop the paired contract entirely: a stale
-        // --paired-bubble-w would keep squeezing a message that no longer shares
-        // a budget with the pill.
+        // --paired-bubble-max-w would keep squeezing a message that no longer
+        // shares a budget with the pill.
         host.style.removeProperty('--seg-head-pill-max-w')
-        host.style.removeProperty('--paired-bubble-w')
+        host.style.removeProperty('--paired-bubble-max-w')
         host.style.removeProperty('--paired-gap-w')
         host.removeAttribute('data-paired-group')
         reportPairedMin(segment.id, null)
@@ -761,6 +814,13 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
       const cap = genericBubbleCapPx(contentColumn, rootFont)
       let intrinsic = cap
       if (body) {
+        // `max-content` on a clone that carries the source's own computed box
+        // chrome (padding/border/box-sizing/overflow/gutter) is the border box
+        // the bubble renders at when nothing constrains it. Previously the body
+        // clone kept the styled scroll container's 46px padding and reserved
+        // gutter while losing the rendered 16px padding and the `visible`
+        // overflow, so the "intrinsic" of a short bubble was 20px larger than
+        // the box it renders.
         intrinsic = measureOffscreen(body, (clone) => {
           clone.style.width = 'max-content'
           clone.style.maxWidth = 'none'
@@ -772,15 +832,19 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
       const A = hostWidth - PAIRED_AXIS_FIXED_PX
       const r = resolvePairedWidths(A, Lp, Lm, Bp, Bm)
       const labelStr = `${Math.max(0, r.label).toFixed(2)}px`
-      const bubbleStr = `${Math.max(0, r.bubble).toFixed(2)}px`
+      // The paired result is a CAP, never a width: the bubble keeps its own
+      // `width: fit-content` + generic cap and can only be narrowed by the
+      // shared budget, so grouping can never grow or re-width an unconstrained
+      // short bubble.
+      const bubbleMaxStr = `${Math.max(0, r.bubble).toFixed(2)}px`
       if (host.style.getPropertyValue('--seg-head-pill-w') !== labelStr) {
         host.style.setProperty('--seg-head-pill-w', labelStr)
       }
       if (host.style.getPropertyValue('--seg-head-pill-max-w') !== labelStr) {
         host.style.setProperty('--seg-head-pill-max-w', labelStr)
       }
-      if (host.style.getPropertyValue('--paired-bubble-w') !== bubbleStr) {
-        host.style.setProperty('--paired-bubble-w', bubbleStr)
+      if (host.style.getPropertyValue('--paired-bubble-max-w') !== bubbleMaxStr) {
+        host.style.setProperty('--paired-bubble-max-w', bubbleMaxStr)
       }
       if (host.style.getPropertyValue('--paired-gap-w') !== `${PAIRED_GROUP_GAP_PX}px`) {
         host.style.setProperty('--paired-gap-w', `${PAIRED_GROUP_GAP_PX}px`)
@@ -805,7 +869,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
       observedBody = null
       host.style.removeProperty('--seg-head-pill-w')
       host.style.removeProperty('--seg-head-pill-max-w')
-      host.style.removeProperty('--paired-bubble-w')
+      host.style.removeProperty('--paired-bubble-max-w')
       host.style.removeProperty('--paired-gap-w')
       host.removeAttribute('data-paired-group')
       reportPairedMin(segment.id, null)
