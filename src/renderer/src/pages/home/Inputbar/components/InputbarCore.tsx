@@ -20,6 +20,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { INPUTBAR_OUTER_SIDE_PAD_PX } from '../../Messages/navRailGeometry'
 import AttachmentPreview from '../AttachmentPreview'
 import {
   useInputbarToolsDispatch,
@@ -430,7 +431,7 @@ const Container = styled.div`
   flex-direction: column;
   position: relative;
   z-index: 2;
-  padding: 0 18px 18px 18px;
+  padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
 `
 
 const InputBarContainer = styled.div`

@@ -20,10 +20,21 @@ import {
   InteractionRailHitTarget,
   InteractionRailLine
 } from './GroupInteractionRail'
+import {
+  bubbleMinPx,
+  genericBubbleCapPx,
+  PAIRED_AXIS_FIXED_PX,
+  PAIRED_GROUP_GAP_PX,
+  resolvePairedWidths
+} from './pairedGroupSizing'
+import { usePairedReadingMin } from './pairedReadingMinContext'
 import { INTERACTION_REGION_SEGMENT_HEADER } from './routeViewportContext'
 import {
   SEGMENT_GROUP_HEADER_HEIGHT_PX,
+  SEGMENT_GROUP_PILL_BAND_TOP_PX,
   SEGMENT_GROUP_PILL_HEIGHT_PX,
+  SEGMENT_GROUP_PILL_LEFT_PX,
+  SEGMENT_GROUP_PILL_MAX_W_PX,
   SEGMENT_GROUP_RAIL_TOP_PX,
   useSegmentGroupGeometry
 } from './SegmentGroupPresentation'
@@ -597,6 +608,11 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
   // One groupwide hover: the header row and the continuous rail are one
   // boundary, so hovering either raises both the line and the header actions.
   const [hovered, setHovered] = useState(false)
+  // The full label always stays mounted — name (ellipsis, full name on
+  // `title`), turn count and hover rename/dissolve actions — at every width.
+  // Narrow columns clamp the pill to the measured free gap (floored at the
+  // minimum usable label width, see the publish effect) instead of hiding
+  // any control.
   const [menuOpen, setMenuOpen] = useState(false)
   // The group's rename and dissolve surfaces are compact ANCHORED popovers (no
   // mask), never centered modals, and both belong to the group-menu entrance:
@@ -627,6 +643,9 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
   // The rail's painted line is the source of the action pins' x: the arrow must
   // point AT the group edge, so the pin is a point on that line.
   const railRef = useRef<HTMLDivElement>(null)
+  // The pill's own box: the expanded header shares the first message's header
+  // band, so that header indents by exactly this width (see `MessageHeader`).
+  const pillRef = useRef<HTMLDivElement>(null)
   // A surface that is open keeps the hover action row revealed: the trigger must
   // not fade out from under the confirmation it just opened.
   const actionsVisible = hovered || renameAnchor !== null || dissolveAnchor !== null
@@ -637,6 +656,161 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
   // members happen to be windowed in.
   const railHeight = geometry?.height ?? 0
   const railTop = geometry?.top ?? SEGMENT_GROUP_RAIL_TOP_PX
+
+  // Paired group label+bubble layout — ONE shared budget, same-frame vars.
+  // A is measured on the actual pair axis: pill attached edge
+  // (hostLeft + PILL_LEFT, PILL_LEFT = -8) to the user bubble's right limit
+  // (host right minus the 45px bubble margin and the 10px row inset, counted
+  // once): A = hostWidth - PAIRED_AXIS_FIXED_PX (47).
+  // Intrinsics are deliberate offscreen measures (same component, aria-hidden),
+  // never the allocated-width feedback: full pill capped at 280 for Lp, first
+  // grapheme + ellipsis + chrome for Lm, first text max-content for the bubble.
+  // Both widths come from resolvePairedWidths in the same frame
+  // (--seg-head-pill-w + --seg-head-pill-max-w carry the label, --paired-bubble-w
+  // carries the bubble); no CSS separate-cap override may break the budget.
+  // Assistant-first keeps its prior indent path and never pairs with a bubble.
+  const { reportPairedMin } = usePairedReadingMin()
+  useLayoutEffect(() => {
+    const pill = pillRef.current
+    if (!pill) return
+    const host = pill.closest('[data-interaction-scope-id]')
+    if (!(host instanceof HTMLElement)) return
+    let observedBody: Element | null = null
+    let observer: ResizeObserver | null = null
+    const firstGraphemeOf = (name: string): string => {
+      try {
+        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+        const it = seg.segment(name)[Symbol.iterator]()
+        const first = it.next()
+        if (!first.done) return (first.value as { segment: string }).segment
+      } catch {
+        /* fall through */
+      }
+      return Array.from(name)[0] ?? ''
+    }
+    const measureOffscreen = (source: HTMLElement, mutate?: (clone: HTMLElement) => void): number => {
+      const clone = source.cloneNode(true) as HTMLElement
+      clone.setAttribute('aria-hidden', 'true')
+      // cssText below replaces the inline style block, and the user's typography
+      // lives on the SOURCE element as an inline `fontSize` (the message font
+      // setting). Re-apply the live computed font so a non-default setting never
+      // measures at the default size.
+      const sourceStyle = getComputedStyle(source)
+      clone.style.cssText =
+        'position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;' +
+        'width:auto;max-width:none;height:auto;white-space:nowrap;flex:none;'
+      clone.style.font = sourceStyle.font
+      clone.style.fontSize = sourceStyle.fontSize
+      clone.style.lineHeight = sourceStyle.lineHeight
+      clone.style.letterSpacing = sourceStyle.letterSpacing
+      if (mutate) mutate(clone)
+      document.body.appendChild(clone)
+      const w = Math.ceil(clone.getBoundingClientRect().width)
+      clone.remove()
+      return w
+    }
+    const publish = () => {
+      const firstMsg = host.querySelector('[data-message-id]')
+      const isUserFirst = firstMsg?.classList.contains('message-user') ?? false
+      if (!isUserFirst) {
+        const fallback = `${Math.ceil(pill.getBoundingClientRect().width)}px`
+        if (host.style.getPropertyValue('--seg-head-pill-w') !== fallback) {
+          host.style.setProperty('--seg-head-pill-w', fallback)
+        }
+        // A group that stops being user-first (renamed/reordered/folded, or an
+        // assistant-first turn) must drop the paired contract entirely: a stale
+        // --paired-bubble-w would keep squeezing a message that no longer shares
+        // a budget with the pill.
+        host.style.removeProperty('--seg-head-pill-max-w')
+        host.style.removeProperty('--paired-bubble-w')
+        host.style.removeProperty('--paired-gap-w')
+        host.removeAttribute('data-paired-group')
+        reportPairedMin(segment.id, null)
+        return
+      }
+      const Lp = Math.min(SEGMENT_GROUP_PILL_MAX_W_PX, measureOffscreen(pill))
+      const Lm = (() => {
+        const w = measureOffscreen(pill, (clone) => {
+          const nameEl = clone.querySelector('[data-testid="topic-segment-label"] span, span')
+          void nameEl
+          const nameSpan = clone.querySelectorAll('span')[1] ?? clone.querySelector('span')
+          const g = firstGraphemeOf(segment.name || '')
+          if (nameSpan) nameSpan.textContent = `${g}…`
+        })
+        return Math.min(Lp, Math.max(1, w))
+      })()
+      const body = firstMsg?.querySelector('.message-content-container') as HTMLElement | null
+      const rootFont = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+      const minFloor = bubbleMinPx(rootFont)
+      const hostWidth = host.clientWidth || host.getBoundingClientRect().width
+      // The generic long-bubble cap is `min(42rem, calc(100% - 91px), 80%)`, where
+      // `100%` resolves against the rendered content parent of the bubble content
+      // container (row padding/margins already applied), NOT against the row host.
+      // Measure that containing box so the cap and the CSS cap are the same truth.
+      const contentParent = body?.parentElement ?? null
+      let contentColumn = hostWidth
+      if (contentParent) {
+        const parentStyle = getComputedStyle(contentParent)
+        const padX =
+          (Number.parseFloat(parentStyle.paddingLeft) || 0) + (Number.parseFloat(parentStyle.paddingRight) || 0)
+        const measuredColumn = contentParent.clientWidth - padX
+        // Only a laid-out box is a real containing block; otherwise keep the host
+        // width instead of collapsing the cap to zero.
+        if (measuredColumn > 0) contentColumn = measuredColumn
+      }
+      const cap = genericBubbleCapPx(contentColumn, rootFont)
+      let intrinsic = cap
+      if (body) {
+        intrinsic = measureOffscreen(body, (clone) => {
+          clone.style.width = 'max-content'
+          clone.style.maxWidth = 'none'
+          clone.style.flex = 'none'
+        })
+      }
+      const Bp = Math.min(intrinsic, cap)
+      const Bm = intrinsic <= minFloor ? Bp : Math.min(minFloor, Bp)
+      const A = hostWidth - PAIRED_AXIS_FIXED_PX
+      const r = resolvePairedWidths(A, Lp, Lm, Bp, Bm)
+      const labelStr = `${Math.max(0, r.label).toFixed(2)}px`
+      const bubbleStr = `${Math.max(0, r.bubble).toFixed(2)}px`
+      if (host.style.getPropertyValue('--seg-head-pill-w') !== labelStr) {
+        host.style.setProperty('--seg-head-pill-w', labelStr)
+      }
+      if (host.style.getPropertyValue('--seg-head-pill-max-w') !== labelStr) {
+        host.style.setProperty('--seg-head-pill-max-w', labelStr)
+      }
+      if (host.style.getPropertyValue('--paired-bubble-w') !== bubbleStr) {
+        host.style.setProperty('--paired-bubble-w', bubbleStr)
+      }
+      if (host.style.getPropertyValue('--paired-gap-w') !== `${PAIRED_GROUP_GAP_PX}px`) {
+        host.style.setProperty('--paired-gap-w', `${PAIRED_GROUP_GAP_PX}px`)
+      }
+      host.setAttribute('data-paired-group', 'true')
+      reportPairedMin(segment.id, r.minPair)
+      const nextBody = body
+      if (nextBody !== observedBody) {
+        if (observedBody && observer) observer.unobserve(observedBody)
+        observedBody = nextBody
+        if (observedBody && observer) observer.observe(observedBody)
+      }
+    }
+    publish()
+    if (typeof ResizeObserver === 'undefined') return
+    observer = new ResizeObserver(publish)
+    observer.observe(pill)
+    observer.observe(host)
+    if (observedBody) observer.observe(observedBody)
+    return () => {
+      observer?.disconnect()
+      observedBody = null
+      host.style.removeProperty('--seg-head-pill-w')
+      host.style.removeProperty('--seg-head-pill-max-w')
+      host.style.removeProperty('--paired-bubble-w')
+      host.style.removeProperty('--paired-gap-w')
+      host.removeAttribute('data-paired-group')
+      reportPairedMin(segment.id, null)
+    }
+  }, [segment.id, segment.name, reportPairedMin])
 
   // Row navigation must never fire from group interactions: the header sits
   // inside the turn wrapper whose click capture selects the turn in edit
@@ -938,6 +1112,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
         onMouseLeave={() => setHovered(false)}>
         {/* 组头标签：唯一一个组头行，位于组首消息处 */}
         <TabContainer
+          ref={pillRef}
           $color={color}
           $folded={false}
           $hovered={hovered}
@@ -1071,18 +1246,27 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, routeSegme
 // ─── Styled Components ───
 
 /**
- * The group's ONE in-flow header row: the only flow contribution of the
- * chrome, the same height in both presentation states (`32px` = the existing
- * `24px` pill + an `8px` gap). It is a positioned host so the continuous rail
- * (and the pill, which hangs into the left gutter) can paint from it, but it
- * contributes no padding/margin/min-height of its own. Its own band is not a
- * hit surface (`pointer-events: none`): only the pill and the rail's transparent
- * hit target are interactive, so the message column and the message list's own
+ * The group's ONE header row: the only flow contribution of the chrome.
+ * Expanded runs share the first message's content band with the pill, so the
+ * row is zero-height and the label sits flush with that content's top
+ * instead of owning an independent `32px` band — grouping adds no vertical
+ * height of its own. A collapsed browse block hides the bodies, so the row
+ * keeps its own `32px` (still the existing `24px` pill + an `8px` gap)
+ * exactly as before. It is a positioned host so the continuous rail (and the
+ * pill, which sits at the gutter) can paint from it, but it contributes no
+ * padding/margin/min-height of its own. Its own band is not a hit surface
+ * (`pointer-events: none`): only the pill and the rail's transparent hit
+ * target are interactive, so the message column and the message list's own
  * click/right-click semantics stay untouched.
  */
 const GroupHeaderRow = styled.div`
   position: relative;
-  height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
+  height: 0;
+  // Collapsed browse view: bodies are hidden and no message band is available
+  // to share, so the row keeps its own 32px — no other rule changes.
+  [data-seg-bodies-hidden='true'] & {
+    height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
+  }
   // Local content layer only: this header paints above the ordinary message
   // rows it labels (z1000, below antd portal overlays ~1030). It takes no
   // part in the nav contract — the Chat row's sibling order already keeps
@@ -1099,10 +1283,10 @@ const GroupHeaderRow = styled.div`
 
 /**
  * The group's single continuous rail: one absolutely positioned overlay that
- * starts just below the pill and runs to the group's last mounted run (its
- * length is measured by the shared group layout manager, including the group's
- * internal divider heights). One element, one hover mark, one interaction
- * surface — never one mark per run.
+ * starts AT the pill's top (passing behind it) and runs to the group's last
+ * mounted run (its length is measured by the shared group layout manager,
+ * including the group's internal divider heights). One element, one hover
+ * mark, one interaction surface — never one mark per run.
  */
 const GroupRail = styled.div<{ $top: number; $height: number }>`
    position: absolute;
@@ -1118,24 +1302,42 @@ const GroupRail = styled.div<{ $top: number; $height: number }>`
 `
 
 const TabContainer = styled.div<{ $color: string; $folded: boolean; $hovered: boolean; $expandable: boolean }>`
-  position: absolute;
-  top: 0;
-  left: -12px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: ${SEGMENT_GROUP_PILL_HEIGHT_PX}px;
-  padding: 0 8px 0 6px;
-  background: ${(props) =>
-    props.$folded
-      ? 'var(--color-background-soft)'
-      : `color-mix(in srgb, ${props.$color} 10%, var(--color-background))`};
-  border: 1px solid
-    ${(props) => (props.$folded ? 'var(--color-border)' : `color-mix(in srgb, ${props.$color} 22%, transparent)`)};
-  border-radius: 4px 8px 8px 4px;
-  pointer-events: auto;
-  white-space: nowrap;
-  max-width: 280px;
+ position: absolute;
+ // Expanded: the pill sits at the rail's right edge, flush with the first
+ // message's own content top (the message container's 10px top padding)
+ // instead of owning a row. The pill's own left border joins the rail line
+ // directly — no opaque chip crossing the line, no connector stem.
+ // Grouping still adds no in-flow height; a user bubble header is absolutely
+ // positioned and reserves nothing, so the pill's top always equals the
+ // first message's content top and the chrome visually encompasses it.
+ top: ${SEGMENT_GROUP_PILL_BAND_TOP_PX}px;
+ left: ${SEGMENT_GROUP_PILL_LEFT_PX}px;
+ z-index: 1;
+ // Collapsed browse view: the row keeps its own 32px, so the pill sits at
+ // the row top exactly as before.
+ [data-seg-bodies-hidden='true'] & {
+   top: 0;
+ }
+ display: flex;
+ align-items: center;
+ gap: 4px;
+ height: ${SEGMENT_GROUP_PILL_HEIGHT_PX}px;
+ padding: 0 8px 0 6px;
+ background: ${(props) =>
+   props.$folded ? 'var(--color-background-soft)' : `color-mix(in srgb, ${props.$color} 10%, var(--color-background))`};
+ border: 1px solid
+   ${(props) => (props.$folded ? 'var(--color-border)' : `color-mix(in srgb, ${props.$color} 22%, transparent)`)};
+ border-radius: 2px 8px 8px 2px;
+ pointer-events: auto;
+ white-space: nowrap;
+ // The label clamps to the run's own free geometry instead of shrinking the
+ // bubble: --seg-head-pill-max-w is the measured gap between this attached
+ // edge and the first message's body minus the pill gap (see the publish
+ // effect), falling back to the absolute cap before it publishes. Past the
+ // max the name truncates (ellipsis, full name on title); the clamp never
+ // goes below the minimum usable label width, so the name, its count and
+ // the hover rename/dissolve actions always stay mounted and reachable.
+ max-width: min(${SEGMENT_GROUP_PILL_MAX_W_PX}px, var(--seg-head-pill-max-w, ${SEGMENT_GROUP_PILL_MAX_W_PX}px));
   isolation: isolate;
 
   @media (prefers-reduced-motion: reduce) {

@@ -3,8 +3,9 @@ import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { emitMock, state } = vi.hoisted(() => ({
+const { emitMock, state, settingsState } = vi.hoisted(() => ({
   emitMock: vi.fn(),
+  settingsState: { messageNavigation: false },
   state: {
     routeKey: 'topic-1::main',
     segments: [
@@ -49,6 +50,9 @@ const { emitMock, state } = vi.hoisted(() => ({
 vi.mock('@renderer/hooks/useRouteScopedSegments', () => ({
   useRouteScopedSegments: () => state
 }))
+vi.mock('@renderer/hooks/useSettings', () => ({
+  useSettings: () => ({ messageNavigation: settingsState.messageNavigation })
+}))
 
 vi.mock('@renderer/services/EventService', () => ({
   EVENT_NAMES: { NAVIGATE_TO_MESSAGE: 'NAVIGATE_TO_MESSAGE' },
@@ -74,6 +78,7 @@ const { default: TopicSegmentDrawer } = await import('../TopicSegmentDrawer')
 describe('TopicSegmentDrawer route-scoped navigation', () => {
   beforeEach(() => {
     emitMock.mockClear()
+    settingsState.messageNavigation = false
     state.routeKey = 'topic-1::main'
     state.segments = [
       {
@@ -294,5 +299,23 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
     expect(document.body.contains(screen.getByTestId('drawer-popover'))).toBe(true)
     const popoverZ = Number(screen.getByTestId('drawer-popover').getAttribute('data-z-index'))
     expect(popoverZ).toBeGreaterThan(1000)
+  })
+
+  it('keeps the drawer available with navigation on and click navigation working', () => {
+    settingsState.messageNavigation = true
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    // Availability is unchanged while the rail is mounted: same trigger,
+    // same rows, same stable-head navigation target.
+    expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
+    expect(screen.getByText('Segment One')).toBeTruthy()
+    fireEvent.click(screen.getByText('Segment One'))
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-2')
+  })
+
+  it('keeps the drawer available with navigation off (historical anchor)', () => {
+    settingsState.messageNavigation = false
+    render(<TopicSegmentDrawer topicId="topic-1" />)
+    expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
+    expect(screen.getByText('Segment Two')).toBeTruthy()
   })
 })

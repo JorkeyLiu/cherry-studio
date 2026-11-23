@@ -1,3 +1,4 @@
+import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { createContext, type ReactNode, use, useLayoutEffect, useRef, useState } from 'react'
 import styled from 'styled-components'
@@ -21,11 +22,13 @@ import { INTERACTION_RAIL_LINE_WIDTH_PX, INTERACTION_RAIL_OUTSET_PX, Interaction
  *   presentation start (its first member in effective-route order, the member
  *   every route that still reaches the group also reaches at the same place) —
  *   the stable host that already survives fold, expand and edit-mode changes.
- *   The slot always occupies the same row height: the GROUP HEADER ROW (pill,
+ *   The slot occupies the same row per state: the GROUP HEADER ROW (pill,
  *   hit target, menu, mutation authority) when the group's stable head resolves
- *   on the current route, otherwise the equal-height continuation row (rail
- *   only, no head identity). A mounted window without the slot hosts NO row: no
- *   temporary one is ever elected from mounted fragments;
+ *   on the current route — zero-height, sharing the slot run's first message
+ *   content band while bodies are shown (its own `32px` only while they are
+ *   hidden) — otherwise the equal-height continuation row (rail only, no head
+ *   identity). A mounted window without the slot hosts NO row: no temporary
+ *   one is ever elected from mounted fragments;
  * - the CONTINUOUS RAIL is ONE absolutely positioned overlay element. It lives
  *   inside the slot row (header or continuation), spanning from the slot down to
  *   the group's last mounted run; when the slot itself is outside the mounted
@@ -45,21 +48,63 @@ import { INTERACTION_RAIL_LINE_WIDTH_PX, INTERACTION_RAIL_OUTSET_PX, Interaction
  */
 
 /**
- * Row height every group's normal-flow slot occupies: the header row in both
- * presentation states, and the equal-height continuation row of a route-
- * truncated residual. One constant, so the two presentations can never drift.
+ * Row height every group's normal-flow slot occupies while a collapsed browse
+ * block hides its bodies: the header row (pill, hit target, menu, mutation
+ * authority) when the group's stable head resolves on the current route,
+ * otherwise the equal-height continuation row (rail only, no head identity).
+ * Expanded runs share the first message's content band instead (zero in-flow
+ * height) — see `SEGMENT_GROUP_PILL_BAND_TOP_PX`. One constant, so the two
+ * collapsed presentations can never drift.
  */
 export const SEGMENT_GROUP_HEADER_HEIGHT_PX = 32
 /** Label pill height (unchanged group-header shape). */
 export const SEGMENT_GROUP_PILL_HEIGHT_PX = 24
 /**
- * Where the rail starts inside the header row: just below the pill (4px
- * clearance), exactly the offset the per-run rule used before this redesign.
+ * Where the label pill sits when the expanded header shares the first
+ * message's own content band: flush with that content's top (the message
+ * container's own `10px` top padding), so the group's chrome top equals the
+ * first bubble's top instead of sitting below it. The pill's left border
+ * joins the rail's right edge (see `TabContainer`), and the rail starts
+ * at this same offset — one attached shape, no floating seam.
  */
-export const SEGMENT_GROUP_RAIL_TOP_PX = 28
+export const SEGMENT_GROUP_PILL_BAND_TOP_PX = 10
+/**
+ * Where the rail starts inside the header row: at the pill's own top, so the
+ * line and the label read as one continuous boundary. The pill's left border
+ * sits on the rail's right edge (no overlap), and the rail runs down from
+ * that joint.
+ */
+export const SEGMENT_GROUP_RAIL_TOP_PX = SEGMENT_GROUP_PILL_BAND_TOP_PX
+/**
+ * Inter-pair clearance — single truth lives in pairedGroupSizing
+ * (PAIRED_GROUP_GAP_PX = 10). Both widths shrink by the same t and the spare
+ * distributes as gap >= 10; the minimum pair never collapses the gap.
+ */
+export const SEGMENT_GROUP_PILL_GAP_PX = 10
+/**
+ * The label pill's attached left edge, relative to its run host: exactly the
+ * rail's right edge (the 2px line spans the host's `[-10,-8]` gutter, the 8px
+ * hit target `[-10,-2]`) — the pill's own left border joins the line, so no
+ * opaque chip crosses the rail and no connector stem is needed. Previously
+ * `-9` (pill border on the rail center: an opaque chip overpainting half the
+ * line); one pixel right puts the border on the line's outer edge instead.
+ */
+export const SEGMENT_GROUP_PILL_LEFT_PX = -8
+/**
+ * Absolute cap for the label pill: past this width the name truncates
+ * (ellipsis, full name on `title`) however wide the free gap is. Rename and
+ * menu access travel with the pill (inline rename on the name, group menu on
+ * right-click/rail), so a clamped pill never loses its controls.
+ */
+export const SEGMENT_GROUP_PILL_MAX_W_PX = 280
+/**
+ * Legacy fixed floor (120) — retained only as a compatibility export.
+ * Paired sizing no longer uses it: Lm is the measured first-grapheme +
+ * ellipsis + chrome width, actions always mounted. Do not use as a clamp.
+ */
+export const SEGMENT_GROUP_PILL_MIN_W_PX = 120
 /** Rail stops this far above the group's last message row (unchanged trim). */
 export const SEGMENT_GROUP_RAIL_TAIL_TRIM_PX = 12
-
 export interface SegmentGroupGeometry {
   /** Rail top inside the group header row. */
   top: number
@@ -70,9 +115,11 @@ export interface SegmentGroupGeometry {
 interface RunRegistration {
   /**
    * This run mounts the group's route-stable presentation slot and hosts its
-   * ONE in-flow `32px` row — the header row when the group's stable head
-   * resolves on this route, the equal-height continuation row otherwise (at most
-   * one per group per commit). Either way it is the group's measured geometry
+   * ONE in-flow slot row — the header row when the group's stable head
+   * resolves on this route (zero-height, sharing the first message's content
+   * band while bodies are shown; its own `32px` only while they are hidden),
+   * the equal-height continuation row otherwise (at most one per group per
+   * commit). Either way it is the group's measured geometry
    * anchor. A carrying run without the slot registers `false`: it is a
    * rail-geometry carrier (and may host the rail-only continuation) but never
    * slot occupancy.
@@ -108,6 +155,13 @@ export interface SegmentGroupLayoutManager {
   registerRangeMember(groupId: string, element: HTMLElement): () => void
   subscribe(groupId: string, listener: () => void): () => void
   getGeometry(groupId: string): SegmentGroupGeometry | null
+  /**
+   * First rendered message id of the group's header-registered slot run, or
+   * `null` when the slot run has no rendered message (collapsed browse
+   * block, unmounted window). Read during the coalesced pass; subscribed
+   * like geometry.
+   */
+  getSlotFirstMessageId(groupId: string): string | null
   /** Synchronous pass; used before paint by the provider's layout effect. */
   measure(): void
   /**
@@ -137,6 +191,8 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
    */
   const rangeMembers = new Map<string, Set<HTMLElement>>()
   const geometries = new Map<string, SegmentGroupGeometry>()
+  /** Slot run first rendered message per group (see `getSlotFirstMessageId`). */
+  const slotFirstByGroup = new Map<string, string>()
   const listeners = new Map<string, Set<() => void>>()
   let resizeObserver: ResizeObserver | null = null
   let frame: number | null = null
@@ -254,13 +310,18 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       const anchor = header ?? topmost?.element ?? null
       if (!anchor) continue
       const anchorRect = rectOf(anchor)
-      // The rail starts just below the slot row's pill band (the slot row is the
-      // header row, or its equal-height continuation). When a range member sits
-      // ABOVE the anchor (a collapsed fold block's summary standing in for the
-      // group's bodies), the span starts there instead, so the published `top`
-      // becomes negative relative to the slot row and the ONE rail still covers
-      // everything the group shows.
-      const railTopAbs = anchorRect ? Math.min(anchorRect.top + SEGMENT_GROUP_RAIL_TOP_PX, rangeTop) : rangeTop
+      // The rail starts AT the slot row's pill top and passes behind the pill:
+      // the expanded pill sits at `SEGMENT_GROUP_RAIL_TOP_PX` (flush with the
+      // first message's content top), while a collapsed browse block keeps its
+      // own `32px` row with the pill at that row's top — read from the anchor
+      // run's own DOM attribute, the same projection-of-live-layout the rest of
+      // this pass already is. When a range member sits ABOVE the anchor (a
+      // collapsed fold block's summary standing in for the group's bodies),
+      // the span starts there instead, so the published `top` becomes negative
+      // relative to the slot row and the ONE rail still covers everything the
+      // group shows.
+      const pillOffset = anchor.getAttribute('data-seg-bodies-hidden') === 'true' ? 0 : SEGMENT_GROUP_RAIL_TOP_PX
+      const railTopAbs = anchorRect ? Math.min(anchorRect.top + pillOffset, rangeTop) : rangeTop
       const next: SegmentGroupGeometry = {
         top: anchorRect && Number.isFinite(railTopAbs) ? railTopAbs - anchorRect.top : SEGMENT_GROUP_RAIL_TOP_PX,
         height:
@@ -268,8 +329,28 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
             ? 0
             : Math.max(0, bottom - railTopAbs - (endsGroup ? SEGMENT_GROUP_RAIL_TAIL_TRIM_PX : 0))
       }
+      // The expanded pill shares the slot run's first message content band:
+      // publish that message so exactly its content reserves room. A mid-turn
+      // group start still reads the run's own first message (not the authority
+      // presentation start); a collapsed block reads no message at all.
+      // Tracked independently from the rail geometry: either change notifies.
+      const slotFirst =
+        header && header.isConnected
+          ? (header.querySelector('[data-message-id]')?.getAttribute('data-message-id') ?? null)
+          : null
+      const previousFirst = slotFirstByGroup.get(groupId) ?? null
+      const firstChanged = previousFirst !== slotFirst
+      if (firstChanged) {
+        if (slotFirst === null) slotFirstByGroup.delete(groupId)
+        else slotFirstByGroup.set(groupId, slotFirst)
+      }
       const previous = geometries.get(groupId)
-      if (previous && Math.abs(previous.top - next.top) < 0.5 && Math.abs(previous.height - next.height) < 0.5) {
+      if (
+        !firstChanged &&
+        previous &&
+        Math.abs(previous.top - next.top) < 0.5 &&
+        Math.abs(previous.height - next.height) < 0.5
+      ) {
         continue
       }
       geometries.set(groupId, next)
@@ -295,6 +376,7 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
         if (current.size === 0) {
           runs.delete(groupId)
           geometries.delete(groupId)
+          slotFirstByGroup.delete(groupId)
           notify(groupId)
           return
         }
@@ -344,6 +426,9 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
     getGeometry(groupId) {
       return geometries.get(groupId) ?? null
     },
+    getSlotFirstMessageId(groupId) {
+      return slotFirstByGroup.get(groupId) ?? null
+    },
     measure,
     resume() {
       if (active) {
@@ -378,6 +463,7 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       runs.clear()
       rangeMembers.clear()
       geometries.clear()
+      slotFirstByGroup.clear()
       listeners.clear()
     }
   }
@@ -419,7 +505,50 @@ export const SegmentGroupPresentationProvider: React.FC<{ children: ReactNode }>
 }
 
 export const useSegmentGroupLayoutManager = (): SegmentGroupLayoutManager | null => use(SegmentGroupLayoutContext)
+/**
+ * The slot run's first RENDERED message: the expanded label pill sits flush
+ * with exactly this message's content top, so only its content reserves room.
+ * This is the DOM-first message of the header-registered run — not the
+ * authority presentation start: a segment may validly start mid-turn
+ * (edit-mode selection groups arbitrary subsets), and then the pill still
+ * sits at the run's top while the presentation start belongs to a later
+ * message. Reading the run's own first `[data-message-id]` keeps the mapping
+ * honest in both cases without duplicating the slot-election rule. Published
+ * by the same coalesced measurement pass as the rail geometry (no per-message
+ * observers, no render side-effects); a collapsed browse block has no rendered
+ * messages, so it publishes `null` and no message reserves room.
+ */
+export const useSegmentSlotFirstMessageId = (groupId: string | undefined): string | null => {
+  const manager = useSegmentGroupLayoutManager()
+  const [firstId, setFirstId] = useState<string | null>(() =>
+    manager && groupId ? manager.getSlotFirstMessageId(groupId) : null
+  )
 
+  useLayoutEffect(() => {
+    if (!manager || !groupId) {
+      setFirstId(null)
+      return
+    }
+    setFirstId(manager.getSlotFirstMessageId(groupId))
+    return manager.subscribe(groupId, () => setFirstId(manager.getSlotFirstMessageId(groupId)))
+  }, [manager, groupId])
+
+  return firstId
+}
+/**
+ * Whether this message carries the group's expanded label pill: true exactly
+ * for the slot run's first rendered message while bodies are shown. One
+ * shared composition (segment membership + slot-first mapping) so the
+ * message container (which reserves room against the bubble body for user
+ * messages, whose header is absolutely positioned and reserves nothing) and
+ * the header (which indents the in-flow avatar/name row) can never disagree
+ * about which message is headed.
+ */
+export const useIsHeadedFirstMessage = (topicId: string, messageId: string): boolean => {
+  const { isMessageInSegment } = useTopicSegments(topicId)
+  const slotFirstId = useSegmentSlotFirstMessageId(isMessageInSegment(messageId)?.id)
+  return slotFirstId !== null && slotFirstId === messageId
+}
 /**
  * Live geometry subscription for the group's rail overlay. A group with no
  * registered run (empty or fully unmounted) simply has no geometry and paints
@@ -492,8 +621,8 @@ export const GroupRailContinuation: React.FC<{ groupId: string; color: string }>
  * a route switch that crosses a fork inside the group leaves the slot — and
  * every shared row around it — exactly where it was.
  *
- * It is ONE real in-flow row of the shared header height (`32px`), holding only
- * the group's continuous rail: no pill, no hit target, no group menu, no hover,
+ * It is ONE real in-flow slot row — zero-height sharing the content band while
+ * bodies are shown (its own `32px` only while they are hidden) — holding only
  * and no head identity invented for this route (the head stays a fact of its
  * owning route; `headerMessageId`/`headerOwnedByRoute` never leak across). The
  * residual group is never hidden: its reachable members render below the slot
@@ -506,8 +635,13 @@ export const GroupRailContinuation: React.FC<{ groupId: string; color: string }>
  */
 const SlotContinuationRow = styled.div`
   position: relative;
-  height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
+  height: 0;
   pointer-events: none;
+  // Collapsed browse view: bodies are hidden, so the slot keeps its own row
+  // exactly like the collapsed header variant — no other rule changes.
+  [data-seg-bodies-hidden='true'] & {
+    height: ${SEGMENT_GROUP_HEADER_HEIGHT_PX}px;
+  }
   // Out-of-flow rail paint must not be clipped: the rail spans the group's rows
   // below this one, so no overflow/contain clipping may be introduced here.
   isolation: isolate;

@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import MessageTokens from './MessageTokens'
+import { useIsHeadedFirstMessage } from './SegmentGroupPresentation'
 
 interface Props {
   message: Message
@@ -68,6 +69,14 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   const isAssistantMessage = message.role === 'assistant'
   const isUserMessage = message.role === 'user'
   const isUserBubbleMessage = isBubbleStyle && isUserMessage && !isMultiSelectMode
+  // The group's label pill shares this message's band when this is the slot
+  // run's first rendered message (single shared slot-first mapping). An
+  // in-flow header row (assistant) indents exactly the pill's measured width
+  // for the avatar/name row. A user bubble message's header is absolutely
+  // positioned and reserves nothing — the bubble body never shrinks for the
+  // group; the LABEL clamps to the free gap instead (see `TopicSegmentLine`) —
+  // so no margin may drag its avatar here.
+  const isHeadedFirst = useIsHeadedFirstMessage(topic.id, message.id) && !isUserBubbleMessage
 
   const username = useMemo(() => removeLeadingEmoji(getUserName()), [getUserName])
   // Missing-assistant fallback reuses the displayed name (model name/message
@@ -83,7 +92,9 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   }, [isBubbleStyle, isUserMessage, isMultiSelectMode])
 
   return (
-    <Container className={isUserBubbleMessage ? 'message-header user-bubble-header' : 'message-header'}>
+    <Container
+      className={isUserBubbleMessage ? 'message-header user-bubble-header' : 'message-header'}
+      $headedFirst={isHeadedFirst}>
       {isAssistantMessage ? (
         isLocalAi ? (
           <Avatar
@@ -139,6 +150,7 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
         <UserWrap>
           <HStack alignItems="center" justifyContent={userNameJustifyContent}>
             <UserName
+              className="message-header-username"
               isBubbleStyle={isBubbleStyle && isUserMessage}
               theme={theme}
               title={isAssistantMessage ? modelTitle : username}>
@@ -174,7 +186,7 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
 
 MessageHeader.displayName = 'MessageHeader'
 
-const Container = styled.div`
+const Container = styled.div<{ $headedFirst?: boolean }>`
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -182,6 +194,27 @@ const Container = styled.div`
   position: relative;
   margin-bottom: 10px;
   user-select: none;
+  // Headed-first group message: the label pill shares this band, so the whole
+  // header starts past it. The width is the pill's own measured box on the
+  // run host (0px before it publishes); every other header is untouched.
+  margin-left: ${(props) => (props.$headedFirst ? 'var(--seg-head-pill-w, 0px)' : '0')};
+  // The reserved room narrows this row: keep the name on one line (ellipsis,
+  // full name stays on 'title') instead of wrapping into a taller header.
+  ${(props) =>
+    props.$headedFirst
+      ? `
+    > *:nth-child(2) {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .message-header-username {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  `
+      : ''}
 `
 
 const UserWrap = styled.div`

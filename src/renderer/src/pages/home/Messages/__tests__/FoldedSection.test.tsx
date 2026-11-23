@@ -777,8 +777,8 @@ describe('FoldedSection', () => {
       stubRect(screen.getByTestId('folded-section-header'), { top: 309.55, bottom: 335.55 })
       view.rerender(tree({ rangeScopeIds: [] }))
 
-      // Run-only rule, unchanged: the rail starts just below the header pill.
-      expect(screen.getByTestId('probe-geometry').textContent).toBe('28/0')
+      // Run-only rule, unchanged: the rail starts at the pill's own top.
+      expect(screen.getByTestId('probe-geometry').textContent).toBe('10/10')
       view.unmount()
     })
 
@@ -790,7 +790,7 @@ describe('FoldedSection', () => {
       expect(Number(screen.getByTestId('probe-geometry').textContent.split('/')[0])).toBeLessThan(0)
 
       collapsed.rerender(tree({ rangeScopeIds: ['seg-1'], isExpanded: true }))
-      expect(screen.getByTestId('probe-geometry').textContent).toBe('28/0')
+      expect(screen.getByTestId('probe-geometry').textContent).toBe('10/10')
       collapsed.unmount()
     })
   })

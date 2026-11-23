@@ -15,6 +15,8 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
+import { sidebarDragMax } from '@renderer/pages/home/Messages/pairedGroupSizing'
+import { usePairedReadingMin } from '@renderer/pages/home/Messages/pairedReadingMinContext'
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { isAcceptedClosureForRoute } from '@renderer/services/contextClosure'
@@ -22,7 +24,7 @@ import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { setTopicListWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
+import { setTopicListWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
@@ -49,6 +51,7 @@ interface Props {
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
   setActiveAssistant: (assistant: Assistant) => void
+  chatColumnMin?: number
 }
 
 const Chat: FC<Props> = (props) => {
@@ -59,6 +62,12 @@ const Chat: FC<Props> = (props) => {
   const { messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
   const dispatch = useAppDispatch()
+  const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
+  const showAssistants = useAppSelector((s) => s.settings.showAssistants)
+  const chatColumnMin = props.chatColumnMin ?? 0
+  // Live window width shared with the home layout: the fixed-window budget must
+  // follow real resize events, not a render-time snapshot.
+  const { windowWidth: liveWindowWidth } = usePairedReadingMin()
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
@@ -473,14 +482,23 @@ const Chat: FC<Props> = (props) => {
             </div>
           </Main>
         </motion.div>
-        {showTopics && (
-          <ResizableHandle
-            cssVar="--topic-list-width"
-            minWidth={SIDEBAR_MIN_WIDTH}
-            onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
-            side="right"
-          />
-        )}
+        {showTopics &&
+          (() => {
+            const leftVisible = showAssistants ? assistantsWidth : 0
+            const winW = liveWindowWidth
+            // Same chat-budget clamp as the left panel: a fixed window is never
+            // squeezed below the reading minimum by widening the topic list.
+            const rightMax = winW > 0 ? sidebarDragMax(winW, leftVisible, chatColumnMin) : SIDEBAR_MAX_WIDTH
+            return (
+              <ResizableHandle
+                cssVar="--topic-list-width"
+                minWidth={SIDEBAR_MIN_WIDTH}
+                maxWidth={rightMax}
+                onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
+                side="right"
+              />
+            )
+          })()}
         <AnimatePresence initial={false}>
           {showTopics && (
             <motion.div

@@ -38,7 +38,11 @@ import {
   renderEditFlowNodes,
   SelectionBlock
 } from '../messageEditSelectionLayout'
-import { SEGMENT_GROUP_HEADER_HEIGHT_PX, SegmentGroupPresentationProvider } from '../SegmentGroupPresentation'
+import {
+  GroupSlotContinuation,
+  SEGMENT_GROUP_HEADER_HEIGHT_PX,
+  SegmentGroupPresentationProvider
+} from '../SegmentGroupPresentation'
 
 const { capturedFoldedSectionProps } = vi.hoisted(() => ({
   capturedFoldedSectionProps: [] as Array<{ isUnfoldAllowed?: boolean }>
@@ -1712,11 +1716,11 @@ describe('route-stable group header placement', () => {
     onResidual.unmount()
   })
 
-  it('gives the continuation slot the header row height, so routes cannot drift', () => {
-    // The header row's own height is asserted independently where it renders
-    // (`TopicSegmentLine.folded`), and both rows are built from
-    // `SEGMENT_GROUP_HEADER_HEIGHT_PX`; asserting the continuation here pins
-    // that the two presentations occupy the same normal-flow height.
+  it('keeps the continuation slot height equal to the header row in both states, so routes cannot drift', () => {
+    // The header row's own heights are asserted independently where it renders
+    // (`TopicSegmentLine.folded`: zero-height expanded sharing the message
+    // band, `32px` collapsed keeping its own row); asserting the continuation
+    // here pins that the two presentations stay interchangeable per state.
     const seg = routeSeg('seg-height')
     const residualMap = new Map([
       [
@@ -1741,10 +1745,25 @@ describe('route-stable group header placement', () => {
     expect(row).not.toBeNull()
     const cs = window.getComputedStyle(row)
     expect(cs.position).toBe('relative')
-    expect(cs.height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    // Expanded: zero in-flow height, exactly like the expanded header variant.
+    expect(cs.height).toBe('0px')
     // Slot occupancy only: no pill, no group menu, no invented head identity.
     expect(container.querySelectorAll('[data-testid="topic-segment-label"]').length).toBe(0)
     expect(container.querySelectorAll('[data-testid="topic-segment-actions"]').length).toBe(0)
+
+    // Collapsed browse view: bodies are hidden and no message band is
+    // available, so the slot keeps its own 32px row — same as the header.
+    const collapsed = render(
+      <div data-seg-bodies-hidden="true">
+        <GroupSlotContinuation groupId="seg-height" color="#808080" />
+      </div>
+    )
+    const collapsedRow = collapsed.container.querySelector(
+      '[data-testid="topic-segment-slot-continuation"]'
+    ) as HTMLElement
+    expect(collapsedRow).not.toBeNull()
+    expect(window.getComputedStyle(collapsedRow).height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    collapsed.unmount()
   })
 
   it('a stale qualification never renders a header here (fail-closed coverage)', () => {

@@ -57,9 +57,16 @@ const SegmentRunHost: React.FC<{
   isHeader: boolean
   /** This run carries the group's authority last mounted member. */
   endsGroup: boolean
+  /**
+   * The collapsed browse view hides this run's bodies while its chrome stays
+   * mounted. Published as a DOM attribute only (no state, no events): chrome
+   * rows read it to keep their own `32px` row while bodies are hidden, and
+   * expanded runs share the first message's header band instead.
+   */
+  bodiesHidden?: boolean
   scopeId?: string
   children: ReactNode
-}> = ({ groupId, isHeader, endsGroup, scopeId, children }) => {
+}> = ({ groupId, isHeader, endsGroup, bodiesHidden, scopeId, children }) => {
   const manager = useSegmentGroupLayoutManager()
   const elementRef = useRef<HTMLDivElement | null>(null)
 
@@ -72,7 +79,10 @@ const SegmentRunHost: React.FC<{
   }, [manager, groupId, isHeader, endsGroup])
 
   return (
-    <RunHost ref={elementRef} data-interaction-scope-id={scopeId}>
+    <RunHost
+      ref={elementRef}
+      data-interaction-scope-id={scopeId}
+      data-seg-bodies-hidden={bodiesHidden ? 'true' : undefined}>
       {children}
     </RunHost>
   )
@@ -500,8 +510,10 @@ export interface RenderEditFlowNodesOptions {
    * the interactive turn, outside its `inert` content and its click-capture
    * cover — so group controls stay independently hit-testable while turn
    * selection is unaffected. The payload is group-level presentation (never
-   * per-run): the group owns one in-flow `32px` row (the header when its head
-   * resolves on this route, the equal-height continuation otherwise), one
+   * per-run): the group owns one normal-flow slot row (the header when its head
+   * resolves on this route — zero-height sharing the first message's band
+   * while bodies are shown, its own `32px` only while they are hidden — the
+   * equal-height continuation otherwise), one continuous rail overlay, one
    * continuous rail overlay, one menu and one hover state no matter how many
    * runs carry it. Omit to render no chrome (tests/probes).
    */
@@ -709,7 +721,8 @@ export function renderEditFlowNodes({
   /**
    * Equal-height continuation slots: one per group whose route-stable slot is
    * mounted but whose stable head resolves on ANOTHER route (a route-truncated
-   * residual). The slot run hosts the same `32px` row the header would occupy —
+   * residual). The slot run hosts the same slot row the header would occupy
+   * (zero-height expanded, its own `32px` while bodies are hidden) — so
    * so switching between such routes leaves the row, and every shared row
    * around it, in place — but paints only the group's rail: no pill, no hit
    * target, no menu, no invented head identity, and the reachable members stay
@@ -838,6 +851,7 @@ export function renderEditFlowNodes({
         groupId={base?.segment.id}
         isHeader={!!chrome || !!slotContinuation}
         endsGroup={base?.isLast === true}
+        bodiesHidden={hideBodies}
         scopeId={scopeId}>
         {chrome && renderSegmentChrome ? renderSegmentChrome(chrome) : null}
         {slotContinuation ? (

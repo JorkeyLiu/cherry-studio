@@ -2,10 +2,13 @@
  * Topic-segment group boundary — one group owns header, boundary and interaction.
  *
  * The law under test: a mounted topic-segment group is ONE presentation entity
- * no matter how many turn runs carry it. It owns exactly one in-flow header row
- * (the same occupied row in both presentation states, so adjacent groups can
- * never overlap and no label cascades), exactly one continuous rail with one
- * interaction surface, exactly one group menu and one groupwide hover.
+ * no matter how many turn runs carry it. Its chrome adds no vertical height:
+ * the expanded header shares the slot run's first message band (a zero-height
+ * in-flow row carrying the absolute pill and the continuous rail), while a
+ * collapsed browse block keeps the row's own 32px. Either way there is exactly
+ * one continuous rail with one interaction surface, exactly one group menu
+ * and one groupwide hover — so adjacent groups never overlap and no label
+ * cascades.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -390,10 +393,12 @@ describe('TopicSegmentLine group boundary', () => {
     const header = screen.getByTestId('topic-segment-group')
     expect(header.getAttribute('data-segment-id')).toBe('seg-1')
     expect(header.getAttribute('data-segment-folded')).toBe('false')
-    // The row is IN NORMAL FLOW: one occupied row, no absolute seam paint.
+    // The row stays in normal flow but shares the first message's header band:
+    // zero in-flow height, so grouping adds no vertical height. The pill hangs
+    // into the message band (absolute) while the rail passes behind it.
     const cs = window.getComputedStyle(header)
     expect(cs.position).toBe('relative')
-    expect(cs.height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    expect(cs.height).toBe('0px')
     expectNoFlowSpacing(header)
     expectNoOuterSpacing(screen.getByTestId('topic-segment-label'))
 
@@ -420,6 +425,226 @@ describe('TopicSegmentLine group boundary', () => {
     expect(screen.getByTestId('topic-segment-label').getAttribute('role')).toBeNull()
     expect(updateSegmentMetadataMock).toHaveBeenCalledTimes(0)
     view.unmount()
+  })
+
+  it('republishes the pill width when the same chrome instance is reused for another group', () => {
+    // The chrome call is keyless, so one mounted instance can carry group B
+    // after group A. The width travels as a CSS variable on the run host: the
+    // swap must clear A's value and publish B's, never leave A's stale.
+    const store = setupStore()
+    const host = document.createElement('div')
+    host.setAttribute('data-interaction-scope-id', 'scope-swap')
+    document.body.appendChild(host)
+    const chrome = (segment: any) =>
+      createElement(TopicSegmentLine, {
+        segment,
+        routeSegment: ownedRouteEntry(),
+        isFirst: true,
+        isLast: false,
+        messageCount: 7
+      })
+    try {
+      const view = render(chrome(makeSegment({ id: 'seg-a', name: 'Alpha' })), {
+        wrapper: wrapper(store),
+        container: host
+      })
+      const pill = screen.getByTestId('topic-segment-label')
+      // Mount publishes the jsdom width; the swap below must replace it with
+      // the newly measured width (the shared observer is a no-op in tests, so
+      // only the identity effect can republish — exactly the regression).
+      Object.defineProperty(pill, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({
+          x: 0,
+          y: 0,
+          left: 0,
+          right: 134,
+          top: 0,
+          bottom: 24,
+          width: 134,
+          height: 24,
+          toJSON: () => ({})
+        })
+      })
+      view.rerender(chrome(makeSegment({ id: 'seg-b', name: 'Beta group' })))
+      expect(host.style.getPropertyValue('--seg-head-pill-w')).toBe('134px')
+      view.unmount()
+    } finally {
+      host.remove()
+    }
+  })
+  it('pairs the label and the group bubble on ONE shared budget for a user-first run and keeps the cap otherwise', () => {
+    // Paired contract: the pill's attached edge (host left - 8px) and the
+    // group's first bubble right limit (host right - 45px) form one axis,
+    // A = host width - 37px, with a 10px minimum gap. Above the sum of
+    // preferred widths both stay preferred and the spare becomes gap; between
+    // the sums of maxima and minima BOTH shrink by the SAME t; neither side
+    // ever underflows its own minimum. An assistant-first header indents its
+    // own row and keeps the plain cap.
+    const store = setupStore()
+    // Deterministic measurement stub: jsdom has no layout engine, so the pill
+    // and the first bubble answer width by their own text length. Every other
+    // element keeps the real rect.
+    const TEXT_W = 7
+    const PILL_CHROME = 60
+    const HOST_W = 864
+    const originalRect = HTMLElement.prototype.getBoundingClientRect
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      writable: true,
+      value: function (this: HTMLElement) {
+        const chars = (this.textContent ?? '').length
+        const isPill = this.getAttribute('data-testid') === 'topic-segment-label'
+        const isBody = this.classList.contains('message-content-container')
+        if (!isPill && !isBody) return originalRect.call(this)
+        const width = isPill ? PILL_CHROME + chars * TEXT_W : chars * TEXT_W
+        return {
+          x: 0,
+          y: 0,
+          left: 0,
+          right: width,
+          top: 0,
+          bottom: 0,
+          width,
+          height: 24,
+          toJSON: () => ({})
+        } as DOMRect
+      }
+    })
+    const stubRect = (el: Element, rect: Record<string, number>) => {
+      Object.defineProperty(el, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({
+          x: 0,
+          y: 0,
+          left: 0,
+          right: 0,
+          top: 0,
+          bottom: 0,
+          width: 0,
+          height: 0,
+          toJSON: () => ({}),
+          ...rect
+        })
+      })
+    }
+    const chrome = (segment: any) =>
+      createElement(TopicSegmentLine, {
+        segment,
+        routeSegment: ownedRouteEntry(),
+        isFirst: true,
+        isLast: false,
+        messageCount: 7
+      })
+    // A mounted slot run: the host carries the interaction scope id and the
+    // run's own first rendered message ahead of the chrome row — the same
+    // order production mounts (the fake message must be INSIDE React's tree,
+    // because createRoot clears pre-existing container children on mount).
+    const tree = (segment: any, firstMessageClass: string | null, bodyText = 'hello') => (
+      <>
+        {firstMessageClass ? (
+          <div data-message-id="m1" className={firstMessageClass}>
+            <div className="message-content-container">{bodyText}</div>
+          </div>
+        ) : null}
+        {chrome(segment)}
+      </>
+    )
+    const mountRun = (scopeId: string) => {
+      const host = document.createElement('div')
+      host.setAttribute('data-interaction-scope-id', scopeId)
+      document.body.appendChild(host)
+      stubRect(host, { left: 100, right: 100 + HOST_W, width: HOST_W })
+      return host
+    }
+    try {
+      // User-first, long body: A sits between the sum of maxima and the sum of
+      // minima, so both sides shrink by the same t and the gap holds at 10px.
+      const NAME = 'A very long user group name for shrinking'
+      const BODY = 'x'.repeat(100)
+      const userHost = mountRun('scope-user')
+      const userView = render(tree(makeSegment({ id: 'seg-u1', name: NAME }), 'message message-user', BODY), {
+        wrapper: wrapper(store),
+        container: userHost
+      })
+      userView.rerender(tree(makeSegment({ id: 'seg-u2', name: NAME }), 'message message-user', BODY))
+      const countLen = (userHost.querySelector('[data-testid="topic-segment-count"]')?.textContent ?? '').length
+      const Lp = Math.min(280, PILL_CHROME + (NAME.length + countLen) * TEXT_W)
+      // One grapheme + ellipsis, the turn count and every pill chrome part.
+      const Lm = Math.min(Lp, PILL_CHROME + (1 + 1 + countLen) * TEXT_W)
+      const cap = Math.min(672, HOST_W - 91, 0.8 * HOST_W)
+      const intrinsic = BODY.length * TEXT_W
+      const Bp = Math.min(intrinsic, cap)
+      const Bm = intrinsic <= 192 ? Bp : Math.min(192, Bp)
+      const A = HOST_W - 47
+      const t = Math.min(1, Math.max(0, (A - 10 - Lm - Bm) / (Lp - Lm + (Bp - Bm))))
+      const L = Lm + t * (Lp - Lm)
+      const B = Bm + t * (Bp - Bm)
+      expect(userHost.getAttribute('data-paired-group')).toBe('true')
+      expect(userHost.style.getPropertyValue('--paired-gap-w')).toBe('10px')
+      expect(userHost.style.getPropertyValue('--seg-head-pill-w')).toBe(`${L.toFixed(2)}px`)
+      expect(userHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe(`${L.toFixed(2)}px`)
+      expect(userHost.style.getPropertyValue('--paired-bubble-w')).toBe(`${B.toFixed(2)}px`)
+      // No priority: both sides stay strictly above their own minimum and the
+      // shared budget closes on the measured axis.
+      expect(L).toBeGreaterThan(Lm)
+      expect(B).toBeGreaterThan(Bm)
+      expect(L + B + 10).toBeCloseTo(A, 1)
+      // Shared progress: the label and the bubble travel the same t.
+      expect((L - Lm) / (Lp - Lm)).toBeCloseTo((B - Bm) / (Bp - Bm), 6)
+      userView.unmount()
+      // Cleanup clears the pair, never leaving the next group a stale budget.
+      expect(userHost.style.getPropertyValue('--seg-head-pill-w')).toBe('')
+      expect(userHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe('')
+      expect(userHost.style.getPropertyValue('--paired-bubble-w')).toBe('')
+      expect(userHost.style.getPropertyValue('--paired-gap-w')).toBe('')
+      expect(userHost.getAttribute('data-paired-group')).toBeNull()
+      // Short body: the preferred width is the intrinsic text width, never the
+      // cap — no forced-wide bubble and no shrink at this host width.
+      const shortHost = mountRun('scope-short')
+      const shortView = render(tree(makeSegment({ id: 'seg-b1', name: 'Short group' }), 'message message-user', 'hi'), {
+        wrapper: wrapper(store),
+        container: shortHost
+      })
+      shortView.rerender(tree(makeSegment({ id: 'seg-b2', name: 'Short group' }), 'message message-user', 'hi'))
+      expect(shortHost.style.getPropertyValue('--paired-bubble-w')).toBe('14.00px')
+      expect(shortHost.style.getPropertyValue('--paired-gap-w')).toBe('10px')
+      shortView.unmount()
+      // Assistant-first: no pair — the header indents its own row and the
+      // stylesheet cap alone governs, so no paired override is published.
+      const asstHost = mountRun('scope-asst')
+      const asstView = render(
+        tree(makeSegment({ id: 'seg-a1', name: 'Assistant group' }), 'message message-assistant'),
+        {
+          wrapper: wrapper(store),
+          container: asstHost
+        }
+      )
+      asstView.rerender(
+        tree(makeSegment({ id: 'seg-a2', name: 'Assistant group renamed' }), 'message message-assistant')
+      )
+      expect(asstHost.getAttribute('data-paired-group')).toBeNull()
+      expect(asstHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe('')
+      expect(asstHost.style.getPropertyValue('--paired-bubble-w')).toBe('')
+      asstView.unmount()
+      // Collapsed browse block (no rendered body): same non-paired cap.
+      const shutHost = mountRun('scope-shut')
+      const shutView = render(tree(makeSegment({ id: 'seg-s1', name: 'Shut group' }), null), {
+        wrapper: wrapper(store),
+        container: shutHost
+      })
+      shutView.rerender(tree(makeSegment({ id: 'seg-s2', name: 'Shut group renamed' }), null))
+      expect(shutHost.getAttribute('data-paired-group')).toBeNull()
+      expect(shutHost.style.getPropertyValue('--seg-head-pill-max-w')).toBe('')
+      shutView.unmount()
+    } finally {
+      Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+        configurable: true,
+        writable: true,
+        value: originalRect
+      })
+      document.querySelectorAll('[data-interaction-scope-id]').forEach((el) => el.remove())
+    }
   })
 
   it('renders color dot and 24px pill box', () => {
@@ -1405,9 +1630,11 @@ describe('TopicSegmentLine group boundary', () => {
       const headers = Array.from(
         view.container.querySelectorAll('[data-testid="topic-segment-group"]')
       ) as HTMLElement[]
-      // Fixed header occupancy in both states.
+      // Expanded headers share the message band: zero in-flow height each
+      // (the collapsed 32px row is pinned separately), so adjacent groups add
+      // no vertical height and can never overlap.
       for (const header of headers) {
-        expect(window.getComputedStyle(header).height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+        expect(window.getComputedStyle(header).height).toBe('0px')
       }
       expect(headers[0].parentElement).not.toBe(headers[1].parentElement)
     })

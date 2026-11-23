@@ -1,4 +1,5 @@
 import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
+import { useSettings } from '@renderer/hooks/useSettings'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { Popover, type PopoverProps } from 'antd'
@@ -9,6 +10,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import { COMPOSER_FLOATING_CONTROL_INSET_PX, COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
+import { resolveTopicSegmentDrawerAnchorLeft } from './navRailGeometry'
 
 interface TopicSegmentDrawerProps {
   topicId: string
@@ -64,6 +66,11 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
     void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, headerMessageId)
   }, [])
 
+  // Rail alignment: while the navigation rail is mounted the anchor moves
+  // left by the shared shift so the portaled trigger lands on the rail axis;
+  // with navigation off the historical inset (and availability) is preserved.
+  const { messageNavigation } = useSettings()
+  const anchorLeft = resolveTopicSegmentDrawerAnchorLeft(messageNavigation)
   // In-flow measurement anchor: the floating trigger is portaled out of the
   // composer's stacking context, so it is positioned from this anchor's live
   // rect (the same spot the trigger occupied before the portal).
@@ -98,7 +105,10 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
       observer?.disconnect()
       window.removeEventListener('resize', update)
     }
-  }, [listedSegments.length])
+  }, [listedSegments.length, anchorLeft])
+
+  // anchorLeft above re-runs the measurement when the alignment toggles, so
+  // the portaled trigger follows the anchor without a new subscription.
 
   const popoverContent = useMemo(() => {
     if (listedSegments.length === 0) return null
@@ -139,7 +149,7 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 
   return (
     <>
-      <TriggerAnchor ref={anchorRef} aria-hidden="true" />
+      <TriggerAnchor ref={anchorRef} $left={anchorLeft} aria-hidden="true" />
       {triggerBox &&
         createPortal(
           <ZIndexPopover
@@ -161,20 +171,22 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 }
 
 // Zero-paint, hit-transparent replica of the original in-flow trigger slot:
-// the `left`/`bottom` gaps come from the shared composer floating control inset
-// and the box is the control's own size, so the portaled (fixed) trigger paints
-// exactly where the in-flow element used to sit. It carries no paint and no
-// hit area, and the same band is what the scroll content reserves as its tail
-// clearance (`composerFloatingBand`).
-const TriggerAnchor = styled.span`
-  position: absolute;
-  left: ${COMPOSER_FLOATING_CONTROL_INSET_PX}px;
-  bottom: calc(100% + ${COMPOSER_FLOATING_CONTROL_INSET_PX}px);
-  top: auto;
-  width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-  height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-  pointer-events: none;
-`
+// the `bottom` gap comes from the shared composer floating control inset and
+// the box is the control's own size, so the portaled (fixed) trigger paints
+// exactly where the in-flow element used to sit; `left` is the shared rail
+// alignment (`navRailGeometry`) while navigation is on and the historical
+// inset with it off. It carries no paint and no hit area, and the same band
+// is what the scroll content reserves as its tail clearance
+// (`composerFloatingBand`). Vertical placement is untouched either way.
+const TriggerAnchor = styled.span<{ $left: number }>`
+   position: absolute;
+   left: ${(props) => props.$left}px;
+   bottom: calc(100% + ${COMPOSER_FLOATING_CONTROL_INSET_PX}px);
+   top: auto;
+   width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+   height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+   pointer-events: none;
+ `
 
 const TriggerWrapper = styled.div<{ $left: number; $top: number }>`
   position: fixed;

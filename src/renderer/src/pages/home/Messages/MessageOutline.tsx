@@ -3,6 +3,8 @@ import type { FC, KeyboardEvent } from 'react'
 import React, { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import styled from 'styled-components'
 
+import { NAV_GUTTER_INSET_PX, NAV_RAIL_BODY_INLINE_PAD_PX as BODY_INLINE_PADDING_PX } from './navRailGeometry'
+
 export interface MessageOutlineEntry {
   id: string
   text: string
@@ -107,7 +109,6 @@ const RAIL_CONTENT_WIDTH_PX = 18
  * regions well above or below the rail stay conversation territory.
  */
 export const NAV_GUTTER_WIDTH_PX = 46
-const NAV_GUTTER_INSET_PX = 10
 /**
  * The outline's hover halo: how far the pointer surface reaches past the body's
  * own box, on every side. The body is the drawn navigator — the compact rail, or
@@ -161,13 +162,13 @@ const prefersReducedMotion = () =>
     : false
 
 /**
- * The body's own horizontal padding (each side, while expanded). The panel's cap
- * has to leave room for it plus the reserved scrollbar gutter, because the
- * body's `max-width` clamps its *border* box: a panel sized to the whole cap
- * would push its own right edge past the clamp and be clipped there instead of
- * ellipsizing.
+ * The body's own horizontal padding (each side, while expanded) — shared from
+ * `./navRailGeometry` (single source with the drawer rail alignment). The
+ * panel's cap has to leave room for it plus the reserved scrollbar gutter,
+ * because the body's `max-width` clamps its *border* box: a panel sized to the
+ * whole cap would push its own right edge past the clamp and be clipped there
+ * instead of ellipsizing.
  */
-const BODY_INLINE_PADDING_PX = 10
 
 interface GeometryAnchor {
   /**

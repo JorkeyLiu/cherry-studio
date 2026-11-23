@@ -1089,8 +1089,10 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         // from the first frame of the enter motion.
         //
         // No reserved tail slot exists any more: every group — the flow
-        // terminal one included — owns a normal-flow header row in both
-        // presentation states (see TopicSegmentLine), so a collapsed group
+        // terminal one included — owns a normal-flow slot row in both
+        // presentation states (zero-height expanded sharing the first
+        // message's band, its own 32px row collapsed; see TopicSegmentLine),
+        // so a collapsed group
         // simply settles its BODY content to zero height below that row. The
         // collapsed label therefore always stays inside the scrollport without
         // opening a blank band, and no flow-order/window fact is needed here.

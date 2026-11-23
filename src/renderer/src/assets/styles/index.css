@@ -166,6 +166,43 @@ ul {
   align-self: self-end;
   margin-left: 46px;
   margin-right: 45px;
+  /* Generic user-bubble width (all user messages, no model/name special):
+    short content stays intrinsic and right-aligned (`fit-content` +
+    `self-end`); long bodies cap at a reading proportion of the ACTUAL
+    message column — 42rem absolute or 80% of the column width — minus the
+    bubble's own 46px + 45px side margins so the capped outer box never runs
+    offscreen. The % terms resolve against the message column (the flex
+    parent). ONE continuous formula, so there is no width switch and no
+    jump while the reading column resizes: narrow columns approach
+    near-full available width (100% - 91px binds below ~455px), wide
+    columns settle at the 80% reading proportion, and very wide columns
+    stop at 42rem. Grouped and ungrouped bubbles share this rule, so
+    grouping never changes body width; the group label clamps to the free
+    gap instead (see `TopicSegmentLine`). */
+  width: fit-content;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: break-word;
+  max-width: min(42rem, calc(100% - 91px), 80%);
+}
+/* Paired group-first user row: bubble + label come from the SAME shared frame
+    (resolvePairedWidths). Both vars are published together on the run host, so
+    no separate CSS cap may override one side and break the 10px budget. The
+    selector repeats the generic bubble chain plus the paired host so it wins
+    over the generic rule above, which carries four class selectors. All other
+    (ungrouped / assistant-first) bubbles keep the generic rule. */
+.bubble:not(.multi-select-mode) [data-paired-group='true'] .message-user .message-content-container {
+  width: var(--paired-bubble-w);
+  max-width: var(--paired-bubble-w);
+  min-width: 0;
+}
+/* Inner containment: code scrolls in its own box, tables/media never exceed
+    the capped bubble. Assistant width is untouched. */
+.bubble:not(.multi-select-mode) .message-user .message-content-container pre,
+.bubble:not(.multi-select-mode) .message-user .message-content-container table,
+.bubble:not(.multi-select-mode) .message-user .message-content-container img,
+.bubble:not(.multi-select-mode) .message-user .message-content-container video {
+  max-width: 100%;
 }
 
 .bubble:not(.multi-select-mode) .message-user .MessageFooter {

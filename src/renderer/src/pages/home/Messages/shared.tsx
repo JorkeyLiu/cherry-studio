@@ -42,7 +42,12 @@ export const MessagesWrapper = styled.div`
 `
 
 export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
-  display: flex;
+   // Reading-column container for container queries: the user-bubble width
+   // cap keys off this scrollport's own inline size (the ACTUAL available
+   // body width after sidebars), never a window breakpoint. House convention
+   // follows the navbar column (containerType inline-size + cqw/%).
+   container-type: inline-size;
+   display: flex;
   flex-direction: column;
   overflow-x: hidden;
   // Single scroll owner (#messages): the route viewport keeper owns all

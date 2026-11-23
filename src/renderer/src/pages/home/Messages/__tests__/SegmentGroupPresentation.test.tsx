@@ -266,7 +266,12 @@ describe('segment group layout manager', () => {
 
     unregister()
     manager.measure()
-    expect(manager.getGeometry('seg-folded')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 0 })
+    // Run-only span restored: the rail starts at the pill top and covers the
+    // run below it, trimmed above the group's end.
+    expect(manager.getGeometry('seg-folded')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 373.55 - (341.55 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX
+    })
     // The group itself is untouched: its run still owns the chrome and geometry.
     expect(manager.getGeometry('seg-folded')).not.toBeNull()
     manager.suspend()
@@ -318,8 +323,8 @@ class FakeResizeObserver {
 
 const RUN_HEADER_RECT = { top: 100, bottom: 132 }
 const RUN_TAIL_RECT = { top: 200, bottom: 400 }
-/** 400 − 100 (span start) − 28 (rail top) − 12 (tail trim). */
-const EXPECTED_RAIL_GEOMETRY = '28:260'
+/** Rail top sits at the pill top (anchor 100 + band 10 = 110): 400 − 110 − 12 (tail trim). */
+const EXPECTED_RAIL_GEOMETRY = '10:278'
 
 let pendingFrames: number[] = []
 let frameSeed = 0
@@ -407,7 +412,7 @@ describe('segment group presentation across route reactivation', () => {
     manager.registerRun('seg-a', header, { isHeader: true, endsGroup: false })
     manager.registerRun('seg-a', tail, { isHeader: false, endsGroup: true })
     manager.measure()
-    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 260 })
+    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
 
     // Activity hide / StrictMode replay: the instance is paused, not killed.
     manager.suspend()
@@ -428,7 +433,7 @@ describe('segment group presentation across route reactivation', () => {
     // Return: the same instance observes and republishes the full span.
     manager.resume()
     manager.measure()
-    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 260 })
+    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
     expect(listener).toHaveBeenCalledTimes(1)
     manager.suspend()
   })
@@ -442,7 +447,7 @@ describe('segment group presentation across route reactivation', () => {
     )
     expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
     const manager = sink.current
-    expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 260 })
+    expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
     expect(FakeResizeObserver.instances).toHaveLength(1)
     expect(FakeResizeObserver.instances[0]?.observed.size).toBe(2)
 
@@ -471,7 +476,7 @@ describe('segment group presentation across route reactivation', () => {
       })
       expect(sink.current).toBe(manager)
       expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
-      expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 260 })
+      expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
       expect(FakeResizeObserver.instances).toHaveLength(activation + 1)
       expect(FakeResizeObserver.instances[activation]?.observed.size).toBe(2)
     }
@@ -485,7 +490,7 @@ describe('segment group presentation across route reactivation', () => {
       </StrictMode>
     )
     expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
-    expect(sink.current?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 260 })
+    expect(sink.current?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
     // The replayed activation was disconnected exactly once; only the live one
     // still observes the two carrying runs (no observer leak).
     const observing = FakeResizeObserver.instances.filter((observer) => observer.observed.size === 2)
@@ -493,5 +498,72 @@ describe('segment group presentation across route reactivation', () => {
     expect(
       FakeResizeObserver.instances.filter((observer) => observer.observed.size === 0 && observer.disconnects === 1)
     ).toHaveLength(1)
+  })
+})
+
+describe('segment group slot first message', () => {
+  /**
+   * The expanded pill shares the slot run's first message band, so exactly
+   * that header indents by the pill width (see `MessageHeader`). The mapping
+   * is the run's own first RENDERED message — never the authority
+   * presentation start, which may belong to a later message when a segment
+   * validly starts mid-turn (edit-mode selection groups arbitrary subsets).
+   */
+  const messageChild = (id: string) => {
+    const child = document.createElement('div')
+    child.setAttribute('data-message-id', id)
+    return child
+  }
+
+  it('publishes the header run first rendered message, so exactly that header indents', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const header = makeHost()
+    header.appendChild(messageChild('m-a'))
+    header.appendChild(messageChild('m-b'))
+    manager.registerRun('seg-slot', header, { isHeader: true, endsGroup: true })
+    manager.measure()
+    expect(manager.getSlotFirstMessageId('seg-slot')).toBe('m-a')
+    manager.suspend()
+  })
+
+  it('reads the run own first message even when the authority start belongs to a later one (mid-turn group start)', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const header = makeHost()
+    header.appendChild(messageChild('m-run-first'))
+    header.appendChild(messageChild('m-authority-start'))
+    manager.registerRun('seg-midturn', header, { isHeader: true, endsGroup: true })
+    manager.measure()
+    // The pill hangs at the run top; the later authority id never wins.
+    expect(manager.getSlotFirstMessageId('seg-midturn')).toBe('m-run-first')
+    manager.suspend()
+  })
+
+  it('publishes null when the header run renders no message (a collapsed browse block indents nothing)', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const header = makeHost()
+    manager.registerRun('seg-collapsed', header, { isHeader: true, endsGroup: true })
+    manager.measure()
+    expect(manager.getSlotFirstMessageId('seg-collapsed')).toBeNull()
+    manager.suspend()
+  })
+
+  it('ignores non-header carriers and clears the slot first when the header run unmounts', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const carrier = makeHost()
+    carrier.appendChild(messageChild('m-tail'))
+    manager.registerRun('seg-tail', carrier, { isHeader: false, endsGroup: true })
+    manager.measure()
+    expect(manager.getSlotFirstMessageId('seg-tail')).toBeNull()
+
+    const header = makeHost()
+    header.appendChild(messageChild('m-head'))
+    const unregister = manager.registerRun('seg-tail', header, { isHeader: true, endsGroup: false })
+    manager.measure()
+    expect(manager.getSlotFirstMessageId('seg-tail')).toBe('m-head')
+
+    unregister()
+    manager.measure()
+    expect(manager.getSlotFirstMessageId('seg-tail')).toBeNull()
+    manager.suspend()
   })
 })

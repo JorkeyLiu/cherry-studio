@@ -14,6 +14,7 @@ import {
   runInstallScript,
   validateGitBashPath
 } from '@main/utils/process'
+import { setMinimumSizeEnsuringBounds } from '@main/utils/windowBounds'
 import { handleZoomFactor } from '@main/utils/zoom'
 import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { UpgradeChannel } from '@shared/config/constant'
@@ -665,7 +666,9 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // window
   ipcMain.handle(IpcChannel.Windows_SetMinimumSize, (_, width: number, height: number) => {
     checkMainWindow()
-    mainWindow.setMinimumSize(width, height)
+    // A raised floor must be satisfiable now: the window may currently sit below
+    // it (closed-panels mode), so apply the minimum together with one bounded grow.
+    setMinimumSizeEnsuringBounds(mainWindow, width, height, [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
   })
 
   ipcMain.handle(IpcChannel.Windows_ResetMinimumSize, () => {
