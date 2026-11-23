@@ -3,7 +3,6 @@ import 'remark-github-blockquote-alert/alert.css'
 import { loggerService } from '@logger'
 import ImageViewer from '@renderer/components/ImageViewer'
 import MarkdownShadowDOMRenderer from '@renderer/components/MarkdownShadowDOMRenderer'
-import { useSmoothStream } from '@renderer/hooks/useSmoothStream'
 import type { MainTextMessageBlock, ThinkingMessageBlock, TranslationMessageBlock } from '@renderer/types/newMessage'
 import { removeSvgEmptyLines } from '@renderer/utils/formats'
 import { normalizeAttachedBlockMathClose, processLatexBrackets } from '@renderer/utils/markdown'
@@ -34,13 +33,14 @@ const DISALLOWED_ELEMENTS = ['iframe', 'script']
 
 /**
  * Maximum cadence window for the expensive full Markdown parse/render while a
- * block is streaming (LOCK-004). Kept as a distinct named constant from the
- * per-block Redux/persistence throttle (messageThunk BLOCK_UPDATE_THROTTLE_MS)
- * so each gate can evolve independently. Actual update cadence depends on
- * chunk arrival timing, requestAnimationFrame, React scheduler, and render
- * cost — not all updates within this window will produce a visible commit.
+ * block is streaming. Kept as a distinct named constant from the per-block
+ * Redux/persistence throttle (messageThunk BLOCK_UPDATE_THROTTLE_MS) so each
+ * gate can evolve independently. While chunks keep arriving, at most one parse
+ * is planned per window and the planned parse always reads the latest raw
+ * content; chunk arrival timing and React scheduler timing mean not every
+ * window produces a visible commit.
  */
-const MARKDOWN_PARSE_CADENCE_MS = 50
+export const MARKDOWN_PARSE_CADENCE_MS = 50
 const MATH_LOAD_MAX_ATTEMPTS_PER_BLOCK = 2
 
 interface Props {
@@ -201,140 +201,132 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
   const { t } = useTranslation()
   // LOCK-106: Markdown math rendering is fixed to KaTeX with single-dollar
   // syntax enabled. The math engine settings are removed.
-  const isTrulyDone = 'status' in block && block.status === 'success'
-  const [displayedContent, setDisplayedContent] = useState(postProcess ? postProcess(block.content) : block.content)
-  // LOCK-004: frequent lightweight stream state (`displayedContent`) is
-  // separated from the expensive parsed Markdown source (`parsedContent`),
-  // which is updated at a bounded cadence and scheduled as non-urgent.
-  const [parsedContent, setParsedContent] = useState(displayedContent)
-  const [isStreamDone, setIsStreamDone] = useState(isTrulyDone)
-  // LOCK-001 completion guard: synchronous mirror of the stream-done state so
-  // the trailing cadence timer can refuse to write a stale ref after the
-  // stream completed (the urgent final flush owns the authoritative ref from
-  // then on).
-  const streamDoneRef = useRef(isStreamDone)
+  //
+  // The initial parsed content is post-processed exactly once (lazily, so it
+  // is not re-processed on every render) and is already the authoritative
+  // text: streaming mounts never start from a cleared intermediate state.
+  const [parsedContent, setParsedContent] = useState(() => (postProcess ? postProcess(block.content) : block.content))
 
+  // Raw block content is the single authority for what gets parsed; the
+  // processed text derived from it is what the bounded cadence publishes.
+  const lastParsedRawRef = useRef(block.content)
+  const lastParsedProcessRef = useRef(postProcess)
+  const lastParsedTextRef = useRef(parsedContent)
+  const lastParseAtRef = useRef(0)
+  const latestRawRef = useRef(block.content)
+  // Latest post-processing callback, read at plan time. Callers may rebuild
+  // this callback on every chunk, so a planned parse must never reuse a stale
+  // identity captured when the plan was made.
+  const latestProcessRef = useRef(postProcess)
   const prevContentRef = useRef(block.content)
   const prevBlockIdRef = useRef(block.id)
-  const lastParsedTextRef = useRef(displayedContent)
-  const lastParseAtRef = useRef(0)
-  const latestDisplayedTextRef = useRef(displayedContent)
+  const prevPostProcessRef = useRef(postProcess)
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Generation token: every exact flush invalidates the generation captured by
+  // a pending trailing timer, so a stale timer can never write old text back.
+  const generationRef = useRef(0)
 
-  const onUpdate = useCallback(
-    (rawText: string) => {
-      // 如果提供了后处理函数就调用，否则直接使用原始文本
-      const finalText = postProcess ? postProcess(rawText) : rawText
-      setDisplayedContent(finalText)
+  const cancelPendingTimer = useCallback(() => {
+    if (pendingTimerRef.current !== null) {
+      clearTimeout(pendingTimerRef.current)
+      pendingTimerRef.current = null
+    }
+  }, [])
+
+  // Publish the latest raw content through the bounded cadence as non-urgent
+  // React work. Both the raw text and the post-processing callback are read
+  // from refs at plan time, and the plan is skipped only when BOTH already
+  // match the last parse, so a callback change with unchanged raw text still
+  // produces a planned (trailing) update. Post-processing runs once per
+  // planned parse.
+  const runStreamingParse = useCallback((generation: number) => {
+    if (generation !== generationRef.current) return
+    const raw = latestRawRef.current
+    const processText = latestProcessRef.current
+    if (raw === lastParsedRawRef.current && processText === lastParsedProcessRef.current) return
+    lastParsedRawRef.current = raw
+    lastParsedProcessRef.current = processText
+    lastParseAtRef.current = performance.now()
+    lastParsedTextRef.current = processText ? processText(raw) : raw
+    scheduleParsedContentCommit(setParsedContent, () => lastParsedTextRef.current)
+  }, [])
+
+  // At most one pending trailing timer exists at a time: new chunks or a
+  // rebuilt post-processing callback do not cancel/restart it, they are simply
+  // picked up from the latest refs when the cadence window closes.
+  const scheduleStreamingParse = useCallback(() => {
+    if (pendingTimerRef.current !== null) return
+    const generation = generationRef.current
+    const elapsed = performance.now() - lastParseAtRef.current
+    if (elapsed >= MARKDOWN_PARSE_CADENCE_MS) {
+      runStreamingParse(generation)
+      return
+    }
+    pendingTimerRef.current = setTimeout(() => {
+      pendingTimerRef.current = null
+      runStreamingParse(generation)
+    }, MARKDOWN_PARSE_CADENCE_MS - elapsed)
+  }, [runStreamingParse])
+
+  // Exact synchronous flush: block switch, same-id non-prefix rewrite
+  // (including a clear), and any non-streaming status commit the authoritative
+  // text immediately and invalidate every pending timer/transition generation.
+  // A post-processing callback change alone is NOT an exact path: while
+  // streaming it only marks pending reprocessing for the bounded cadence.
+  // The exact flush still re-processes when the last published text was
+  // produced by a different callback identity, so an exact commit (e.g. stream
+  // completion) never leaves text from a superseded callback on screen.
+  const flushExactContent = useCallback(
+    (raw: string, processText: Props['postProcess'], reprocess: boolean) => {
+      cancelPendingTimer()
+      generationRef.current += 1
+      if (reprocess || raw !== lastParsedRawRef.current || processText !== lastParsedProcessRef.current) {
+        lastParsedRawRef.current = raw
+        lastParsedProcessRef.current = processText
+        lastParsedTextRef.current = processText ? processText(raw) : raw
+      }
+      lastParseAtRef.current = performance.now()
+      setParsedContent(lastParsedTextRef.current)
     },
-    [postProcess]
+    [cancelPendingTimer]
   )
 
-  const { addChunk, reset } = useSmoothStream({
-    onUpdate,
-    streamDone: isStreamDone,
-    enabled: block.status === 'streaming',
-    initialText: block.content
-  })
-
-  // Keep a ref to the newest displayed text so the trailing cadence flush
-  // always parses the latest committed text.
+  // The initial content was already parsed by the lazy state initializer, so
+  // the cadence baseline starts at mount instead of firing a duplicate parse.
   useEffect(() => {
-    latestDisplayedTextRef.current = displayedContent
-  })
+    lastParseAtRef.current = performance.now()
+  }, [])
 
   useEffect(() => {
-    const newContent = block.content || ''
-    const oldContent = prevContentRef.current || ''
-
+    const raw = block.content || ''
+    const prevRaw = prevContentRef.current || ''
     const isDifferentBlock = block.id !== prevBlockIdRef.current
-
-    const isContentReset = oldContent && newContent && !newContent.startsWith(oldContent)
+    const isNonPrefixRewrite = !raw.startsWith(prevRaw)
     const isStreaming = block.status === 'streaming'
+    const postProcessChanged = prevPostProcessRef.current !== postProcess
 
-    if (isDifferentBlock || isContentReset) {
-      const flushed = postProcess ? postProcess(newContent) : newContent
-      if (isStreaming) {
-        reset(newContent)
-      } else {
-        // Completed blocks bypass the smooth-stream lifecycle entirely. Their
-        // final content is already authoritative and should be committed
-        // directly without re-arming a stream reset or animation frame.
-        setDisplayedContent(flushed)
-      }
-      // Block switch/reset must render immediately: flush parsed content now
-      // (synchronously, not transitioned) so transitions and resets are exact.
-      lastParsedTextRef.current = flushed
-      lastParseAtRef.current = performance.now()
-      setParsedContent(flushed)
-    } else {
-      const delta = newContent.substring(oldContent.length)
-      if (delta && isStreaming) {
-        addChunk(delta)
-      } else if (!isStreaming) {
-        const flushed = postProcess ? postProcess(newContent) : newContent
-        setDisplayedContent(flushed)
-      }
-    }
-
-    prevContentRef.current = newContent
+    prevContentRef.current = raw
     prevBlockIdRef.current = block.id
+    prevPostProcessRef.current = postProcess
+    latestRawRef.current = raw
+    latestProcessRef.current = postProcess
 
-    // 更新 stream 状态
-    setIsStreamDone(!isStreaming)
-    streamDoneRef.current = !isStreaming
-  }, [block.content, block.id, block.status, addChunk, reset, postProcess])
+    if (isDifferentBlock || isNonPrefixRewrite || !isStreaming) {
+      flushExactContent(raw, postProcess, isDifferentBlock || isNonPrefixRewrite || postProcessChanged)
+      return
+    }
+    if (raw !== lastParsedRawRef.current || postProcessChanged) {
+      scheduleStreamingParse()
+    }
+  }, [block.content, block.id, block.status, postProcess, flushExactContent, scheduleStreamingParse])
 
-  // Bounded, non-urgent Markdown parse cadence (LOCK-004).
+  // A pending trailing timer never outlives the component.
   useEffect(() => {
-    if (isStreamDone) {
-      // Completion / error / pause: flush the exact final content promptly and
-      // urgently. `block.content` is the authoritative final text and
-      // `displayedContent` can lag it by at most the smooth-stream tail drain,
-      // so this is the no-truncation final render source.
-      const finalText = postProcess ? postProcess(block.content) : block.content
-      if (finalText !== lastParsedTextRef.current) {
-        lastParsedTextRef.current = finalText
-        lastParseAtRef.current = performance.now()
-        setParsedContent(finalText)
-      }
-      return
+    return () => {
+      cancelPendingTimer()
+      generationRef.current += 1
     }
-
-    // While streaming, parse at most once per cadence window. Updates are
-    // wrapped in startTransition so React treats them as non-urgent work that
-    // yields to scroll/input.
-    if (displayedContent === lastParsedTextRef.current) return
-
-    const now = performance.now()
-    const elapsed = now - lastParseAtRef.current
-    if (elapsed >= MARKDOWN_PARSE_CADENCE_MS) {
-      lastParsedTextRef.current = displayedContent
-      lastParseAtRef.current = now
-      // LOCK-001 race guard: the transition reads the authoritative ref at
-      // commit time, so a pending cadence commit can never overwrite the
-      // urgent final flush with stale streaming text.
-      scheduleParsedContentCommit(setParsedContent, () => lastParsedTextRef.current)
-      return
-    }
-
-    // Trailing flush: parse the latest accumulated text at the cadence boundary.
-    const timer = setTimeout(() => {
-      // LOCK-001 completion guard: if the stream completed while this trailing
-      // timer was pending, the urgent final flush has already written the exact
-      // final content to the authoritative ref. Writing the trailing (possibly
-      // stale) text into the ref now would let a later transition re-apply it
-      // and clobber the final content — refuse the write entirely.
-      if (streamDoneRef.current) return
-      const latest = latestDisplayedTextRef.current
-      lastParsedTextRef.current = latest
-      lastParseAtRef.current = performance.now()
-      // Same LOCK-001 race guard as above: the trailing commit re-reads the
-      // authoritative ref, which the final flush has already updated, so an
-      // overdue trailing transition re-applies exact final content.
-      scheduleParsedContentCommit(setParsedContent, () => lastParsedTextRef.current)
-    }, MARKDOWN_PARSE_CADENCE_MS - elapsed)
-    return () => clearTimeout(timer)
-  }, [displayedContent, isStreamDone, postProcess, block.content])
+  }, [cancelPendingTimer])
 
   const isPausedEmpty = 'status' in block && block.status === 'paused' && isEmpty(block.content)
 

@@ -485,7 +485,8 @@
       "@ai-sdk/anthropic": "patches/@ai-sdk__anthropic.patch",
       "@cherrystudio/embedjs-loader-web@0.1.31": "patches/@cherrystudio__embedjs-loader-web@0.1.31.patch",
       "builder-util@26.8.1": "patches/builder-util@26.8.1.patch",
-      "rc-util@5.44.4": "patches/rc-util@5.44.4.patch"
+      "rc-util@5.44.4": "patches/rc-util@5.44.4.patch",
+      "micromark-extension-gfm-table@2.1.1": "patches/micromark-extension-gfm-table@2.1.1.patch"
     },
     "onlyBuiltDependencies": [
       "@j178/prek",

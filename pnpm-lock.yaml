@@ -75,6 +75,9 @@ patchedDependencies:
   libsql@0.4.7:
     hash: f3ec6f70dc903a98a92db446653d30dcd6586439c80c4ba0703e9da84d8d9a78
     path: patches/libsql-npm-0.4.7-444e260fb1.patch
+  micromark-extension-gfm-table@2.1.1:
+    hash: 4727c1b54366be487f645b12efbd2ab04d1b68b93e9359383094fe6b9cf8c71d
+    path: patches/micromark-extension-gfm-table@2.1.1.patch
   pdf-parse@1.1.1:
     hash: 4d737b8dcffcd1ebfe3cf9f14f433acb1a96a725d0ed5fcff764bf114c23ab7b
     path: patches/pdf-parse-npm-1.1.1-04a6109b2a.patch
@@ -21723,7 +21726,7 @@ snapshots:
       micromark-util-symbol: 2.0.1
       micromark-util-types: 2.0.2
 
-  micromark-extension-gfm-table@2.1.1:
+  micromark-extension-gfm-table@2.1.1(patch_hash=4727c1b54366be487f645b12efbd2ab04d1b68b93e9359383094fe6b9cf8c71d):
     dependencies:
       devlop: 1.1.0
       micromark-factory-space: 2.0.1
@@ -21748,7 +21751,7 @@ snapshots:
       micromark-extension-gfm-autolink-literal: 2.1.0
       micromark-extension-gfm-footnote: 2.1.0
       micromark-extension-gfm-strikethrough: 2.1.0
-      micromark-extension-gfm-table: 2.1.1
+      micromark-extension-gfm-table: 2.1.1(patch_hash=4727c1b54366be487f645b12efbd2ab04d1b68b93e9359383094fe6b9cf8c71d)
       micromark-extension-gfm-tagfilter: 2.0.0
       micromark-extension-gfm-task-list-item: 2.1.0
       micromark-util-combine-extensions: 2.0.1

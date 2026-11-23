@@ -1,25 +1,31 @@
 import 'katex/dist/katex.min.css'
 
+import type { Citation } from '@renderer/types'
 import type { MainTextMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
+import { withCitationTags } from '@renderer/utils/citation'
 import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import Markdown from '../Markdown'
+import Markdown, { MARKDOWN_PARSE_CADENCE_MS } from '../Markdown'
 
 /**
- * LOCK-004 streaming behavior tests for Markdown:
- *   - the final rendered Markdown receives the exact complete content with no
- *     truncation when the stream completes (even mid-drain)
- *   - expensive ReactMarkdown parse/render updates are bounded well below the
- *     animation-frame rate while streaming
- *   - block switches / resets flush immediately and exactly
- *   - the paused empty-block label is preserved
+ * Markdown streaming behavior tests:
+ *   - streaming content is parsed at most once per cadence window from the
+ *     latest raw block content, with no animation-frame/grapheme queue
+ *   - a short silence still delivers the tail (one pending trailing timer)
+ *   - completion / error / pause flush the exact authoritative content
+ *   - block switches / non-prefix rewrites / clears flush immediately
+ *   - post-processing runs once per planned parse and the latest callback is
+ *     used for the last content
  */
 
 // Recording ReactMarkdown mock: every rendered children value is captured so
 // parse/update cadence and exact final content are observable.
-const md = vi.hoisted(() => ({ children: [] as string[] }))
+const md = vi.hoisted(() => ({
+  children: [] as string[],
+  commits: [] as Array<{ text: string; at: number }>
+}))
 
 // Stable `t` like the real react-i18next hook (a new `t` every render would
 // defeat MarkdownBody memoization and make cadence assertions meaningless).
@@ -29,6 +35,7 @@ vi.mock('react-markdown', () => ({
   __esModule: true,
   default: ({ children }: any) => {
     md.children.push(children)
+    md.commits.push({ text: children, at: performance.now() })
     return <div data-testid="markdown-children">{children}</div>
   }
 }))
@@ -69,7 +76,20 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('@renderer/utils/formats', () => ({
-  removeSvgEmptyLines: vi.fn((str: string) => str)
+  removeSvgEmptyLines: vi.fn((str: string) => str),
+  cleanMarkdownContent: vi.fn((str: string) => str),
+  encodeHTML: vi.fn((str: string) =>
+    str.replace(/[&<>"']/g, (match) => {
+      const entities: { [key: string]: string } = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&apos;'
+      }
+      return entities[match]
+    })
+  )
 }))
 
 vi.mock('@renderer/utils/markdown', () => ({
@@ -88,9 +108,10 @@ const makeBlock = (id: string, content: string, status: MessageBlockStatus): Mai
 
 const lastRendered = () => md.children[md.children.length - 1]
 
-describe('Markdown streaming (LOCK-004)', () => {
+describe('Markdown streaming cadence', () => {
   beforeEach(() => {
     md.children.length = 0
+    md.commits.length = 0
     vi.useFakeTimers()
   })
 
@@ -106,22 +127,23 @@ describe('Markdown streaming (LOCK-004)', () => {
 
     const { rerender } = render(<Markdown block={makeBlock('block-1', partial, MessageBlockStatus.STREAMING)} />)
 
-    // Simulate streaming commits appending content, frames draining the queue.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', finalContent, MessageBlockStatus.STREAMING)} />)
     })
     act(() => {
-      vi.advanceTimersByTime(16 * 40)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS + 10)
     })
 
     // Completion flips the status; the remaining tail must flush exactly.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', finalContent, MessageBlockStatus.SUCCESS)} />)
     })
-    act(() => {
-      vi.advanceTimersByTime(16 * 20)
-    })
 
+    expect(lastRendered()).toBe(finalContent)
+
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
+    })
     expect(lastRendered()).toBe(finalContent)
   })
 
@@ -149,40 +171,56 @@ describe('Markdown streaming (LOCK-004)', () => {
     expect(lastRendered()).toBe(updatedContent)
   })
 
-  it('starts the smooth-stream frame loop for active streaming content', () => {
+  it('does not use animation frames for streaming content; one cadence timer delivers the latest text', () => {
     const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const { rerender } = render(<Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} />)
 
-    render(<Markdown block={makeBlock('block-1', 'Streaming', MessageBlockStatus.STREAMING)} />)
+    expect(lastRendered()).toBe('start')
+    const timersAtMount = setTimeoutSpy.mock.calls.length
 
-    expect(requestAnimationFrameSpy).toHaveBeenCalled()
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'start delta', MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS / 2)
+    })
+    expect(lastRendered()).toBe('start')
+
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(lastRendered()).toBe('start delta')
+
+    expect(setTimeoutSpy.mock.calls.length).toBe(timersAtMount + 1)
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled()
   })
 
-  it('flushes the exact final content when completion arrives before the stream drains', () => {
+  it('flushes the exact final content when completion arrives before the cadence window closes', () => {
     const finalContent = 'alpha beta gamma delta epsilon zeta'
     const partial = 'alpha beta gamma'
 
     const { rerender } = render(<Markdown block={makeBlock('block-1', partial, MessageBlockStatus.STREAMING)} />)
-    // Only a frame or two: the tail ("delta epsilon zeta") is still queued.
     act(() => {
-      vi.advanceTimersByTime(16 * 2)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS / 2)
     })
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', finalContent, MessageBlockStatus.SUCCESS)} />)
     })
-    act(() => {
-      vi.advanceTimersByTime(16 * 20)
-    })
 
+    expect(lastRendered()).toBe(finalContent)
+
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
+    })
     expect(lastRendered()).toBe(finalContent)
   })
 
   it.each([MessageBlockStatus.ERROR, MessageBlockStatus.PAUSED])(
-    'cancels stale stream work and renders exact final content for streaming to %s',
+    'invalidates pending streaming work and renders exact final content for streaming to %s',
     (status) => {
       const finalContent = `Authoritative final content for ${status}`
       const streamedContent = `${finalContent} with queued stale tail`
-      const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
-      const cancelAnimationFrameSpy = vi.spyOn(globalThis, 'cancelAnimationFrame')
       const { rerender } = render(
         <Markdown block={makeBlock('block-1', 'Initial stream', MessageBlockStatus.STREAMING)} />
       )
@@ -194,49 +232,73 @@ describe('Markdown streaming (LOCK-004)', () => {
         vi.advanceTimersByTime(16)
       })
 
-      expect(requestAnimationFrameSpy).toHaveBeenCalled()
-
+      // Simulate a trailing timer that survives the status transition: the
+      // generation guard must make it inert.
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {})
       act(() => {
         rerender(<Markdown block={makeBlock('block-1', finalContent, status)} />)
       })
+      clearTimeoutSpy.mockRestore()
 
-      expect(cancelAnimationFrameSpy).toHaveBeenCalled()
-      expect(screen.getByTestId('markdown-children').textContent).toBe(finalContent)
+      expect(lastRendered()).toBe(finalContent)
 
-      const renderCountAfterTransition = md.children.length
+      const commitCountAfterTransition = md.commits.length
       act(() => {
-        vi.advanceTimersByTime(500)
+        vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
       })
 
-      expect(md.children.length).toBe(renderCountAfterTransition)
-      expect(screen.getByTestId('markdown-children').textContent).toBe(finalContent)
+      expect(md.commits.length).toBe(commitCountAfterTransition)
+      expect(lastRendered()).toBe(finalContent)
     }
   )
 
-  it('bounds full Markdown parse/render updates below the frame rate while streaming', () => {
-    const { rerender } = render(<Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} />)
-    md.children.length = 0
+  it('plans at most one full parse per cadence window under continuous chunks and delivers the tail on silence', () => {
+    const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+    const parseTimes: number[] = []
+    const processText = (text: string) => {
+      parseTimes.push(performance.now())
+      return text
+    }
+
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} postProcess={processText} />
+    )
+    parseTimes.length = 0
+    md.commits.length = 0
 
     // ~12 commits with one frame between them (192ms), like a streaming burst.
     let content = 'start'
     for (let i = 0; i < 12; i++) {
       content += ` word${i}`
       act(() => {
-        rerender(<Markdown block={makeBlock('block-1', content, MessageBlockStatus.STREAMING)} />)
+        rerender(
+          <Markdown block={makeBlock('block-1', content, MessageBlockStatus.STREAMING)} postProcess={processText} />
+        )
       })
       act(() => {
         vi.advanceTimersByTime(16)
       })
     }
-    // Let the trailing cadence flush settle.
+    // Let the trailing cadence flush settle (short silence after the last chunk).
     act(() => {
-      vi.advanceTimersByTime(300)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 4)
     })
 
-    // 12 frames happened; the parse cadence (50ms) must keep the full-text
-    // parse count far below the frame count.
-    expect(md.children.length).toBeGreaterThan(0)
-    expect(md.children.length).toBeLessThan(6)
+    expect(parseTimes.length).toBeGreaterThan(0)
+    for (let i = 1; i < parseTimes.length; i++) {
+      expect(parseTimes[i] - parseTimes[i - 1]).toBeGreaterThanOrEqual(MARKDOWN_PARSE_CADENCE_MS)
+    }
+    expect(lastRendered()).toBe(content)
+
+    // No permanent RAF/grapheme catching-up: the final text stays stable.
+    const parseCount = parseTimes.length
+    const commitCount = md.commits.length
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
+    })
+    expect(parseTimes.length).toBe(parseCount)
+    expect(md.commits.length).toBe(commitCount)
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled()
   })
 
   it('flushes the new block content immediately and exactly on block switch', () => {
@@ -251,7 +313,7 @@ describe('Markdown streaming (LOCK-004)', () => {
     expect(lastRendered()).toBe('block two content')
   })
 
-  it('does not render stale text after a content reset (regenerate)', () => {
+  it('flushes a same-id non-prefix rewrite immediately and renders an empty reset immediately', () => {
     const { rerender } = render(
       <Markdown block={makeBlock('block-1', 'old streamed answer part one', MessageBlockStatus.STREAMING)} />
     )
@@ -260,8 +322,6 @@ describe('Markdown streaming (LOCK-004)', () => {
     })
 
     // Content reset: the new stream no longer extends the old one.
-    // The reset must flush immediately so the new content is visible before
-    // any timers or status transitions can mask a stale reset.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'brand new answer', MessageBlockStatus.STREAMING)} />)
     })
@@ -270,14 +330,25 @@ describe('Markdown streaming (LOCK-004)', () => {
     act(() => {
       vi.advanceTimersByTime(16 * 40)
     })
-    act(() => {
-      rerender(<Markdown block={makeBlock('block-1', 'brand new answer tail', MessageBlockStatus.SUCCESS)} />)
-    })
-    act(() => {
-      vi.advanceTimersByTime(16 * 20)
-    })
 
-    expect(lastRendered()).toBe('brand new answer tail')
+    // Empty text is a non-prefix rewrite too: it must render immediately.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', '', MessageBlockStatus.STREAMING)} />)
+    })
+    expect(lastRendered()).toBe('')
+
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'fresh content', MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(lastRendered()).toBe('fresh content')
+
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'fresh content tail', MessageBlockStatus.SUCCESS)} />)
+    })
+    expect(lastRendered()).toBe('fresh content tail')
   })
 
   it('renders the paused label for an empty paused block', () => {
@@ -285,114 +356,103 @@ describe('Markdown streaming (LOCK-004)', () => {
     expect(screen.getByTestId('markdown-children')).toHaveTextContent('message.chat.completion.paused')
   })
 
-  it('does not fire a parse commit within the first 50ms cadence window', () => {
-    const { rerender } = render(<Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} />)
-    const countAtMount = md.children.length
+  it('does not plan a parse within the first cadence window after mount', () => {
+    const parseTimes: number[] = []
+    const processText = (text: string) => {
+      parseTimes.push(performance.now())
+      return text
+    }
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} postProcess={processText} />
+    )
+    parseTimes.length = 0
+    const commitCountAtMount = md.commits.length
 
-    // Stream a delta; the cadence effect should schedule a trailing timer, not
-    // an immediate parse commit, because elapsed < 50ms.
     act(() => {
-      rerender(<Markdown block={makeBlock('block-1', 'start delta', MessageBlockStatus.STREAMING)} />)
+      rerender(
+        <Markdown block={makeBlock('block-1', 'start delta', MessageBlockStatus.STREAMING)} postProcess={processText} />
+      )
     })
     act(() => {
-      vi.advanceTimersByTime(40)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS - 10)
     })
 
-    // No parse commit should have fired inside the 50ms cadence window.
-    expect(md.children.length).toBe(countAtMount)
+    expect(parseTimes.length).toBe(0)
+    expect(md.commits.length).toBe(commitCountAtMount)
 
-    // After the full 50ms cadence window, the trailing timer fires and a
-    // parse commit is scheduled. Let enough time pass for both the cadence
-    // timer to fire and the smooth stream to fully drain, then verify the
-    // rendered text matches the latest streamed content.
     act(() => {
       vi.advanceTimersByTime(20)
     })
-    // Allow transition flush.
-    act(() => {
-      vi.advanceTimersByTime(0)
-    })
-    expect(md.children.length).toBeGreaterThan(countAtMount)
-
-    // Advance further so the smooth stream fully drains remaining queued text.
-    act(() => {
-      vi.advanceTimersByTime(200)
-    })
+    expect(parseTimes.length).toBe(1)
     expect(lastRendered()).toBe('start delta')
   })
 
-  it('preserves paused content and prevents stale timer overwrite, then resumes correctly', () => {
+  it('does not clear streaming initial content before the first planned parse', () => {
+    const initialContent = 'Already streamed content'
+    const { rerender } = render(<Markdown block={makeBlock('block-1', initialContent, MessageBlockStatus.STREAMING)} />)
+    expect(lastRendered()).toBe(initialContent)
+
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', `${initialContent} tail`, MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS - 10)
+    })
+    // No cleared/intermediate state: the initial content is still on screen
+    // until the cadence boundary publishes the latest raw content.
+    expect(lastRendered()).toBe(initialContent)
+
+    act(() => {
+      vi.advanceTimersByTime(20)
+    })
+    expect(lastRendered()).toBe(`${initialContent} tail`)
+  })
+
+  it('preserves paused content and prevents a stale timer from overwriting it, then resumes correctly', () => {
     const { rerender } = render(
       <Markdown block={makeBlock('block-1', 'streaming content', MessageBlockStatus.STREAMING)} />
     )
-    md.children.length = 0
+    md.commits.length = 0
 
-    // Stream within the <50ms cadence window so the trailing timer is pending
-    // but has not yet fired.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'streaming content extra', MessageBlockStatus.STREAMING)} />)
     })
     act(() => {
-      vi.advanceTimersByTime(30)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS / 2)
     })
 
-    // Pause the stream. This sets isStreamDone=true, which causes the cadence
-    // effect to flush block.content as the authoritative final text and arms
-    // the completion guard against stale trailing timers.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'streaming content extra', MessageBlockStatus.PAUSED)} />)
     })
-    act(() => {
-      vi.advanceTimersByTime(0)
-    })
 
-    // The paused content must be the latest block content, not stale
-    // mid-stream text from the smooth stream queue.
-    const pausedContent = lastRendered()
-    expect(pausedContent).toBe('streaming content extra')
+    // The paused content must be the latest block content, not stale mid-stream text.
+    expect(lastRendered()).toBe('streaming content extra')
 
-    // Fire any surviving trailing timers — the completion guard must refuse
-    // to overwrite the paused content with stale text.
     act(() => {
-      vi.advanceTimersByTime(300)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
     })
     expect(lastRendered()).toBe('streaming content extra')
 
-    // Resume streaming with appended content. The delta is computed from the
-    // previous block content and fed into the smooth stream.
+    // Resume streaming with appended content.
     act(() => {
       rerender(
         <Markdown block={makeBlock('block-1', 'streaming content extra resumed', MessageBlockStatus.STREAMING)} />
       )
     })
-
-    // Let the cadence timer fire and transition flush so the new content is
-    // committed to the parsed content state.
     act(() => {
-      vi.advanceTimersByTime(60)
-    })
-    act(() => {
-      vi.advanceTimersByTime(0)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
     })
 
-    // Complete the resumed stream and flush final content.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'streaming content extra resumed', MessageBlockStatus.SUCCESS)} />)
     })
-    act(() => {
-      vi.advanceTimersByTime(100)
-    })
 
-    // The final rendered text must be the resumed content, not the earlier
-    // paused content overwritten by a stale timer.
     expect(lastRendered()).toBe('streaming content extra resumed')
   })
 
   it('flushes exact final content when stream completes during a cadence window', () => {
     const { rerender } = render(<Markdown block={makeBlock('block-1', 'partial', MessageBlockStatus.STREAMING)} />)
 
-    // Stream more content, then immediately complete — within <50ms of the
-    // last content change. The trailing cadence timer is still pending.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'partial extended tail', MessageBlockStatus.STREAMING)} />)
     })
@@ -400,21 +460,187 @@ describe('Markdown streaming (LOCK-004)', () => {
       vi.advanceTimersByTime(30)
     })
 
-    // Completion: the urgent final flush must render exact final content.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'partial extended tail', MessageBlockStatus.SUCCESS)} />)
     })
     act(() => {
-      vi.advanceTimersByTime(100)
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 10)
     })
 
     expect(lastRendered()).toBe('partial extended tail')
+  })
 
-    // Fire any surviving trailing timers after completion — the guard must
-    // refuse to overwrite the final content.
+  it('runs postProcess only for planned parses, not per chunk or on a duplicate flush', () => {
+    const processText = vi.fn((text: string) => text)
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'a', MessageBlockStatus.STREAMING)} postProcess={processText} />
+    )
+    // Initial parsed content is post-processed exactly once.
+    expect(processText).toHaveBeenCalledTimes(1)
+
     act(() => {
-      vi.advanceTimersByTime(300)
+      rerender(<Markdown block={makeBlock('block-1', 'a b', MessageBlockStatus.STREAMING)} postProcess={processText} />)
     })
-    expect(lastRendered()).toBe('partial extended tail')
+    act(() => {
+      rerender(
+        <Markdown block={makeBlock('block-1', 'a b c', MessageBlockStatus.STREAMING)} postProcess={processText} />
+      )
+    })
+    expect(processText).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(processText).toHaveBeenCalledTimes(2)
+    expect(lastRendered()).toBe('a b c')
+
+    act(() => {
+      rerender(
+        <Markdown block={makeBlock('block-1', 'a b c d', MessageBlockStatus.STREAMING)} postProcess={processText} />
+      )
+    })
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(processText).toHaveBeenCalledTimes(3)
+    expect(lastRendered()).toBe('a b c d')
+
+    // Completion with unchanged content must not re-process it.
+    act(() => {
+      rerender(
+        <Markdown block={makeBlock('block-1', 'a b c d', MessageBlockStatus.SUCCESS)} postProcess={processText} />
+      )
+    })
+    expect(processText).toHaveBeenCalledTimes(3)
+    expect(lastRendered()).toBe('a b c d')
+  })
+
+  it('defers a streaming callback change to the cadence tail without restarting the pending timer', () => {
+    const first = vi.fn((text: string) => `first|${text}`)
+    const second = vi.fn((text: string) => `second|${text}`)
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'alpha', MessageBlockStatus.STREAMING)} postProcess={first} />
+    )
+    expect(lastRendered()).toBe('first|alpha')
+    const timersAtMount = setTimeoutSpy.mock.calls.length
+
+    // Stay inside the cadence window: the window has not closed yet, so this
+    // cannot take the "opportunity already open" path either.
+    act(() => {
+      vi.advanceTimersByTime(10)
+    })
+
+    // Same raw content, new callback identity: NOT an exact path while
+    // streaming. It only marks pending reprocessing for the cadence tail.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'alpha', MessageBlockStatus.STREAMING)} postProcess={second} />)
+    })
+    expect(lastRendered()).toBe('first|alpha')
+    expect(second).not.toHaveBeenCalled()
+
+    // Callback churn must not restart (cancel + re-arm) the single timer.
+    act(() => {
+      rerender(
+        <Markdown
+          block={makeBlock('block-1', 'alpha', MessageBlockStatus.STREAMING)}
+          postProcess={(text) => `third|${text}`}
+        />
+      )
+    })
+    act(() => {
+      vi.advanceTimersByTime(10)
+    })
+    expect(setTimeoutSpy.mock.calls.length).toBe(timersAtMount + 1)
+
+    // After the cadence boundary the tail runs with the latest callback and the
+    // whole authoritative raw text (never a processed prefix plus raw suffix).
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(lastRendered()).toBe('third|alpha')
+    expect(second).not.toHaveBeenCalled()
+  })
+
+  it('bounds parses when the caller rebuilds postProcess on every chunk', () => {
+    const callbacks = Array.from({ length: 9 }, (_, i) => vi.fn((text: string) => `v${i}|${text}`))
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    let content = 'w0'
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', content, MessageBlockStatus.STREAMING)} postProcess={callbacks[0]} />
+    )
+    const commitsAtStart = md.commits.length
+    const timersAtStart = setTimeoutSpy.mock.calls.length
+
+    // 8 chunks, 10ms apart, each carrying a fresh callback identity: the
+    // caller's per-chunk rebuild must not turn into one urgent parse per chunk.
+    for (let i = 1; i <= 8; i++) {
+      content += ` w${i}`
+      const cb = callbacks[i]
+      act(() => {
+        rerender(<Markdown block={makeBlock('block-1', content, MessageBlockStatus.STREAMING)} postProcess={cb} />)
+      })
+      act(() => {
+        vi.advanceTimersByTime(10)
+      })
+    }
+
+    // At most one timer exists at a time across the whole churn window.
+    expect(setTimeoutSpy.mock.calls.length - timersAtStart).toBeLessThanOrEqual(2)
+
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS * 2)
+    })
+    // ~80ms of chunks at a 50ms cadence: the parse count stays small.
+    expect(md.commits.length - commitsAtStart).toBeLessThanOrEqual(4)
+    // The last rendered text is the latest callback over the latest raw text.
+    expect(lastRendered()).toBe(`v8|${content}`)
+  })
+
+  it('flushes a callback change immediately for non-streaming blocks', () => {
+    const first = (text: string) => `first|${text}`
+    const second = (text: string) => `second|${text}`
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'alpha', MessageBlockStatus.SUCCESS)} postProcess={first} />
+    )
+    expect(lastRendered()).toBe('first|alpha')
+
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'alpha', MessageBlockStatus.SUCCESS)} postProcess={second} />)
+    })
+    expect(lastRendered()).toBe('second|alpha')
+  })
+
+  it('applies real citation post-processing to streamed and final content', () => {
+    const citations: Citation[] = [{ number: 1, url: 'https://example.com', title: 'Example' }]
+    const postProcess = (text: string) => withCitationTags(text, citations)
+
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'Answer [1]', MessageBlockStatus.STREAMING)} postProcess={postProcess} />
+    )
+    expect(lastRendered()).toContain("data-citation='")
+    expect(lastRendered()).toContain('https://example.com')
+
+    act(() => {
+      rerender(
+        <Markdown
+          block={makeBlock('block-1', 'Answer [1] with more [1]', MessageBlockStatus.STREAMING)}
+          postProcess={postProcess}
+        />
+      )
+    })
+    act(() => {
+      vi.advanceTimersByTime(MARKDOWN_PARSE_CADENCE_MS)
+    })
+    expect(lastRendered()).toContain('with more')
+    expect(lastRendered()).toContain('https://example.com')
+
+    const finalContent = 'Answer [1] with more [1] and the end'
+    act(() => {
+      rerender(
+        <Markdown block={makeBlock('block-1', finalContent, MessageBlockStatus.SUCCESS)} postProcess={postProcess} />
+      )
+    })
+    expect(lastRendered()).toBe(withCitationTags(finalContent, citations))
   })
 })
