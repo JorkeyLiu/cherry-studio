@@ -110,9 +110,24 @@ export interface SegmentGroupGeometry {
   top: number
   /** Rail length covering the group's mounted extent (including dividers). */
   height: number
+  /**
+   * Stable identity of the run the span is measured relative to: the header
+   * run's `runId` for a headed group, otherwise the `runId` of the
+   * geometrically topmost carrying run. Top/height and owner publish
+   * atomically with one equality — a changed owner with identical numbers
+   * still notifies, and a run may paint the rail-only continuation only when
+   * this equals its own `runId`.
+   */
+  anchorRunId: string
 }
 
 interface RunRegistration {
+  /**
+   * Stable identity of the carrying run (the composition's `deriveTurnKey`
+   * of that run): the geometry owner is published as this id, never as an
+   * order or index, so the rail-only continuation can gate on it.
+   */
+  runId: string
   /**
    * This run mounts the group's route-stable presentation slot and hosts its
    * ONE in-flow slot row — the header row when the group's stable head
@@ -275,7 +290,8 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       const members = rangeMembers.get(groupId)
       if ((!registrations || registrations.size === 0) && (!members || members.size === 0)) continue
       let header: HTMLElement | null = null
-      let topmost: { element: HTMLElement; top: number } | null = null
+      let headerRunId = ''
+      let topmost: { element: HTMLElement; top: number; runId: string } | null = null
       /** Topmost RANGE member: the span's upper bound, never a header. */
       let rangeTop = Infinity
       let bottom = -Infinity
@@ -283,12 +299,15 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       if (registrations) {
         for (const [element, registration] of registrations) {
           if (!element.isConnected) continue
-          if (registration.isHeader) header = element
+          if (registration.isHeader) {
+            header = element
+            headerRunId = registration.runId
+          }
           if (registration.endsGroup) endsGroup = true
           const rect = rectOf(element)
           if (!rect) continue
           bottom = Math.max(bottom, rect.bottom)
-          if (!topmost || rect.top < topmost.top) topmost = { element, top: rect.top }
+          if (!topmost || rect.top < topmost.top) topmost = { element, top: rect.top, runId: registration.runId }
         }
       }
       if (members) {
@@ -301,15 +320,16 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
         }
       }
       // A mounted group whose route-stable slot is outside the window has no
-      // slot run at all: the anchor is the topmost carrying run by rect (the
-      // composition hosts the rail-only continuation there, in oldest→newest
-      // flow order — the first carrying run — i.e. at the group's mounted
-      // visual top, the same run this geometry is relative to). Geometry is
-      // still
-      // published for that carrier — a rail with no slot occupancy — so the
-      // visible group range keeps one continuous line without a temporary `32px`
-      // row.
+      // slot run at all: the anchor is the topmost carrying run by rect — the
+      // group's mounted visual top, the same run this geometry is relative
+      // to. The anchor's stable run identity publishes WITH the numbers (see
+      // `anchorRunId`): the rail-only continuation paints only in the run
+      // matching it, so the composition never elects a carrier of its own.
+      // Geometry is still published for that carrier — a rail with no slot
+      // occupancy — so the visible group range keeps one continuous line
+      // without a temporary `32px` row.
       const anchor = header ?? topmost?.element ?? null
+      const anchorRunId = header ? headerRunId : (topmost?.runId ?? '')
       if (!anchor) continue
       const anchorRect = rectOf(anchor)
       // The rail starts AT the slot row's pill top and passes behind the pill:
@@ -329,7 +349,8 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
         height:
           !Number.isFinite(railTopAbs) || !Number.isFinite(bottom)
             ? 0
-            : Math.max(0, bottom - railTopAbs - (endsGroup ? SEGMENT_GROUP_RAIL_TAIL_TRIM_PX : 0))
+            : Math.max(0, bottom - railTopAbs - (endsGroup ? SEGMENT_GROUP_RAIL_TAIL_TRIM_PX : 0)),
+        anchorRunId
       }
       // The expanded pill shares the slot run's first message content band:
       // publish that message so exactly its content reserves room. A mid-turn
@@ -350,6 +371,7 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       if (
         !firstChanged &&
         previous &&
+        previous.anchorRunId === next.anchorRunId &&
         Math.abs(previous.top - next.top) < 0.5 &&
         Math.abs(previous.height - next.height) < 0.5
       ) {
@@ -373,6 +395,7 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       return () => {
         const current = runs.get(groupId)
         if (!current) return
+        const removed = current.get(element)
         current.delete(element)
         unobserve(element)
         if (current.size === 0) {
@@ -381,6 +404,18 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
           slotFirstByGroup.delete(groupId)
           notify(groupId)
           return
+        }
+        // The removed run owned the published span (or the slot-first
+        // mapping): drop the publication synchronously so no remaining run
+        // can paint the stale owner against its own coordinates. The
+        // scheduled pass re-elects ownership from the survivors; a non-owner
+        // leaving takes only the coalesced path below.
+        const ownedAnchor = removed !== undefined && geometries.get(groupId)?.anchorRunId === removed.runId
+        const ownedSlot = removed?.isHeader === true && slotFirstByGroup.has(groupId)
+        if (ownedAnchor || ownedSlot) {
+          if (ownedAnchor) geometries.delete(groupId)
+          if (ownedSlot) slotFirstByGroup.delete(groupId)
+          notify(groupId)
         }
         schedule()
       }
@@ -586,11 +621,13 @@ export interface SegmentGroupPresentation {
 
 /**
  * Rail-only continuation carrier: the absolutely positioned overlay a group
- * paints when its route-stable slot is OUTSIDE the mounted window. It is hosted
- * by the group's visual-top carrying run (the same run the manager anchors
- * headless geometry to) and contributes ZERO in-flow height — the group keeps
- * one continuous rail across its mounted extent but never a temporary `32px`
- * row. Visual only: no hit target, no group menu, no hover state.
+ * paints when its route-stable slot is OUTSIDE the mounted window. Every
+ * eligible carrying run mounts one, but only the run whose stable identity
+ * matches the manager's published anchor paints it (see `anchorRunId`) —
+ * the composition never elects a carrier of its own. It contributes ZERO
+ * in-flow height — the group keeps one continuous rail across its mounted
+ * extent but never a temporary `32px` row. Visual only: no hit target, no
+ * group menu, no hover state.
  */
 const ContinuationRail = styled.div<{ $top: number; $height: number }>`
    position: absolute;
@@ -603,20 +640,28 @@ const ContinuationRail = styled.div<{ $top: number; $height: number }>`
   isolation: isolate;
 `
 
-export const GroupRailContinuation: React.FC<{ groupId: string; color: string }> = ({ groupId, color }) => {
+export const GroupRailContinuation: React.FC<{ groupId: string; color: string; runId: string }> = ({
+  groupId,
+  color,
+  runId
+}) => {
   const geometry = useSegmentGroupGeometry(groupId)
   if (!geometry || geometry.height <= 0) return null
+  // Ownership gate: only the published anchor paints. A stale, missing or
+  // unregistered anchor matches no run, so no run paints stale geometry
+  // against another coordinate system.
+  if (geometry.anchorRunId !== runId) return null
   return (
     <ContinuationRail
       $top={geometry.top}
       $height={geometry.height}
       data-testid="topic-segment-rail-continuation"
-      data-segment-id={groupId}>
+      data-segment-id={groupId}
+      data-run-id={runId}>
       <InteractionRailLine $color={color} $active={false} />
     </ContinuationRail>
   )
 }
-
 /**
  * The group's normal-flow slot when its stable head resolves on ANOTHER route
  * (a route-truncated residual): the same occupied row the header row takes, so

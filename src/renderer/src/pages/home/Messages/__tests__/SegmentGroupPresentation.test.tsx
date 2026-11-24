@@ -51,13 +51,14 @@ describe('segment group layout manager', () => {
     // Header row (32px) at 100..132; the group's lowest mounted run ends at 400.
     stubRect(header, { top: 100, bottom: 132 })
     stubRect(lower, { top: 200, bottom: 400 })
-    manager.registerRun('seg-a', header, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-a', lower, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-a', lower, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
 
     expect(manager.getGeometry('seg-a')).toEqual({
       top: SEGMENT_GROUP_RAIL_TOP_PX,
-      height: 400 - 100 - SEGMENT_GROUP_RAIL_TOP_PX - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX
+      height: 400 - 100 - SEGMENT_GROUP_RAIL_TOP_PX - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX,
+      anchorRunId: 'run-header'
     })
     manager.suspend()
   })
@@ -68,8 +69,8 @@ describe('segment group layout manager', () => {
     const lower = makeHost()
     stubRect(header, { top: 100, bottom: 132 })
     stubRect(lower, { top: 260, bottom: 360 })
-    manager.registerRun('seg-a', header, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-a', lower, { isHeader: false, endsGroup: false })
+    manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-a', lower, { runId: 'run-carrier', isHeader: false, endsGroup: false })
     manager.measure()
 
     const geometry = manager.getGeometry('seg-a')
@@ -86,8 +87,8 @@ describe('segment group layout manager', () => {
     const lower = makeHost()
     stubRect(header, { top: 100, bottom: 132 })
     stubRect(lower, { top: 260, bottom: 360 })
-    manager.registerRun('seg-a', header, { isHeader: true, endsGroup: true })
-    manager.registerRun('seg-a', lower, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: true })
+    manager.registerRun('seg-a', lower, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
 
     const geometry = manager.getGeometry('seg-a')!
@@ -118,15 +119,16 @@ describe('segment group layout manager', () => {
     const lower = makeHost()
     stubRect(header, { top: 100, bottom: 132 })
     stubRect(lower, { top: 200, bottom: 380 })
-    manager.registerRun('seg-partial', header, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-partial', lower, { isHeader: false, endsGroup: false })
+    manager.registerRun('seg-partial', header, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-partial', lower, { runId: 'run-carrier', isHeader: false, endsGroup: false })
     manager.measure()
 
     // One span, no tail trim (the group's authority last member is outside the
     // mounted window), and the anchor is the header run itself.
     expect(manager.getGeometry('seg-partial')).toEqual({
       top: SEGMENT_GROUP_RAIL_TOP_PX,
-      height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX
+      height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX,
+      anchorRunId: 'run-header'
     })
     manager.suspend()
   })
@@ -141,13 +143,14 @@ describe('segment group layout manager', () => {
     const lowerCarrier = makeHost()
     stubRect(topCarrier, { top: 100, bottom: 160 })
     stubRect(lowerCarrier, { top: 200, bottom: 380 })
-    manager.registerRun('seg-headless', topCarrier, { isHeader: false, endsGroup: false })
-    manager.registerRun('seg-headless', lowerCarrier, { isHeader: false, endsGroup: false })
+    manager.registerRun('seg-headless', topCarrier, { runId: 'run-top', isHeader: false, endsGroup: false })
+    manager.registerRun('seg-headless', lowerCarrier, { runId: 'run-lower', isHeader: false, endsGroup: false })
     manager.measure()
 
     expect(manager.getGeometry('seg-headless')).toEqual({
       top: SEGMENT_GROUP_RAIL_TOP_PX,
-      height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX
+      height: 380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX,
+      anchorRunId: 'run-top'
     })
     manager.suspend()
   })
@@ -160,8 +163,8 @@ describe('segment group layout manager', () => {
     stubRect(lower, { top: 200, bottom: 400 })
     const listener = vi.fn()
     manager.subscribe('seg-a', listener)
-    manager.registerRun('seg-a', header, { isHeader: true, endsGroup: true })
-    manager.registerRun('seg-a', lower, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: true })
+    manager.registerRun('seg-a', lower, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
     expect(listener).toHaveBeenCalledTimes(1)
     manager.measure()
@@ -186,7 +189,7 @@ describe('segment group layout manager', () => {
     stubRect(header, { top: 100, bottom: 132 })
     const listener = vi.fn()
     manager.subscribe('seg-a', listener)
-    const unregister = manager.registerRun('seg-a', header, { isHeader: true, endsGroup: true })
+    const unregister = manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: true })
     manager.measure()
     expect(manager.getGeometry('seg-a')).not.toBeNull()
 
@@ -220,8 +223,8 @@ describe('segment group layout manager', () => {
     stubRect(header, { top: 341.55, bottom: 373.55 })
     stubRect(emptyBodyHost, { top: 341.55, bottom: 341.55 })
     manager.registerRangeMember('seg-folded', summary)
-    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-folded', emptyBodyHost, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-folded', header, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-folded', emptyBodyHost, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
 
     const geometry = manager.getGeometry('seg-folded')!
@@ -240,7 +243,7 @@ describe('segment group layout manager', () => {
     stubRect(summary, { top: 320, bottom: 340 })
     stubRect(header, { top: 350, bottom: 382 })
     manager.registerRangeMember('seg-folded', summary)
-    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: false })
+    manager.registerRun('seg-folded', header, { runId: 'run-header', isHeader: true, endsGroup: false })
     manager.measure()
     expect(manager.getGeometry('seg-folded')!.top).toBeCloseTo(-30, 5)
 
@@ -260,7 +263,7 @@ describe('segment group layout manager', () => {
     stubRect(summary, { top: 309.55, bottom: 335.55 })
     stubRect(header, { top: 341.55, bottom: 373.55 })
     const unregister = manager.registerRangeMember('seg-folded', summary)
-    manager.registerRun('seg-folded', header, { isHeader: true, endsGroup: true })
+    manager.registerRun('seg-folded', header, { runId: 'run-header', isHeader: true, endsGroup: true })
     manager.measure()
     expect(manager.getGeometry('seg-folded')!.top).toBeLessThan(0)
 
@@ -270,7 +273,8 @@ describe('segment group layout manager', () => {
     // run below it, trimmed above the group's end.
     expect(manager.getGeometry('seg-folded')).toEqual({
       top: SEGMENT_GROUP_RAIL_TOP_PX,
-      height: 373.55 - (341.55 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX
+      height: 373.55 - (341.55 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX,
+      anchorRunId: 'run-header'
     })
     // The group itself is untouched: its run still owns the chrome and geometry.
     expect(manager.getGeometry('seg-folded')).not.toBeNull()
@@ -284,6 +288,68 @@ describe('segment group layout manager', () => {
     manager.registerRangeMember('seg-bodyless', summary)
     manager.measure()
     expect(manager.getGeometry('seg-bodyless')).toBeNull()
+    manager.suspend()
+  })
+})
+describe('segment group anchor identity', () => {
+  it('anchors headless geometry to the geometric topmost run, not the first registered', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const first = makeHost()
+    const second = makeHost()
+    stubRect(first, { top: 200, bottom: 380 })
+    stubRect(second, { top: 100, bottom: 160 })
+    manager.registerRun('seg-swap', first, { runId: 'run-first', isHeader: false, endsGroup: false })
+    manager.registerRun('seg-swap', second, { runId: 'run-second', isHeader: false, endsGroup: true })
+    manager.measure()
+    const geometry = manager.getGeometry('seg-swap')!
+    expect(geometry.anchorRunId).toBe('run-second')
+    expect(geometry.top).toBe(SEGMENT_GROUP_RAIL_TOP_PX)
+    expect(geometry.height).toBe(380 - 100 - SEGMENT_GROUP_RAIL_TOP_PX - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX)
+    manager.suspend()
+  })
+  it('notifies when the anchor identity changes while top and height stay equal', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const runA = makeHost()
+    const runB = makeHost()
+    stubRect(runA, { top: 100, bottom: 260 })
+    stubRect(runB, { top: 200, bottom: 260 })
+    const listener = vi.fn()
+    manager.subscribe('seg-move', listener)
+    manager.registerRun('seg-move', runA, { runId: 'run-a', isHeader: false, endsGroup: true })
+    manager.registerRun('seg-move', runB, { runId: 'run-b', isHeader: false, endsGroup: true })
+    manager.measure()
+    expect(listener).toHaveBeenCalledTimes(1)
+    const before = manager.getGeometry('seg-move')!
+    expect(before.anchorRunId).toBe('run-a')
+    stubRect(runA, { top: 200, bottom: 260 })
+    stubRect(runB, { top: 100, bottom: 260 })
+    manager.measure()
+    const after = manager.getGeometry('seg-move')!
+    expect(after.top).toBe(before.top)
+    expect(after.height).toBe(before.height)
+    expect(after.anchorRunId).toBe('run-b')
+    expect(listener).toHaveBeenCalledTimes(2)
+    manager.suspend()
+  })
+  it('drops the publication synchronously when the anchor unmounts, then re-elects the survivor', () => {
+    const manager = createSegmentGroupLayoutManager()
+    const runA = makeHost()
+    const runB = makeHost()
+    stubRect(runA, { top: 100, bottom: 200 })
+    stubRect(runB, { top: 200, bottom: 380 })
+    const listener = vi.fn()
+    manager.subscribe('seg-drop', listener)
+    const unregisterA = manager.registerRun('seg-drop', runA, { runId: 'run-a', isHeader: false, endsGroup: false })
+    manager.registerRun('seg-drop', runB, { runId: 'run-b', isHeader: false, endsGroup: true })
+    manager.measure()
+    expect(manager.getGeometry('seg-drop')?.anchorRunId).toBe('run-a')
+    expect(listener).toHaveBeenCalledTimes(1)
+    unregisterA()
+    expect(manager.getGeometry('seg-drop')).toBeNull()
+    expect(listener).toHaveBeenCalledTimes(2)
+    manager.measure()
+    expect(manager.getGeometry('seg-drop')?.anchorRunId).toBe('run-b')
+    expect(listener).toHaveBeenCalledTimes(3)
     manager.suspend()
   })
 })
@@ -333,12 +399,14 @@ const RunHostProbe = ({
   groupId,
   rect,
   isHeader,
-  endsGroup
+  endsGroup,
+  runId
 }: {
   groupId: string
   rect: { top: number; bottom: number }
   isHeader: boolean
   endsGroup: boolean
+  runId: string
 }) => {
   const manager = useSegmentGroupLayoutManager()
   const elementRef = useRef<HTMLDivElement | null>(null)
@@ -352,8 +420,8 @@ const RunHostProbe = ({
   useLayoutEffect(() => {
     const element = elementRef.current
     if (!manager || !element) return
-    return manager.registerRun(groupId, element, { isHeader, endsGroup })
-  }, [manager, groupId, isHeader, endsGroup])
+    return manager.registerRun(groupId, element, { isHeader, endsGroup, runId })
+  }, [manager, groupId, isHeader, endsGroup, runId])
 
   return <div ref={elementRef} />
 }
@@ -371,8 +439,8 @@ const ManagerProbe = ({ sink }: { sink: { current: SegmentGroupLayoutManager | n
 const SegmentGroupFlow = ({ sink }: { sink: { current: SegmentGroupLayoutManager | null } }) => (
   <SegmentGroupPresentationProvider>
     <ManagerProbe sink={sink} />
-    <RunHostProbe groupId="seg-a" rect={RUN_HEADER_RECT} isHeader endsGroup={false} />
-    <RunHostProbe groupId="seg-a" rect={RUN_TAIL_RECT} isHeader={false} endsGroup />
+    <RunHostProbe groupId="seg-a" rect={RUN_HEADER_RECT} isHeader endsGroup={false} runId="run-header" />
+    <RunHostProbe groupId="seg-a" rect={RUN_TAIL_RECT} isHeader={false} endsGroup runId="run-tail" />
     <RailGeometryProbe groupId="seg-a" />
   </SegmentGroupPresentationProvider>
 )
@@ -409,10 +477,14 @@ describe('segment group presentation across route reactivation', () => {
     const tail = makeHost()
     stubRect(header, RUN_HEADER_RECT)
     stubRect(tail, RUN_TAIL_RECT)
-    manager.registerRun('seg-a', header, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-a', tail, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-a', header, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-a', tail, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
-    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
+    expect(manager.getGeometry('seg-a')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 278,
+      anchorRunId: 'run-header'
+    })
 
     // Activity hide / StrictMode replay: the instance is paused, not killed.
     manager.suspend()
@@ -424,8 +496,8 @@ describe('segment group presentation across route reactivation', () => {
     stubRect(returningTail, RUN_TAIL_RECT)
     const listener = vi.fn()
     manager.subscribe('seg-a', listener)
-    manager.registerRun('seg-a', returningHeader, { isHeader: true, endsGroup: false })
-    manager.registerRun('seg-a', returningTail, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-a', returningHeader, { runId: 'run-header', isHeader: true, endsGroup: false })
+    manager.registerRun('seg-a', returningTail, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
     expect(manager.getGeometry('seg-a')).toBeNull()
     expect(listener).not.toHaveBeenCalled()
@@ -433,7 +505,11 @@ describe('segment group presentation across route reactivation', () => {
     // Return: the same instance observes and republishes the full span.
     manager.resume()
     manager.measure()
-    expect(manager.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
+    expect(manager.getGeometry('seg-a')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 278,
+      anchorRunId: 'run-header'
+    })
     expect(listener).toHaveBeenCalledTimes(1)
     manager.suspend()
   })
@@ -447,7 +523,11 @@ describe('segment group presentation across route reactivation', () => {
     )
     expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
     const manager = sink.current
-    expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
+    expect(manager?.getGeometry('seg-a')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 278,
+      anchorRunId: 'run-header'
+    })
     expect(FakeResizeObserver.instances).toHaveLength(1)
     expect(FakeResizeObserver.instances[0]?.observed.size).toBe(2)
 
@@ -476,7 +556,11 @@ describe('segment group presentation across route reactivation', () => {
       })
       expect(sink.current).toBe(manager)
       expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
-      expect(manager?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
+      expect(manager?.getGeometry('seg-a')).toEqual({
+        top: SEGMENT_GROUP_RAIL_TOP_PX,
+        height: 278,
+        anchorRunId: 'run-header'
+      })
       expect(FakeResizeObserver.instances).toHaveLength(activation + 1)
       expect(FakeResizeObserver.instances[activation]?.observed.size).toBe(2)
     }
@@ -490,7 +574,11 @@ describe('segment group presentation across route reactivation', () => {
       </StrictMode>
     )
     expect(screen.getByTestId('rail-geometry').textContent).toBe(EXPECTED_RAIL_GEOMETRY)
-    expect(sink.current?.getGeometry('seg-a')).toEqual({ top: SEGMENT_GROUP_RAIL_TOP_PX, height: 278 })
+    expect(sink.current?.getGeometry('seg-a')).toEqual({
+      top: SEGMENT_GROUP_RAIL_TOP_PX,
+      height: 278,
+      anchorRunId: 'run-header'
+    })
     // The replayed activation was disconnected exactly once; only the live one
     // still observes the two carrying runs (no observer leak).
     const observing = FakeResizeObserver.instances.filter((observer) => observer.observed.size === 2)
@@ -520,7 +608,7 @@ describe('segment group slot first message', () => {
     const header = makeHost()
     header.appendChild(messageChild('m-a'))
     header.appendChild(messageChild('m-b'))
-    manager.registerRun('seg-slot', header, { isHeader: true, endsGroup: true })
+    manager.registerRun('seg-slot', header, { runId: 'run-header', isHeader: true, endsGroup: true })
     manager.measure()
     expect(manager.getSlotFirstMessageId('seg-slot')).toBe('m-a')
     manager.suspend()
@@ -531,7 +619,7 @@ describe('segment group slot first message', () => {
     const header = makeHost()
     header.appendChild(messageChild('m-run-first'))
     header.appendChild(messageChild('m-authority-start'))
-    manager.registerRun('seg-midturn', header, { isHeader: true, endsGroup: true })
+    manager.registerRun('seg-midturn', header, { runId: 'run-header', isHeader: true, endsGroup: true })
     manager.measure()
     // The pill hangs at the run top; the later authority id never wins.
     expect(manager.getSlotFirstMessageId('seg-midturn')).toBe('m-run-first')
@@ -541,7 +629,7 @@ describe('segment group slot first message', () => {
   it('publishes null when the header run renders no message (a collapsed browse block indents nothing)', () => {
     const manager = createSegmentGroupLayoutManager()
     const header = makeHost()
-    manager.registerRun('seg-collapsed', header, { isHeader: true, endsGroup: true })
+    manager.registerRun('seg-collapsed', header, { runId: 'run-header', isHeader: true, endsGroup: true })
     manager.measure()
     expect(manager.getSlotFirstMessageId('seg-collapsed')).toBeNull()
     manager.suspend()
@@ -551,13 +639,17 @@ describe('segment group slot first message', () => {
     const manager = createSegmentGroupLayoutManager()
     const carrier = makeHost()
     carrier.appendChild(messageChild('m-tail'))
-    manager.registerRun('seg-tail', carrier, { isHeader: false, endsGroup: true })
+    manager.registerRun('seg-tail', carrier, { runId: 'run-carrier', isHeader: false, endsGroup: true })
     manager.measure()
     expect(manager.getSlotFirstMessageId('seg-tail')).toBeNull()
 
     const header = makeHost()
     header.appendChild(messageChild('m-head'))
-    const unregister = manager.registerRun('seg-tail', header, { isHeader: true, endsGroup: false })
+    const unregister = manager.registerRun('seg-tail', header, {
+      runId: 'run-header',
+      isHeader: true,
+      endsGroup: false
+    })
     manager.measure()
     expect(manager.getSlotFirstMessageId('seg-tail')).toBe('m-head')
 

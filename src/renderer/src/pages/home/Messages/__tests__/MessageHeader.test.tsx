@@ -146,7 +146,7 @@ describe('MessageHeader', () => {
     const ref = useRef<HTMLDivElement>(null)
     useLayoutEffect(() => {
       if (!manager || !ref.current) return
-      return manager.registerRun(groupId, ref.current, { isHeader: true, endsGroup: true })
+      return manager.registerRun(groupId, ref.current, { runId: 'run-header', isHeader: true, endsGroup: true })
     }, [manager, groupId])
     return <div ref={ref}>{messageId ? <div data-message-id={messageId} /> : null}</div>
   }

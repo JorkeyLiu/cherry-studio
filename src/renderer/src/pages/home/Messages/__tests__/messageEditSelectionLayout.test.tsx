@@ -1637,6 +1637,107 @@ describe('route-stable group header placement', () => {
     expect(observed!.height).toBe(260 - (100 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX)
     expect(observed!.top + observed!.height).toBeLessThanOrEqual(260 - 100)
   })
+  it('paints the rail-only continuation in the measured anchor when input order disagrees with visual order', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    // Input array order is newest-first here (m-b BEFORE m-a) while the
+    // stubbed visual tops keep m-a on top: the composition elects no carrier
+    // from order, so only the measured anchor (m-a) paints.
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes: [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    expect(chromeProbe).not.toHaveBeenCalled()
+    const continuation = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(continuation.getAttribute('data-segment-id')).toBe('seg-route')
+    expect(continuation.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(1)
+  })
+  it('moves the rail-only continuation to the new anchor when visual tops swap with identical numbers', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 260 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    let observed: SegmentGroupGeometry | null = null
+    const GeometryProbe = () => {
+      observed = useSegmentGroupGeometry('seg-route')
+      return null
+    }
+    const flow = (nodes: FlowNode[]) => (
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+          <GeometryProbe />
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    const nodes = [routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })]
+    const view = render(flow(nodes))
+    const first = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(first.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    const firstTop = observed!.top
+    const firstHeight = observed!.height
+    const firstRunId = first.getAttribute('data-run-id')
+    // Swap the visual positions: the union (100..260) is unchanged, so the
+    // numbers stay identical while the measured anchor moves to m-b.
+    stubHostRects({ 'body-m-a': { top: 200, bottom: 260 }, 'body-m-b': { top: 100, bottom: 260 } })
+    view.rerender(flow(nodes))
+    await vi.waitFor(() => {
+      const live = view.container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]')
+      expect(live.length).toBe(1)
+      expect(live.item(0)?.parentElement?.querySelector('[data-testid="body-m-b"]')).not.toBeNull()
+    })
+    expect(observed!.top).toBe(firstTop)
+    expect(observed!.height).toBe(firstHeight)
+    const second = view.container.querySelector('[data-testid="topic-segment-rail-continuation"]')!
+    expect(second.getAttribute('data-run-id')).not.toBe(firstRunId)
+    view.unmount()
+  })
+  it('hands the rail-only continuation to the survivor when the anchor run unmounts', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const flow = (nodes: FlowNode[]) => (
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    const view = render(flow([routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })]))
+    const first = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(first.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    // Window replacement drops the anchor run: the publication is invalidated
+    // synchronously, so no stale paint survives; the next pass elects m-b.
+    view.rerender(flow([routeTurn('g-b', 'm-b', seg, { isLast: true })]))
+    await vi.waitFor(() => {
+      const live = view.container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]')
+      expect(live.length).toBe(1)
+      expect(live.item(0)?.parentElement?.querySelector('[data-testid="body-m-b"]')).not.toBeNull()
+    })
+    view.unmount()
+  })
 
   it('hosts the route-stable slot, replacing the header with an equal-height continuation row', () => {
     stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })

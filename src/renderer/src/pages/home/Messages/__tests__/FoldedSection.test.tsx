@@ -728,7 +728,7 @@ describe('FoldedSection', () => {
       useLayoutEffect(() => {
         const element = ref.current
         if (!manager || !element) return
-        return manager.registerRun(groupId, element, { isHeader: true, endsGroup: true })
+        return manager.registerRun(groupId, element, { runId: 'run-header', isHeader: true, endsGroup: true })
       }, [manager, groupId])
       return <div ref={ref} data-testid="probe-run-host" />
     }
