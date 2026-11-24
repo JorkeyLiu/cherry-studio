@@ -2,6 +2,7 @@ import { useContextClosure } from '@renderer/hooks/useContextClosure'
 import { useLoadedTopicMessages } from '@renderer/hooks/useMessageOperations'
 import { isAcceptedClosureForRoute } from '@renderer/services/contextClosure'
 import { type ContextInfo, resolveSharedContextInfo } from '@renderer/services/contextInfoService'
+import { getClosureReadReceipt } from '@renderer/services/executionOverlayReadReceipt'
 import {
   getComposedOverlayBlocks,
   getExecutionOverlayVersion,
@@ -109,10 +110,12 @@ export function useContextPresentation(options: {
   )
 
   // Terminal handoff: a newly accepted closure retires retained execution
-  // overlays only when Main ordering proves it already contains them.
+  // overlays only via its own read receipt (exact response object → witness
+  // captured when that read was issued). Witness-less, stale, failed, or
+  // other-route reads retain. Still an effect — never during render.
   useEffect(() => {
     if (freshClosure) {
-      tryHandoffAfterClosure(topicId, route, freshClosure as never)
+      tryHandoffAfterClosure(topicId, route, freshClosure as never, getClosureReadReceipt(freshClosure) ?? null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [freshClosure])

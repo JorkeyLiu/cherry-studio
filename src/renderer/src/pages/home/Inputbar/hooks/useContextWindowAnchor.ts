@@ -9,6 +9,7 @@ import {
   setCachedContextClosure
 } from '@renderer/services/contextClosure'
 import { dbService } from '@renderer/services/db'
+import { bindClosureReadReceipt, captureClosureReadReceipt } from '@renderer/services/executionOverlayReadReceipt'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
 import type { Assistant, AssistantSettings, ContextWindowAnchor } from '@renderer/types'
@@ -83,6 +84,9 @@ export function useContextWindowAnchor(
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
+    // Read receipt: capture synchronously before the resolve dispatch (no await
+    // between) so terminals acked while the resolve is in flight stay excluded.
+    const readReceipt = captureClosureReadReceipt(topicId, route)
     let resolved: string | null | undefined
     let closureResponse: { messages: unknown[]; blocks: unknown[]; closure: unknown } | null = null
     try {
@@ -205,6 +209,10 @@ export function useContextWindowAnchor(
       // triggers no middleware bump/invalidation.
       try {
         setCachedContextClosure(topicId, fullResponse, route)
+        // Pair this exact response with its read witness before publication:
+        // cache + persist carry the same object. Unpublishable/invalid reads
+        // return above and are never bound, so they can never retire an overlay.
+        bindClosureReadReceipt(fullResponse, readReceipt)
       } catch {
         return
       }

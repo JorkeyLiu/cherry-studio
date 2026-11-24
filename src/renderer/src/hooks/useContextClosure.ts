@@ -14,6 +14,7 @@ import {
   subscribeClosureInvalidations
 } from '@renderer/services/contextClosure'
 import { dbService } from '@renderer/services/db'
+import { bindClosureReadReceipt, captureClosureReadReceipt } from '@renderer/services/executionOverlayReadReceipt'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
 import type { FetchContextClosureRequest, FetchContextClosureResponse } from '@shared/chatDb'
@@ -191,6 +192,9 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
+    // Read receipt: capture synchronously before the read dispatch (no await
+    // between) so terminals acked while this read is in flight stay excluded.
+    const readReceipt = captureClosureReadReceipt(topicId, route)
     setLoading(true)
     void (async () => {
       try {
@@ -235,6 +239,11 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         // Cache publication stores snapshot of generation at fetch start (which equals current).
         // Stored fingerprint is closure-derived (authority), never viewport-derived.
         const closureFp = computeClosureFingerprint(response.messages as any)
+        // Pair this exact response with its read witness before publication:
+        // cache + accept carry the same object, so a later cache hit keeps
+        // its original read's receipt. Failed/invalid reads return above and
+        // are never bound, so they can never retire an overlay.
+        bindClosureReadReceipt(response, readReceipt)
         setCachedContextClosureWithFingerprint(topicId, response, closureFp, route)
         if (
           seq === seqRef.current &&

@@ -16,12 +16,17 @@
  */
 import { configureStore } from '@reduxjs/toolkit'
 import {
+  bindClosureReadReceipt,
+  captureClosureReadReceipt,
+  getClosureReadReceipt
+} from '@renderer/services/executionOverlayReadReceipt'
+import {
   getComposedOverlayBlocks,
   registerExecutionOverlay,
   resetExecutionOverlayForTests,
   routeKeyForExecutionOverlay,
-  setExecutionOverlayGenerationReadersForTests,
-  subscribeExecutionOverlay
+  subscribeExecutionOverlay,
+  tryHandoffAfterClosure
 } from '@renderer/services/executionOverlayRegistry'
 import messageBlocksReducer from '@renderer/store/messageBlock'
 import { MessageBlockType } from '@renderer/types/newMessage'
@@ -98,10 +103,6 @@ const topicMessages = (topicId: string) => [
 describe('useContextPresentation', () => {
   beforeEach(() => {
     resetExecutionOverlayForTests()
-    setExecutionOverlayGenerationReadersForTests({
-      getCachedGeneration: () => undefined,
-      getLoadGeneration: () => 0
-    })
     vi.clearAllMocks()
     hoisted.closure = null
     hoisted.loadedByTopic.clear()
@@ -181,5 +182,94 @@ describe('useContextPresentation', () => {
     expect(result.current.sharedContextInfo.tokenEstimationMessages).toEqual([])
     expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
     expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 0, max: 0 })
+  })
+
+  it('retires a retained terminal via the accepted response’s own read receipt', () => {
+    const store = makeStore()
+    hoisted.loadedByTopic.set(TOPIC, topicMessages(TOPIC))
+    const routeKey = routeKeyForExecutionOverlay(TOPIC, null)
+    const unsubscribe = subscribeExecutionOverlay(routeKey, () => {})
+    try {
+      const handle = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        snapshot: () => ({
+          blocks: [{ id: 'a1-block', messageId: 'a1', type: MessageBlockType.MAIN_TEXT, content: 'live-body' } as any]
+        })
+      })
+      act(() => {
+        handle.notifyDelta()
+      })
+      handle.recordTerminalPersisted('success')
+      handle.dispose()
+      // Read issued after the ack, bound to this exact response object.
+      const closure = makeClosure(TOPIC, ANCHOR, 'closure-body')
+      bindClosureReadReceipt(closure, captureClosureReadReceipt(TOPIC, null))
+      hoisted.closure = closure
+
+      const { result } = renderHook(
+        () =>
+          useContextPresentation({
+            topicId: TOPIC,
+            anchorGroupKey: ANCHOR,
+            topicMessages: topicMessages(TOPIC) as any,
+            assistant
+          }),
+        { wrapper: wrapper(store) }
+      )
+      // The handoff effect retired the retained terminal: the accepted
+      // closure body shows, not the overlay.
+      expect(getClosureReadReceipt(result.current.freshClosure)).toBeDefined()
+      expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('closure-body')
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('retains the terminal when the accepted response carries no read receipt', () => {
+    const store = makeStore()
+    hoisted.loadedByTopic.set(TOPIC, topicMessages(TOPIC))
+    const routeKey = routeKeyForExecutionOverlay(TOPIC, null)
+    const unsubscribe = subscribeExecutionOverlay(routeKey, () => {})
+    try {
+      const handle = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        snapshot: () => ({
+          blocks: [{ id: 'a1-block', messageId: 'a1', type: MessageBlockType.MAIN_TEXT, content: 'live-body' } as any]
+        })
+      })
+      act(() => {
+        handle.notifyDelta()
+      })
+      handle.recordTerminalPersisted('success')
+      handle.dispose()
+      // Pre-existing cache-style response with no receipt: fail-closed.
+      hoisted.closure = makeClosure(TOPIC, ANCHOR, 'closure-body')
+
+      const { result } = renderHook(
+        () =>
+          useContextPresentation({
+            topicId: TOPIC,
+            anchorGroupKey: ANCHOR,
+            topicMessages: topicMessages(TOPIC) as any,
+            assistant
+          }),
+        { wrapper: wrapper(store) }
+      )
+      expect(getClosureReadReceipt(result.current.freshClosure)).toBeUndefined()
+      expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('live-body')
+      // Direct proof with an explicit stale witness also retains.
+      expect(
+        tryHandoffAfterClosure(TOPIC, null, result.current.freshClosure as never, {
+          routeKey,
+          terminals: []
+        })
+      ).toBe(false)
+    } finally {
+      unsubscribe()
+    }
   })
 })

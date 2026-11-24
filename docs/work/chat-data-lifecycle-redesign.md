@@ -358,5 +358,31 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
   更新；同路由已接受投影保留直到权威结果到达（现行 ADR 语义），不恢复普通
   Redux block 订阅。无代码改动。
 - F3 通道路径边界：`messageThunk.ts` `setupChannelStream` 无生产调用者，未接
-  context overlay；仅在其导出注释说明 non-UI path 与未来统一 wiring 要求，
-  未扩实际通道功能。无代码改动。
+   context overlay；仅在其导出注释说明 non-UI path 与未来统一 wiring 要求，
+   未扩实际通道功能。无代码改动。
+
+ ## 14 续补记：显式本地见证替代 lazy generation 读取（已实现；提案正文仍不改）
+
+ - 替换事实：`executionOverlayRegistry.ts` 的 lazy `import('@renderer/services/contextClosure')`
+   generation readers（`ensureGenerationReaders`、`getCachedClosureGeneration` /
+   `getClosureLoadGeneration` 动态读取、test seam、lazy promise）已删除，不再存在。
+   `recordTerminalPersisted` 只在实际 terminal 事务 ack 成功后记录本地 terminal
+   token（per-execution sequence），不再读任何闭包 generation。handoff 改由读取方在实际
+   `dbService.fetchContextClosure` / `resolveContextClosure` 调用紧前同步捕获的显式
+   `TerminalReadWitness`（routeKey + 已完成 terminal 的 execution 身份/token）驱动；
+   `useContextClosure` 与 `useContextWindowAnchor` 两处 issuer 经
+   `executionOverlayReadReceipt.ts`（`WeakMap` exact response → witness，只存读元数据）
+   捕获/绑定，`useContextPresentation` effect 只按 exact accepted response 取回并传入，
+   不再从最新 cache 旁取任意 generation。未知/无 witness、读前 ack、读中 ack、失败/无效读、
+   跨 route 一律 retain；成员未入 closure 不 retire；内存界限（≤2/route、无订阅释放）不变。
+   这只是 renderer-local 顺序证明，不声称 Main commit revision，不作跨窗口保证。
+ - 时态校准：§14 “Handoff（无 Main stamp）”段与 F1 段中“cached generation 更新 / genAtAck /
+   reader 缺失/NaN”表述是当时的已实现记录，不改写为从未存在。本补记之后，handoff 的唯一
+   排序证据是显式本地 witness；“无 Main stamp、无新 capability/schema/provider 变更”的外部
+   保证不变，ADR 不改。
+ - 测试：`executionOverlayRegistry.test.ts` 按显式 witness 重写（旧动态 import seam 用例改为
+   missing-witness fail-closed；覆盖 read-before-ack、ack-during-read、cache-hit 配对原 receipt、
+   stale/failed/invalid、route 隔离、双 attempt 同 messageId、multi-terminal token），新增
+   `useContextClosureReadReceipt.test.tsx`（真实 hook issuer：绑定/happens-before/无效不绑/
+   cache-hit 原 receipt）与 `useContextWindowAnchor.readReceipt.test.ts`（anchor resolve 绑定），
+   `useContextPresentation.test.tsx` 增补 receipt 配对 handoff/retain。

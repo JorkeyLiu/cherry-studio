@@ -20,12 +20,14 @@ const logger = loggerService.withContext('ExecutionOverlay')
  * - Overlay composition only covers accepted closure members; structural
  *   changes still require a new authoritative Main closure. Initial
  *   unpublished bodies never affect other routes (route-key isolation).
- * - A terminal Main-transaction ack records a local terminal checkpoint
- *   (monotonic ticket + structural generation at ack). A later accepted
- *   closure retires the overlay only when the closure was published after
- *   that checkpoint (cached generation newer) AND carries the terminal
- *   member. Older in-flight reads can never retire it; terminal-persist
- *   failure never records a checkpoint.
+ * - A terminal Main-transaction ack records a local terminal token: the
+ *   per-execution sequence at ack time. The ack never reads the closure
+ *   cache. A later accepted closure retires the overlay only when the read
+ *   that produced it captured an explicit witness already containing that
+ *   exact execution identity + terminal sequence AND the closure carries the
+ *   terminal member. Older in-flight reads, reads issued before the ack, and
+ *   witness-less reads can never retire it; terminal-persist failure never
+ *   records a token.
  * - Bounded memory: live entries die with their execution; terminal bodies
  *   are retained only while their route has subscribers and at most
  *   `MAX_RETAINED_TERMINALS_PER_ROUTE` per route. Routes with zero
@@ -65,7 +67,7 @@ interface Entry {
   resendAttemptId?: string
   seq: number
   snapshotBlocks: Map<string, MessageBlock> | null
-  terminal: { status: string; genAtAck: number; ticket: number } | null
+  terminal: { status: string; terminalSeq: number } | null
   disposed: boolean
   snapshot: () => { blocks: MessageBlock[] }
 }
@@ -74,7 +76,6 @@ const MAX_RETAINED_TERMINALS_PER_ROUTE = 2
 
 let nextExecutionId = 1
 let nextOrder = 1
-let nextTerminalTicket = 1
 const entries = new Map<number, Entry>()
 const routeVersions = new Map<string, number>()
 const listeners = new Map<string, Set<() => void>>()
@@ -88,29 +89,33 @@ export function resetExecutionOverlayForTests(): void {
   composedCache.clear()
   nextExecutionId = 1
   nextOrder = 1
-  nextTerminalTicket = 1
 }
 
 export function routeKeyForExecutionOverlay(topicId: string, route: string | null): string {
   return typeof route === 'string' && route.length > 0 ? `${topicId}:${route}` : topicId
 }
 
-/** Reader resolved lazily to avoid a module cycle (contextClosure never imports this module). */
-let cachedGenerationReader: null | ((topicId: string, branchId?: string | null) => number | undefined) = null
-let loadGenerationReader: null | ((topicId: string, branchId?: string | null) => number) = null
-async function ensureGenerationReaders(): Promise<void> {
-  if (cachedGenerationReader && loadGenerationReader) return
-  try {
-    const mod = await import('@renderer/services/contextClosure')
-    // Assign only when still unset: an explicit seam (tests) installed while
-    // the import was in flight must not be overwritten by the late default.
-    if (!cachedGenerationReader) cachedGenerationReader = mod.getCachedClosureGeneration
-    if (!loadGenerationReader) loadGenerationReader = mod.getClosureLoadGeneration
-  } catch (error) {
-    logger.warn('ExecutionOverlay: generation readers unavailable; handoff stays retained.', error as Error)
-  }
+/** Route-scoped execution identity for a terminal persist checkpoint. */
+export interface TerminalWitnessEntry {
+  executionId: number
+  terminalSeq: number
+  messageId: string
+  resendAttemptId?: string
 }
-void ensureGenerationReaders()
+
+/**
+ * Local terminal-read witness: the set of execution identities whose terminal
+ * Main-transaction ack had observably completed before one closure read
+ * started. Renderer-local ordering evidence only — never a Main commit
+ * revision, never a cross-window guarantee. Exact per-execution identity +
+ * per-execution terminal sequence; no wallclock, no namespace-global Main
+ * version. Running executions and terminals acked after the capture are
+ * excluded; a read with no/unknown witness must fail closed (retain).
+ */
+export interface TerminalReadWitness {
+  routeKey: string
+  terminals: readonly TerminalWitnessEntry[]
+}
 
 function bumpRouteVersion(routeKey: string): void {
   routeVersions.set(routeKey, (routeVersions.get(routeKey) ?? 0) + 1)
@@ -227,13 +232,10 @@ export function registerExecutionOverlay(params: RegisterExecutionOverlayParams)
     },
     recordTerminalPersisted: (status: string) => {
       if (entry.disposed) return
-      let genAtAck = -1
-      try {
-        genAtAck = loadGenerationReader ? loadGenerationReader(params.topicId, params.route) : -1
-      } catch {
-        genAtAck = -1
-      }
-      entry.terminal = { status, genAtAck, ticket: nextTerminalTicket++ }
+      // Local terminal token only: the per-execution sequence at ack time.
+      // Never reads the closure cache — ordering evidence comes from the
+      // read-side witness captured before each closure read.
+      entry.terminal = { status, terminalSeq: entry.seq }
       if (hasSubscribers(routeKey)) {
         capture()
       } else {
@@ -253,8 +255,8 @@ export function registerExecutionOverlay(params: RegisterExecutionOverlayParams)
         entries.delete(id)
       }
       // A subscribed terminal keeps its body: a later accepted closure read
-      // may still prove (via Main ordering) that it already contains the
-      // terminal member and retire it. Unsubscribe drops it.
+      // carrying an explicit witness for this exact execution may still
+      // retire it. Unsubscribe drops it.
       pruneTerminals(routeKey)
       emitRoute(routeKey)
     }
@@ -302,45 +304,66 @@ export function getComposedOverlayBlocks(
 }
 
 /**
+* Terminal handoff: retire retained overlays once a newly accepted closure
+* proves (via Main ordering) it already contains the terminal member.
+/**
+  * Capture a terminal-read witness for one route: the exact execution
+  * identities (plus immutable terminal token per execution sequence) whose
+  * terminal ack had observably completed before this call. Must be called
+  * synchronously at read-issue time, with no await before the read dispatch,
+  * so terminals acked while the read is in flight are excluded. Bounded: one
+  * small entry per existing terminal on this route, no body copy.
+  */
+export function captureTerminalReadWitness(routeKey: string): TerminalReadWitness {
+  const terminals: TerminalWitnessEntry[] = []
+  for (const entry of entries.values()) {
+    if (entry.routeKey !== routeKey || !entry.terminal) continue
+    terminals.push({
+      executionId: entry.id,
+      terminalSeq: entry.terminal.terminalSeq,
+      messageId: entry.messageId,
+      resendAttemptId: entry.resendAttemptId
+    })
+  }
+  return { routeKey, terminals }
+}
+
+/**
  * Terminal handoff: retire retained overlays once a newly accepted closure
- * proves (via Main ordering) it already contains the terminal member.
- * A closure retires an entry only when the closure carries the terminal
- * message id AND its cached publication generation is newer than the
- * generation captured at the terminal ack. Reads that started before the ack
- * (or failed revalidations that never produce a new accepted closure) can
- * never retire the overlay, and an entry whose checkpoint is unknown (readers
- * not ready at the ack, failed/invalid ack-time read) never retires via
- * handoff at all. Returns true when at least one entry retired.
+ * proves (via the read-side witness) it was read after the terminal ack.
+ * A closure retires an entry only when ALL hold on the fixed route: the
+ * witness is for this exact route, it contains this exact execution identity
+ * with the matching terminal token, and the closure carries the terminal
+ * message id. Reads issued before the ack, terminals acked mid-read, failed /
+ * invalid reads (never bound), witness-less reads, and reads for another
+ * route always retain. Returns true when at least one entry retired.
+ * Renderer-local ordering only — never a Main commit revision, never a
+ * cross-window guarantee. Pure check: notification still flows only through
+ * the existing route subscription (call from an effect, never during render).
  */
 export function tryHandoffAfterClosure(
   topicId: string,
   route: string | null,
-  closure: { messages: ReadonlyArray<{ id?: unknown }> }
+  closure: { messages: ReadonlyArray<{ id?: unknown }> },
+  witness?: TerminalReadWitness | null
 ): boolean {
   const routeKey = routeKeyForExecutionOverlay(topicId, route)
-  let cachedGen: number | undefined
-  try {
-    cachedGen = cachedGenerationReader ? cachedGenerationReader(topicId, route) : undefined
-  } catch {
-    cachedGen = undefined
+  if (!witness || witness.routeKey !== routeKey) return false
+  const byExecution = new Map<number, TerminalWitnessEntry>()
+  for (const t of witness.terminals) {
+    if (!byExecution.has(t.executionId)) {
+      byExecution.set(t.executionId, t)
+    }
   }
   let retired = false
   const memberIds = new Set((closure.messages ?? []).map((m) => m?.id))
   for (const entry of Array.from(entries.values())) {
     if (entry.routeKey !== routeKey || !entry.terminal) continue
     if (!memberIds.has(entry.messageId)) continue
-    // Unknown checkpoint (generation readers not ready at the ack, or the
-    // ack-time read failed/returned an invalid generation): there is no
-    // Main-ordering evidence, so always retain — never hand off early.
-    // Cleanup still follows the existing unsubscribe/route-leave, prune, and
-    // bound rules. A reader becoming ready later does not backfill this
-    // entry; only a later ack carrying a valid checkpoint can hand off.
-    const ackGen = entry.terminal.genAtAck
-    if (!(ackGen >= 0)) continue
-    // A closure proves containment only when its cached publication
-    // generation is newer than the ack generation. An unreadable or invalid
-    // cached generation is no proof — retain.
-    if (!(typeof cachedGen === 'number' && cachedGen >= 0 && cachedGen > ackGen)) continue
+    const w = byExecution.get(entry.id)
+    if (!w) continue
+    if (w.terminalSeq !== entry.terminal.terminalSeq) continue
+    if (w.messageId !== entry.messageId || w.resendAttemptId !== entry.resendAttemptId) continue
     entries.delete(entry.id)
     retired = true
   }
@@ -368,13 +391,4 @@ export function getExecutionOverlayDiagnostics(): {
     subscribedRouteCount: listeners.size,
     maxRetainedTerminalsPerRoute: MAX_RETAINED_TERMINALS_PER_ROUTE
   }
-}
-
-/** Test seam: replace the generation readers without importing contextClosure. */
-export function setExecutionOverlayGenerationReadersForTests(readers: {
-  getCachedGeneration?: (topicId: string, branchId?: string | null) => number | undefined
-  getLoadGeneration?: (topicId: string, branchId?: string | null) => number
-}): void {
-  cachedGenerationReader = readers.getCachedGeneration ?? null
-  loadGenerationReader = readers.getLoadGeneration ?? null
 }

@@ -1,20 +1,22 @@
 /**
  * Execution overlay registry (route B): per-execution monotonic sequence,
- * route isolation, no-subscriber no-capture, Main-ordered terminal handoff,
+ * route isolation, no-subscriber no-capture, witness-gated terminal handoff,
  * supersession without wallclock, bounded retention, and cleanup.
  *
- * Pure registry unit test: generation readers are stubbed through the test
- * seam so no closure cache or store is involved.
+ * Pure registry unit test: handoff is driven only by explicit terminal-read
+ * witnesses captured via `captureTerminalReadWitness` — no closure cache or
+ * store is involved. Unknown/no-witness reads always retain (fail-closed).
  */
 import {
+  captureTerminalReadWitness,
   getComposedOverlayBlocks,
   getExecutionOverlayDiagnostics,
   getExecutionOverlayVersion,
   registerExecutionOverlay,
   resetExecutionOverlayForTests,
   routeKeyForExecutionOverlay,
-  setExecutionOverlayGenerationReadersForTests,
   subscribeExecutionOverlay,
+  type TerminalReadWitness,
   tryHandoffAfterClosure
 } from '@renderer/services/executionOverlayRegistry'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,18 +28,13 @@ function block(id: string, content: string, messageId = 'a1'): any {
   return { id, messageId, type: 'main_text', content, status: 'streaming' }
 }
 
-let loadGen = 5
-let cachedGen: number | undefined = 5
+function witnessFor(route: string | null): TerminalReadWitness {
+  return captureTerminalReadWitness(routeKey(route))
+}
 
 describe('executionOverlayRegistry', () => {
   beforeEach(() => {
     resetExecutionOverlayForTests()
-    loadGen = 5
-    cachedGen = 5
-    setExecutionOverlayGenerationReadersForTests({
-      getCachedGeneration: () => cachedGen,
-      getLoadGeneration: () => loadGen
-    })
   })
 
   it('advances a per-execution monotonic sequence and notifies subscribers on the existing cadence', () => {
@@ -119,7 +116,7 @@ describe('executionOverlayRegistry', () => {
     }
   })
 
-  it('retires a terminal overlay only when a newer accepted closure carries the terminal member', () => {
+  it('retires a terminal overlay only when the read witness proves the read started after the ack', () => {
     const key = routeKey(null)
     const unsubscribe = subscribeExecutionOverlay(key, () => {})
     try {
@@ -130,23 +127,173 @@ describe('executionOverlayRegistry', () => {
         snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
       })
       handle.notifyDelta()
-      loadGen = 7
+      // Read issued before the terminal ack: the witness is empty, so even a
+      // closure carrying the terminal member must retain.
+      const readBeforeAck = witnessFor(null)
+      expect(readBeforeAck.terminals).toEqual([])
       handle.recordTerminalPersisted('success')
       handle.dispose()
-
-      // Same-generation read (started before/at the ack): retained.
-      cachedGen = 7
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, readBeforeAck)).toBe(false)
       expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
         'terminal-body'
       )
 
-      // Closure without the terminal member: retained.
-      cachedGen = 8
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'other' }] })).toBe(false)
+      // Closure without the terminal member: retained even with a valid witness.
+      const validRead = witnessFor(null)
+      expect(validRead.terminals).toHaveLength(1)
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'other' }] }, validRead)).toBe(false)
 
-      // Newer accepted closure carrying the terminal member: retired.
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(true)
+      // New read (issued after the ack) carrying the terminal member: retired.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, validRead)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('excludes terminals acked while the read is in flight', () => {
+    const key = routeKey(null)
+    const unsubscribe = subscribeExecutionOverlay(key, () => {})
+    try {
+      const first = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        snapshot: () => ({ blocks: [block('a1-block', 'first-terminal')] })
+      })
+      first.notifyDelta()
+      first.recordTerminalPersisted('success')
+      first.dispose()
+      // Read issued now only knows the first terminal.
+      const midRead = witnessFor(null)
+      expect(midRead.terminals).toHaveLength(1)
+
+      const second = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a2',
+        snapshot: () => ({ blocks: [block('a2-block', 'second-terminal')] })
+      })
+      second.notifyDelta()
+      second.recordTerminalPersisted('error')
+      second.dispose()
+
+      // The mid-flight ack is not in this read's witness: a closure carrying
+      // both members retires only the first entry.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }, { id: 'a2' }] }, midRead)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
+      expect((getComposedOverlayBlocks(key, ['a2-block']).get('a2-block') as { content?: unknown })?.content).toBe(
+        'second-terminal'
+      )
+
+      // A later read covering both retires the remainder.
+      const lateRead = witnessFor(null)
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }, { id: 'a2' }] }, lateRead)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a2-block']).size).toBe(0)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('retires one terminal per matching token when several terminals share a route', () => {
+    const key = routeKey(null)
+    const unsubscribe = subscribeExecutionOverlay(key, () => {})
+    try {
+      for (const messageId of ['a1', 'a2']) {
+        const handle = registerExecutionOverlay({
+          topicId: TOPIC,
+          route: null,
+          messageId,
+          snapshot: () => ({ blocks: [block(`${messageId}-block`, `terminal-${messageId}`, messageId)] })
+        })
+        handle.notifyDelta()
+        handle.recordTerminalPersisted('success')
+        handle.dispose()
+      }
+      const read = witnessFor(null)
+      expect(read.terminals).toHaveLength(2)
+      // Closure carrying only one member retires only that entry.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, read)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
+      expect((getComposedOverlayBlocks(key, ['a2-block']).get('a2-block') as { content?: unknown })?.content).toBe(
+        'terminal-a2'
+      )
+      // The same witness still applies to the remainder (tokens are per entry).
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a2' }] }, read)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a2-block']).size).toBe(0)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('never lets an old receipt retire a newer attempt with the same message id', () => {
+    const key = routeKey(null)
+    const unsubscribe = subscribeExecutionOverlay(key, () => {})
+    try {
+      const first = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        resendAttemptId: 'attempt-1',
+        snapshot: () => ({ blocks: [block('a1-block', 'first-body')] })
+      })
+      first.notifyDelta()
+      first.recordTerminalPersisted('success')
+      first.dispose()
+      const oldReceipt = witnessFor(null)
+
+      const second = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        resendAttemptId: 'attempt-2',
+        snapshot: () => ({ blocks: [block('a1-block', 'second-body')] })
+      })
+      second.notifyDelta()
+      second.recordTerminalPersisted('success')
+      second.dispose()
+
+      // The old receipt names the first execution only: the second attempt stays.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, oldReceipt)).toBe(true)
+      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
+        'second-body'
+      )
+      // A fresh read retires the newer attempt.
+      const newReceipt = witnessFor(null)
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, newReceipt)).toBe(true)
+      expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('retains on missing, foreign-route, and stale witnesses (fail-closed)', () => {
+    const key = routeKey(null)
+    const unsubscribe = subscribeExecutionOverlay(key, () => {})
+    try {
+      const handle = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
+      })
+      handle.notifyDelta()
+      handle.recordTerminalPersisted('success')
+      handle.dispose()
+
+      // No witness at all (cold read, never bound): retain.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, null)).toBe(false)
+      // Witness for another route: retain.
+      const foreign = witnessFor('branch-b')
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, foreign)).toBe(false)
+      expect(tryHandoffAfterClosure(TOPIC, 'branch-b', { messages: [{ id: 'a1' }] }, foreign)).toBe(false)
+      // The terminal is still retained throughout.
+      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
+        'terminal-body'
+      )
+      // The exact-route witness still retires it.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, witnessFor(null))).toBe(true)
       expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
     } finally {
       unsubscribe()
@@ -223,95 +370,28 @@ describe('executionOverlayRegistry', () => {
     expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
   })
 
-  it('retains the overlay when the terminal checkpoint is unknown (readers missing at the ack)', () => {
+  it('keeps an unsubscribed terminal checkpoint minimal and still retires it on a witnessed read', () => {
     const key = routeKey(null)
-    // Explicitly simulate generation readers never becoming ready — this test
-    // must NOT inherit the valid stub readers from beforeEach, otherwise the
-    // gap this regression covers would be masked by the mock.
-    setExecutionOverlayGenerationReadersForTests({})
-    const unsubscribe = subscribeExecutionOverlay(key, () => {})
-    try {
-      const handle = registerExecutionOverlay({
-        topicId: TOPIC,
-        route: null,
-        messageId: 'a1',
-        snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
-      })
-      handle.notifyDelta()
-      handle.recordTerminalPersisted('success') // checkpoint unknown: no reader
-      handle.dispose()
-      // A later accepted closure carrying the terminal member is NOT ordering
-      // evidence on its own: the checkpoint is unknown, so no early handoff.
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
-      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
-        'terminal-body'
-      )
-      // A reader becoming ready later does not backfill the unknown
-      // checkpoint: still no handoff. Only a later ack carrying a valid
-      // checkpoint can hand off (covered by the newer-generation test above).
-      setExecutionOverlayGenerationReadersForTests({
-        getCachedGeneration: () => 99,
-        getLoadGeneration: () => 99
-      })
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
-      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
-        'terminal-body'
-      )
-    } finally {
-      unsubscribe()
-    }
-    // Cleanup still follows the existing rules: route leave releases the body.
+    const handle = registerExecutionOverlay({
+      topicId: TOPIC,
+      route: null,
+      messageId: 'a1',
+      snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
+    })
+    // No consumer: no body is captured, but the terminal token is recorded.
+    handle.notifyDelta()
+    handle.recordTerminalPersisted('success')
     expect(getComposedOverlayBlocks(key, ['a1-block']).size).toBe(0)
-  })
 
-  it('treats invalid generations as unknown: no handoff without ordering evidence', () => {
-    const key = routeKey(null)
-    // Ack-time read returns an invalid generation: checkpoint unknown.
-    setExecutionOverlayGenerationReadersForTests({
-      getCachedGeneration: () => 8,
-      getLoadGeneration: () => Number.NaN
-    })
     const unsubscribe = subscribeExecutionOverlay(key, () => {})
     try {
-      const handle = registerExecutionOverlay({
-        topicId: TOPIC,
-        route: null,
-        messageId: 'a1',
-        snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
-      })
-      handle.notifyDelta()
-      handle.recordTerminalPersisted('success')
-      handle.dispose()
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
-      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
-        'terminal-body'
-      )
+      // No body to compose while unsubscribed; a witnessed read still retires
+      // the checkpoint itself.
+      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] }, witnessFor(null))).toBe(true)
+      expect(getExecutionOverlayDiagnostics().retainedTerminalCount).toBe(0)
     } finally {
+      handle.dispose()
       unsubscribe()
-    }
-    // An unreadable cached generation is likewise no proof: a valid-checkpoint
-    // entry is still retained when the closure read cannot be ordered.
-    setExecutionOverlayGenerationReadersForTests({
-      getCachedGeneration: () => undefined,
-      getLoadGeneration: () => 7
-    })
-    const unsubscribe2 = subscribeExecutionOverlay(key, () => {})
-    try {
-      const handle = registerExecutionOverlay({
-        topicId: TOPIC,
-        route: null,
-        messageId: 'a1',
-        snapshot: () => ({ blocks: [block('a1-block', 'terminal-body')] })
-      })
-      handle.notifyDelta()
-      handle.recordTerminalPersisted('success') // checkpoint 7, valid
-      handle.dispose()
-      expect(tryHandoffAfterClosure(TOPIC, null, { messages: [{ id: 'a1' }] })).toBe(false)
-      expect((getComposedOverlayBlocks(key, ['a1-block']).get('a1-block') as { content?: unknown })?.content).toBe(
-        'terminal-body'
-      )
-    } finally {
-      unsubscribe2()
     }
   })
 
