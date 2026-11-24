@@ -302,8 +302,10 @@ export function createSegmentGroupLayoutManager(): SegmentGroupLayoutManager {
       }
       // A mounted group whose route-stable slot is outside the window has no
       // slot run at all: the anchor is the topmost carrying run by rect (the
-      // composition hosts the rail-only continuation there, in newest→oldest
-      // render order, i.e. at the group's mounted visual top). Geometry is still
+      // composition hosts the rail-only continuation there, in oldest→newest
+      // flow order — the first carrying run — i.e. at the group's mounted
+      // visual top, the same run this geometry is relative to). Geometry is
+      // still
       // published for that carrier — a rail with no slot occupancy — so the
       // visible group range keeps one continuous line without a temporary `32px`
       // row.

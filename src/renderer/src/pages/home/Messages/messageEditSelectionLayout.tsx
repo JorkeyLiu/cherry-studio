@@ -809,10 +809,14 @@ export function renderEditFlowNodes({
           break
         case 'rail-only': {
           // Slot outside the mounted window: no row at all, never a temporary
-          // one. The last carrying run in render order (the group's mounted
-          // visual top — the same run the layout manager anchors headless
-          // geometry to) carries the rail-only continuation.
-          const carrier = carrying[carrying.length - 1]
+          // one. The FIRST carrying run in flow order (the group's mounted
+          // visual top — production DOM order is oldest→newest, so this is the
+          // same run the layout manager anchors headless geometry to) carries
+          // the rail-only continuation. Geometry is published relative to that
+          // anchor, so painting it anywhere else would offset the rail past the
+          // group's in-flow bottom and grow scrollHeight (see the rail-only
+          // regression test: top + height must stay within the mounted extent).
+          const carrier = carrying[0]
           if (carrier) continuationByRun.set(carrier, { segmentId, color })
           break
         }

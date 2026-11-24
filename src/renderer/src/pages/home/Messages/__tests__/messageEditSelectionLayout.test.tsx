@@ -41,7 +41,11 @@ import {
 import {
   GroupSlotContinuation,
   SEGMENT_GROUP_HEADER_HEIGHT_PX,
-  SegmentGroupPresentationProvider
+  SEGMENT_GROUP_RAIL_TAIL_TRIM_PX,
+  SEGMENT_GROUP_RAIL_TOP_PX,
+  type SegmentGroupGeometry,
+  SegmentGroupPresentationProvider,
+  useSegmentGroupGeometry
 } from '../SegmentGroupPresentation'
 
 const { capturedFoldedSectionProps } = vi.hoisted(() => ({
@@ -1533,8 +1537,9 @@ describe('route-stable group header placement', () => {
     )
 
   // Rects keyed by the body a run host carries: the manager measures from
-  // these, so the continuation overlay can paint in jsdom. Newest→oldest
-  // render order means the LAST run is the mounted visual top.
+  // these, so the continuation overlay can paint in jsdom. Production flow
+  // order is oldest→newest (messageFlowNodes reverses once), so the FIRST run
+  // is the mounted visual top — the headless geometry anchor.
   const stubHostRects = (rectByBodyTestId: Record<string, { top: number; bottom: number }>) =>
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const body = this.querySelector('[data-testid^="body-"]')
@@ -1584,18 +1589,33 @@ describe('route-stable group header placement', () => {
     view2.unmount()
   })
 
-  it('renders no temporary header when the stable start leaves the window (continuation only)', async () => {
+  it('anchors the rail-only continuation to the same run geometry uses (production oldest→newest order)', async () => {
     stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
     const seg = routeSeg('seg-route')
     const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
     const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    let observed: SegmentGroupGeometry | null = null
+    const GeometryProbe = () => {
+      observed = useSegmentGroupGeometry('seg-route')
+      return null
+    }
     // m-head (the stable start) is NOT mounted: no 32px header placeholder may
-    // be elected from m-a/m-b. The visual-top run (m-a, last in render order)
-    // carries the rail-only continuation with zero in-flow occupancy.
-    const { container } = renderRouteFlow(
-      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
-      routeMap,
-      chromeProbe
+    // be elected from m-a/m-b. Production flow order is oldest→newest, so the
+    // visual-top run (m-a, FIRST in flow order — the same run the layout
+    // manager anchors headless geometry to) carries the rail-only continuation
+    // with zero in-flow occupancy.
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes: [routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })],
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+          <GeometryProbe />
+        </>
+      </SegmentGroupPresentationProvider>
     )
     expect(chromeProbe).not.toHaveBeenCalled()
     const continuation = await screen.findByTestId('topic-segment-rail-continuation')
@@ -1606,6 +1626,16 @@ describe('route-stable group header placement', () => {
     expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(1)
     // A window-first member never takes the slot: no `32px` row is elected.
     expect(container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+    // Measurable anchor/carrier agreement: geometry is published relative to
+    // the visual-top run (pill offset from its top) and the rail bottom stays
+    // within the group's mounted extent — so the absolute overlay can never
+    // extend past the in-flow bottom and grow scrollHeight. (Painting this
+    // same geometry in the visual-bottom run would overshoot by the inter-run
+    // gap: the keep-last true-branch scrollHeight regression, 1395 vs 1042.)
+    expect(observed).not.toBeNull()
+    expect(observed!.top).toBe(SEGMENT_GROUP_RAIL_TOP_PX)
+    expect(observed!.height).toBe(260 - (100 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX)
+    expect(observed!.top + observed!.height).toBeLessThanOrEqual(260 - 100)
   })
 
   it('hosts the route-stable slot, replacing the header with an equal-height continuation row', () => {
