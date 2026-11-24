@@ -160,6 +160,21 @@ async function createHarness(
 ) {
   const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
   const attempt = ATTEMPT
+  const loadedMsg = store.getState().messages.entities[ASSISTANT_MSG_ID]
+  const executionState = new AssistantExecutionState(
+    loadedMsg ?? {
+      id: ASSISTANT_MSG_ID,
+      assistantId: 'assistant-1',
+      role: 'assistant',
+      topicId: TOPIC_ID,
+      blocks: [],
+      status: AssistantMessageStatus.PENDING,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      askId: 'user-1'
+    },
+    []
+  )
   const manager = new BlockManager({
     dispatch: store.dispatch as any,
     getState: store.getState as any,
@@ -168,9 +183,11 @@ async function createHarness(
     assistantMsgId: ASSISTANT_MSG_ID,
     topicId: TOPIC_ID,
     resendAttemptId: attempt,
+    executionState,
     throttledBlockUpdate: vi.fn(),
     flushThrottledBlockUpdate: vi.fn(),
     cancelThrottledBlockUpdate: vi.fn(),
+    drainMirrors: vi.fn(),
     ...managerOverrides
   })
   const callbacks = createCallbacks({
@@ -581,9 +598,11 @@ describe('Naming lifecycle: post-persist only', () => {
       assistantMsgId: ASSISTANT_MSG_ID,
       topicId: TOPIC_ID,
       resendAttemptId: ATTEMPT,
+      executionState: new AssistantExecutionState(store.getState().messages.entities[ASSISTANT_MSG_ID], []),
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     // Pinned branch route from the request; the harness store has no
     // topicBranch slice so latest-active fallback would be null.
@@ -645,7 +664,8 @@ describe('Detached execution: request-local state completes without Redux inject
       executionState,
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     const callbacks = createCallbacks({
       blockManager: manager,
@@ -656,8 +676,7 @@ describe('Detached execution: request-local state completes without Redux inject
       saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
       saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
         saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT),
-      assistant: assistantStub,
-      executionState
+      assistant: assistantStub
     })
     return { manager, callbacks, executionState }
   }
@@ -726,7 +745,8 @@ describe('Detached execution: request-local state completes without Redux inject
       executionState,
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     const callbacks = createCallbacks({
       blockManager: manager,
@@ -736,8 +756,7 @@ describe('Detached execution: request-local state completes without Redux inject
       assistantMsgId: ASSISTANT_MSG_ID,
       saveUpdatesToDB: saveUpdatesForExec as any,
       saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} }),
-      assistant: assistantStub,
-      executionState
+      assistant: assistantStub
     })
 
     await callbacks.onLLMResponseCreated()
@@ -783,7 +802,8 @@ describe('Detached execution: request-local state completes without Redux inject
       executionState,
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     const callbacks = createCallbacks({
       blockManager: manager,
@@ -794,8 +814,7 @@ describe('Detached execution: request-local state completes without Redux inject
       saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
       saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
         saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT),
-      assistant: assistantStub,
-      executionState
+      assistant: assistantStub
     })
     manager.activeBlockInfo = { id: 'b-evict', type: MessageBlockType.MAIN_TEXT }
     // Evict the topic projection mid-generation (disposable removal only).
@@ -872,7 +891,8 @@ describe('BlockManager local-first: transition + patch order/dedup', () => {
       executionState,
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
 
     await manager.handleBlockTransition(mkBlock('b1', 'one'), MessageBlockType.MAIN_TEXT)
@@ -905,7 +925,8 @@ describe('BlockManager local-first: transition + patch order/dedup', () => {
       executionState,
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     await manager.handleBlockTransition(mkBlock('b-loaded', 'hi'), MessageBlockType.MAIN_TEXT)
     expect(executionState.getBlockIds()).toEqual(['b-loaded'])

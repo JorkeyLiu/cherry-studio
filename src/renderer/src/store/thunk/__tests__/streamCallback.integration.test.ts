@@ -1,6 +1,7 @@
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { AssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { createStreamProcessor } from '@renderer/services/StreamProcessingService'
 import type { AppDispatch } from '@renderer/store'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
@@ -58,8 +59,14 @@ const createMockCallbacks = (
       saveUpdatesToDB: vi.fn(),
       assistantMsgId: mockAssistantMsgId,
       topicId: mockTopicId,
+      executionState: new AssistantExecutionState(
+        { id: mockAssistantMsgId, topicId: mockTopicId, role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     }),
     dispatch,
     getState,

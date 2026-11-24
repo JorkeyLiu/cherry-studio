@@ -14,6 +14,7 @@
 
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { AssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -308,9 +309,14 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
       topicId: 'topic-1',
       resendAttemptId: execA.attempt,
       barrier: execA.barrier,
+      executionState: new AssistantExecutionState(
+        { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     storeState.messageBlocks.entities['block-A1'] = { id: 'block-A1', messageId: 'assistant-1' }
     managerA.smartBlockUpdate('block-A1', { content: 'A-partial' }, MessageBlockType.MAIN_TEXT, true)
@@ -329,9 +335,14 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
       topicId: 'topic-1',
       resendAttemptId: execB.attempt,
       barrier: execB.barrier,
+      executionState: new AssistantExecutionState(
+        { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     storeState.messageBlocks.entities['block-B1'] = { id: 'block-B1', messageId: 'assistant-1' }
     managerB.smartBlockUpdate('block-B1', { content: 'B-final' }, MessageBlockType.MAIN_TEXT, true)
@@ -454,9 +465,14 @@ describe('F2: success-final awaits quiescence', () => {
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
       barrier,
+      executionState: new AssistantExecutionState(
+        { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: throttledFn,
       flushThrottledBlockUpdate: flushFn,
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     // Throttled-path write marks the block touched; immediate path suspends a write.
     manager.smartBlockUpdate('b-t', { content: 'streaming' }, MessageBlockType.MAIN_TEXT)
@@ -510,9 +526,11 @@ describe('F2: success-final awaits quiescence', () => {
       topicId: 'topic-1',
       resendAttemptId: attempt,
       barrier,
+      executionState: new AssistantExecutionState(assistantMsg, []),
       throttledBlockUpdate: vi.fn(),
       flushThrottledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     const callbacks = createCallbacks({
       blockManager: manager,
@@ -568,7 +586,7 @@ describe('F2: success-final awaits quiescence', () => {
   })
 })
 
-describe('Legacy ordinary path: no attempt, no barrier, no flush wiring', () => {
+describe('Ordinary path without attempt/barrier: required flush + drain wiring', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = {
@@ -578,27 +596,35 @@ describe('Legacy ordinary path: no attempt, no barrier, no flush wiring', () => 
     }
   })
 
-  it('tolerates save mocks returning nothing and keeps the old cancel semantics', () => {
+  it('tolerates save mocks returning nothing and flushes the pending trailing write (never cancels)', () => {
     const dispatch = vi.fn()
+    const flushFn = vi.fn()
     const cancelFn = vi.fn()
     // Loaded parity: the message stays loaded so the Redux mirror still lands.
     storeState.messages.entities['assistant-1'] = createMessage({ id: 'assistant-1' })
     const manager = new BlockManager({
       dispatch,
       getState: () => storeState as never,
-      // Legacy/test wiring: bare vi.fn() returns undefined, like the
-      // pre-F2 `void save(...)` fire-and-forget call sites tolerated.
+      // Test wiring: bare vi.fn() returns undefined, like the pre-F2
+      // `void save(...)` fire-and-forget call sites tolerated.
       saveUpdatedBlockToDB: vi.fn(),
       saveUpdatesToDB: vi.fn(),
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
+      executionState: new AssistantExecutionState(
+        { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: cancelFn
+      flushThrottledBlockUpdate: flushFn,
+      cancelThrottledBlockUpdate: cancelFn,
+      drainMirrors: vi.fn()
     })
     expect(() => manager.smartBlockUpdate('b-legacy', { content: 'x' }, MessageBlockType.MAIN_TEXT, true)).not.toThrow()
-    // Redux update still lands and the pending throttle is cancelled (never flushed).
+    // Redux update still lands and the pending throttle is flushed (never cancelled).
     expect(dispatch).toHaveBeenCalledTimes(1)
-    expect(cancelFn).toHaveBeenCalledWith('b-legacy')
+    expect(flushFn).toHaveBeenCalledWith('b-legacy')
+    expect(cancelFn).not.toHaveBeenCalled()
   })
 
   it('handleBlockTransition with a barrier but a non-promise save resolves without tracking', async () => {
@@ -613,8 +639,14 @@ describe('Legacy ordinary path: no attempt, no barrier, no flush wiring', () => 
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
       barrier,
+      executionState: new AssistantExecutionState(
+        { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
+        []
+      ),
       throttledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     await expect(
       manager.handleBlockTransition({ id: 'nb-legacy', messageId: 'assistant-1' } as never, MessageBlockType.MAIN_TEXT)

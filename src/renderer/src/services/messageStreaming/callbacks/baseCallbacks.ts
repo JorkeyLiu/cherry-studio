@@ -120,7 +120,6 @@ interface BaseCallbacksDependencies {
    * the latest active route at completion time.
    */
   requestRoute?: string | null
-  executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
    * Single-transaction final checkpoint for onComplete (Fix B). Fail-loud:
@@ -155,7 +154,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
   } = deps
   // Captured request route (never re-derived from latest active when pinned).
   const pinnedRequestRoute: string | null | undefined = deps.requestRoute
-  const executionState: AssistantExecutionState = deps.executionState ?? blockManager.executionState
+  const executionState: AssistantExecutionState = blockManager.executionState
 
   const startTime = Date.now()
   const notificationService = NotificationService.getInstance()

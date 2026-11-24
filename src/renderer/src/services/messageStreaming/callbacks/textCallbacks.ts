@@ -15,14 +15,14 @@ interface TextCallbacksDependencies {
   blockManager: BlockManager
   getState: any
   assistantMsgId: string
-  executionState?: AssistantExecutionState
+  executionState: AssistantExecutionState
   getCitationBlockId: () => string | null
   getCitationBlockIdFromTool: () => string | null
 }
 
 export const createTextCallbacks = (deps: TextCallbacksDependencies) => {
   const { blockManager, getState, assistantMsgId, getCitationBlockId, getCitationBlockIdFromTool } = deps
-  const executionState = deps.executionState ?? blockManager.executionState
+  const executionState = deps.executionState
 
   // 内部维护的状态
   let mainTextBlockId: string | null = null

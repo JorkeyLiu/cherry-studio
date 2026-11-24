@@ -861,8 +861,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       requestRoute: execRoute,
       saveUpdatesToDB: saveUpdatesToDBForExec,
       saveFinalUpdatesAtomically: saveFinalUpdatesAtomicallyForExec,
-      assistant,
-      executionState
+      assistant
     })
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
@@ -4946,7 +4945,6 @@ export const setupChannelStream = (
     getState,
     topicId,
     assistantMsgId: assistantMessage.id,
-    executionState: channelExecutionState,
     saveUpdatesToDB: saveUpdatesToDBForChannel,
     // Ordinary IM channel execution: no resend attempt (carrier omitted), but
     // the same single-transaction final checkpoint as ordinary chat, pinned to

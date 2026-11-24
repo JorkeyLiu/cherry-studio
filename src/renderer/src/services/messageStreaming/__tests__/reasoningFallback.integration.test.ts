@@ -1,6 +1,7 @@
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { AssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { createStreamProcessor } from '@renderer/services/StreamProcessingService'
 import type { AppDispatch } from '@renderer/store'
 import type { RootState } from '@renderer/store'
@@ -81,8 +82,11 @@ describe('reasoning fallback integration: normal completion must not leave STREA
       saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
       assistantMsgId: mockAssistantMsgId,
       topicId: mockTopicId,
+      executionState: new AssistantExecutionState(getState().messages.entities[mockAssistantMsgId] as never, []),
       throttledBlockUpdate: vi.fn(),
-      cancelThrottledBlockUpdate: vi.fn()
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
     })
     const callbacks = createCallbacks({
       blockManager,

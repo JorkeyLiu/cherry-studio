@@ -19,12 +19,12 @@ interface ToolCallbacksDependencies {
   assistantMsgId: string
   dispatch: AppDispatch
   getState?: any
-  executionState?: AssistantExecutionState
+  executionState: AssistantExecutionState
 }
 
 export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
   const { blockManager, assistantMsgId } = deps
-  const executionState = deps.executionState ?? blockManager.executionState
+  const executionState = deps.executionState
   const getState = deps.getState as undefined | (() => { messageBlocks?: { entities?: Record<string, unknown> } })
 
   // 内部维护的状态

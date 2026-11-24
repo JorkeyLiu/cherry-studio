@@ -14,12 +14,12 @@ interface CitationCallbacksDependencies {
   blockManager: BlockManager
   assistantMsgId: string
   getState: any
-  executionState?: AssistantExecutionState
+  executionState: AssistantExecutionState
 }
 
 export const createCitationCallbacks = (deps: CitationCallbacksDependencies) => {
   const { blockManager, assistantMsgId, getState } = deps
-  const executionState = deps.executionState ?? blockManager.executionState
+  const executionState = deps.executionState
 
   const findLocalMainTextBlock = () => {
     for (const id of executionState.getBlockIds()) {

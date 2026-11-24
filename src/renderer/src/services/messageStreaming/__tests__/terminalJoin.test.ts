@@ -251,8 +251,7 @@ async function createHarness(opts: { deferTerminalPersist?: boolean } = {}): Pro
     requestRoute: null,
     saveUpdatesToDB: saveUpdatesFinal,
     saveFinalUpdatesAtomically: saveFinal,
-    assistant: assistantStub,
-    executionState
+    assistant: assistantStub
   })
   const dispatchChunk = createStreamProcessor(callbacks as any)
   return {

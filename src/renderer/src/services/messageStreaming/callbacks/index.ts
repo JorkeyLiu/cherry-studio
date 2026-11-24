@@ -1,7 +1,6 @@
 import type { Assistant } from '@renderer/types'
 
 import type { BlockManager } from '../BlockManager'
-import type { AssistantExecutionState } from '../executionState'
 import { createBaseCallbacks } from './baseCallbacks'
 import { createCitationCallbacks } from './citationCallbacks'
 import { createImageCallbacks } from './imageCallbacks'
@@ -22,7 +21,6 @@ interface CallbacksDependencies {
    * completion never re-derives the route from latest active.
    */
   requestRoute?: string | null
-  executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
    * Single-transaction final checkpoint for onComplete (Fix B): persists the
@@ -53,11 +51,8 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     assistant,
     requestRoute
   } = deps
-  // Request-local execution state threads through every generation. When the
-  // caller omits it (legacy/test harnesses), fall back to the BlockManager's
-  // own state so no path returns to Redux-only.
-  const executionState = deps.executionState ?? blockManager.executionState
-
+  // Single execution-state source: the BlockManager's own runtime instance.
+  const executionState = blockManager.executionState
   // 首先创建 thinkingCallbacks ，以便传递 getCurrentThinkingInfo 给 baseCallbacks
   const thinkingCallbacks = createThinkingCallbacks({
     blockManager,
@@ -75,7 +70,6 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     saveUpdatesToDB,
     saveFinalUpdatesAtomically,
     assistant,
-    executionState,
     getCurrentThinkingInfo: thinkingCallbacks.getCurrentThinkingInfo
   })
 

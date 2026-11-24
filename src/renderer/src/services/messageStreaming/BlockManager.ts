@@ -3,10 +3,10 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { updateOneBlock, upsertOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
-import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import type { MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
-import { AssistantExecutionState, createAssistantExecutionState } from './executionState'
+import type { AssistantExecutionState } from './executionState'
 import type { WriteBarrier } from './writeBarrier'
 
 const logger = loggerService.withContext('BlockManager')
@@ -58,14 +58,10 @@ interface BlockManagerDependencies {
   /** Execution write barrier for F2 finalization quiescence (optional). */
   barrier?: WriteBarrier
   /**
-   * Request-local execution state. Every generation owns one instance;
-   * Redux is only an optional mirror. When omitted, one is created from
-   * `initialMessage`/`initialBlocks` or the current Redux lookup so no
-   * construction point falls back to Redux-only.
+   * Request-local execution state. Every generation owns one instance and the
+   * caller passes it in; Redux is only an optional mirror, never a fallback.
    */
-  executionState?: AssistantExecutionState
-  initialMessage?: Message
-  initialBlocks?: MessageBlock[]
+  executionState: AssistantExecutionState
   // 节流器管理从外部传入
   throttledBlockUpdate: (
     id: string,
@@ -76,16 +72,16 @@ interface BlockManagerDependencies {
   ) => void
   /**
    * Flush (never drop) a block's pending throttled trailing write, preserving
-   * the last state. Falls back to cancel only when no flush fn is provided
-   * (legacy/test contexts without F2 wiring).
+   * the last state. Always wired to the execution scheduler.
    */
-  flushThrottledBlockUpdate?: (id: string) => void
+  flushThrottledBlockUpdate: (id: string) => void
   cancelThrottledBlockUpdate: (id: string) => void
   /**
    * Run pending Redux-mirror callbacks inline without touching DB writes.
-   * Wired to the execution scheduler drain; absent in legacy/test contexts.
+   * Wired to the execution scheduler drain; called by terminal paths after
+   * quiescence so the final projection publishes complete text.
    */
-  drainMirrors?: () => void
+  drainMirrors: () => void
 }
 
 export class BlockManager {
@@ -109,40 +105,7 @@ export class BlockManager {
 
   constructor(dependencies: BlockManagerDependencies) {
     this.deps = dependencies
-    if (dependencies.executionState) {
-      this.exec = dependencies.executionState
-    } else if (dependencies.initialMessage) {
-      this.exec = new AssistantExecutionState(dependencies.initialMessage, dependencies.initialBlocks ?? [])
-    } else {
-      try {
-        const reduxMsg = dependencies.getState()?.messages?.entities?.[dependencies.assistantMsgId] as
-          | Message
-          | undefined
-        if (reduxMsg) {
-          this.exec = createAssistantExecutionState(reduxMsg, dependencies.getState as never)
-        } else {
-          this.exec = new AssistantExecutionState(
-            {
-              id: dependencies.assistantMsgId,
-              topicId: dependencies.topicId,
-              role: 'assistant',
-              blocks: []
-            } as unknown as Message,
-            []
-          )
-        }
-      } catch {
-        this.exec = new AssistantExecutionState(
-          {
-            id: dependencies.assistantMsgId,
-            topicId: dependencies.topicId,
-            role: 'assistant',
-            blocks: []
-          } as unknown as Message,
-          []
-        )
-      }
-    }
+    this.exec = dependencies.executionState
   }
 
   /** Request-local execution fact for this generation (never the Redux mirror). */
@@ -184,14 +147,10 @@ export class BlockManager {
 
   /** Flush a block's pending trailing write without dropping last state. */
   private flushBlock(id: string): void {
-    if (this.deps.flushThrottledBlockUpdate) {
-      try {
-        this.deps.flushThrottledBlockUpdate(id)
-      } catch (error) {
-        logger.warn(`[flushBlock] Failed to flush throttled update for block ${id}:`, error as Error)
-      }
-    } else {
-      this.deps.cancelThrottledBlockUpdate(id)
+    try {
+      this.deps.flushThrottledBlockUpdate(id)
+    } catch (error) {
+      logger.warn(`[flushBlock] Failed to flush throttled update for block ${id}:`, error as Error)
     }
   }
 
@@ -414,18 +373,16 @@ export class BlockManager {
     await done
   }
   /**
-   * Run pending Redux-mirror callbacks inline (DB writes untouched). No-op
-   * without scheduler wiring. Called by terminal paths after quiescence so
-   * the final projection publishes complete text even when a frame was
-   * withheld and the owner is about to dispose (which cancels RAF).
+   * Run pending Redux-mirror callbacks inline (DB writes untouched). Called
+   * by terminal paths after quiescence so the final projection publishes
+   * complete text even when a frame was withheld and the owner is about to
+   * dispose (which cancels RAF).
    */
   drainMirrors(): void {
-    if (this.deps.drainMirrors) {
-      try {
-        this.deps.drainMirrors()
-      } catch (error) {
-        logger.warn('[drainMirrors] Failed to drain pending mirrors:', error as Error)
-      }
+    try {
+      this.deps.drainMirrors()
+    } catch (error) {
+      logger.warn('[drainMirrors] Failed to drain pending mirrors:', error as Error)
     }
   }
 }

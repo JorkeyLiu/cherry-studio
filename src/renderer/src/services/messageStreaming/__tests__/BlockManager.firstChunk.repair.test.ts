@@ -57,7 +57,8 @@ describe('BlockManager first-frame immediate vs throttled repair', () => {
       executionState: exec,
       throttledBlockUpdate: throttledBlockUpdate as any,
       flushThrottledBlockUpdate,
-      cancelThrottledBlockUpdate
+      cancelThrottledBlockUpdate,
+      drainMirrors: vi.fn()
     })
   }
 
