@@ -11,6 +11,7 @@ import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
 import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
+import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
@@ -209,7 +210,10 @@ const Chat: FC<Props> = (props) => {
     )
     return result
   }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id, activeBranchId])
-
+  // Route-scoped group segments for the navigator's C spines: the same
+  // route-local projection the drawer and message flow consume. The outline
+  // maps members onto its own rows, so the nav never re-derives membership.
+  const { segments: routeSegments } = useRouteScopedSegments(props.activeTopic.id)
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {
       // Already mounted — forward imperatively without losing focus/text.
@@ -448,6 +452,8 @@ const Chat: FC<Props> = (props) => {
                     topicId={props.activeTopic.id}
                     readingAnchor={readingAnchor}
                     onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                    segments={routeSegments}
+                    contextBoundaryMessageId={sharedContextInfo.boundaryMessageId ?? null}
                   />
                 )}
                 <Messages

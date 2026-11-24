@@ -1,6 +1,7 @@
 import { bumpAndInvalidate, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -1312,27 +1313,26 @@ describe('ConversationNavigation fork markers', () => {
   })
 
   /**
-   * The text the outline marker must carry while expanded: the branch the
-   * viewed route actually travels at the fork (the child on the root-first
-   * `path`), or — when the route took no child there — the message flow's
-   * children-here count form. Both come from the shared `forkMarkerLabel`
-   * rule, so this helper asserts the geometry and returns the text.
+   * The accessible label the outline divider carries while expanded: the
+   * branch the viewed route actually travels at the fork (the child on the
+   * root-first `path`), or — when the route took no child there — the message
+   * flow's children-here count form. Both come from the shared
+   * `forkMarkerLabel` rule. Approved textless form: the label lives in the
+   * divider's `title`/accessible name only — nothing paints, in either state.
    */
   const revealedForkText = (container: HTMLElement): string => {
     const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
-    // The marker's label is mounted in both states (its compact clip and opacity
-    // are the switch, never a mount), so the same text is there collapsed and
-    // expanded; what this helper proves is that it is the label the flow
-    // resolved, flanked by the two rules.
+    // The divider carries no painted text in either state (its one child is
+    // the 1px rule), so the switch mounts and unmounts nothing.
     const collapsed = forkRows()[0]
-    expect(collapsed.children).toHaveLength(3)
+    expect(collapsed.children).toHaveLength(1)
+    expect(collapsed.textContent).toBe('')
     fireEvent.mouseEnter(body)
     const expanded = forkRows()[0]
-    // line + text + line: the text is the middle element, the two rules flank it.
-    expect(expanded.children).toHaveLength(3)
-    const [, name] = Array.from(expanded.children)
-    expect(name.textContent).toBe(expanded.textContent)
-    return expanded.textContent ?? ''
+    // One textless rule in both states; the title is what names the fork.
+    expect(expanded.children).toHaveLength(1)
+    expect(expanded.textContent).toBe('')
+    return expanded.getAttribute('title') ?? ''
   }
 
   it('names the marker with the child branch the current route travels through', async () => {
@@ -1390,5 +1390,172 @@ describe('ConversationNavigation fork markers', () => {
     // The shared label rule, resolved through i18n: one child at this fork.
     expect(revealedForkText(container)).toBe('1 branches here')
     expect(forkRows()[0].previousElementSibling).toBe(row)
+  })
+})
+
+describe('ConversationNavigation group runs and context divider', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.setActiveBranchId(null)
+    mocks.setUpdatedAt('t0')
+    branchTree.reset()
+  })
+
+  /** u1 / a1 / u2 / a2 — the outline lists the two user rows only. */
+  const seedThread = () => {
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        userMsg('u2', ['b2']),
+        assistantMsg('a2', ['ba2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+  }
+
+  const segment = (id: string, memberIds: string[], color?: string): RouteScopedSegment => ({
+    id,
+    name: id,
+    ...(color === undefined ? {} : { color }),
+    sortOrder: 0,
+    memberIds,
+    messageCount: memberIds.length,
+    firstMessageId: memberIds[0] ?? null,
+    headerMessageId: null,
+    headerInRoute: false,
+    headerOwnedByRoute: false,
+    presentationStartMessageId: memberIds[0] ?? null
+  })
+
+  const groupOverlays = () => screen.queryAllByTestId('conversation-nav-group-overlay')
+
+  it('projects segment members onto outline rows as one overlay node link per run', async () => {
+    seedThread()
+    // Assistant members belong to their preceding user turn (the same single
+    // mapping the highlight and fork markers share), so the u1/a1/u2/a2 group
+    // lands on the contiguous [u1, u2] run; unresolvable members drop out.
+    render(
+      <ConversationNavigation
+        topicId="topic-1"
+        onNavigate={mocks.onNavigate}
+        segments={[segment('s1', ['u1', 'a1', 'u2', 'a2', 'ghost'], '#1a2b3c')]}
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    expect(groupOverlays()).toHaveLength(1)
+    const groups = groupOverlays()[0].querySelectorAll('g[data-group-run]')
+    expect(Array.from(groups).map((g) => g.getAttribute('data-group-run'))).toEqual(['s1'])
+    expect(groups[0].getAttribute('stroke')).toBe('#1a2b3c')
+  })
+
+  it('breaks a run at ordinary ungrouped rows and colors parallel lanes per group', async () => {
+    seedThread()
+    // s1 reaches u1 and u2 (contiguous here); s2 reaches only u1 on top of
+    // it — overlapping membership paints parallel lanes, never one hidden
+    // group. Each run is still one node link in the group's own color.
+    render(
+      <ConversationNavigation
+        topicId="topic-1"
+        onNavigate={mocks.onNavigate}
+        segments={[segment('s1', ['u1', 'u2'], '#1a2b3c'), segment('s2', ['a1'], '#4d5e6f')]}
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    const lanes = groupOverlays()[0].querySelectorAll('g[data-group-run]')
+    expect(Array.from(lanes).map((g) => g.getAttribute('data-group-run'))).toEqual(['s1', 's2'])
+    expect(lanes[0].getAttribute('stroke')).toBe('#1a2b3c')
+    expect(lanes[1].getAttribute('stroke')).toBe('#4d5e6f')
+  })
+
+  it('draws the context divider above the mapped row for a user boundary', async () => {
+    seedThread()
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} contextBoundaryMessageId="u2" />)
+    const row = await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    const dividers = screen.queryAllByTestId('conversation-nav-context')
+    expect(dividers).toHaveLength(1)
+    // Directly ABOVE the mapped row: the flow draws its own divider above
+    // the anchor the same way.
+    expect(dividers[0].nextElementSibling).toBe(row)
+    expect(dividers[0].children).toHaveLength(1)
+    expect(dividers[0].textContent).toBe('')
+  })
+
+  it('maps an assistant boundary onto its user row and divides above it', async () => {
+    seedThread()
+    // The accepted boundary is the assistant answer a2; the outline lists
+    // user rows only, so the divider sits above u2 — the same row the
+    // reading-anchor highlight would land on.
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} contextBoundaryMessageId="a2" />)
+    const row = await screen.findByTestId('conversation-nav-item-u2')
+    await screen.findByTestId('conversation-nav-item-u1')
+
+    const dividers = screen.queryAllByTestId('conversation-nav-context')
+    expect(dividers).toHaveLength(1)
+    expect(dividers[0].nextElementSibling).toBe(row)
+  })
+
+  it('draws no divider or overlay while the new route snapshot is pending', async () => {
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer')
+    ]
+    const topic1Snapshot = {
+      messages: [
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        userMsg('u2', ['b2']),
+        assistantMsg('a2', ['ba2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    }
+    // topic-1 resolves at once; the new route stays pending, so the
+    // synchronous key derivation is what the intermediate render can prove.
+    mocks.loadWholeTopicSnapshot.mockImplementation(async (topicId: string) => {
+      if (topicId === 'topic-1') return topic1Snapshot as never
+      return new Promise<never>(() => {})
+    })
+    // The route key derives synchronously every render: switching topic hides
+    // the old route's list on the very first frame, so neither the divider
+    // nor the overlay can paint stale rows under the new key.
+    const { rerender } = render(
+      <ConversationNavigation
+        topicId="topic-1"
+        onNavigate={mocks.onNavigate}
+        segments={[segment('s1', ['u1'], '#1a2b3c')]}
+        contextBoundaryMessageId="u1"
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(screen.queryAllByTestId('conversation-nav-context')).toHaveLength(1)
+    expect(screen.queryAllByTestId('conversation-nav-group-overlay')).toHaveLength(1)
+
+    // New route fetch stays pending: the intermediate render is already
+    // empty — no stale rows, divider or overlay under the new key.
+    rerender(
+      <ConversationNavigation
+        topicId="topic-2"
+        onNavigate={mocks.onNavigate}
+        segments={[segment('s1', ['u1'], '#1a2b3c')]}
+        contextBoundaryMessageId="u1"
+      />
+    )
+    expect(screen.queryByTestId('conversation-navigation')).toBeNull()
   })
 })

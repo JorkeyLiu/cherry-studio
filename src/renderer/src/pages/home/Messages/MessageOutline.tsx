@@ -3,8 +3,17 @@ import type { FC, KeyboardEvent } from 'react'
 import React, { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import styled from 'styled-components'
 
+import {
+  buildNavGroupNodes,
+  NAV_GROUP_GUTTER_PX,
+  NAV_GROUP_LANE_STEP_PX,
+  NAV_GROUP_NODE_RADIUS_PX,
+  NAV_GROUP_SPINE_OFFSET_PX,
+  NAV_GROUP_TEXT_GAP_PX,
+  type NavGroupRun,
+  snapGroupCoord
+} from './navGroupRuns'
 import { NAV_GUTTER_INSET_PX, NAV_RAIL_BODY_INLINE_PAD_PX as BODY_INLINE_PADDING_PX } from './navRailGeometry'
-
 export interface MessageOutlineEntry {
   id: string
   text: string
@@ -15,16 +24,26 @@ interface MessageOutlineProps {
   onNavigate: (id: string) => void
   activeId?: string | null
   /**
-   * Rows that are followed by a fork marker: `forkAfter.has(id)` draws one
-   * non-interactive fork row directly after that message row, and the value is
-   * the TEXT that marker shows while the outline is expanded — either the branch
-   * the viewed route travels at that fork or, when the route took no branch
-   * there, the fork's children-here count. Both forms come from the same label
-   * rule the message stream's divider renders (`forkMarkerLabel`), so the marker
-   * never invents or drops the text on its own.
+   * Rows that follow a fork: `forkAfter.has(id)` draws one non-interactive
+   * textless divider row directly AFTER that message row. The value is the
+   * caller's label (the branch this route travels, or the fork's
+   * children-here count from `forkMarkerLabel`) — kept as the row's
+   * `title`/accessible name only, never painted as text. The visible line is
+   * a dashed 1px rule at 60% of the usable width, lighter than the context
+   * solid; it never takes part in width measurement.
    * Keys are message ids that exist in `entries` (the caller owns that filter).
    */
   forkAfter?: ReadonlyMap<string, string>
+  /**
+   * Group runs to draw as node links in the rail's left whitespace.
+   * Pure data in: geometry is measured from the rows at layout time.
+   */
+  groupRuns?: readonly NavGroupRun[]
+  /**
+   * Row the textless solid context divider sits ABOVE (already resolved to an
+   * outline row by the caller); null draws no divider.
+   */
+  contextRowId?: string | null
 }
 
 /** Idle window before follow resumes after a manual wheel/pointer/key interaction. */
@@ -41,6 +60,17 @@ const FOLLOW_RESUME_IDLE_MS = 800
  * height.
  */
 const EXPAND_TRANSITION_MS = 180
+/**
+ * Marker handoff phases inside the 180ms geometry switch: the outgoing layer
+ * fades in 40ms, the incoming layer waits 40ms then fades over 140ms, so the
+ * two are never both clearly visible and a reversal starts from the current
+ * value with at most ~40ms of blank. Expand: dot 40ms out, text/nodes/divider
+ * 40ms delay + 140ms in. Collapse: text/nodes/divider 40ms out, dot 40ms
+ * delay + 140ms in.
+ */
+const MARKER_FADE_OUT_MS = 40
+const CONTENT_FADE_DELAY_MS = 40
+const CONTENT_FADE_IN_MS = 140
 /**
  * The anchored row's own height is the switch's progress signal: it reaches
  * these sizes only when every row has finished growing/shrinking, so the
@@ -125,14 +155,28 @@ const OUTLINE_HALO_PAD_PX = 10
 const OUTLINE_MAX_WIDTH_PX = 320
 const OUTLINE_MAX_WIDTH_INSET_PX = 24
 /**
- * Expanded fork row: two rules that reserve this basis each, either side of the
- * label at this gap. The pair is what makes the rules part of the row's
- * intrinsic width (see `MessageOutlineForkSegment`), so the measured panel
- * width includes them; `measurePanelWidth` reads the same two constants the CSS
- * uses instead of a second copy of the arithmetic.
+ * Expanded panel floor: the open panel never squeezes below this, so a short
+ * label still reads at a stable width and the current-row change (a pure
+ * color swap) cannot jitter the width. A narrow column wins: when the cap
+ * itself is below the floor, the cap is the width.
  */
-const FORK_SEGMENT_BASIS_PX = 8
-const FORK_ROW_GAP_PX = 8
+const OUTLINE_MIN_WIDTH_PX = 200
+/**
+ * Divider rows (context solid, fork dashed): textless 1px rules at 60% of the
+ * usable width, centered, on a compact 8px row. Footprint math (expanded,
+ * flex column gap 4px): row 8px + margins -2px*2 = 4px effective, plus the
+ * two 4px gaps minus the one baseline gap the rows would have anyway =
+ * 4 + 4 = 8px extra beyond a plain row gap, 12px total block with neighbors.
+ * Collapsed: height 0 + margins -1px*2 = -2px effective, plus 2px+2px gaps
+ * minus the baseline 2px = 0 extra, so the dot column keeps its rhythm.
+ * Height/margin/opacity share the 180ms geometry timeline; opacity follows the
+ * content handoff (40ms out / 40ms delay + 140ms in). They never carry text,
+ * so they never take part in width measurement.
+ */
+const DIVIDER_ROW_HEIGHT_PX = 8
+const DIVIDER_ROW_MARGIN_EXPANDED_PX = -2
+const DIVIDER_ROW_MARGIN_COLLAPSED_PX = -1
+const DIVIDER_LINE_WIDTH_PERCENT = 60
 
 /**
  * Sub-pixel tolerance for "this row is where it was": layout reports fractional
@@ -376,7 +420,14 @@ const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => 
  * the follow instead of dropping it, and an interrupted geometry switch hands
  * its reveal to that same deferred path.
  */
-const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId, forkAfter }) => {
+const MessageOutline: FC<MessageOutlineProps> = ({
+  entries,
+  onNavigate,
+  activeId,
+  forkAfter,
+  groupRuns = [],
+  contextRowId = null
+}) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const followPausedRef = useRef(false)
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -406,6 +457,16 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
   const contentRef = useRef<HTMLDivElement | null>(null)
   const [panelWidthPx, setPanelWidthPx] = useState(RAIL_CONTENT_WIDTH_PX)
   const [panelCapPx, setPanelCapPx] = useState<number | null>(null)
+  // Group-run count for the width measurement below, which is a stable empty-
+  // dep callback: the ref carries the current count without re-subscribing
+  // the ResizeObserver on every row list change.
+  const groupRunsCountRef = useRef(0)
+  groupRunsCountRef.current = groupRuns.length
+  // Overlay geometry loop handle: the single transient group-geometry tick in
+  // flight, if any (see `startGroupGeometryTick`). Static geometry writes no
+  // frames — the loop only runs across the expand/collapse switch.
+  const groupTickRef = useRef<number | null>(null)
+  const groupSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Read by the resize observer, which runs outside the render that set it.
   const latestExpandedRef = useRef(expanded)
   latestExpandedRef.current = expanded
@@ -445,14 +506,15 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
    * at, and it follows short, long and streaming-updated text with no model of
    * its own.
    *
-   * Two inputs are added from their own geometry rather than the content box:
-   * a fork row's label only owns layout width while expanded, so its row is the
-   * label's measured text width plus the two rule bases and gaps the CSS
-   * reserves (read from the same constants the CSS uses); and the cap is the
+   * Two adjustments on top of the content box: the group gutter (the rail's
+   * left whitespace the node links live in) is reserved while at least one run
+   * is drawn, and the result is clamped to the floor — except when the narrow
+   * column's own cap sits below it, in which case the cap wins. The cap is the
    * body's own — the reading column's cap minus the padding and the stable
    * scrollbar gutter the body reserves around the panel, so the panel never
    * pushes past the body's `max-width` clamp (which would clip it instead of
-   * ellipsizing the row at that edge).
+   * ellipsizing the row at that edge). Divider rows carry no text, so they
+   * never take part in the measurement.
    */
   const measurePanelWidth = useCallback((expandedTarget: boolean) => {
     const container = containerRef.current
@@ -470,12 +532,10 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     setPanelCapPx((previous) => (previous === cap ? previous : cap))
     if (!expandedTarget) return
     let needed = content.getBoundingClientRect().width
-    for (const label of container.querySelectorAll<HTMLElement>('[data-outline-fork-label]')) {
-      const labelWidth = label.scrollWidth
-      if (labelWidth > 0) needed = Math.max(needed, labelWidth + 2 * (FORK_SEGMENT_BASIS_PX + FORK_ROW_GAP_PX))
-    }
+    if (groupRunsCountRef.current > 0) needed += NAV_GROUP_GUTTER_PX
     if (needed <= 0) return
-    const width = Math.min(needed, cap)
+    const floor = Math.min(OUTLINE_MIN_WIDTH_PX, cap)
+    const width = Math.min(Math.max(needed, floor), cap)
     setPanelWidthPx((previous) => (Math.abs(previous - width) < 0.5 ? previous : width))
   }, [])
 
@@ -531,6 +591,121 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
     observer.observe(host)
     return () => observer.disconnect()
   }, [measurePanelWidth])
+  // Group overlay geometry: one direct DOM write per run.
+  //
+  // The node links live in an SVG overlay that scrolls with the content, so
+  // every line/node is positioned from row rects relative to the content box
+  // (scroll-invariant) — no scroll listener, no React state, no re-render.
+  // The lane X derives from the measured row-text edge: the first lane's
+  // line sits NAV_GROUP_TEXT_GAP_PX + NAV_GROUP_SPINE_OFFSET_PX left of the
+  // text, deeper lanes step further left in the rail's own whitespace and
+  // never touch the text.
+  // All coordinates snap to half pixels next to the 1px stroke so the line
+  // stays a single crisp stroke instead of straddling two device rows.
+  // Nodes paint over the line center-to-center with the panel surface as
+  // fill, so the line never shows through a hollow node.
+  const updateGroupOverlay = useCallback(() => {
+    const content = contentRef.current
+    if (!content || groupRuns.length === 0) return
+    const contentRect = content.getBoundingClientRect()
+    if (contentRect.width <= 0 && contentRect.height <= 0) return
+    const textEl = content.querySelector<HTMLElement>('[data-outline-row-text]')
+    const textStart = textEl != null ? textEl.getBoundingClientRect().left - contentRect.left : contentRect.width
+    for (const run of groupRuns) {
+      const group = content.querySelector<SVGGElement>(`[data-group-run="${run.segmentId}"]`)
+      if (!group) continue
+      const line = group.querySelector<SVGLineElement>('[data-group-run-line]')
+      const firstNode = group.querySelector<SVGCircleElement>('[data-group-run-node="first"]')
+      const lastNode = group.querySelector<SVGCircleElement>('[data-group-run-node="last"]')
+      const centers: number[] = []
+      for (const rowId of run.rowIds) {
+        const row = findRow(content, rowId)
+        if (!row) continue
+        const rect = row.getBoundingClientRect()
+        if (rect.height <= 0) continue
+        centers.push(snapGroupCoord(rect.top - contentRect.top + rect.height / 2))
+      }
+      const spineX = snapGroupCoord(
+        textStart - NAV_GROUP_TEXT_GAP_PX - NAV_GROUP_SPINE_OFFSET_PX - run.lane * NAV_GROUP_LANE_STEP_PX
+      )
+      const { line: lineGeometry, nodes } = buildNavGroupNodes(centers)
+      if (line) {
+        if (!lineGeometry) {
+          line.setAttribute('visibility', 'hidden')
+        } else {
+          line.setAttribute('visibility', 'visible')
+          line.setAttribute('x1', `${spineX}`)
+          line.setAttribute('x2', `${spineX}`)
+          line.setAttribute('y1', `${lineGeometry.y1}`)
+          line.setAttribute('y2', `${lineGeometry.y2}`)
+        }
+      }
+      const nodeEls = [firstNode, lastNode]
+      for (let i = 0; i < nodeEls.length; i++) {
+        const node = nodeEls[i]
+        if (!node) continue
+        const cy = nodes[i]
+        if (cy === undefined) {
+          node.setAttribute('visibility', 'hidden')
+          continue
+        }
+        node.setAttribute('visibility', 'visible')
+        node.setAttribute('cx', `${spineX}`)
+        node.setAttribute('cy', `${cy}`)
+      }
+    }
+  }, [groupRuns])
+  // Transient overlay tick across the expand/collapse switch: row heights
+  // interpolate for the switch's length, so the lines/nodes re-measure every frame
+  // until the rows settle at their target height — then the loop ends and
+  // static geometry writes nothing more. Reduced motion settles in the
+  // applied frame: measure once, no loop, no timer.
+  const stopGroupGeometryTick = useCallback(() => {
+    if (groupTickRef.current != null) {
+      cancelAnimationFrame(groupTickRef.current)
+      groupTickRef.current = null
+    }
+    if (groupSettleTimerRef.current) {
+      clearTimeout(groupSettleTimerRef.current)
+      groupSettleTimerRef.current = null
+    }
+  }, [])
+  const startGroupGeometryTick = useCallback(
+    (expandedTarget: boolean) => {
+      stopGroupGeometryTick()
+      updateGroupOverlay()
+      if (prefersReducedMotion()) return
+      if (groupRuns.length === 0) return
+      const targetHeight = expandedTarget ? ROW_HEIGHT_EXPANDED_PX : ROW_HEIGHT_COLLAPSED_PX
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        stopGroupGeometryTick()
+        updateGroupOverlay()
+      }
+      groupSettleTimerRef.current = setTimeout(finish, GEOMETRY_SETTLE_FALLBACK_MS)
+      const tick = () => {
+        if (groupTickRef.current == null) return
+        updateGroupOverlay()
+        const content = contentRef.current
+        const row = content?.querySelector<HTMLElement>('[data-message-id]')
+        const rowHeight = row?.isConnected === true ? row.getBoundingClientRect().height : targetHeight
+        if (Math.abs(rowHeight - targetHeight) <= ROW_HEIGHT_SETTLE_TOLERANCE_PX) {
+          finish()
+          return
+        }
+        groupTickRef.current = requestAnimationFrame(tick)
+      }
+      groupTickRef.current = requestAnimationFrame(tick)
+    },
+    [groupRuns, stopGroupGeometryTick, updateGroupOverlay]
+  )
+  // Geometry follows layout: rows re-measure whenever the row list, the runs,
+  // or the switch state changes. The unmount cleanup below releases the tick.
+  useLayoutEffect(() => {
+    startGroupGeometryTick(expanded)
+  }, [expanded, entries, groupRuns, startGroupGeometryTick])
 
   // Container-local follow: the outline's own scrollTop moves only for an
   // active row that is not fully visible inside the body. A row the reader can
@@ -748,6 +923,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
       document.removeEventListener('pointerup', handlePointerUp)
       pendingFollowRef.current = false
       stopGeometryCompensation(false)
+      stopGroupGeometryTick()
       if (resumeTimerRef.current) {
         clearTimeout(resumeTimerRef.current)
         resumeTimerRef.current = null
@@ -765,7 +941,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
         scrollbarTimerRef.current = null
       }
     }
-  }, [scheduleResume, stopGeometryCompensation])
+  }, [scheduleResume, stopGeometryCompensation, stopGroupGeometryTick])
 
   // Reading-anchor follow: a changed anchor is always a follow intent (held
   // while the user browses, landed on resume). A row-list change is only
@@ -883,12 +1059,67 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
             data-outline-interactive={contentInteractive ? 'ready' : 'blocked'}
             style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
             <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
+              {/*Group overlay: one node link per run — a single 1px vertical line joining the first/last row centers with one small hollow node at each end (no hooks, no middle nodes; a single-row run is one node with no line). No viewBox: user units are CSS px aligned to the content box (scrolls with it); stroke never distorts on resize. Geometry is written straight to line/circle attributes (see `updateGroupOverlay`) — no React state, mount once, opacity follows the handoff. Nodes paint over the line with the panel surface as fill, so the line never shows through.*/}
+              <MessageOutlineGroupOverlay
+                aria-hidden="true"
+                data-testid="conversation-nav-group-overlay"
+                data-expanded={expanded ? 'true' : 'false'}>
+                {groupRuns.map((run) => (
+                  <g
+                    key={run.segmentId}
+                    data-group-run={run.segmentId}
+                    stroke={run.color}
+                    strokeOpacity={0.7}
+                    strokeWidth={1}>
+                    {run.rowIds.length > 1 ? (
+                      <line
+                        data-group-run-line
+                        x1={0}
+                        y1={0}
+                        x2={0}
+                        y2={0}
+                        visibility="hidden"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    ) : null}
+                    <circle
+                      data-group-run-node="first"
+                      cx={0}
+                      cy={0}
+                      r={NAV_GROUP_NODE_RADIUS_PX}
+                      visibility="hidden"
+                      fill="var(--color-background)"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    {run.rowIds.length > 1 ? (
+                      <circle
+                        data-group-run-node="last"
+                        cx={0}
+                        cy={0}
+                        r={NAV_GROUP_NODE_RADIUS_PX}
+                        visibility="hidden"
+                        fill="var(--color-background)"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    ) : null}
+                  </g>
+                ))}
+              </MessageOutlineGroupOverlay>
               {entries.map((entry) => {
                 const isActive = activeId != null && entry.id === activeId
                 const hasFork = forkAfter?.has(entry.id) ?? false
                 const forkText = forkAfter?.get(entry.id) ?? ''
+                const hasContext = contextRowId != null && entry.id === contextRowId
                 return (
                   <Fragment key={entry.id}>
+                    {hasContext ? (
+                      <MessageOutlineDividerRow
+                        aria-hidden="true"
+                        data-testid="conversation-nav-context"
+                        data-divider="context">
+                        <MessageOutlineDividerLine $variant="solid" />
+                      </MessageOutlineDividerRow>
+                    ) : null}
                     <MessageOutlineItem
                       $active={isActive}
                       // Pointer navigation waits for the settled switch. The
@@ -911,35 +1142,21 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
                       data-message-id={entry.id}
                       title={entry.text}>
                       <MessageOutlineItemDot $level={1} />
-                      <MessageOutlineItemText $level={1} $miniLevel={1}>
+                      <MessageOutlineItemText $level={1} $miniLevel={1} data-outline-row-text>
                         {entry.text}
                       </MessageOutlineItemText>
                     </MessageOutlineItem>
-                    {/*
-                      Fork marker: a separate row directly AFTER the marked message
-                      row, never a message row itself — no stable id, role, tab stop
-                      or handler, so it can never be a navigation target, a highlight
-                      winner or a follow target. Decorative only (`aria-hidden`): the
-                      message row next to it is the navigation entry.
-
-                      Expanded it reads `── <text> ──`, the message flow's divider
-                      text without its `▾` (that caret belongs to the flow's clickable
-                      popover trigger, and this row is not interactive). The label is
-                      mounted in BOTH states and only its own clip and opacity switch:
-                      mounting it on expansion would replace the fade with a pop, and
-                      the row would lose the label's width while measuring it. It is
-                      always present, because the caller supplies the flow's
-                      untaken-fork count form when the route took no branch here.
-                    */}
+                    {/*Fork divider: a separate textless row directly AFTER the marked message row — never a message row itself (no stable id, role, tab stop or handler), so it can never be a navigation target, a highlight winner or a follow target. Decorative only (`aria-hidden`): the message row next to it is the navigation entry. The caller's label (branch name or the flow's children-here count) is kept as `title`/accessible name only — the visible line is a dashed 1px rule at 60% of the usable width, so it never takes part in width measurement.*/}
                     {hasFork ? (
-                      <MessageOutlineForkRow
+                      <MessageOutlineDividerRow
                         aria-hidden="true"
+                        aria-label={forkText}
+                        title={forkText}
                         data-testid="conversation-nav-fork"
+                        data-divider="fork"
                         key={`fork-${entry.id}`}>
-                        <MessageOutlineForkSegment />
-                        <MessageOutlineForkName data-outline-fork-label>{forkText}</MessageOutlineForkName>
-                        <MessageOutlineForkSegment />
-                      </MessageOutlineForkRow>
+                        <MessageOutlineDividerLine $variant="dashed" />
+                      </MessageOutlineDividerRow>
                     ) : null}
                   </Fragment>
                 )
@@ -1022,14 +1239,15 @@ const MessageOutlineHalo = styled.div`
 `
 
 const MessageOutlineItemDot = styled.div<{ $level: number }>`
-  width: ${({ $level }) => 16 - $level * 2}px;
-  height: 4px;
-  background: var(--color-border);
-  border-radius: 2px;
-  margin-right: 4px;
-  flex-shrink: 0;
-  transition: background 0.2s ease;
-`
+   width: ${({ $level }) => 16 - $level * 2}px;
+   height: 4px;
+   background: var(--color-border);
+   border-radius: 2px;
+   margin-right: 4px;
+   flex-shrink: 0;
+   opacity: 1;
+   transition: opacity ${CONTENT_FADE_IN_MS}ms ease-out ${CONTENT_FADE_DELAY_MS}ms;
+ `
 
 /**
  * Expanded text. It is mounted in both states and only its opacity switches:
@@ -1037,19 +1255,21 @@ const MessageOutlineItemDot = styled.div<{ $level: number }>`
  * with a pop, and the row would lose the text's width while the panel measures
  * itself. Compact it is fully transparent, and the panel's own clip keeps it out
  * of the 34px rail, so nothing about it is visible before its fade starts.
+ * Handoff: collapsed the text fades out in 40ms; expanded it waits 40ms then
+ * fades over 140ms, so the dot and the text are never both clearly visible.
  */
 const MessageOutlineItemText = styled.div<{ $level: number; $miniLevel: number }>`
-  overflow: hidden;
-  color: var(--color-text-3);
-  opacity: 0;
-  transition: opacity ${EXPAND_TRANSITION_MS}ms ease-out;
-  padding: 2px 8px;
-  padding-left: ${({ $level, $miniLevel }) => ($level - $miniLevel) * 8}px;
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-`
+   overflow: hidden;
+   color: var(--color-text-3);
+   opacity: 0;
+   transition: opacity ${MARKER_FADE_OUT_MS}ms ease-out 0ms;
+   padding: 2px 8px;
+   padding-left: ${({ $level, $miniLevel }) => ($level - $miniLevel) * 8}px;
+   font-size: 13px;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+ `
 
 const MessageOutlineItem = styled.div<{ $active?: boolean }>`
    height: 12px;
@@ -1059,6 +1279,10 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
    flex-shrink: 0;
    overflow: hidden;
    transition: height ${EXPAND_TRANSITION_MS}ms ease-out;
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+  }
   /**
    * Everything that says "this is a clickable row" belongs to the settled
    * switch alone: data-outline-interactive is the panel's pointer gate (see
@@ -1067,28 +1291,37 @@ const MessageOutlineItem = styled.div<{ $active?: boolean }>`
    * expansion cannot also light up whatever row it landed on. The attribute is
    * read as an ancestor selector so the rule needs no forward reference to the
    * panel, and the gate is the only thing that ever writes it.
+   *
+   * Hover brightens the text alone (neutral, no background, no dot recolor);
+   * the current row stays on its primary color even while hovered.
    */
   [data-outline-interactive='ready'] & {
     cursor: pointer;
     &:hover {
       ${MessageOutlineItemText} {
-        color: var(--color-text-2);
+        color: var(--color-text-1);
       }
-      ${MessageOutlineItemDot} {
-        background: var(--color-text-3);
+    }
+    &[aria-current='true']:hover {
+      ${MessageOutlineItemText} {
+        color: var(--color-primary);
       }
     }
   }
+  // The current row stays identifiable in both states through the same prop:
+  // expanded the text above takes primary (the dots are fully transparent
+  // there), while the collapsed rail reads the dots alone, so the current
+  // dash takes primary here too. No hover recolor on the dots — hover stays
+  // a text-only brightening, and the collapsed rail never hovers at all
+  // (see the pointer gate above).
   ${({ $active }) =>
     $active &&
     `
     ${MessageOutlineItemText} {
-      color: var(--color-text-1);
+      color: var(--color-primary);
+      font-weight: 500;
     }
     ${MessageOutlineItemDot} {
-      background: var(--color-primary);
-    }
-    &:hover ${MessageOutlineItemDot} {
       background: var(--color-primary);
     }
   `}
@@ -1137,6 +1370,7 @@ const MessageOutlineContent = styled.div`
   display: flex;
   flex-direction: column;
   width: max-content;
+  position: relative;
   gap: 2px;
   transition: gap ${EXPAND_TRANSITION_MS}ms ease-out;
   ${MessageOutlinePanel}[data-outline-interactive='blocked'] & {
@@ -1145,86 +1379,76 @@ const MessageOutlineContent = styled.div`
 `
 
 /**
- * Fork marker row: the same height as a message row in both states (12px
- * collapsed / 24px expanded), and the content owns the shared row gap, so the
- * collapsed and expanded lists line up row for row.
- *
- * Collapsed it occupies exactly the dot band — 6px + 1px gap + a zero-wide label
- * + 1px gap + 6px = the 14px dot width — so the dashes read as one short
- * interruption of the rail instead of two separated strokes. Expanded it hosts
- * the fork's label (branch name or count form) between its two rules at the
- * flow's 8px gap; the rules' 8px basis is part of that row's intrinsic width, so
- * the row never resolves to "label only".
- *
- * The row keeps its stretched width in both states on purpose: shrinking it to
- * the 14px band at the switch would re-place the label and both rules inside a
- * still-open panel — the very pop the width transition exists to remove. Only
- * heights, the gap and the label's own clip switch, and they all interpolate.
- * Not interactive: no cursor, no hover state.
+ * Group node-link overlay: one SVG spanning the content box (which it scrolls
+ * with), carrying one vertical line plus hollow end nodes per run. It mounts
+ * once and only its opacity follows the switch — collapsed the rail shows the
+ * dots alone, expanded the dots fade out and the node links fade in over the
+ * same 180ms ease-out, so the switch reverses from wherever it is with no
+ * mount swap.
  */
-const MessageOutlineForkRow = styled.div`
-  height: 12px;
-  align-self: stretch;
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  flex-shrink: 0;
-  pointer-events: none;
-  transition:
-    height ${EXPAND_TRANSITION_MS}ms ease-out,
-    gap ${EXPAND_TRANSITION_MS}ms ease-out;
-`
+const MessageOutlineGroupOverlay = styled.svg`
+   position: absolute;
+   inset: 0;
+   width: 100%;
+   height: 100%;
+   overflow: visible;
+   pointer-events: none;
+   opacity: 0;
+   transition: opacity ${MARKER_FADE_OUT_MS}ms ease-out 0ms;
+   & line,
+   & circle {
+     vector-effect: non-scaling-stroke;
+   }
+ `
+
 /**
- * One dash. Collapsed it is a 6px stroke with the dot's 2px radius. Expanded it
- * keeps an 8px base size and then grows into whatever width the row has left,
- * so the two rules read as the dividers around the name — the same 1px
- * `var(--color-border)` line the message-flow fork divider draws.
- *
- * The base size is not zero on purpose. The content is sized by its widest row,
- * and a zero-base rule contributes nothing to that intrinsic width: when the
- * fork's label was the widest thing in the rail (short messages like "hi"), the
- * row spent its whole width on the label and both rules measured zero — the
- * divider lost its lines. A real base makes the two rules part of the row's
- * intrinsic width, so the rail grows just enough to show `line — label — line`.
- * Growth then hands any surplus to the rules, so a wide rail still draws the
- * dividers out to its two ends instead of leaving two short dashes beside a wide
- * gap, and the 8px floor keeps a visible line even when a capped panel has to
- * shrink the row. `flex` is what interpolates here (a `width: auto` target
- * cannot), so the pair spreads out of the dot band instead of jumping.
+ * Context/fork divider row: an 8px non-interactive row in the open panel,
+ * centering one textless 1px rule at 60% of the usable width, with -2px top /
+ * bottom margins so the block reads as one thin rule (4px effective + gaps =
+ * 12px total) instead of a blank line. Collapsed it compresses to height 0
+ * with -1px margins (0 extra beyond the ordinary row gap) on the same 180ms
+ * ease-out as the rows; opacity follows the content handoff. The DOM stays
+ * mounted so the switch reverses mid-flight. It is spacing, not a message row
+ * — it carries no text, so it never takes part in width measurement.
+ * Decorative only (`aria-hidden` at the render site); the neighboring message
+ * row stays the navigation entry. Adjacent context+fork rows stack as two thin
+ * rules with their own gap and are never merged, so boundary semantics stay
+ * untouched.
  */
-const MessageOutlineForkSegment = styled.div`
-  width: 6px;
-  height: 1px;
-  background: var(--color-border);
-  border-radius: 2px;
-  flex: 0 0 6px;
-  transition:
-    flex ${EXPAND_TRANSITION_MS}ms ease-out,
-    min-width ${EXPAND_TRANSITION_MS}ms ease-out;
-`
+const MessageOutlineDividerRow = styled.div`
+   height: ${DIVIDER_ROW_HEIGHT_PX}px;
+   margin-top: ${DIVIDER_ROW_MARGIN_EXPANDED_PX}px;
+   margin-bottom: ${DIVIDER_ROW_MARGIN_EXPANDED_PX}px;
+   align-self: stretch;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
+   overflow: hidden;
+   pointer-events: none;
+   opacity: 1;
+   transition:
+     height ${EXPAND_TRANSITION_MS}ms ease-out,
+     margin-top ${EXPAND_TRANSITION_MS}ms ease-out,
+     margin-bottom ${EXPAND_TRANSITION_MS}ms ease-out,
+     opacity ${CONTENT_FADE_IN_MS}ms ease-out ${CONTENT_FADE_DELAY_MS}ms;
+ `
+
 /**
- * The fork's label between the two rules: the message-flow divider's text form
- * (11.5px, secondary text color) at the flow's 8px gap. It never wraps or
- * shrinks, so the rules absorb every width change around it.
- *
- * Compact it is clipped to zero width and transparent instead of being unmounted
- * or hidden with `display`: both of those would make the label appear and
- * disappear in a single frame. Its clip and its opacity interpolate, and the
- * fade is what masks the (necessarily faster) width change — the text is already
- * gone by the time the hint of it would be readable.
+ * The divider rule itself. The context solid is the clearer of the two
+ * (message-flow form, ~0.6); the fork dashed is lighter (~0.4). Percentage
+ * widths resolve against the content box, so an empty rule contributes nothing
+ * to the intrinsic width the panel is measured from. Theme tokens only, no
+ * hard-coded hex.
  */
-const MessageOutlineForkName = styled.div`
-  flex: 0 0 auto;
-  max-width: 0;
-  overflow: hidden;
-  font-size: 11.5px;
-  color: var(--color-text-2);
-  white-space: nowrap;
-  opacity: 0;
-  transition:
-    max-width ${EXPAND_TRANSITION_MS}ms ease-out,
-    opacity ${EXPAND_TRANSITION_MS}ms ease-out;
-`
+const MessageOutlineDividerLine = styled.div<{ $variant: 'solid' | 'dashed' }>`
+   width: ${DIVIDER_LINE_WIDTH_PERCENT}%;
+   flex-shrink: 0;
+   height: ${({ $variant }) => ($variant === 'solid' ? '1px' : '0')};
+   background: ${({ $variant }) => ($variant === 'solid' ? 'var(--color-text-3)' : 'transparent')};
+   border-top: ${({ $variant }) => ($variant === 'solid' ? 'none' : '1px dashed var(--color-text-3)')};
+   opacity: ${({ $variant }) => ($variant === 'solid' ? 0.6 : 0.4)};
+ `
 /**
  * `$expanded` and `$scrollbarVisible` are transient props (styled-components
  * never forwards them to the DOM); they are projected onto `data-expanded` and
@@ -1263,37 +1487,38 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
    border-radius: 10px;
    pointer-events: auto;
    background-color: transparent;
-   box-shadow: 0 0 10px 0 rgba(128, 128, 128, 0);
+   box-shadow:
+     inset 0 0 0 1px rgba(128, 128, 128, 0),
+     0 0 10px 0 rgba(128, 128, 128, 0);
    transition:
      padding ${EXPAND_TRANSITION_MS}ms ease-out,
-     background-color ${EXPAND_TRANSITION_MS}ms ease-out,
-     box-shadow ${EXPAND_TRANSITION_MS}ms ease-out;
-  /**
-   * Scoped to this body: the app's scrollbars stay classic and untouched, and
-   * only this one element withholds its paint (see the reveal delay constant).
-   * overflow-y is deliberately NOT part of it — the switch is a width
-   * transition of this box, so the bar would be carried across the opening panel
-   * instead of appearing on its final edge. Keeping the scroll container live
-   * (auto) with its gutter reserved means the bar is merely invisible: scroll
-   * range, client height and scrollTop are the same as when it is painted.
-   *
-   * The :hover arm is the specificity that matters: the shared Scrollbar paints
-   * its thumb through the webkit scrollbar thumb pseudo-element and its own
-   * :hover rule, so the withheld state has to out-specify both. transition: none
-   * is the instant half — the shared component fades its thumb over 2s, and a
-   * fade here would keep painting the bar for the whole of it, at whatever x it
-   * had reached, which is the artifact being removed.
-   */
-  &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb,
-  &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb:hover {
-    background: transparent;
-    transition: none;
-  }
-  &[data-expanded='true'] {
+     box-shadow ${EXPAND_TRANSITION_MS}ms ease-out,
+     background-color 0s linear ${EXPAND_TRANSITION_MS}ms;
+   /**
+    * Scoped to this body: the app's scrollbars stay classic and untouched, and
+    * only this one element withholds its paint (see the reveal delay constant).
+    * overflow-y is deliberately NOT part of it — the switch is a width
+    * transition of this box, so the bar would be carried across the opening panel
+    * instead of appearing on its final edge. Keeping the scroll container live
+    * (auto) with its gutter reserved means the bar is merely invisible: scroll
+    * range, client height and scrollTop are the same as when it is painted.
+    */
+   &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb,
+   &[data-outline-scrollbar='hidden']::-webkit-scrollbar-thumb:hover {
+     background: transparent;
+     transition: none;
+   }
+   &[data-expanded='true'] {
      padding: ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px ${BODY_INLINE_PADDING_PX}px;
      overflow-y: auto;
      background-color: var(--color-background);
-     box-shadow: 0 0 10px 0 rgba(128, 128, 128, 0.2);
+     box-shadow:
+       inset 0 0 0 1px var(--color-border),
+       0 2px 8px 0 rgba(0, 0, 0, 0.08);
+     transition:
+       padding ${EXPAND_TRANSITION_MS}ms ease-out,
+       box-shadow ${EXPAND_TRANSITION_MS}ms ease-out,
+       background-color 0s;
      ${MessageOutlineContent} {
        gap: 4px;
      }
@@ -1302,31 +1527,43 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
      }
      ${MessageOutlineItemText} {
        opacity: 1;
+       transition: opacity ${CONTENT_FADE_IN_MS}ms ease-out ${CONTENT_FADE_DELAY_MS}ms;
      }
-  // Fork marker row: the message-row height and the message-flow divider form —
-  // the two rules flank the fork's text at the flow's 8px gap instead of
-  // abutting. The rules grow, so they own the distribution: they reach the row's
-  // two ends on a wide rail and keep their base size when the row is only as wide
-  // as the label needs.
-  ${MessageOutlineForkRow} {
-    height: 24px;
-    gap: ${FORK_ROW_GAP_PX}px;
-  }
-  ${MessageOutlineForkSegment} {
-    width: auto;
-    flex: 1 1 ${FORK_SEGMENT_BASIS_PX}px;
-    min-width: ${FORK_SEGMENT_BASIS_PX}px;
-  }
-  ${MessageOutlineForkName} {
-    max-width: ${OUTLINE_MAX_WIDTH_PX}px;
-    opacity: 1;
-  }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-    ${MessageOutlinePanel} {
-      transition: none;
-    }
+     ${MessageOutlineItemDot} {
+       opacity: 0;
+       transition: opacity ${MARKER_FADE_OUT_MS}ms ease-out 0ms;
+     }
+     ${MessageOutlineGroupOverlay} {
+       opacity: 1;
+       transition: opacity ${CONTENT_FADE_IN_MS}ms ease-out ${CONTENT_FADE_DELAY_MS}ms;
+     }
+     ${MessageOutlineDividerRow} {
+       opacity: 1;
+       transition:
+         height ${EXPAND_TRANSITION_MS}ms ease-out,
+         margin-top ${EXPAND_TRANSITION_MS}ms ease-out,
+         margin-bottom ${EXPAND_TRANSITION_MS}ms ease-out,
+         opacity ${CONTENT_FADE_IN_MS}ms ease-out ${CONTENT_FADE_DELAY_MS}ms;
+     }
+   }
+   &[data-expanded='false'] {
+     ${MessageOutlineDividerRow} {
+       height: 0;
+       margin-top: ${DIVIDER_ROW_MARGIN_COLLAPSED_PX}px;
+       margin-bottom: ${DIVIDER_ROW_MARGIN_COLLAPSED_PX}px;
+       opacity: 0;
+       transition:
+         height ${EXPAND_TRANSITION_MS}ms ease-out,
+         margin-top ${EXPAND_TRANSITION_MS}ms ease-out,
+         margin-bottom ${EXPAND_TRANSITION_MS}ms ease-out,
+         opacity ${MARKER_FADE_OUT_MS}ms ease-out 0ms;
+     }
+   }
+   @media (prefers-reduced-motion: reduce) {
+     transition: none;
+     ${MessageOutlinePanel} {
+       transition: none;
+     }
     ${MessageOutlineContent} {
       transition: none;
     }
@@ -1339,13 +1576,13 @@ const MessageOutlineBody = styled(Scrollbar).attrs<{
     ${MessageOutlineItemDot} {
       transition: none;
     }
-   ${MessageOutlineForkRow} {
+   ${MessageOutlineGroupOverlay} {
      transition: none;
    }
-   ${MessageOutlineForkSegment} {
+   ${MessageOutlineDividerRow} {
      transition: none;
    }
-   ${MessageOutlineForkName} {
+   ${MessageOutlineDividerLine} {
      transition: none;
    }
   }

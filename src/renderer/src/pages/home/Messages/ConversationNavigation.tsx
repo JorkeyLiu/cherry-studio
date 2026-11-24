@@ -4,6 +4,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -13,6 +14,7 @@ import { useSelector } from 'react-redux'
 import { forkMarkerLabel, groupForkChildrenByParent, resolveForkPlacement, takenChildAtAnchor } from './forkPlacement'
 import MessageOutline from './MessageOutline'
 import type { ReadingAnchorReport } from './Messages'
+import { buildNavGroupRuns, type NavGroupRun } from './navGroupRuns'
 import { useBranchTree } from './useBranchTree'
 import {
   type AttachmentLabelFormatters,
@@ -36,6 +38,22 @@ interface ConversationNavigationProps {
   topicId: string
   readingAnchor?: ReadingAnchorReport | null
   onNavigate: (messageId: string) => void
+  /**
+   * Route-scoped segment projection for this route (Chat wires
+   * `useRouteScopedSegments`; defaults to none). The outline maps each
+   * member to its user row and splits non-contiguous membership into
+   * separate runs — it never rewrites catalog membership or order.
+   */
+  segments?: readonly RouteScopedSegment[]
+  /**
+   * Accepted context boundary from Chat's shared projection
+   * (`sharedContextInfo.boundaryMessageId`): the same Main-reported id the
+   * message flow draws its context divider from. The outline draws its own
+   * textless divider ABOVE the mapped user row — DOM-before the anchor
+   * turn, exactly like the flow — whether the boundary is a user message
+   * (its own row) or an assistant message (its preceding user row).
+   */
+  contextBoundaryMessageId?: string | null
 }
 
 /**
@@ -110,7 +128,13 @@ const resolveOutlineRowId = (
   precedingUserByMessageId: ReadonlyMap<string, string>
 ): string | undefined => (itemIds.has(messageId) ? messageId : precedingUserByMessageId.get(messageId))
 
-const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, readingAnchor, onNavigate }) => {
+const ConversationNavigation: FC<ConversationNavigationProps> = ({
+  topicId,
+  readingAnchor,
+  onNavigate,
+  segments = [],
+  contextBoundaryMessageId = null
+}) => {
   const { t } = useTranslation()
   // Bracketed quote-only placeholder (locales stay raw — same wrap-at-call-site
   // convention as attachment kind labels); mixed text+quote previews pass through.
@@ -446,12 +470,43 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     [snapshotKey, activeRouteKey, topicId, activeBranchId, onNavigate]
   )
 
+  // Group runs: each segment's members map to outline rows through the same
+  // single resolver the highlight and the fork markers share; non-contiguous
+  // membership splits into separate continuous runs. Gated on the loaded
+  // route like every other derivation, so a pending route never shows the
+  // previous route's groups.
+  const groupRuns = useMemo<NavGroupRun[]>(
+    () =>
+      isSnapshotCurrent
+        ? buildNavGroupRuns({
+            rowIds: items.map((item) => item.id),
+            resolveRowId: (messageId) => resolveOutlineRowId(messageId, itemIds, precedingUserByMessageId),
+            segments
+          })
+        : [],
+    [isSnapshotCurrent, items, itemIds, precedingUserByMessageId, segments]
+  )
+  // Context divider row: drawn ABOVE the mapped user row (the same row the
+  // highlight would land on), matching the flow's DOM-before-anchor divider.
+  // Unresolvable or absent boundaries draw no divider.
+  const contextRowId = useMemo<string | null>(() => {
+    if (!isSnapshotCurrent || !contextBoundaryMessageId) return null
+    return resolveOutlineRowId(contextBoundaryMessageId, itemIds, precedingUserByMessageId) ?? null
+  }, [isSnapshotCurrent, contextBoundaryMessageId, itemIds, precedingUserByMessageId])
   if (items.length === 0) return null
-
   // Presentation is the restored original MessageOutline (verbatim styles);
   // this module stays a caller-local data controller only.
   const entries = items.map((item) => ({ id: item.id, text: item.preview }))
-  return <MessageOutline entries={entries} onNavigate={handleNavigate} activeId={activeId} forkAfter={forkAfter} />
+  return (
+    <MessageOutline
+      entries={entries}
+      onNavigate={handleNavigate}
+      activeId={activeId}
+      forkAfter={forkAfter}
+      groupRuns={groupRuns}
+      contextRowId={contextRowId}
+    />
+  )
 }
 
 export default ConversationNavigation
