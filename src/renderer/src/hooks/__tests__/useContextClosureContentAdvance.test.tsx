@@ -4,7 +4,7 @@
  *
  * Real store (real `messageBlocks` reducer + real `closureInvalidationMiddleware`)
  * + real hook guards; only the DB boundary is mocked so a response can be held
- * in flight while a trusted mirror advances the content revision.
+ * in flight while a trusted mirror lands (a closure-freshness no-op).
  *
  * Covered:
  * - authoritative structure is accepted (preview counts present, not pending)
@@ -22,8 +22,8 @@
 import { configureStore } from '@reduxjs/toolkit'
 import {
   bumpAndInvalidate,
+  getClosureLoadGeneration,
   getClosureSemanticToken,
-  getContentGeneration,
   getFreshValidatedClosure,
   resetAllClosureStateForTests
 } from '@renderer/services/contextClosure'
@@ -203,16 +203,19 @@ describe('useContextClosure: content mirror advancing during an in-flight fetch'
     })
     await waitFor(() => expect(fetchClosureMock).toHaveBeenCalledTimes(1))
     const tokenBefore = getClosureSemanticToken(TOPIC, null)
+    const genBefore = getClosureLoadGeneration(TOPIC, null)
 
-    // Same-block streaming deltas land while the fetch is in flight: content
-    // revision advances, structural generation does not.
+    // Same-block streaming deltas land while the fetch is in flight: the
+    // exempt mirror is a closure-freshness no-op — structural generation
+    // does not move and no extra closure read is triggered.
     await act(async () => {
       storeRef.current.dispatch(trustedMirror('a1-block', 'live-newest-2') as any)
       storeRef.current.dispatch(trustedMirror('a1-block', 'live-newest-3') as any)
       await Promise.resolve()
     })
-    expect(getContentGeneration(TOPIC, null)).toBeGreaterThan(0)
+    expect(getClosureLoadGeneration(TOPIC, null)).toBe(genBefore)
     expect(getClosureSemanticToken(TOPIC, null)).toBe(tokenBefore)
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
 
     // Authoritative response: structure 2/2 with a body that predates the deltas.
     await act(async () => {

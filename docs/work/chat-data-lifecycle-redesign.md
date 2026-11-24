@@ -294,12 +294,17 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
   `sharedContextInfo`；`closureBlockHydration.ts` 及其专属 tests 已删除
   （无生产消费者）。
 - 仍保留：closure 现有 cache 短期复用与结构失效 guard（generation/global/
-  deletion/identity/anchor/route）；`closureOwnership` 标记与
-  `contentGenerations`/middleware（Messages 活镜像仍用）；普通 Redux 块仍是
-  Messages 渲染源；请求路径仍是 caller-local（`fetchContextClosure` +
-  request local overlay）；`contextCount`/CW 语义、请求/结构/删除/路由失效
-  guard 不变。`contextInfoService` 只增正文来源注释与
+  deletion/identity/anchor/route）；`closureOwnership` 标记与 middleware
+  豁免谓词（`markClosureContentMirror`/`isExemptContentMirrorAction` 严格规则
+  不变，命中即 no-op 返回：不 invalidate、不 signal、不写 clock）；普通
+  Redux 块仍是 Messages 渲染源；请求路径仍是 caller-local
+  （`fetchContextClosure` + request local overlay）；`contextCount`/CW 语义、
+  请求/结构/删除/路由失效 guard 不变。`contextInfoService` 只增正文来源注释与
   `ClosureBodySnapshot` 别名，签名不变。
+- 内容时钟退出（本 slice）：`contextClosure.ts` 的 `contentGenerations` 及
+  `get/ensure/bump*ContentGeneration*` 已删除（生产读者为 0，唯一写点是
+  middleware 豁免分支），§28/§30 曾用它作 hydration 模式信号的历史记录保留，
+  不改写为“从未存在”；`resetAllClosureStateForTests` 不再清它（map 已不存在）。
 - 执行适配：`fetchAndProcessAssistantResponseImpl` 在执行生命周期内注册
   overlay（固定 route + messageId + resendAttempt，per-execution monotonic
   sequence，`executionState.snapshot()` 不可变捕获）；`BlockManager`
@@ -332,8 +337,9 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
 - 诚实 residuals（无收益承诺）：IM 通道执行路径（`messageThunk.ts` channel
   path）未接线；内存边界仅为保留计数上限，字节预算/memory 实测数无；
   C（Main 侧 invalidations）未动，B 仍是本地 invalidations；§12 未决项中
-  “ADR 措辞”与“adapter 订阅/delta 接口形状”按本实现落定，其余未决（结构/
-  内容 epoch、affect index、跨窗口 overlay 保证、写路径全枚举）不动。
+  “ADR 措辞”与“adapter 订阅/delta 接口形状”按本实现落定，内容 epoch 一项
+  已落定（内容时钟退出，无分离 epoch；§12 提案正文不动）；其余未决（结构
+  epoch、affect index、跨窗口 overlay 保证、写路径全枚举）不动。
 
 ## 14 补记：审阅修复与边界（F1/F2/F3；提案正文仍不改）
 

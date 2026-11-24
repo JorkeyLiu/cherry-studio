@@ -397,3 +397,22 @@
   execution-owned overlay，仅覆盖已接受成员）替代；普通 `messageBlocks` 不再经
   闭包水合写入，“不能收窄订阅”由新机制满足（accepted 快照 + overlay delta 同拍
   重组），不再要求长期保留旧 `activeBlockIds` 订阅链。新旧表述矛盾时以本补记为准。
+## 45. 内容时钟退出补记（§28/§30 历史保留，仅加时态标记；未 commit）
+- 退出事实：`services/contextClosure.ts` 的 `contentGenerations` 及
+  `get/ensure/bump*ContentGeneration*` 已删除（生产 get/ensure 读者为 0，
+  唯一 bump 写点是 `store/index.ts` 豁免分支）；`resetAllClosureStateForTests`
+  不再清它；`store/index.ts` 豁免分支改为命中即 no-op 返回（不 invalidate、
+  不 signal、不写 clock），`isExemptContentMirrorAction` 严格谓词不变，
+  未标记/未知照常 fail-closed；`markClosureContentMirror` 标记保留
+  （`messageThunk.ts` 两处 mirrorTo 打标不动，不改 provider/UI/overlay/handoff）。
+- 时态校准：§28/§30 中“`contentGenerations` 与结构 `loadGenerations` 分离、
+  只作 hydration 模式信号 / `ensureContentGeneration` 快照 `contentAtFetch` /
+  豁免分支 `bumpContentGeneration`”等表述是当时的已实现记录，不改写为从未存在。
+  本补记之后，结构 `loadGenerations` 是唯一的接受/新鲜度信号；豁免 mirror 的
+  store 更新实时性由 reducer 先行应用保证，不再需要内容时钟见证。
+- 测试语义更新（未删功能场景）：`closureContentMirror.test.ts` 7 用例保留，
+  内容时钟断言改为可观察行为断言（stream 不触发结构 invalidate/refetch、
+  接受 snapshot 与 state 不水合、terminal 照常 invalidates、
+  未知/unsafe mutation fail-closed）；`useContextClosureContentAdvance.test.tsx`
+  同步去掉内容时钟读写，改断结构 generation/token 不变与无额外 fetch。
+  未跑 full/lint/build/E2E（主代理后续聚合）。

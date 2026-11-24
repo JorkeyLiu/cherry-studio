@@ -151,8 +151,9 @@ export function markClosureContentMirror<T>(action: T): T {
  * Whether an action carries the trusted streaming content-mirror marker.
  * Absent/invalid means not a content mirror (safe default: invalidate).
  * A content mirror is never read-only: both markers set still exempts only
- * via the content path (read-only already exempts, but the content revision
- * must still advance so stale hydrations cannot overwrite the new delta).
+ * via the content path (read-only already exempts, but the mirror stays a
+ * closure-freshness no-op — it updates the ordinary projection without
+ * invalidating structure).
  */
 export function isClosureContentMirror(action: unknown): boolean {
   return (

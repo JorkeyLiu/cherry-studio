@@ -242,21 +242,12 @@ let globalLoadSeq = 0
 const closureFingerprints = new Map<string, string>()
 // Generation snapshot stored at cache publication time (full-closure freshness, covers outside-viewport same-length mutations)
 const cachedGenerations = new Map<string, number>()
-// Content-only revision for trusted streaming mirrors: advances on exempt
-// `updateOneBlock` content patches WITHOUT clearing the structural cache and
-// WITHOUT emitting the semantic invalidation signal (so no background
-// refetch). The closure snapshot is still accepted and cached on structural
-// guards; UI context bodies reach the projection through the closure snapshot
-// composed with the execution-owned overlay (route B) — the ordinary-block
-// closure hydration path is exited, so this revision no longer chooses a
-// hydration strategy. Structural `loadGenerations` remain the sole
-// acceptance/freshness signal; this revision never invalidates structure,
-// never gates a cache read, and never triggers a fetch. Cached `blocks`
-// bytes are never authoritative fresh bodies: provider requests always read
-// a caller-local Main closure + overlay.
-// Retained across retention/evict like loadGenerations (in-flight protection
-// survives trimming).
-const contentGenerations = new Map<string, number>()
+// Content-only revision exited: no production readers remain, so no content
+// clock is kept. Structural `loadGenerations` are the sole
+// acceptance/freshness signal; exempt streaming mirrors keep the store
+// update real-time but never invalidate structure and never notify.
+// Cached `blocks` bytes are never authoritative fresh bodies: provider
+// requests always read a caller-local Main closure + overlay.
 // Global epoch for block mutations: advances even when no cache entry exists (covers uncached in-flight fetches)
 // B-09 local diagnostics: bounded scalar hit/miss counters (renderer-local, no content retention)
 let closureCacheHitCount = 0
@@ -508,7 +499,6 @@ export function resetAllClosureStateForTests(): void {
   closureFingerprints.clear()
   cachedGenerations.clear()
   loadGenerations.clear()
-  contentGenerations.clear()
   globalLoadSeq = 0
   globalBlockGeneration = 0
   closureCacheHitCount = 0
@@ -603,77 +593,6 @@ export function bumpClosureGeneration(topicId: string, branchId?: string | null)
   const next = bumpClosureGenerationForKey(closureKeyForRoute(topicId, branchId))
   emitClosureInvalidations()
   return next
-}
-
-function ensureContentGenerationForKey(key: string): number {
-  const existing = contentGenerations.get(key)
-  if (existing !== undefined) return existing
-  contentGenerations.set(key, 0)
-  return 0
-}
-
-/**
- * Register a content revision at fetch/read start (mirrors
- * `ensureClosureGeneration` for the uncached-branch race). Init-only, never
- * bumps, never invalidates, never notifies.
- */
-export function ensureContentGeneration(topicId: string, branchId?: string | null): number {
-  return ensureContentGenerationForKey(closureKeyForRoute(topicId, branchId))
-}
-
-/**
- * Pure read of the content-only revision (no ensure side effect beyond the
- * 0-default for unknown routes). Structural cache freshness never consults
- * this, and it never gates acceptance: the ordinary-block closure hydration
- * path is exited, so no caller chooses a hydration strategy anymore. The
- * revision observes trusted streaming mirror activity for the Messages live
- * mirror only.
- */
-export function getContentGeneration(topicId: string, branchId?: string | null): number {
-  return contentGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0
-}
-
-/**
- * Advance the content-only revision for one route key without touching the
- * structural cache, structural generation, or the reactive signal. The store
- * update that triggered this bump has already been applied by the middleware
- * (reducer ran before the middleware), so UI/store subscribers still observe
- * the new text in real time.
- */
-function bumpContentGenerationForKey(key: string): number {
-  const next = (contentGenerations.get(key) ?? 0) + 1
-  contentGenerations.set(key, next)
-  return next
-}
-
-/**
- * Content-only bump for a topic (bare-topic fanout, branch-safe): advances
- * every registered route key of the topic without clearing cache and without
- * notifying. Unregistered topics bump the bare key so the revision cannot go
- * backwards; a later route `ensureContentGeneration` starts at 0 and the
- * earlier bare bump is intentionally not visible to the new route (same
- * init-only semantics as `bumpAndInvalidate` for uncached branches — the
- * fetch-start ensure precedes any concurrent mirror in the live-route case,
- * which is the only case the hydrate guard must cover).
- */
-export function bumpContentGeneration(topicId: string, branchId?: string | null): number {
-  if (branchId === undefined) {
-    const prefix = `${topicId}:`
-    const keys = new Set<string>([...loadGenerations.keys(), ...contentGenerations.keys(), ...closureCache.keys()])
-    let touched = false
-    for (const key of keys) {
-      if (key === topicId || key.startsWith(prefix)) {
-        bumpContentGenerationForKey(key)
-        touched = true
-      }
-    }
-    if (!touched) {
-      return bumpContentGenerationForKey(topicId)
-    }
-    // Last-touched next value is diagnostic only; callers ignore it.
-    return getContentGeneration(topicId, null)
-  }
-  return bumpContentGenerationForKey(closureKeyForRoute(topicId, branchId))
 }
 
 export function nextGlobalLoadSeq(): number {

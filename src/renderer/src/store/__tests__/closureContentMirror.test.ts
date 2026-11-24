@@ -1,10 +1,8 @@
 import { configureStore } from '@reduxjs/toolkit'
 import {
   computeClosureFingerprint,
-  ensureContentGeneration,
   getClosureLoadGeneration,
   getClosureSemanticToken,
-  getContentGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
   resetAllClosureStateForTests,
@@ -82,7 +80,6 @@ describe('closure streaming content-mirror exemption', () => {
     const tokenBefore = getClosureSemanticToken('topicA', null)
     const genBefore = getClosureLoadGeneration('topicA')
     const globalBefore = getGlobalBlockGeneration()
-    const contentBefore = getContentGeneration('topicA')
     let notifications = 0
     const unsubscribe = subscribeClosureInvalidations(() => {
       notifications += 1
@@ -99,7 +96,6 @@ describe('closure streaming content-mirror exemption', () => {
       expect(getClosureSemanticToken('topicA', null)).toBe(tokenBefore)
       expect(getClosureLoadGeneration('topicA')).toBe(genBefore)
       expect(getGlobalBlockGeneration()).toBe(globalBefore)
-      expect(getContentGeneration('topicA')).toBeGreaterThan(contentBefore)
       expect(notifications).toBe(0)
     } finally {
       unsubscribe()
@@ -115,14 +111,16 @@ describe('closure streaming content-mirror exemption', () => {
       ) as any
     )
     const fp = seedFresh('topicA')
+    const genBefore = getClosureLoadGeneration('topicA')
     store.dispatch(trustedMirror('topicA', 'b-stream', { content: 'Hello world!' }) as any)
     const entity = (store.getState().messageBlocks as any).entities['b-stream']
     expect(entity?.content).toBe('Hello world!')
     // The live store delta is the fresh body; the cached closure stays
     // structurally fresh (counts/boundary), but its block bytes are never
-    // claimed as authoritative fresh bodies.
+    // claimed as authoritative fresh bodies. Structural generation is
+    // untouched: exempt mirrors never invalidate and never notify.
     expect(getFreshValidatedClosure('topicA', 'u1', fp)).not.toBeNull()
-    expect(getContentGeneration('topicA')).toBeGreaterThan(0)
+    expect(getClosureLoadGeneration('topicA')).toBe(genBefore)
   })
 
   it('unmarked or structurally meaningful block writes still invalidate', () => {
@@ -194,31 +192,29 @@ describe('closure streaming content-mirror exemption', () => {
     expect(getFreshValidatedClosure('topicC', 'u1', fpC)).toBeNull()
   })
 
-  it('content delta during a fetch accepts structure; structural ABA still invalidates', () => {
+  it('content delta during a fetch keeps structure accepted; structural ABA still invalidates', () => {
     const fp = seedFresh('topicA')
-    ensureContentGeneration('topicA', null)
     const generationAtFetch = getClosureLoadGeneration('topicA')
-    const contentAtFetch = getContentGeneration('topicA')
     const globalAtFetch = getGlobalBlockGeneration()
-
-    // A same-block streaming delta lands during the fetch: structure stays
-    // fresh, content revision moves.
-    ;(closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(
-      trustedMirror('topicA', 'b-stream', { content: 'newer delta' })
-    )
-    // Structural acceptance is unaffected: the authoritative closure is still
-    // fresh (no discard → no authority-pending).
-    expect(getFreshValidatedClosure('topicA', 'u1', fp)).not.toBeNull()
-    expect(getClosureLoadGeneration('topicA')).toBe(generationAtFetch)
-    expect(getGlobalBlockGeneration()).toBe(globalAtFetch)
-    expect(getContentGeneration('topicA')).not.toBe(contentAtFetch)
-
-    // The ordinary-block hydration strategy (gap-fill/full) is exited: a
-    // content advance publishes no blocks into the ordinary store at all.
-    // Streaming bodies reach the UI context projection only through the
-    // execution-owned overlay (covered by its own suite), so no block
-    // fabrication is asserted here — the store mirror above wrote exactly
-    // the exempt content patch and nothing else.
+    let notifications = 0
+    const unsubscribe = subscribeClosureInvalidations(() => {
+      notifications += 1
+    })
+    try {
+      // A same-block streaming delta lands during the fetch: structure stays
+      // fresh, no signal is emitted, no refetch is triggered.
+      ;(closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(
+        trustedMirror('topicA', 'b-stream', { content: 'newer delta' })
+      )
+      // Structural acceptance is unaffected: the authoritative closure is still
+      // fresh (no discard → no authority-pending).
+      expect(getFreshValidatedClosure('topicA', 'u1', fp)).not.toBeNull()
+      expect(getClosureLoadGeneration('topicA')).toBe(generationAtFetch)
+      expect(getGlobalBlockGeneration()).toBe(globalAtFetch)
+      expect(notifications).toBe(0)
+    } finally {
+      unsubscribe()
+    }
 
     // Structural ABA on the same route (invalidate then republish) still
     // moves the structural generation, so a same-route ABA cannot masquerade
@@ -241,14 +237,19 @@ describe('closure streaming content-mirror exemption', () => {
     expect(getFreshValidatedClosure('topicA', 'u2', fp)).toBeNull()
   })
 
-  it('read-only closure hydration stays exempt without moving the content revision', () => {
-    seedFresh('topicA')
-    const contentBefore = getContentGeneration('topicA')
+  it('read-only closure hydration stays exempt without structural invalidation', () => {
+    const fp = seedFresh('topicA')
+    const genBefore = getClosureLoadGeneration('topicA')
+    const globalBefore = getGlobalBlockGeneration()
     ;(closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(
       markClosureReadOnly(
         withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [{ id: 'b-h' }] }, 'topicA')
       )
     )
-    expect(getContentGeneration('topicA')).toBe(contentBefore)
+    // Read-only hydration never invalidates: cache stays fresh and no
+    // structural generation advances.
+    expect(getFreshValidatedClosure('topicA', 'u1', fp)).not.toBeNull()
+    expect(getClosureLoadGeneration('topicA')).toBe(genBefore)
+    expect(getGlobalBlockGeneration()).toBe(globalBefore)
   })
 })

@@ -535,16 +535,15 @@ storeSyncService.setOptions({
  * - Trusted streaming content mirrors (`meta.closureContentMirror`, see
  *   `markClosureContentMirror` + `isExemptContentMirrorAction`) for exactly
  *   `messageBlocks/updateOneBlock` with content-only non-terminal patches
- *   advance ONLY the content revision (`bumpContentGeneration`) without
- *   clearing the structural cache and without emitting the semantic signal,
- *   so continuous same-block text deltas still apply to the store (UI filter
- *   and token estimate stay real-time) but never invalidate structure or
- *   valid and is still accepted; the response bodies never reach the ordinary
- *   store through closure hydration (that path is exited) — streaming bodies
- *   reach the UI context projection through the execution-owned overlay. New
- *   blocks/upserts/removes/type transitions/terminal status/unknown
- *   keys/unscoped actions fail closed to structural invalidation even with
- *   the marker. Cached `blocks` bytes are never authoritative fresh bodies.
+ *   are a closure-freshness no-op: the reducer already applied the patch
+ *   (store/UI filter and token estimate stay real-time) but the middleware
+ *   neither clears the structural cache nor emits the semantic signal, so
+ *   continuous same-block text deltas never invalidate structure. Streaming
+ *   bodies reach the UI context projection through the execution-owned
+ *   overlay. New blocks/upserts/removes/type transitions/terminal
+ *   status/unknown keys/unscoped actions fail closed to structural
+ *   invalidation even with the marker. Cached `blocks` bytes are never
+ *   authoritative fresh bodies.
  * - `messageBlocks/setMessageBlocksLoading|setMessageBlocksError` are not
  *   block-content mutations and never invalidate.
  * - `resident/jointPublishComplete`, `residentRegistry/*`, `retention/*` are
@@ -574,20 +573,12 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
     const type = typeof action?.type === 'string' ? (action.type as string) : ''
     if (!type) return result
     // Trusted streaming content mirror: content-only existing-block patch.
-    // Advances ONLY the content revision (no structural clear, no signal) so
-    // the store update stays real-time but structure is not invalidated.
+    // No-op for closure freshness: the store update is already applied (the
+    // reducer ran before the middleware), so UI/store subscribers still
+    // observe the new text in real time — but structure is never invalidated,
+    // no generation advances, and no signal is emitted (no refetch).
     // Central predicate owns the rule; unmarked/unknown still invalidates.
-    if (isExemptContentMirrorAction(action)) {
-      const topicIds = getClosureTopicIds(action)
-      if (topicIds !== null) {
-        for (const topicId of topicIds) {
-          closureCache.bumpContentGeneration(topicId)
-        }
-      } else {
-        closureCache.bumpAndInvalidateAll()
-      }
-      return result
-    }
+    if (isExemptContentMirrorAction(action)) return result
     // Explicit authoritative read-only hydration/publication never invalidates,
     // regardless of slice. Only read sites set this marker.
     if (isClosureReadOnly(action)) return result
