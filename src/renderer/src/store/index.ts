@@ -35,7 +35,13 @@ import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
-import { getClosureTopicIds, isClosureReadOnly, isExemptContentMirrorAction } from './closureOwnership'
+import {
+  AUTHORITY_HANDLED_ACTION_TYPES,
+  getClosureTopicIds,
+  isAuthorityHandled,
+  isClosureReadOnly,
+  isExemptContentMirrorAction
+} from './closureOwnership'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -582,6 +588,12 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
     // Explicit authoritative read-only hydration/publication never invalidates,
     // regardless of slice. Only read sites set this marker.
     if (isClosureReadOnly(action)) return result
+    // Same-ack authority-handled projection convergence: the ack's consume
+    // helper already bumped before this dispatch, so the middleware must not
+    // infer a second invalidation. Renderer-internal marker only; family-gated
+    // so a stray marker on any other type fails closed to inference below.
+    // Unmarked actions keep today's fail-closed behavior.
+    if (isAuthorityHandled(action) && AUTHORITY_HANDLED_ACTION_TYPES.has(type)) return result
     if (
       type === 'resident/jointPublishComplete' ||
       type === SEGMENT_CATALOG_PUBLISH_COMPLETE ||

@@ -17,6 +17,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { AssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
+import { CLOSURE_AUTHORITY_HANDLED_META_KEY } from '@renderer/store/closureOwnership'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import { messagesSlice } from '@renderer/store/newMessage'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -211,7 +212,11 @@ async function createHarness(
 describe('Terminal ordering: quiesce before terminal marking + DB-first atomic', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.updateMessageAndBlocks.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: { scope: 'all' as const }
+    })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
     mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
@@ -285,7 +290,11 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
 
     // Cleanup consumed once post-commit per the existing paradigm.
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledTimes(1)
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledWith({ affectedFileIds: [], remainingReferenceCounts: {} })
+    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledWith({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: { scope: 'all' }
+    })
 
     // Redux converges to the committed state only after success: both the
     // terminal block and the message are SUCCESS.
@@ -297,6 +306,44 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       status: AssistantMessageStatus.SUCCESS
     })
     emitSpy.mockRestore()
+  })
+
+  it('terminal success dispatches carry the authority-handled marker (same-ack dedup), streaming ones do not', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-text'] })
+    seedBlocks(store, [textBlock({ status: MessageBlockStatus.STREAMING, content: 'streaming' })])
+
+    // Capture every dispatched action alongside the commit boundary.
+    const seen: Array<{ type: string; marked: boolean; phase: 'pre' | 'post' }> = []
+    let commitDone = false
+    const origDispatch = store.dispatch.bind(store)
+    ;(store as any).dispatch = (action: any) => {
+      seen.push({
+        type: action?.type ?? '',
+        marked: action?.meta?.[CLOSURE_AUTHORITY_HANDLED_META_KEY] === true,
+        phase: commitDone ? 'post' : 'pre'
+      })
+      return origDispatch(action)
+    }
+    const { manager, callbacks } = await createHarness(store)
+    manager.activeBlockInfo = { id: 'b-text', type: MessageBlockType.MAIN_TEXT }
+    mocks.updateMessageAndBlocks.mockImplementation(async () => {
+      commitDone = true
+      return {
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        contextInvalidation: { scope: 'all' as const }
+      }
+    })
+
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+
+    const post = seen.filter((s) => s.phase === 'post' && s.type.startsWith('newMessages/'))
+    expect(post.length).toBeGreaterThan(0)
+    for (const s of post) expect(s.marked).toBe(true)
+    // Streaming/intermediate convergence stays on the fail-closed default.
+    for (const s of seen.filter((x) => x.phase === 'pre')) expect(s.marked).toBe(false)
   })
 
   it('quiesces before any terminal block marking or atomic persist (no pre-quiesce SUCCESS dispatch)', async () => {
@@ -455,7 +502,11 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
 
   it('saveFinalMessageAndBlocksAtomically forwards the attempt and consumes cleanup; rethrows on failure', async () => {
     const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
-    const cleanup = { affectedFileIds: ['f-1'], remainingReferenceCounts: { 'f-1': 0 } }
+    const cleanup = {
+      affectedFileIds: ['f-1'],
+      remainingReferenceCounts: { 'f-1': 0 },
+      contextInvalidation: { scope: 'all' as const }
+    }
 
     mocks.updateMessageAndBlocks.mockResolvedValueOnce(cleanup)
     const result = await saveFinalMessageAndBlocksAtomically(
@@ -501,7 +552,11 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
 describe('Naming lifecycle: post-persist only', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.updateMessageAndBlocks.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: { scope: 'all' as const }
+    })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
     mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
@@ -630,7 +685,11 @@ describe('Naming lifecycle: post-persist only', () => {
 describe('Detached execution: request-local state completes without Redux injection', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.updateMessageAndBlocks.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: { scope: 'all' as const }
+    })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
     mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
@@ -755,7 +814,11 @@ describe('Detached execution: request-local state completes without Redux inject
       topicId: TOPIC_ID,
       assistantMsgId: ASSISTANT_MSG_ID,
       saveUpdatesToDB: saveUpdatesForExec as any,
-      saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} }),
+      saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        contextInvalidation: { scope: 'all' as const }
+      }),
       assistant: assistantStub
     })
 
@@ -778,6 +841,23 @@ describe('Detached execution: request-local state completes without Redux inject
       (b: any) => b?.messageId === ASSISTANT_MSG_ID
     )
     expect(orphans).toEqual([])
+  })
+
+  it('detached success persists and returns the full ack without publishing a projection', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    const { callbacks, executionState } = await createDetachedHarness(store)
+
+    await callbacks.onLLMResponseCreated()
+    await callbacks.onTextStart()
+    await callbacks.onTextChunk('detached body')
+    await callbacks.onTextComplete('detached body')
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+    // Local execution fact converged; Redux never injected (nothing to mark).
+    expect(executionState.getMessage().status).toBe(AssistantMessageStatus.SUCCESS)
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
   })
 
   it('evicted mid-execution still completes local DB final without re-injection', async () => {
@@ -844,12 +924,157 @@ describe('Detached execution: request-local state completes without Redux inject
     expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
     expect(store.getState().messageBlocks.entities['b-evict']).toBeUndefined()
   })
+
+  it('evicted mid-execution (ordinary exec path): terminal token recorded before invalidation consume, no re-injection', async () => {
+    // Same eviction setup as above, but the terminal save goes through the
+    // ordinary-execution post-persist sequence (recordTerminalPersisted THEN
+    // consumeUpdateAckInvalidation) composed from the real production pieces:
+    // the real saveFinalMessageAndBlocksAtomically, a real overlay from the
+    // real registerExecutionOverlay, and the real consumeUpdateAckInvalidation.
+    // The production closure itself (saveFinalUpdatesAtomicallyForExec) is not
+    // exported, so no new architecture was dug for this test — the observable
+    // order (persist → terminal token → invalidation) and its witnesses are
+    // the claim under test.
+    const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
+    const { createAssistantExecutionState } = await import('@renderer/services/messageStreaming/executionState')
+    const {
+      registerExecutionOverlay,
+      routeKeyForExecutionOverlay,
+      captureTerminalReadWitness,
+      resetExecutionOverlayForTests
+    } = await import('@renderer/services/executionOverlayRegistry')
+    const { consumeUpdateAckInvalidation } = await import('@renderer/services/db/authorityInvalidation')
+    const { getGlobalBlockGeneration, subscribeClosureInvalidations, resetAllClosureStateForTests } = await import(
+      '@renderer/services/contextClosure'
+    )
+
+    resetExecutionOverlayForTests()
+    resetAllClosureStateForTests()
+
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-evict'] })
+    seedBlocks(store, [textBlock({ id: 'b-evict', content: 'partial', status: MessageBlockStatus.STREAMING })])
+    const executionState = createAssistantExecutionState(
+      store.getState().messages.entities[ASSISTANT_MSG_ID],
+      store.getState as any
+    )
+    const routeKey = routeKeyForExecutionOverlay(TOPIC_ID, null)
+    const execOverlay = registerExecutionOverlay({
+      topicId: TOPIC_ID,
+      route: null,
+      messageId: ASSISTANT_MSG_ID,
+      resendAttemptId: ATTEMPT,
+      snapshot: () => ({ blocks: executionState.snapshot().blocks })
+    })
+
+    const order: string[] = []
+    const origRecord = execOverlay.recordTerminalPersisted.bind(execOverlay)
+    execOverlay.recordTerminalPersisted = (status: string) => {
+      order.push('terminal-recorded')
+      return origRecord(status)
+    }
+    const unsub = subscribeClosureInvalidations(() => {
+      order.push('closure-invalidated')
+    })
+    const genBefore = getGlobalBlockGeneration()
+
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn(),
+      drainMirrors: vi.fn()
+    })
+    const callbacks = createCallbacks({
+      blockManager: manager,
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      topicId: TOPIC_ID,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      saveFinalUpdatesAtomically: async (mid: string, tid: string, mu: any, blocks: any[]) => {
+        const response = await saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT)
+        order.push('persisted')
+        const terminalStatus = (mu as { status?: unknown }).status
+        if (typeof terminalStatus === 'string') {
+          execOverlay.recordTerminalPersisted(terminalStatus)
+        }
+        order.push('consume')
+        consumeUpdateAckInvalidation(response as never)
+        return response
+      },
+      assistant: assistantStub
+    })
+    try {
+      manager.activeBlockInfo = { id: 'b-evict', type: MessageBlockType.MAIN_TEXT }
+      // Evict the topic projection mid-generation (disposable removal only).
+      store.dispatch(messagesSlice.actions.removeMessages({ topicId: TOPIC_ID, messageIds: [ASSISTANT_MSG_ID] }))
+      store.dispatch(messageBlocksSlice.actions.removeManyBlocks(['b-evict']))
+      expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+
+      // Local throttled chunk still advances the execution fact after eviction.
+      manager.smartBlockUpdate('b-evict', { content: 'evicted partial' }, MessageBlockType.MAIN_TEXT)
+      expect((executionState.getBlock('b-evict') as { content?: unknown })?.content).toBe('evicted partial')
+
+      await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+
+      // DB-first final committed with the closure attempt.
+      expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+      const [, updates] = mocks.updateMessageAndBlocks.mock.calls[0] as unknown as [
+        string,
+        Record<string, any>,
+        Array<Record<string, any>>,
+        string[],
+        string
+      ]
+      expect(updates.status).toBe(AssistantMessageStatus.SUCCESS)
+
+      // Ordering: persist → terminal token → consume → closure invalidation.
+      // The read witness for any later accepted closure is therefore always
+      // initiated after the terminal token.
+      const persistedAt = order.indexOf('persisted')
+      const terminalAt = order.indexOf('terminal-recorded')
+      const consumeAt = order.indexOf('consume')
+      const invalidatedAt = order.indexOf('closure-invalidated')
+      expect(persistedAt).toBeGreaterThanOrEqual(0)
+      expect(terminalAt).toBeGreaterThan(persistedAt)
+      expect(consumeAt).toBeGreaterThan(terminalAt)
+      expect(invalidatedAt).toBeGreaterThan(consumeAt)
+      expect(getGlobalBlockGeneration()).toBe(genBefore + 1)
+
+      // The terminal token is capturable as a read witness for this route.
+      const witness = captureTerminalReadWitness(routeKey)
+      expect(witness.routeKey).toBe(routeKey)
+      expect(witness.terminals.map((t) => t.messageId)).toContain(ASSISTANT_MSG_ID)
+      expect(witness.terminals.map((t) => t.executionId)).toContain(execOverlay.id)
+
+      // No re-injection after eviction.
+      expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+      expect(store.getState().messageBlocks.entities['b-evict']).toBeUndefined()
+    } finally {
+      unsub()
+      execOverlay.dispose()
+      resetExecutionOverlayForTests()
+    }
+  })
 })
 
 describe('BlockManager local-first: transition + patch order/dedup', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.updateMessageAndBlocks.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: { scope: 'all' as const }
+    })
   })
 
   const mkBlock = (id: string, content: string): MessageBlock =>

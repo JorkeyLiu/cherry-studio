@@ -11,6 +11,7 @@ function ack(overrides: Record<string, unknown> = {}) {
       messageId: 'm-1',
       createdMessageIds: ['m-1'],
       mutableMessageIds: ['m-1'],
+      contextInvalidation: { scope: 'all' },
       ...overrides
     }
   }

@@ -14,6 +14,7 @@ import {
   isExemptContentMirrorAction,
   markClosureContentMirror,
   markClosureReadOnly,
+  withAuthorityHandled,
   withClosureTopics
 } from '@renderer/store/closureOwnership'
 import messageBlocksReducer, { updateOneBlock, upsertOneBlock } from '@renderer/store/messageBlock'
@@ -225,6 +226,43 @@ describe('closure streaming content-mirror exemption', () => {
     )
     expect(getClosureLoadGeneration('topicA')).not.toBe(structuralBefore)
     expect(getFreshValidatedClosure('topicA', 'u1', fp)).toBeNull()
+  })
+
+  it('authority-handled same-ack projection actions emit no semantic signal (no second inference)', () => {
+    const fp = seedFresh('topicA')
+    const tokenBefore = getClosureSemanticToken('topicA', null)
+    const globalBefore = getGlobalBlockGeneration()
+    let notifications = 0
+    const unsubscribe = subscribeClosureInvalidations(() => {
+      notifications += 1
+    })
+    try {
+      // The ack owner already consumed the effect (that emit happened before
+      // these dispatches); these same-ack projection commits must not infer a
+      // second invalidation.
+      const marked = [
+        withAuthorityHandled(
+          withClosureTopics({ type: 'newMessages/applyAppendAcknowledgment', payload: { topicId: 'topicA' } }, 'topicA')
+        ),
+        withAuthorityHandled(withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [] }, 'topicA'))
+      ]
+      for (const action of marked) {
+        ;(closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(action)
+      }
+      expect(getFreshValidatedClosure('topicA', 'u1', fp)).not.toBeNull()
+      expect(getClosureSemanticToken('topicA', null)).toBe(tokenBefore)
+      expect(getGlobalBlockGeneration()).toBe(globalBefore)
+      expect(notifications).toBe(0)
+
+      // The same action WITHOUT the marker keeps today's fail-closed inference.
+      ;(closureInvalidationMiddleware as any)({} as any)((a: unknown) => a)(
+        withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [] }, 'topicA')
+      )
+      expect(getFreshValidatedClosure('topicA', 'u1', fp)).toBeNull()
+      expect(notifications).toBeGreaterThan(0)
+    } finally {
+      unsubscribe()
+    }
   })
 
   it('anchor mismatch still fails closed after exempt mirrors', () => {

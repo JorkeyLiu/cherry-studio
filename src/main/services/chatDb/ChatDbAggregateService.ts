@@ -111,7 +111,8 @@ import type {
   StreamWriteDiagnostics,
   TopicBranchWire,
   TopicReferenceWire,
-  TopicWire
+  TopicWire,
+  UpdateMessageAndBlocksResponse
 } from '@shared/chatDb'
 import type { UpdateMessageResult, UpdateMessageUsageResult, UpdateMessageUsageSource } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
@@ -7699,13 +7700,18 @@ export class ChatDbAggregateService {
         // Main-issued creation acknowledgment. The created flag is derived
         // inside the same root transaction above (a throw publishes nothing);
         // the addressed route and row identity echo the authoritative stamp.
+        // The conservative context-invalidation effect is stamped only on this
+        // success path (including the patch-existing no-op below): a
+        // notification, never an exactly-once proof of a true change.
+        // Rollback/conflict/failure return no success metadata.
         const createdMessageIds = txResult.created ? [messageData.id] : []
         return {
           topicId,
           branchId: route,
           messageId: messageData.id,
           createdMessageIds,
-          mutableMessageIds: [...createdMessageIds]
+          mutableMessageIds: [...createdMessageIds],
+          contextInvalidation: { scope: 'all' as const }
         }
       } catch (error) {
         outcomeOk = false
@@ -8045,7 +8051,7 @@ export class ChatDbAggregateService {
    *   topic ownership (LOCK-004). Blocks whose parent message does not
    *   belong to the requested topic are rejected atomically.
    * - File references are collected from owned blocks only before cascade.
-   * - Returns FileCleanupResult for caller-side post-commit consumption.
+   * - Returns UpdateMessageAndBlocksResponse for caller-side post-commit consumption.
    */
   updateMessageAndBlocks(
     topicId: string,
@@ -8053,7 +8059,7 @@ export class ChatDbAggregateService {
     blocksToUpdateJson: JsonObject[],
     blockIdsToDelete: string[] = [],
     options?: { resendAttemptId?: string; branchId?: string | null }
-  ): ChatDbResult<FileCleanupResult> {
+  ): ChatDbResult<UpdateMessageAndBlocksResponse> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(options?.branchId)
       const messageId = messageUpdatesJson.id as string
@@ -8088,7 +8094,7 @@ export class ChatDbAggregateService {
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
 
-      let txResult: FileCleanupResult
+      let txResult: UpdateMessageAndBlocksResponse
       try {
         txResult = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -8114,8 +8120,9 @@ export class ChatDbAggregateService {
           // Check message exists
           const existing = repos.messages.getInTopic(messageId, topicId)
           if (!existing.found) {
-            // No-op: follow Dexie-compatible semantics — empty cleanup
-            return { affectedFileIds: [], remainingReferenceCounts: {} }
+            // No-op: follow Dexie-compatible semantics — empty cleanup with a
+            // conservative invalidation notification (not a proof of change).
+            return { affectedFileIds: [], remainingReferenceCounts: {}, contextInvalidation: { scope: 'all' as const } }
           }
 
           // Phase 1: Resolve every block through its parent message and verify ownership.
@@ -8491,7 +8498,9 @@ export class ChatDbAggregateService {
             })
             if (issue.issued) syncNotify = true
           }
-          return buildFileCleanupResult(repos, affectedFileIds)
+          // Authority ack effect is stamped only on this success path;
+          // rollback/conflict/failure throw above and carry no success metadata.
+          return { ...buildFileCleanupResult(repos, affectedFileIds), contextInvalidation: { scope: 'all' as const } }
         })
       } catch (e) {
         this.recordSyncTxFailure('updateMessageAndBlocks', syncCtx, e)

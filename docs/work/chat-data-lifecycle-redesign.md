@@ -428,3 +428,69 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
    草稿（`executionState.ts` 构造即拷贝），UI 侧消息/块实体引用变化即可靠失效；
    file 缓存仍沿用既有 `fileCacheKey` 契约，未新增外部保证；overlay 高频 bump
    下全 filter 每轮仍全量跑，内存/耗时无实测数。
+
+## 14 续补记：authority mutation 回执驱动的 context 失效（最小切片；提案正文仍不改）
+
+- 范围（仅两条命令）：`chatdb:append-message`（普通 send 的 user/assistant stub、
+  多模型 stub 批量、IM channel append）与 `chatdb:update-message-and-blocks`
+  （普通 streaming 终态落盘；顺带覆盖直接编辑的同一命令调用者）。跨 Main /
+  shared / preload / dataSource / renderer 同一契约，但**未**改其他
+  FileCleanup 家族通道、**未**新增 IPC channel、**未**新增持久 schema、**未**
+  引入 revision/event bus/新 sync 协议、**未**改 provider/request 语义、**未**
+  触碰 ADR 锁定的产品规则。
+- 契约（纯非版本 metadata）：`ContextInvalidationEffect = { scope: 'all' }`。
+  `AppendMessageResponse` 增加 **required** `contextInvalidation`；
+  新增 `UpdateMessageAndBlocksResponse extends FileCleanupResult` 并带同一
+  required 字段（仅该 channel 用独立 validator，其余 FileCleanup 通道照旧，
+  只显式拒绝这一新字段）。`scope: 'all'` 的语义是**保守的上下文缓存失效通知**：
+  跨分支/引用的受影响范围尚未精确计算，因此所有已接受的 closure 都可能陈旧，
+  renderer 必须重新向 Main 读取；它**不删除任何数据**、**不证明真的发生了变化**、
+  **不承诺每条通知恰对应一次真实变更**。
+- Main 口径：只在根事务成功结束后返回 envelope（`ChatDbAggregateService`
+  append / update 成功返回），rollback / conflict / validation failure 一律无成功
+  metadata（失败 envelope 不含 `value`）。missing-row no-op 也保守返回 `all`
+  （通知而非证明）。`updateMessageAndBlocks` 返回类型为
+  `ChatDbResult<UpdateMessageAndBlocksResponse>`。
+- 严格校验：append 与 update 的 result validator 都要求该字段存在，且拒绝
+  missing / malformed / unknown scope / unknown keys；request 形状不变。
+- 回执消费位置（**恰一次**，且必须在权威成功后、任何本地 route-currency /
+  loaded / projection guard 之前）：
+  - append：`SqliteMessageDataSource.appendMessage` 在 `unwrap` 成功之后、
+    `dispatchTopicUpdatedAt` 与任何 publication guard 之前消费一次
+    （`consumeAppendAckInvalidation`）。所有生产 append 都经过这一个 typed
+    adapter 消费点，thunk **不再**重复消费。
+  - update：dataSource **默认不消费**（显式延迟给 ack 拥有者），由
+    `saveFinalUpdatesAtomicallyForExec`（普通 execution，先
+    `recordTerminalPersisted` 后消费）与 IM channel 终态 wrapper、以及
+    `updateMessageAndBlocksThunk` / `removeBlocksThunk` / `initiateTranslationThunk`
+    各自在权威成功后消费。Main 失败（`unwrap` 抛出或结构化 reject）**不消费**。
+  - 顺序保证：普通终态的 closure 读取见证一定在 terminal token 之后发起
+    （record → consume → 任何 projection dispatch 的既有顺序不变）。
+- 投影侧去重（renderer 内部处理状态，非 Main authority）：新增单一
+  `closureInvalidationHandled` meta 标记 + `AUTHORITY_HANDLED_ACTION_TYPES`
+  白名单，middleware 只对「同一 ack 之后的收敛投影」跳过**推断式**失效
+  （strict 的 content-mirror 豁免与 `closureReadOnly` 读取水合规则原样保留）。
+  覆盖的动作家族：`applyAppendAcknowledgment` / `applyAppendAcknowledgments`
+  与同一 ack 之后的 block upsert、终态 success 收敛的
+  `updateMessage` / `upsertManyBlocks` / `removeManyBlocks` / `updateOneBlock`、
+  以及 DB-first 直接编辑 thunk 的同 ack 提交。未标记/未迁移/流式中间投影
+  继续 fail-closed 推断；`setTopicLoading` 之类 loading 标记不触发任何新全量失效。
+- 覆盖边界（诚实）：IM channel 的 append/终态虽已消费回执，但该通道当前无
+  生产 caller（window 未接线），不宣称「所有 channel 通用已迁移」。remote
+  apply / multi-window push / import 等路径仍走既有推断式失效（本切片 bypass），
+  未新增版本号或事件推送覆盖。
+- 已知成本与局限：`scope: 'all'` 的全域失效频率高于未来的 scoped 方案（明确
+  成本，不是性能承诺）；受影响范围未证明时不用「仅 owner」冒充全覆盖。去重只
+  覆盖「同一 ack 的投影收敛」，不承诺跨事务/多阶段恰一次；user/assistant stub
+  批量仍按各自 ack 保守各 bump 一次（不为「恰一次」追加全局去重 id 状态）。
+  分支/引用受影响 topic 的精确范围计算仍是下一目标。
+- 测试：shared 契约（append/update 成功必需 metadata、missing/malformed/
+  unknown scope/unknown keys 拒绝、失败 envelope 无 metadata、其他 FileCleanup
+  通道拒绝新字段且原较宽形状不漂移）；Main aggregate/ack（成功 effect、
+  missing-row no-op、conflict 无成功 metadata）；renderer helper（
+  well-formed / malformed 保守 bump / 非 ack 不 bump）；dataSource（append 成功
+  恰好消费一次且与投影接受无关、失败不消费、update 默认不消费）；middleware
+  与 content-mirror（同 ack 标记不产生第二次 semantic 信号、未标记仍推断、
+  非白名单家族 fail-closed、scope-all 清空各 route）；append publication
+  fail-closed（echo 不匹配不发布）；terminal success 投影均带标记（流式不标记）；
+  既有 overlay registry / read receipt / send handover / lifecycle 回归保持通过。 审阅补测（本切片内关闭）：F1——两条迁移通道各一条 IPC 级用例，aggregate 回 ok:true 但缺 `contextInvalidation` 的回执经真实 handler 路径被 `validateChatDbResult` 拒绝，返回无 value 的有效 `STORAGE_ERROR` envelope；F2——`evicted mid-execution` 增 ordinary-exec 路径用例，以真实 `saveFinalMessageAndBlocksAtomically` + 真实 overlay + 真实 consume 按生产顺序 （persist → `recordTerminalPersisted` → consume → projection dispatch 前）驱动真实 `onComplete`，断言 token 先于失效、可捕获 read witness、无重注；生产闭包本身未导出，故未为测试新增架构接缝。

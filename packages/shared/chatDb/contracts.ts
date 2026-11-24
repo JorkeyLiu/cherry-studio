@@ -352,8 +352,43 @@ const APPEND_MESSAGE_VALUE_KEYS = new Set([
   'branchId',
   'messageId',
   'createdMessageIds',
-  'mutableMessageIds'
+  'mutableMessageIds',
+  'contextInvalidation'
 ])
+
+const CONTEXT_INVALIDATION_EFFECT_KEYS = new Set(['scope'])
+
+/**
+ * Conservative context-invalidation effect validation (shared by the two
+ * authority-mutation ack channels only).
+ *
+ * Closed-set: exactly `{ scope: 'all' }`. Missing, malformed, unknown-scope,
+ * or unknown-key payloads reject. Request shape is unchanged.
+ */
+function validateContextInvalidationEffect(value: unknown, path: string, channel: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected ContextInvalidationEffect object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] ContextInvalidationEffect must be a plain object`)
+  }
+  const v = value as Record<string, unknown>
+  for (const key of Object.keys(v)) {
+    if (!CONTEXT_INVALIDATION_EFFECT_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in ContextInvalidationEffect: "${key}"`)
+    }
+  }
+  if (!('scope' in v)) {
+    throw new ValidationError(`${path}.scope`, `[${channel}] Missing required field "scope"`)
+  }
+  if (v.scope !== 'all') {
+    throw new ValidationError(
+      `${path}.scope`,
+      `[${channel}] Unknown contextInvalidation scope: ${JSON.stringify(v.scope)}`
+    )
+  }
+}
 
 /**
  * Main-issued creation acknowledgment result validation
@@ -362,6 +397,9 @@ const APPEND_MESSAGE_VALUE_KEYS = new Set([
  * The addressed route echoes normalized (null = main route); the delta is
  * limited to actual new owned row(s): at most one created id, equal to
  * `messageId` when present, with the capability delta a subset of created.
+ * `contextInvalidation` is required on every success (including the
+ * patch-existing no-op): a conservative notification, not an exactly-once
+ * proof of a true change.
  */
 function validateAppendMessageResult(result: unknown): void {
   const channel = 'chatdb:append-message'
@@ -405,6 +443,13 @@ function validateAppendMessageResult(result: unknown): void {
         throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be a created id`)
       }
     }
+    if (!('contextInvalidation' in v)) {
+      throw new ValidationError(
+        'result.value.contextInvalidation',
+        `[${channel}] Missing required field "contextInvalidation"`
+      )
+    }
+    validateContextInvalidationEffect(v.contextInvalidation, 'result.value.contextInvalidation', channel)
   }
 }
 
@@ -864,7 +909,7 @@ const updateMessageAndBlocksContract: ChatDbContract = {
       }
     }
   },
-  validateResult: fileCleanupResultValidator('chatdb:update-message-and-blocks')
+  validateResult: validateUpdateMessageAndBlocksResult
 }
 
 const deleteMessageContract: ChatDbContract = {
@@ -1759,7 +1804,15 @@ const listTrashTopicsContract: ChatDbContract = {
   }
 }
 
-/** Result validator for FileCleanupResult-shaped responses. */
+/**
+ * Result validator for FileCleanupResult-shaped responses.
+ *
+ * Each channel keeps its original shape acceptance (wider payloads such as
+ * `deletedTopicIds` still pass); the ONLY new rejection is the authority
+ * context-invalidation effect, which belongs exclusively to the two migrated
+ * ack channels below. This keeps the shared family unwidened with zero
+ * behavior drift for unmigrated paths.
+ */
 function fileCleanupResultValidator(channel: string): (result: unknown) => void {
   return (result: unknown): void => {
     validateResultEnvelope(result, channel)
@@ -1772,6 +1825,12 @@ function fileCleanupResultValidator(channel: string): (result: unknown) => void 
         )
       }
       const v = obj.value as Record<string, unknown>
+      if ('contextInvalidation' in v) {
+        throw new ValidationError(
+          'result.value.contextInvalidation',
+          `[${channel}] Unknown key in success value: "contextInvalidation"`
+        )
+      }
       validateStringArray(v.affectedFileIds, `result.value.affectedFileIds`)
       validateJsonObject(v.remainingReferenceCounts, `result.value.remainingReferenceCounts`)
       const counts = v.remainingReferenceCounts as Record<string, unknown>
@@ -1788,6 +1847,62 @@ function fileCleanupResultValidator(channel: string): (result: unknown) => void 
   }
 }
 
+/** Closed-set keys for the update-message-and-blocks ack (cleanup + effect). */
+const UPDATE_MESSAGE_AND_BLOCKS_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'contextInvalidation'
+])
+
+/**
+ * Result validator for `chatdb:update-message-and-blocks` ONLY.
+ *
+ * Same file-cleanup payload as the shared family plus a required
+ * `contextInvalidation: { scope: 'all' }`. Unknown top-level keys, missing /
+ * malformed effects, and unknown scopes reject. Other FileCleanup channels
+ * keep the shared validator (unchanged behavior, new field rejected there).
+ */
+function validateUpdateMessageAndBlocksResult(result: unknown): void {
+  const channel = 'chatdb:update-message-and-blocks'
+  validateResultEnvelope(result, channel)
+  const obj = result as Record<string, unknown>
+  if (obj.ok === true) {
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', `[${channel}] Expected UpdateMessageAndBlocksResponse object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!UPDATE_MESSAGE_AND_BLOCKS_VALUE_KEYS.has(key)) {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+      }
+    }
+    validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+    validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+    const counts = v.remainingReferenceCounts as Record<string, unknown>
+    for (const key of Object.keys(counts)) {
+      if (key.length === 0) {
+        throw new ValidationError(
+          'result.value.remainingReferenceCounts',
+          `[${channel}] remainingReferenceCounts key must be a non-empty string`
+        )
+      }
+      validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+    }
+    if (!('contextInvalidation' in v)) {
+      throw new ValidationError(
+        'result.value.contextInvalidation',
+        `[${channel}] Missing required field "contextInvalidation"`
+      )
+    }
+    validateContextInvalidationEffect(v.contextInvalidation, 'result.value.contextInvalidation', channel)
+  }
+}
+
 /** Result validator for deletion responses that include exact deletedTopicIds. */
 function deletionCleanupResultValidator(channel: string): (result: unknown) => void {
   return (result: unknown): void => {
@@ -1801,6 +1916,12 @@ function deletionCleanupResultValidator(channel: string): (result: unknown) => v
         )
       }
       const v = obj.value as Record<string, unknown>
+      if ('contextInvalidation' in v) {
+        throw new ValidationError(
+          'result.value.contextInvalidation',
+          `[${channel}] Unknown key in success value: "contextInvalidation"`
+        )
+      }
       validateStringArray(v.affectedFileIds, `result.value.affectedFileIds`)
       validateJsonObject(v.remainingReferenceCounts, `result.value.remainingReferenceCounts`)
       const counts = v.remainingReferenceCounts as Record<string, unknown>

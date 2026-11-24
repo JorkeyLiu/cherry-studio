@@ -1118,6 +1118,103 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
+  // Authority-ack result validation (slice: append-message + update-message-and-blocks)
+  //
+  // Each migrated channel: an aggregate result with ok:true but a MISSING
+  // contextInvalidation effect must fail the shared validateChatDbResult
+  // check inside the REAL handler path (ipc.ts result-validation step), so
+  // the handler returns a valid STORAGE_ERROR envelope with no value —
+  // never the invalid success. The aggregate method itself is stubbed to
+  // simulate the invalid envelope; request validation, dispatch, and result
+  // validation all run through production code.
+  // =========================================================================
+
+  it('append-message: ok:true aggregate result missing contextInvalidation returns STORAGE_ERROR without value', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    const { validateChatDbResult } = await import('@shared/chatDb')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'appendMessage')
+    try {
+      // ok:true but the required ack effect is absent.
+      spy.mockReturnValueOnce({
+        topicId: 't-ack-append',
+        branchId: null,
+        messageId: 'm-ack-1',
+        createdMessageIds: ['m-ack-1'],
+        mutableMessageIds: ['m-ack-1']
+      } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-ack-append',
+          message: { id: 'm-ack-1', topicId: 't-ack-append', role: 'user', content: 'hi' },
+          blocks: []
+        }
+      )
+
+      expect(result.ok).toBe(false)
+      if (result.ok === false) {
+        expect(result.error.code).toBe('STORAGE_ERROR')
+        expect(result.error.retryable).toBe(false)
+        expect('value' in result).toBe(false)
+      }
+      // The fallback envelope itself is well-formed for this channel.
+      expect(() => validateChatDbResult('chatdb:append-message', result)).not.toThrow()
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  it('update-message-and-blocks: ok:true aggregate result missing contextInvalidation returns STORAGE_ERROR without value', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    const { validateChatDbResult } = await import('@shared/chatDb')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'updateMessageAndBlocks')
+    try {
+      // ok:true but the required ack effect is absent (cleanup fields only).
+      spy.mockReturnValueOnce({
+        affectedFileIds: [],
+        remainingReferenceCounts: {}
+      } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_UpdateMessageAndBlocks)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-ack-update',
+          messageUpdates: { id: 'm-ack-1' },
+          blocksToUpdate: []
+        }
+      )
+
+      expect(result.ok).toBe(false)
+      if (result.ok === false) {
+        expect(result.error.code).toBe('STORAGE_ERROR')
+        expect(result.error.retryable).toBe(false)
+        expect('value' in result).toBe(false)
+      }
+      // The fallback envelope itself is well-formed for this channel.
+      expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  // =========================================================================
   // All 68 commands preserve 68-registration invariant
   // =========================================================================
 

@@ -19,7 +19,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // --- Mocks ----------------------------------------------------------------
 
 const { mocks } = vi.hoisted(() => {
-  const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} }
+  const emptyCleanup = {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    contextInvalidation: { scope: 'all' as const }
+  }
   return {
     mocks: {
       emptyCleanup,
@@ -143,6 +147,8 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 }))
 
 // Import AFTER mocks
+import { getGlobalBlockGeneration, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
+import { CLOSURE_AUTHORITY_HANDLED_META_KEY } from '@renderer/store/closureOwnership'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 
 // --- Test data ------------------------------------------------------------
@@ -354,7 +360,11 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
   })
 
   it('returns FileCleanupResult to callers', async () => {
-    const cleanupResult = { affectedFileIds: ['file-1'], remainingReferenceCounts: { 'file-1': 0 } }
+    const cleanupResult = {
+      affectedFileIds: ['file-1'],
+      remainingReferenceCounts: { 'file-1': 0 },
+      contextInvalidation: { scope: 'all' as const }
+    }
     mocks.dbUpdateMessageAndBlocks.mockResolvedValue(cleanupResult)
 
     const result = await updateMessageAndBlocksThunk(
@@ -393,7 +403,11 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
   // --- LOCK-005: Combined patch + block upsert + blockIdsToDelete + cleanup rollback ---
 
   it('sends combined message patch + block upserts + blockIdsToDelete in single atomic call', async () => {
-    const cleanupResult = { affectedFileIds: ['file-1'], remainingReferenceCounts: { 'file-1': 0 } }
+    const cleanupResult = {
+      affectedFileIds: ['file-1'],
+      remainingReferenceCounts: { 'file-1': 0 },
+      contextInvalidation: { scope: 'all' as const }
+    }
     mocks.dbUpdateMessageAndBlocks.mockResolvedValue(cleanupResult)
 
     const messageUpdates = {
@@ -442,6 +456,43 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
     expect(mocks.updateMessageAction).not.toHaveBeenCalled()
     expect(mocks.upsertManyBlocksAction).not.toHaveBeenCalled()
     expect(mocks.removeManyBlocksAction).not.toHaveBeenCalled()
+  })
+
+  it('passes the authority effect through and marks same-ack commits handled', async () => {
+    resetAllClosureStateForTests()
+    const before = getGlobalBlockGeneration()
+    const messageUpdates = { id: messageId, updatedAt: '2026-07-29T00:00:00.000Z' }
+    const blocks = [makeBlock('block-1', 'content')]
+
+    const result = await updateMessageAndBlocksThunk(topicId, messageUpdates, blocks, ['gone-1'])(dispatch)
+
+    // Full ack (cleanup + effect) is returned; the effect is consumed once.
+    expect((result as any).contextInvalidation).toEqual({ scope: 'all' })
+    expect(getGlobalBlockGeneration()).toBe(before + 1)
+    // Same-ack DB-first commits carry the handled marker; the timestamp
+    // touch is outside the handled family and stays unmarked.
+    const handled: string[] = []
+    for (const [action] of dispatch.mock.calls as Array<[any]>) {
+      if (['updateMessage', 'upsertManyBlocks', 'removeManyBlocks'].includes(action?.type)) {
+        expect(action?.meta?.[CLOSURE_AUTHORITY_HANDLED_META_KEY]).toBe(true)
+        handled.push(action.type)
+      } else {
+        expect(action?.meta?.[CLOSURE_AUTHORITY_HANDLED_META_KEY]).not.toBe(true)
+      }
+    }
+    expect(handled.sort()).toEqual(['removeManyBlocks', 'updateMessage', 'upsertManyBlocks'])
+  })
+
+  it('consumes nothing when Main rejects (no bump, no dispatch)', async () => {
+    resetAllClosureStateForTests()
+    const before = getGlobalBlockGeneration()
+    mocks.dbUpdateMessageAndBlocks.mockRejectedValue(new Error('CONFLICT_ERROR'))
+
+    await expect(updateMessageAndBlocksThunk(topicId, { id: messageId }, [])(dispatch)).rejects.toThrow(
+      'CONFLICT_ERROR'
+    )
+    expect(getGlobalBlockGeneration()).toBe(before)
+    expect(dispatch).not.toHaveBeenCalled()
   })
 
   it('includes usage in combined message patch when caller provides it', async () => {

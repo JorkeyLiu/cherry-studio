@@ -415,6 +415,32 @@ describe('sendMessage append acknowledgment publication', () => {
     expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
   })
 
+  it(
+    'ack-echo mismatch in this route publishes nothing even when the Main ack is otherwise valid',
+    {
+      timeout: 60_000
+    },
+    async () => {
+      mocks.appendMessage.mockImplementation(((topicId: string) => ({
+        // Wrong message identity echo: the guarded publication must fail closed.
+        topicId,
+        branchId: null,
+        messageId: 'ghost',
+        createdMessageIds: ['ghost'],
+        mutableMessageIds: ['ghost'],
+        contextInvalidation: { scope: 'all' }
+      })) as never)
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+
+      await sendMessage(createUserMessage(), [], makeAssistant() as never, 't-1')(dispatch, () => storeState as never)
+
+      expect(mocks.applyAppendAck).not.toHaveBeenCalled()
+      expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+      expect(mocks.queueAdd).not.toHaveBeenCalled()
+    }
+  )
+
   it('multi-model stubs publish one plural commit under the captured route', { timeout: 60_000 }, async () => {
     const mentionA = { id: 'mention-a', provider: 'p', name: 'A', group: 'g' }
     const mentionB = { id: 'mention-b', provider: 'p', name: 'B', group: 'g' }

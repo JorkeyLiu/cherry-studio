@@ -131,7 +131,8 @@ describe('appendMessage creation acknowledgment', () => {
       branchId: null,
       messageId: 'm0',
       createdMessageIds: ['m0'],
-      mutableMessageIds: ['m0']
+      mutableMessageIds: ['m0'],
+      contextInvalidation: { scope: 'all' }
     })
     expect(branchOf(sqlite, 'm0')).toBeNull()
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
@@ -162,7 +163,8 @@ describe('appendMessage creation acknowledgment', () => {
       branchId: b1,
       messageId: 'c0',
       createdMessageIds: ['c0'],
-      mutableMessageIds: ['c0']
+      mutableMessageIds: ['c0'],
+      contextInvalidation: { scope: 'all' }
     })
     expect(branchOf(sqlite, 'c0')).toBe(b1)
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
@@ -179,7 +181,8 @@ describe('appendMessage creation acknowledgment', () => {
       branchId: null,
       messageId: 'm0',
       createdMessageIds: [],
-      mutableMessageIds: []
+      mutableMessageIds: [],
+      contextInvalidation: { scope: 'all' }
     })
     const row = sqlite.prepare('SELECT content AS c FROM messages WHERE id=?').get('m0') as { c: string }
     expect(row.c).toBe('patched')
@@ -222,6 +225,7 @@ describe('appendMessage creation acknowledgment', () => {
     expect(res.value.createdMessageIds).toEqual(['m2'])
     expect(res.value.mutableMessageIds).toEqual(['m2'])
     expect(res.value.branchId).toBeNull()
+    expect(res.value.contextInvalidation).toEqual({ scope: 'all' })
     expect(branchOf(sqlite, 'm2')).toBeNull()
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
   })
@@ -240,6 +244,8 @@ describe('appendMessage creation acknowledgment', () => {
     )
     expectFailure(res)
     if (!isFailure(res)) throw new Error('expected failure')
+    expect(res).not.toHaveProperty('value')
+    expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
     expect(sqlite.prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).toEqual({ c: 0 })
     expect(sqlite.prepare('SELECT COUNT(*) AS c FROM message_blocks').get() as { c: number }).toEqual({ c: 0 })
   })

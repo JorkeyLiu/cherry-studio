@@ -28,6 +28,7 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { pushBranchCreateAction, pushBranchMoveAction } from '@renderer/services/branchOperationHistory'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
+import { consumeUpdateAckInvalidation } from '@renderer/services/db/authorityInvalidation'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
@@ -90,6 +91,7 @@ import type {
   SemanticModelSnapshot,
   SemanticResendResponse,
   StreamWriteDiagnostics,
+  UpdateMessageAndBlocksResponse,
   UpdateMessageUsageSource
 } from '@shared/chatDb'
 import type { HistoryReferenceMeta } from '@shared/chatDb'
@@ -97,7 +99,12 @@ import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
 
-import { markClosureContentMirror, markClosureReadOnly, withClosureTopics } from '../closureOwnership'
+import {
+  markClosureContentMirror,
+  markClosureReadOnly,
+  withAuthorityHandled,
+  withClosureTopics
+} from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
@@ -291,12 +298,17 @@ export const saveFinalMessageAndBlocksAtomically = async (
    * transaction as the roster rewrite, so no absorbed row is orphaned.
    */
   blockIdsToDelete: readonly string[] = []
-): Promise<FileCleanupResult> => {
+): Promise<UpdateMessageAndBlocksResponse> => {
   try {
     // An explicitly pinned null addresses the main route and is never
     // re-resolved; only an absent route falls back to the active route.
     const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
-    const cleanup = await dbService.updateMessageAndBlocks(
+    // Deferred invalidation consumption: this wrapper returns the full ack but
+    // never consumes its context-invalidation effect. Each caller consumes
+    // explicitly after ITS authority-success point — the ordinary terminal
+    // execution only AFTER recordTerminalPersisted — so the ack is consumed
+    // exactly once and the closure read witness is always post-terminal-token.
+    const response = await dbService.updateMessageAndBlocks(
       topicId,
       { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
       blocksToUpdate,
@@ -304,8 +316,8 @@ export const saveFinalMessageAndBlocksAtomically = async (
       resendAttemptId,
       route
     )
-    await consumeFileCleanupResult(cleanup)
-    return cleanup
+    await consumeFileCleanupResult(response)
+    return response
   } catch (error) {
     logger.error(`[DB Save Final] Failed atomic final persist for message ${messageId}:`, error as Error)
     throw error
@@ -315,6 +327,16 @@ export const saveFinalMessageAndBlocksAtomically = async (
 // Removed persistAgentExchange and createPersistedMessagePayload functions
 // These are no longer needed since messages are saved immediately via appendMessage
 // and updated during streaming via updateMessageAndBlocks
+
+/**
+ * Echo fields the publication guards read. A full AppendMessageResponse is
+ * always assignable; a locally-built synthetic echo (resend path, never a
+ * consumed Main ack) carries exactly these fields and nothing more.
+ */
+type AppendEchoFields = Pick<
+  AppendMessageResponse,
+  'topicId' | 'branchId' | 'messageId' | 'createdMessageIds' | 'mutableMessageIds'
+>
 
 /**
  * Per-ack Main echo validation shared by the singular and plural publish
@@ -328,7 +350,7 @@ export const saveFinalMessageAndBlocksAtomically = async (
 const toValidAppendEntry = (
   topicId: string,
   message: Message,
-  ack: AppendMessageResponse | null | undefined,
+  ack: AppendEchoFields | null | undefined,
   capturedRoute: string | null
 ): { message: Message; createdMessageIds: string[]; mutableMessageIds: string[] } | null => {
   try {
@@ -386,29 +408,36 @@ const isAppendRouteCurrencyValid = (
  * a route switch — including away-and-back — never injects rows or
  * capability into the unrelated currently displayed route). Owned DB
  * execution already committed; only the projection publication is gated.
+ *
+ * `ackEffectConsumed` must be true ONLY when this exact ack already passed
+ * through the data-source consume helper (ordinary sends, stubs, channel
+ * appends — all flow through the single typed-adapter consume point BEFORE
+ * publication). Synthetic locally-built acks (e.g. the resend per-message
+ * publication) must leave it false: this same-ack projection commit is then
+ * NOT exempt from closure invalidation inference.
  */
 const publishAppendAck = (
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
   message: Message,
-  ack: AppendMessageResponse | null | undefined,
+  ack: AppendEchoFields | null | undefined,
   capturedRoute: string | null,
-  capturedGeneration: number
+  capturedGeneration: number,
+  ackEffectConsumed?: boolean
 ): boolean => {
   try {
     const entry = toValidAppendEntry(topicId, message, ack, capturedRoute)
     if (!entry) return false
     if (!isAppendRouteCurrencyValid(getState, topicId, capturedRoute, capturedGeneration)) return false
-    dispatch(
-      newMessagesActions.applyAppendAcknowledgment({
-        topicId,
-        route: capturedRoute,
-        message: entry.message,
-        createdMessageIds: entry.createdMessageIds,
-        mutableMessageIds: entry.mutableMessageIds
-      })
-    )
+    const commitAction = newMessagesActions.applyAppendAcknowledgment({
+      topicId,
+      route: capturedRoute,
+      message: entry.message,
+      createdMessageIds: entry.createdMessageIds,
+      mutableMessageIds: entry.mutableMessageIds
+    })
+    dispatch(ackEffectConsumed === true ? withAuthorityHandled(commitAction) : commitAction)
     return true
   } catch {
     return false
@@ -435,12 +464,17 @@ const publishConfirmedAppendAcks = (
   try {
     if (!Array.isArray(confirmed) || confirmed.length === 0) return false
     if (!isAppendRouteCurrencyValid(getState, topicId, capturedRoute, capturedGeneration)) return false
+    // Every collected entry passed per-ack echo validation on a real Main ack
+    // that the data source already consumed at authority-success time, so
+    // this same-ack batch commit carries the handled marker.
     dispatch(
-      newMessagesActions.applyAppendAcknowledgments({
-        topicId,
-        route: capturedRoute,
-        entries: confirmed
-      })
+      withAuthorityHandled(
+        newMessagesActions.applyAppendAcknowledgments({
+          topicId,
+          route: capturedRoute,
+          entries: confirmed
+        })
+      )
     )
     return true
   } catch {
@@ -738,8 +772,8 @@ const fetchAndProcessAssistantResponseImpl = async (
     messageUpdates: Partial<Message>,
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete?: readonly string[]
-  ): Promise<FileCleanupResult> => {
-    const cleanup = await saveFinalMessageAndBlocksAtomically(
+  ): Promise<UpdateMessageAndBlocksResponse> => {
+    const response = await saveFinalMessageAndBlocksAtomically(
       execTopicId,
       messageId,
       messageUpdates,
@@ -757,7 +791,12 @@ const fetchAndProcessAssistantResponseImpl = async (
     if (typeof terminalStatus === 'string') {
       execOverlay.recordTerminalPersisted(terminalStatus)
     }
-    return cleanup
+    // Authority-ack consumption AFTER the terminal token and BEFORE any
+    // projection dispatch (baseCallbacks dispatches below): the closure read
+    // witness is initiated after the token. A Main failure throws above and
+    // never invalidates.
+    consumeUpdateAckInvalidation(response)
+    return response
   }
   // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
   const isExecLoaded = () => {
@@ -1207,7 +1246,8 @@ export const sendMessage =
         userMessage,
         userAck,
         sendRoute,
-        sendGeneration
+        sendGeneration,
+        true
       )
       // Invalid user ack fails closed before any generation: no anchor step,
       // no assistant stub, no provider queue. Nothing authoritatively received.
@@ -1217,7 +1257,7 @@ export const sendMessage =
       // Associated block projection rides the successful row/capability
       // publication only: a rejected/stale ack emits no orphan blocks.
       if (userPublished && userMessageBlocks.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
+        dispatch(withAuthorityHandled(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId)))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
       // OPTIONAL estimate stays display-only and publication-gated (unchanged).
@@ -1275,7 +1315,7 @@ export const sendMessage =
         // projection filters the late publication, and the pinned request fills
         // the row (reload-recoverable) exactly as before.
         const assistantAcknowledged = toValidAppendEntry(topicId, assistantMessage, assistantAck, sendRoute) !== null
-        publishAppendAck(dispatch, getState, topicId, assistantMessage, assistantAck, sendRoute, sendGeneration)
+        publishAppendAck(dispatch, getState, topicId, assistantMessage, assistantAck, sendRoute, sendGeneration, true)
         if (!assistantAcknowledged) {
           logger.warn('sendMessage: assistant response stub was not acknowledged; provider request skipped', {
             topicId,
@@ -2165,8 +2205,11 @@ export const initiateTranslationThunk =
       )
 
       // 3. Update Database
-      // Get the final message list from Redux state *after* updates
-      await dbService.updateMessageAndBlocks(
+      // Get the final message list from Redux state *after* updates.
+      // The Redux dispatches above are optimistic (pre-ack) and stay
+      // unmarked: only the conservative invalidation effect is consumed here,
+      // never a handled exemption for a projection that preceded authority.
+      const translationResponse = await dbService.updateMessageAndBlocks(
         topicId,
         { id: messageId, blocks: updatedBlockIds },
         [newBlock],
@@ -2174,6 +2217,7 @@ export const initiateTranslationThunk =
         undefined,
         activeRouteOf(getState, topicId)
       )
+      consumeUpdateAckInvalidation(translationResponse)
       return newBlock.id // Return the ID
     } catch (error) {
       logger.error(`[initiateTranslationThunk] Failed for message ${messageId}:`, error as Error)
@@ -3424,7 +3468,7 @@ export const updateMessageAndBlocksThunk =
     // 1. Atomic SQLite persistence (LOCK-001)
     // One IPC command: message patch + block upserts + block deletions in a single transaction.
     // If this fails, the error propagates and Redux is never touched.
-    const cleanup = await dbService.updateMessageAndBlocks(
+    const response = await dbService.updateMessageAndBlocks(
       topicId,
       messageUpdates ?? { id: messageId! },
       blockUpdatesList,
@@ -3432,8 +3476,14 @@ export const updateMessageAndBlocksThunk =
       undefined,
       activeRouteOf(getState, topicId)
     )
+    // Same-transaction authority success: consume the conservative effect
+    // before the DB-first Redux commits below (they are provably post-ack and
+    // carry the handled marker). A Main failure throws above and never
+    // invalidates; the missing-id early return has no ack to consume.
+    consumeUpdateAckInvalidation(response)
 
-    // 2. Commit to Redux AFTER successful SQLite persistence
+    // 2. Commit to Redux AFTER successful SQLite persistence (+ ack consume
+    // above, so these same-ack commits carry the handled marker).
     if (messageUpdates && messageId) {
       // Strip identity fields for Redux patch (LOCK-002: id, topicId, sortOrder must not be in changes)
       // oxlint-disable-next-line @typescript-eslint/no-unused-vars
@@ -3447,26 +3497,28 @@ export const updateMessageAndBlocksThunk =
       // Only dispatch message update if there are actual changes beyond identity fields
       if (Object.keys(actualMessageChanges).length > 0) {
         dispatch(
-          newMessagesActions.updateMessage({
-            topicId,
-            messageId,
-            updates: actualMessageChanges
-          })
+          withAuthorityHandled(
+            newMessagesActions.updateMessage({
+              topicId,
+              messageId,
+              updates: actualMessageChanges
+            })
+          )
         )
       }
     }
 
     if (blockUpdatesList.length > 0) {
-      dispatch(withClosureTopics(upsertManyBlocks(blockUpdatesList), topicId))
+      dispatch(withAuthorityHandled(withClosureTopics(upsertManyBlocks(blockUpdatesList), topicId)))
     }
 
     if (blockIdsToDelete.length > 0) {
-      dispatch(withClosureTopics(removeManyBlocks(blockIdsToDelete), topicId))
+      dispatch(withAuthorityHandled(withClosureTopics(removeManyBlocks(blockIdsToDelete), topicId)))
     }
 
     dispatch(updateTopicUpdatedAt({ topicId }))
 
-    return cleanup
+    return response
   }
 
 /**
@@ -3607,7 +3659,7 @@ export const removeBlocksThunk =
       // Strip all contract-forbidden identity/order fields (id, topicId, sortOrder).
       const messagePatch = { id: messageId, blocks: updatedBlockIds }
 
-      const cleanup = await dbService.updateMessageAndBlocks(
+      const removeResponse = await dbService.updateMessageAndBlocks(
         topicId,
         messagePatch,
         [],
@@ -3615,15 +3667,23 @@ export const removeBlocksThunk =
         undefined,
         activeRouteOf(getState, topicId)
       )
-      await consumeFileCleanupResult(cleanup)
+      await consumeFileCleanupResult(removeResponse)
+      // Same-transaction authority success: consume the conservative effect
+      // before the DB-first Redux commits below. A Main failure throws above
+      // and never invalidates.
+      consumeUpdateAckInvalidation(removeResponse)
       // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
       blockIdsToRemove.forEach((id) => cancelBlockEverywhere(id))
 
-      dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates: { blocks: updatedBlockIds } }))
+      dispatch(
+        withAuthorityHandled(
+          newMessagesActions.updateMessage({ topicId, messageId, updates: { blocks: updatedBlockIds } })
+        )
+      )
 
       // File cleanup already consumed; Redux-only block removal
       if (blockIdsToRemove.length > 0) {
-        dispatch(withClosureTopics(removeManyBlocks(blockIdsToRemove), topicId))
+        dispatch(withAuthorityHandled(withClosureTopics(removeManyBlocks(blockIdsToRemove), topicId)))
       }
 
       dispatch(updateTopicUpdatedAt({ topicId }))
@@ -4840,11 +4900,12 @@ export const addChannelUserMessage = (
         userMessage,
         ack,
         null,
-        capturedChannelGeneration
+        capturedChannelGeneration,
+        true
       )
       if (!published) return
       for (const block of allBlocks) {
-        dispatch(withClosureTopics(upsertOneBlock(block), topicId))
+        dispatch(withAuthorityHandled(withClosureTopics(upsertOneBlock(block), topicId)))
       }
     })
     .catch((err) => {
@@ -4888,7 +4949,7 @@ export const setupChannelStream = (
   dbService
     .appendMessage(topicId, assistantMessage, [], undefined, undefined, undefined, null)
     .then((ack) => {
-      publishAppendAck(dispatch, store.getState, topicId, assistantMessage, ack, null, capturedStreamGeneration)
+      publishAppendAck(dispatch, store.getState, topicId, assistantMessage, ack, null, capturedStreamGeneration, true)
     })
     .catch((err) => {
       logger.error('Failed to persist initial channel assistant message', err as Error)
@@ -4988,14 +5049,19 @@ export const setupChannelStream = (
     // Ordinary IM channel execution: no resend attempt (carrier omitted), but
     // the same single-transaction final checkpoint as ordinary chat, pinned to
     // the main route.
-    saveFinalUpdatesAtomically: (
+    saveFinalUpdatesAtomically: async (
       messageId: string,
       channelTopicId: string,
       messageUpdates: Partial<Message>,
       blocksToUpdate: MessageBlock[],
       blockIdsToDelete?: readonly string[]
-    ): Promise<FileCleanupResult> =>
-      saveFinalMessageAndBlocksAtomically(
+    ): Promise<UpdateMessageAndBlocksResponse> => {
+      // IM channel terminal: no execution-overlay record on this path, but the
+      // same explicit consume ordering as ordinary chat — effect consumed at
+      // authority success, before createCallbacks dispatches its terminal
+      // projection commits (which carry the handled marker). A Main failure
+      // throws and never invalidates.
+      const channelResponse = await saveFinalMessageAndBlocksAtomically(
         channelTopicId,
         messageId,
         messageUpdates,
@@ -5003,7 +5069,10 @@ export const setupChannelStream = (
         undefined,
         null,
         blockIdsToDelete
-      ),
+      )
+      consumeUpdateAckInvalidation(channelResponse)
+      return channelResponse
+    },
     assistant
   })
   const streamProcessorCallbacks = createStreamProcessor(callbacks)

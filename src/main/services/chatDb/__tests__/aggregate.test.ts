@@ -525,6 +525,12 @@ describe('ChatDbAggregateService', () => {
     it('no-op for missing message (Dexie-compatible)', () => {
       const result = agg.updateMessageAndBlocks('nonexistent', { id: 'nonexistent-msg' } as any, [])
       expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual({
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        contextInvalidation: { scope: 'all' }
+      })
+      expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
     })
 
     it('rejects deleting a block from another message in the same topic without mutation', () => {
@@ -549,6 +555,8 @@ describe('ChatDbAggregateService', () => {
 
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
+      expect(result).not.toHaveProperty('value')
+      expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
 
       const fetched = okValue(agg.fetchMessages(topicId))
       expect(fetched.messages.find((message) => message.id === messageA.id)?.content).toBe('Message A')
@@ -607,8 +615,10 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
       expect(okValue(result)).toEqual({
         affectedFileIds: ['file-same-message'],
-        remainingReferenceCounts: { 'file-same-message': 0 }
+        remainingReferenceCounts: { 'file-same-message': 0 },
+        contextInvalidation: { scope: 'all' }
       })
+      expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
       const fetched = okValue(agg.fetchMessages(topicId))
       expect(fetched.messages[0].content).toBe('Updated')
       expect(fetched.blocks).toEqual([])

@@ -17,6 +17,7 @@
  */
 
 import { loggerService } from '@logger'
+import { getGlobalBlockGeneration, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
 import type {
   AppendMessageRequest,
   AppendMessageResponse,
@@ -40,7 +41,6 @@ import type {
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
-  FileCleanupResult,
   GetRawTopicRequest,
   GetRawTopicResponse,
   HardDeleteTopicRequest,
@@ -76,6 +76,7 @@ import type {
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
+  UpdateMessageAndBlocksResponse,
   UpdateMessageRequest,
   UpdateMessageResult,
   UpdateSegmentMetadataRequest,
@@ -125,7 +126,7 @@ function makeApiSpy() {
     appendMessage: vi.fn<(request: AppendMessageRequest) => Promise<ChatDbResult<AppendMessageResponse>>>(),
     updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<UpdateMessageResult>>>(),
     updateMessageAndBlocks:
-      vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
+      vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<UpdateMessageAndBlocksResponse>>>(),
     selectAnswerMessage:
       vi.fn<(request: SelectAnswerMessageRequest) => Promise<ChatDbResult<SelectAnswerMessageResponse>>>(),
     selectUsefulAnswer:
@@ -197,7 +198,8 @@ function ackResult(messageId: string, branchId: string | null = null): ChatDbRes
     branchId,
     messageId,
     createdMessageIds: [messageId],
-    mutableMessageIds: [messageId]
+    mutableMessageIds: [messageId],
+    contextInvalidation: { scope: 'all' as const }
   })
 }
 
@@ -264,7 +266,8 @@ describe('SqliteMessageDataSource', () => {
         branchId: null,
         messageId: 'm-1',
         createdMessageIds: ['m-1'],
-        mutableMessageIds: ['m-1']
+        mutableMessageIds: ['m-1'],
+        contextInvalidation: { scope: 'all' }
       })
     })
 
@@ -312,7 +315,13 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('updateMessageAndBlocks calls api.updateMessageAndBlocks (strips topicId/sortOrder)', async () => {
-      api.updateMessageAndBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+      api.updateMessageAndBlocks.mockResolvedValue(
+        successResult({
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          contextInvalidation: { scope: 'all' as const }
+        })
+      )
       const msgUpdates = { id: 'm-1', topicId: 't-1', sortOrder: 5, content: 'updated' } as any
       await ds.updateMessageAndBlocks('topic-1', msgUpdates, [])
       const req = api.updateMessageAndBlocks.mock.calls[0][0]
@@ -1309,7 +1318,13 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('dispatches after updateMessageAndBlocks', async () => {
-      api.updateMessageAndBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+      api.updateMessageAndBlocks.mockResolvedValue(
+        successResult({
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          contextInvalidation: { scope: 'all' as const }
+        })
+      )
       await dispatchesAfter(() => ds.updateMessageAndBlocks('t-1', { id: 'm-1' } as any, []))
     })
 
@@ -1506,6 +1521,54 @@ describe('SqliteMessageDataSource', () => {
   // =========================================================================
   // Send-timing diagnostics (LOCK-001/003/004)
   // =========================================================================
+
+  describe('authority ack consumption (independent of projection acceptance)', () => {
+    it('append success consumes the effect once, before any publication guard', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
+      await ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])
+      expect(getGlobalBlockGeneration()).toBe(before + 1)
+    })
+
+    it('a malformed effect on a success ack still invalidates conservatively', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      const malformed = ackResult('m-1')
+      if (malformed.ok) {
+        ;(malformed.value as unknown as Record<string, unknown>).contextInvalidation = { scope: 'partial' }
+      }
+      api.appendMessage.mockResolvedValue(malformed)
+      // Local echo guard lives in the thunk; here the typed success already
+      // failed closed at the IPC boundary, so the source serves the same
+      // conservative invalidation and keeps the ack's other fields intact.
+      await ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])
+      expect(getGlobalBlockGeneration()).toBe(before + 1)
+    })
+
+    it('append failure invalidates nothing', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      api.appendMessage.mockResolvedValue(failureResult('STORAGE_ERROR', 'append failed'))
+      await expect(ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])).rejects.toThrow()
+      expect(getGlobalBlockGeneration()).toBe(before)
+    })
+
+    it('updateMessageAndBlocks does NOT consume by default (deferred to the ack owner)', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      api.updateMessageAndBlocks.mockResolvedValue(
+        successResult({
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          contextInvalidation: { scope: 'all' as const }
+        })
+      )
+      const response = await ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [])
+      expect(response.contextInvalidation).toEqual({ scope: 'all' })
+      expect(getGlobalBlockGeneration()).toBe(before)
+    })
+  })
 
   describe('append send-timing diagnostics', () => {
     let infoSpy: ReturnType<typeof vi.spyOn>

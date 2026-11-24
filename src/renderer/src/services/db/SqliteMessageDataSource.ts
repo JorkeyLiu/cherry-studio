@@ -154,6 +154,7 @@ import type {
   TopicWire,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
+  UpdateMessageAndBlocksResponse,
   UpdateMessageRequest,
   UpdateMessageResult,
   UpdateMessageUsageResult,
@@ -168,6 +169,7 @@ import type {
 } from '@shared/chatDb'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
+import { consumeAppendAckInvalidation } from './authorityInvalidation'
 import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
 import type { BlockWriteRouteContext, MessageDataSource } from './types'
 
@@ -218,7 +220,7 @@ export interface ChatDbApi {
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<AppendMessageResponse>>
   updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<UpdateMessageResult>>
-  updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
+  updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<UpdateMessageAndBlocksResponse>>
   // Cross-process authority answer selection (Main-resolved full group)
   selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
   // BRANCH-12: group-level atomic useful selection (Main-resolved full group)
@@ -498,6 +500,12 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
 
     const ack = unwrap(result)
+    // Authority-success consumption (exactly once for this ack): the typed IPC
+    // success already guarantees Main committed the root transaction. Consume
+    // the conservative invalidation effect BEFORE any local route-currency /
+    // loaded / projection guard (those live in the thunk publication path).
+    // A Main failure throws in unwrap above and never invalidates.
+    consumeAppendAckInvalidation(ack)
     if (isDiagnosedAppend) {
       logAppendDiagnostic('renderer.append.total', elapsedMs(t0), {
         correlationId,
@@ -567,7 +575,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     blockIdsToDelete: string[] = [],
     resendAttemptId?: string,
     branchId?: string | null
-  ): Promise<FileCleanupResult> {
+  ): Promise<UpdateMessageAndBlocksResponse> {
     // Clone and strip redundant identity/order fields for Dexie-compatible semantics
     const clonedUpdates = cloneForWire(messageUpdates as unknown as JsonObject) as Record<string, unknown>
     delete clonedUpdates.topicId
@@ -583,6 +591,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
       ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     await prepareOrderingBaseline(topicId)
+    // No default invalidation consumption here: the ordinary terminal
+    // execution must record its terminal token BEFORE the effect is consumed
+    // (see saveFinalUpdatesAtomicallyForExec), and non-terminal callers
+    // consume explicitly at their own authority-success points. A Main
+    // failure throws in unwrap and never invalidates.
     const result = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
     return result

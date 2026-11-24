@@ -40,7 +40,8 @@ import type {
   StreamWriteDiagnostics,
   TopicBranchWire,
   TopicDataExportPayload,
-  TopicReferenceWire
+  TopicReferenceWire,
+  UpdateMessageAndBlocksResponse
 } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
@@ -141,8 +142,12 @@ export interface MessageDataSource {
 
   /**
    * Update existing message and its blocks in one route.
-   * Returns FileCleanupResult when blocks are deleted, for post-commit
-   * consumption by the caller.
+   * Returns the UpdateMessageAndBlocksResponse: the aggregate
+   * FileCleanupResult for post-commit consumption by the caller plus the
+   * required authority context-invalidation effect. The data source does NOT
+   * consume the effect itself — each caller consumes it explicitly after
+   * success (the ordinary terminal path only after recordTerminalPersisted),
+   * so the ack is consumed exactly once.
    */
   updateMessageAndBlocks(
     topicId: string,
@@ -151,7 +156,7 @@ export interface MessageDataSource {
     blockIdsToDelete?: string[],
     resendAttemptId?: string,
     branchId?: BranchRoute
-  ): Promise<FileCleanupResult>
+  ): Promise<UpdateMessageAndBlocksResponse>
 
   /**
    * Cross-process authority answer selection in one route.

@@ -1908,7 +1908,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
           branchId: null,
           messageId: 'm-1',
           createdMessageIds: ['m-1'],
-          mutableMessageIds: ['m-1']
+          mutableMessageIds: ['m-1'],
+          contextInvalidation: { scope: 'all' }
         }
       })
     ).not.toThrow()
@@ -2381,7 +2382,11 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:update-message-and-blocks', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          contextInvalidation: { scope: 'all' }
+        }
       })
     ).not.toThrow()
   })
@@ -6100,5 +6105,144 @@ describe('tree-preserving clipboard contracts', () => {
       })
     ).toThrow(ValidationError)
     expect(() => validateChatDbResult('chatdb:replay-clipboard-tree', { ok: true, value: fileCleanup })).not.toThrow()
+  })
+})
+
+// ===========================================================================
+// Authority-mutation ack effects (minimal slice: append + update only)
+// ---------------------------------------------------------------------------
+// `contextInvalidation: { scope: 'all' }` is a REQUIRED conservative
+// notification on every success of the two migrated channels — including a
+// patch-existing no-op (notification, not an exactly-once proof of a true
+// change). Rollback/conflict/failure envelopes carry no success metadata.
+// Every other FileCleanup-family channel rejects the new field while keeping
+// its original shape acceptance (no global family widening, no drift).
+// ===========================================================================
+
+describe('authority-mutation ack effects', () => {
+  const appendAck = (effect: unknown) => ({
+    ok: true,
+    value: {
+      topicId: 't-1',
+      branchId: null,
+      messageId: 'm-1',
+      createdMessageIds: ['m-1'],
+      mutableMessageIds: ['m-1'],
+      contextInvalidation: effect
+    }
+  })
+
+  const updateAck = (effect: unknown) => ({
+    ok: true,
+    value: {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: effect
+    }
+  })
+
+  it('append-message: rejects a missing effect', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', {
+        ok: true,
+        value: {
+          topicId: 't-1',
+          branchId: null,
+          messageId: 'm-1',
+          createdMessageIds: ['m-1'],
+          mutableMessageIds: ['m-1']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('append-message: rejects malformed effects', () => {
+    for (const effect of [null, 'all', ['all'], { scope: 'partial' }, {}, { revision: 3 }]) {
+      expect(() => validateChatDbResult('chatdb:append-message', appendAck(effect))).toThrow(ValidationError)
+    }
+  })
+
+  it('append-message: rejects unknown keys inside the effect', () => {
+    expect(() => validateChatDbResult('chatdb:append-message', appendAck({ scope: 'all', revision: 3 }))).toThrow(
+      ValidationError
+    )
+  })
+
+  it('append-message: rejects unknown top-level keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', {
+        ok: true,
+        value: {
+          topicId: 't-1',
+          branchId: null,
+          messageId: 'm-1',
+          createdMessageIds: ['m-1'],
+          mutableMessageIds: ['m-1'],
+          contextInvalidation: { scope: 'all' },
+          revision: 3
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-message-and-blocks: rejects a missing effect', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-message-and-blocks', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-message-and-blocks: rejects malformed effects', () => {
+    for (const effect of [null, 'all', ['all'], { scope: 'partial' }, {}, { revision: 3 }]) {
+      expect(() => validateChatDbResult('chatdb:update-message-and-blocks', updateAck(effect))).toThrow(ValidationError)
+    }
+  })
+
+  it('update-message-and-blocks: rejects unknown keys inside the effect', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-message-and-blocks', updateAck({ scope: 'all', revision: 3 }))
+    ).toThrow(ValidationError)
+  })
+
+  it('update-message-and-blocks: rejects unknown top-level keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-message-and-blocks', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          contextInvalidation: { scope: 'all' },
+          deletedTopicIds: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('unmigrated FileCleanup channels reject the new field but keep their shapes', () => {
+    const withEffect = (extra: Record<string, unknown> = {}) => ({
+      ok: true,
+      value: { affectedFileIds: [], remainingReferenceCounts: {}, ...extra, contextInvalidation: { scope: 'all' } }
+    })
+    expect(() => validateChatDbResult('chatdb:delete-blocks', withEffect())).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:delete-messages-with-segments', withEffect())).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:paste-messages-to-topic', withEffect())).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:hard-delete-topic', withEffect({ deletedTopicIds: [] }))).toThrow(
+      ValidationError
+    )
+    // Original wider shapes still pass without the new field.
+    expect(() =>
+      validateChatDbResult('chatdb:paste-messages-to-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
+      })
+    ).not.toThrow()
+  })
+
+  it('failure envelopes carry no success metadata', () => {
+    const conflict = { ok: false, error: { code: 'TEST_CONFLICT', message: 'conflict', retryable: false } }
+    expect(() => validateChatDbResult('chatdb:append-message', conflict)).not.toThrow()
+    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', conflict)).not.toThrow()
   })
 })

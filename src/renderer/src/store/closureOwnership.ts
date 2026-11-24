@@ -51,6 +51,21 @@ export const CLOSURE_READ_ONLY_META_KEY = 'closureReadOnly' as const
 export const CLOSURE_CONTENT_MIRROR_META_KEY = 'closureContentMirror' as const
 
 /**
+ * Explicit authority-handled marker for closure invalidation, carried in
+ * `action.meta.closureInvalidationHandled`.
+ *
+ * Renderer-internal projection state only — never Main authority. Set ONLY on
+ * dispatches that are provably emitted AFTER the current ack's
+ * `consume*AckInvalidation` already bumped (same-ack projection convergence:
+ * the singular/plural append-ack commits and their same-ack block upserts,
+ * and terminal success-final projection commits after the terminal ack).
+ * It is NOT a read of hydration (`closureReadOnly` stays the read path) and
+ * it never exempts an action whose ack did not actually succeed. Unmarked or
+ * unknown actions keep the safe fail-closed inference.
+ */
+export const CLOSURE_AUTHORITY_HANDLED_META_KEY = 'closureInvalidationHandled' as const
+
+/**
  * Block fields that provably cannot affect Main closure structure metadata
  * (counts/boundary/folded/route/anchor). Any other key (id/messageId/type and
  * everything else) fails closed to structural invalidation. `status` is
@@ -194,3 +209,48 @@ export function isExemptContentMirrorAction(action: unknown): boolean {
   }
   return true
 }
+
+/**
+ * Attach the explicit authority-handled marker to a same-ack projection action.
+ * Preserves existing `meta`. Tolerates a missing action the same way
+ * `withClosureTopics` does. Call ONLY on dispatches provably emitted after
+ * the current ack's consume helper already bumped.
+ */
+export function withAuthorityHandled<T>(action: T): T {
+  const base = (action ?? {}) as Record<string, any>
+  return {
+    ...base,
+    meta: { ...base.meta, [CLOSURE_AUTHORITY_HANDLED_META_KEY]: true }
+  } as T
+}
+
+/**
+ * Whether an action carries the explicit authority-handled marker.
+ * Absent/invalid means not handled (safe default: infer/invalidate).
+ * The middleware additionally gates on the action family, so a stray marker
+ * on an unrelated family never exempts.
+ */
+export function isAuthorityHandled(action: unknown): boolean {
+  return (
+    (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[CLOSURE_AUTHORITY_HANDLED_META_KEY] ===
+    true
+  )
+}
+
+/**
+ * Action families whose same-ack projection convergence may carry the
+ * authority-handled marker. Only these types are eligible for the dedup exit;
+ * any other marked type fails closed to the existing inference. This keeps
+ * streaming intermediate mirrors, loading markers, resident/retention
+ * lifecycle, and unlisted `newMessages/*` mutations on the safe default.
+ */
+export const AUTHORITY_HANDLED_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'newMessages/applyAppendAcknowledgment',
+  'newMessages/applyAppendAcknowledgments',
+  'newMessages/updateMessage',
+  'newMessages/updateManyMessages',
+  'messageBlocks/upsertManyBlocks',
+  'messageBlocks/upsertOneBlock',
+  'messageBlocks/removeManyBlocks',
+  'messageBlocks/updateOneBlock'
+])

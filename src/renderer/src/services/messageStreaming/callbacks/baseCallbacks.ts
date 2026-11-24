@@ -7,7 +7,7 @@ import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
-import { withClosureTopics } from '@renderer/store/closureOwnership'
+import { withAuthorityHandled, withClosureTopics } from '@renderer/store/closureOwnership'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { newMessagesActions } from '@renderer/store/newMessage'
@@ -685,13 +685,13 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           // below no longer references them, so leaving the entities behind
           // would show the projection a block set the DB no longer holds.
           if (foldedAwayBlockIds.length > 0) {
-            dispatch(withClosureTopics(removeManyBlocks(foldedAwayBlockIds), topicId))
+            dispatch(withAuthorityHandled(withClosureTopics(removeManyBlocks(foldedAwayBlockIds), topicId)))
           }
           // Write the merged survivors back: the projection still holds their
           // pre-fold payload, and the committed one is the joined text with the
           // absorbed citations. Without this the UI would keep showing one run.
           if (foldedSurvivorBlocks.length > 0) {
-            dispatch(withClosureTopics(upsertManyBlocks(foldedSurvivorBlocks), topicId))
+            dispatch(withAuthorityHandled(withClosureTopics(upsertManyBlocks(foldedSurvivorBlocks), topicId)))
           }
           const convergedThinkingIds = committedBlocks
             .filter(
@@ -708,24 +708,28 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
             if (committed.thinking_millsec != null) {
               changes.thinking_millsec = committed.thinking_millsec
             }
-            dispatch(withClosureTopics(updateOneBlock({ id: tid, changes }), topicId))
+            dispatch(withAuthorityHandled(withClosureTopics(updateOneBlock({ id: tid, changes }), topicId)))
           }
           // A terminal target absorbed by the fold has already been dropped
           // above; the survivor carries the run's terminal status instead.
           if (!convergedThinkingIds.includes(possibleBlockId) && !foldedAwayBlockIds.includes(possibleBlockId)) {
             dispatch(
-              withClosureTopics(
-                updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),
-                topicId
+              withAuthorityHandled(
+                withClosureTopics(
+                  updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),
+                  topicId
+                )
               )
             )
           }
           dispatch(
-            newMessagesActions.updateMessage({
-              topicId,
-              messageId: assistantMsgId,
-              updates: finalMessageUpdates
-            })
+            withAuthorityHandled(
+              newMessagesActions.updateMessage({
+                topicId,
+                messageId: assistantMsgId,
+                updates: finalMessageUpdates
+              })
+            )
           )
         }
 
@@ -779,11 +783,13 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       // exactly what the single transaction persisted. Detached never injects.
       if (isLoaded()) {
         dispatch(
-          newMessagesActions.updateMessage({
-            topicId,
-            messageId: assistantMsgId,
-            updates: finalMessageUpdates
-          })
+          withAuthorityHandled(
+            newMessagesActions.updateMessage({
+              topicId,
+              messageId: assistantMsgId,
+              updates: finalMessageUpdates
+            })
+          )
         )
       }
 

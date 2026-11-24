@@ -179,6 +179,22 @@ export interface AppendMessageRequest extends ResendAttemptIdCarrier {
 }
 
 /**
+ * Authority mutation acknowledgment effect for context-closure freshness.
+ *
+ * Conservative coarse signal: `scope: 'all'` means every accepted route
+ * closure may be stale (cross-branch/reference effects are not precisely
+ * scoped), so the renderer drops cached closures and requires a fresh
+ * authoritative read. It never deletes data and is not a proof of a true
+ * content change: a no-op success may still carry `all` as a notification,
+ * never as an exactly-once or diff guarantee. No timestamps, revisions, or
+ * commit ids; no versions, event bus, or sync protocol.
+ */
+export interface ContextInvalidationEffect {
+  /** Coarse invalidation scope. Only `'all'` is defined. */
+  scope: 'all'
+}
+
+/**
  * @see IpcChannel.ChatDb_AppendMessage
  *
  * Main-issued typed creation acknowledgment for one append. The Main stamp
@@ -189,6 +205,10 @@ export interface AppendMessageRequest extends ResendAttemptIdCarrier {
  * genuinely inserted a new owned row and `[]` when it patched a pre-existing
  * same-route row; `mutableMessageIds` is the authoritative capability delta
  * (always a subset of `createdMessageIds`). A failure publishes nothing.
+ *
+ * `contextInvalidation` is required on every success (including the
+ * patch-existing no-op): a conservative notification, not an exactly-once
+ * proof of a true change. Rollback/conflict/failure never carry it.
  */
 export interface AppendMessageResponse {
   /** Echo of the request topic. */
@@ -205,6 +225,8 @@ export interface AppendMessageResponse {
    * never infers from branchId.
    */
   mutableMessageIds: string[]
+  /** Required conservative context-cache invalidation notification. */
+  contextInvalidation: ContextInvalidationEffect
 }
 
 /**
@@ -288,6 +310,22 @@ export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
   /** Block entities to upsert. Each must contain `id` and `messageId`. */
   blocksToUpdate: JsonObject[]
   blockIdsToDelete?: string[]
+}
+
+/**
+ * @see IpcChannel.ChatDb_UpdateMessageAndBlocks
+ *
+ * Success envelope for the single atomic message+blocks finalization shape.
+ * Extends the shared file-cleanup payload with a required conservative
+ * context-cache invalidation notification (`scope: 'all'`). Only this
+ * channel carries the extra field; the shared `FileCleanupResult` family is
+ * unchanged. Rollback/conflict/failure never carry success metadata; the
+ * missing-target no-op still succeeds conservatively with `all` (a
+ * notification, never an exactly-once proof of a true change).
+ */
+export interface UpdateMessageAndBlocksResponse extends FileCleanupResult {
+  /** Required conservative context-cache invalidation notification. */
+  contextInvalidation: ContextInvalidationEffect
 }
 
 /**
@@ -3248,7 +3286,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }
   'chatdb:append-message': { request: AppendMessageRequest; response: AppendMessageResponse }
   'chatdb:update-message': { request: UpdateMessageRequest; response: UpdateMessageResult }
-  'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
+  'chatdb:update-message-and-blocks': {
+    request: UpdateMessageAndBlocksRequest
+    response: UpdateMessageAndBlocksResponse
+  }
   // Cross-process authority answer selection (Main-resolved full group)
   'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }
   // Atomic group-level useful selection (Main-resolved full group)

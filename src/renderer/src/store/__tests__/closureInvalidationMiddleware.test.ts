@@ -6,8 +6,11 @@ import {
   resetAllClosureStateForTests,
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
+import { bumpAndInvalidateAll } from '@renderer/services/contextClosure'
 import { closureInvalidationMiddleware } from '@renderer/store'
-import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
+import { markClosureReadOnly, withAuthorityHandled, withClosureTopics } from '@renderer/store/closureOwnership'
+import { upsertManyBlocks } from '@renderer/store/messageBlock'
+import { newMessagesActions } from '@renderer/store/newMessage'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -189,5 +192,74 @@ describe('closureInvalidationMiddleware topic scoping (Task A)', () => {
     )
     expect((action as any).meta.fromSync).toBe(true)
     expect((action as any).meta.closureTopicIds).toEqual(['topicA'])
+  })
+})
+
+describe('closureInvalidationMiddleware authority-handled dedup (minimal slice)', () => {
+  beforeEach(() => {
+    resetAllClosureStateForTests()
+  })
+
+  it('a marked same-ack applyAppendAcknowledgment does not infer a second invalidation', () => {
+    const fpA = seedFresh('topicA')
+    runMiddleware(
+      withAuthorityHandled(
+        newMessagesActions.applyAppendAcknowledgment({
+          topicId: 'topicA',
+          route: null,
+          message: { id: 'u9', topicId: 'topicA' },
+          createdMessageIds: ['u9'],
+          mutableMessageIds: ['u9']
+        } as any)
+      )
+    )
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+  })
+
+  it('an unmarked same-ack action keeps the fail-closed inference', () => {
+    const fpA = seedFresh('topicA')
+    runMiddleware(
+      newMessagesActions.applyAppendAcknowledgment({
+        topicId: 'topicA',
+        route: null,
+        message: { id: 'u9', topicId: 'topicA' },
+        createdMessageIds: ['u9'],
+        mutableMessageIds: ['u9']
+      } as any)
+    )
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).toBeNull()
+  })
+
+  it('a marked same-ack block upsert does not infer; the unmarked twin still does', () => {
+    const fpA = seedFresh('topicA')
+    const blk = { id: 'b1', messageId: 'u1' }
+    runMiddleware(withAuthorityHandled(withClosureTopics(upsertManyBlocks([blk] as any), 'topicA')))
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+
+    const fpA2 = seedFresh('topicA')
+    runMiddleware(withClosureTopics(upsertManyBlocks([blk] as any), 'topicA'))
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA2)).toBeNull()
+  })
+
+  it('scope-all invalidation clears every accepted route; the loading marker still creates no loop', () => {
+    const fpA = seedFresh('topicA')
+    const fpB = seedFresh('topicB')
+    bumpAndInvalidateAll()
+
+    // Every route's accepted closure must be re-read from Main (conservative
+    // scope: cross-branch/reference effects are not precisely known).
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).toBeNull()
+
+    // A loading marker must never become the thing that triggers a new read.
+    const fpAfter = seedFresh('topicA')
+    runMiddleware({ type: 'newMessages/setTopicLoading', payload: { topicId: 'topicA', loading: false } })
+    expect(getFreshValidatedClosure('topicA', 'u1', fpAfter)).not.toBeNull()
+  })
+
+  it('a stray marker on a non-family type fails closed to inference', () => {
+    const fpA = seedFresh('topicA')
+    runMiddleware(withAuthorityHandled({ type: 'newMessages/addMessage', payload: { topicId: 'topicA' } }))
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).toBeNull()
   })
 })

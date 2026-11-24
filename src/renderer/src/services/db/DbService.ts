@@ -21,7 +21,6 @@ import type {
   FetchTopicMessageTimesResponse,
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
-  FileCleanupResult,
   ImportTopicDataResponse,
   InheritanceBoundarySnapshot,
   InsertMessageGroup,
@@ -45,6 +44,7 @@ import type {
   SetTurnFoldsResponse,
   StreamWriteDiagnostics,
   TopicDataExportPayload,
+  UpdateMessageAndBlocksResponse,
   UpdateMessageUsageSource,
   UpdateSegmentMetadataRequest,
   UpsertSegmentRequest
@@ -231,7 +231,7 @@ class DbService implements MessageDataSource {
     blockIdsToDelete: string[] = [],
     resendAttemptId?: string,
     branchId?: string | null
-  ): Promise<FileCleanupResult> {
+  ): Promise<UpdateMessageAndBlocksResponse> {
     return this.ordinarySource.updateMessageAndBlocks(
       topicId,
       updates,
