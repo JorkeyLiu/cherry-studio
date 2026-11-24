@@ -8,6 +8,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { decodeNumericOrderCursor, encodeNumericOrderCursor, type PageCursor, type PageResult } from '../domain/cursor'
 import { topicSegmentToRowPatch } from '../domain/mappers'
 import type { EntityPatchInput, TopicSegmentData } from '../domain/types'
+import { ChatDbValidationError } from '../errors'
 import { messages, topics, topicSegmentMessages, topicSegments } from '../schema'
 import {
   type AffectedCount,
@@ -55,6 +56,34 @@ export class TopicSegmentsRepository {
     const existingSet = new Set(existing)
     for (const id of messageIds) {
       if (!existingSet.has(id)) throw new Error(`Message ${id} does not belong to topic ${topicId}`)
+    }
+  }
+  /**
+   * Single-membership guard: a message belongs to at most one group. Any
+   * requested id already filed under a different group rejects the whole
+   * write with zero rows changed — membership is never silently moved or
+   * shared across groups. Runs on the caller's executor (the outer
+   * transaction when composed inside an aggregate command), so the check
+   * and the write are atomic.
+   */
+  private assertNoForeignMembership(executor: any, segmentId: string, messageIds: string[]): void {
+    if (messageIds.length === 0) return
+    const conflicts = executor
+      .select({ messageId: topicSegmentMessages.messageId })
+      .from(topicSegmentMessages)
+      .where(
+        and(
+          sql`${topicSegmentMessages.messageId} IN ${messageIds}`,
+          sql`${topicSegmentMessages.segmentId} != ${segmentId}`
+        )
+      )
+      .all()
+      .map((row: { messageId: string }) => row.messageId)
+    if (conflicts.length > 0) {
+      const ids = [...new Set(conflicts)].sort()
+      throw new ChatDbValidationError(
+        `Messages already filed under another group cannot join segment ${segmentId}: ${ids.join(', ')}`
+      )
     }
   }
 
@@ -445,6 +474,7 @@ export class TopicSegmentsRepository {
       .get()
     if (!segment) throw new Error(`Segment ${segmentId} does not exist`)
     this.validateMessagesBelongToTopic(messageIds, segment.topicId)
+    this.assertNoForeignMembership(this.db, segmentId, messageIds)
     return this.db.transaction((tx) => {
       const maxOrder = tx
         .select({ max: sql<number>`COALESCE(MAX(${topicSegmentMessages.sortOrder}), -1)` })
@@ -540,6 +570,7 @@ export class TopicSegmentsRepository {
     if (!segment) throw new Error(`Segment ${segmentId} does not exist`)
     if (messageIds.length > 0) {
       this.validateMessagesBelongToTopic(messageIds, segment.topicId)
+      this.assertNoForeignMembership(this.db, segmentId, messageIds)
     }
     return this.db.transaction((tx) => {
       tx.delete(topicSegmentMessages).where(eq(topicSegmentMessages.segmentId, segmentId)).run()

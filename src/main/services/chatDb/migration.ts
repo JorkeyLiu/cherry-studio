@@ -538,6 +538,74 @@ export function verifyFtsRowidParity(rawSqlite: Database.Database): FtsRowidPari
 }
 
 /**
+ * Unique structural index created by migration 021: a message belongs to at
+ * most one group, enforced at the SQL level in addition to the
+ * transaction-level guards on every membership writer. The legacy
+ * per-message lookup index is intentionally kept (same both-indexes pattern
+ * as file_references block/file lookups) so earlier migration assertions
+ * stay byte-accurate; the planner uses the unique index for enforcement.
+ */
+export const TOPIC_SEGMENT_MESSAGES_MESSAGE_ID_UNIQ_INDEX = 'topic_segment_messages_message_id_uniq'
+
+export interface SegmentSingleMembershipResult {
+  /** Messages filed under more than one group. */
+  multiFiledCount: number
+}
+
+/**
+ * Typed failure raised by migration 021's single-membership preflight. The
+ * message is a fixed, count-only classification — never message or group
+ * IDs. Throwing inside the migration transaction rolls the whole migration
+ * back atomically (021 stays unrecorded) and, crucially, performs no repair:
+ * legacy overlaps are surfaced, never silently merged or deleted.
+ */
+export class MigrationSegmentMembershipError extends Error {
+  constructor(detail: string, cause?: unknown) {
+    super(
+      `Migration 021 single-membership preflight failed: ${detail}. ` +
+        'The migration was rolled back; no membership changes were made and no overlap was repaired.'
+    )
+    this.name = 'MigrationSegmentMembershipError'
+    if (cause !== undefined) {
+      this.cause = cause
+    }
+  }
+}
+
+/**
+ * Verify single membership on a pre-021 database: no message may be filed
+ * under more than one group. Pure read — never modifies state.
+ *
+ * Fails closed with a typed {@link MigrationSegmentMembershipError} when any
+ * message is multi-filed, or when the membership table cannot be read
+ * (missing/unreadable pre-state).
+ *
+ * @param rawSqlite  Raw better-sqlite3 handle of the pre-021 database.
+ */
+export function verifySegmentSingleMembership(rawSqlite: Database.Database): SegmentSingleMembershipResult {
+  let rows: Array<{ n: number }>
+  try {
+    rows = rawSqlite
+      .prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT message_id FROM topic_segment_messages GROUP BY message_id HAVING COUNT(DISTINCT segment_id) > 1)`
+      )
+      .all() as Array<{ n: number }>
+  } catch (cause) {
+    throw new MigrationSegmentMembershipError(
+      'the membership table is missing or unreadable (malformed pre-state)',
+      cause
+    )
+  }
+  const multiFiledCount = rows[0]?.n ?? 0
+  if (multiFiledCount > 0) {
+    throw new MigrationSegmentMembershipError(
+      `${multiFiledCount} message(s) filed under more than one group — resolve overlaps before upgrading; nothing was changed`
+    )
+  }
+  return { multiFiledCount: 0 }
+}
+
+/**
  * Registry of all known migrations in execution order.
  * New migrations MUST be appended at the end. Never reorder or remove entries.
  */
@@ -1292,6 +1360,17 @@ export const MIGRATIONS: MigrationEntry[] = [
                  LIMIT 1
               )
         WHERE header_message_id IS NULL`
+    ]
+  },
+  {
+    key: '021_topic_segment_single_membership',
+    description:
+      'Enforce the single-membership invariant at the SQL level: a unique index on topic_segment_messages(message_id) so a message can be filed under at most one group. The fail-closed preflight rejects any pre-existing multi-filed message before DDL and performs no repair — overlaps are surfaced, never silently merged or deleted. The legacy per-message lookup index is kept; no membership row, segment row, or message is rewritten.',
+    preflight: (rawSqlite) => {
+      verifySegmentSingleMembership(rawSqlite)
+    },
+    sql: [
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${TOPIC_SEGMENT_MESSAGES_MESSAGE_ID_UNIQ_INDEX} ON topic_segment_messages(message_id)`
     ]
   }
 ]

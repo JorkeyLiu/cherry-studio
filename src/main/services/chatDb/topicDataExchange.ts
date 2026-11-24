@@ -687,6 +687,9 @@ export function validateTopicDataImport(payload: unknown): ValidatedTopicDataImp
       fail('payload.branches', `branch "${branch.id}" anchor "${anchorId}" is not owned by the parent route (BRANCH-7)`)
     }
   }
+  // A message belongs to at most one group: reject cross-segment duplicates
+  // before any write (ImportWriter inserts raw rows and cannot repair).
+  const memberOwner = new Map<string, number>()
   for (const [index, segment] of segments.entries()) {
     const memberIds = segment.messageIds as string[]
     const seen = new Set<string>()
@@ -698,6 +701,14 @@ export function validateTopicDataImport(payload: unknown): ValidatedTopicDataImp
         fail(`payload.segments[${index}].messageIds[${memberIndex}]`, `duplicate message "${messageId}"`)
       }
       seen.add(messageId)
+      const ownerIndex = memberOwner.get(messageId)
+      if (ownerIndex !== undefined) {
+        fail(
+          `payload.segments[${index}].messageIds[${memberIndex}]`,
+          `message "${messageId}" is already filed under segment index ${ownerIndex} — a message belongs to at most one group`
+        )
+      }
+      memberOwner.set(messageId, index)
     }
   }
   for (const [index, ref] of fileReferences.entries()) {

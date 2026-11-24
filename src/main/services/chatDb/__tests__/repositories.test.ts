@@ -2227,10 +2227,11 @@ describe('Repository Tests', () => {
     it('membership replacement rollback preserves state', () => {
       messagesRepo.create(makeMessage({ id: 'sm-1', topicId: 'topic-1' }))
       messagesRepo.create(makeMessage({ id: 'sm-2', topicId: 'topic-1' }))
+      messagesRepo.create(makeMessage({ id: 'sm-3', topicId: 'topic-1' }))
       segmentsRepo.create(makeSegment({ id: 'sm-seg', topicId: 'topic-1' }))
       segmentsRepo.create(makeSegment({ id: 'sm-seg2', topicId: 'topic-1' }))
       segmentsRepo.addMessages('sm-seg', ['sm-1', 'sm-2'])
-      segmentsRepo.addMessages('sm-seg2', ['sm-1'])
+      segmentsRepo.addMessages('sm-seg2', ['sm-3'])
 
       // replaceMessageIds processes: (1) DELETE all old memberships, (2) INSERT new ones.
       // Trigger aborts on the second INSERT (sm-1), so the DELETE and first INSERT
@@ -2255,7 +2256,7 @@ describe('Repository Tests', () => {
       expect(segmentsRepo.getMessageIds('sm-seg')).toEqual(['sm-1', 'sm-2'])
       expect(segmentsRepo.getById('sm-seg').found).toBe(true)
       // Other segment untouched
-      expect(segmentsRepo.getMessageIds('sm-seg2')).toEqual(['sm-1'])
+      expect(segmentsRepo.getMessageIds('sm-seg2')).toEqual(['sm-3'])
 
       sqlite.exec('DROP TRIGGER IF EXISTS abort_membership')
     })

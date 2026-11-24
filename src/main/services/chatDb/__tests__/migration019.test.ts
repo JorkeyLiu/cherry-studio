@@ -69,7 +69,7 @@ function rerunThisMigration(): number {
 
 describe('019_retire_segment_fold', () => {
   it('is registered second-to-last and touches only the segment extra key', () => {
-    expect(MIGRATIONS.length).toBe(20)
+    expect(MIGRATIONS.length).toBe(21)
     expect(MIGRATIONS[18].key).toBe(MIGRATION_KEY)
     const joined = MIGRATIONS[18].sql.join(' ')
     expect(joined).toContain('UPDATE topic_segments')
@@ -81,7 +81,7 @@ describe('019_retire_segment_fold', () => {
 
   it('clears the legacy marker, keeps sibling extra keys and message folds, and is idempotent', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(20)
+    expect(runMigrations(db as never, sqlite)).toBe(21)
 
     sqlite.prepare(`INSERT INTO topics (id, assistant_id, name) VALUES ('t1', 'a1', 'Topic')`).run()
     sqlite
@@ -179,7 +179,7 @@ describe('019_retire_segment_fold', () => {
 
   it('is top-level scoped: a nested `folded` key is data, not a legacy marker', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(20)
+    expect(runMigrations(db as never, sqlite)).toBe(21)
     sqlite.prepare(`INSERT INTO topics (id, assistant_id, name) VALUES ('t1', 'a1', 'Topic')`).run()
     sqlite
       .prepare(
@@ -214,7 +214,7 @@ describe('019_retire_segment_fold', () => {
 
   it('a fresh database records the migration with nothing to clean', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(20)
+    expect(runMigrations(db as never, sqlite)).toBe(21)
     const state = sqlite.prepare(`SELECT key FROM migration_state WHERE key = ?`).get(MIGRATION_KEY)
     expect(state).toBeTruthy()
     expect(runMigrations(db as never, sqlite)).toBe(0)

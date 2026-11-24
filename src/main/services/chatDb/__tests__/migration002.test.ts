@@ -359,7 +359,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const count = runMigrations(db, sqlite)
-      expect(count).toBe(20)
+      expect(count).toBe(21)
 
       const tables = getTableNames(sqlite)
       expect(tables).toContain('migration_state')
@@ -494,11 +494,11 @@ describe('Migration 002', () => {
 
       insert001Data(sqlite)
 
-      // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–020 (19 migrations).
-      // Apply 002 (+003 … +020 — all pending)
+      // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–021 (20 migrations).
+      // Apply 002 (+003 … +021 — all pending)
       const db2 = wrapDrizzle(sqlite)
       const count = runMigrations(db2, sqlite)
-      expect(count).toBe(19)
+      expect(count).toBe(20)
 
       // Verify topic data survived
       const topic = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('topic-1') as Record<string, unknown>
@@ -880,7 +880,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const first = runMigrations(db, sqlite)
-      expect(first).toBe(20)
+      expect(first).toBe(21)
 
       const second = runMigrations(db, sqlite)
       expect(second).toBe(0)
@@ -958,8 +958,8 @@ describe('Migration 002', () => {
   // =========================================================================
 
   describe('Migration registry', () => {
-    it('should have exactly twenty migrations', () => {
-      expect(MIGRATIONS).toHaveLength(20)
+    it('should have exactly twenty-one migrations', () => {
+      expect(MIGRATIONS).toHaveLength(21)
       expect(MIGRATIONS[0].key).toBe('001_initial_schema')
       expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
       expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
@@ -980,6 +980,7 @@ describe('Migration 002', () => {
       expect(MIGRATIONS[17].key).toBe('018_topic_references')
       expect(MIGRATIONS[18].key).toBe('019_retire_segment_fold')
       expect(MIGRATIONS[19].key).toBe('020_topic_segment_header_identity')
+      expect(MIGRATIONS[20].key).toBe('021_topic_segment_single_membership')
     })
 
     it('002 should have SQL statements', () => {
@@ -1805,11 +1806,11 @@ describe('Migration 002 — duplicate file_references collapse', () => {
         JSON.stringify({ id: 'file-x', note: 'loser' })
       )
 
-    // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–020 (19 migrations).
-    // Apply 002 (+003 … +020 — all pending)
+    // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–021 (20 migrations).
+    // Apply 002 (+003 … +021 — all pending)
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(19)
+    expect(count).toBe(20)
 
     // Only one row should survive (ref-a has lower id lexicographically)
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>
@@ -1963,11 +1964,11 @@ describe('Migration 002 — multi-block file reference resolution', () => {
         JSON.stringify({ id: 'file-shared', note: 'high-meta-loses' })
       )
 
-    // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–020 (19 migrations).
-    // Apply 002 (+003 … +020 — all pending)
+    // 001 is already baselined in migration_state above, so runMigrations applies the remaining 002–021 (20 migrations).
+    // Apply 002 (+003 … +021 — all pending)
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(19)
+    expect(count).toBe(20)
 
     // Exactly one reference should survive
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>

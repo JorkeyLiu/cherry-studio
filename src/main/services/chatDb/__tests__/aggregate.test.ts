@@ -924,8 +924,10 @@ describe('ChatDbAggregateService', () => {
       const topicId = `t-${uid()}`
       const u1 = makeMessageJson(topicId, { role: 'user' })
       const u2 = makeMessageJson(topicId, { role: 'user' })
+      const u3 = makeMessageJson(topicId, { role: 'user' })
       agg.appendMessage(topicId, u1 as any, [])
       agg.appendMessage(topicId, u2 as any, [])
+      agg.appendMessage(topicId, u3 as any, [])
       const hitId = `seg-${uid()}`
       const missId = `seg-${uid()}`
       agg.upsertSegment({
@@ -935,7 +937,7 @@ describe('ChatDbAggregateService', () => {
         messageIds: [u1.id as string, u2.id as string],
         branchId: null
       })
-      agg.upsertSegment({ segmentId: missId, topicId, name: 'miss', messageIds: [u2.id as string], branchId: null })
+      agg.upsertSegment({ segmentId: missId, topicId, name: 'miss', messageIds: [u3.id as string], branchId: null })
 
       const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
       expect(result.ok).toBe(true)
@@ -2402,7 +2404,7 @@ describe('ChatDbAggregateService', () => {
       expect(listed.map((s) => s.messageCount)).toEqual([1, 1, 1])
     })
 
-    it('equal first-message position is stable: newcomer goes after existing, existing order kept', () => {
+    it('duplicate first-message membership rejects: a message already filed cannot join a second group', () => {
       const topicId = `t-${uid()}`
       const msgs = [makeMessageJson(topicId), makeMessageJson(topicId)]
       for (const m of msgs) agg.appendMessage(topicId, m as any, [])
@@ -2427,13 +2429,22 @@ describe('ChatDbAggregateService', () => {
           branchId: null
         })
       )
-      const tie = okValue(
-        agg.upsertSegment({ segmentId: 'seg-tie', topicId, name: 'Tie', messageIds: [m1], color: null, branchId: null })
-      )
-      expect(tie.sortOrder).toBe(1)
+      // m1 is already filed under seg-first: single membership rejects the
+      // whole command with zero writes — the catalog keeps both groups.
+      const tie = agg.upsertSegment({
+        segmentId: 'seg-tie',
+        topicId,
+        name: 'Tie',
+        messageIds: [m1],
+        color: null,
+        branchId: null
+      })
+      expect(tie.ok).toBe(false)
+      if (tie.ok) return
+      expect(tie.error.code).toBe('VALIDATION_ERROR')
       const listed = okValue(agg.listSegments(topicId))
-      expect(listed.map((s) => s.id)).toEqual(['seg-first', 'seg-tie', 'seg-second'])
-      expect(listed.map((s) => s.sortOrder)).toEqual([0, 1, 2])
+      expect(listed.map((s) => s.id)).toEqual(['seg-first', 'seg-second'])
+      expect(listed.map((s) => s.sortOrder)).toEqual([0, 1])
     })
 
     it('upsert validates request membership against the complete topic authority order', () => {

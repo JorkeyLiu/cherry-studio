@@ -188,7 +188,7 @@ describe('group-level range guard — owner equality only', () => {
     expect(both.turns.flatMap((t) => t.messageIds).sort()).toEqual(['a1-x', 'a2-x', 'u1-x', 'u2-x'])
   })
 
-  it('root: group create and membership replacement across a fork stay allowed for one owner', () => {
+  it('root: group create reusing another group member rejects atomically; replacement within one group stays allowed', () => {
     const topicId = `t-${uid()}`
     seedRoot(topicId)
     fork(topicId, null, 'u2')
@@ -198,18 +198,27 @@ describe('group-level range guard — owner equality only', () => {
     const segmentId = `seg-${uid()}`
     okValue(agg.upsertSegment({ segmentId, topicId, name: 'Left', messageIds: ['u1', 'a1'], branchId: null }))
     expect(segmentRow(segmentId)?.header_message_id).toBe('u1')
+    const before = segmentPreimage(topicId)
 
-    // Create across the fork: same owner, so the group is written in full and
-    // its head is the first member at creation.
+    // Create across the fork reuses u1, already filed under Left: single
+    // membership rejects the whole command with zero writes — nothing is
+    // created and Left is unchanged.
     const newSegmentId = `seg-${uid()}`
-    const created = okValue(
-      agg.upsertSegment({ segmentId: newSegmentId, topicId, name: 'Across', messageIds: ['u1', 'u3'], branchId: null })
-    )
-    expect(created.messageIds).toEqual(['u1', 'u3'])
-    expect(created.headerMessageId).toBe('u1')
+    const across = agg.upsertSegment({
+      segmentId: newSegmentId,
+      topicId,
+      name: 'Across',
+      messageIds: ['u1', 'u3'],
+      branchId: null
+    })
+    expect(errorCode(across)).toBe('VALIDATION_ERROR')
+    expect(segmentRow(newSegmentId)).toBeUndefined()
+    expect(segmentPreimage(topicId)).toBe(before)
+    expect(repos.segments.getMessageIds(segmentId)).toEqual(['u1', 'a1'])
 
-    // Membership replacement across the fork: same owner, so it lands and the
-    // head follows the first surviving member deterministically.
+    // Membership replacement across the fork: u3 is unfiled so it joins the
+    // same group, and the head follows the first surviving member
+    // deterministically.
     const replaced = okValue(
       agg.replaceSegmentMembership({ segmentId, messageIds: ['u1', 'a1', 'u3'], branchId: null })
     )
