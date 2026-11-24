@@ -37,11 +37,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const hoisted = vi.hoisted(() => ({
   closure: null as any,
-  loadedByTopic: new Map<string, any[]>()
+  loadedByTopic: new Map<string, any[]>(),
+  closureCalls: [] as unknown[][]
 }))
 
 vi.mock('@renderer/hooks/useContextClosure', () => ({
-  useContextClosure: () => ({ closure: hoisted.closure, loading: false })
+  useContextClosure: (...args: unknown[]) => {
+    hoisted.closureCalls.push(args)
+    return { closure: hoisted.closure, loading: false }
+  }
 }))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
@@ -106,6 +110,7 @@ describe('useContextPresentation', () => {
     vi.clearAllMocks()
     hoisted.closure = null
     hoisted.loadedByTopic.clear()
+    hoisted.closureCalls.length = 0
   })
 
   it('drives counts and token lists from the accepted closure snapshot, not the ordinary store', () => {
@@ -271,5 +276,35 @@ describe('useContextPresentation', () => {
     } finally {
       unsubscribe()
     }
+  })
+  it('loaded-projection growth (0→many) passes no new inputs to the closure hook and retains the accepted read', () => {
+    const store = makeStore()
+    hoisted.closure = makeClosure(TOPIC, ANCHOR, 'closure-body')
+    const { result, rerender } = renderHook(
+      ({ msgs }: { msgs: any[] }) =>
+        useContextPresentation({
+          topicId: TOPIC,
+          anchorGroupKey: ANCHOR,
+          topicMessages: msgs,
+          assistant
+        }),
+      { wrapper: wrapper(store), initialProps: { msgs: [] as any[] } }
+    )
+    expect(result.current.freshClosure).not.toBeNull()
+    const accepted = result.current.freshClosure
+    expect(hoisted.closureCalls.length).toBeGreaterThan(0)
+    // Pages arrive 0→many with no identity/semantic change.
+    const grown = [...topicMessages(TOPIC), ...topicMessages(TOPIC).map((m) => ({ ...m, id: `${m.id}-p2` }))] as any[]
+    rerender({ msgs: grown })
+    // The closure hook is entered with identity-only args on every call:
+    // loaded-projection membership is never passed down as a new input.
+    for (const args of hoisted.closureCalls) {
+      expect(args).toEqual([TOPIC, ANCHOR, null])
+    }
+    // The accepted read is undisturbed: same reference, same counts/snapshot.
+    expect(result.current.freshClosure).toBe(accepted)
+    expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 2, max: 2 })
+    expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
+    expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('closure-body')
   })
 })

@@ -416,3 +416,26 @@
   未知/unsafe mutation fail-closed）；`useContextClosureContentAdvance.test.tsx`
   同步去掉内容时钟读写，改断结构 generation/token 不变与无额外 fetch。
   未跑 full/lint/build/E2E（主代理后续聚合）。
+ ## 46. authority-read 生命周期去掉 loaded-viewport 依赖（§29 自愈退出；未 commit）
+ - 退出事实：`hooks/useContextClosure.ts` 删除 `useLoadedTopicMessages` 订阅与
+   `viewportTick`（原 `messages.length` 仅作 effect 重检）。effect 依赖现为
+   `[topicId, anchorGroupKey, route, semanticSignal]`：触发 = route 激活时的
+   identity + genuine mutation 的 semantic token；签名保持
+   `(topicId, anchorGroupKey, branchId?)`，未保留 legacy 参数。生产唯一调用方
+   `useContextPresentation` 只传 identity/anchor，仍保留 `topicMessages` 入参
+   供 cold-empty/provisional fallback 表达（不得把空投影当全 topic 空权威，
+   现行 ADR 行为不变；其余 loaded-message fallback 未动）。
+ - 时态校准：§29 补记中“初次 cold topic 挂载常因 messages load 改变 viewportTick
+   而二次触发自愈”是当时的已实现记录，不改写。`viewportTick` 不再是触发源后，
+   cold 路由靠挂载即读 + semantic 信号重读；transient 失败保留 accepted 等下一
+   真实信号，不因删 tick 增加无限重试。性能口径：此前命中本就是 cache hit 零 IPC，
+   本轮收益是依赖关系而非每 viewport 变化省一次 IPC，不作毫秒级结论。
+ - 测试语义更新（未删场景意图）：hook 只测 semantic/token/identity（新增 cold 空
+   投影照读 Main pending→authority、在飞 sole read 经 0→many 不重启且原 receipt
+   保留）；原“只读 window 合并（viewport 增长）不额外 fetch”意图迁到
+   `useContextPresentation.test.tsx`（rerender `topicMessages` 长度变化证明 closure
+   hook 入参恒为 identity 且 accepted 不动）；`contextRouteIsolation` 源断言改新
+   签名语义（无 viewport 订阅 + 固定 effect deps）。route/anchor/topicroute 切换、
+   late fail-closed、accepted retain、B09 bound、terminal handoff/witness、空 route
+   fallback/首发 anchor 建立集成场景保留。
+ - 未跑 lint/fresh build/E2E（主代理后续聚合）；未动 Main/shared/IPC/ADR。

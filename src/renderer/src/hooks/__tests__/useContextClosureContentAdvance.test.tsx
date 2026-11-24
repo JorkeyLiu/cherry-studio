@@ -63,10 +63,6 @@ const { fetchClosureMock, resolveClosureMock, storeRef, proxy, dispatchFn, topic
   }
 })
 
-vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useLoadedTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
-}))
-
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchContextClosure: (...args: any[]) => fetchClosureMock(...args),

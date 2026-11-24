@@ -110,6 +110,12 @@ describe('context per-route isolation (CW-1..CW-8)', () => {
     expect(closureHook).toMatch(/branchId/)
     expect(closureHook).toMatch(/fetchContextClosure/)
     expect(closureHook).toMatch(/branchId: route|branchId:\s*route/)
+    // Authority-read lifecycle is identity + semantic only: no loaded-viewport
+    // subscription and no length tick in the effect deps.
+    expect(closureHook).not.toMatch(/useLoadedTopicMessages/)
+    expect(closureHook).not.toMatch(/provisionalLoadedMessages/)
+    expect(closureHook).not.toMatch(/viewportTick/)
+    expect(closureHook).toMatch(/\[topicId, anchorGroupKey, route, semanticSignal\]/)
 
     const reanchorHook = fs.readFileSync('src/renderer/src/pages/home/Inputbar/hooks/useContextWindowAnchor.ts', 'utf8')
     expect(reanchorHook).toMatch(/anchorKeyForRoute/)

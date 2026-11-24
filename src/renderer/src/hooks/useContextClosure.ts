@@ -1,4 +1,3 @@
-import { useLoadedTopicMessages } from '@renderer/hooks/useMessageOperations'
 import {
   bumpAndInvalidate,
   closureKeyForRoute,
@@ -90,18 +89,12 @@ export function useClosureSemanticSignal(topicId: string, branchId?: string | nu
  */
 export function useContextClosure(topicId: string, anchorGroupKey: string | null, branchId?: string | null) {
   const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
-  // Reactive semantic invalidation (viewport-independent): per-route
-  // routeGen:globalGen token. Length-preserving mutations bump generation
-  // without changing viewport length; this token is the background-refresh
-  // trigger only — it NEVER clears the accepted UI projection.
-  // Viewport length is NOT a semantic proxy and never gates freshness.
+  // Lifecycle trigger (viewport-independent): identity (topic/route/anchor)
+  // plus the reactive semantic token below. Loaded-viewport membership is
+  // NOT subscribed and never re-triggers this effect: pure page growth hits
+  // the fresh-cache path (zero IPC already) and genuine mutations always bump
+  // the semantic token, so no viewport re-check is needed for correctness.
   const semanticSignal = useClosureSemanticSignal(topicId, route)
-  // Viewport subscription retained ONLY as a re-check trigger so a genuine
-  // mutation (which also updates the viewport) re-validates promptly. The
-  // viewport content never gates the accepted projection: pure read growth
-  // retains it, generation mismatch triggers background refetch.
-  const provisionalLoadedMessages = useLoadedTopicMessages(topicId)
-  const viewportTick = Array.isArray(provisionalLoadedMessages) ? provisionalLoadedMessages.length : 0
   const [closure, setClosure] = useState<FetchContextClosureResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const seqRef = useRef(0)
@@ -255,17 +248,19 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         }
       } catch {
         // Transient read failure: RETAIN the accepted projection (no blank
-        // interim). The next semantic/viewport signal retries. Only an
+        // interim). The next semantic signal retries (page growth alone does
+        // not: the fresh-cache path already covers it with zero IPC). Only an
         // authoritative invalid response (above) fail-closes to null.
       } finally {
         if (seq === seqRef.current) setLoading(false)
       }
     })()
-    // viewportTick is a re-check trigger only (see above); fingerprint/newest
-    // intentionally play no role in freshness. semanticSignal is the reactive
-    // background-refresh trigger for length-preserving mutations
-    // (viewport-independent) — it never clears the accepted projection.
-  }, [topicId, anchorGroupKey, route, viewportTick, semanticSignal])
+    // Effect deps are identity (topic/route/anchor) plus the reactive
+    // semantic token only. Fingerprint/newest intentionally play no role in
+    // freshness, and loaded-viewport membership is not subscribed at all:
+    // semanticSignal is the background-refresh trigger for genuine mutations
+    // (length-preserving or not) — it never clears the accepted projection.
+  }, [topicId, anchorGroupKey, route, semanticSignal])
 
   // Identity-transition render guard: between a topic/route/anchor prop change
   // and the effect above clearing state, fail closed for that single render

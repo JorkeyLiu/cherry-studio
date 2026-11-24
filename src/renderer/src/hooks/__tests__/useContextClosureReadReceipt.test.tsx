@@ -37,10 +37,6 @@ const { fetchClosureMock, dispatchMock, getStateMock, upsertManyBlocksMock, topi
     }
   })
 
-vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useLoadedTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
-}))
-
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchContextClosure: fetchClosureMock
@@ -284,5 +280,50 @@ describe('useContextClosure read receipt', () => {
     } finally {
       unsubscribe()
     }
+  })
+  it('in-flight sole read survives loaded-projection growth 0→many (no cancel/restart; original receipt kept)', async () => {
+    // Route starts with an empty loaded projection (pages not yet delivered).
+    topicMessagesMap.set(TOPIC, [] as any)
+    messagesForTopicMap.set(TOPIC, [] as any)
+    let resolveCold!: (v: FetchContextClosureResponse) => void
+    const deferred = new Promise<FetchContextClosureResponse>((res) => {
+      resolveCold = res
+    })
+    fetchClosureMock.mockImplementationOnce(() => deferred)
+    const { result, rerender } = renderHook(({ t, a }) => useContextClosure(t, a), {
+      initialProps: { t: TOPIC, a: ANCHOR }
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
+    expect(result.current.closure).toBeNull()
+
+    // Presentation delivers pages 0→many while the read is in flight. The
+    // hook never subscribed to loaded membership, so the same-identity
+    // rerender must not cancel or restart the sole read.
+    const grown = [
+      { id: 'u1', role: 'user', topicId: TOPIC, blocks: [] },
+      { id: 'a1', role: 'assistant', askId: 'u1', topicId: TOPIC, blocks: [] }
+    ]
+    topicMessagesMap.set(TOPIC, grown as any)
+    messagesForTopicMap.set(TOPIC, grown as any)
+    await act(async () => {
+      rerender({ t: TOPIC, a: ANCHOR })
+      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
+
+    // Sole read lands: accepted with its own receipt (no second witness taken).
+    const resp = makeResp(TOPIC, ANCHOR)
+    await act(async () => {
+      resolveCold(resp)
+      await deferred
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await waitFor(() => expect(result.current.closure).toBe(resp))
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
+    expect(getClosureReadReceipt(result.current.closure)).toBeDefined()
   })
 })

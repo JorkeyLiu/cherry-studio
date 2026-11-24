@@ -43,10 +43,6 @@ const {
 
 // ── Mocks (must be before hook import) ─────────────────────────────────────
 
-vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useLoadedTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
-}))
-
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchContextClosure: fetchClosureMock

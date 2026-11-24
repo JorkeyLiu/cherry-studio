@@ -38,10 +38,6 @@ const {
   }
 })
 
-vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useLoadedTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
-}))
-
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchContextClosure: fetchClosureMock
@@ -256,7 +252,10 @@ describe('semantic reactive refresh (viewport-independent, no fingerprint)', () 
     expect(result.current.closure?.closure.totalTurnCount).toBe(6)
     fetchClosureMock.mockClear()
 
-    // Read-only window merge (viewport growth, no generation bump): must NOT fetch extra.
+    // Read-only window merge (loaded-projection growth, no generation bump):
+    // the hook does not subscribe to loaded-viewport membership at all, so
+    // growing the projection store plus a same-identity rerender must NOT
+    // fetch extra. Identity and the semantic token are the only triggers.
     const grown = [
       ...viewport,
       { id: 'u2', role: 'user', topicId, blocks: [] },
@@ -381,5 +380,39 @@ describe('semantic reactive refresh (viewport-independent, no fingerprint)', () 
       await Promise.resolve()
     })
     expect(emptyTopic.current.closure).toBeNull()
+  })
+  it('cold route with valid anchor but empty loaded projection still reads Main closure (pending → authority, no page-growth self-heal)', async () => {
+    const topicId = 't-cold-empty'
+    const anchor = 'u1'
+    // No page delivered yet: the empty projection must never gate authority.
+    topicMessagesMap.set(topicId, [] as any)
+    messagesForTopicMap.set(topicId, [] as any)
+    getStateMock.mockReturnValue(makeAssistantState({ [topicId]: anchor }) as any)
+    let resolveCold!: (v: FetchContextClosureResponse) => void
+    const deferred = new Promise<FetchContextClosureResponse>((res) => {
+      resolveCold = res
+    })
+    fetchClosureMock.mockImplementationOnce(() => deferred)
+    const { result } = renderHook(({ t, a }) => useContextClosure(t, a), {
+      initialProps: { t: topicId, a: anchor }
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // The authority read issues immediately despite the empty projection…
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
+    // …and the route stays pending (never an empty-projection authority).
+    expect(result.current.closure).toBeNull()
+    expect(result.current.loading).toBe(true)
+    const resp = makeResp(topicId, anchor, ['u1', 'a1'], { total: 2, selected: 2 })
+    await act(async () => {
+      resolveCold(resp)
+      await deferred
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await waitFor(() => expect(result.current.closure).not.toBeNull())
+    expect(result.current.closure?.closure.totalTurnCount).toBe(2)
+    // Exactly one read: no page-growth self-heal follow-up.
+    expect(fetchClosureMock).toHaveBeenCalledTimes(1)
   })
 })
