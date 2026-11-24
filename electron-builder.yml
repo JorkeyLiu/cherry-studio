@@ -38,6 +38,12 @@ files:
   - "!local"
   - "!docs"
   - "!packages"
+  # Playwright E2E / ui:observe artifacts (gitignored, never app inputs). Exclude
+  # the directory entries themselves too, so the packager walker prunes the tree
+  # instead of descending into disposable-profile snapshots whose absolute
+  # symlinks dangle once the owning temp profile has been cleaned up.
+  - "!test-results{,/**}"
+  - "!playwright-report{,/**}"
   - "!.swc"
   - "!.bin"
   - "!._*"
