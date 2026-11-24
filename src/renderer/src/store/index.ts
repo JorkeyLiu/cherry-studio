@@ -528,10 +528,9 @@ storeSyncService.setOptions({
  *   in store/closureOwnership.ts): one/many unique topics -> `bumpAndInvalidate`
  *   each; absent/invalid/explicit-unknown -> `bumpAndInvalidateAll` (deliberate
  *   global fallback). Ownership is never inferred from Redux entities or
- *   projections here. Explicitly marked read-only hydrations
  *   (`meta.closureReadOnly`, see `markClosureReadOnly`) — Main window block
- *   hydration and closure hydration for the same topic — never invalidate
- *   structurally (read-only still advances no generation).
+ *   hydration and other read-only joint publications for the same topic —
+ *   never invalidate structurally (read-only still advances no generation).
  *   Safe default: absent marker means mutate (invalidate).
  * - Trusted streaming content mirrors (`meta.closureContentMirror`, see
  *   `markClosureContentMirror` + `isExemptContentMirrorAction`) for exactly
@@ -540,10 +539,9 @@ storeSyncService.setOptions({
  *   clearing the structural cache and without emitting the semantic signal,
  *   so continuous same-block text deltas still apply to the store (UI filter
  *   and token estimate stay real-time) but never invalidate structure or
- *   trigger an IPC closure refetch. The authoritative closure STRUCTURE stays
- *   valid and is still accepted; an in-flight fetch that sees this revision
- *   advanced gap-fills only missing blocks instead of overwriting live bodies
- *   (`selectClosureBlocksForHydration`). New
+ *   valid and is still accepted; the response bodies never reach the ordinary
+ *   store through closure hydration (that path is exited) — streaming bodies
+ *   reach the UI context projection through the execution-owned overlay. New
  *   blocks/upserts/removes/type transitions/terminal status/unknown
  *   keys/unscoped actions fail closed to structural invalidation even with
  *   the marker. Cached `blocks` bytes are never authoritative fresh bodies.

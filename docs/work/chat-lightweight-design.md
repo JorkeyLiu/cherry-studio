@@ -376,3 +376,24 @@
 - 聚合门（final worktree state，pinned Node 24.11.1 / pnpm 10.27.0，均为原始 exit）：focused flow 面 8 files / 98 tests **exit 0**；focused viewport 面 10 files / 103 tests **exit 0**；`pnpm test:renderer` **exit 0**（4 分片 231/232/232 files，3213/2779/2521 tests）；`pnpm lint` **exit 0**（lint write-fix 只动本单元测试文件 1 处未用 import + 1 重复行，之后重跑通过）；fresh `pnpm build` **exit 0**。复用 E2E 资产 `tests/e2e/specs/conversation/ordinary-chat.spec.ts`（fresh build）2 passed **exit 0**，未新建 E2E 资产。可见观察（fresh build，`pnpm ui:observe` 自带隔离 harness、自定义场景 home→输入→流中→history 阅读→结构新增→终态）**exit 0** PASS：message-rows=4、context-boundaries=0，DOM 文本断言通过（截图只作过程记录，未作像素断言）。
 - 明确未做 / 不能声称：① 只证明“消掉了纯 identity 触发的一次 plan+flow 重建”（计数证据），**不承诺毫秒级加速**，不作 A/B 因果；② UI 观察覆盖流中输入/history 阅读/结构新增/终态，未覆盖分支切换、折叠交互、edit 模式的可见 runtime（这些只在挂载单测中断言）；③ 未跑 full `pnpm test` 的 main / aicore / shared / scripts / e2e-utils lane（判断：生产触点仅 renderer `Messages.tsx`，`pnpm lint` 五通道 typecheck 已 exit 0）；未跑 `pnpm openapi:check`（无 openapi 输入改动）。
 - 清理（按 delivery-validation 默认）：成功命令日志（focused-flow / focused-viewport / test-renderer / lint×3 / build / e2e-ordinary / ui-observe）与观察场景/截图按默认已删；工作树最终为本单元 3 文件——`M Messages.tsx`、`?? Messages.flowNodesMemo.test.tsx`、`M docs/work/chat-lightweight-design.md`（本节追加，§1-42 原样）。未 commit / 未 push / 未委派。
+## 44. 共享快照不可收窄订阅：Inputbar token 估计/过滤语义依赖新快照（回归保护，无性能承诺）
+ - 判定（生产候选已关闭）：不能移除 Chat 对 blockSnapshot 的依赖。`Chat.tsx:167-192` 的 activeBlockIds → selectMessageBlocksByIds → createSnapshotBlockMap → resolveSharedContextInfo 链路必须保留：Inputbar 的 tokenEstimationMessages（`Inputbar.tsx:193-200` 经 usePromptTokenEstimate 把消息与 blockSnapshot 配对估计 history tokens）与内容过滤语义（filterEmptyMessages / filterErrorOnlyMessagesWithRelated 读显式 snapshot）都依赖新快照；任何引用块正文 patch（即使消息数组/roster 不变）都必须形成新 snapshot + 新 derivation，否则 token 估计引用 stale history。Messages 侧 memo（§43）只吸收纯身份抖动，不改变输入语义。
+ - 为何订阅不能收窄：`activeBlockIds` 已是最小订阅（closure 消息块，或无 closure 时 loaded topic 引用块），但“引用集合不变”≠“内容不变”——同一 block id 的 content patch 不改变 ID 集合，却改变过滤/估计结果；若只订阅 ID 集合，content-only patch 将漏掉新 derivation。反之非引用块 commit 经 §32 selector 复用 + memo 链保持同一引用，不触发派生（本节测试覆盖）。
+ - 新增保护（仅测试 + 文档，零生产改动）：`Chat.sharedContextSnapshot.test.tsx` 新增第二用例（closure-backed route，真 Chat + 真 store + 真 selector/derive/filter），证明：① 非引用块 patch → 同一引用；② 引用块正文变空 → 新 snapshot 且 `tokenEstimationMessages`/`uiMessages` 经真实 `filterEmptyMessages` 变空，anchor/boundary/counts 保持权威不变；③ anchor/boundary/counts 切换与当前 snapshot 内容同拍派生（无 stale body）。测试过程如实记录的两处 harness 事实（与生产行为无关）：`lodash` mock 须经 `default` 透出真实命名导出（CJS interop 下 `importOriginal` 直接 spread 拿不到 `isEmpty`/`remove`）；`rerender` 必须传新 element 对象，同一 element 会被 React element-identity bailout 跳过重渲染。
+ - 未新增 Inputbar 测试的理由：消费侧已有 `usePromptTokenEstimate.test.ts`（messages+snapshot 配对估计）与 `Inputbar.generationWiring.test.tsx`（接线）覆盖；本节补的是“共享输入本身随引用块变化”这一侧。未新增 E2E 资产（单元/组件足够）。`Messages.flowNodesMemo` 的保护（纯 identity 不重建 flow）不受影响，本轮邻域复跑通过。
+ - 明确未做 / 不能声称：未测 branch 切换叠加在飞 closure 的可见 runtime（fixture 只表达“元数据与快照同拍派生”，不虚构分支切换）；未测 error-only 过滤分支（与空过滤共享同一 snapshot-read 路径，由 `contextInfoService.closedSnapshot` 既有覆盖）；无延迟/帧率/内存结论，不承诺性能收益。
+ - 验证（final worktree state，pinned Node 24.11.1 / pnpm 10.27.0，均为原始 exit，日志在 session scratch `logs/`）：focused `Chat.sharedContextSnapshot` 2/2 exit 0；邻域 `Messages.flowNodesMemo` + `Inputbar.generationWiring` + `usePromptTokenEstimate` + `contextInfoService.closedSnapshot` + `messageBlock.selectorIdentity` 面 exit 0；`pnpm lint` exit 0；`pnpm test:renderer` exit 0。`git diff --check` clean；未 commit/push。
+
+## 44 补记：路线 B 实施后的替代说明（原 §44 记录保留，仅加历史时态标记）
+
+- 原 §44 全部记录保留：其保护意图（共享快照不可收窄订阅、token 估计/过滤语义
+  依赖新快照、两用例回归保护）继续有效，`Chat.sharedContextSnapshot.test.tsx`
+  两场景意图在路线 B 下保留（第二场景改由 closure 快照 + execution overlay
+  组合表达）。
+- 时态校准：§44 中“`Chat.tsx:167-192` 的 activeBlockIds → selectMessageBlocksByIds
+  → createSnapshotBlockMap → resolveSharedContextInfo 链路必须保留”一句是路线 B
+  实施前的历史要求。路线 B 实施后该旧链路已退出，由 Chat 级
+  `useContextPresentation` 的显式 `blockSnapshot`（已接受闭包自带块快照 +
+  execution-owned overlay，仅覆盖已接受成员）替代；普通 `messageBlocks` 不再经
+  闭包水合写入，“不能收窄订阅”由新机制满足（accepted 快照 + overlay delta 同拍
+  重组），不再要求长期保留旧 `activeBlockIds` 订阅链。新旧表述矛盾时以本补记为准。

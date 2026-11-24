@@ -9,11 +9,15 @@
  * Covered:
  * - authoritative structure is accepted (preview counts present, not pending)
  * - the stale response body never overwrites the newer live delta
- * - roster blocks missing from the store are still gap-filled
+ * - response blocks are never published into the ordinary store (hydration
+ *   exited): a roster block missing from the store stays absent there, and
+ *   streaming bodies reach the UI context projection only through the
+ *   execution-owned overlay (asserted via the registry composition)
  * - cache is usable after acceptance and no extra fetch is triggered
  * - a structural change during the flight still rejects
  * - accepted-projection retention guards still hold
- * - the same flow through `useContextWindowAnchor` (anchor still persists)
+ * - the same flow through `useContextWindowAnchor` (anchor still persists,
+ *   no response blocks published)
  */
 import { configureStore } from '@reduxjs/toolkit'
 import {
@@ -24,6 +28,13 @@ import {
   resetAllClosureStateForTests
 } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
+import {
+  getComposedOverlayBlocks,
+  registerExecutionOverlay,
+  resetExecutionOverlayForTests,
+  routeKeyForExecutionOverlay,
+  subscribeExecutionOverlay
+} from '@renderer/services/executionOverlayRegistry'
 import { closureInvalidationMiddleware } from '@renderer/store'
 import assistantsReducer, { updateAssistants } from '@renderer/store/assistants'
 import { markClosureContentMirror, withClosureTopics } from '@renderer/store/closureOwnership'
@@ -177,13 +188,13 @@ function deferred<T>() {
 describe('useContextClosure: content mirror advancing during an in-flight fetch', () => {
   beforeEach(() => {
     resetAllClosureStateForTests()
+    resetExecutionOverlayForTests()
     vi.clearAllMocks()
     topicMessagesMap.clear()
     storeRef.current = makeStore({ [TOPIC]: ANCHOR })
     topicMessagesMap.set(TOPIC, [{ id: 'u1', role: 'user', topicId: TOPIC, blocks: [] }])
   })
-
-  it('accepts authoritative structure, gap-fills missing blocks, keeps the live body, no extra fetch', async () => {
+  it('accepts authoritative structure, publishes no response blocks, keeps the live body, no extra fetch', async () => {
     seedLiveBlock('live-newest')
     const flight = deferred<FetchContextClosureResponse>()
     fetchClosureMock.mockImplementationOnce(() => flight.promise)
@@ -228,11 +239,36 @@ describe('useContextClosure: content mirror advancing during an in-flight fetch'
     expect(info.isAuthoritativePending).toBe(false)
     expect(info.contextCount).toEqual({ current: 2, max: 2 })
 
-    // Stale body never overwrote the newer live delta; the missing roster
-    // block was still hydrated.
+    // Stale body never overwrote the newer live delta, and nothing was
+    // published into the ordinary store: the missing roster block stays
+    // absent there (hydration exited). The accepted members' bodies come
+    // from the closure snapshot composed with the execution-owned overlay.
     const entities = storeRef.current.getState().messageBlocks.entities
     expect(entities['a1-block']?.content).toBe('live-newest-3')
-    expect(entities['a2-block']?.content).toBe('gap-filled')
+    expect(entities['a2-block']).toBeUndefined()
+
+    // New mechanism: an execution registered for this route overlays the
+    // live body onto the accepted members — the composed overlay shows the
+    // current execution text while the ordinary store stays untouched.
+    const routeKey = routeKeyForExecutionOverlay(TOPIC, null)
+    const unsubscribe = subscribeExecutionOverlay(routeKey, () => {})
+    try {
+      const execHandle = registerExecutionOverlay({
+        topicId: TOPIC,
+        route: null,
+        messageId: 'a1',
+        snapshot: () => ({
+          blocks: [{ id: 'a1-block', messageId: 'a1', type: 'main_text', content: 'live-newest-3' } as any]
+        })
+      })
+      execHandle.notifyDelta()
+      const overlay = getComposedOverlayBlocks(routeKey, ['a1-block', 'a2-block'])
+      expect((overlay.get('a1-block') as { content?: unknown })?.content).toBe('live-newest-3')
+      expect(overlay.has('a2-block')).toBe(false)
+      execHandle.dispose()
+    } finally {
+      unsubscribe()
+    }
 
     // Cache usable immediately for the same anchor; still exactly one fetch.
     expect(getFreshValidatedClosure(TOPIC, ANCHOR, undefined, null)).not.toBeNull()
@@ -248,7 +284,7 @@ describe('useContextClosure: content mirror advancing during an in-flight fetch'
     expect(storeRef.current.getState().messageBlocks.entities['a1-block']?.content).toBe('live-newest-4')
   })
 
-  it('never publishes a response block without a usable id under gap-fill', async () => {
+  it('never publishes response blocks into the ordinary store (unusable ids included)', async () => {
     seedLiveBlock('live')
     const flight = deferred<FetchContextClosureResponse>()
     fetchClosureMock.mockImplementationOnce(() => flight.promise)
@@ -265,7 +301,7 @@ describe('useContextClosure: content mirror advancing during an in-flight fetch'
         makeResp(ANCHOR, ['u1', 'a1'], { total: 1, selected: 1 }, [
           { id: 'a1-block', messageId: 'a1', content: 'stale' },
           // Passes the response validator (messageId resolves) but has no
-          // usable block identity: gap-fill must never publish it.
+          // usable block identity — still never published (hydration exited).
           { messageId: 'a1', content: 'no-identity' } as any
         ])
       )
@@ -344,13 +380,14 @@ describe('useContextClosure: content mirror advancing during an in-flight fetch'
 describe('useContextWindowAnchor: content mirror advancing during a resolve', () => {
   beforeEach(() => {
     resetAllClosureStateForTests()
+    resetExecutionOverlayForTests()
     vi.clearAllMocks()
     topicMessagesMap.clear()
     storeRef.current = makeStore({ [TOPIC]: ANCHOR })
     topicMessagesMap.set(TOPIC, [{ id: 'u1', role: 'user', topicId: TOPIC, blocks: [] }])
   })
 
-  it('still persists the resolved anchor, gap-fills blocks, keeps the live body', async () => {
+  it('still persists the resolved anchor and keeps the live body without publishing response blocks', async () => {
     // Live streaming block belongs to message 'a2' (the roster row the new
     // anchor resolves to).
     seedLiveBlock('live', 'a2-block')
@@ -406,6 +443,8 @@ describe('useContextWindowAnchor: content mirror advancing during a resolve', ()
     expect(getFreshValidatedClosure(TOPIC, 'u2', undefined, null)).not.toBeNull()
     const entities = storeRef.current.getState().messageBlocks.entities
     expect(entities['a2-block']?.content).toBe('live-2')
-    expect(entities['a3-block']?.content).toBe('gap-filled')
+    // Hydration exited: the response's missing roster block is not fabricated
+    // into the ordinary store.
+    expect(entities['a3-block']).toBeUndefined()
   })
 })

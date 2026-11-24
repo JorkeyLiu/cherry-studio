@@ -32,6 +32,7 @@ import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@rend
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { BlockWriteRouteContext } from '@renderer/services/db/types'
+import { registerExecutionOverlay } from '@renderer/services/executionOverlayRegistry'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
@@ -683,6 +684,20 @@ const fetchAndProcessAssistantResponseImpl = async (
   // ordinary stub; initial blocks resolve from matching Redux entities when
   // present (detached semantic resets are usually empty, never injected).
   const executionState = createAssistantExecutionState(assistantMessage, getState)
+  // Execution-owned UI overlay (route B): registered by the execution
+  // lifecycle, never by a mounted page. Pinned to this execution's fixed
+  // route + assistant message + resend attempt with a unique local execution
+  // id and a per-execution monotonic sequence. Subscribers read immutable
+  // snapshots captured from `executionState` on the existing streaming
+  // cadence (see `notifyExecutionDelta` wiring below); there is no new
+  // timer/RAF here and no read of the whole Redux table.
+  const execOverlay = registerExecutionOverlay({
+    topicId,
+    route: execRoute,
+    messageId: assistantMsgId,
+    resendAttemptId,
+    snapshot: () => executionState.snapshot()
+  })
   // F2: one write barrier per execution; all persistence this execution
   // produces is tracked here for finalization quiescence.
   const writeBarrier = new WriteBarrier()
@@ -717,14 +732,14 @@ const fetchAndProcessAssistantResponseImpl = async (
   // F1/Fix B: execution-scoped final atomic persist binding the immutable
   // closure attempt. onComplete's success-final checkpoint carries exactly
   // this id; ordinary executions pass undefined (carrier omitted).
-  const saveFinalUpdatesAtomicallyForExec = (
+  const saveFinalUpdatesAtomicallyForExec = async (
     messageId: string,
     execTopicId: string,
     messageUpdates: Partial<Message>,
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete?: readonly string[]
-  ): Promise<FileCleanupResult> =>
-    saveFinalMessageAndBlocksAtomically(
+  ): Promise<FileCleanupResult> => {
+    const cleanup = await saveFinalMessageAndBlocksAtomically(
       execTopicId,
       messageId,
       messageUpdates,
@@ -733,6 +748,17 @@ const fetchAndProcessAssistantResponseImpl = async (
       execRoute,
       blockIdsToDelete
     )
+    // Terminal handoff checkpoint: the Main transaction committed (success
+    // and landed error/cancel terminals alike), so a later accepted closure
+    // read may retire the retained overlay. A persist failure throws above
+    // and never records a checkpoint, so the overlay is never withdrawn for
+    // an unpublished terminal.
+    const terminalStatus = messageUpdates.status
+    if (typeof terminalStatus === 'string') {
+      execOverlay.recordTerminalPersisted(terminalStatus)
+    }
+    return cleanup
+  }
   // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
   const isExecLoaded = () => {
     try {
@@ -770,6 +796,9 @@ const fetchAndProcessAssistantResponseImpl = async (
       // middleware predicate exempts only provably content-only non-terminal
       // patches; unmarked/unknown still fail closed to structural invalidation.
       store.dispatch(mirrorTopicId ? withClosureTopics(mirrorAction, mirrorTopicId) : mirrorAction)
+      // Same cadence, execution-owned overlay: the subscriber recomposes only
+      // accepted members from the immutable execution snapshot.
+      execOverlay.notifyDelta()
     }
   })
   // Terminal join owner: the execution BlockManager, visible to the finally
@@ -802,7 +831,8 @@ const fetchAndProcessAssistantResponseImpl = async (
         }),
       flushThrottledBlockUpdate: (id: string) => writeScheduler.flush(id),
       cancelThrottledBlockUpdate: (id: string) => writeScheduler.cancel(id),
-      drainMirrors: () => writeScheduler.drainMirrors()
+      drainMirrors: () => writeScheduler.drainMirrors(),
+      notifyExecutionDelta: () => execOverlay.notifyDelta()
     })
     execBlockManager = blockManager
 
@@ -920,6 +950,10 @@ const fetchAndProcessAssistantResponseImpl = async (
     // teardown this additionally guarantees no stale trailing write can land
     // afterwards. In-flight barrier-tracked DB promises still settle.
     writeScheduler.dispose()
+    // End the execution-owned UI overlay: snapshots stop, retained terminal
+    // bodies are dropped when no consumer holds the route. Disposal never
+    // terminates the execution itself (it already settled above).
+    execOverlay.dispose()
   }
   // No execution-attempt cleanup needed: the attempt lives only in this
   // execution closure (F1) — later ordinary edits never see it, and a
@@ -4822,6 +4856,11 @@ export const addChannelUserMessage = (
  * Sets up the streaming pipeline for rendering IM channel responses in real-time.
  * Creates the assistant message immediately — call addChannelUserMessage first
  * to ensure correct message ordering.
+ *
+ * Non-UI-overlay path: this channel has no production callers and is not
+ * connected to the context overlay (`executionOverlayRegistry`) — a future UI
+ * wiring must register through the same execution-owned overlay path rather
+ * than growing a parallel mechanism. No channel functionality changes here.
  */
 export const setupChannelStream = (
   dispatch: AppDispatch,

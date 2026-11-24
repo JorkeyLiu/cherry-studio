@@ -310,7 +310,9 @@ export function computeContextInfo(
  * `current/max`. Only an EMPTY route (empty topic / empty branch / fresh
  * anchorless route, I-1) uses the bounded fallback's legitimate 0/0 shape.
  * No timing, no diagnostics, no side effects — Chat wraps this with
- * phase-timing only.
+ * phase-timing only. Block bodies always come from the caller-supplied
+ * snapshot (`ClosureBodySnapshot`: closure snapshot, optionally composed with
+ * the execution-owned overlay) — never ordinary-block hydration reads.
  * Extracted so the TokenCount re-anchor committed-render regression
  * constrains the exact product semantics. Actual provider requests never
  * consume the pending marker or the bounded fallback as authority: they read
@@ -371,6 +373,19 @@ export function resolveSharedContextInfo(
   }
 }
 
+/**
+ * Body source contract (route B): UI block bodies come from the
+ * caller-supplied closure snapshot (`closure.blocks` read through the given
+ * `snapshotBlocks`, optionally composed with the execution-owned overlay for
+ * accepted members) — never from ordinary `messageBlocks` hydration. The
+ * snapshot is read-only here: this derivation never changes authority
+ * membership/boundaries and confers no new completeness capability; it is
+ * not a second authority and never feeds provider requests. Block reads are
+ * closed over the caller-supplied snapshot when one is provided (a block
+ * missing from the snapshot is treated as missing, never the store).
+ * Without a snapshot the legacy store-backed reads apply (unchanged).
+ */
+export type ClosureBodySnapshot = SnapshotBlockMap
 export function deriveContextInfoFromClosure(
   closure: FetchContextClosureResponse,
   snapshotBlocks?: SnapshotBlockMap

@@ -122,7 +122,11 @@ describe('context per-route isolation (CW-1..CW-8)', () => {
     expect(callbacks).toMatch(/computeContextInfo\(contextMsgs,\s*assistant,\s*topicId,\s*undefined,\s*execRoute\)/)
 
     const chat = fs.readFileSync('src/renderer/src/pages/home/Chat.tsx', 'utf8')
-    expect(chat).toMatch(/useContextClosure\(props\.activeTopic\.id,\s*anchorGroupKey,\s*activeBranchId\)/)
+    expect(chat).toMatch(/useContextPresentation\(\{/)
+    expect(chat).toMatch(/topicId:\s*props\.activeTopic\.id/)
+    expect(chat).toMatch(/branchId:\s*activeBranchId/)
+    const presentation = fs.readFileSync('src/renderer/src/hooks/useContextPresentation.ts', 'utf8')
+    expect(presentation).toMatch(/useContextClosure\(topicId,\s*anchorGroupKey,\s*route\)/)
   })
 
   it('local projection never recomputes a valid anchor (no viewport authority)', () => {

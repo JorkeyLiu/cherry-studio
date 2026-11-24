@@ -77,6 +77,14 @@ interface BlockManagerDependencies {
   flushThrottledBlockUpdate: (id: string) => void
   cancelThrottledBlockUpdate: (id: string) => void
   /**
+   * Notify the execution-owned UI overlay that the local execution fact
+   * advanced. The overlay piggybacks this call on the existing streaming
+   * cadence (throttle/RAF mirror + immediate/transition writes) — it owns no
+   * timer and recomputes nothing itself. Optional: executions without a UI
+   * consumer omit it.
+   */
+  notifyExecutionDelta?: () => void
+  /**
    * Run pending Redux-mirror callbacks inline without touching DB writes.
    * Wired to the execution scheduler drain; called by terminal paths after
    * quiescence so the final projection publishes complete text.
@@ -236,6 +244,7 @@ export class BlockManager {
       }
       if (this.isLoaded()) {
         this.deps.dispatch(withClosureTopics(updateOneBlock({ id: blockId, changes }), this.deps.topicId))
+        this.deps.notifyExecutionDelta?.()
       }
       this.trackSave(
         this.deps.saveUpdatedBlockToDB(
@@ -293,6 +302,7 @@ export class BlockManager {
           blockType: newBlock.type
         })
       )
+      this.deps.notifyExecutionDelta?.()
     }
 
     // DB streaming writes use the local execution fact, never the Redux entity.

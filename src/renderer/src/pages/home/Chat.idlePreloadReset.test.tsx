@@ -65,6 +65,9 @@ vi.mock('@renderer/services/AssistantService', () => ({
 }))
 
 vi.mock('@renderer/services/contextClosure', () => ({
+  closureKeyForRoute: (topicId: string, branchId?: string | null) =>
+    typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId,
+  isAcceptedClosureForRoute: () => false,
   computeClosureFingerprint: () => 'fp',
   getFreshValidatedClosure: () => null
 }))

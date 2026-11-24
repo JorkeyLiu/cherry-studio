@@ -5,13 +5,18 @@
  * `messageBlocks` slice + real `selectMessageBlocksByIds` + real
  * `resolveSharedContextInfo` + real `createSnapshotBlockMap`; only the
  * Messages/Inputbar children are stubs that record the shared projection).
- * The route sits authority-pending (persisted anchor, no closure), so the
- * shared input is the loaded topic's referenced blocks.
+ * The first case sits authority-pending (persisted anchor, no closure), so the
+ * shared input is the loaded topic's referenced blocks. The second case pins
+ * an authoritative closure, so the same real pipeline derives the Inputbar's
+ * `tokenEstimationMessages` through the real empty-message filter.
  *
  * Proves the inactive-block isolation claim: committing a block the active
  * input does not reference leaves the recorded shared projection untouched
  * (same identity), while updating a referenced block forms a new snapshot
- * and a new derivation carrying the updated content.
+ * and a new derivation carrying the updated content — and, on the
+ * closure-backed route, the real derived Inputbar input change (a message
+ * dropping out of `tokenEstimationMessages` when its only text goes blank)
+ * with authority metadata (anchor/boundary/counts) untouched.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import { act, render } from '@testing-library/react'
@@ -21,6 +26,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const hoisted = vi.hoisted(() => ({
   infos: [] as unknown[],
+  closureState: { closure: null as any, accept: false },
   stableMsgs: [
     {
       id: 'm1',
@@ -73,14 +79,16 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 }))
 
 vi.mock('@renderer/hooks/useContextClosure', () => ({
-  useContextClosure: () => ({ closure: null, loading: false }),
+  useContextClosure: () => ({ closure: hoisted.closureState.closure, loading: false }),
   useClosureSemanticSignal: () => '0:0'
 }))
 
 vi.mock('@renderer/services/contextClosure', () => ({
+  closureKeyForRoute: (topicId: string, branchId?: string | null) =>
+    typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId,
   computeClosureFingerprint: () => 'fp',
   getFreshValidatedClosure: () => null,
-  isAcceptedClosureForRoute: () => false
+  isAcceptedClosureForRoute: () => hoisted.closureState.accept
 }))
 
 vi.mock('@renderer/services/EventService', () => ({
@@ -121,13 +129,19 @@ vi.mock('@renderer/components/useRouteIdlePreload', () => ({
   useRouteIdlePreload: () => {}
 }))
 
-vi.mock('lodash', () => ({
-  debounce: (fn: (...args: unknown[]) => void) => {
-    const wrapped = (...args: unknown[]) => fn(...args)
-    wrapped.cancel = vi.fn()
-    return wrapped
+vi.mock('lodash', async (importOriginal) => {
+  const mod = (await importOriginal()) as any
+  // CJS interop: named exports live on `default`, not as own keys.
+  const real = mod.default ?? mod
+  return {
+    ...real,
+    debounce: (fn: (...args: unknown[]) => void) => {
+      const wrapped = (...args: unknown[]) => fn(...args)
+      wrapped.cancel = vi.fn()
+      return wrapped
+    }
   }
-}))
+})
 
 vi.mock('motion/react', () => {
   const MotionDiv = ({ children, ...rest }: { children?: ReactModule.ReactNode }) => <div {...rest}>{children}</div>
@@ -187,6 +201,12 @@ vi.mock('./Tabs', () => ({
   default: () => null
 }))
 
+import {
+  registerExecutionOverlay,
+  resetExecutionOverlayForTests,
+  routeKeyForExecutionOverlay,
+  subscribeExecutionOverlay
+} from '@renderer/services/executionOverlayRegistry'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
@@ -206,6 +226,9 @@ const lastInfo = (): any => hoisted.infos[hoisted.infos.length - 1]
 describe('Chat shared-context snapshot', () => {
   beforeEach(() => {
     hoisted.infos.length = 0
+    hoisted.closureState.closure = null
+    hoisted.closureState.accept = false
+    resetExecutionOverlayForTests()
   })
 
   it('inactive block commits do not invalidate the shared input; referenced updates form a new snapshot', () => {
@@ -271,5 +294,126 @@ describe('Chat shared-context snapshot', () => {
     expect(info2.blockSnapshot.get('b1').content).toBe('hello updated')
     expect(info2.isAuthoritativePending).toBe(true)
     expect(info2.anchorGroupKey).toBe('g0')
+  })
+
+  it('closure-backed route: referenced patch changes tokenEstimationMessages; unrelated keeps identity; metadata moves same-beat', () => {
+    const store = makeStore()
+
+    // Authoritative closure over the same message: bodies come from the
+    // closure's own block snapshot (never the ordinary store) — the real
+    // derivation reads content through the explicit snapshot, metadata stays
+    // authoritative.
+    const closureMessage = {
+      id: 'm1',
+      role: 'user',
+      topicId: 't1',
+      assistantId: 'a1',
+      createdAt: '2026-07-19T00:00:00.000Z',
+      status: 'success',
+      blocks: ['b1']
+    }
+    const helloBlock = {
+      id: 'b1',
+      messageId: 'm1',
+      type: MessageBlockType.MAIN_TEXT,
+      content: 'hello',
+      status: 'success'
+    }
+    hoisted.closureState.closure = {
+      messages: [closureMessage],
+      blocks: [helloBlock],
+      closure: {
+        anchorGroupKey: 'g0',
+        boundaryMessageId: null,
+        selectedTurnCount: 1,
+        totalTurnCount: 1,
+        foldedMessageIds: []
+      }
+    }
+    hoisted.closureState.accept = true
+
+    const renderChat = () => (
+      <Provider store={store}>
+        <Chat
+          assistant={{ id: 'a1' } as never}
+          activeTopic={{ id: 't1', name: 'T' } as never}
+          setActiveTopic={vi.fn()}
+          setActiveAssistant={vi.fn()}
+        />
+      </Provider>
+    )
+    const { rerender } = render(renderChat())
+
+    const rendered = hoisted.infos.length
+    expect(rendered).toBeGreaterThan(0)
+    const info1 = lastInfo()
+    expect(info1.isAuthoritativePending).toBe(false)
+    expect(info1.anchorGroupKey).toBe('g0')
+    expect(info1.tokenEstimationMessages.map((m: { id: string }) => m.id)).toEqual(['m1'])
+    expect(info1.uiMessages.map((m: { id: string }) => m.id)).toEqual(['m1'])
+    expect(info1.blockSnapshot.get('b1').content).toBe('hello')
+
+    // An unrelated block commit does not touch the shared input.
+    act(() => {
+      store.dispatch(
+        messageBlocksSlice.actions.upsertOneBlock({
+          id: 'bx',
+          type: MessageBlockType.MAIN_TEXT,
+          content: 'unrelated',
+          messageId: 'm9'
+        } as any)
+      )
+    })
+    expect(hoisted.infos.length).toBe(rendered)
+    expect(lastInfo()).toBe(info1)
+
+    // Blanking the only referenced text empties the real derived Inputbar
+    // inputs (empty-message filter) while authority metadata holds. Bodies
+    // now arrive through the execution-owned overlay (accepted member only),
+    // never through the ordinary store.
+    const execRouteKey = routeKeyForExecutionOverlay('t1', null)
+    const execUnsubscribe = subscribeExecutionOverlay(execRouteKey, () => {})
+    const execHandle = registerExecutionOverlay({
+      topicId: 't1',
+      route: null,
+      messageId: 'm1',
+      snapshot: () => ({
+        blocks: [{ ...helloBlock, content: '   ' } as any]
+      })
+    })
+    act(() => {
+      execHandle.notifyDelta()
+    })
+    const info2 = lastInfo()
+    expect(info2).not.toBe(info1)
+    expect(info2.blockSnapshot.get('b1').content).toBe('   ')
+    expect(info2.tokenEstimationMessages).toEqual([])
+    expect(info2.uiMessages).toEqual([])
+    expect(info2.anchorGroupKey).toBe('g0')
+    expect(info2.boundaryMessageId).toBe(info1.boundaryMessageId)
+    expect(info2.contextCount).toEqual(info1.contextCount)
+
+    // Same-beat metadata move: a new closure anchor/boundary derives together
+    // with the current snapshot content — no stale body rides along.
+    hoisted.closureState.closure = {
+      ...hoisted.closureState.closure,
+      closure: {
+        anchorGroupKey: 'g1',
+        boundaryMessageId: 'm1',
+        selectedTurnCount: 2,
+        totalTurnCount: 5,
+        foldedMessageIds: []
+      }
+    }
+    rerender(renderChat())
+    const info3 = lastInfo()
+    expect(info3).not.toBe(info2)
+    expect(info3.anchorGroupKey).toBe('g1')
+    expect(info3.boundaryMessageId).toBe('m1')
+    expect(info3.contextCount).toEqual({ current: 2, max: 5 })
+    expect(info3.blockSnapshot.get('b1').content).toBe('   ')
+    expect(info3.tokenEstimationMessages).toEqual([])
+    execHandle.dispose()
+    execUnsubscribe()
   })
 })

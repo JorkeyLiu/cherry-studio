@@ -1,5 +1,4 @@
 import { configureStore } from '@reduxjs/toolkit'
-import { selectClosureBlocksForHydration } from '@renderer/services/closureBlockHydration'
 import {
   computeClosureFingerprint,
   ensureContentGeneration,
@@ -195,7 +194,7 @@ describe('closure streaming content-mirror exemption', () => {
     expect(getFreshValidatedClosure('topicC', 'u1', fpC)).toBeNull()
   })
 
-  it('content delta during a fetch accepts structure but gap-fills bodies; structural ABA still invalidates', () => {
+  it('content delta during a fetch accepts structure; structural ABA still invalidates', () => {
     const fp = seedFresh('topicA')
     ensureContentGeneration('topicA', null)
     const generationAtFetch = getClosureLoadGeneration('topicA')
@@ -214,25 +213,12 @@ describe('closure streaming content-mirror exemption', () => {
     expect(getGlobalBlockGeneration()).toBe(globalAtFetch)
     expect(getContentGeneration('topicA')).not.toBe(contentAtFetch)
 
-    // The content advance selects gap-fill: a live body is never overwritten,
-    // a missing roster block is filled.
-    const liveEntities: Record<string, unknown> = { 'b-live': { id: 'b-live', content: 'live-newest' } }
-    const publication = selectClosureBlocksForHydration(
-      [
-        { id: 'b-live', content: 'stale-from-response' },
-        { id: 'b-missing', content: 'gap-fill-me' },
-        { id: 42 as unknown as string, content: 'no identity' }
-      ],
-      (id) => id in liveEntities,
-      true
-    )
-    expect(publication.mode).toBe('gap-fill')
-    expect(publication.blocks).toEqual([{ id: 'b-missing', content: 'gap-fill-me' }])
-    // No content advance → full snapshot publication (pre-existing behavior).
-    expect(
-      selectClosureBlocksForHydration([{ id: 'b-live', content: 'authoritative' }], (id) => id in liveEntities, false)
-        .mode
-    ).toBe('full')
+    // The ordinary-block hydration strategy (gap-fill/full) is exited: a
+    // content advance publishes no blocks into the ordinary store at all.
+    // Streaming bodies reach the UI context projection only through the
+    // execution-owned overlay (covered by its own suite), so no block
+    // fabrication is asserted here — the store mirror above wrote exactly
+    // the exempt content patch and nothing else.
 
     // Structural ABA on the same route (invalidate then republish) still
     // moves the structural generation, so a same-route ABA cannot masquerade

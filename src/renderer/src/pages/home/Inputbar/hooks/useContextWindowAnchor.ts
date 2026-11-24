@@ -1,11 +1,8 @@
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { selectClosureBlocksForHydration } from '@renderer/services/closureBlockHydration'
 import {
   ensureClosureGeneration,
-  ensureContentGeneration,
   getClosureLoadGeneration,
-  getContentGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
   isValidContextClosureResponse,
@@ -14,8 +11,6 @@ import {
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
-import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
-import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import type { Assistant, AssistantSettings, ContextWindowAnchor } from '@renderer/types'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { useCallback } from 'react'
@@ -38,18 +33,15 @@ import { useCallback } from 'react'
  * persists settings; empty resolver results remove the key. Transport
  * failures and NOT_FOUND preserve current settings.
  *
- * Closure blocks are hydrated via scoped `withClosureTopics` ownership; the
- * cache publication follows the existing generation/global/deletion
- * structural guards so stale structural responses never overwrite newer
- * state. A same-block streaming content delta advances only the content
- * revision, which must NOT abort the resolved anchor: it changes the
- * hydration strategy instead (`selectClosureBlocksForHydration` gap-fills
- * missing blocks and never overwrites a live body). All fallible
- * validation/preparation happens before any dispatch; the synchronous
- * publish block (blocks dispatch → cache set → anchor persist, no await
- * between) never leaves a dispatched new anchor without its cache. Anchor
- * is last because the blocks dispatch bumps/invalidates via
- * closureInvalidationMiddleware — the cache snapshot must follow the bump.
+ * No ordinary-block writes happen on this path: the cache publication
+ * follows the existing generation/global/deletion structural guards so stale
+ * structural responses never overwrite newer state, and UI bodies come from
+ * the closure snapshot composed with the execution-owned overlay (route B).
+ * A same-block streaming content delta advances only the content revision,
+ * which must NOT abort the resolved anchor. All fallible
+ * validation/preparation happens before any publish; the synchronous
+ * publish block (cache set → anchor persist, no await between) never leaves
+ * a persisted new anchor without its cache.
  * There is deliberately NO effect here (and none in the Inputbar) that
  * synchronizes anchors to message loading or message-list changes. Changing
  * `contextCount` alone never moves an existing anchor; re-anchoring happens
@@ -88,9 +80,7 @@ export function useContextWindowAnchor(
     // In-flight freshness guards (mirrors useContextClosure): a mutation or
     // hard-deletion during the resolve discards cache publication.
     ensureClosureGeneration(topicId, route)
-    ensureContentGeneration(topicId, route)
     const generationAtFetch = getClosureLoadGeneration(topicId, route)
-    const contentAtFetch = getContentGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
     let resolved: string | null | undefined
@@ -194,49 +184,25 @@ export function useContextWindowAnchor(
         blocks: closureResponse.blocks,
         closure: closureResponse.closure
       } as unknown as FetchContextClosureResponse
-      // All fallible validation/preparation before any dispatch.
+      // All fallible validation/preparation before any publish. No
+      // ordinary-block writes happen here: UI bodies come from the closure
+      // snapshot composed with the execution-owned overlay, so a same-block
+      // streaming delta changes nothing on this path and must NOT abort the
+      // resolved anchor.
       const valid = isValidContextClosureResponse({ topicId, branchId: route, anchorGroupKey: resolved }, fullResponse)
       if (!valid) return
       if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return
-      // Same-block streaming deltas advance ONLY the content revision: the
-      // resolved anchor/closure structure stays authoritative and must still
-      // be published. A content advance changes only the hydration strategy
-      // (gap-fill missing roster blocks, never overwrite a live body that
-      // already carries newer text than this response).
-      const contentAdvanced = getContentGeneration(topicId, route) !== contentAtFetch
-      const publication = selectClosureBlocksForHydration(
-        (Array.isArray(closureResponse.blocks) ? closureResponse.blocks : []) as Array<{ id?: string }>,
-        (id) => Boolean((store.getState() as any)?.messageBlocks?.entities?.[id]),
-        contentAdvanced
-      )
-      let blocksAction: unknown = null
-      try {
-        if (publication.blocks.length > 0) {
-          // Read-only closure hydration for the new anchor: must not
-          // invalidate the semantic generation it just snapshotted.
-          blocksAction = markClosureReadOnly(withClosureTopics(upsertManyBlocks(publication.blocks as any), topicId))
-        }
-      } catch {
-        return
-      }
       // Re-read structural freshness immediately before the synchronous
       // publish (covers races between validation and publish with no await
       // in between).
       if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return
-      // Synchronous publish: blocks (bumps/invalidates via middleware) →
-      // cache (snapshots post-bump generation) → anchor (visible only when
-      // the cache is already readable for the new anchor).
-      try {
-        if (blocksAction) {
-          store.dispatch(blocksAction as any)
-        }
-      } catch {
-        return
-      }
+      // Synchronous publish: cache → anchor (visible only when the cache is
+      // already readable for the new anchor). No blocks dispatch: this path
+      // triggers no middleware bump/invalidation.
       try {
         setCachedContextClosure(topicId, fullResponse, route)
       } catch {

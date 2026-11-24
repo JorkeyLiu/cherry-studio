@@ -245,16 +245,15 @@ const cachedGenerations = new Map<string, number>()
 // Content-only revision for trusted streaming mirrors: advances on exempt
 // `updateOneBlock` content patches WITHOUT clearing the structural cache and
 // WITHOUT emitting the semantic invalidation signal (so no background
-// refetch). It is consumed ONLY as a hydration-mode decision
-// (`closureBlockHydration.selectClosureBlocksForHydration`): when it advanced
-// during a fetch, the authoritative STRUCTURE (counts/boundary/roster) is
-// still accepted and cached, and the response's blocks are gap-filled only
-// (missing entities) so a stale body never overwrites a newer live delta.
-// Structural `loadGenerations` remain the sole acceptance/freshness signal;
-// this revision never invalidates structure, never gates a cache read, and
-// never triggers a fetch. Cached `blocks` bytes are never authoritative fresh
-// bodies: UI content always comes from the live store snapshot and provider
-// requests always read a caller-local Main closure + overlay.
+// refetch). The closure snapshot is still accepted and cached on structural
+// guards; UI context bodies reach the projection through the closure snapshot
+// composed with the execution-owned overlay (route B) — the ordinary-block
+// closure hydration path is exited, so this revision no longer chooses a
+// hydration strategy. Structural `loadGenerations` remain the sole
+// acceptance/freshness signal; this revision never invalidates structure,
+// never gates a cache read, and never triggers a fetch. Cached `blocks`
+// bytes are never authoritative fresh bodies: provider requests always read
+// a caller-local Main closure + overlay.
 // Retained across retention/evict like loadGenerations (in-flight protection
 // survives trimming).
 const contentGenerations = new Map<string, number>()
@@ -625,11 +624,10 @@ export function ensureContentGeneration(topicId: string, branchId?: string | nul
 /**
  * Pure read of the content-only revision (no ensure side effect beyond the
  * 0-default for unknown routes). Structural cache freshness never consults
- * this, and it never gates acceptance: a caller captures it at fetch start and
- * compares it after the response to CHOOSE the hydration strategy only
- * (`closureBlockHydration.selectClosureBlocksForHydration`): unchanged → full
- * publication, advanced → gap-fill (authoritative structure is still accepted
- * and cached; the response bodies never overwrite live ones).
+ * this, and it never gates acceptance: the ordinary-block closure hydration
+ * path is exited, so no caller chooses a hydration strategy anymore. The
+ * revision observes trusted streaming mirror activity for the Messages live
+ * mirror only.
  */
 export function getContentGeneration(topicId: string, branchId?: string | null): number {
   return contentGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0

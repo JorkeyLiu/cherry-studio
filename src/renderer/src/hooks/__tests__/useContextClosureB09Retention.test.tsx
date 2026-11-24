@@ -313,7 +313,10 @@ describe('B-09 hook-level retention (useContextClosure)', () => {
     expect(getCachedContextClosure('t-active')).not.toBeNull()
     expect(getCachedContextClosure('t-stale')).toBeNull()
     expect(getAllCachedTopicIds()).toEqual(['t-active'])
-    expect(upsertManyBlocksMock).toHaveBeenCalledWith(activeResp.blocks)
+    // Route B: an accepted closure never writes ordinary blocks — bodies come
+    // from the closure snapshot composed with the execution-owned overlay —
+    // so the cache publication dispatches nothing at all.
+    expect(upsertManyBlocksMock).not.toHaveBeenCalled()
     // Ensure stale blocks never dispatched even after active success
     const allBlockPayloads = upsertManyBlocksMock.mock.calls.map((c: any) => c[0])
     expect(allBlockPayloads.flat().some((b: any) => b?.id === `b-t-stale`)).toBe(false)
