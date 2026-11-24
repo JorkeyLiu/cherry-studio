@@ -385,4 +385,46 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
    stale/failed/invalid、route 隔离、双 attempt 同 messageId、multi-terminal token），新增
    `useContextClosureReadReceipt.test.tsx`（真实 hook issuer：绑定/happens-before/无效不绑/
    cache-hit 原 receipt）与 `useContextWindowAnchor.readReceipt.test.ts`（anchor resolve 绑定），
-   `useContextPresentation.test.tsx` 增补 receipt 配对 handoff/retain。
+    cache-hit 原 receipt）与 `useContextWindowAnchor.readReceipt.test.ts`（anchor resolve 绑定），
+    `useContextPresentation.test.tsx` 增补 receipt 配对 handoff/retain。
+
+ ## 14 续补记：UI token 估算稳定历史按不可变快照复用（bounded slice；提案正文仍不改）
+
+ - 范围：只动 UI token 预览的重复估算工作，不碰过滤语义、不碰请求路径、不碰
+   authority/pending/count/boundary。`filterContextMessages`
+   全过滤链（useful/error/adjacent/lastAssistant/empty/roleStart 的既有顺序与
+   trailing-assistant 分流）原样保留；`estimateMessagesUsage` 与 provider 实际
+   历史分支、`ConversationService` 不变；无 snapshot 的 legacy
+   `estimateHistoryTokens` 行为不变（store 回退仍在）。
+ - 做法：新增 `historyTokenEstimateSession.ts`
+  （`createHistoryTokenEstimateSession` 纯工厂）：每实例只保留当前已选消息集的
+   per-message 估算 promise/result。输入在同一调用内同步闭合——显式快照直接用，
+   无快照时一次同步 store 读后即闭合成 caller-local `SnapshotBlockMap`，异步
+   continuation 不再后读全局 map。每条目以“message 对象引用 + 按
+   `message.blocks` 顺序的块实体引用（含缺失）+ `includeMedia`”判等复用；任一
+   引用变化即整条按当前精确算法重估（不按追加字符串手算 token，tokenizer 非
+   线性）。系统 prompt 每轮单独重估，不使 prompt 变化全 history 失效。
+   `includeMedia` 变化使结果失效。空集只计系统 prompt。删除/filtered-out/路由
+   切换清出 scope 条目，无全局 Map、无新常驻 LRU，条目数恒 ≤ 当前已选集。
+   重叠 run 以 promise 同一性比较：旧 run 的迟到拒绝删不掉新 run 条目，失败不
+   缓存可重试。hook 侧 `usePromptTokenEstimate` 在 `routeIdentity`
+  （topic/branch/anchor）变化与 unmount 时 reset 会话，保留既有
+   200ms debounce/requestId/cancel 语义；identity 只做会话边界，不构造 authority。
+   `useContextPresentation` 的 `blockSnapshot` memo 不动（overlay 组合仍是 O(B)
+   新 Map，诚实说明；会话复用不依赖 map 身份，只依赖块实体引用）。
+ - 证据口径：只证明“减少重复估算工作”（per-message estimator 调用计数），不作
+   延迟收益承诺——无 runtime 成本证明。O(selectedMessages) 身份检查仍在，全
+   filter 每轮仍跑，不谎称总 O(Δ)。
+ - 测试：新增 `historyTokenEstimateSession.test.ts`（首轮与 canonical
+   `estimateHistoryTokens` 标量一致、次轮零重复、单条/单块/缺失→出现/
+   text/reasoning/files/images 引用变化重估、`includeMedia` 失效、prompt 单独
+   变化不碰 history、空集、删减裁剪与条目界、顺序不变复用、双 run 重叠旧失败
+   不删新条目、拒绝不缓存可重试、store-once 回退等价）与
+   `usePromptTokenEstimate.session.test.ts`（debounce/requestId、identity 切换
+   全量重估、unmount 清理后重挂载重估、stale 不覆盖、includeMedia 透传）；
+   既有 `usePromptTokenEstimate.test.ts` legacy 路径用例全部保留。
+ - 残余：in-place mutation 风险经查不成立——Redux 经 immer 更新必换引用，
+   `AssistantExecutionState` 的 `blocks.push` 操作的是 deepCopy 后的 request-local
+   草稿（`executionState.ts` 构造即拷贝），UI 侧消息/块实体引用变化即可靠失效；
+   file 缓存仍沿用既有 `fileCacheKey` 契约，未新增外部保证；overlay 高频 bump
+   下全 filter 每轮仍全量跑，内存/耗时无实测数。

@@ -22,7 +22,7 @@ import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
-import store, { useAppDispatch } from '@renderer/store'
+import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import type { SendRoutePin } from '@renderer/store/thunk/messageThunk'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId, selectRouteGeneration } from '@renderer/store/topicBranch'
@@ -188,6 +188,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     [includeHistoryMedia]
   )
 
+  // Session identity branch: same route the send path pins synchronously.
+  const sessionBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+
   // Async, debounced, race-safe estimate: selected history + current draft
   // (text + attachments) combined into one scalar.
   const estimateTokenCount = usePromptTokenEstimate({
@@ -196,7 +199,16 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     blockSnapshot: previewContextInfo.blockSnapshot,
     text,
     files,
-    estimateHistory
+    estimateHistory,
+    // Session identity: same topic/route/anchor as the shared projection.
+    // The session never derives authority from this — it only bounds and
+    // resets cached per-message estimates (no cross-route reuse).
+    routeIdentity: {
+      topicId: topic.id,
+      branchId: sessionBranchId,
+      anchorGroupKey: previewContextInfo.anchorGroupKey
+    },
+    includeMedia: includeHistoryMedia
   })
 
   // contextCount from computeContextInfo: selected context turns / total turns
