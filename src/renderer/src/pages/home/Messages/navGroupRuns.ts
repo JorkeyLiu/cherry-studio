@@ -32,21 +32,27 @@ export interface NavGroupRun {
 
 /**
  * Group node-link geometry: each run is one 1px vertical line in the run's
- * group color joining the first/last row centers, with one small hollow node
- * (1px stroke, same group color) at each end. No horizontal hooks, no corner
- * arcs, no middle nodes; a single-row run is one node with no line. The lane-0
- * line sits one spine offset + one text gap left of the row text, deeper lanes
- * step further left in the rail's own whitespace and never touch the text.
- * The 18px gutter is the rail's own left whitespace reserved in the measured
- * width, never taken from text, so the line (offset 8 + gap 6 = 14 left of
- * text, 4px inside the gutter) is never clipped.
+ * group color joining the first/last row centers, with one hollow node (1px
+ * stroke, same group color, panel-surface fill, 6px outer ring) at each end and
+ * one more of the same node at every interior row center from three rows up. No
+ * horizontal hooks, no corner arcs; a single-row run is one node with no line,
+ * a two-row run is just its two ends with no interior node.
+ * The line sits NAV_GROUP_SPINE_OFFSET_PX + NAV_GROUP_TEXT_GAP_PX left of the
+ * row text; deeper lanes step further left in the rail's own whitespace and
+ * never touch the text. The 18px gutter is the rail's own left whitespace
+ * reserved in the measured width, never taken from text, so the line (offset 8
+ * + gap 6 = 14 left of text, 4px inside the gutter) is never clipped.
  */
 export const NAV_GROUP_SPINE_OFFSET_PX = 8
 /** Gap between the node-link line and the row text's left edge. */
 export const NAV_GROUP_TEXT_GAP_PX = 6
 /** Horizontal step between parallel lanes for overlapping runs. */
 export const NAV_GROUP_LANE_STEP_PX = 6
-/** Hollow node centerline radius: a 1px stroke paints a 6px outer node. */
+/**
+ * Hollow node centerline radius: one 1px stroke paints a 6px outer node.
+ * Both node kinds — the run's ends and its interior rows — use this radius,
+ * so every node on a node link is the same 6px hollow ring.
+ */
 export const NAV_GROUP_NODE_RADIUS_PX = 2.5
 /** Extra measured panel width reserved while at least one run is drawn. */
 export const NAV_GROUP_GUTTER_PX = 18
@@ -129,24 +135,31 @@ export function buildNavGroupRuns(input: {
 }
 
 /**
- * Node-link endpoints for a run — pure geometry, no DOM.
+ * Node-link geometry for a run — pure geometry, no DOM.
  *
  * `centers` are the resolved row-center Y coordinates in outline order
  * (already snapped). A multi-row run joins first-to-last with one vertical
- * line and paints one hollow node at each end; a single-row run paints
- * exactly one node and no line; no run paints middle nodes and ungrouped
- * rows paint nothing. The caller draws the line center-to-center and paints
- * each node over it with the panel surface as fill, so the line never shows
- * through a hollow node.
+ * line and paints one hollow node at each end; its interior rows (three rows
+ * up) get one more of the same node each. A single-row run paints exactly one
+ * node and no line, and ungrouped rows paint nothing. The caller draws the
+ * line center-to-center and paints every node over it with the panel surface
+ * as fill, so the line never shows through a node.
  */
-export function buildNavGroupNodes(centers: readonly number[]): {
+export interface NavGroupNodeGeometry {
+  /** One vertical line joining the first/last row centers, or null for one row. */
   line: { y1: number; y2: number } | null
+  /** Hollow end-node centers: `[first]` for a single-row run, `[first, last]` otherwise. */
   nodes: number[]
-} {
-  if (centers.length === 0) return { line: null, nodes: [] }
-  if (centers.length === 1) return { line: null, nodes: [centers[0]] }
+  /** Interior-node centers: one per interior row of a three-or-more-row run, else empty. */
+  middleNodes: number[]
+}
+
+export function buildNavGroupNodes(centers: readonly number[]): NavGroupNodeGeometry {
+  if (centers.length === 0) return { line: null, nodes: [], middleNodes: [] }
+  if (centers.length === 1) return { line: null, nodes: [centers[0]], middleNodes: [] }
   return {
     line: { y1: centers[0], y2: centers[centers.length - 1] },
-    nodes: [centers[0], centers[centers.length - 1]]
+    nodes: [centers[0], centers[centers.length - 1]],
+    middleNodes: centers.slice(1, -1)
   }
 }

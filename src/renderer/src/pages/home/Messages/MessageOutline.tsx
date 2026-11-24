@@ -603,7 +603,8 @@ const MessageOutline: FC<MessageOutlineProps> = ({
   // All coordinates snap to half pixels next to the 1px stroke so the line
   // stays a single crisp stroke instead of straddling two device rows.
   // Nodes paint over the line center-to-center with the panel surface as
-  // fill, so the line never shows through a hollow node.
+  // fill, so the line never shows through: the ends and the interior rows of
+  // a three-or-more-row run paint the same node.
   const updateGroupOverlay = useCallback(() => {
     const content = contentRef.current
     if (!content || groupRuns.length === 0) return
@@ -628,7 +629,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({
       const spineX = snapGroupCoord(
         textStart - NAV_GROUP_TEXT_GAP_PX - NAV_GROUP_SPINE_OFFSET_PX - run.lane * NAV_GROUP_LANE_STEP_PX
       )
-      const { line: lineGeometry, nodes } = buildNavGroupNodes(centers)
+      const { line: lineGeometry, nodes, middleNodes } = buildNavGroupNodes(centers)
       if (line) {
         if (!lineGeometry) {
           line.setAttribute('visibility', 'hidden')
@@ -640,19 +641,23 @@ const MessageOutline: FC<MessageOutlineProps> = ({
           line.setAttribute('y2', `${lineGeometry.y2}`)
         }
       }
-      const nodeEls = [firstNode, lastNode]
-      for (let i = 0; i < nodeEls.length; i++) {
-        const node = nodeEls[i]
-        if (!node) continue
-        const cy = nodes[i]
+      // One placement for every node of the run: the ends and the interior
+      // nodes are the same node, so a run whose interior rows did not resolve
+      // hides them exactly like an unresolvable end node.
+      const placeNode = (node: SVGCircleElement | null, cy: number | undefined) => {
+        if (!node) return
         if (cy === undefined) {
           node.setAttribute('visibility', 'hidden')
-          continue
+          return
         }
         node.setAttribute('visibility', 'visible')
         node.setAttribute('cx', `${spineX}`)
         node.setAttribute('cy', `${cy}`)
       }
+      placeNode(firstNode, nodes[0])
+      placeNode(lastNode, nodes[1])
+      const middleNodeEls = Array.from(group.querySelectorAll<SVGCircleElement>('[data-group-run-node="middle"]'))
+      for (let i = 0; i < middleNodeEls.length; i++) placeNode(middleNodeEls[i], middleNodes[i])
     }
   }, [groupRuns])
   // Transient overlay tick across the expand/collapse switch: row heights
@@ -1059,7 +1064,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({
             data-outline-interactive={contentInteractive ? 'ready' : 'blocked'}
             style={{ width: expanded ? panelWidthPx : RAIL_CONTENT_WIDTH_PX }}>
             <MessageOutlineContent ref={contentRef} style={panelCapPx == null ? undefined : { maxWidth: panelCapPx }}>
-              {/*Group overlay: one node link per run — a single 1px vertical line joining the first/last row centers with one small hollow node at each end (no hooks, no middle nodes; a single-row run is one node with no line). No viewBox: user units are CSS px aligned to the content box (scrolls with it); stroke never distorts on resize. Geometry is written straight to line/circle attributes (see `updateGroupOverlay`) — no React state, mount once, opacity follows the handoff. Nodes paint over the line with the panel surface as fill, so the line never shows through.*/}
+              {/*Group overlay: one node link per run — a single 1px vertical line joining the first/last row centers with one hollow node at each end, plus an identical hollow node at every interior row when the run has three rows or more (no hooks; a single-row run is one node with no line, a two-row run is its two ends alone). No viewBox: user units are CSS px aligned to the content box (scrolls with it); stroke never distorts on resize. Geometry is written straight to line/circle attributes (see `updateGroupOverlay`) — no React state, mount once, opacity follows the handoff. Every node is the same 6px hollow ring — 1px group stroke, panel-surface fill — painted over the line, so the line never shows through.*/}
               <MessageOutlineGroupOverlay
                 aria-hidden="true"
                 data-testid="conversation-nav-group-overlay"
@@ -1102,6 +1107,23 @@ const MessageOutline: FC<MessageOutlineProps> = ({
                         vectorEffect="non-scaling-stroke"
                       />
                     ) : null}
+                    {/*Interior nodes: the same hollow node the ends use, at every row center between them, so a run of three or more rows reads as a linked chain rather than its endpoints alone. Mounted from the run's own row count and positioned by `updateGroupOverlay` on every layout tick; radius, 1px group stroke and panel-surface fill are shared constants, so every node in the chain is the same 6px ring. Painted after the line, like the ends.*/}
+                    {run.rowIds.length > 2
+                      ? run.rowIds
+                          .slice(1, -1)
+                          .map((rowId) => (
+                            <circle
+                              key={rowId}
+                              data-group-run-node="middle"
+                              cx={0}
+                              cy={0}
+                              r={NAV_GROUP_NODE_RADIUS_PX}
+                              visibility="hidden"
+                              fill="var(--color-background)"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          ))
+                      : null}
                   </g>
                 ))}
               </MessageOutlineGroupOverlay>
@@ -1380,8 +1402,9 @@ const MessageOutlineContent = styled.div`
 
 /**
  * Group node-link overlay: one SVG spanning the content box (which it scrolls
- * with), carrying one vertical line plus hollow end nodes per run. It mounts
- * once and only its opacity follows the switch — collapsed the rail shows the
+ * with), carrying one vertical line plus the same hollow node at every row of
+ * the run, ends and interior rows alike. It mounts once and only its opacity
+ * follows the switch — collapsed the rail shows the
  * dots alone, expanded the dots fade out and the node links fade in over the
  * same 180ms ease-out, so the switch reverses from wherever it is with no
  * mount swap.

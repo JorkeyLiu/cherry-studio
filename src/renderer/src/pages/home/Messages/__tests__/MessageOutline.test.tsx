@@ -685,9 +685,10 @@ describe('MessageOutline textless dividers', () => {
     // the wiring: one node link per run, carrying the run's group color on
     // the single low-contrast 1px stroke, a non-scaling stroke so a resized
     // viewport never distorts it, and hollow end nodes filled with the panel
-    // surface so the line never shows through. A multi-row run paints one
-    // line plus exactly two end nodes (no middle nodes, no hooks); a
-    // single-row run paints exactly one node and no line. The SVG carries
+    // surface so the line never shows through. The runs below are a two-row and
+    // a single-row one, so each keeps its bare endpoints and no hooks — an
+    // interior node appears only from three rows up (the case after this one) —
+    // and a single-row run is one node with no line. The SVG carries
     // no viewBox: user units are CSS px aligned to the content box.
     render(
       <MessageOutline
@@ -728,6 +729,62 @@ describe('MessageOutline textless dividers', () => {
     expect(singleNodes[0].getAttribute('fill')).toBe('var(--color-background)')
     const norm = normalizedCss()
     expect(norm).toContain('vector-effect:non-scaling-stroke')
+  })
+
+  it('adds one hollow interior node per middle row from three rows up, and none below that', () => {
+    // The node contract is uniform across a run: the first row, the last row,
+    // and every row between them carry the same r2.5 hollow node — 1px group
+    // stroke, panel-surface fill, 6px outer ring. A run of two rows is its two
+    // ends, a single-row run is one node, and every node in the overlay belongs
+    // to a run, so a row in no run paints nothing.
+    render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[
+          { segmentId: 's3', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 },
+          { segmentId: 's2', color: '#4d5e6f', rowIds: ['u1', 'u2'], lane: 0 },
+          { segmentId: 's1', color: '#7a8b9c', rowIds: ['u3'], lane: 0 }
+        ]}
+      />
+    )
+    const overlay = screen.getByTestId('conversation-nav-group-overlay')
+    const groups = overlay.querySelectorAll('g[data-group-run]')
+    expect(Array.from(groups).map((g) => g.getAttribute('data-group-run'))).toEqual(['s3', 's2', 's1'])
+
+    // Three rows: two hollow ends plus exactly one identical interior node (N - 2).
+    const threeRows = groups[0]
+    const ends = threeRows.querySelectorAll('circle[data-group-run-node="first"], circle[data-group-run-node="last"]')
+    expect(ends).toHaveLength(2)
+    const middle = threeRows.querySelectorAll('circle[data-group-run-node="middle"]')
+    expect(middle).toHaveLength(1)
+    for (const node of middle) {
+      expect(node.getAttribute('r')).toBe('2.5')
+      expect(node.getAttribute('fill')).toBe('var(--color-background)')
+      // Same stroke as the ends, inherited from the group (no fill tint, no
+      // override): one 1px ring, never a doubled or wider stroke.
+      expect(node.getAttribute('stroke')).toBeNull()
+      expect(node.getAttribute('stroke-width')).toBeNull()
+    }
+
+    // Two rows: no interior row, so no middle node.
+    expect(groups[1].querySelectorAll('circle[data-group-run-node="middle"]')).toHaveLength(0)
+    // Single row: one hollow node, still no middle node.
+    expect(groups[2].querySelectorAll('circle[data-group-run-node="middle"]')).toHaveLength(0)
+    // One group stroke for the whole run: the ends and the interior node share
+    // r2.5, so every ring is 6px.
+    expect(threeRows.getAttribute('stroke')).toBe('#1a2b3c')
+    expect(threeRows.getAttribute('stroke-width')).toBe('1')
+
+    // Endpoints keep their hollow form everywhere, and no circle sits outside
+    // a run (an ungrouped row never gets a node).
+    for (const node of overlay.querySelectorAll(
+      'circle[data-group-run-node="first"], circle[data-group-run-node="last"]'
+    )) {
+      expect(node.getAttribute('r')).toBe('2.5')
+      expect(node.getAttribute('fill')).toBe('var(--color-background)')
+    }
+    expect(overlay.querySelectorAll('circle').length).toBe(6)
   })
 
   it('compresses divider rows to zero when collapsed: no blank bands in the dot column', () => {
@@ -1031,6 +1088,59 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
     flushRaf()
     expect(body.scrollTop).toBe(344 - 60)
     expect(rowOf('u2').getBoundingClientRect().top).toBe(60)
+  })
+
+  it('re-measures the interior node from its row on every overlay tick', () => {
+    // A run of three rows carries exactly one interior node of the same 6px
+    // hollow form as its ends, and
+    // overlay is pure measurement: the dot sits on its row's content-space
+    // center and is rewritten on every geometry tick of the switch, so growing
+    // rows and a scroll moving under them never leave it behind.
+    const { container } = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[{ segmentId: 's1', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 }]}
+      />
+    )
+    const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
+    stubScrollable(body, 5000, 100)
+    stubRect(body, 0, 100)
+    // The overlay measures against the content box the rows live in.
+    stubRect(body.firstElementChild!.firstElementChild!, 0, 500)
+    const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    modelRow(body, rowOf('u1'), 100, 12)
+    const middleRow = modelRow(body, rowOf('u2'), 116, 12)
+    modelRow(body, rowOf('u3'), 132, 12)
+
+    const group = screen.getByTestId('conversation-nav-group-overlay').querySelector('g[data-group-run]')!
+    const firstDot = group.querySelector('circle[data-group-run-node="first"]')!
+    const middleDot = group.querySelector('circle[data-group-run-node="middle"]')!
+    const lastDot = group.querySelector('circle[data-group-run-node="last"]')!
+    const line = group.querySelector('line[data-group-run-line]')!
+
+    // Expanding starts the tick loop, which re-measures as the rows move: one
+    // spine for the line and both node kinds, row centers snapped to n+0.5.
+    fireEvent.mouseEnter(body)
+    flushRaf()
+    expect(line.getAttribute('x1')).toBe('-13.5')
+    expect(firstDot.getAttribute('cy')).toBe('106.5')
+    expect(middleDot.getAttribute('cy')).toBe('122.5')
+    expect(lastDot.getAttribute('cy')).toBe('138.5')
+    expect(middleDot.getAttribute('cx')).toBe(line.getAttribute('x1'))
+    expect(middleDot.getAttribute('visibility')).toBe('visible')
+
+    // The rows move (a switch's own geometry): the interior node follows its
+    // row instead of a remembered offset.
+    middleRow.contentTop = 150
+    flushRaf()
+    expect(middleDot.getAttribute('cy')).toBe('156.5')
+
+    // A scroll moves the rows under the overlay: the content-space write on
+    // the next tick keeps the dot on its row on screen.
+    body.scrollTop = 40
+    flushRaf()
+    expect(middleDot.getAttribute('cy')).toBe('116.5')
   })
 
   it('keeps a single writer when a ResizeObserver callback lands mid-switch', () => {

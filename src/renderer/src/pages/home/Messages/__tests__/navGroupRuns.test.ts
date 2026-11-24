@@ -85,16 +85,19 @@ describe('buildNavGroupRuns', () => {
 })
 
 describe('nav group geometry constants', () => {
-  it('uses an 8px spine offset and a 6px text gap, gutter held at 18px, 2.5px node radius', () => {
+  it('uses an 8px spine offset and a 6px text gap, gutter held at 18px, one 6px node ring', () => {
     // Lane-0 line sits one offset + one gap left of the row text; the text gap
     // stays 6px so each line lands 6px left of the row text and text starts
     // never move when the line shifts right. The 18px gutter is unchanged
-    // (offset 8 + gap 6 = 14, 4px slack) so text starts stay stable. The
-    // hollow node is r2.5: a 1px stroke paints a 6px outer node.
+    // (offset 8 + gap 6 = 14, 4px slack) so text starts stay stable. Every
+    // node on a run — the ends and the interior rows — is the same r2.5
+    // hollow ring under the group's 1px stroke, so each paints a 6px outer
+    // node.
     expect(NAV_GROUP_SPINE_OFFSET_PX).toBe(8)
     expect(NAV_GROUP_TEXT_GAP_PX).toBe(6)
     expect(NAV_GROUP_GUTTER_PX).toBe(18)
     expect(NAV_GROUP_NODE_RADIUS_PX).toBe(2.5)
+    expect(2 * NAV_GROUP_NODE_RADIUS_PX + 1).toBe(6)
   })
 
   it('snaps 1px-stroke coords to CSS n+0.5, never to an integer axis', () => {
@@ -128,28 +131,36 @@ describe('nav group geometry constants', () => {
 })
 
 describe('buildNavGroupNodes', () => {
-  it('draws a multi-row run as one vertical line with exactly two end nodes', () => {
-    const { line, nodes } = buildNavGroupNodes([10.5, 20.5, 30.5])
-    // One line joining first-to-last center; only the two ends get nodes —
-    // middle rows never paint a node.
+  it('keeps the two ends on `nodes` and gives every interior row one node of its own', () => {
+    // Three rows: one line joining first-to-last, the two ends still the only
+    // `nodes`, and the N - 2 interior centers in `middleNodes` — the same
+    // hollow node as the ends — so a middle row is never mistaken for an
+    // endpoint.
+    const { line, nodes, middleNodes } = buildNavGroupNodes([10.5, 20.5, 30.5])
     expect(line).toEqual({ y1: 10.5, y2: 30.5 })
     expect(nodes).toEqual([10.5, 30.5])
     expect(nodes).not.toContain(20.5)
+    expect(middleNodes).toEqual([20.5])
+    // Five rows: three interior nodes, still in outline order.
+    expect(buildNavGroupNodes([10.5, 20.5, 30.5, 40.5, 50.5]).middleNodes).toEqual([20.5, 30.5, 40.5])
   })
 
   it('joins a two-row run first-to-last with no middle node', () => {
-    const { line, nodes } = buildNavGroupNodes([10.5, 30.5])
+    const { line, nodes, middleNodes } = buildNavGroupNodes([10.5, 30.5])
     expect(line).toEqual({ y1: 10.5, y2: 30.5 })
     expect(nodes).toEqual([10.5, 30.5])
+    // Two rows are exactly their two ends: no interior row, so no middle node.
+    expect(middleNodes).toEqual([])
   })
 
   it('draws a single-row run as exactly one node with no line', () => {
-    const { line, nodes } = buildNavGroupNodes([12.5])
+    const { line, nodes, middleNodes } = buildNavGroupNodes([12.5])
     expect(line).toBeNull()
     expect(nodes).toEqual([12.5])
+    expect(middleNodes).toEqual([])
   })
 
   it('draws nothing when no row resolves', () => {
-    expect(buildNavGroupNodes([])).toEqual({ line: null, nodes: [] })
+    expect(buildNavGroupNodes([])).toEqual({ line: null, nodes: [], middleNodes: [] })
   })
 })
