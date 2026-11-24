@@ -240,7 +240,11 @@ import {
 } from './positionStabilizer'
 import Prompt from './Prompt'
 import { ReferenceDivider } from './ReferenceDivider'
-import { attemptFirstPosition, isFirstPlacementAwaitingAttempt } from './routeFirstPlacement'
+import {
+  attemptFirstPosition,
+  isFirstPlacementAwaitingAttempt,
+  resolveTargetProjectionReadiness
+} from './routeFirstPlacement'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
 import {
@@ -2311,57 +2315,65 @@ const Messages = ({
     }
     if (!controller.isSessionCurrent(pending.epoch)) return
     const live = scrollContainerRef.current
-    const hasWindow = (viewportStateRef.current.window?.displayMessages.length ?? 0) > 0
     const current = isViewportTransitionCurrent({
       topicMatch: topicIdRef.current === pending.topicId,
       routeMatch: routeRef.current === pending.routeId,
       epochCurrent: controller.isSessionCurrent(pending.epoch),
       mounted: !unmountedRef.current
     })
-    if (!current || !live || !hasWindow) {
+    if (!current || !live) {
+      failVisibleTransition(pending.epoch)
+      return
+    }
+    // Target-projection readiness (atomic-visibility boundary): only this
+    // session's OWN committed + rendered projection may place and reveal. A
+    // projection that is still being read, not committed yet, or proven only
+    // by a previous commit's state stays hidden with the plan unconsumed — the
+    // projection/read commits re-run this layout pass through the deps below
+    // (no timer, no poll loop).
+    const readiness = resolveTargetProjectionReadiness({
+      pending,
+      rendered: controller.renderedProvenance,
+      window: viewportState.window,
+      loadedProjection: loadedMessages,
+      windowReadBusy: isTopicReadBusy
+    })
+    if (readiness === 'waiting') return
+    if (readiness === 'observed-empty') {
       // Deterministic empty visible fallback (F1): an observed empty window
       // for the current target is a legitimate empty projection (empty topic /
       // deletion fallback tail), not a missing commit — fail visible exactly
       // once (releases, visible, no snapshot, ack settle false via
-      // failVisible). Only a not-yet-observed window (null) stays hidden
-      // awaiting the commit. No fake stable snapshot/anchor is invented.
+      // failVisible). No fake stable snapshot/anchor is invented.
       // Provenance-bound: only this transaction's actually committed target
-      // window may take the empty fallback. A transient/bootstrap-old empty
-      // (manual bootstrap arm with no atomic window commit) stays hidden
-      // awaiting the hydrate/nav commit instead of killing it.
-      const observedWindow = viewportStateRef.current.window
-      const observedEmpty = observedWindow != null && (observedWindow.displayMessages?.length ?? 0) === 0
-      // Missing window yet (commit not observed): stay hidden until the
-      // window lands; only fail visible when this epoch is stale/gone.
-      // Observed empty falls through to fail-visible below (never hidden)
-      // ONLY when provenance-bound (see below).
-      if (!hasWindow && current && live && !unmountedRef.current && !observedEmpty) return
-      if (!hasWindow && current && live && !unmountedRef.current && observedEmpty) {
-        const ack = planAckRef.current
-        const ackArmed = !!ack && ack.epoch === pending.epoch
-        if (!ackArmed) return
-        try {
-          const rendered = controller.renderedProvenance
-          const ow = observedWindow as {
-            oldestMessageId?: unknown
-            newestMessageId?: unknown
-            displayMessages?: unknown[]
-          } | null
-          const observedId =
-            ow && Array.isArray(ow.displayMessages)
-              ? `${String(ow.oldestMessageId ?? '')}::${String(ow.newestMessageId ?? '')}::${ow.displayMessages.length}`
-              : null
-          const renderedMatches =
-            !!rendered &&
-            !!observedId &&
-            rendered.epoch === pending.epoch &&
-            rendered.topicId === pending.topicId &&
-            rendered.routeId === pending.routeId &&
-            rendered.windowId === observedId
-          if (!renderedMatches) return
-        } catch {
-          return
-        }
+      // window may take the empty fallback (placement ack armed for this epoch
+      // + rendered provenance is that very window), so a transient/bootstrap-
+      // old empty keeps waiting for the hydrate/nav commit instead of killing
+      // it.
+      const observedWindow = viewportState.window as {
+        oldestMessageId?: unknown
+        newestMessageId?: unknown
+        displayMessages?: unknown[]
+      } | null
+      const ack = planAckRef.current
+      const ackArmed = !!ack && ack.epoch === pending.epoch
+      if (!ackArmed) return
+      try {
+        const rendered = controller.renderedProvenance
+        const observedId =
+          observedWindow && Array.isArray(observedWindow.displayMessages)
+            ? `${String(observedWindow.oldestMessageId ?? '')}::${String(observedWindow.newestMessageId ?? '')}::${observedWindow.displayMessages.length}`
+            : null
+        const renderedMatches =
+          !!rendered &&
+          !!observedId &&
+          rendered.epoch === pending.epoch &&
+          rendered.topicId === pending.topicId &&
+          rendered.routeId === pending.routeId &&
+          rendered.windowId === observedId
+        if (!renderedMatches) return
+      } catch {
+        return
       }
       failVisibleTransition(pending.epoch)
       return
@@ -2447,6 +2459,12 @@ const Messages = ({
     // fetch-hold → positioning move or a new plan epoch reruns exactly once
     // via the current-plan gate above (stale epochs return inert, placed
     // sessions leave `positioning` so repeats are no-ops).
+    //
+    // Projection-readiness retry (atomic-visibility boundary): a waiting pass
+    // (see `resolveTargetProjectionReadiness`) must re-run when the target
+    // projection actually commits — the projected window, the topic's loaded
+    // projection, and the in-flight window-read fact are therefore deps, not
+    // timers. Each of those is a real commit/read event of the same session.
   }, [
     controller,
     controller.currentPhase,
@@ -2454,6 +2472,8 @@ const Messages = ({
     planSeq,
     viewportPhaseAttr,
     viewportState.window,
+    loadedMessages,
+    isTopicReadBusy,
     failVisibleTransition,
     scrollContainerRef,
     notifyViewport,
@@ -4936,7 +4956,7 @@ const Messages = ({
       // attempt cannot consume it on the stale projection.
       const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, pendingRouteAtArm)
       void prepareNavigationTarget(decision.intent).then(
-        (result) => {
+        async (result) => {
           if (controller.currentEpoch !== bootstrapRestoreEpoch) return
           if (transitionEpochRef.current !== bootstrapEpoch) {
             failVisibleTransition(bootstrapRestoreEpoch)
@@ -4967,36 +4987,28 @@ const Messages = ({
           // visible preserving the prior lawful snapshot.
           const pendingTransition = transitionPlanRef.current
           if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-            try {
-              const live = scrollContainerRef.current
-              if (
-                !live ||
-                unmountedRef.current ||
-                topicIdRef.current !== topic.id ||
-                routeRef.current !== pendingTransition.routeId ||
-                !controller.isSessionCurrent(bootstrapRestoreEpoch)
-              ) {
-                failVisibleTransition(bootstrapRestoreEpoch)
-                bootstrapPhaseRef.current = 'done'
-                return
-              }
-              let attempt: ViewportFirstPositionOutcome | 'refused'
-              try {
-                attempt = attemptFirstPosition(controller, pendingTransition, live)
-              } catch {
-                attempt = 'refused'
-              }
-              if (attempt === 'refused') {
-                failVisibleTransition(bootstrapRestoreEpoch)
-                bootstrapPhaseRef.current = 'done'
-                return
-              }
-              if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
-                failVisibleTransition(bootstrapRestoreEpoch)
-                bootstrapPhaseRef.current = 'done'
-                return
-              }
-            } catch {
+            // First position belongs to the pre-paint layout gate, exactly-once.
+            // This completion must never attempt the plan itself: a direct
+            // attempt records the outcome before the target projection commit
+            // renders, so the layout pass would then exit on `outcome !== null`
+            // and complete the placement on a projection that is not the
+            // target's yet (the A->B->A stale-window reveal). Await the layout
+            // attempt instead - resolved by the same plan ack (a real event:
+            // pre-paint placement, or supersession/teardown settling it
+            // unobserved), then re-gate currency exactly as before.
+            const pendingRoute = pendingTransition.routeId
+            const stillTarget = (): boolean =>
+              topicIdRef.current === topic.id &&
+              routeRef.current === pendingRoute &&
+              !unmountedRef.current &&
+              controller.currentEpoch === bootstrapRestoreEpoch
+            const placementObserved = await awaitPlanPlacement(bootstrapRestoreEpoch, stillTarget)
+            if (!placementObserved) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+            if (!stillTarget()) {
               failVisibleTransition(bootstrapRestoreEpoch)
               bootstrapPhaseRef.current = 'done'
               return
@@ -5112,7 +5124,7 @@ const Messages = ({
     // route against THIS value, not against itself.
     const restoreRouteAtArm = routeRef.current
     void prepareNavigationTarget(decision.intent).then(
-      (result) => {
+      async (result) => {
         if (controller.currentEpoch !== bootstrapRestoreEpoch) return
         if (transitionEpochRef.current !== restoreEpoch) {
           failVisibleTransition(bootstrapRestoreEpoch)
@@ -5134,33 +5146,22 @@ const Messages = ({
         // visible preserving the prior lawful snapshot.
         const pendingTransition = transitionPlanRef.current
         if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-          try {
-            const live = scrollContainerRef.current
-            if (
-              !live ||
-              unmountedRef.current ||
-              topicIdRef.current !== topic.id ||
-              routeRef.current !== pendingTransition.routeId ||
-              !controller.isSessionCurrent(bootstrapRestoreEpoch)
-            ) {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              return
-            }
-            let attempt: ViewportFirstPositionOutcome | 'refused'
-            try {
-              attempt = attemptFirstPosition(controller, pendingTransition, live)
-            } catch {
-              attempt = 'refused'
-            }
-            if (attempt === 'refused') {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              return
-            }
-            if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              return
-            }
-          } catch {
+          // Same contract as the pending path above: the pre-paint layout gate
+          // owns first position exactly-once; this completion only awaits its
+          // observation (never attempts the plan, never consumes it on a
+          // projection the gate still classifies as not committed).
+          const pendingRoute = pendingTransition.routeId
+          const stillTarget = (): boolean =>
+            topicIdRef.current === topic.id &&
+            routeRef.current === pendingRoute &&
+            !unmountedRef.current &&
+            controller.currentEpoch === bootstrapRestoreEpoch
+          const placementObserved = await awaitPlanPlacement(bootstrapRestoreEpoch, stillTarget)
+          if (!placementObserved) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          if (!stillTarget()) {
             failVisibleTransition(bootstrapRestoreEpoch)
             return
           }
@@ -5292,6 +5293,7 @@ const Messages = ({
   }, [
     beginBootstrapFetch,
     commitBootstrapPositioningPlan,
+    awaitPlanPlacement,
     checkElement,
     commitDisplayedStable,
     commitDisplayedStableWithAnchor,

@@ -20,9 +20,10 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   attemptFirstPosition,
   type FirstPlacementPending,
-  isFirstPlacementAwaitingAttempt
+  isFirstPlacementAwaitingAttempt,
+  resolveTargetProjectionReadiness
 } from '../routeFirstPlacement'
-import { RouteViewportController } from '../routeViewportController'
+import { type RenderedProvenance, RouteViewportController } from '../routeViewportController'
 
 const installRows = (container: HTMLElement, ids: string[]): void => {
   container.innerHTML = ''
@@ -373,5 +374,339 @@ describe('routeFirstPlacement delivery', () => {
     expect(stalePending.outcome).toBeNull()
     expect(writes()).toBe(0)
     expect(c.currentEpoch).toBe(newer)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Target-projection readiness (atomic-visibility boundary).
+  //
+  // The pre-paint placement/reveal may only complete on the target projection
+  // THIS transaction committed. A transient pre-commit projection (an empty
+  // window while the target's window read is in flight, or while its loaded
+  // projection already holds the content the window must show) is
+  // not-yet-observed: the pass stays hidden with the plan unconsumed instead of
+  // being treated as a completed first placement. Genuine observed empties and
+  // short real content stay legal, and the gate never looks at scroll geometry.
+  // ---------------------------------------------------------------------------
+
+  const installStreamedRows = (
+    container: HTMLElement,
+    ids: string[],
+    geometry: { scrollHeight: number; clientHeight: number }
+  ): void => {
+    container.innerHTML = ''
+    for (const id of ids) {
+      const row = document.createElement('div')
+      row.id = `message-${id}`
+      row.textContent = id
+      container.appendChild(row)
+    }
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, get: () => geometry.scrollHeight })
+    Object.defineProperty(container, 'clientHeight', { configurable: true, get: () => geometry.clientHeight })
+  }
+
+  /** Projection facts a render commit exposes to the pre-paint layout pass. */
+  interface ProjectionCommit {
+    window: { displayMessages: { id: string }[] } | null
+    loadedProjection: readonly unknown[] | undefined
+    windowReadBusy: boolean
+  }
+
+  /**
+   * Production-shaped pre-paint delivery: the real readiness gate, the real
+   * exactly-once attempt, the real controller, and the real reveal. Deps are
+   * the commit facts (window / loaded projection / read busy) plus the
+   * controller's phase/epoch — never a timer.
+   */
+  const ReadinessDeliveryHarness = ({
+    controller,
+    containerHost,
+    pendingHost,
+    seq,
+    projection,
+    events
+  }: {
+    controller: RouteViewportController
+    containerHost: { current: HTMLElement | null }
+    pendingHost: { current: FirstPlacementPending | null }
+    seq: number
+    projection: ProjectionCommit
+    events: string[]
+  }): null => {
+    void seq
+    useLayoutEffect(() => {
+      if (controller.currentPhase !== 'positioning') return
+      const pending = pendingHost.current
+      if (!pending || pending.outcome !== null) return
+      if (!controller.isSessionCurrent(pending.epoch)) return
+      const live = containerHost.current
+      if (!live) return
+      const readiness = resolveTargetProjectionReadiness({
+        pending,
+        rendered: controller.renderedProvenance,
+        window: projection.window,
+        loadedProjection: projection.loadedProjection,
+        windowReadBusy: projection.windowReadBusy
+      })
+      events.push(readiness)
+      if (readiness !== 'ready') return
+      let attempt: ReturnType<typeof attemptFirstPosition>
+      try {
+        attempt = attemptFirstPosition(controller, pending, live)
+      } catch {
+        attempt = 'refused'
+      }
+      events.push(attempt)
+      if (attempt === 'refused' || attempt === 'unplaced') return
+      if ((controller.currentPhase as string) === 'terminal') return
+      if (!controller.isActivationSession) controller.revealed(pending.epoch)
+    }, [
+      controller,
+      controller.currentPhase,
+      controller.currentEpoch,
+      seq,
+      projection.window,
+      projection.loadedProjection,
+      projection.windowReadBusy
+    ])
+    return null
+  }
+
+  describe('target-projection readiness (atomic-visibility boundary)', () => {
+    const session = { topicId: 'A', routeId: null, epoch: 7 }
+    const rendered: Pick<RenderedProvenance, 'epoch' | 'topicId' | 'routeId'> = {
+      epoch: 7,
+      topicId: 'A',
+      routeId: null
+    }
+    const rows = [
+      { id: 'm2', topicId: 'A' },
+      { id: 'm1', topicId: 'A' }
+    ]
+
+    it('classifies readiness from the commit facts (never from scroll geometry)', () => {
+      const readiness = (
+        input: Partial<Omit<Parameters<typeof resolveTargetProjectionReadiness>[0], 'pending' | 'rendered'>> & {
+          rendered?: typeof rendered | null
+        }
+      ): string =>
+        resolveTargetProjectionReadiness({
+          pending: session,
+          rendered,
+          window: { displayMessages: rows },
+          loadedProjection: rows,
+          windowReadBusy: false,
+          ...input
+        })
+
+      // Not-yet-observed target projection.
+      expect(readiness({ window: null })).toBe('waiting')
+      expect(readiness({ rendered: null })).toBe('waiting')
+      // A rendered provenance from another session never authorizes placement.
+      expect(readiness({ rendered: { ...rendered, epoch: 6 } })).toBe('waiting')
+      expect(readiness({ rendered: { ...rendered, topicId: 'B' } })).toBe('waiting')
+      expect(readiness({ rendered: { ...rendered, routeId: 'branch' } })).toBe('waiting')
+      // Own committed non-empty projection: ready on its own facts. An unrelated
+      // in-flight read (topic-level window read / pagination) never delays it.
+      expect(readiness({})).toBe('ready')
+      expect(readiness({ windowReadBusy: true })).toBe('ready')
+      // Rows owned by the OUTGOING topic are the stale pre-commit window: a
+      // topic return keeps the old window in viewportState until the target
+      // window lands, whatever its length.
+      expect(readiness({ window: { displayMessages: [{ id: 'm9', topicId: 'B' }] } })).toBe('waiting')
+      expect(readiness({ window: { displayMessages: [{ id: 'm9' }] } })).toBe('waiting')
+      // Empty own window: only an idle read plus a proven-empty resident
+      // projection is an observed empty. A read in flight is still transient.
+      expect(readiness({ window: { displayMessages: [] }, windowReadBusy: true })).toBe('waiting')
+      expect(readiness({ window: { displayMessages: [] } })).toBe('waiting')
+      expect(readiness({ window: { displayMessages: [] }, loadedProjection: undefined })).toBe('waiting')
+      // Genuine observed empty (empty topic / deletion fallback tail).
+      expect(readiness({ window: { displayMessages: [] }, loadedProjection: [] })).toBe('observed-empty')
+    })
+
+    it('A→B→A return: transient empty projection stays hidden, then places the saved bottom once the target rows are positioned', () => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      try {
+        const ids = Array.from({ length: 10 }, (_, i) => `rrp-msg-00${790 + i}`).reverse()
+        const writes = countScrollWrites(container).writes
+        // B is the displayed route; the user returns to the long topic A whose
+        // window is NOT resident (A→B→A). A's saved viewport is the real bottom.
+        const c = new RouteViewportController({ topicId: 'B', route: null })
+        const saved = {
+          scrollTop: 2314,
+          messageId: 'rrp-msg-00798',
+          intraRowOffset: -120.109375,
+          isAtBottom: true
+        }
+        const ret = c.request({ kind: 'top', topicId: 'A', targetRoute: null, saved })
+        expect(c.displayedRoute).toEqual({ topicId: 'B', route: null })
+        // The return commits the target window identity pre-paint (still hidden).
+        expect(c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, '::0')).toBe(true)
+        expect(c.currentPhase).toBe('positioning')
+
+        const pendingHost: { current: FirstPlacementPending | null } = {
+          current: { topicId: 'A', routeId: null, epoch: ret.epoch, plan: { kind: 'bottom' }, outcome: null }
+        }
+        const events: string[] = []
+        const loadedProjection = ids.map((id) => ({ id, topicId: 'A' }))
+        const host = { current: container as HTMLElement | null }
+        const view = render(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={host}
+            pendingHost={pendingHost}
+            seq={0}
+            projection={{ window: { displayMessages: [] }, loadedProjection, windowReadBusy: true }}
+            events={events}
+          />
+        )
+        // Transient pre-commit empty while the target's window read is in flight:
+        // hidden-owned, plan unconsumed, no write, no reveal, B stays displayed.
+        expect(events).toEqual(['waiting'])
+        expect(pendingHost.current?.outcome).toBeNull()
+        expect(c.currentPhase).toBe('positioning')
+        expect(c.displayedRoute).toEqual({ topicId: 'B', route: null })
+        expect(writes()).toBe(0)
+
+        // Read completed, projection still not committed: the loaded projection
+        // already holds the content the target window must show.
+        view.rerender(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={host}
+            pendingHost={pendingHost}
+            seq={1}
+            projection={{ window: { displayMessages: [] }, loadedProjection, windowReadBusy: false }}
+            events={events}
+          />
+        )
+        expect(events).toEqual(['waiting', 'waiting'])
+        expect(pendingHost.current?.outcome).toBeNull()
+        expect(writes()).toBe(0)
+
+        // The projection commit: the target window and its rows land in the same
+        // React commit (rows installed before the layout pass reads the port).
+        installStreamedRows(container, ids, { scrollHeight: 2717, clientHeight: 403 })
+        const committedProjection: ProjectionCommit = {
+          window: { displayMessages: loadedProjection },
+          loadedProjection,
+          windowReadBusy: false
+        }
+        view.rerender(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={host}
+            pendingHost={pendingHost}
+            seq={2}
+            projection={committedProjection}
+            events={events}
+          />
+        )
+        expect(events).toEqual(['waiting', 'waiting', 'ready', 'placed'])
+        expect(container.querySelectorAll('#message-rrp-msg-00790')).toHaveLength(1)
+        expect(writes()).toBe(1)
+        expect(container.scrollTop).toBe(2314)
+        expect(pendingHost.current?.outcome).toBe('placed')
+        expect(c.currentPhase).toBe('aligned')
+        expect(c.displayedRoute).toEqual({ topicId: 'A', route: null })
+        view.unmount()
+      } finally {
+        container.remove()
+      }
+    })
+
+    it('same-route short real content with zero scroll travel is a legal bottom placement', () => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      try {
+        const ids = ['s2', 's1']
+        // Short real content: the port has no travel at all (scrollHeight ==
+        // clientHeight). Zero travel is legal content, not a missing projection.
+        installStreamedRows(container, ids, { scrollHeight: 403, clientHeight: 403 })
+        const writes = countScrollWrites(container).writes
+        const c = new RouteViewportController({ topicId: 't1', route: null })
+        const req = c.request({
+          kind: 'top',
+          topicId: 't1',
+          targetRoute: null,
+          saved: { scrollTop: 0, messageId: null, intraRowOffset: null, isAtBottom: true }
+        })
+        expect(c.applyTransitionWindow(req.epoch, { topicId: 't1', route: null }, 's1::s2::2')).toBe(true)
+        const pendingHost: { current: FirstPlacementPending | null } = {
+          current: { topicId: 't1', routeId: null, epoch: req.epoch, plan: { kind: 'bottom' }, outcome: null }
+        }
+        const events: string[] = []
+        const projection = {
+          window: { displayMessages: ids.map((id) => ({ id, topicId: 't1' })) },
+          loadedProjection: ids,
+          windowReadBusy: false
+        }
+        render(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={{ current: container }}
+            pendingHost={pendingHost}
+            seq={0}
+            projection={projection}
+            events={events}
+          />
+        )
+        expect(events).toEqual(['ready', 'placed'])
+        expect(writes()).toBe(0)
+        expect(container.scrollTop).toBe(0)
+        expect(c.currentPhase).toBe('aligned')
+        expect(c.displayedRoute).toEqual({ topicId: 't1', route: null })
+      } finally {
+        container.remove()
+      }
+    })
+
+    it('a late obsolete window from a superseded return never reveals or writes', () => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      try {
+        const ids = ['m2', 'm1']
+        installStreamedRows(container, ids, { scrollHeight: 1000, clientHeight: 400 })
+        const writes = countScrollWrites(container).writes
+        const c = new RouteViewportController({ topicId: 'B', route: null })
+        const ret = c.request({
+          kind: 'top',
+          topicId: 'A',
+          targetRoute: null,
+          saved: { scrollTop: 600, messageId: 'm1', intraRowOffset: -10, isAtBottom: false }
+        })
+        expect(c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, 'm1::m2::2')).toBe(true)
+        // A newer navigation supersedes the return before its projection lands;
+        // the late window still carries the obsolete epoch.
+        const newer = c.request({ kind: 'top', topicId: 'A', targetRoute: null })
+        expect(newer.epoch).toBeGreaterThan(ret.epoch)
+        const pendingHost: { current: FirstPlacementPending | null } = {
+          current: { topicId: 'A', routeId: null, epoch: ret.epoch, plan: { kind: 'bottom' }, outcome: null }
+        }
+        const events: string[] = []
+        const projection = {
+          window: { displayMessages: ids.map((id) => ({ id, topicId: 'A' })) },
+          loadedProjection: ids,
+          windowReadBusy: false
+        }
+        render(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={{ current: container }}
+            pendingHost={pendingHost}
+            seq={0}
+            projection={projection}
+            events={events}
+          />
+        )
+        expect(events).toEqual([])
+        expect(pendingHost.current?.outcome).toBeNull()
+        expect(writes()).toBe(0)
+        expect(c.displayedRoute).toEqual({ topicId: 'B', route: null })
+        expect(c.currentEpoch).toBe(newer.epoch)
+      } finally {
+        container.remove()
+      }
+    })
   })
 })

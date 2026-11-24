@@ -140,8 +140,16 @@ const mocks = vi.hoisted(() => {
       return vi.fn() // unsubscribe
     }),
 
-    // useLoadedTopicMessages mock — returns empty messages by default
+    // useLoadedTopicMessages mock — returns empty messages by default.
+    // `loadedResident` separates "projection not resident yet" (`undefined` =
+    // no completeness fact, the A→B→A transient state) from a proven empty
+    // projection (`[]`), which is the atomic-visibility gate's observed-empty
+    // evidence.
     topicMessages: [] as Message[],
+    loadedResident: true,
+    // Target-topic window-read busy state: an explicit pending identity list
+    // means a read is in flight for that topic (the reducer slice shape).
+    pendingWindowReads: {} as Record<string, unknown[]>,
 
     // Unified navigation: controllable ensure + observable dispatches/toast.
     ensureMock: vi.fn(async () => ({ status: 'resident' }) as any),
@@ -223,7 +231,7 @@ vi.mock('@renderer/hooks/useClipboardKeyboard', () => ({
 }))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useLoadedTopicMessages: () => mocks.topicMessages,
+  useLoadedTopicMessages: () => (mocks.loadedResident ? mocks.topicMessages : undefined),
   useTopicLoading: () => false,
   useMessageOperations: () => ({
     displayCount: 20,
@@ -347,7 +355,7 @@ vi.mock('@renderer/services/MessagesService', () => ({
 vi.mock('@renderer/store', () => ({
   default: {
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
       editMode: { enabled: false },
       // Production RootState always carries the resident-registry slice (its
       // initialState is { entries: {} }); the real selector then reads
@@ -357,17 +365,17 @@ vi.mock('@renderer/store', () => ({
     subscribe: vi.fn(() => vi.fn())
   },
   useAppDispatch: () => (mocks as any).dispatchMock,
-  // Read-busy idle: window-read pending identities only (generation never
-  // sets this slice); empty = no outstanding window read.
+  // Read-busy: window-read pending identities only (generation never sets
+  // this slice); the literals read the live knob so tests can inject a read.
   useAppSelector: (selector: any) =>
     selector({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
       editMode: { enabled: false },
       residentRegistry: { entries: {} }
     } as any),
   useAppStore: () => ({
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: {} },
+      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
       editMode: { enabled: false },
       // Same production-shape conformance as the default store mock above.
       residentRegistry: { entries: {} }
@@ -728,6 +736,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // Unified navigation defaults: resident (zero reads), empty projection.
     mocks.ensureMock.mockReset()
     mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
+    mocks.loadedResident = true
+    mocks.pendingWindowReads = {}
     mocks.topicMessages = [] as any
     cleanupMessageRows()
     ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
@@ -1737,6 +1747,140 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
     expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+  })
+
+  it('readiness gate: unready target withholds placement until its own projection commits', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    // Phase 1: target projection not resident yet (A→B→A transient) — the
+    // gate must withhold (waiting): hidden, no reveal, no ack, plan kept.
+    // No busy read here: a pending read holds the navigate path itself, so
+    // the prepare below would never be created; busy is injected in phase 2
+    // after the plan is committed.
+    mocks.loadedResident = false
+    mocks.topicMessages = [] as any
+    mocks.pendingWindowReads = {}
+
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+
+    // Phase 2: the target is resident-empty but a window read is in flight —
+    // still waiting (busy): hidden, no reveal, no ack. The plan stays
+    // committed-but-unconsumed while the completion suspends on its ack.
+    mocks.loadedResident = true
+    mocks.pendingWindowReads = { 'topic-a': ['read-1'] }
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+
+    // Phase 3: the read drains and the target's own rows commit — the
+    // withheld plan places exactly once.
+    mocks.pendingWindowReads = {}
+    mocks.loadedResident = true
+    mocks.topicMessages = [makeMsg('msg-boot', 'topic-a'), makeMsg('m-tail', 'topic-a')] as any
+    installMessageRow('msg-boot')
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1)
+    expect(mocks.commitStableViewport).toHaveBeenCalledTimes(1)
+  })
+
+  it('readiness gate: proven empty target releases visible with no fabricated commit', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    // Phase 1: target projection not resident yet (A→B→A transient) — the
+    // gate withholds: hidden, no commit, no pending consume.
+    mocks.loadedResident = false
+    mocks.topicMessages = [] as any
+    mocks.pendingWindowReads = {}
+
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    // The prepare resolves while the target is still uncommitted: the plan
+    // is delivered on the legacy bootstrap binding, the layout gate stays
+    // `waiting` (no hydrate window id yet), and the completion suspends on
+    // the placement ack — hidden with the plan unconsumed.
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+
+    // Phase 2: the hydrate read completes AFTER plan delivery. This is the
+    // production deferred-receipt race (the ensure around-read receipt lands
+    // later than the prepare microtask): the window-reconcile effect
+    // re-applies the target's own empty window through the real production
+    // `applyMessageWindow` seam, which rebinds the empty window's real
+    // identity into rendered provenance via `noteSameRouteWindowUpdate` —
+    // no fabricated snapshot, no new epoch, no timer.
+    mocks.loadedResident = true
+    mocks.topicMessages = [] as any
+    mocks.pendingWindowReads = {}
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    // observed-empty → fail-visible: the owner releases visible, the ack
+    // settles, the completion runs to done — with no stable commit and no
+    // pending consume (an empty target never clears pending nor invents an
+    // anchor snapshot). This is the genuine-empty runtime contract the
+    // visible empty-DOM entry proves in production.
+    expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('revealed')
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
   })
 
   it('bootstrap provenance: missing target with a non-empty window still refuses stable', async () => {
