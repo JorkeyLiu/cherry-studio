@@ -164,6 +164,7 @@ import type {
 } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
+  memo,
   use,
   useCallback,
   useEffect,
@@ -713,6 +714,17 @@ export const suspendKeeperForAppendedTailBottom = (controller: RouteViewportCont
     return false
   }
 }
+/**
+ * Shared stable empty projections for the uncommitted window state. The
+ * `?? []` fallback in `displayMessages`/`displayGroups` below would allocate
+ * a fresh array on every render while `viewportState.window` is null, which
+ * defeats the shallow prop comparison on `MessagesContent` (and the
+ * grouped/render-plan memos inside it) even when nothing changed. These are
+ * never mutated downstream (projection copies before reversing), so one
+ * shared reference per shape is the honest empty value.
+ */
+const NO_DISPLAY_MESSAGES: Message[] = []
+const NO_DISPLAY_GROUPS: MessageViewportGroup[] = []
 
 interface MessagesContentProps {
   assistant: Assistant
@@ -799,7 +811,7 @@ interface MessagesContentProps {
   onToggleExpandFoldSection: (sectionId: string) => void
 }
 
-const MessagesContent: React.FC<MessagesContentProps> = ({
+const MessagesContentInner: React.FC<MessagesContentProps> = ({
   assistant,
   topic,
   scrollContainerRef,
@@ -1255,6 +1267,18 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   )
 }
 
+/**
+ * Shallow prop memo: every parent-driven flow input arrives as a prop
+ * (window lists, route keys, boundary/pending scalars, callbacks), so a
+ * parent re-render with unchanged semantics — e.g. a new `sharedContextInfo`
+ * identity whose boundary/anchor/pending scalars are identical — bails out
+ * before `renderMessageSegments` rebuilds the flow nodes. Flow inputs owned
+ * inside (edit mode, branch tree, segments, reference, route capability)
+ * re-render from their own subscriptions, never through this memo, so
+ * real-time updates and the viewport/Main-authority governance are unaffected.
+ */
+const MessagesContent: React.FC<MessagesContentProps> = memo(MessagesContentInner)
+
 const Messages = ({
   ref,
   assistant,
@@ -1450,8 +1474,11 @@ const Messages = ({
     }
   }, [topic.id])
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
-  const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
-  const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
+  const displayMessages = useMemo(
+    () => viewportState.window?.displayMessages ?? NO_DISPLAY_MESSAGES,
+    [viewportState.window]
+  )
+  const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? NO_DISPLAY_GROUPS, [viewportState.window])
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
   // History-edge fact for head fork dividers: the displayed window provably
   // contains the true history head only when Main reported no older page AND the
