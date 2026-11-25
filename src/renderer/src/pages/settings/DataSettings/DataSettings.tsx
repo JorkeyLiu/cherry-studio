@@ -3,8 +3,7 @@ import DividerWithText from '@renderer/components/DividerWithText'
 import ListItem from '@renderer/components/ListItem'
 import Scrollbar from '@renderer/components/Scrollbar'
 import { useTheme } from '@renderer/context/ThemeProvider'
-import ImportMenuOptions from '@renderer/pages/settings/DataSettings/ImportMenuSettings'
-import { FileText, FolderCog, FolderOpen } from 'lucide-react'
+import { FileText, FolderCog } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -20,12 +19,12 @@ import WebDavSettings from './WebDavSettings'
 
 /**
  * Data settings inside the bounded settings dialog: a compact section rail
- * (import/export preserved at provider parity) plus the selected section's
+ * (data/backup/sync/webdav/s3/export preserved) plus the selected section's
  * content next to it. The rail and the content are visible at once; the rail
  * never becomes a full-width page and no scroll region is sized by the
  * viewport.
  */
-type DataSectionKey = 'data' | 'sync' | 'local_backup' | 'webdav' | 's3' | 'import_settings' | 'export_options'
+type DataSectionKey = 'data' | 'sync' | 'local_backup' | 'webdav' | 's3' | 'export_options'
 
 type DataNavItem =
   | { kind: 'divider'; key: string; text: string }
@@ -58,13 +57,6 @@ const DataSettings: FC = () => {
       key: 's3',
       title: t('settings.data.s3.title.label'),
       icon: <CloudServerOutlined style={{ fontSize: 16 }} />
-    },
-    { kind: 'divider', key: 'divider_import_settings', text: t('settings.data.divider.import_settings') },
-    {
-      kind: 'section',
-      key: 'import_settings',
-      title: t('settings.data.import_settings.title'),
-      icon: <FolderOpen size={16} />
     },
     { kind: 'divider', key: 'divider_export_settings', text: t('settings.data.divider.export_settings') },
     {
@@ -101,7 +93,6 @@ const DataSettings: FC = () => {
         {menu === 'sync' && <SyncSettings />}
         {menu === 'webdav' && <WebDavSettings />}
         {menu === 's3' && <S3Settings />}
-        {menu === 'import_settings' && <ImportMenuOptions />}
         {menu === 'export_options' && <ExportOptionsSettings />}
         {menu === 'local_backup' && <LocalBackupSettings />}
       </Pane>

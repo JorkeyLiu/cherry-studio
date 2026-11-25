@@ -4,7 +4,7 @@
 > **决策锁**：MM-1 … MM-12（§3 决策表，durable decision IDs）。
 > **最后更新**：2026-09-26
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定上下文锚点由 [Context window governance](./context-window.md) 治理，投影完备性与权威意图由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md) 治理——本文档不改变、不重述这些治理域的边界。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定上下文锚点由 [Context window governance](./context-window.md) 治理，投影完备性与权威意图由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md) 治理——本文档不改变、不重述这些治理域的边界。
 
 ---
 
@@ -195,7 +195,7 @@ resolveReferenceServingModel(canonicalId, snapshot, canonicalName?)
 ## 14. 非目标（Non-goals）
 
 - 不定义应用身份、兼容性标识、发布/更新、平台范围——由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理。
-- 不定义 SQLite schema、迁移 mechanics、L2 ZIP 导入管线——由 [SQLite migration governance](../archived/sqlite-migration.md) 治理。
+- 不定义 SQLite schema、迁移 mechanics——由 [SQLite migration governance](../archived/sqlite-migration.md) 治理。
 - 不定义上下文锚点的详细有效性/默认/继承/修复策略——由 [Context window governance](./context-window.md) 治理。
 - 不定义投影完备性与权威意图的窗口/集合/闭包语义——由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md) 治理。
 - 不定义同步收敛（基线/操作日志/帧合并/水位）——现状由 [Personal Multi-Device Sync](../work/multi-device-sync.md) 治理，目标由 [Sync Connection & Channel ADR](./sync-connection-channel.md) 与 [Sync Data Convergence ADR](./sync-data-convergence.md) 治理。

@@ -92,7 +92,7 @@ async function downloadBunBinary(platform, arch, version = DEFAULT_BUN_VERSION, 
     // Use the new download function
     await downloadWithRedirects(downloadUrl, tempFilename)
 
-    // Extract the zip file using adm-zip
+    // Extract the zip file using StreamZip
     console.log(`Extracting ${packageName} to ${binDir}...`)
     const zip = new StreamZip.async({ file: tempFilename })
 

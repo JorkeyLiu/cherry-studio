@@ -33,21 +33,22 @@ import type { CreateDirectoryOptions, FileStat } from 'webdav'
 import { getDataPath } from '../utils'
 import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import { chatDbService } from './chatDb'
-import { createL3ArchiveMetadata, type L3ArchiveMetadata, validateL3ArchiveMetadata } from './chatDb/l3ArchiveMetadata'
-import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
-import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from './chatDbImport/promotion/filesSnapshot'
 import {
+  CANDIDATE_ROOT_DIRNAME,
   FILES_CATALOG_SNAPSHOT_FILENAME,
   FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
   FILES_PROMOTE_STAGING_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
   PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_STAGING_FILENAME,
   ROLLBACK_SNAPSHOT_FILENAME,
   ROLLBACK_SNAPSHOT_STAGING_FILENAME
-} from './chatDbImport/promotion/journal'
-import { PROMOTION_JOURNAL_STAGING_FILENAME } from './chatDbImport/promotion/journalStore'
-import { validateReadonlyChatDb } from './chatDbImport/promotion/readonlyDbValidation'
+} from './chatDb/backupArtifactNames'
+import { createL3ArchiveMetadata, type L3ArchiveMetadata, validateL3ArchiveMetadata } from './chatDb/l3ArchiveMetadata'
+import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
+import { validateReadonlyChatDb } from './chatDb/readonlyDbValidation'
 import S3Storage from './S3Storage'
 import WebDav from './WebDav'
 import { windowService } from './WindowService'
@@ -637,15 +638,14 @@ class BackupManager {
   // artifacts that are meaningless outside a running DB; chat.db.backup is a
   // transient snapshot staging file (LOCK-6020).
   //
-  // L2 promotion internals at the Data root (LOCK-L3-2): the owned candidate
-  // root, the promotion journal (+ staging), the chat.db rollback snapshot
-  // (+ staging), the Files rollback snapshots (retained / old / staging),
-  // the Files promote-staging dir, and the Dexie files-catalog snapshot
-  // (+ staging). These are stale-state artifacts that must never round-trip
-  // through a backup/restore. Names are imported from the L2 module constants
-  // to avoid drift; the candidate root is pinned below (must equal
-  // candidateDb.CANDIDATE_ROOT_DIRNAME) and cross-checked in
-  // backupManager.production.test.ts.
+  // Reserved artifacts from the retired external-app import pipeline: the
+  // former candidate root, promotion journal (+ staging), chat.db rollback
+  // snapshot (+ staging), Files rollback snapshots (retained / old /
+  // staging), Files promote-staging dir, and files-catalog snapshot
+  // (+ staging). These names are no longer produced by Cherry Chat; they stay
+  // excluded so stale state cannot round-trip through a same-app backup.
+  // Names come from one pinned module; backupManager.production.test.ts guards
+  // drift.
   //
   // Exclusions apply by basename at every level of the Data subtree,
   // matching the historical filter semantics of copyDirWithProgressFiltered.
@@ -656,8 +656,8 @@ class BackupManager {
     'chat.db-wal',
     'chat.db-shm',
     'chat.db.backup',
-    // L2 promotion internals at the Data root (LOCK-L3-2)
-    'chat-import-candidates', // == candidateDb.CANDIDATE_ROOT_DIRNAME
+    // Retired external-import residue at the Data root
+    CANDIDATE_ROOT_DIRNAME,
     PROMOTION_JOURNAL_FILENAME,
     PROMOTION_JOURNAL_STAGING_FILENAME,
     ROLLBACK_SNAPSHOT_FILENAME,
@@ -1675,7 +1675,7 @@ class BackupManager {
         logger.debug('[restoreDirect] Validating extracted chat.db before staging...')
         const extractedChatDbPath = path.join(dataSource, 'chat.db')
 
-        // Use the shared readonly validation gate from the promotion module.
+        // Use the shared readonly chat-DB validation gate.
         // sampleCount=2: minimal reads to verify basic structure without
         // spending excessive time on large databases.
         const dbValidation = validateReadonlyChatDb(extractedChatDbPath, 2)

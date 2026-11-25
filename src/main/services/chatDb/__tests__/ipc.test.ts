@@ -2,7 +2,7 @@
  * ChatDb IPC Registration Tests — mocked ipcMain, real validation.
  *
  * Covers:
- * - Exactly 67 handlers registered
+ * - Handler count matches the expected channel list
  * - Request validation before dispatch
  * - All result/error mapping categories
  * - Null result for void commands
@@ -89,6 +89,102 @@ import { IpcChannel } from '@shared/IpcChannel'
 
 import { registerChatDbIpc } from '../ipc'
 
+const expectedChannels = [
+  // Original 13
+  IpcChannel.ChatDb_FetchMessages,
+  IpcChannel.ChatDb_GetRawTopic,
+  IpcChannel.ChatDb_TopicExists,
+  IpcChannel.ChatDb_EnsureTopic,
+  IpcChannel.ChatDb_AppendMessage,
+  IpcChannel.ChatDb_UpdateMessage,
+  IpcChannel.ChatDb_UpdateMessageAndBlocks,
+  // PERF-100: one atomic multi-model answer-tab selection
+  IpcChannel.ChatDb_SelectAnswerMessage,
+  // BRANCH-12: one atomic multi-model useful selection
+  IpcChannel.ChatDb_SelectUsefulAnswer,
+  // Turn-level atomic fold/unfold over complete turns of the addressed route
+  IpcChannel.ChatDb_SetTurnFolds,
+  IpcChannel.ChatDb_DeleteMessage,
+  IpcChannel.ChatDb_DeleteMessages,
+  IpcChannel.ChatDb_UpdateBlocks,
+  IpcChannel.ChatDb_UpdateSingleBlock,
+  IpcChannel.ChatDb_BulkAddBlocks,
+  IpcChannel.ChatDb_DeleteBlocks,
+  // Phase 5.1A
+  IpcChannel.ChatDb_ListSegments,
+  IpcChannel.ChatDb_UpsertSegment,
+  IpcChannel.ChatDb_UpdateSegmentMetadata,
+  IpcChannel.ChatDb_DeleteSegment,
+  IpcChannel.ChatDb_ReplaceSegmentMembership,
+  IpcChannel.ChatDb_ReorderMessages,
+  IpcChannel.ChatDb_ReorderAnswerGroup,
+  IpcChannel.ChatDb_ListFileRefsByFile,
+  IpcChannel.ChatDb_CountFileRefsByFile,
+  IpcChannel.ChatDb_ListBlocksByFile,
+  // Phase 5.1B: topic lifecycle
+  IpcChannel.ChatDb_UpdateTopicMetadata,
+  IpcChannel.ChatDb_SoftDeleteTopic,
+  IpcChannel.ChatDb_RestoreTopic,
+  IpcChannel.ChatDb_ListTrashTopics,
+  IpcChannel.ChatDb_HardDeleteTopic,
+  IpcChannel.ChatDb_PurgeExpiredTopics,
+  // Phase 5.1B: compound mutations
+  IpcChannel.ChatDb_CloneMessagesToTopic,
+  IpcChannel.ChatDb_ResetMessagesForResend,
+  IpcChannel.ChatDb_ResendUserMessages,
+  IpcChannel.ChatDb_RegenerateAssistantMessage,
+  IpcChannel.ChatDb_DeleteMessagesWithSegments,
+  IpcChannel.ChatDb_DeleteMessagesWithDependents,
+  IpcChannel.ChatDb_PasteMessagesToTopic,
+  // Phase 5.1B-2: search
+  IpcChannel.ChatDb_SearchMessages,
+  // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+  IpcChannel.ChatDb_EmptyTrashTopics,
+  IpcChannel.ChatDb_TransferTopicOwnership,
+  IpcChannel.ChatDb_ResetAssistantTopics,
+  // S6.1: windowed reads
+  IpcChannel.ChatDb_FetchMessagesWindow,
+  // S6.2b R-05: authoritative answer-group READ
+  IpcChannel.ChatDb_FetchAnswerGroup,
+  // S6.2c-1: branch by stable anchor
+  IpcChannel.ChatDb_BranchMessagesToTopic,
+  // True topic branches (local-only lineage, no prefix cloning)
+  IpcChannel.ChatDb_CreateBranch,
+  IpcChannel.ChatDb_ListBranches,
+  IpcChannel.ChatDb_RenameBranch,
+  IpcChannel.ChatDb_DeleteBranch,
+  // Move selected turns to new branch (exact-match expectedSelectedMessageIds guard)
+  IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch,
+  // Operation-scoped branch authority replay (branch undo/redo)
+  IpcChannel.ChatDb_ReplayBranchOperation,
+  // S6.2c-2: insert after stable anchor
+  IpcChannel.ChatDb_InsertMessagesAfterAnchor,
+  // S6.2c-3: insert message groups
+  IpcChannel.ChatDb_InsertMessageGroups,
+  // S6.3 R-06: authoritative context closure READ
+  IpcChannel.ChatDb_FetchContextClosure,
+  IpcChannel.ChatDb_ResolveContextClosure,
+  // One-shot whole-topic snapshot READ (topic exports / knowledge)
+  IpcChannel.ChatDb_FetchWholeTopicSnapshot,
+  // Group-scoped clipboard READ (copy/cut; selected groups only)
+  IpcChannel.ChatDb_FetchClipboardGroups,
+  // Tree-preserving clipboard (opt-in include child branches; fetch/paste/replay/delete)
+  IpcChannel.ChatDb_FetchClipboardTree,
+  IpcChannel.ChatDb_PasteClipboardTree,
+  IpcChannel.ChatDb_ReplayClipboardTree,
+  IpcChannel.ChatDb_DeleteClipboardTree,
+  // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+  IpcChannel.ChatDb_FetchTopicNamingContext,
+  IpcChannel.ChatDb_FetchTopicActivity,
+  IpcChannel.ChatDb_FetchTopicMessageTimes,
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  IpcChannel.ChatDb_ExportTopicData,
+  IpcChannel.ChatDb_ImportTopicData,
+  // Cross-topic history reference creation (live shared prefix)
+  IpcChannel.ChatDb_CreateReferencedTopic
+]
+const expectedChannelCount = expectedChannels.length
+
 describe('ChatDb IPC Registration', () => {
   let disposer: () => void
 
@@ -107,111 +203,17 @@ describe('ChatDb IPC Registration', () => {
   // Handler count
   // =========================================================================
 
-  it('registers exactly 67 handlers', () => {
+  it(`registers exactly ${expectedChannelCount} handlers`, () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
   })
 
   // =========================================================================
   // All channels
   // =========================================================================
 
-  it('registers all 67 ChatDb channels', () => {
+  it(`registers all ${expectedChannelCount} ChatDb channels`, () => {
     disposer = registerChatDbIpc()
-
-    const expectedChannels = [
-      // Original 13
-      IpcChannel.ChatDb_FetchMessages,
-      IpcChannel.ChatDb_GetRawTopic,
-      IpcChannel.ChatDb_TopicExists,
-      IpcChannel.ChatDb_EnsureTopic,
-      IpcChannel.ChatDb_AppendMessage,
-      IpcChannel.ChatDb_UpdateMessage,
-      IpcChannel.ChatDb_UpdateMessageAndBlocks,
-      // PERF-100: one atomic multi-model answer-tab selection
-      IpcChannel.ChatDb_SelectAnswerMessage,
-      // BRANCH-12: one atomic multi-model useful selection
-      IpcChannel.ChatDb_SelectUsefulAnswer,
-      // Turn-level atomic fold/unfold over complete turns of the addressed route
-      IpcChannel.ChatDb_SetTurnFolds,
-      IpcChannel.ChatDb_DeleteMessage,
-      IpcChannel.ChatDb_DeleteMessages,
-      IpcChannel.ChatDb_UpdateBlocks,
-      IpcChannel.ChatDb_UpdateSingleBlock,
-      IpcChannel.ChatDb_BulkAddBlocks,
-      IpcChannel.ChatDb_DeleteBlocks,
-      // Phase 5.1A
-      IpcChannel.ChatDb_ListSegments,
-      IpcChannel.ChatDb_UpsertSegment,
-      IpcChannel.ChatDb_UpdateSegmentMetadata,
-      IpcChannel.ChatDb_DeleteSegment,
-      IpcChannel.ChatDb_ReplaceSegmentMembership,
-      IpcChannel.ChatDb_ReorderMessages,
-      IpcChannel.ChatDb_ReorderAnswerGroup,
-      IpcChannel.ChatDb_ListFileRefsByFile,
-      IpcChannel.ChatDb_CountFileRefsByFile,
-      IpcChannel.ChatDb_ListBlocksByFile,
-      // Phase 5.1B: topic lifecycle
-      IpcChannel.ChatDb_UpdateTopicMetadata,
-      IpcChannel.ChatDb_SoftDeleteTopic,
-      IpcChannel.ChatDb_RestoreTopic,
-      IpcChannel.ChatDb_ListTrashTopics,
-      IpcChannel.ChatDb_HardDeleteTopic,
-      IpcChannel.ChatDb_PurgeExpiredTopics,
-      // Phase 5.1B: compound mutations
-      IpcChannel.ChatDb_CloneMessagesToTopic,
-      IpcChannel.ChatDb_ResetMessagesForResend,
-      IpcChannel.ChatDb_ResendUserMessages,
-      IpcChannel.ChatDb_RegenerateAssistantMessage,
-      IpcChannel.ChatDb_DeleteMessagesWithSegments,
-      IpcChannel.ChatDb_DeleteMessagesWithDependents,
-      IpcChannel.ChatDb_PasteMessagesToTopic,
-      // Phase 5.1B-2: search
-      IpcChannel.ChatDb_SearchMessages,
-      // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
-      IpcChannel.ChatDb_EmptyTrashTopics,
-      IpcChannel.ChatDb_TransferTopicOwnership,
-      IpcChannel.ChatDb_ResetAssistantTopics,
-      // S6.1: windowed reads
-      IpcChannel.ChatDb_FetchMessagesWindow,
-      // S6.2b R-05: authoritative answer-group READ
-      IpcChannel.ChatDb_FetchAnswerGroup,
-      // S6.2c-1: branch by stable anchor
-      IpcChannel.ChatDb_BranchMessagesToTopic,
-      // True topic branches (local-only lineage, no prefix cloning)
-      IpcChannel.ChatDb_CreateBranch,
-      IpcChannel.ChatDb_ListBranches,
-      IpcChannel.ChatDb_RenameBranch,
-      IpcChannel.ChatDb_DeleteBranch,
-      // Move selected turns to new branch (exact-match expectedSelectedMessageIds guard)
-      IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch,
-      // Operation-scoped branch authority replay (branch undo/redo)
-      IpcChannel.ChatDb_ReplayBranchOperation,
-      // S6.2c-2: insert after stable anchor
-      IpcChannel.ChatDb_InsertMessagesAfterAnchor,
-      // S6.2c-3: insert message groups
-      IpcChannel.ChatDb_InsertMessageGroups,
-      // S6.3 R-06: authoritative context closure READ
-      IpcChannel.ChatDb_FetchContextClosure,
-      IpcChannel.ChatDb_ResolveContextClosure,
-      // One-shot whole-topic snapshot READ (topic exports / knowledge)
-      IpcChannel.ChatDb_FetchWholeTopicSnapshot,
-      // Group-scoped clipboard READ (copy/cut; selected groups only)
-      IpcChannel.ChatDb_FetchClipboardGroups,
-      // Tree-preserving clipboard (opt-in include child branches; fetch/paste/replay)
-      IpcChannel.ChatDb_FetchClipboardTree,
-      IpcChannel.ChatDb_PasteClipboardTree,
-      IpcChannel.ChatDb_ReplayClipboardTree,
-      // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
-      IpcChannel.ChatDb_FetchTopicNamingContext,
-      IpcChannel.ChatDb_FetchTopicActivity,
-      IpcChannel.ChatDb_FetchTopicMessageTimes,
-      // Standalone topic JSON data exchange (whole-logical-topic export/import)
-      IpcChannel.ChatDb_ExportTopicData,
-      IpcChannel.ChatDb_ImportTopicData,
-      // Cross-topic history reference creation (live shared prefix)
-      IpcChannel.ChatDb_CreateReferencedTopic
-    ]
 
     for (const channel of expectedChannels) {
       expect(handlers.has(channel)).toBe(true)
@@ -224,11 +226,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(67)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(expectedChannelCount)
   })
 
   // =========================================================================
@@ -1041,7 +1043,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(67)
+    expect(mockHandle).toHaveBeenCalledTimes(expectedChannelCount)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -1117,19 +1119,19 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
-  // All 67 commands preserve 67-registration invariant
+  // All commands preserve the registration invariant
   // =========================================================================
 
-  it('preserves exactly 67 registrations after multiple calls', () => {
+  it(`preserves exactly ${expectedChannelCount} registrations after multiple calls`, () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
   })
 
   // =========================================================================
@@ -1138,15 +1140,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(67) // stale disposer is a no-op
+    expect(handlers.size).toBe(expectedChannelCount) // stale disposer is a no-op
 
     // The current disposer works
     disposer()
@@ -1158,32 +1160,32 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Active disposer still works
     disposer()
     expect(handlers.size).toBe(0)
   })
 
-  it('three sequential registrations produce exactly 67 handlers each time', () => {
+  it(`three sequential registrations produce exactly ${expectedChannelCount} handlers each time`, () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
     d2()
-    expect(handlers.size).toBe(67)
+    expect(handlers.size).toBe(expectedChannelCount)
 
     // Active disposer works
     disposer()

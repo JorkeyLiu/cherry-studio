@@ -34,8 +34,6 @@ import appService from './services/AppService'
 import AppUpdater from './services/AppUpdater'
 import BackupManager from './services/BackupManager'
 import { registerChatDbIpc } from './services/chatDb/ipc'
-import { registerChatImportIpc } from './services/chatDbImport'
-import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import { ConfigKeys, configManager } from './services/ConfigManager'
 import { externalAppsService } from './services/ExternalAppsService'
 import { fileStorage as fileManager } from './services/FileStorage'
@@ -769,12 +767,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // ChatDB — 23 command-oriented IPC handlers for SQLite message persistence
   registerChatDbIpc()
-
-  // ChatImport — 6 import-only IPC handlers for Phase 4 source-reader pipeline
-  registerChatImportIpc()
-
-  // CherryImport — L2 Cherry Studio ZIP import control (Phase 6.3)
-  registerCherryImportControlIpc(mainWindow.webContents)
 
   // Sync — app-level operation log + HTTP relay (MVP)
   const { registerSyncIpc } = await import('./services/sync/syncIpc')

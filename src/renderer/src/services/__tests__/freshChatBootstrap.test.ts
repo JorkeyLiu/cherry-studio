@@ -9,14 +9,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  clearFreshBootstrapPending,
   collectFreshTopicTargets,
+  configureFreshChatBootstrapFinalizer,
   finalizeFreshChatBootstrap,
   FRESH_CHAT_BOOTSTRAP_PENDING_KEY,
+  getFreshChatBootstrapReadinessState,
   isFreshBootstrapPending,
   markFreshBootstrapPendingIfFreshProfile,
   PERSIST_COMPAT_KEY,
-  readPersistedProfileExists
+  readPersistedProfileExists,
+  runFreshChatBootstrap
 } from '../freshChatBootstrap'
 
 beforeEach(() => {
@@ -57,24 +59,10 @@ describe('collectFreshTopicTargets', () => {
 })
 
 describe('finalizeFreshChatBootstrap', () => {
-  it('applied import clears the marker without ensuring', async () => {
-    markFreshBootstrapPendingIfFreshProfile()
-    const ensureTopic = vi.fn()
-    const result = await finalizeFreshChatBootstrap({
-      applied: true,
-      collectTargets: () => [{ id: 't-1', assistantId: 'a-1', name: 'T' }],
-      ensureTopic
-    })
-    expect(result).toBe('import-applied')
-    expect(ensureTopic).not.toHaveBeenCalled()
-    expect(isFreshBootstrapPending()).toBe(false)
-  })
-
-  it('verified-no-pending with marker ensures every target then clears', async () => {
+  it('pending marker ensures every target then clears', async () => {
     markFreshBootstrapPendingIfFreshProfile()
     const ensured: string[] = []
     const result = await finalizeFreshChatBootstrap({
-      applied: false,
       collectTargets: () => [
         { id: 't-1', assistantId: 'a-1', name: 'T1' },
         { id: 't-2', assistantId: 'a-1', name: 'T2' }
@@ -92,7 +80,6 @@ describe('finalizeFreshChatBootstrap', () => {
     localStorage.setItem(PERSIST_COMPAT_KEY, '{"_persist":{"version":225}}')
     const ensureTopic = vi.fn()
     const result = await finalizeFreshChatBootstrap({
-      applied: false,
       collectTargets: () => [{ id: 't-1', assistantId: 'a-1', name: 'T' }],
       ensureTopic
     })
@@ -104,7 +91,6 @@ describe('finalizeFreshChatBootstrap', () => {
     markFreshBootstrapPendingIfFreshProfile()
     await expect(
       finalizeFreshChatBootstrap({
-        applied: false,
         collectTargets: () => [{ id: 't-1', assistantId: 'a-1', name: 'T' }],
         ensureTopic: async () => {
           throw new Error('ensureTopic IPC failed')
@@ -126,7 +112,6 @@ describe('finalizeFreshChatBootstrap', () => {
     // First attempt: single target fails -> marker retained.
     await expect(
       finalizeFreshChatBootstrap({
-        applied: false,
         collectTargets: () => [{ id: 't-1', assistantId: 'a-1' }],
         ensureTopic: flaky
       })
@@ -134,7 +119,6 @@ describe('finalizeFreshChatBootstrap', () => {
     expect(isFreshBootstrapPending()).toBe(true)
     // Retry: create-only rerun succeeds (partial ensures are safe) -> cleared.
     const result = await finalizeFreshChatBootstrap({
-      applied: false,
       collectTargets: () => [{ id: 't-1', assistantId: 'a-1' }],
       ensureTopic: async (target) => {
         ensured.push(target.id)
@@ -150,7 +134,6 @@ describe('finalizeFreshChatBootstrap', () => {
     localStorage.setItem(FRESH_CHAT_BOOTSTRAP_PENDING_KEY, 'pending')
     const ensureTopic = vi.fn()
     const result = await finalizeFreshChatBootstrap({
-      applied: false,
       collectTargets: () => [{ id: 't-relaunch', assistantId: 'default', name: 'Default Topic' }],
       ensureTopic
     })
@@ -163,12 +146,69 @@ describe('finalizeFreshChatBootstrap', () => {
     expect(isFreshBootstrapPending()).toBe(false)
   })
 
-  it('apply failure path never clears (finalizer not reached with unknown outcome)', async () => {
-    markFreshBootstrapPendingIfFreshProfile()
-    // The readiness boot settles `failed` on apply throw WITHOUT calling the
-    // finalizer — the marker must still be pending afterwards.
-    expect(isFreshBootstrapPending()).toBe(true)
-    clearFreshBootstrapPending()
-    expect(isFreshBootstrapPending()).toBe(false)
+  describe('fresh-chat bootstrap readiness', () => {
+    it('existing profile is ready immediately without invoking the finalizer', async () => {
+      const finalizer = vi.fn(async () => 'ensured' as const)
+      configureFreshChatBootstrapFinalizer(finalizer)
+
+      expect(getFreshChatBootstrapReadinessState()).toBe('ready')
+      await expect(runFreshChatBootstrap()).resolves.toBe('not-pending')
+      expect(finalizer).not.toHaveBeenCalled()
+    })
+
+    it('shares one pending promise and opens only after ensure clears the marker', async () => {
+      markFreshBootstrapPendingIfFreshProfile()
+      let resolveEnsure!: () => void
+      const ensureTopic = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveEnsure = resolve
+          })
+      )
+      configureFreshChatBootstrapFinalizer(() =>
+        finalizeFreshChatBootstrap({
+          collectTargets: () => [{ id: 't-1', assistantId: 'default', name: 'Topic' }],
+          ensureTopic
+        })
+      )
+
+      const first = runFreshChatBootstrap()
+      const second = runFreshChatBootstrap()
+      expect(second).toBe(first)
+      expect(getFreshChatBootstrapReadinessState()).toBe('pending')
+
+      await vi.waitFor(() => expect(ensureTopic).toHaveBeenCalledTimes(1))
+      expect(isFreshBootstrapPending()).toBe(true)
+      resolveEnsure()
+      await expect(first).resolves.toBe('ensured')
+      expect(isFreshBootstrapPending()).toBe(false)
+      expect(getFreshChatBootstrapReadinessState()).toBe('ready')
+    })
+
+    it('failure retains the marker and retry succeeds without re-ensuring after readiness', async () => {
+      markFreshBootstrapPendingIfFreshProfile()
+      const ensureTopic = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('ensureTopic IPC failed'))
+        .mockResolvedValue(undefined)
+      configureFreshChatBootstrapFinalizer(() =>
+        finalizeFreshChatBootstrap({
+          collectTargets: () => [{ id: 't-1', assistantId: 'default', name: 'Topic' }],
+          ensureTopic
+        })
+      )
+
+      await expect(runFreshChatBootstrap()).rejects.toThrow('ensureTopic IPC failed')
+      expect(getFreshChatBootstrapReadinessState()).toBe('failed')
+      expect(isFreshBootstrapPending()).toBe(true)
+
+      await expect(runFreshChatBootstrap()).resolves.toBe('ensured')
+      expect(ensureTopic).toHaveBeenCalledTimes(2)
+      expect(getFreshChatBootstrapReadinessState()).toBe('ready')
+      expect(isFreshBootstrapPending()).toBe(false)
+
+      await expect(runFreshChatBootstrap()).resolves.toBe('not-pending')
+      expect(ensureTopic).toHaveBeenCalledTimes(2)
+    })
   })
 })

@@ -1796,98 +1796,6 @@
     "preview": "Предпросмотр",
     "split": "Разделить"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "Импорт ChatGPT",
-      "button": "Выбрать файл",
-      "description": "Импортирует только текст переписки, не включает изображения и вложения",
-      "error": {
-        "invalid_json": "Неверный формат файла JSON",
-        "no_conversations": "В файле не найдено ни одной беседы",
-        "no_valid_conversations": "Нет допустимых бесед для импорта",
-        "unknown": "Импорт не удался, проверьте формат файла"
-      },
-      "help": {
-        "step1": "1. Войдите в ChatGPT, перейдите в Настройки > Управление данными > Экспортировать данные",
-        "step2": "2. Дождитесь письма с файлом экспорта",
-        "step3": "3. Распакуйте загруженный файл и найдите conversations.json",
-        "title": "Как экспортировать диалоги с ChatGPT?"
-      },
-      "importing": "Импортирование разговоров...",
-      "selecting": "Выбор файла...",
-      "success": "Успешно импортировано {{topics}} бесед с {{messages}} сообщениями",
-      "title": "Импортировать диалоги ChatGPT",
-      "untitled_conversation": "Безымянный разговор"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "Импорт был отменён. Изменения в ваши данные не вносились.",
-        "title": "Импорт отменён"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "Начать импорт",
-      "confirm_description": "Это заменит все существующие данные чата данными из резервной копии Cherry Studio. Это действие нельзя отменить.",
-      "confirm_title": "Подтверждение импорта",
-      "confirm_warning": "Внимание: Все текущие беседы и сообщения будут заменены.",
-      "description": "Импорт бесед, сообщений и вложений из ZIP-файла резервной копии Cherry Studio. Это заменит все существующие данные чата.",
-      "error": {
-        "title": "Ошибка импорта",
-        "unknown": "Импорт не удался. Пожалуйста, проверьте формат ZIP-файла и попробуйте снова."
-      },
-      "phase": {
-        "cancelled": "Импорт был отменён",
-        "discovering": "Определение структуры базы данных...",
-        "error": "Импорт не удался",
-        "extracting": "Извлечение ZIP-архива...",
-        "idle": "Готово к импорту",
-        "processing": "Обработка и проверка данных...",
-        "promoting": "Применение импорта (замена данных)...",
-        "reading": "Чтение данных чата...",
-        "success": "Импорт успешно завершён! Приложение будет перезапущено.",
-        "unsupported": "Платформа не поддерживается"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "Выбрать файл",
-      "select_file": "Выбрать ZIP-резервную копию Cherry Studio",
-      "steps": {
-        "confirm": "Подтвердить",
-        "import": "Импорт",
-        "promote": "Применить",
-        "select": "Выбрать файл"
-      },
-      "success": {
-        "description": "Ваша резервная копия Cherry Studio была импортирована. Приложение будет перезапущено для применения изменений.",
-        "title": "Импорт успешен"
-      },
-      "title": "Импорт ZIP-резервной копии Cherry Studio",
-      "unsupported": {
-        "description": "Импорт ZIP Cherry Studio в настоящее время поддерживается только на macOS. Ваша текущая платформа пока не поддерживается.",
-        "title": "Платформа не поддерживается"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "Этот импорт заменит все существующие данные чата. Убедитесь, что у вас есть резервная копия текущих данных при необходимости.",
-        "title": "Заменить всё"
-      }
-    },
-    "confirm": {
-      "button": "Выберите файл для импорта",
-      "label": "Вы уверены, что хотите импортировать внешние данные?"
-    },
-    "content": "Выберите внешний файл с перепиской для импорта; в настоящее время поддерживаются только файлы в формате JSON ChatGPT",
-    "title": "Импорт внешних бесед"
-  },
   "knowledge": {
     "add": {
       "title": "Добавить базу знаний"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "Основные настройки данных",
         "cloud_storage": "Настройки облачного резервирования",
-        "export_settings": "Настройки экспорта",
-        "import_settings": "Импорт настроек"
+        "export_settings": "Настройки экспорта"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} час",
       "hour_interval_other": "{{count}} часов",
-      "import_settings": {
-        "button": "Импортировать файл JSON",
-        "chatgpt": "Импорт из ChatGPT",
-        "cherrystudio": "Импорт из ZIP Cherry Studio",
-        "cherrystudio_button": "Импортировать ZIP-резервную копию",
-        "title": "Импорт внешних данных приложения"
-      },
       "limit": {
         "appDataDiskQuota": "Предупреждение о пространстве на диске",
         "appDataDiskQuotaDescription": "Каталог данных почти заполнен, что может привести к невозможности сохранения новых данных. Сначала создайте резервную копию данных, затем освободите дисковое пространство."

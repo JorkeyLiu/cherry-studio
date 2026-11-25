@@ -4,7 +4,7 @@
 > **决策锁**：BRANCH-1 … BRANCH-13（§3 决策索引，durable decision IDs；迁移语义为既有 ID 的 bounded 扩展，跨话题引用为 BRANCH-13 bounded 新 ID，不使用会话 LOCK ID）。
 > **最后更新**：2026-11-20
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；其余治理域（应用身份、SQLite 聊天权威与 L2 导入、上下文锚点、投影完备性、视口、同步）的边界与链接集中见 §9。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；其余治理域（应用身份、SQLite 聊天权威、上下文锚点、投影完备性、视口、同步）的边界与链接集中见 §9。
 > **决策状态与实现状态**：BRANCH-1…BRANCH-13 全部 **Locked**——表示治理决策已确定，**不代表已实现或已验证**。除话题内分支的既有 durable 语义外，“移至新建分支”（§5.3）与跨话题引用（§6）是正在实现中的目标语义；本文档只定义合同，不声称代码已完成，也不声称任何测试已通过（验证证据归验证报告）。跨话题引用的持久化与单话题导出/导入、整库备份语义见 §7 唯一定义。已取消的 merge/sync 支持不在本文档范围，分支与引用维持 local-only。
 
 ---
@@ -265,7 +265,7 @@ Renderer 门禁（§4.8）：话题内分支创建仅在自有（owned/mutable�
 
 **调用者本地读取**：导出/知识/剪贴板组装/命名/活跃度是 caller-local 读取（`whole-topic`/`naming-context`/`topic-activity`），消费后丢弃；剪切的删除另经权威删除路径。可选“包含子分支”的树保留剪贴板捕获是独立完备性能力 `'clipboard-tree'`（§4.6）：载荷只由调用方持有至粘贴/重放，不进入普通消息/块驻留投影；其剪切不在渲染侧另行删除，而是与目标插入同属一个 Main 事务。
 
-**持久化与迁移**：跨话题引用对持久化的影响是**增量**的——新增 `topic_references` 表（迁移 `018_topic_references`），每个引用目标话题一行：`target_topic_id` 主键，目标删除时级联清理；`source_topic_id` 为普通列、非外键、不级联，源删除永不删除目标；`source_branch_id` 可空；`anchor_message_id` 为端点稳定 ID（端点删除时由 Main 就地前移到最近存活前驱，仍为非空既有列，无 schema/迁移变化）。既有 legacy 源格式（topics/messages、`branch_id`、`topic_branches` ancestry、既有导入结构）保持不变，既有数据库升级后无引用行、行为不变。L2 ZIP 导入管线与 SQLite schema/迁移 mechanics 由 SQLite migration governance 治理（链接见 §9）。
+**持久化与迁移**：跨话题引用对持久化的影响是**增量**的——新增 `topic_references` 表（迁移 `018_topic_references`），每个引用目标话题一行：`target_topic_id` 主键，目标删除时级联清理；`source_topic_id` 为普通列、非外键、不级联，源删除永不删除目标；`source_branch_id` 可空；`anchor_message_id` 为端点稳定 ID（端点删除时由 Main 就地前移到最近存活前驱，仍为非空既有列，无 schema/迁移变化）。既有 legacy 源格式（topics/messages、`branch_id`、`topic_branches` ancestry、既有单话题导出/导入结构）保持不变，既有数据库升级后无引用行、行为不变。SQLite schema/迁移 mechanics 由 SQLite migration governance 治理（链接见 §9）。
 
 **单话题导出/导入与整库备份**：单话题导出（阅读格式与原生 JSON）把当前引用到的历史**展开为实际快照数据**——导出物自包含、可移植，不依赖源话题的活引用关系；源缺失时导出既有内容并**显式记录缺失历史**，绝不声称完整。导入为导出物生成全新稳定 ID、成为**独立的目标自有消息**（原引用前缀转为目标自有、可写），与源不留任何活关系。整库备份为原样复制，**保留**原有的消息共享与引用关系。文件/图片依赖沿用既有导出契约，不新增 bundle 系统、不新增导出选择 UI。导出元数据的精确字段形状由实现承担，本文档只定义上述语义。
 
@@ -303,7 +303,7 @@ Renderer 门禁（§4.8）：话题内分支创建仅在自有（owned/mutable�
 以下域不在本文档定义，链接相应权威文档（集中列出，正文不重复）：
 
 - 应用身份、兼容性标识、发布/更新、平台范围——[Application Identity ADR](./cherry-chat-application-identity.md)。
-- SQLite schema、迁移 mechanics、L2 ZIP 导入管线——[SQLite migration governance](../archived/sqlite-migration.md)。
+- SQLite schema、迁移 mechanics——[SQLite migration governance](../archived/sqlite-migration.md)。
 - 上下文锚点的有效性/默认/继承/修复策略——[Context window governance](./context-window.md)。
 - 投影完备性（`loaded-projection`、窗口三元区分、稳定 ID 导航、调用者本地读取、请求本地覆盖）——[Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）。
 - 聊天视口定位——[Chat Viewport Position](./chat-viewport-position.md)（VIEWPORT-1…VIEWPORT-16）。

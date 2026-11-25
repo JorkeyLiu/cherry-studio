@@ -1,26 +1,22 @@
 /**
- * Chat DB maintenance coordination contract (Phase 4.4.0, LOCK-4402).
+ * Chat DB maintenance coordination contract.
  *
- * Defines ONE shared coordination contract covering the five maintenance
+ * Defines ONE shared coordination contract covering the four maintenance
  * operations that may not overlap on the live chat database:
  *
- *   backup | restore | promotion | init | close
+ *   backup | restore | init | close
  *
- * Phase 4.4.1 (LOCK-4416) adopts this contract at runtime: the outer
- * complete backup operations (`BackupManager`), restore staging/activation,
- * and the live `ChatDbService` singleton init/close all coordinate through
- * ONE shared coordinator instance (`getSharedMaintenanceCoordinator`).
- * `BackupManager`/`ChatDbBackup` keep their internal fine-grained mutexes
- * for serialisation; the shared coordinator adds cross-category mutual
- * exclusion. Candidate ChatDbService instances (import candidate DBs) are
- * NOT live maintenance and never join the shared coordinator. Promotion
- * exact-once is additionally enforced by the promotion protocol itself;
- * this contract only serializes maintenance operations (the promotion
- * lease seam below is consumed by later orchestration).
+ * The outer complete backup operations (`BackupManager`), restore
+ * staging/activation, and the live `ChatDbService` singleton init/close all
+ * coordinate through ONE shared coordinator instance
+ * (`getSharedMaintenanceCoordinator`). `BackupManager`/`ChatDbBackup` keep
+ * their internal fine-grained mutexes for serialisation; the shared
+ * coordinator adds cross-category mutual exclusion. Non-live ChatDbService
+ * instances are NOT live maintenance and never join the shared coordinator.
  *
  * Contract semantics:
  * - Single-holder lease: at most one maintenance operation holds the lease
- *   at any time. Every pair of the five operations conflicts (including two
+ *   at any time. Every pair of the four operations conflicts (including two
  *   operations of the same kind).
  * - Acquisition is non-blocking and deterministic: it either grants a lease
  *   or reports the conflicting holder. Queueing/retry policy belongs to the
@@ -36,17 +32,15 @@
 // Operations + conflict matrix
 // ---------------------------------------------------------------------------
 
-/** The five coordinated maintenance operations (LOCK-4402). */
-export const MAINTENANCE_OPERATIONS = ['backup', 'restore', 'promotion', 'init', 'close'] as const
+/** The four coordinated maintenance operations. */
+export const MAINTENANCE_OPERATIONS = ['backup', 'restore', 'init', 'close'] as const
 
 export type MaintenanceOperationKind = (typeof MAINTENANCE_OPERATIONS)[number]
 
 /**
  * True when two maintenance operations may not run concurrently.
- * The matrix is total and symmetric: EVERY pair conflicts (LOCK-4402 —
- * promotion must be mutually exclusive with live backup, restore, other
- * promotions, and ChatDbService init/close; the same holds between the
- * remaining operations because they all touch the live chat.db files).
+ * The matrix is total and symmetric: EVERY pair conflicts because all
+ * operations touch the live chat.db files.
  */
 export function maintenanceOperationsConflict(a: MaintenanceOperationKind, b: MaintenanceOperationKind): boolean {
   assertKnownOperation(a)
@@ -105,15 +99,6 @@ export interface MaintenanceCoordinator {
 /** Strict owner label allowlist — bounded, path-free diagnostics only. */
 const OWNER_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 
-/**
- * Module-private holder peek per factory-created coordinator (Phase 4.4.2,
- * LOCK-4422). Lets {@link validatePromotionAuthorization} compare the exact
- * held lease (by lease ID) WITHOUT exposing the lease ID publicly — an
- * exposed lease ID would let callers forge a `MaintenanceLease` and release
- * a foreign holder, which is exactly the generic bypass this seam refuses.
- */
-const coordinatorHolderPeeks = new WeakMap<MaintenanceCoordinator, () => MaintenanceLease | null>()
-
 /** Create an independent coordinator instance (pure in-memory state). */
 export function createMaintenanceCoordinator(): MaintenanceCoordinator {
   let holder: MaintenanceLease | null = null
@@ -151,7 +136,6 @@ export function createMaintenanceCoordinator(): MaintenanceCoordinator {
     }
   }
 
-  coordinatorHolderPeeks.set(coordinator, () => holder)
   return coordinator
 }
 
@@ -212,10 +196,9 @@ let sharedCoordinator: MaintenanceCoordinator | null = null
 
 /**
  * The single process-wide coordinator adopted by live maintenance callers:
- * BackupManager (backup + restore staging/activation), the live
- * ChatDbService singleton (init/close), and promotion orchestration (via
- * `acquirePromotionLease`). Candidate ChatDbService instances must NOT use
- * this coordinator — candidate init/close are not live maintenance.
+ * BackupManager (backup + restore staging/activation) and the live
+ * ChatDbService singleton (init/close). Non-live ChatDbService instances
+ * must NOT use this coordinator.
  */
 export function getSharedMaintenanceCoordinator(): MaintenanceCoordinator {
   if (sharedCoordinator === null) {
@@ -270,132 +253,4 @@ export async function withMaintenanceLease<T>(
   } finally {
     coordinator.release(lease)
   }
-}
-
-// ---------------------------------------------------------------------------
-// Promotion lease seam (Phase 4.4.1, LOCK-4416 — no promotion-only mutex)
-// ---------------------------------------------------------------------------
-
-/**
- * Bounded handle over a granted promotion lease. Later promotion
- * orchestration acquires this seam instead of introducing its own mutex.
- * `release()` is idempotent and owner-safe: it releases only the exact
- * granted lease, exactly once, and can never disturb a newer holder.
- */
-export interface PromotionLeaseHandle {
-  /** Bounded owner label the lease was granted to. */
-  readonly ownerId: string
-  /** True once this handle released (or failed to release) its lease. */
-  isReleased(): boolean
-  /**
-   * Release the promotion lease. Returns true on the first successful
-   * release; false on duplicate calls or if the slot moved on.
-   */
-  release(): boolean
-}
-
-/**
- * Module-private registry proving a {@link PromotionLeaseHandle} was minted
- * by {@link acquirePromotionLease} (Phase 4.4.2, LOCK-4422). A structurally
- * identical object forged elsewhere is never registered and can therefore
- * never validate as promotion authorization. The granted lease and its
- * coordinator stay private to this module.
- */
-const promotionHandleGrants = new WeakMap<
-  PromotionLeaseHandle,
-  { readonly coordinator: MaintenanceCoordinator; readonly lease: MaintenanceLease }
->()
-
-/**
- * Acquire the exclusive promotion lease on the shared coordinator.
- * Throws `MaintenanceBusyError` while backup, restore, live init/close,
- * or another promotion holds the slot. The live DB stays open and
- * authoritative during preparation (LOCK-4411) — holding this lease closes
- * nothing.
- */
-export function acquirePromotionLease(
-  ownerId: string,
-  coordinator: MaintenanceCoordinator = getSharedMaintenanceCoordinator()
-): PromotionLeaseHandle {
-  const lease = acquireMaintenanceLeaseOrThrow(coordinator, 'promotion', ownerId)
-  let released = false
-
-  const handle: PromotionLeaseHandle = {
-    ownerId,
-    isReleased(): boolean {
-      return released
-    },
-    release(): boolean {
-      if (released) {
-        return false
-      }
-      released = true
-      return coordinator.release(lease)
-    }
-  }
-
-  promotionHandleGrants.set(handle, { coordinator, lease })
-  return handle
-}
-
-// ---------------------------------------------------------------------------
-// Promotion authorization validation seam (Phase 4.4.2, LOCK-4422)
-// ---------------------------------------------------------------------------
-
-/** Bounded reasons a promotion authorization check can be refused. */
-export type PromotionAuthorizationRefusalReason =
-  /** The handle was not minted by `acquirePromotionLease` (forged/foreign object). */
-  | 'unrecognized-handle'
-  /** The handle already released its lease (stale authorization). */
-  | 'released'
-  /** The handle was granted on a different coordinator than the one being validated against. */
-  | 'foreign-coordinator'
-  /** The coordinator's current holder is not this exact lease (superseded slot). */
-  | 'not-current-holder'
-
-/** Verdict of {@link validatePromotionAuthorization}. */
-export type PromotionAuthorizationResult =
-  | { readonly authorized: true; readonly ownerId: string }
-  | { readonly authorized: false; readonly reason: PromotionAuthorizationRefusalReason }
-
-/**
- * Prove that `handle` is the CURRENTLY HELD promotion lease on
- * `coordinator` (Phase 4.4.2, LOCK-4422). The proof is exact: the handle
- * must have been minted by {@link acquirePromotionLease} on this exact
- * coordinator, must not be released, and the coordinator's current holder
- * must be the exact granted lease (lease ID + owner + `promotion` kind
- * compared internally — never exposed).
- *
- * This seam is deliberately NOT a generic bypass:
- * - It validates only `promotion` authorization; it can never authorize
- *   backup/restore/init/close callers.
- * - It grants nothing and releases nothing — a verdict only.
- * - An ownerId string alone is never accepted; only the module-minted
- *   handle object with the live lease identity validates.
- */
-export function validatePromotionAuthorization(
-  handle: PromotionLeaseHandle,
-  coordinator: MaintenanceCoordinator = getSharedMaintenanceCoordinator()
-): PromotionAuthorizationResult {
-  const grant = promotionHandleGrants.get(handle)
-  if (!grant) {
-    return { authorized: false, reason: 'unrecognized-handle' }
-  }
-  if (grant.coordinator !== coordinator) {
-    return { authorized: false, reason: 'foreign-coordinator' }
-  }
-  if (handle.isReleased()) {
-    return { authorized: false, reason: 'released' }
-  }
-  const peekHolder = coordinatorHolderPeeks.get(coordinator)
-  const holder = peekHolder ? peekHolder() : null
-  if (
-    holder === null ||
-    holder.leaseId !== grant.lease.leaseId ||
-    holder.kind !== 'promotion' ||
-    holder.ownerId !== grant.lease.ownerId
-  ) {
-    return { authorized: false, reason: 'not-current-holder' }
-  }
-  return { authorized: true, ownerId: grant.lease.ownerId }
 }

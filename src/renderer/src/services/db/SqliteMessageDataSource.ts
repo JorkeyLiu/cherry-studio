@@ -373,10 +373,10 @@ function unwrap<T>(result: ChatDbResult<T>): T {
  *
  * The ChatDb bridge API is resolved lazily at method-call time: a
  * constructor-injected API is preferred, otherwise `window.api?.chatDb` is
- * read on each call. Construction never touches `window.api`, so isolated
- * renderer contexts (e.g. chatImport) that do not expose the ordinary preload
- * bridge can evaluate this module safely. An actual SQLite method call
- * without any available bridge throws a clear, deterministic error.
+ * read on each call. Construction never touches `window.api`, so renderer
+ * contexts without the ordinary preload bridge can evaluate this module
+ * safely. An actual SQLite method call without any available bridge throws a
+ * clear, deterministic error.
  */
 export class SqliteMessageDataSource implements MessageDataSource {
   /** Optional injected bridge (tests / non-preload contexts). */

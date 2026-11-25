@@ -18,7 +18,7 @@
  *
  * This module is evaluated ONLY when an old-version source database actually
  * needs one of these upgrades (the schema module lazy-imports it). It must
- * therefore stay side-effect-free for the isolated chatImport renderer: it has
+ * therefore stay side-effect-free for isolated renderer contexts: it has
  * NO runtime dependencies on `@renderer/config/translate`, i18n, LoggerService,
  * lodash, `utils/messageUtils/create`, or `@renderer/types` (value exports).
  * Migration-local constants and the side-effect-free helpers in
@@ -56,9 +56,9 @@ import {
 
 /**
  * Migration-local no-op logger. The original code routed through the main
- * renderer's LoggerService, which is unusable (and unsafe) inside the isolated
- * chatImport window. Call sites are preserved structurally; this keeps the
- * upgrades module free of any LoggerService/window.electron dependency.
+ * renderer's LoggerService, which is unusable (and unsafe) in isolated renderer
+ * contexts. Call sites are preserved structurally; this keeps the upgrades
+ * module free of any LoggerService/window.electron dependency.
  */
 const logger = {
   info: (..._args: unknown[]) => {},

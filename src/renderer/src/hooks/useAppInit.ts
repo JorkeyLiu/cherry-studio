@@ -16,6 +16,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect } from 'react'
 
 import { useDefaultModel } from './useAssistant'
+import { useDismissStartupSpinner } from './useDismissStartupSpinner'
 import useFullScreenNotice from './useFullScreenNotice'
 import { useSettings } from './useSettings'
 import useUpdateHandler from './useUpdateHandler'
@@ -37,8 +38,9 @@ export function useAppInit() {
   const avatar = useLiveQuery(() => db.settings.get('image://avatar'))
   const { theme } = useTheme()
 
+  useDismissStartupSpinner()
+
   useEffect(() => {
-    document.getElementById('spinner')?.remove()
     // eslint-disable-next-line no-restricted-syntax
     console.timeEnd('init')
   }, [])

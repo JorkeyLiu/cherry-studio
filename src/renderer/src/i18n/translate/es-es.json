@@ -1796,98 +1796,6 @@
     "preview": "Vista previa",
     "split": "Dividir"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "Importación de ChatGPT",
-      "button": "Seleccionar archivo",
-      "description": "Solo importa el texto de la conversación, no incluye imágenes ni archivos adjuntos",
-      "error": {
-        "invalid_json": "Formato de archivo JSON inválido",
-        "no_conversations": "No se encontraron conversaciones en el archivo",
-        "no_valid_conversations": "No hay conversaciones válidas para importar",
-        "unknown": "Error de importación, por favor verifica el formato del archivo"
-      },
-      "help": {
-        "step1": "1. Inicia sesión en ChatGPT, ve a Configuración > Controles de datos > Exportar datos",
-        "step2": "2. Espera el archivo de exportación por correo electrónico",
-        "step3": "3. Extrae el archivo descargado y busca conversations.json",
-        "title": "Cómo exportar conversaciones de ChatGPT"
-      },
-      "importing": "Importando conversaciones...",
-      "selecting": "Seleccionando archivo...",
-      "success": "Importadas con éxito {{topics}} conversaciones con {{messages}} mensajes",
-      "title": "Importar conversaciones de ChatGPT",
-      "untitled_conversation": "Conversación Sin Título"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "La importación fue cancelada. No se realizaron cambios en sus datos.",
-        "title": "Importación cancelada"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "Iniciar importación",
-      "confirm_description": "Esto reemplazará todos los datos de chat existentes con los datos de la copia de seguridad de Cherry Studio. Esta acción no se puede deshacer.",
-      "confirm_title": "Confirmar importación",
-      "confirm_warning": "Advertencia: Todas las conversaciones y mensajes actuales serán reemplazados.",
-      "description": "Importar conversaciones, mensajes y archivos adjuntos desde un archivo de copia de seguridad ZIP de Cherry Studio. Esto reemplazará todos los datos de chat existentes.",
-      "error": {
-        "title": "Error de importación",
-        "unknown": "La importación falló. Verifique el formato del archivo ZIP e intente de nuevo."
-      },
-      "phase": {
-        "cancelled": "La importación fue cancelada",
-        "discovering": "Descubriendo estructura de la base de datos...",
-        "error": "La importación falló",
-        "extracting": "Extrayendo archivo ZIP...",
-        "idle": "Listo para importar",
-        "processing": "Procesando y validando datos...",
-        "promoting": "Aplicando importación (reemplazando datos)...",
-        "reading": "Leyendo datos de chat...",
-        "success": "¡Importación completada exitosamente! La aplicación se reiniciará.",
-        "unsupported": "Plataforma no compatible"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "Seleccionar archivo",
-      "select_file": "Seleccionar copia de seguridad ZIP de Cherry Studio",
-      "steps": {
-        "confirm": "Confirmar",
-        "import": "Importar",
-        "promote": "Aplicar",
-        "select": "Seleccionar archivo"
-      },
-      "success": {
-        "description": "Su copia de seguridad de Cherry Studio ha sido importada. La aplicación se reiniciará para aplicar los cambios.",
-        "title": "Importación exitosa"
-      },
-      "title": "Importar copia de seguridad ZIP de Cherry Studio",
-      "unsupported": {
-        "description": "La importación ZIP de Cherry Studio actualmente solo es compatible con macOS. Su plataforma actual aún no es compatible.",
-        "title": "Plataforma no compatible"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "Esta importación reemplazará todos los datos de chat existentes. Asegúrese de tener una copia de seguridad de sus datos actuales si es necesario.",
-        "title": "Reemplazar todo"
-      }
-    },
-    "confirm": {
-      "button": "Seleccionar Archivo de Importación",
-      "label": "¿Estás seguro de que quieres importar datos externos?"
-    },
-    "content": "Selecciona el archivo de conversación de la aplicación externa para importar; actualmente solo admite archivos en formato JSON de ChatGPT",
-    "title": "Importar Conversaciones Externas"
-  },
   "knowledge": {
     "add": {
       "title": "Agregar base de conocimientos"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "Configuración básica",
         "cloud_storage": "Configuración de almacenamiento en la nube",
-        "export_settings": "Configuración de exportación",
-        "import_settings": "Importar configuración"
+        "export_settings": "Configuración de exportación"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} hora",
       "hour_interval_other": "{{count}} horas",
-      "import_settings": {
-        "button": "Importar archivo Json",
-        "chatgpt": "Importar desde ChatGPT",
-        "cherrystudio": "Importar desde ZIP de Cherry Studio",
-        "cherrystudio_button": "Importar copia de seguridad ZIP",
-        "title": "Importar datos de aplicaciones externas"
-      },
       "limit": {
         "appDataDiskQuota": "Advertencia de espacio en disco",
         "appDataDiskQuotaDescription": "El espacio de almacenamiento de datos está casi lleno, por favor, limpie el espacio en disco, de lo contrario, se perderán los datos"

@@ -16,11 +16,11 @@ import HomePage from './pages/home/HomePage'
 // full-page route and stays mounted. Secondary tasks (Files, Knowledge,
 // Settings) render inside a TaskDialog overlay; the URL stays on the task
 // path so shortcut/deeplink/provider query semantics keep working, and close
-// navigates explicitly to '/' (never history-back out of the app). Import
-// chunk loading/errors stay inside the dialog; home itself stays eager.
-// Notes page/entries removed (storage/migration/import compatibility
-// preserved); launchpad removed as a full page (legacy entries redirect to
-// chat via LaunchpadRedirect below).
+// navigates explicitly to '/' (never history-back out of the app). Settings
+// module preload chunk loading/errors stay inside the dialog; home itself
+// stays eager. Notes page/entries removed (storage/migration/import
+// compatibility preserved); launchpad removed as a full page (legacy entries
+// redirect to chat via LaunchpadRedirect below).
 const importFilesPage = () => import('./pages/files/FilesPage')
 const importKnowledgePage = () => import('./pages/knowledge/KnowledgePage')
 

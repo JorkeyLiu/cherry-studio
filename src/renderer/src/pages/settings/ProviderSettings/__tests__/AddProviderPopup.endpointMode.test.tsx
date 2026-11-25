@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@logger', () => ({
-  loggerService: { withContext: () => ({ error: vi.fn() }) }
+  loggerService: { withContext: () => ({ info: vi.fn(), error: vi.fn() }) }
 }))
 vi.mock('@renderer/components/Layout', () => ({
   Center: ({ children }: any) => <div>{children}</div>,

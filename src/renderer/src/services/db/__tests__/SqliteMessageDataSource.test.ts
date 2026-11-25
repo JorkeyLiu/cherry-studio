@@ -1426,16 +1426,15 @@ describe('SqliteMessageDataSource', () => {
   })
 
   // =========================================================================
-  // Constructor / API resolution (chatImport isolation fix)
+  // Constructor / API resolution (isolated context fix)
   //
-  // Regression: constructing the data source inside an isolated renderer that
-  // does NOT expose the ordinary preload bridge (e.g. chatImport exposes only
-  // window.chatImport) must not throw. The bridge is resolved lazily at
-  // method-call time, and a missing bridge fails loudly with a deterministic
-  // error only when an actual SQLite method is invoked.
+  // Regression: constructing the data source in a renderer context that does
+  // NOT expose the ordinary preload bridge must not throw. The bridge is
+  // resolved lazily at method-call time, and a missing bridge fails loudly
+  // with a deterministic error only when an actual SQLite method is invoked.
   // =========================================================================
 
-  describe('constructor / API resolution (chatImport isolation)', () => {
+  describe('constructor / API resolution (isolated context)', () => {
     // renderer.setup.ts stubs globalThis.api (jsdom: window === globalThis).
     // Capture that exact stub and restore it after every test so sibling
     // suites stay isolated from window.api mutations.

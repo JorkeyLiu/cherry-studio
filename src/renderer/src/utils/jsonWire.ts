@@ -17,9 +17,8 @@
  *
  * Does NOT use JSON.stringify/parse. Does NOT mutate inputs.
  *
- * Shared by SqliteMessageDataSource (renderer→Main IPC) and the chatImport
- * entry point (Dexie→Main IPC) per LOCK-N5. Dependency-neutral: no imports
- * from services, databases, or preload.
+ * Shared IPC wire cloning used by SqliteMessageDataSource. Dependency-neutral:
+ * no imports from services, databases, or preload.
  */
 
 const MAX_DEPTH = 20

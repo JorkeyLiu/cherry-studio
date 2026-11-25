@@ -2,10 +2,10 @@
  * Focused regression tests for the historical Dexie upgrade functions
  * (`./upgrades`) and their side-effect-free helpers (`./migrationHelpers`).
  *
- * These functions run inside the isolated chatImport renderer against a
+ * These functions run in isolated renderer contexts against a
  * source database that needs a v5/v7/v8 upgrade, so they are exercised here
  * directly with a minimal in-memory fake Dexie Transaction (the same fake
- * table/collection pattern used by `windows/chatImport/entryPoint.test.ts`).
+ * table/collection pattern used by the schema isolation tests).
  * No IndexedDB, window bridge, or real Dexie open is required.
  *
  * Assertions prove representative migration OUTPUT parity without pinning

@@ -39,7 +39,6 @@ vi.mock('../BasicDataSettings', () => ({ default: () => <div>basic-panel</div> }
 vi.mock('../SyncSettings', () => ({ default: () => <div>sync-panel</div> }))
 vi.mock('../WebDavSettings', () => ({ default: () => <div>webdav-panel</div> }))
 vi.mock('../S3Settings', () => ({ default: () => <div>s3-panel</div> }))
-vi.mock('../ImportMenuSettings', () => ({ default: () => <div>import-panel</div> }))
 vi.mock('../ExportOptionsSettings', () => ({ default: () => <div>export-options-panel</div> }))
 vi.mock('../LocalBackupSettings', () => ({ default: () => <div>local-backup-panel</div> }))
 
@@ -52,7 +51,6 @@ const RETAINED_MENU_TITLES = [
   'settings.data.local.title',
   'settings.data.webdav.title',
   'settings.data.s3.title.label',
-  'settings.data.import_settings.title',
   'settings.data.export_options.title'
 ]
 
@@ -63,7 +61,6 @@ const SECTION_CASES: Array<[testId: string, panelText: string]> = [
   ['data-section-local_backup', 'local-backup-panel'],
   ['data-section-webdav', 'webdav-panel'],
   ['data-section-s3', 's3-panel'],
-  ['data-section-import_settings', 'import-panel'],
   ['data-section-export_options', 'export-options-panel']
 ]
 
@@ -91,6 +88,13 @@ describe('DataSettings', () => {
     expect(screen.queryByText('Synchronization')).toBeNull()
   })
 
+  it('no longer offers external application import entry points', () => {
+    render(<DataSettings />)
+    expect(screen.queryByText('settings.data.import_settings.title')).toBeNull()
+    expect(screen.queryByTestId('data-section-import_settings')).toBeNull()
+    expect(screen.queryByText('settings.data.divider.import_settings')).toBeNull()
+  })
+
   it('shows the section rail and the selected section content at the same time', () => {
     render(<DataSettings />)
 
@@ -100,7 +104,7 @@ describe('DataSettings', () => {
     expect(screen.queryByRole('tablist')).toBeNull()
     expect(screen.queryAllByRole('tab')).toHaveLength(0)
 
-    // All seven sections are reachable from the rail.
+    // All retained sections are reachable from the rail.
     for (const [testId] of SECTION_CASES) {
       expect(screen.getByTestId(testId)).toBeInTheDocument()
     }
@@ -110,7 +114,7 @@ describe('DataSettings', () => {
     expect(screen.getByTestId('data-section-data').className).toContain('active')
 
     // The group dividers of the previous sidebar layout are restored.
-    for (const divider of ['basic', 'cloud_storage', 'import_settings', 'export_settings']) {
+    for (const divider of ['basic', 'cloud_storage', 'export_settings']) {
       expect(screen.getByText(`settings.data.divider.${divider}`)).toBeInTheDocument()
     }
   })

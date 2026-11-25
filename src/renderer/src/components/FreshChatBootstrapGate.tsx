@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import { APP_NAME, AppLogo } from '../config/env'
+import { useDismissStartupSpinner } from '../hooks/useDismissStartupSpinner'
 import {
   getFreshChatBootstrapReadinessState,
   runFreshChatBootstrap,
@@ -67,6 +68,7 @@ export function FreshChatBootstrapGate({ children }: { children: React.ReactNode
     getFreshChatBootstrapReadinessState
   )
   const { t } = useTranslation()
+  useDismissStartupSpinner()
   const [retrying, setRetrying] = useState(false)
 
   const handleRetry = useCallback(async () => {

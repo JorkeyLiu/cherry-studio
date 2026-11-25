@@ -26,7 +26,6 @@ function isForbidden(resolvedRepoPath: string): boolean {
   return (
     rel.startsWith(join('src/renderer/src/store') + '/') ||
     rel === normalize('src/renderer/src/services/assistantDefaults.ts') ||
-    rel === normalize('src/renderer/src/services/importProjection.ts') ||
     rel === normalize('src/renderer/src/services/db/topicTrashLifecycle.ts')
   )
 }

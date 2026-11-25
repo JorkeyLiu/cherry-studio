@@ -1796,98 +1796,6 @@
     "preview": "Xem trước",
     "split": "Tách"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "Nhập ChatGPT",
-      "button": "Chọn Tệp",
-      "description": "Chỉ nhập văn bản cuộc trò chuyện, không bao gồm hình ảnh và tệp đính kèm",
-      "error": {
-        "invalid_json": "Định dạng tệp JSON không hợp lệ",
-        "no_conversations": "Không tìm thấy cuộc trò chuyện nào trong tệp",
-        "no_valid_conversations": "Không có cuộc trò chuyện hợp lệ để nhập",
-        "unknown": "Nhập khẩu thất bại, vui lòng kiểm tra định dạng tệp"
-      },
-      "help": {
-        "step1": "1. Đăng nhập vào ChatGPT, vào Cài đặt > Kiểm soát dữ liệu > Xuất dữ liệu",
-        "step2": "2. Chờ nhận tệp xuất qua email",
-        "step3": "3. Giải nén tệp đã tải xuống và tìm conversations.json",
-        "title": "Cách xuất các cuộc trò chuyện ChatGPT?"
-      },
-      "importing": "Đang nhập cuộc trò chuyện...",
-      "selecting": "Đang chọn tệp...",
-      "success": "Đã nhập thành công {{topics}} cuộc trò chuyện với {{messages}} tin nhắn",
-      "title": "Nhập các cuộc trò chuyện từ ChatGPT",
-      "untitled_conversation": "Cuộc trò chuyện chưa có tiêu đề"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "Nhập dữ liệu đã bị hủy. Không có thay đổi nào được thực hiện đối với dữ liệu của bạn.",
-        "title": "Nhập dữ liệu đã bị hủy"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "Bắt đầu nhập dữ liệu",
-      "confirm_description": "Thao tác này sẽ thay thế tất cả dữ liệu trò chuyện hiện có bằng dữ liệu từ bản sao lưu Cherry Studio. Hành động này không thể hoàn tác.",
-      "confirm_title": "Xác nhận nhập dữ liệu",
-      "confirm_warning": "Cảnh báo: Tất cả các cuộc trò chuyện và tin nhắn hiện tại sẽ bị thay thế.",
-      "description": "Nhập cuộc trò chuyện, tin nhắn và tệp đính kèm từ tệp sao lưu ZIP Cherry Studio. Thao tác này sẽ thay thế tất cả dữ liệu trò chuyện hiện có.",
-      "error": {
-        "title": "Lỗi nhập dữ liệu",
-        "unknown": "Nhập dữ liệu thất bại. Vui lòng kiểm tra định dạng tệp ZIP và thử lại."
-      },
-      "phase": {
-        "cancelled": "Nhập dữ liệu đã bị hủy",
-        "discovering": "Đang phát hiện cấu trúc cơ sở dữ liệu...",
-        "error": "Nhập dữ liệu thất bại",
-        "extracting": "Đang giải nén kho lưu trữ ZIP...",
-        "idle": "Sẵn sàng nhập dữ liệu",
-        "processing": "Đang xử lý và xác thực dữ liệu...",
-        "promoting": "Đang áp dụng nhập dữ liệu (thay thế dữ liệu)...",
-        "reading": "Đang đọc dữ liệu trò chuyện...",
-        "success": "Nhập dữ liệu thành công! Ứng dụng sẽ khởi động lại.",
-        "unsupported": "Nền tảng không được hỗ trợ"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "Chọn tệp",
-      "select_file": "Chọn bản sao lưu ZIP Cherry Studio",
-      "steps": {
-        "confirm": "Xác nhận",
-        "import": "Nhập dữ liệu",
-        "promote": "Áp dụng",
-        "select": "Chọn tệp"
-      },
-      "success": {
-        "description": "Bản sao lưu Cherry Studio đã được nhập. Ứng dụng sẽ khởi động lại để áp dụng các thay đổi.",
-        "title": "Nhập dữ liệu thành công"
-      },
-      "title": "Nhập bản sao lưu ZIP Cherry Studio",
-      "unsupported": {
-        "description": "Nhập dữ liệu ZIP Cherry Studio hiện chỉ được hỗ trợ trên macOS. Nền tảng hiện tại của bạn chưa được hỗ trợ.",
-        "title": "Nền tảng không được hỗ trợ"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "Thao tác nhập này sẽ thay thế tất cả dữ liệu trò chuyện hiện có. Đảm bảo bạn có bản sao lưu dữ liệu hiện tại nếu cần.",
-        "title": "Thay thế tất cả"
-      }
-    },
-    "confirm": {
-      "button": "Chọn Tập tin Nhập",
-      "label": "Bạn có chắc chắn muốn nhập dữ liệu từ bên ngoài không?"
-    },
-    "content": "Chọn tệp tin cuộc hội thoại ứng dụng ngoài để nhập, hiện tại chỉ hỗ trợ các tệp tin định dạng JSON của ChatGPT",
-    "title": "Nhập các cuộc trò chuyện từ bên ngoài"
-  },
   "knowledge": {
     "add": {
       "title": "Thêm Cơ sở kiến thức"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "Cài đặt Dữ liệu Cơ bản",
         "cloud_storage": "Cài đặt Sao lưu Đám mây",
-        "export_settings": "Xuất Cài đặt",
-        "import_settings": "Nhập Cài đặt"
+        "export_settings": "Xuất Cài đặt"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} ora",
       "hour_interval_other": "{{count}} giờ",
-      "import_settings": {
-        "button": "Nhập tệp Json",
-        "chatgpt": "Nhập từ ChatGPT",
-        "cherrystudio": "Nhập từ ZIP Cherry Studio",
-        "cherrystudio_button": "Nhập bản sao lưu ZIP",
-        "title": "Nhập dữ liệu ứng dụng từ bên ngoài"
-      },
       "limit": {
         "appDataDiskQuota": "Cảnh báo Dung lượng Đĩa",
         "appDataDiskQuotaDescription": "Dung lượng thư mục dữ liệu gần đầy, vui lòng dọn dẹp bộ nhớ đĩa, nếu không dữ liệu sẽ bị mất"

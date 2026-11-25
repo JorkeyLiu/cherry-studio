@@ -1796,98 +1796,6 @@
     "preview": "Προεπισκόπηση",
     "split": "Διαχωρισμός"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "Εισαγωγή ChatGPT",
-      "button": "Επιλέξτε Αρχείο",
-      "description": "Εισάγει μόνο κείμενο συνομιλίας, δεν περιλαμβάνει εικόνες και συνημμένα",
-      "error": {
-        "invalid_json": "Μη έγκυρη μορφή αρχείου JSON",
-        "no_conversations": "Δεν βρέθηκαν συνομιλίες στο αρχείο",
-        "no_valid_conversations": "Δεν υπάρχουν έγκυρες συνομιλίες προς εισαγωγή",
-        "unknown": "Η εισαγωγή απέτυχε, παρακαλώ ελέγξτε τη μορφή του αρχείου"
-      },
-      "help": {
-        "step1": "1. Συνδεθείτε στο ChatGPT, πηγαίνετε στις Ρυθμίσεις > Έλεγχοι δεδομένων > Εξαγωγή δεδομένων",
-        "step2": "2. Περιμένετε το αρχείο εξαγωγής μέσω email",
-        "step3": "3. Εξαγάγετε το ληφθέν αρχείο και βρείτε το conversations.json",
-        "title": "Πώς να εξάγετε συνομιλίες του ChatGPT;"
-      },
-      "importing": "Εισαγωγή συνομιλιών...",
-      "selecting": "Επιλογή αρχείου...",
-      "success": "Επιτυχής εισαγωγή {{topics}} συνομιλιών με {{messages}} μηνύματα",
-      "title": "Εισαγωγή Συνομιλιών του ChatGPT",
-      "untitled_conversation": "Συνομιλία χωρίς τίτλο"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "Η εισαγωγή ακυρώθηκε. Δεν πραγματοποιήθηκαν αλλαγές στα δεδομένα σας.",
-        "title": "Εισαγωγή ακυρώθηκε"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "Έναρξη εισαγωγής",
-      "confirm_description": "Αυτό θα αντικαταστήσει όλα τα υπάρχοντα δεδομένα συνομιλίας με τα δεδομένα από το αντίγραφο ασφαλείας Cherry Studio. Αυτή η ενέργεια δεν μπορεί να αναιρεθεί.",
-      "confirm_title": "Επιβεβαίωση εισαγωγής",
-      "confirm_warning": "Προσοχή: Όλες οι τρέχουσες συνομιλίες και μηνύματα θα αντικατασταθούν.",
-      "description": "Εισαγωγή συνομιλιών, μηνυμάτων και συνημμένων από ένα αρχείο ασφαλείας ZIP του Cherry Studio. Αυτό θα αντικαταστήσει όλα τα υπάρχοντα δεδομένα συνομιλίας.",
-      "error": {
-        "title": "Σφάλμα εισαγωγής",
-        "unknown": "Η εισαγωγή απέτυχε. Παρακαλώ ελέγξτε τη μορφή του αρχείου ZIP και δοκιμάστε ξανά."
-      },
-      "phase": {
-        "cancelled": "Η εισαγωγή ακυρώθηκε",
-        "discovering": "Ανακάλυψη δομής βάσης δεδομένων...",
-        "error": "Η εισαγωγή απέτυχε",
-        "extracting": "Εξαγωγή αρχείου ZIP...",
-        "idle": "Έτοιμο για εισαγωγή",
-        "processing": "Επεξεργασία και επικύρωση δεδομένων...",
-        "promoting": "Εφαρμογή εισαγωγής (αντικατάσταση δεδομένων)...",
-        "reading": "Ανάγνωση δεδομένων συνομιλίας...",
-        "success": "Η εισαγωγή ολοκληρώθηκε επιτυχώς! Η εφαρμογή θα επανεκκινηθεί.",
-        "unsupported": "Η πλατφόρμα δεν υποστηρίζεται"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "Επιλογή αρχείου",
-      "select_file": "Επιλογή αντιγράφου ασφαλείας ZIP Cherry Studio",
-      "steps": {
-        "confirm": "Επιβεβαίωση",
-        "import": "Εισαγωγή",
-        "promote": "Εφαρμογή",
-        "select": "Επιλογή αρχείου"
-      },
-      "success": {
-        "description": "Το αντίγραφο ασφαλείας Cherry Studio εισήχθη. Η εφαρμογή θα επανεκκινηθεί για εφαρμογή των αλλαγών.",
-        "title": "Επιτυχής εισαγωγή"
-      },
-      "title": "Εισαγωγή αντιγράφου ασφαλείας ZIP Cherry Studio",
-      "unsupported": {
-        "description": "Η εισαγωγή ZIP Cherry Studio υποστηρίζεται προς το παρόν μόνο σε macOS. Η τρέχουσα πλατφόρμα σας δεν υποστηρίζεται ακόμα.",
-        "title": "Η πλατφόρμα δεν υποστηρίζεται"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "Αυτή η εισαγωγή θα αντικαταστήσει όλα τα υπάρχοντα δεδομένα συνομιλίας. Βεβαιωθείτε ότι έχετε ένα αντίγραφο ασφαλείας των τρεχόντων δεδομένων σας αν χρειαστεί.",
-        "title": "Αντικατάσταση όλων"
-      }
-    },
-    "confirm": {
-      "button": "Επιλέξτε Εισαγωγή Αρχείου",
-      "label": "Είστε σίγουροι ότι θέλετε να εισάγετε εξωτερικά δεδομένα;"
-    },
-    "content": "Επιλέξτε εξωτερικό αρχείο συνομιλίας εφαρμογής για εισαγωγή, προς το παρόν υποστηρίζονται μόνο αρχεία μορφής JSON του ChatGPT",
-    "title": "Εισαγωγή Εξωτερικών Συνομιλιών"
-  },
   "knowledge": {
     "add": {
       "title": "Προσθήκη βιβλιοθήκης γνώσεων"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "Ρυθμίσεις βασικών δεδομένων",
         "cloud_storage": "Ρυθμίσεις αποθήκευσης στο νέφος",
-        "export_settings": "Ρυθμίσεις εξαγωγής",
-        "import_settings": "Εισαγωγή Ρυθμίσεων"
+        "export_settings": "Ρυθμίσεις εξαγωγής"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} ώρα",
       "hour_interval_other": "{{count}} ώρες",
-      "import_settings": {
-        "button": "Εισαγωγή αρχείου Json",
-        "chatgpt": "Εισαγωγή από το ChatGPT",
-        "cherrystudio": "Εισαγωγή από ZIP Cherry Studio",
-        "cherrystudio_button": "Εισαγωγή αντιγράφου ασφαλείας ZIP",
-        "title": "Εισαγωγή Δεδομένων Εξωτερικής Εφαρμογής"
-      },
       "limit": {
         "appDataDiskQuota": "Προειδοποίηση χώρου δίσκου",
         "appDataDiskQuotaDescription": "Ο κατάλογος δεδομένων της εφαρμογής είναι σχεδόν γεμάτος, παρακαλώ απομακρύνετε τον χώρο δίσκου, αλλιώς θα χαθούν τα δεδομένα"

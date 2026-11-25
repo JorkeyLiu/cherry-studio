@@ -1,26 +1,14 @@
 /**
- * Shared readonly chat-DB validation gate + durability helpers
- * (Phase 4.4.1/4.4.2, LOCK-4412/LOCK-4424, LOCK-SP-5).
+ * Shared readonly chat-DB validation gate for same-app backup restore.
  *
- * Private promotion-internal module extracted from `snapshot.ts` so the
- * rollback-snapshot validator (Phase 4.4.1) and the replacement verifier
- * (Phase 4.4.2) run the EXACT same gate sequence over a candidate file:
- *
- *   readonly + fileMustExist open → PRAGMA integrity_check → PRAGMA
- *   foreign_key_check → exact migration-state compatibility against the
- *   registered MIGRATIONS → derived search-projection gate (LOCK-SP-5:
- *   required objects, count parity, messageId parity, fixed MATCH smoke) →
- *   minimum application-layer sample reads through the production
- *   repository/aggregate read path.
- *
- * Failures resolve to a bounded gate name plus a safe machine sub-code —
- * never raw messages, paths, or stack traces. Callers map the gate to
- * their own bounded failure-code unions (SNAPSHOT_* / REPLACEMENT_*).
+ * Opens a candidate database strictly readonly and runs one fixed gate
+ * sequence: open, integrity, foreign keys, migration-state compatibility,
+ * derived search-projection presence/parity, and minimum application-layer
+ * sample reads. Failures resolve to a bounded gate name plus a safe machine
+ * sub-code — never raw messages, paths, or stack traces.
  *
  * Main-only module. Not exposed over IPC/preload/renderer.
  */
-
-import fs from 'node:fs'
 
 import { ChatDbAggregateService } from '@main/services/chatDb/ChatDbAggregateService'
 import {
@@ -38,7 +26,7 @@ import * as schema from '@main/services/chatDb/schema'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
-import { NAVIGATION_PROJECTION_STATE_KEY } from '../navigationProjection'
+import { LEGACY_NAVIGATION_PROJECTION_STATE_KEY } from './backupArtifactNames'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,12 +47,8 @@ export interface ReadonlyChatDbValidationFailure {
   readonly safeCode: string | null
 }
 
-// ---------------------------------------------------------------------------
-// Safe error codes + durability helpers (shared by snapshot + install)
-// ---------------------------------------------------------------------------
-
 /** Extract a safe machine code from an unknown error (no messages/paths). */
-export function safeErrorCode(error: unknown): string {
+function safeErrorCode(error: unknown): string {
   if (error !== null && typeof error === 'object') {
     const code = (error as { code?: unknown }).code
     if (typeof code === 'string' && /^[A-Z0-9_]{2,64}$/.test(code)) return code
@@ -73,44 +57,19 @@ export function safeErrorCode(error: unknown): string {
   return 'UNKNOWN'
 }
 
-/** fsync one file by path (durability of the bytes before a rename). */
-export function fsyncFile(filePath: string): void {
-  const fd = fs.openSync(filePath, 'r')
-  try {
-    fs.fsyncSync(fd)
-  } finally {
-    fs.closeSync(fd)
-  }
-}
-
-/** fsync a directory so a completed rename is durable (POSIX). */
-export function fsyncDirectory(dirPath: string): void {
-  const fd = fs.openSync(dirPath, 'r')
-  try {
-    fs.fsyncSync(fd)
-  } finally {
-    fs.closeSync(fd)
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Individual gates
 // ---------------------------------------------------------------------------
 
 /**
  * Exact migration compatibility: the applied `migration_state` keys must
- * equal the registered MIGRATIONS keys as a set — a missing key means the
- * file is behind the running schema, an unknown key means it is ahead of
- * it. Any ambiguity is returned as incompatible, never relaxed.
+ * equal the registered MIGRATIONS keys as a set. A missing key means the file
+ * is behind the running schema; an unknown key means it is ahead of it.
  *
- * One exact operational exception (LOCK-RV1/RV2): the versioned one-shot
- * navigation projection key (`NAVIGATION_PROJECTION_STATE_KEY`) is written
- * into the candidate `migration_state` before seal and must remain in the
- * promoted live DB until the renderer durable apply+ack, so the readonly
- * gate permits EXACTLY that key (never a prefix/pattern) to survive the
- * MIGRATIONS set comparison. The value is never inspected here — payload
- * validation belongs to the later durable apply path (LOCK-PROD-6). Every
- * other unexpected key still rejects the file as ahead of schema.
+ * One operational exception: the retired import handoff used a versioned
+ * one-shot key in existing local databases. It is tolerated by exact match
+ * only, so older same-app backups remain restorable; no prefix/pattern
+ * allowance is granted and its value is never inspected.
  */
 function checkMigrationCompatibility(sqlite: Database.Database): ReadonlyChatDbValidationFailure | null {
   const table = sqlite
@@ -135,11 +94,7 @@ function checkMigrationCompatibility(sqlite: Database.Database): ReadonlyChatDbV
     }
     applied.delete(migration.key)
   }
-  if (applied.size > 0) {
-    // LOCK-RV1: tolerate the single exact pending navigation projection
-    // operational key. Exact-match only — no prefix/pattern allowlist.
-    applied.delete(NAVIGATION_PROJECTION_STATE_KEY)
-  }
+  applied.delete(LEGACY_NAVIGATION_PROJECTION_STATE_KEY)
   if (applied.size > 0) {
     return { gate: 'migration', safeCode: 'MIGRATION_KEY_UNKNOWN' }
   }
@@ -147,24 +102,20 @@ function checkMigrationCompatibility(sqlite: Database.Database): ReadonlyChatDbV
 }
 
 /**
- * LOCK-SP-5: lightweight derived search-projection gate shared by the
- * replacement/snapshot promotion paths. Bounded cost (six fixed statements)
- * and NOT the full candidate content recompute — that stays
- * CandidateVerifier-only (LOCK-SP-2/3). Checks, in order:
+ * Lightweight derived search-projection gate. Bounded cost (six fixed
+ * statements) and not a full content recompute. Checks, in order:
  *
- *   1. required objects: the derived normalized table, its message_id
- *      index, the FTS5 table, and the three sync triggers must all exist in
- *      sqlite_master with the exact expected type (names from the migration
- *      constants — single source of truth, LOCK-FTS-2);
+ *   1. required objects: the derived normalized table, its message_id index,
+ *      the FTS5 table, and the three sync triggers exist with the exact
+ *      expected type (names from the migration constants);
  *   2. count parity: canonical predicate (`type='main_text'` + non-null
- *      content) vs `message_blocks_normalized` vs `message_blocks_fts`;
+ *      content) vs normalized table vs FTS table;
  *   3. messageId parity: one indexed LEFT JOIN counting normalized rows
- *      whose block_id has no canonical block or whose message_id differs;
- *   4. fixed synthetic MATCH smoke (LOCK-SP-4): `MATCH ?` must execute.
+ *      without a canonical block or with a differing message_id;
+ *   4. fixed synthetic MATCH smoke — MATCH must execute.
  *
  * Safe sub-codes are fixed constants (optionally with the missing object
- * name appended) — never content, paths, or SQL. Rejects
- * migration_state-applied-with-missing-objects.
+ * name appended) — never content, paths, or SQL.
  */
 function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidationFailure | null {
   const required: ReadonlyArray<{ name: string; type: 'table' | 'index' | 'trigger' }> = [
@@ -185,7 +136,6 @@ function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidat
   )
   for (const obj of required) {
     if (master.get(obj.name) !== obj.type) {
-      // Fixed code + fixed object name only (LOCK-SP-3/LOCK-PRIV).
       return { gate: 'search-projection', safeCode: `OBJECT_MISSING_${obj.name.toUpperCase()}` }
     }
   }
@@ -203,7 +153,6 @@ function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidat
     return { gate: 'search-projection', safeCode: 'COUNT_MISMATCH' }
   }
 
-  // messageId parity via ONE indexed equi-join (bounded, non-quadratic).
   const badMessageIds = countOf(
     `SELECT COUNT(*) AS n FROM message_blocks_normalized n
      LEFT JOIN message_blocks mb ON mb.id = n.block_id
@@ -213,8 +162,6 @@ function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidat
     return { gate: 'search-projection', safeCode: 'MESSAGE_ID_MISMATCH' }
   }
 
-  // Fixed synthetic MATCH smoke (LOCK-SP-4) — proves MATCH executes; the
-  // token is not required to match source content.
   try {
     const rows = sqlite
       .prepare(`SELECT block_id FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE ${MESSAGE_BLOCKS_FTS_TABLE} MATCH ?`)
@@ -230,10 +177,10 @@ function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidat
 }
 
 /**
- * Minimum application-layer reads through the SAME repository/aggregate
- * read path production uses (candidateVerifier house style): topic count,
- * first topic page, per-topic aggregate raw read, and per-topic segment
- * membership reads. Zero rows is a valid (empty but migrated) database.
+ * Minimum application-layer reads through the same repository/aggregate read
+ * path production uses: topic count, first topic page, per-topic aggregate raw
+ * read, and per-topic segment membership reads. Zero rows is a valid (empty
+ * but migrated) database.
  */
 function runSampleReads(sqlite: Database.Database, sampleCount: number): ReadonlyChatDbValidationFailure | null {
   try {
@@ -274,9 +221,9 @@ function runSampleReads(sqlite: Database.Database, sampleCount: number): Readonl
 // ---------------------------------------------------------------------------
 
 /**
- * Full readonly validation gate (LOCK-4412 / LOCK-4424). Opens `dbPath`
- * strictly readonly; the handle closes on every outcome. Returns the first
- * failed gate or null when every gate passes. Never mutates the file.
+ * Full readonly validation gate. Opens `dbPath` strictly readonly; the handle
+ * closes on every outcome. Returns the first failed gate or null when every
+ * gate passes. Never mutates the file.
  */
 export function validateReadonlyChatDb(dbPath: string, sampleCount: number): ReadonlyChatDbValidationFailure | null {
   let sqlite: Database.Database | null = null
@@ -315,7 +262,6 @@ export function validateReadonlyChatDb(dbPath: string, sampleCount: number): Rea
     }
 
     try {
-      // LOCK-SP-5: derived search-projection gate (lightweight, bounded).
       const searchProjectionFailure = checkSearchProjection(sqlite)
       if (searchProjectionFailure !== null) return searchProjectionFailure
     } catch (error) {

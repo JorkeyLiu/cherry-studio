@@ -7,11 +7,10 @@ import { classifyMainTestFiles } from './scripts/vitest-lanes/mainLanes'
 const mainConfig = (electronViteConfig as any).main
 const rendererConfig = (electronViteConfig as any).renderer
 
-// Deterministic lane manifests for the main-process suite (LOCK-TEST-001..006):
-// `main` (core) runs every non-native, non-heavy main test on at most 2 thread
-// workers; `main-native` and `main-heavy` each run on a single fork worker so
-// the better-sqlite3 binding and the memory-heavy exhaustive/benchmark suites
-// never run in a thread-pool worker. See scripts/vitest-lanes/mainLanes.ts.
+// Deterministic lane manifests for the main-process suite: `main` (core)
+// runs every non-native main test on at most 2 thread workers, while
+// `main-native` runs on a single fork worker so the better-sqlite3 binding
+// is never loaded in a thread-pool worker. See scripts/vitest-lanes/mainLanes.ts.
 const mainLanes = classifyMainTestFiles()
 
 export default defineConfig({
@@ -48,8 +47,7 @@ export default defineConfig({
         }
       },
       // 主进程 native lane：直接加载 better-sqlite3、显式 vi.unmock/doUnmock
-      // 真实环境测试、以及 legacy fork-pinned 文件；单 fork worker
-      // （LOCK-ABI-2 —— 原生绑定绝不在线程池 worker 中加载）
+      // 的真实环境测试；单 fork worker，原生绑定不在线程池 worker 中加载
       {
         extends: true,
         plugins: mainConfig.plugins,
@@ -61,27 +59,6 @@ export default defineConfig({
           environment: 'node',
           setupFiles: ['tests/main.setup.ts'],
           include: mainLanes.native,
-          pool: 'forks',
-          poolOptions: {
-            forks: {
-              maxForks: 1
-            }
-          }
-        }
-      },
-      // 主进程 heavy lane：10k 消息 SQLite 集成 benchmark 与 recoveryV2 的
-      // 236,196 组合穷举，必须独占一个内存受限的单 fork 进程（LOCK-MEM-4）
-      {
-        extends: true,
-        plugins: mainConfig.plugins,
-        resolve: {
-          alias: mainConfig.resolve.alias
-        },
-        test: {
-          name: 'main-heavy',
-          environment: 'node',
-          setupFiles: ['tests/main.setup.ts'],
-          include: mainLanes.heavy,
           pool: 'forks',
           poolOptions: {
             forks: {

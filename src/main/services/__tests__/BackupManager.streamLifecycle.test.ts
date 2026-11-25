@@ -149,7 +149,7 @@ vi.mock('../../utils', () => ({
   getDataPath: vi.fn(() => '/mock/data')
 }))
 
-vi.mock('../chatDbImport/promotion/readonlyDbValidation', () => ({
+vi.mock('../chatDb/readonlyDbValidation', () => ({
   validateReadonlyChatDb: vi.fn().mockReturnValue(null)
 }))
 
@@ -168,7 +168,7 @@ import { Writable } from 'node:stream'
 import * as fs from 'fs-extra'
 
 import BackupManager from '../BackupManager'
-import { validateReadonlyChatDb } from '../chatDbImport/promotion/readonlyDbValidation'
+import { validateReadonlyChatDb } from '../chatDb/readonlyDbValidation'
 
 // ---------------------------------------------------------------------------
 // Helpers: Controllable stream factories

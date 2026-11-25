@@ -116,19 +116,19 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import StreamZip from 'node-stream-zip'
 
 import { BackupManager } from '../../BackupManager'
-import { CANDIDATE_ROOT_DIRNAME } from '../../chatDbImport/candidateDb'
-import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from '../../chatDbImport/promotion/filesSnapshot'
 import {
+  CANDIDATE_ROOT_DIRNAME,
   FILES_CATALOG_SNAPSHOT_FILENAME,
   FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
   FILES_PROMOTE_STAGING_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
   PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_STAGING_FILENAME,
   ROLLBACK_SNAPSHOT_FILENAME,
   ROLLBACK_SNAPSHOT_STAGING_FILENAME
-} from '../../chatDbImport/promotion/journal'
-import { PROMOTION_JOURNAL_STAGING_FILENAME } from '../../chatDbImport/promotion/journalStore'
+} from '../../chatDb/backupArtifactNames'
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { getSharedMaintenanceCoordinator, isMaintenanceBusyError } from '../maintenanceCoordination'
 import { runMigrations } from '../migration'

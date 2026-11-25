@@ -20,7 +20,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [`adr/cherry-chat-application-identity.md`](./adr/cherry-chat-application-identity.md) | Cherry Chat 应用身份、兼容边界、updater/发布冻结、平台范围 |
+| [`adr/cherry-chat-application-identity.md`](./adr/cherry-chat-application-identity.md) | Cherry Chat 应用身份、保留的本地兼容边界、updater/发布冻结、平台范围 |
 | [`adr/context-window.md`](./adr/context-window.md) | 稳定 topic 上下文锚点、允许的锚点迁移、兼容修复、持久化边界 |
 | [`adr/model-metadata.md`](./adr/model-metadata.md) | 模型元数据与请求身份（serving vs canonical vs display、enrichment-only、精确查找、缓存边界） |
 | [`adr/projection-completeness-authority.md`](./adr/projection-completeness-authority.md) | 已加载投影语义、类型化完备性能力、稳定 ID 导航/变更、调用者本地完整读取、请求级执行覆盖 |
@@ -33,7 +33,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [`architecture/architecture.md`](./architecture/architecture.md) | 已实现架构详表（主进程/渲染进程/Redux/AI Core/数据库/IPC/多窗口/tracing/技术栈/源兼容） |
+| [`architecture/architecture.md`](./architecture/architecture.md) | 已实现架构详表（主进程/渲染进程/Redux/AI Core/数据库/IPC/多窗口/tracing/技术栈/保留的本地兼容边界） |
 
 ---
 

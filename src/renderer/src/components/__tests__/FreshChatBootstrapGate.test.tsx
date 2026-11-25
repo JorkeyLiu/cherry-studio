@@ -1,5 +1,6 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key })
@@ -25,6 +26,14 @@ function configureFinalizer(ensureTopic: (target: { id: string }) => Promise<voi
   )
 }
 
+function installStartupSpinner(): HTMLDivElement {
+  const spinner = document.createElement('div')
+  spinner.id = 'spinner'
+  Object.assign(spinner.style, { position: 'fixed', inset: '0', zIndex: '9999' })
+  document.body.appendChild(spinner)
+  return spinner
+}
+
 function renderGate() {
   return render(
     <FreshChatBootstrapGate>
@@ -39,19 +48,25 @@ beforeEach(() => {
   localStorage.removeItem(PERSIST_COMPAT_KEY)
 })
 
+afterEach(() => {
+  document.getElementById('spinner')?.remove()
+})
+
 describe('FreshChatBootstrapGate', () => {
-  it('existing profile renders the ordinary tree immediately without a loading frame', () => {
+  it('releases the HTML startup spinner when an existing profile renders the ordinary tree', () => {
     const ensureTopic = vi.fn()
     configureFinalizer(ensureTopic)
+    installStartupSpinner()
 
     renderGate()
 
+    expect(document.getElementById('spinner')).toBeNull()
     expect(screen.getByTestId('ordinary-tree')).toBeInTheDocument()
     expect(screen.queryByTestId('startup-readiness-loading')).not.toBeInTheDocument()
     expect(ensureTopic).not.toHaveBeenCalled()
   })
 
-  it('keeps the ordinary tree unmounted until fresh-topic ensure completes', async () => {
+  it('releases the HTML startup spinner while pending and keeps the ordinary tree unmounted', async () => {
     markFreshBootstrapPendingIfFreshProfile()
     let resolveEnsure!: () => void
     const ensureTopic = vi.fn(
@@ -62,9 +77,11 @@ describe('FreshChatBootstrapGate', () => {
     )
     configureFinalizer(ensureTopic)
     const bootstrap = runFreshChatBootstrap()
+    installStartupSpinner()
 
     renderGate()
 
+    expect(document.getElementById('spinner')).toBeNull()
     const loading = screen.getByTestId('startup-readiness-loading')
     expect(loading).toHaveAttribute('aria-busy', 'true')
     expect(loading.querySelector('.ant-spin')).toBeNull()
@@ -86,7 +103,7 @@ describe('FreshChatBootstrapGate', () => {
     expect(localStorage.getItem(FRESH_CHAT_BOOTSTRAP_PENDING_KEY)).toBeNull()
   })
 
-  it('shows a localized error and retries successfully in the same session', async () => {
+  it('releases the HTML startup spinner before a real retry click recovers the failed gate', async () => {
     markFreshBootstrapPendingIfFreshProfile()
     let resolveRetry!: () => void
     const ensureTopic = vi
@@ -103,15 +120,19 @@ describe('FreshChatBootstrapGate', () => {
       await expect(runFreshChatBootstrap()).rejects.toThrow('ensureTopic IPC failed')
     })
 
+    installStartupSpinner()
+    const user = userEvent.setup()
+
     renderGate()
 
+    expect(document.getElementById('spinner')).toBeNull()
     expect(screen.getByTestId('startup-readiness-error')).toBeInTheDocument()
     expect(screen.getByText('startup.readiness.error.title')).toBeInTheDocument()
     expect(screen.getByText('startup.readiness.error.description')).toBeInTheDocument()
     expect(screen.queryByTestId('ordinary-tree')).not.toBeInTheDocument()
     expect(localStorage.getItem(FRESH_CHAT_BOOTSTRAP_PENDING_KEY)).not.toBeNull()
 
-    fireEvent.click(screen.getByTestId('startup-readiness-retry'))
+    await user.click(screen.getByTestId('startup-readiness-retry'))
 
     const retryPending = await screen.findByTestId('startup-readiness-loading')
     expect(retryPending.querySelector('.ant-spin')).toBeNull()

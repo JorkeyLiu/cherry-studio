@@ -1866,98 +1866,6 @@
     "preview": "Preview",
     "split": "Split"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "ChatGPT Import",
-      "button": "Select File",
-      "description": "Only imports conversation text, does not include images and attachments",
-      "error": {
-        "invalid_json": "Invalid JSON file format",
-        "no_conversations": "No conversations found in file",
-        "no_valid_conversations": "No valid conversations to import",
-        "unknown": "Import failed, please check file format"
-      },
-      "help": {
-        "step1": "1. Log in to ChatGPT, go to Settings > Data controls > Export data",
-        "step2": "2. Wait for the export file via email",
-        "step3": "3. Extract the downloaded file and find conversations.json",
-        "title": "How to export ChatGPT conversations?"
-      },
-      "importing": "Importing conversations...",
-      "selecting": "Selecting file...",
-      "success": "Successfully imported {{topics}} conversations with {{messages}} messages",
-      "title": "Import ChatGPT Conversations",
-      "untitled_conversation": "Untitled Conversation"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "The import was cancelled. No changes were made to your data.",
-        "title": "Import Cancelled"
-      },
-      "catalog_recovery": {
-        "description": "Please wait — the application will reopen shortly.",
-        "error_code": "Error code",
-        "repair_required": {
-          "description": "Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "Data recovery incomplete"
-        },
-        "title": "Recovering imported data…"
-      },
-      "confirm_button": "Start Import",
-      "confirm_description": "This will replace all existing chat data with the data from the Cherry Studio backup. This action cannot be undone.",
-      "confirm_title": "Confirm Import",
-      "confirm_warning": "Warning: All current conversations and messages will be replaced.",
-      "description": "Import conversations, messages, and attachments from a Cherry Studio ZIP backup file. This will replace all existing chat data.",
-      "error": {
-        "title": "Import Error",
-        "unknown": "Import failed. Please check the ZIP file format and try again."
-      },
-      "phase": {
-        "cancelled": "Import was cancelled",
-        "discovering": "Discovering database structure...",
-        "error": "Import failed",
-        "extracting": "Extracting ZIP archive...",
-        "idle": "Ready to import",
-        "processing": "Processing and validating data...",
-        "promoting": "Applying import (replacing data)...",
-        "reading": "Reading chat data...",
-        "success": "Import completed successfully! The application will restart.",
-        "unsupported": "Platform not supported"
-      },
-      "recovered": {
-        "assistant_name": "Recovered conversations",
-        "topic_name": "Recovered conversation {{index}}"
-      },
-      "select_button": "Select File",
-      "select_file": "Select Cherry Studio ZIP Backup",
-      "steps": {
-        "confirm": "Confirm",
-        "import": "Import",
-        "promote": "Apply",
-        "select": "Select File"
-      },
-      "success": {
-        "description": "Your Cherry Studio backup has been imported. The application will restart to apply the changes.",
-        "title": "Import Successful"
-      },
-      "title": "Import Cherry Studio ZIP Backup",
-      "unsupported": {
-        "description": "Cherry Studio ZIP import is currently only supported on macOS. Your current platform is not yet supported.",
-        "title": "Platform Not Supported"
-      },
-      "untitled_topic": "Untitled Topic",
-      "warning": {
-        "description": "This import will replace all existing chat data. Make sure you have a backup of your current data if needed.",
-        "title": "Replace All"
-      }
-    },
-    "confirm": {
-      "button": "Select Import File",
-      "label": "Are you sure you want to import external data?"
-    },
-    "content": "Select external application conversation file to import, currently only supports ChatGPT JSON format files",
-    "title": "Import External Conversations"
-  },
   "knowledge": {
     "add": {
       "title": "Add Knowledge Base"
@@ -3849,8 +3757,7 @@
       "divider": {
         "basic": "Basic Data Settings",
         "cloud_storage": "Cloud Backup Settings",
-        "export_settings": "Export Settings",
-        "import_settings": "Import Settings"
+        "export_settings": "Export Settings"
       },
       "export_options": {
         "exclude_citations": {
@@ -3942,13 +3849,6 @@
       },
       "hour_interval_one": "{{count}} hour",
       "hour_interval_other": "{{count}} hours",
-      "import_settings": {
-        "button": "Import Json File",
-        "chatgpt": "Import from ChatGPT",
-        "cherrystudio": "Import from Cherry Studio ZIP",
-        "cherrystudio_button": "Import ZIP Backup",
-        "title": "Import Outside Application Data"
-      },
       "limit": {
         "appDataDiskQuota": "Disk Space Warning",
         "appDataDiskQuotaDescription": "Data directory space is almost full, please clear disk space, otherwise data will be lost"
