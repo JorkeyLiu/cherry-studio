@@ -156,6 +156,14 @@ const mocks = vi.hoisted(() => {
 
     // Unified navigation: controllable ensure + observable dispatches/toast.
     ensureMock: vi.fn(async () => ({ status: 'resident' }) as any),
+    // Bootstrap prepare structure handoff: opt into the REAL ensure/prepare
+    // State used when the mounted component's mocked dispatch executes a real
+    // thunk (bootstrap prepare's deferred around read).
+    stateForThunk: null as any,
+    // helpers for the focused around-receipt tests below; all existing suites
+    // keep the controllable shims.
+    useRealEnsure: false,
+    useRealPrepare: false,
     dispatchMock: vi.fn(),
     upsertManyBlocksMock: vi.fn((blocks: unknown) => ({ type: 'messageBlocks/upsertMany', payload: blocks })),
     messagesReceivedMock: vi.fn((payload: unknown) => ({ type: 'newMessages/messagesReceived', payload })),
@@ -523,7 +531,7 @@ let resolveTransactionControlled: ((result: 'success' | 'not-found' | 'cancelled
 const pendingTransactionResolvers: Array<(result: 'success' | 'not-found' | 'cancelled') => void> = []
 
 vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
-  const actual = await vi.importActual('../messageNavigation')
+  const actual = (await vi.importActual('../messageNavigation')) as any
   return {
     ...actual,
     runMessageNavigationTransaction: vi.fn(
@@ -539,8 +547,9 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
     // terminal 'prepared' so epoch/persistence assertions hold unchanged
     // under the prepare-only bootstrap contract.
     prepareMessageNavigationTarget: vi.fn(
-      (_intent: any, _deps: any): Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }> =>
-        new Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }>((resolve) => {
+      (_intent: any, _deps: any): Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }> => {
+        if ((mocks as any).useRealPrepare) return actual.prepareMessageNavigationTarget(_intent, _deps)
+        return new Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }>((resolve) => {
           pendingTransactionResolvers.push((result) => {
             if (result !== 'success') {
               resolve({ status: result })
@@ -565,6 +574,7 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
             resolve({ status: 'prepared', token: {}, resolved: preparedResolved } as any)
           })
         })
+      }
     )
   }
 })
@@ -577,12 +587,19 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
 // pending/epoch/persistence semantics; ensure-then-transaction success is covered
 // by messageNavigationLoader.test.ts and the unified block below (controllable
 // via mocks.ensureMock per test).
-vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', () => ({
-  ensureMessageLoaded: (...args: any[]) => (mocks as any).ensureMock(...args),
-  buildNavigationAroundRequest: vi.fn(),
-  NAVIGATION_LOADER_BEFORE: 10,
-  NAVIGATION_LOADER_AFTER: 19
-}))
+vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return {
+    ...actual,
+    // Real loader is opt-in for the around-receipt handoff tests; existing
+    // suites keep the deterministic resident shim.
+    ensureMessageLoaded: (...args: any[]) =>
+      (mocks as any).useRealEnsure ? actual.ensureMessageLoaded(...args) : (mocks as any).ensureMock(...args),
+    buildNavigationAroundRequest: vi.fn(),
+    NAVIGATION_LOADER_BEFORE: 10,
+    NAVIGATION_LOADER_AFTER: 19
+  }
+})
 
 vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
   // Return empty projection to keep rendering empty while navigate logic uses
@@ -743,6 +760,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     mocks.scrollKeyStore.clear()
     mocks.scrollKeyRef.current = ''
     // Unified navigation defaults: resident (zero reads), empty projection.
+    mocks.useRealEnsure = false
+    mocks.useRealPrepare = false
     mocks.ensureMock.mockReset()
     mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
     mocks.loadedResident = true
@@ -2631,5 +2650,263 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
       structure: late.response.structure
     })
     expect(refused?.segments.map((s) => s.id)).toEqual(['s9'])
+  })
+
+  // Bootstrap prepare around receipt — REAL ensure/prepare helpers mounted in
+  // Messages. Fixtures above provide the real deferred receipt, checker and
+  // provider forwarder seam; only store/I/O are controlled. This closes the
+  // previous gap where the prepare helper was always shimmed.
+  describe('bootstrap prepare around structure handoff (real mounted wiring)', () => {
+    const TARGET = 'msg-boot'
+    const OLD = 'old-1'
+    const TAIL = 'm-tail'
+
+    beforeEach(() => {
+      mocks.useRealEnsure = true
+      mocks.useRealPrepare = true
+      mocks.acceptCommittedStructure.mockClear()
+      mocks.dispatchMock.mockClear()
+      mocks.clearPendingNavigate.mockClear()
+      mocks.getPendingNavigate.mockClear()
+      mocks.fetchMessagesWindow.mockReset()
+      // The production component dispatches the real deferred thunk through
+      // useAppDispatch; make the mocked dispatch execute it against the same
+      // controlled state used by the receipt fixtures.
+      mocks.dispatchMock.mockImplementation((action: any) =>
+        typeof action === 'function' ? action(mocks.dispatchMock, () => mocks.stateForThunk) : action
+      )
+      mocks.deferredReadImpl.mockReset()
+      mocks.deferredReadImpl.mockImplementation(async () => undefined)
+      mocks.setPendingNavigate(null)
+      mocks.topicMessages = [] as any
+      mocks.loadedResident = true
+      mocks.pendingWindowReads = {}
+    })
+
+    const mergedFor = (topicId: string) =>
+      mocks.dispatchMock.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (action: any) => action?.type === 'newMessages/messagesWindowMerged' && action?.payload?.topicId === topicId
+        )
+
+    // Around windows are strictly validated: echo anchor + requested bounds.
+    const aroundWindowResponse = (
+      req: any,
+      ids: string[],
+      opts: { blocks?: unknown[]; mutableMessageIds?: string[]; reference?: unknown; structure?: unknown } = {}
+    ) => ({
+      messages: ids.map((id) => ({ id })),
+      blocks: opts.blocks ?? [],
+      window: {
+        kind: 'around',
+        completeness: 'window',
+        topicId: req.topicId,
+        anchorMessageId: req.anchorMessageId,
+        requested: { before: req.before, after: req.after },
+        firstMessageId: ids[0] ?? null,
+        lastMessageId: ids[ids.length - 1] ?? null,
+        returnedCount: ids.length,
+        hasMoreBefore: true,
+        hasMoreAfter: false
+      },
+      ...(opts.mutableMessageIds !== undefined ? { mutableMessageIds: opts.mutableMessageIds } : {}),
+      ...(opts.reference !== undefined ? { reference: opts.reference } : {}),
+      ...(opts.structure !== undefined ? { structure: opts.structure } : {})
+    })
+
+    const installRealRead = (topicId: string) => {
+      const state = controlledState(topicId)
+      mocks.stateForThunk = state
+      const receipts: any[] = []
+      installRealDeferredRead(state, [], receipts)
+      return { state, receipts }
+    }
+
+    const commitProjection = (ids: string[], topicId: string) => {
+      mocks.topicMessages = ids.map((id) => makeMsg(id, topicId)) as any
+      installMessageRow(TARGET)
+    }
+
+    it('accepts the fetched structure only at final apply, exactly once, with full receipt fields', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      const { receipts } = installRealRead(topic.id)
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      // One resident neighbour makes the canonical loader take the UNION
+      // path, never a rebase of the loaded projection.
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      const reference = { kind: 'branch', source: 's1' }
+      const structure = structuredBundle({ topicId: topic.id, branchId: null }, [
+        { id: 's1', members: [OLD, TARGET, TAIL] }
+      ])
+      mocks.fetchMessagesWindow.mockImplementation(async (req: any) =>
+        aroundWindowResponse(req, [OLD, TARGET, TAIL], { reference, structure })
+      )
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      await waitFor(() => expect(mergedFor(topic.id)).toHaveLength(1))
+      // Merge happened but the target is not yet observably committed: the
+      // provider must still be untouched at this point.
+      expect(mocks.acceptCommittedStructure).not.toHaveBeenCalled()
+      const merged = mergedFor(topic.id)[0].payload
+      expect(new Set(merged.messages.map((message: any) => message.id))).toEqual(new Set([OLD, TARGET, TAIL]))
+      expect(mocks.fetchMessagesWindow.mock.calls[0]?.[0]?.includeStructure).toBe(true)
+
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() => expect(mocks.acceptCommittedStructure).toHaveBeenCalledTimes(1))
+      const receipt = receipts.find((item) => item?.topicId === topic.id)
+      expect(receipt).toBeDefined()
+      expect(mocks.acceptCommittedStructure).toHaveBeenCalledWith(
+        topic.id,
+        null,
+        structure,
+        reference,
+        receipt.routeGeneration
+      )
+    })
+
+    it('rejects a receipt superseded between merge and final apply (no stale structure)', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      const { state } = installRealRead(topic.id)
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      const structure = structuredBundle({ topicId: topic.id, branchId: null }, [
+        { id: 's1', members: [OLD, TARGET, TAIL] }
+      ])
+      mocks.fetchMessagesWindow.mockImplementation(async (req: any) =>
+        aroundWindowResponse(req, [OLD, TARGET, TAIL], { structure })
+      )
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      await waitFor(() => expect(mergedFor(topic.id)).toHaveLength(1))
+      expect(mocks.acceptCommittedStructure).not.toHaveBeenCalled()
+
+      // Late same-topic read advances the request sequence captured by the
+      // first receipt. This happens AFTER its merge, before its window apply.
+      const realThunk = await vi.importActual<any>('@renderer/store/thunk/messageThunk')
+      const exec: any = (action: any) => {
+        if (typeof action === 'function') return action(exec, () => state)
+        return action
+      }
+      mocks.fetchMessagesWindow.mockImplementationOnce(async (req: any) =>
+        validWindowResponse({ ...req, kind: 'latest' }, ['late-only'])
+      )
+      await realThunk.dispatchDeferredRouteWindowRead(exec, () => state, topic.id, null, { kind: 'latest' })
+
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() =>
+        expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+      )
+      expect(mocks.acceptCommittedStructure).not.toHaveBeenCalled()
+      // The merged messages are not withdrawn by the failed handoff.
+      expect(mergedFor(topic.id)).toHaveLength(1)
+    })
+
+    it('already-loaded target keeps its zero-read contract and accepts nothing extra', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      commitProjection([TARGET, TAIL], topic.id)
+      render(
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      await act(async () => {})
+      await waitFor(() => expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1))
+      expect(mocks.fetchMessagesWindow.mock.calls.filter((call: any) => call[0]?.kind === 'around')).toHaveLength(0)
+      expect(mocks.acceptCommittedStructure).not.toHaveBeenCalled()
+    })
+
+    it('missing structure keeps the merge but fails closed at the provider seam', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      installRealRead(topic.id)
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      mocks.fetchMessagesWindow.mockImplementation(async (req: any) => aroundWindowResponse(req, [OLD, TARGET, TAIL]))
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      await waitFor(() => expect(mergedFor(topic.id)).toHaveLength(1))
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() =>
+        expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+      )
+      expect(mocks.acceptCommittedStructure).not.toHaveBeenCalled()
+      expect(mergedFor(topic.id)).toHaveLength(1)
+    })
+
+    it('present-but-empty structure is accepted as the current route projection', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      installRealRead(topic.id)
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      const emptyStructure = structuredBundle({ topicId: topic.id, branchId: null }, [])
+      mocks.fetchMessagesWindow.mockImplementation(async (req: any) =>
+        aroundWindowResponse(req, [OLD, TARGET, TAIL], { structure: emptyStructure })
+      )
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      await waitFor(() => expect(mergedFor(topic.id)).toHaveLength(1))
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() => expect(mocks.acceptCommittedStructure).toHaveBeenCalledTimes(1))
+      expect(mocks.acceptCommittedStructure).toHaveBeenCalledWith(
+        topic.id,
+        null,
+        emptyStructure,
+        null,
+        expect.any(Number)
+      )
+    })
   })
 })

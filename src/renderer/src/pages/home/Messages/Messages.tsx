@@ -133,6 +133,7 @@ import {
   isDeferredRouteWindowReceiptCurrent,
   loadRouteMessagesThunk,
   resolveAdoptedResidentBaseline,
+  toDeferredChromeStructure,
   toDeferredJointPayload,
   updateMessageAndBlocksThunk
 } from '@renderer/store/thunk/messageThunk'
@@ -282,6 +283,22 @@ import {
   type ViewportFirstPositionPlan,
   type ViewportTransitionPhase
 } from './viewportTransition'
+
+// Request-local receipt payload carried from the deferred around read to the
+// final prepare apply. Never a module cache: the callback below only records
+// it in the caller's navigation-local variable, and acceptance happens later
+// inside `applyWindow` behind fresh currency + session guards.
+interface DeferredNavigationStructureHandoff {
+  receipt: DeferredRouteWindowReceipt
+  structure: FetchMessagesWindowStructure | null
+  reference: HistoryReferenceMeta | null
+}
+
+interface PrepareNavigationStructureHandoff extends DeferredNavigationStructureHandoff {
+  topicId: string
+  route: string | null
+  sessionEpoch: number
+}
 
 /**
  * Read-only reading-anchor report (renderer-local, no persistence): the
@@ -1296,6 +1313,25 @@ const Messages = ({
   // Surface-owned structure: the committed window snapshot and its single
   // write entry live in ChatRouteStructureProvider, shared with the drawer.
   const { committedChrome, acceptCommittedStructure } = useChatRouteStructure()
+  // Window-commit structure co-commit: single thin forwarder into the
+  // provider-owned writer. Every production caller (four deferred commit
+  // sites plus the bootstrap prepare apply below) invokes it only after its
+  // own receipt currency + commit guards pass, so a staged or cancelled
+  // result is never accepted. The owner handles projection, empty-route
+  // clear, rebaseline and debounce/generation bookkeeping; this component
+  // keeps no copy.
+  const publishCommittedChrome = useCallback(
+    (
+      targetTopicId: string,
+      targetBranchId: string | null,
+      structure: FetchMessagesWindowStructure | null,
+      reference?: HistoryReferenceMeta | null,
+      receiptRouteGeneration?: number
+    ): void => {
+      acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)
+    },
+    [acceptCommittedStructure]
+  )
 
   // One-shot deletion-fallback intent (branch subtree removal with active
   // fallback). Consumed exactly once by the deletion effect below with an
@@ -3882,7 +3918,6 @@ const Messages = ({
   // `navigateAndSave` below, and programmatic restores via the explicit
   // stable commit on completion. No input-gated fence: a successful
   // programmatic restore is itself a valid stable viewport.
-
   /**
    * Shared target-load stage for message navigation (FULL + PREPARE stages).
    *
@@ -3933,6 +3968,10 @@ const Messages = ({
       // dispatch-source publication generation. Pure local baseline only;
       // never writes the resident registry.
       onDeferredAroundDispatched?: (dispatchedPromise: unknown) => void
+      // Request-local structure handoff for the PREPARE deferred around
+      // receipt. Called only after the committed projection is observable;
+      // it records the payload for the final apply, never accepts it here.
+      onDeferredStructureReady?: (handoff: DeferredNavigationStructureHandoff) => void
     }): Promise<'ready' | 'cancelled' | 'not-found' | 'error'> => {
       const { targetId, topicIdAtStart, routeAtStart, isStale } = args
       // Deferred receipt for the PREPARE around read (merge publication only).
@@ -4066,6 +4105,19 @@ const Messages = ({
       }
       if (isStale()) {
         return 'cancelled'
+      }
+      // Handoff only (no acceptance): the same receipt's structure travels
+      // with THIS navigation to the final apply, where currency/session/
+      // intent guards are re-checked before the provider sees it. Calling
+      // this after the merge + projection wait keeps staged or cancelled
+      // results out of the writer.
+      const committedReceipt = viaRouteReceipt as DeferredRouteWindowReceipt | null
+      if (args.viaRouteThunk === true && committedReceipt && args.onDeferredStructureReady) {
+        args.onDeferredStructureReady({
+          receipt: committedReceipt,
+          structure: toDeferredChromeStructure(committedReceipt),
+          reference: (committedReceipt.response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+        })
       }
 
       return 'ready'
@@ -4211,7 +4263,10 @@ const Messages = ({
    * (stale/throw, token closed) — never a permanently hidden transition.
    */
   const runPrepareOnlyTransaction = useCallback(
-    (intent: MessageNavigationIntent): Promise<MessageNavigationPrepareStatus> => {
+    (
+      intent: MessageNavigationIntent,
+      structureHandoff?: PrepareNavigationStructureHandoff
+    ): Promise<MessageNavigationPrepareStatus> => {
       return prepareMessageNavigationTarget(intent, {
         begin: (token, targetId, source, alignment) => {
           const generation = viewportStateRef.current.navigation.generation
@@ -4222,14 +4277,71 @@ const Messages = ({
         isCurrent: isCurrentNavigation,
         cancelLoadsAndTimers: cancelNavigationLoadsAndTimers,
         resolve: (requestedIntent) => resolveMessageNavigation(messagesRef.current, requestedIntent),
-        prepareWindow: (resolved) =>
-          chooseNavigationWindow(messagesRef.current, viewportStateRef.current.window, resolved, displayCount),
+        prepareWindow: (resolved) => {
+          const prepared = chooseNavigationWindow(
+            messagesRef.current,
+            viewportStateRef.current.window,
+            resolved,
+            displayCount
+          )
+          // A deferred around receipt may already have reached the ordinary
+          // reconcile apply before this transaction resumes. In that case the
+          // current window legitimately covers the target; reapply the SAME
+          // window object so this transaction still has one guarded final
+          // commit to co-accept its structure. Without a handoff this remains
+          // the original zero-apply behavior.
+          if (!prepared && structureHandoff && resolved.kind === 'message') {
+            const currentWindow = viewportStateRef.current.window
+            if (currentWindow?.displayMessages.some((message) => message.id === resolved.targetId)) {
+              return currentWindow
+            }
+          }
+          return prepared
+        },
         applyWindow: (token, window) => {
           const initialState = viewportStateRef.current
           const committed = viewportCommitWaiterRef.current.wait(initialState, (committedState) => {
             if (committedState.navigation.token !== token) return false
             return committedState.window === window ? true : null
           })
+          // Final acceptance gate, immediately before the window is committed.
+          // The handoff is request-local; revalidate it against live currency
+          // and the same controller session/route intent that owns this
+          // bootstrap transition. A cancelled/late/target-missing result
+          // leaves the provider untouched (the window dispatch itself keeps
+          // its existing semantics — never drop loaded messages or replace
+          // the scroll path here). Provider accept and window/apply are in
+          // the same synchronous batch, matching the four deferred sites.
+          if (structureHandoff && isCurrentNavigation(token)) {
+            const handoff = structureHandoff
+            const routeIntent = controller.currentIntent
+            try {
+              if (
+                handoff.topicId === handoff.receipt.topicId &&
+                handoff.route === handoff.receipt.route &&
+                handoff.topicId === topicIdRef.current &&
+                handoff.route === routeRef.current &&
+                controller.currentEpoch === handoff.sessionEpoch &&
+                controller.isSessionCurrent(handoff.sessionEpoch) &&
+                controller.currentPhase === 'fetch-hold' &&
+                routeIntent !== null &&
+                routeIntent.topicId === handoff.topicId &&
+                routeIntent.targetRoute === handoff.route &&
+                isDeferredRouteWindowReceiptCurrent(() => store.getState(), handoff.receipt) &&
+                handoff.structure !== null
+              ) {
+                publishCommittedChrome(
+                  handoff.topicId,
+                  handoff.route,
+                  handoff.structure,
+                  handoff.reference,
+                  handoff.receipt.routeGeneration
+                )
+              }
+            } catch {
+              // Fail-closed: a malformed/stale handoff is never published.
+            }
+          }
           viewportDispatch({ type: 'navigation/apply-window', token, window })
           return committed
         },
@@ -4241,9 +4353,11 @@ const Messages = ({
     },
     [
       cancelNavigationLoadsAndTimers,
+      controller,
       displayCount,
       isCurrentNavigation,
       navigationTargetStatus,
+      publishCommittedChrome,
       revealNavigationTarget,
       settleNavigationDom,
       viewportDispatch,
@@ -4275,6 +4389,10 @@ const Messages = ({
         const transitionEpochAtStart = transitionEpochRef.current
         const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
         const residentGenAtStart = captureResidentGeneration(() => store.getState(), topicIdAtStart)
+        // Request-local handoff slot for the deferred around receipt. Only
+        // this navigation's closure can see it; no module state/cache/event.
+        let structureHandoff: PrepareNavigationStructureHandoff | null = null
+        const sessionEpoch = controller.currentEpoch
         // Adoptable baseline: starts at the pre-dispatch capture and moves to
         // the dispatch-source publication generation only on same-request
         // proof (dispatched deferred around promise identity + route). Any
@@ -4320,12 +4438,20 @@ const Messages = ({
             } catch {
               // Fail-closed: keep the pre-dispatch baseline on read failure.
             }
+          },
+          onDeferredStructureReady: (deferredHandoff) => {
+            structureHandoff = {
+              ...deferredHandoff,
+              topicId: topicIdAtStart,
+              route: routeAtStart,
+              sessionEpoch
+            }
           }
         })
         if (ready === 'not-found') return 'not-found'
         if (ready !== 'ready') return 'cancelled'
 
-        return runPrepareOnlyTransaction(intent)
+        return runPrepareOnlyTransaction(intent, structureHandoff ?? undefined)
       })()
     },
     [controller, ensureNavigationTargetReady, runPrepareOnlyTransaction]
@@ -6596,24 +6722,6 @@ const Messages = ({
     },
     []
   )
-  // Window-commit chrome co-commit: a thin forwarder into the provider-owned
-  // writer. Every production caller below is a receipt late guard followed by
-  // an atomic `onPublish`, so an uncommitted receipt (including bootstrap
-  // dispatch) is never accepted. Projection, empty-route clear, catalog/
-  // reference rebaseline and debounce/generation handling belong to the single
-  // owner in `useRouteScopedSegments`; this component keeps no copy.
-  const publishCommittedChrome = useCallback(
-    (
-      targetTopicId: string,
-      targetBranchId: string | null,
-      structure: FetchMessagesWindowStructure | null,
-      reference?: HistoryReferenceMeta | null,
-      receiptRouteGeneration?: number
-    ): void => {
-      acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)
-    },
-    [acceptCommittedStructure]
-  )
   // Single route-window entry (provenance-bound atomic commit).
   // Records session epoch + target route + window identity as rendered,
   // dispatches the window, and stores the first-position plan in the SAME
@@ -7681,6 +7789,7 @@ const Messages = ({
     commitRouteWindowAtomic,
     failVisibleTransition,
     notifyViewport,
+    publishCommittedChrome,
     scrollContainerRef,
     selectMessageForFold,
     waitForProjectionCommit,
@@ -8207,6 +8316,7 @@ const Messages = ({
       commitRouteWindowAtomic,
       dispatch,
       failVisibleTransition,
+      publishCommittedChrome,
       saveDisplayedSnapshot,
       scrollContainerRef,
       stepDividerSearch,
@@ -8479,6 +8589,7 @@ const Messages = ({
     displayCount,
     awaitPlanPlacement,
     failVisibleTransition,
+    publishCommittedChrome,
     t,
     topic.id
   ])
@@ -9868,6 +9979,7 @@ const Messages = ({
     dispatch,
     failVisibleTransition,
     getLegacyMainSavedPosition,
+    publishCommittedChrome,
     readTargetSnapshot,
     referenceRefreshToken,
     saveDisplayedSnapshot,
