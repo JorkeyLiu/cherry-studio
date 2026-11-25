@@ -14,15 +14,13 @@ import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import StatusIcon from '../components/StatusIcon'
 import {
-  FlexAlignCenter,
-  ItemContainer,
-  ItemHeader,
-  KnowledgeEmptyView,
-  ResponsiveButton,
-  StatusIconWrapper
-} from '../KnowledgeContent'
+  KnowledgeSourceBody,
+  KnowledgeSourceContent,
+  KnowledgeSourceToolbar
+} from '../components/KnowledgeSourceLayout'
+import StatusIcon from '../components/StatusIcon'
+import { FlexAlignCenter, KnowledgeEmptyView, ResponsiveButton, StatusIconWrapper } from '../KnowledgeContent'
 
 interface KnowledgeContentProps {
   selectedBase: KnowledgeBase
@@ -79,11 +77,13 @@ const KnowledgeNotes: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   }
 
   return (
-    <ItemContainer>
-      <ItemHeader>
+    <KnowledgeSourceBody>
+      <KnowledgeSourceToolbar>
+        <span />
         <ResponsiveButton
           type="primary"
-          icon={<PlusIcon size={16} />}
+          size="small"
+          icon={<PlusIcon size={14} />}
           onClick={(e) => {
             e.stopPropagation()
             void handleAddNote()
@@ -91,59 +91,63 @@ const KnowledgeNotes: FC<KnowledgeContentProps> = ({ selectedBase }) => {
           disabled={disabled}>
           {t('knowledge.add_note')}
         </ResponsiveButton>
-      </ItemHeader>
-      <ItemFlexColumn>
-        {noteItems.length === 0 && <KnowledgeEmptyView />}
-        <DynamicVirtualList
-          list={reversedItems}
-          estimateSize={estimateSize}
-          overscan={2}
-          scrollerStyle={{ paddingRight: 2 }}
-          itemContainerStyle={{ paddingBottom: 10 }}
-          autoHideScrollbar>
-          {(note) => (
-            <FileItem
-              key={note.id}
-              fileInfo={{
-                name: (
-                  <NotePreview onClick={() => handleEditNote(note)}>
-                    {markdownToPreviewText(note.content as string, 50)}
-                  </NotePreview>
-                ),
-                ext: isMarkdownContent(note.content as string) ? '.md' : '.txt',
-                extra: getDisplayTime(note),
-                actions: (
-                  <FlexAlignCenter>
-                    <Button type="text" onClick={() => handleEditNote(note)} icon={<EditIcon size={14} />} />
-                    <StatusIconWrapper>
-                      <StatusIcon
-                        sourceId={note.id}
-                        base={base}
-                        getProcessingStatus={getProcessingStatus}
-                        type="note"
+      </KnowledgeSourceToolbar>
+      <KnowledgeSourceContent>
+        {noteItems.length === 0 ? (
+          <KnowledgeEmptyView />
+        ) : (
+          <DynamicVirtualList
+            list={reversedItems}
+            estimateSize={estimateSize}
+            overscan={2}
+            scrollerStyle={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: '16px 16px 16px 2px' }}
+            itemContainerStyle={{ paddingBottom: 10 }}
+            autoHideScrollbar>
+            {(note) => (
+              <FileItem
+                key={note.id}
+                fileInfo={{
+                  name: (
+                    <NotePreview onClick={() => handleEditNote(note)}>
+                      {markdownToPreviewText(note.content as string, 50)}
+                    </NotePreview>
+                  ),
+                  ext: isMarkdownContent(note.content as string) ? '.md' : '.txt',
+                  extra: getDisplayTime(note),
+                  actions: (
+                    <FlexAlignCenter>
+                      <Button
+                        type="text"
+                        size="small"
+                        onClick={() => handleEditNote(note)}
+                        icon={<EditIcon size={14} />}
                       />
-                    </StatusIconWrapper>
-                    <Button
-                      type="text"
-                      danger
-                      onClick={() => removeItem(note)}
-                      icon={<DeleteIcon size={14} className="lucide-custom" />}
-                    />
-                  </FlexAlignCenter>
-                )
-              }}
-            />
-          )}
-        </DynamicVirtualList>
-      </ItemFlexColumn>
-    </ItemContainer>
+                      <StatusIconWrapper>
+                        <StatusIcon
+                          sourceId={note.id}
+                          base={base}
+                          getProcessingStatus={getProcessingStatus}
+                          type="note"
+                        />
+                      </StatusIconWrapper>
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        onClick={() => removeItem(note)}
+                        icon={<DeleteIcon size={14} className="lucide-custom" />}
+                      />
+                    </FlexAlignCenter>
+                  )
+                }}
+              />
+            )}
+          </DynamicVirtualList>
+        )}
+      </KnowledgeSourceContent>
+    </KnowledgeSourceBody>
   )
 }
-
-const ItemFlexColumn = styled.div`
-  padding: 20px 16px;
-  height: calc(100vh - 135px);
-`
 
 const NotePreview = styled.span`
   cursor: pointer;

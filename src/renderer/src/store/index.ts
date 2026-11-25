@@ -485,7 +485,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 229,
+    version: 230,
     transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',

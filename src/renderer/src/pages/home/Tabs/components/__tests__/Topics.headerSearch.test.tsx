@@ -121,10 +121,6 @@ vi.mock('@renderer/hooks/useInPlaceEdit', () => ({
   useInPlaceEdit: () => ({ startEdit: vi.fn(), isEditing: false, inputProps: {} })
 }))
 
-vi.mock('@renderer/hooks/useNotesSettings', () => ({
-  useNotesSettings: () => ({ notesPath: '' })
-}))
-
 vi.mock('@renderer/hooks/useRuntime', () => ({
   modelGenerating: vi.fn(async () => {})
 }))
@@ -183,7 +179,6 @@ vi.mock('@renderer/utils', () => ({
 
 vi.mock('@renderer/utils/export', () => ({
   exportTopicAsMarkdown: vi.fn(),
-  exportTopicToNotes: vi.fn(),
   topicToMarkdown: vi.fn()
 }))
 

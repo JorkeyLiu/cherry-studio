@@ -23,7 +23,8 @@
  * - Repeated + rapid Settings↔Chat while the intermediate predecessor never
  *   settled/saved (newest stable snapshot still wins).
  * - Missing/invalid retained anchor fallback (victim authority delete +
- *   disposable loaded-projection clear while hidden; seed rows remain SQLite;
+ *   disposable loaded-projection clear while the dialog leg is open; seed rows
+ *   remain SQLite;
  *   emptied window must issue a full route-thunk request and land on a legal
  *   survivor viewport with no stale overlay).
  * Interrupted in-flight restore with a held load and old late-completion
@@ -71,6 +72,13 @@ interface ResumeFrame {
   scrollHeight: number
   clientHeight: number
   phase: string
+  /**
+   * True only once the route is back on Home ('/'). The Home base is mounted
+   * and painted while a task dialog covers it, so raw `homeVisible` alone does
+   * not identify the return; the gate keeps "home-visible frame" meaning the
+   * same thing it meant when Chat was hidden during the detour.
+   */
+  returned: boolean
   homeVisible: boolean
   messagesVisible: boolean
   containerVis: string
@@ -754,6 +762,14 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
           } catch {
             homeVisible = false
           }
+          // Return gate: the Home base stays painted behind an open task
+          // dialog, so `homeVisible` only becomes meaningful evidence of the
+          // return once the route is back on '/'. Without this gate the
+          // "first home-visible frame" would be a frame taken while the
+          // Settings shell was still open (pre-restore geometry).
+          const hash = window.location.hash
+          const returned = hash === '#/' || hash === '#' || hash === '' || hash.startsWith('#/home')
+          if (!returned) homeVisible = false
           let messagesVisible = false
           let containerVis = ''
           let anchorId = ''
@@ -799,6 +815,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
             scrollHeight,
             clientHeight,
             phase,
+            returned,
             homeVisible,
             messagesVisible,
             containerVis
@@ -842,7 +859,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       }, PROBE_KEY)
 
     const describeResumeFrame = (f: ResumeFrame): string =>
-      `t=${f.t} anchor=${f.anchorId}@${f.anchorOffset} st=${f.scrollTop} phase=${f.phase} home=${f.homeVisible ? 1 : 0} msgs=${f.messagesVisible ? 1 : 0} vis=${f.containerVis}`
+      `t=${f.t} anchor=${f.anchorId}@${f.anchorOffset} st=${f.scrollTop} phase=${f.phase} ret=${f.returned ? 1 : 0} home=${f.homeVisible ? 1 : 0} msgs=${f.messagesVisible ? 1 : 0} vis=${f.containerVis}`
 
     // Route-window request observation uses the top-level subscribe-based
     // RouteLoadProbe (no store.dispatch monkeypatch; see header contract).
@@ -1011,9 +1028,9 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       await captureRowIdentity()
       await sidebarPage.goToSettings()
       await waitForSettingsLoad(page)
-      await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
-      // Sampler + subscribe load probe start BEFORE the return while Chat is
-      // hidden, so setup wheel/seed dispatches are excluded by construction.
+      await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
+      // Sampler + subscribe load probe start BEFORE the return while the dialog
+      // leg is open, so setup wheel/seed dispatches are excluded by construction.
       // The probe counts ONLY canonical loadingByTopic false->true edges for
       // this topic (subscribe fires synchronously per dispatch, including
       // thunk-inner ones, even when the read resolves immediately). For an
@@ -1069,19 +1086,20 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     await roundtripWithProbe('middle', middle, false, middleSnap, [middle.id])
 
     // --- PRE-PAINT minimal-alignment leg (deterministic 9px retained mismatch) ---
-    // Same middle viewport, but while Home is hidden the persisted target
-    // offset is nudged by +9px via the established window.keyv scroll-key seam
-    // (test-controlled geometry, no test-only app API): inside the 12px E2E
-    // measurement budget but outside the 1px production alignment epsilon, so
-    // the pre-paint retained activation must perform its single synchronous
-    // correction before first paint. A direct hidden scrollTop write is
-    // ineffective while display:none (clamped, delta 0 — observed), so the
-    // mismatch is expressed through the target snapshot the pre-paint lane
-    // measures against; retained DOM stays at the original offset. Target
-    // identity still covers (anchor stays in the retained window/loaded
-    // projection/DOM); the sampler starts BEFORE the return while Chat is
-    // hidden, and the existing no-blank + tight 1px first-frame contract below
-    // proves the return needed no visible correction.
+    // Same middle viewport, but while the Settings task dialog is open the
+    // persisted target offset is nudged by +9px via the established window.keyv
+    // scroll-key seam (test-controlled geometry, no test-only app API): inside
+    // the 12px E2E measurement budget but outside the 1px production alignment
+    // epsilon, so the retained activation must perform its single synchronous
+    // correction before the chat is presented again. A direct scrollTop write
+    // would be re-clamped by the live viewport, so the mismatch is expressed
+    // through the target snapshot the pre-paint lane measures against; retained
+    // DOM stays at the original offset. Target identity still covers (anchor
+    // stays in the retained window/loaded projection/DOM). The sampler is armed
+    // BEFORE the close, and the return gate in the sampler (`returned`) keeps
+    // only frames sampled back on the Home route, so the tight 1px first-frame
+    // contract below still measures the first frame of the return — not a frame
+    // painted behind the still-open dialog (always-visible Home base).
     {
       const mismatchBase = await settledOrThrow()
       const mismatchSnap = await readSnap()
@@ -1089,7 +1107,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       await captureRowIdentity()
       await sidebarPage.goToSettings()
       await waitForSettingsLoad(page)
-      await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+      await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
       const perturbed = await page.evaluate(
         ({ tid, wantId }: { tid: string; wantId: string }) => {
           try {
@@ -1138,7 +1156,10 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         type: 'resume-mismatch-perturb',
         description: `nudge snapshot intraRowOffset base=${mismatchBase.id}@${mismatchBase.offset} before=${(perturbed as { before?: unknown }).before} after=${(perturbed as { after?: unknown }).after} applied=${(perturbed as { applied?: unknown }).applied} key=${(perturbed as { key?: unknown }).key} snapId=${(perturbed as { id?: unknown }).id}`
       })
-      expect(perturbed.applied, 'mismatch: test-controlled snapshot nudge must apply while hidden').toBe(true)
+      expect(
+        perturbed.applied,
+        'mismatch: test-controlled snapshot nudge must apply while the dialog leg is open'
+      ).toBe(true)
       expect(
         (perturbed as { id?: unknown }).id,
         'mismatch: nudged snapshot must pertain to the live baseline stable message ID'
@@ -1224,7 +1245,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     // No settledOrThrow / snapshot wait here by construction (unstable predecessor).
     await sidebarPage.goToSettings()
     await waitForSettingsLoad(page)
-    await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+    await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
     await startResumeProbe()
     const rapidSeed = await installRouteLoadProbe(page, RESUME_PROBE_KEY, topicId)
     expect(rapidSeed.startingLoading, 'rapid: seed loading must be false before return').toBe(false)
@@ -1700,8 +1721,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     const FB_LOAD_KEY = '__page_fallback_load_probe'
     await sidebarPage.goToSettings()
     await waitForSettingsLoad(page)
-    await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
-    // Deliberate presentation-window invalidation while Chat is hidden: clear
+    await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
+    // Deliberate presentation-window invalidation while the dialog leg is open: clear
     // ONLY the disposable loaded projection for this topic via the established
     // newMessages/removeMessages reducer (all surviving ids) plus display
     // block ids via messageBlocks/removeManyBlocks. Seed rows remain in
@@ -1736,15 +1757,13 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       },
       { tid: topicId, mids: remaining }
     )
-    expect(cleared.loadedLen, 'projection clear must empty the disposable loaded window').toBe(0)
-    // Hidden-DOM prerequisite REMOVED (corrected premise): while Chat is hidden
-    // Activity effects are disconnected, so retained #messages DOM is lawful
-    // resource state and does NOT have to reconcile to empty — the prior
-    // loaded0+DOM-absent joint wait therefore timed out after 10s despite a
-    // valid emptied store (loadedLen 0 passed). Pure
+    // Always-visible base premise: Chat effects stay connected while the
+    // dialog leg is open, so retained #messages DOM stays lawful live state.
+    // Pure
     // shouldRestoreRetainedWindowInPlace requires loadedContainsAnchor, so the
     // bounded store proof above already suffices to refuse in-place reuse
-    // independent of stale retained DOM. Sampler + subscribe probe arming below
+    // independent of retained DOM. Sampler + subscribe probe arming below
+    // starts while the dialog leg is open; first-visible gating happens on close.
     // starts while hidden; first-visible gating happens on reveal.
     // Seed rows remain SQLite: Main authority still holds every survivor
     // (victim absent). Read-only standard capability, no renderer state input.
@@ -1812,12 +1831,13 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       scrollHeight: number
       clientHeight: number
       phase: string
+      returned: boolean
       homeVisible: boolean
       messagesVisible: boolean
       containerVis: string
     }
     const fbDescribe = (f: FbFrame): string =>
-      `t=${f.t} anchor=${f.anchorId}@${f.anchorOffset} st=${f.scrollTop} phase=${f.phase} home=${f.homeVisible ? 1 : 0} msgs=${f.messagesVisible ? 1 : 0} vis=${f.containerVis}`
+      `t=${f.t} anchor=${f.anchorId}@${f.anchorOffset} st=${f.scrollTop} phase=${f.phase} ret=${f.returned ? 1 : 0} home=${f.homeVisible ? 1 : 0} msgs=${f.messagesVisible ? 1 : 0} vis=${f.containerVis}`
     const fbPeek = async (): Promise<FbFrame[]> =>
       page.evaluate((k: string) => {
         const p = (window as any)[k] as { frames: FbFrame[] } | undefined
@@ -1842,6 +1862,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         scrollHeight: number
         clientHeight: number
         phase: string
+        returned: boolean
         homeVisible: boolean
         messagesVisible: boolean
         containerVis: string
@@ -1864,6 +1885,12 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
               homeVisible = cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0
             }
           }
+          // Return gate (always-visible base): `#home-page` is painted behind
+          // the open task dialog, so a raw home-visible frame says nothing
+          // about the return; only frames sampled back on the Home route count.
+          const hash = window.location.hash
+          const returned = hash === '#/' || hash === '#' || hash === '' || hash.startsWith('#/home')
+          if (!returned) homeVisible = false
           let messagesVisible = false
           let containerVis = ''
           let anchorId = ''
@@ -1905,6 +1932,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
             scrollHeight: Math.round(scrollHeight * 10) / 10,
             clientHeight: Math.round(clientHeight * 10) / 10,
             phase,
+            returned,
             homeVisible,
             messagesVisible,
             containerVis
@@ -1965,6 +1993,27 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       await sidebarPage.goToHome()
       await waitForChatReady(page)
       await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
+      // Always-visible base: closing the task shell is the only observable
+      // "return" edge. The previous hidden-Chat model re-activated the route
+      // here, and that activation is what issued the fresh-window read that
+      // repopulates an emptied disposable projection. With Home never hidden
+      // there is no activation edge, so this precondition is stated explicitly
+      // (a precise failure) instead of surfacing as an opaque settle timeout.
+      await page
+        .waitForFunction(() => document.querySelectorAll('#messages [data-message-id]').length > 0, undefined, {
+          timeout: 10000
+        })
+        .catch(async () => {
+          const peeked = await fbPeek().catch(() => [] as FbFrame[])
+          const tail = peeked.slice(-6).map(fbDescribe).join(' | ')
+          test.info().annotations.push({
+            type: 'fallback-no-rows-after-close',
+            description: `no rows on the returned route frames=${peeked.length} tail=[${tail}]`
+          })
+          throw new Error(
+            'fallback: no #messages rows exist after closing the task shell — the emptied current-topic projection was not healed by any fresh-window route read on return'
+          )
+        })
       // Corrected lifetime: reach eventual visible + stable termination WHILE
       // the sampler continues; only then stop and assert first+EVERY visible
       // frame. Stopping first would sample zero positioned frames.

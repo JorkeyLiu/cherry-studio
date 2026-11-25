@@ -2054,12 +2054,14 @@ export class RouteViewportController {
   }
 
   /**
-   * Explicit Activity detach: cancel the short-lived activation/restore
+   * Explicit viewport-lifetime detach: cancel the short-lived activation/restore
    * transaction (released exactly once via `invalidateAll`, epoch advanced so
-   * stale completions stay inert) and arm the reactivation requirement. The
-   * long-lived route session truth (displayed + anchorCache + persisted
-   * snapshots owned outside) survives; hidden never samples. The next
-   * `request()` is the sole activation that consumes this flag.
+   * stale completions stay inert) and arm the reactivation requirement. Used by
+   * surface mount/disposal and by the secondary-task overlay close, which
+   * re-arms the guarded own-target activation. The long-lived route session
+   * truth (displayed + anchorCache + persisted snapshots owned outside)
+   * survives; a detached lifetime never samples. The next `request()` is the
+   * sole activation that consumes this flag.
    */
   detach(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     const out = this.invalidateAll(reason)

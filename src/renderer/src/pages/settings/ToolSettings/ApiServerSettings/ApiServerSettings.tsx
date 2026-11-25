@@ -194,7 +194,8 @@ const ApiServerSettings: FC = () => {
 const Container = styled(SettingContainer)`
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--navbar-height));
+  height: 100%;
+  min-height: 0;
 `
 
 const HeaderSection = styled.div`

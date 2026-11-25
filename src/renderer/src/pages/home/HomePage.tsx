@@ -5,7 +5,11 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
 import { useActiveTopic } from '@renderer/hooks/useTopic'
-import { RouteViewportProvider, useRouteViewportCommands } from '@renderer/pages/home/Messages/routeViewportContext'
+import {
+  isTaskDialogPath,
+  RouteViewportProvider,
+  useRouteViewportCommands
+} from '@renderer/pages/home/Messages/routeViewportContext'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import NavigationService from '@renderer/services/NavigationService'
 import { useAppSelector } from '@renderer/store'
@@ -43,12 +47,18 @@ const HomePage: FC = () => {
   // the selected topic's own active branch. Topic changes arrive via the
   // `topicId` prop (provider syncs displayed); the branch is read fresh here.
   const activeBranchId = useAppSelector((s) => selectActiveBranchId(s, activeTopic.id))
+  // Secondary tasks (Files / Knowledge / Settings) render as a centered
+  // in-app modal dialog ABOVE the always-visible chat base, so the task path is
+  // the single open/close edge the route viewport provider needs for its
+  // activation handoff (see `isTaskDialogPath`). The check lives here, once:
+  // the conversation tree holds no page-local pathname booleans.
+  const taskDialogOpen = isTaskDialogPath(location.pathname)
 
   _activeAssistant = activeAssistant
 
   return (
     <Container id="home-page">
-      <RouteViewportProvider topicId={activeTopic.id} initialRoute={activeBranchId}>
+      <RouteViewportProvider topicId={activeTopic.id} initialRoute={activeBranchId} taskDialogOpen={taskDialogOpen}>
         <HomeViewportScope
           activeAssistant={activeAssistant}
           activeTopic={activeTopic}

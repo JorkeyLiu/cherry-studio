@@ -3,6 +3,8 @@ import type { Locator, Page } from '@playwright/test'
 
 import { BasePage } from './base.page'
 
+import { TaskDialogPage } from './task-dialog.page'
+
 /**
  * Page Object for the Sidebar/Navigation component.
  * Handles navigation between different sections of the app.
@@ -17,6 +19,10 @@ import { BasePage } from './base.page'
  *   prefix) never match this app's `...index.html#/...` file URLs (that glob
  *   shape requires a `/` immediately before `#`), which previously burned a
  *   silent 10s `waitForURL` timeout on every navigation.
+ * - Secondary routes (settings / files / knowledge) render inside a centered
+ *   `task-dialog` above an always-visible Home base; an open dialog is closed
+ *   through its backdrop dismissal (the shell renders no close control) before
+ *   any further navigation click.
  */
 export class SidebarPage extends BasePage {
   readonly sidebar: Locator
@@ -39,6 +45,18 @@ export class SidebarPage extends BasePage {
     this.settingsLink = page.locator('[data-testid="sidebar-nav-settings"], a[href*="/settings"]')
     this.appsLink = page.locator('a[href*="/apps"]')
     this.translateLink = page.locator('a[href*="/translate"]')
+  }
+
+  /**
+   * Close an open task dialog (settings / files / knowledge) through its
+   * backdrop dismissal and verify the contract: dialog gone, route home.
+   * Returns whether a dialog was actually open.
+   */
+  private async closeTaskDialogIfOpen(): Promise<boolean> {
+    const dialogPage = new TaskDialogPage(this.page)
+    if (!(await dialogPage.isOpen())) return false
+    await dialogPage.closeWithBackdrop()
+    return true
   }
 
   /**
@@ -67,6 +85,11 @@ export class SidebarPage extends BasePage {
         .locator('[data-testid="sidebar-nav-settings"]')
         .first()
         .waitFor({ state: 'visible', timeout: 10000 })
+      // A centered task dialog owns the active route surface and covers the
+      // sidebar: close it through its backdrop dismissal (which navigates '/')
+      // before issuing any navigation click, so nothing is clicked through an
+      // overlay.
+      await this.closeTaskDialogIfOpen()
       const iconCount = iconTestId === null ? 0 : await this.page.locator(`[data-testid="${iconTestId}"]`).count()
       if (iconCount === 0) {
         // Explicit compatibility fallback for a missing nav icon: hash
@@ -84,14 +107,29 @@ export class SidebarPage extends BasePage {
 
   /**
    * Navigate to Home page.
+   *
+   * Task-dialog contract: settings/files/knowledge render inside a centered
+   * task dialog above Home, so the base is never hidden and the sidebar can
+   * sit behind the dialog surface. When a dialog is open the backdrop
+   * dismissal IS the navigation — it lands on '/' by contract — so no click is
+   * ever aimed through the overlay.
    */
   async goToHome(): Promise<void> {
-    await this.navigateViaSidebar({
-      label: 'goToHome',
-      iconTestId: 'sidebar-nav-assistants',
-      clickTarget: this.homeLink,
-      hashFallback: '/',
-      urlExpect: /.*#\/$|.*#$|.*#\/home.*/
+    await test.step('sidebar goToHome', async () => {
+      await this.page
+        .locator('[data-testid="sidebar-nav-settings"]')
+        .first()
+        .waitFor({ state: 'visible', timeout: 10000 })
+      const closedByDialog = await this.closeTaskDialogIfOpen()
+      if (!closedByDialog) {
+        const iconCount = await this.page.locator('[data-testid="sidebar-nav-assistants"]').count()
+        if (iconCount === 0) {
+          await this.navigateTo('/')
+        } else {
+          await this.homeLink.click({ timeout: 5000 })
+        }
+      }
+      await this.page.waitForURL(/.*#\/$|.*#$|.*#\/home.*/, { timeout: 10000 })
     })
   }
 
@@ -106,10 +144,16 @@ export class SidebarPage extends BasePage {
       hashFallback: '/knowledge',
       urlExpect: /.*#\/knowledge.*/
     })
+    await new TaskDialogPage(this.page).expectOpen()
   }
 
   /**
    * Navigate to Settings page.
+   *
+   * Task-dialog contract: secondary routes render inside the centered
+   * `task-dialog` (opened via the real settings nav click or the hash
+   * fallback), so the caller lands on `/settings/...` with the Home base
+   * still mounted and visible underneath the dialog surface.
    */
   async goToSettings(): Promise<void> {
     await this.navigateViaSidebar({
@@ -119,6 +163,7 @@ export class SidebarPage extends BasePage {
       hashFallback: '/settings/provider',
       urlExpect: /.*#\/settings\/.*/
     })
+    await new TaskDialogPage(this.page).expectOpen()
   }
 
   /**
@@ -132,6 +177,7 @@ export class SidebarPage extends BasePage {
       hashFallback: '/files',
       urlExpect: /.*#\/files.*/
     })
+    await new TaskDialogPage(this.page).expectOpen()
   }
 
   /**

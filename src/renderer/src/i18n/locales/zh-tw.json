@@ -2045,6 +2045,7 @@
     "notes_placeholder": "輸入此知識庫的附加資訊或上下文...",
     "provider_not_found": "未找到供應商",
     "rename": "重新命名",
+    "reorder": "調整順序",
     "search": "搜尋知識庫",
     "search_placeholder": "輸入查詢內容",
     "settings": {
@@ -4791,6 +4792,9 @@
       },
       "filter_agent": "篩選支援 Agent 的服務商",
       "get_api_key": "點選這裡取得金鑰",
+      "menu": {
+        "label": "連線操作"
+      },
       "misc": "其他",
       "no_models_for_check": "沒有可以被檢查的模型（例如對話模型）",
       "not_checked": "未檢查",
@@ -4828,6 +4832,12 @@
       },
       "search": "搜尋模型平臺...",
       "search_placeholder": "搜尋模型 ID 或名稱",
+      "switcher": {
+        "add": "新增連線",
+        "empty": "沒有符合的連線",
+        "search": "搜尋連線名稱或 ID",
+        "toggle": "切換連線啟用狀態"
+      },
       "title": "模型提供者",
       "vertex_ai": {
         "api_host_help": "Vertex AI 的 API 位址，不建議填寫，通常適用於反向代理",

@@ -9,7 +9,6 @@ import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePop
 import { isMac } from '@renderer/config/constant'
 import { useAssistant, useAssistants } from '@renderer/hooks/useAssistant'
 import { useInPlaceEdit } from '@renderer/hooks/useInPlaceEdit'
-import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
 import { finishTopicRenaming, startTopicRenaming } from '@renderer/hooks/useTopic'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
@@ -32,7 +31,7 @@ import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
-import { exportTopicAsMarkdown, exportTopicToNotes } from '@renderer/utils/export'
+import { exportTopicAsMarkdown } from '@renderer/utils/export'
 import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { reorderTopicsForPin, sortTopicsPinnedFirst } from '@renderer/utils/sort'
 import { mergeVisibleTopicReorder, resolveTopicOrderMode, sortTopicsByCreatedAtDesc } from '@renderer/utils/topicOrder'
@@ -47,7 +46,6 @@ import {
   FileDown,
   FolderOutput,
   ListTodo,
-  NotebookPen,
   PinIcon,
   PinOffIcon,
   Save,
@@ -149,7 +147,6 @@ export function filterTopicsBySearch<T extends { name: string }>(topics: T[], se
 // pinned topics always sort/stay at the top.
 export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, setActiveTopic }) => {
   const { t } = useTranslation()
-  const { notesPath } = useNotesSettings()
   const { assistants } = useAssistants()
   const { assistant, addTopic, removeTopic, moveTopic, updateTopic, updateTopics, updateAssistant } = useAssistant(
     _assistant.id
@@ -596,14 +593,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         icon: <Save size={14} />,
         children: [
           {
-            label: t('notes.save'),
-            key: 'notes',
-            icon: <NotebookPen size={14} />,
-            onClick: async () => {
-              void exportTopicToNotes(topic, notesPath)
-            }
-          },
-          {
             label: t('chat.save.topic.knowledge.title'),
             key: 'knowledge',
             onClick: async () => {
@@ -684,7 +673,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     logger,
     isRenaming,
     assistants,
-    notesPath,
     assistant,
     updateTopic,
     onPinTopic,

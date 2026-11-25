@@ -309,13 +309,31 @@ export const viewportPhaseAttrFor = (
   return 'revealed'
 }
 
+/**
+ * Secondary task surfaces rendered as a centered in-app modal dialog ABOVE the
+ * always-visible chat base (Files / Knowledge / Settings task dialogs).
+ *
+ * The SINGLE place the task-dialog boundary reads location: viewport activation
+ * ownership is a provider-level lifecycle concern, so no page-local pathname
+ * booleans are scattered through the conversation tree. Unsupported/deprecated
+ * paths are not enumerated here — they redirect to the chat base, so a redirect
+ * never produces a false open/close handoff.
+ */
+const TASK_DIALOG_ROUTE_PATHS = ['/files', '/knowledge', '/settings'] as const
+
+export const isTaskDialogPath = (pathname: string): boolean =>
+  TASK_DIALOG_ROUTE_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))
+
 export function RouteViewportProvider({
   topicId,
   initialRoute,
+  taskDialogOpen = false,
   children
 }: {
   topicId: string
   initialRoute: RouteId
+  /** Task dialog overlay open above the chat base (see `isTaskDialogPath`). */
+  taskDialogOpen?: boolean
   children: ReactNode
 }) {
   const dispatch = useAppDispatch()
@@ -417,7 +435,7 @@ export function RouteViewportProvider({
     } catch {}
   }, [])
 
-  // Detach / attach (Activity hidden boundary, single controller owner):
+  // Lifetime detach/attach (surface mount/disposal, single controller owner):
   // detach cancels the short-lived transaction (released exactly once, epoch
   // advanced so stale completions stay inert, reactivation armed) via the
   // explicit `detach()`, unregisters the live capturer, and preserves the last
@@ -431,23 +449,21 @@ export function RouteViewportProvider({
   // double-release. Ordinary `version` bumps (controller progress) only
   // re-render visuals/keeper and never retrigger restore.
   //
-  // Pre-paint timing (F1): this is a layout effect so the detached-armed
-  // hidden state (idle + activationRequired → `positioning`) is published
-  // while still hidden, and the reattached hidden state is committed
-  // synchronously before Activity restores first paint. The single TOP
-  // pipeline itself stays passive (Messages `useEffect`) and still opens the
-  // guarded fetch-hold after first paint — but that first paint is already
-  // hidden via the armed-idle mapping, never an unverified visible frame.
-  // The detach cleanup notifies once so the hidden render caches the armed
-  // hidden attr before the show render; without it the value memo would stay
-  // stale-revealed until the passive attach ran after paint.
+  // Pre-paint timing (F1): this is a layout effect so the armed state (idle +
+  // activationRequired → `positioning`) is committed synchronously before the
+  // first paint of a (re)mount, and the single TOP pipeline itself stays
+  // passive (Messages `useEffect`) so it never paints an unverified visible
+  // frame. A task dialog is NOT a hide: it is rendered above the still-visible
+  // base and owns the separate open/close handoff below. The detach cleanup
+  // notifies once so the cleanup render caches the armed attr; without it the
+  // value memo would stay stale-revealed until the passive attach ran after
+  // paint.
   useLayoutEffect(() => {
     const owned = controllerRef.current
-    // Reconnect setup (Activity visible): the short-lived transaction was
-    // cancelled on detach with a fresh epoch + armed reactivation; make the
-    // reconnected phase observable via BOTH signals: the connection generation
-    // (sole restore trigger) plus the projection version (visuals/keeper).
-    // Single increment per activation — no transaction started here.
+    // Reconnect setup ((re)mount): make the fresh lifetime observable via BOTH
+    // signals — the connection generation (sole restore trigger) plus the
+    // projection version (visuals/keeper). One increment per activation; no
+    // transaction starts here.
     try {
       setConnectionGeneration((g) => g + 1)
     } catch {}
@@ -467,6 +483,57 @@ export function RouteViewportProvider({
       } catch {}
     }
   }, [notifyChanged])
+
+  // Task-dialog overlay handoff (secondary task rendered ABOVE the chat base):
+  // the overlay never deactivates, unmounts or hides the conversation — same
+  // visible DOM, same running render/stream effects — so the former hidden
+  // lifetime boundary becomes an explicit open/close activation handoff at the
+  // SAME single owner (this provider). Nothing here opens a transaction, so an
+  // open/close can never start a second restore pipeline.
+  //
+  // OPEN (`invalidateAll`): cancel the short-lived activation/restore
+  // transaction exactly as the hidden lifetime did — ownership released once,
+  // epoch advanced so every in-flight/late completion and held load stays
+  // inert, live intent/anchor/rendered cleared — but ARM NOTHING: the base is
+  // not hidden, so there is no reactivation to reveal and it stays visible at
+  // its current geometry.
+  //
+  // CLOSE (`detach` + connection generation): the close is the reactivation
+  // edge for the still-selected route. `detach` arms the guarded reactivation
+  // and advances the epoch; the connection generation is the sole restore
+  // trigger, so the SINGLE existing pre-paint validated-continuation lane runs
+  // in the close commit (zero writes, no visible correction, while the retained
+  // viewport still proves its legal target) and otherwise the single passive
+  // TOP pipeline re-reads the route from the authority — the same recovery an
+  // invalid or emptied projection always took. No second restore subsystem and
+  // no page-close compensation.
+  //
+  // The first observation only records the current surface: mounting behind an
+  // already-open task dialog is not a handoff.
+  const taskDialogRef = useRef<boolean | null>(null)
+  useLayoutEffect(() => {
+    const previous = taskDialogRef.current
+    taskDialogRef.current = taskDialogOpen
+    if (previous === null || previous === taskDialogOpen) return
+    const owned = controllerRef.current
+    if (taskDialogOpen) {
+      try {
+        owned?.invalidateAll()
+      } catch {}
+    } else {
+      try {
+        owned?.detach()
+      } catch {}
+      try {
+        setConnectionGeneration((g) => g + 1)
+      } catch {}
+    }
+    // Publish the handoff before paint: this render carries the phase attr and
+    // connection generation the pre-paint validated-continuation lane reads.
+    try {
+      notifyChanged()
+    } catch {}
+  }, [taskDialogOpen, notifyChanged])
   useEffect(() => {
     const hot = (import.meta as unknown as { hot?: { dispose: (cb: () => void) => void } }).hot
     if (!hot) return

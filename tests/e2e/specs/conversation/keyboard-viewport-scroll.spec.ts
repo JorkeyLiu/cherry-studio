@@ -1633,7 +1633,7 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
     const sidebarKb = new SidebarPage(page)
     await sidebarKb.goToSettings()
     await waitForSettingsLoad(page)
-    await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+    await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
     await sidebarKb.goToHome()
     await waitForChatReady(page)
     await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
@@ -2321,7 +2321,7 @@ test.describe('Keyboard viewport scroll — real PageUp/PageDown after ordinary 
 
     await sidebarPage.goToSettings()
     await waitForSettingsLoad(page)
-    await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+    await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
     await sidebarPage.goToHome()
     await waitForChatReady(page)
     await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })

@@ -2045,6 +2045,7 @@
     "notes_placeholder": "Enter additional information or context for this knowledge base...",
     "provider_not_found": "Provider not found",
     "rename": "Rename",
+    "reorder": "Reorder",
     "search": "Search knowledge base",
     "search_placeholder": "Enter text to search",
     "settings": {
@@ -4791,6 +4792,9 @@
       },
       "filter_agent": "Filter Agent Supported Providers",
       "get_api_key": "Get API Key",
+      "menu": {
+        "label": "Connection actions"
+      },
       "misc": "Other",
       "no_models_for_check": "No models available for checking (e.g. chat models)",
       "not_checked": "Not Checked",
@@ -4828,6 +4832,12 @@
       },
       "search": "Search Providers...",
       "search_placeholder": "Search model id or name",
+      "switcher": {
+        "add": "Add Connection",
+        "empty": "No matching connections",
+        "search": "Search connections by name or ID",
+        "toggle": "Toggle connection enabled"
+      },
       "title": "Model Provider",
       "vertex_ai": {
         "api_host_help": "The API host for Vertex AI, not recommended to fill in, generally applicable to reverse proxy",

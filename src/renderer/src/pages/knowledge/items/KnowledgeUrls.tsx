@@ -12,14 +12,16 @@ import { PlusIcon } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import styled from 'styled-components'
 
+import {
+  KnowledgeSourceBody,
+  KnowledgeSourceContent,
+  KnowledgeSourceToolbar
+} from '../components/KnowledgeSourceLayout'
 import StatusIcon from '../components/StatusIcon'
 import {
   ClickableSpan,
   FlexAlignCenter,
-  ItemContainer,
-  ItemHeader,
   KnowledgeEmptyView,
   RefreshIcon,
   ResponsiveButton,
@@ -116,11 +118,13 @@ const KnowledgeUrls: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   }
 
   return (
-    <ItemContainer>
-      <ItemHeader>
+    <KnowledgeSourceBody>
+      <KnowledgeSourceToolbar>
+        <span />
         <ResponsiveButton
           type="primary"
-          icon={<PlusIcon size={16} />}
+          size="small"
+          icon={<PlusIcon size={14} />}
           onClick={(e) => {
             e.stopPropagation()
             void handleAddUrl()
@@ -128,81 +132,87 @@ const KnowledgeUrls: FC<KnowledgeContentProps> = ({ selectedBase }) => {
           disabled={disabled}>
           {t('knowledge.add_url')}
         </ResponsiveButton>
-      </ItemHeader>
-      <ItemFlexColumn>
-        {urlItems.length === 0 && <KnowledgeEmptyView />}
-        <DynamicVirtualList
-          list={reversedItems}
-          estimateSize={estimateSize}
-          overscan={2}
-          scrollerStyle={{ paddingRight: 2 }}
-          itemContainerStyle={{ paddingBottom: 10 }}
-          autoHideScrollbar>
-          {(item) => (
-            <FileItem
-              key={item.id}
-              fileInfo={{
-                name: (
-                  <Dropdown
-                    menu={{
-                      items: [
-                        {
-                          key: 'edit',
-                          icon: <EditIcon size={14} />,
-                          label: t('knowledge.edit_remark'),
-                          onClick: () => handleEditRemark(item)
-                        },
-                        {
-                          key: 'copy',
-                          icon: <CopyIcon size={14} />,
-                          label: t('common.copy'),
-                          onClick: () => {
-                            void navigator.clipboard.writeText(item.content as string)
-                            window.toast.success(t('message.copied'))
+      </KnowledgeSourceToolbar>
+      <KnowledgeSourceContent>
+        {urlItems.length === 0 ? (
+          <KnowledgeEmptyView />
+        ) : (
+          <DynamicVirtualList
+            list={reversedItems}
+            estimateSize={estimateSize}
+            overscan={2}
+            scrollerStyle={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: '16px 16px 16px 2px' }}
+            itemContainerStyle={{ paddingBottom: 10 }}
+            autoHideScrollbar>
+            {(item) => (
+              <FileItem
+                key={item.id}
+                fileInfo={{
+                  name: (
+                    <Dropdown
+                      menu={{
+                        items: [
+                          {
+                            key: 'edit',
+                            icon: <EditIcon size={14} />,
+                            label: t('knowledge.edit_remark'),
+                            onClick: () => handleEditRemark(item)
+                          },
+                          {
+                            key: 'copy',
+                            icon: <CopyIcon size={14} />,
+                            label: t('common.copy'),
+                            onClick: () => {
+                              void navigator.clipboard.writeText(item.content as string)
+                              window.toast.success(t('message.copied'))
+                            }
                           }
-                        }
-                      ]
-                    }}
-                    trigger={['contextMenu']}>
-                    <ClickableSpan>
-                      <Tooltip title={item.content as string}>
-                        <Ellipsis>
-                          <a href={item.content as string} target="_blank" rel="noopener noreferrer">
-                            {item.remark || (item.content as string)}
-                          </a>
-                        </Ellipsis>
-                      </Tooltip>
-                    </ClickableSpan>
-                  </Dropdown>
-                ),
-                ext: '.url',
-                extra: getDisplayTime(item),
-                actions: (
-                  <FlexAlignCenter>
-                    {item.uniqueId && <Button type="text" icon={<RefreshIcon />} onClick={() => refreshItem(item)} />}
-                    <StatusIconWrapper>
-                      <StatusIcon sourceId={item.id} base={base} getProcessingStatus={getProcessingStatus} type="url" />
-                    </StatusIconWrapper>
-                    <Button
-                      type="text"
-                      danger
-                      onClick={() => removeItem(item)}
-                      icon={<DeleteIcon size={14} className="lucide-custom" />}
-                    />
-                  </FlexAlignCenter>
-                )
-              }}
-            />
-          )}
-        </DynamicVirtualList>
-      </ItemFlexColumn>
-    </ItemContainer>
+                        ]
+                      }}
+                      trigger={['contextMenu']}>
+                      <ClickableSpan>
+                        <Tooltip title={item.content as string}>
+                          <Ellipsis>
+                            <a href={item.content as string} target="_blank" rel="noopener noreferrer">
+                              {item.remark || (item.content as string)}
+                            </a>
+                          </Ellipsis>
+                        </Tooltip>
+                      </ClickableSpan>
+                    </Dropdown>
+                  ),
+                  ext: '.url',
+                  extra: getDisplayTime(item),
+                  actions: (
+                    <FlexAlignCenter>
+                      {item.uniqueId && (
+                        <Button type="text" size="small" icon={<RefreshIcon />} onClick={() => refreshItem(item)} />
+                      )}
+                      <StatusIconWrapper>
+                        <StatusIcon
+                          sourceId={item.id}
+                          base={base}
+                          getProcessingStatus={getProcessingStatus}
+                          type="url"
+                        />
+                      </StatusIconWrapper>
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        onClick={() => removeItem(item)}
+                        icon={<DeleteIcon size={14} className="lucide-custom" />}
+                      />
+                    </FlexAlignCenter>
+                  )
+                }}
+              />
+            )}
+          </DynamicVirtualList>
+        )}
+      </KnowledgeSourceContent>
+    </KnowledgeSourceBody>
   )
 }
-
-const ItemFlexColumn = styled.div`
-  padding: 20px 16px;
-  height: calc(100vh - 135px);
-`
 
 export default KnowledgeUrls

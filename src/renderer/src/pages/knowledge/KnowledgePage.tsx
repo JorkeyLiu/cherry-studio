@@ -1,16 +1,13 @@
-import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
 import { DraggableList } from '@renderer/components/DraggableList'
 import { DeleteIcon, EditIcon } from '@renderer/components/Icons'
 import ListItem from '@renderer/components/ListItem'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
-import Scrollbar from '@renderer/components/Scrollbar'
 import { useKnowledgeBases } from '@renderer/hooks/useKnowledge'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
-import KnowledgeSearchPopup from '@renderer/pages/knowledge/components/KnowledgeSearchPopup'
 import type { KnowledgeBase } from '@renderer/types'
 import type { MenuProps } from 'antd'
-import { Dropdown, Empty } from 'antd'
-import { Book, Plus, Settings } from 'lucide-react'
+import { Button, Dropdown, Empty, Flex, Modal, Select } from 'antd'
+import { ArrowUpDown, Book, Ellipsis, Plus, Settings } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -18,13 +15,14 @@ import styled from 'styled-components'
 
 import AddKnowledgeBasePopup from './components/AddKnowledgeBasePopup'
 import EditKnowledgeBasePopup from './components/EditKnowledgeBasePopup'
+import KnowledgeSearchPopup from './components/KnowledgeSearchPopup'
 import KnowledgeContent from './KnowledgeContent'
 
 const KnowledgePage: FC = () => {
   const { t } = useTranslation()
   const { bases, renameKnowledgeBase, deleteKnowledgeBase, updateKnowledgeBases } = useKnowledgeBases()
   const [selectedBase, setSelectedBase] = useState<KnowledgeBase | undefined>(bases[0])
-  const [isDragging, setIsDragging] = useState(false)
+  const [reorderOpen, setReorderOpen] = useState(false)
 
   const handleAddKnowledge = useCallback(async () => {
     const newBase = await AddKnowledgeBasePopup.show({ title: t('knowledge.add.title') })
@@ -40,9 +38,14 @@ const KnowledgePage: FC = () => {
     }
   }, [])
 
+  // Keep the selection valid: reselect the first base when the selected one
+  // is deleted, and clear it when the last base is gone. Reordering never
+  // touches the selection: updateKnowledgeBases only permutes store order.
   useEffect(() => {
     const hasSelectedBase = bases.find((base) => base.id === selectedBase?.id)
-    !hasSelectedBase && setSelectedBase(bases[0])
+    if (!hasSelectedBase) {
+      setSelectedBase(bases[0])
+    }
   }, [bases, selectedBase])
 
   const getMenuItems = useCallback(
@@ -68,6 +71,13 @@ const KnowledgePage: FC = () => {
           key: 'settings',
           icon: <Settings size={14} />,
           onClick: () => handleEditKnowledgeBase(base)
+        },
+        {
+          // NEW locale key (reported, not shipped): knowledge.reorder.
+          label: t('knowledge.reorder'),
+          key: 'reorder',
+          icon: <ArrowUpDown size={14} />,
+          onClick: () => setReorderOpen(true)
         },
         { type: 'divider' },
         {
@@ -101,138 +111,133 @@ const KnowledgePage: FC = () => {
 
   return (
     <Container data-testid="knowledge-page">
-      <Navbar>
-        <NavbarCenter style={{ borderRight: 'none' }}>{t('knowledge.title')}</NavbarCenter>
-      </Navbar>
-      <ContentContainer id="content-container">
-        <KnowledgeSideNav>
-          <DraggableList
-            list={bases}
-            onUpdate={updateKnowledgeBases}
-            style={{ marginBottom: 0, paddingBottom: isDragging ? 50 : 0 }}
-            onDragStart={() => setIsDragging(true)}
-            onDragEnd={() => setIsDragging(false)}>
+      <BaseBar>
+        <BaseSelect
+          data-testid="knowledge-base-select"
+          value={selectedBase?.id}
+          placeholder={t('knowledge.no_bases')}
+          onChange={(value) => {
+            const baseId = value as string
+            const base = bases.find((b) => b.id === baseId)
+            if (base) {
+              setSelectedBase(base)
+            }
+          }}
+          options={bases.map((base) => ({ value: base.id, label: base.name }))}
+          prefix={<Book size={14} />}
+          showSearch
+          optionFilterProp="label"
+        />
+        <Flex align="center" gap={4} style={{ flexShrink: 0 }}>
+          <Button
+            type="text"
+            size="small"
+            data-testid="knowledge-base-add"
+            icon={<Plus size={16} />}
+            aria-label={t('button.add')}
+            onClick={handleAddKnowledge}
+          />
+          {selectedBase && (
+            <Dropdown menu={{ items: getMenuItems(selectedBase) }} trigger={['click']} placement="bottomRight">
+              <Button
+                type="text"
+                size="small"
+                data-testid="knowledge-base-more"
+                icon={<Ellipsis size={16} />}
+                aria-label={t('common.more')}
+              />
+            </Dropdown>
+          )}
+        </Flex>
+      </BaseBar>
+      <Body>
+        {bases.length === 0 || !selectedBase ? (
+          <EmptyWrap>
+            <Empty description={t('knowledge.empty')} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <Button type="primary" size="small" icon={<Plus size={14} />} onClick={handleAddKnowledge}>
+              {t('button.add')}
+            </Button>
+          </EmptyWrap>
+        ) : (
+          <KnowledgeContent key={selectedBase.id} selectedBase={selectedBase} />
+        )}
+      </Body>
+      <Modal
+        title={t('knowledge.reorder')}
+        open={reorderOpen}
+        onCancel={() => setReorderOpen(false)}
+        footer={null}
+        width={320}
+        centered
+        destroyOnHidden>
+        <ReorderList>
+          <DraggableList list={bases} onUpdate={updateKnowledgeBases}>
             {(base: KnowledgeBase) => (
-              <Dropdown menu={{ items: getMenuItems(base) }} trigger={['contextMenu']} key={base.id}>
-                <div>
-                  <ListItem
-                    active={selectedBase?.id === base.id}
-                    icon={<Book size={16} />}
-                    title={base.name}
-                    onClick={() => setSelectedBase(base)}
-                  />
-                </div>
-              </Dropdown>
+              <ListItem
+                active={selectedBase?.id === base.id}
+                icon={<Book size={16} />}
+                title={base.name}
+                onClick={() => {
+                  setSelectedBase(base)
+                  setReorderOpen(false)
+                }}
+              />
             )}
           </DraggableList>
-          {!isDragging && (
-            <AddKnowledgeItem onClick={handleAddKnowledge}>
-              <AddKnowledgeName>
-                <Plus size={18} />
-                {t('button.add')}
-              </AddKnowledgeName>
-            </AddKnowledgeItem>
-          )}
-          <div style={{ minHeight: '10px' }}></div>
-        </KnowledgeSideNav>
-        {bases.length === 0 ? (
-          <MainContent>
-            <Empty description={t('knowledge.empty')} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-          </MainContent>
-        ) : selectedBase ? (
-          <KnowledgeContent selectedBase={selectedBase} />
-        ) : null}
-      </ContentContainer>
+        </ReorderList>
+      </Modal>
     </Container>
   )
 }
 
 const Container = styled.div`
   display: flex;
-  flex: 1;
   flex-direction: column;
-  height: calc(100vh - var(--navbar-height));
-`
-
-const ContentContainer = styled.div`
-  display: flex;
   flex: 1;
-  flex-direction: row;
-  min-height: 100%;
-`
-
-const MainContent = styled(Scrollbar)`
-  padding: 15px 20px;
-  display: flex;
+  min-height: 0;
   width: 100%;
-  flex-direction: column;
-  padding-bottom: 50px;
-`
-
-const KnowledgeSideNav = styled(Scrollbar)`
-  display: flex;
-  flex-direction: column;
-
-  width: calc(var(--settings-width) + 100px);
-  border-right: 0.5px solid var(--color-border);
-  padding: 12px 10px;
-
-  .ant-menu {
-    border-inline-end: none !important;
-    background: transparent;
-    flex: 1;
-  }
-
-  .ant-menu-item {
-    height: 40px;
-    line-height: 40px;
-    margin: 4px 0;
-    width: 100%;
-
-    &:hover {
-      background-color: var(--color-background-soft);
-    }
-
-    &.ant-menu-item-selected {
-      background-color: var(--color-background-soft);
-      color: var(--color-primary);
-    }
-  }
-
-  > div {
-    margin-bottom: 8px;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
-  }
-`
-
-const AddKnowledgeItem = styled.div`
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-  padding: 7px 12px;
-  position: relative;
-  border-radius: var(--list-item-border-radius);
-  border: 0.5px solid transparent;
-  cursor: pointer;
-  &:hover {
-    background-color: var(--color-background-soft);
-  }
-`
-
-const AddKnowledgeName = styled.div`
-  color: var(--color-text);
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
+  height: 100%;
   overflow: hidden;
-  font-size: 13px;
+  background-color: var(--color-background);
+`
+
+const BaseBar = styled.div`
   display: flex;
-  flex-direction: row;
   align-items: center;
   gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 0.5px solid var(--color-border);
+  flex-shrink: 0;
+`
+
+const BaseSelect = styled(Select)`
+  flex: 1;
+  min-width: 0;
+`
+
+const Body = styled.div`
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+`
+
+const EmptyWrap = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+`
+
+const ReorderList = styled.div`
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 0;
 `
 
 export default KnowledgePage
