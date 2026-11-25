@@ -12,7 +12,6 @@ import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { type MessageAssistantConfig, useAssistantSettingsUpdater, withEmptyTopics } from '@renderer/hooks/useAssistant'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
-import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
@@ -36,7 +35,7 @@ import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType }
 import { classNames } from '@renderer/utils'
 import { abortCompletion } from '@renderer/utils/abortController'
 import { isAbortError } from '@renderer/utils/error'
-import { exportMessageAsMarkdown, exportMessageToNotes, messageToMarkdown } from '@renderer/utils/export'
+import { exportMessageAsMarkdown } from '@renderer/utils/export'
 import { saveExportImage } from '@renderer/utils/exportFile'
 import { removeTrailingDoubleSpaces } from '@renderer/utils/markdown'
 import {
@@ -62,7 +61,6 @@ import {
   Languages,
   Menu,
   MessageSquarePlus,
-  NotebookPen,
   Save,
   Split,
   ThumbsUp,
@@ -177,7 +175,6 @@ type MessageMenubarButtonContext = {
   // window-outside members. True for non-grouped messages.
   isGroupMutable: boolean
   message: Message
-  notesPath: string
   onCopy: (e: React.MouseEvent) => void
   onEdit: () => void | Promise<void>
   onInsertMessages: () => void | Promise<void>
@@ -212,7 +209,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     onUpdateUseful
   } = props
   const { t } = useTranslation()
-  const { notesPath } = useNotesSettings()
   const [copied, setCopied] = useTemporaryValue(false, 2000)
   const translationAbortKey = createTranslationAbortKey(message.id)
   // remove confirm for regenerate; tooltip stays simple
@@ -590,8 +586,8 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
   }, [isGroupMutableForMenu, message.id, onUpdateUseful])
 
   const dropdownItems = useMemo(() => {
-    // More menu (overflow): Clone Topic stays; Translate and Save to Notes
-    // moved here from visible buttons; Edit/Insert moved OUT to visible
+    // More menu (overflow): Clone Topic stays; Translate moved here from
+    // visible buttons; Edit/Insert moved OUT to visible
     // toolbar renderers (`assistant-edit`/`assistant-insert`). The grouped
     // assistant `useful` toggle also lives here (directly after Clone Topic),
     // never as a visible toolbar button.
@@ -656,16 +652,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
               }))
             ]
           },
-      {
-        label: <span data-testid="message-save-notes-menu-btn">{t('notes.save')}</span>,
-        key: 'save-to-notes',
-        icon: <NotebookPen size={15} />,
-        onClick: async () => {
-          const title = await getMessageTitle(message)
-          const markdown = messageToMarkdown(message)
-          void exportMessageToNotes(title, markdown, notesPath)
-        }
-      },
       {
         label: t('chat.save.label'),
         key: 'save',
@@ -754,7 +740,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     mainTextContent,
     message,
     messageContainerRef,
-    notesPath,
     onNewBranch,
     onReferenceTopic,
     onUseful,
@@ -844,7 +829,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     isTranslating,
     isUserMessage,
     message,
-    notesPath,
     onCopy,
     onEdit,
     onInsertMessages,
@@ -1222,26 +1206,6 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     // toolbar never renders it. This stub stays so the stable button id keeps
     // a registered renderer; the registry no longer lists it as visible.
     return null
-  },
-  notes: ({ isAssistantMessage, softHoverBg, message, notesPath, t }) => {
-    if (!isAssistantMessage) {
-      return null
-    }
-
-    return (
-      <Tooltip title={t('notes.save')} mouseEnterDelay={0.8}>
-        <ActionButton
-          className="message-action-button"
-          onClick={async () => {
-            const title = await getMessageTitle(message)
-            const markdown = messageToMarkdown(message)
-            void exportMessageToNotes(title, markdown, notesPath)
-          }}
-          $softHoverBg={softHoverBg}>
-          <NotebookPen size={15} />
-        </ActionButton>
-      </Tooltip>
-    )
   },
   'true-branch': ({ isAssistantMessage, isInherited, isBranchMetadataMissing, onTrueBranch, softHoverBg, t }) => {
     // Visible assistant-message toolbar button, immediately left of Delete

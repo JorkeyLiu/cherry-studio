@@ -4881,6 +4881,28 @@ const migrateConfig = {
       logger.error('migrate 229 error', error as Error)
       return state
     }
+  },
+  '230': (state: any) => {
+    try {
+      // Notebook feature retired (chat-only base; notes entries removed):
+      // strip the 'notes' nav icon from persisted sidebar icon lists.
+      // Storage/migration/import compatibility is untouched — only the
+      // nav entry is removed, so unknown persisted entries fail closed.
+      const icons = state?.settings?.sidebarIcons
+      if (icons && typeof icons === 'object') {
+        if (Array.isArray(icons.visible)) {
+          icons.visible = icons.visible.filter((icon: unknown) => icon !== 'notes')
+        }
+        if (Array.isArray(icons.disabled)) {
+          icons.disabled = icons.disabled.filter((icon: unknown) => icon !== 'notes')
+        }
+      }
+      logger.info('migrate 230 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 230 error', error as Error)
+      return state
+    }
   }
 }
 

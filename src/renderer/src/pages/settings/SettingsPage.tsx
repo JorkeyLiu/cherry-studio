@@ -1,6 +1,4 @@
-import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
 import Scrollbar from '@renderer/components/Scrollbar'
-import ModelSettings from '@renderer/pages/settings/ModelSettings/ModelSettings'
 import { Divider as AntDivider } from 'antd'
 import { Cloud, Command, HardDrive, Info, MonitorCog, Package, Server, Settings2 } from 'lucide-react'
 import type { FC } from 'react'
@@ -12,10 +10,16 @@ import AboutSettings from './AboutSettings'
 import DataSettings from './DataSettings/DataSettings'
 import DisplaySettings from './DisplaySettings/DisplaySettings'
 import GeneralSettings from './GeneralSettings'
+import ModelSettings from './ModelSettings/ModelSettings'
 import { ProviderList } from './ProviderSettings'
 import ShortcutSettings from './ShortcutSettings'
 import { ApiServerSettings } from './ToolSettings/ApiServerSettings'
 
+/**
+ * Settings body for the task dialog: a compact category rail plus one content
+ * area. The page owns no window chrome and no viewport-sized layout — it fills
+ * the dialog body and every scroll region is bounded by that body.
+ */
 const SettingsPage: FC = () => {
   const { pathname } = useLocation()
   const { t } = useTranslation()
@@ -24,59 +28,56 @@ const SettingsPage: FC = () => {
 
   return (
     <Container data-testid="settings-page">
-      <Navbar>
-        <NavbarCenter style={{ borderRight: 'none' }}>{t('settings.title')}</NavbarCenter>
-      </Navbar>
       <ContentContainer id="content-container">
-        <SettingMenus>
+        <SettingMenus aria-label={t('settings.title')}>
           <MenuItemLink to="/settings/provider">
             <MenuItem className={isRoute('/settings/provider')}>
-              <Cloud size={18} />
+              <Cloud size={16} />
               {t('settings.provider.title')}
             </MenuItem>
           </MenuItemLink>
           <MenuItemLink to="/settings/model">
             <MenuItem className={isRoute('/settings/model')}>
-              <Package size={18} />
+              <Package size={16} />
               {t('settings.model')}
             </MenuItem>
           </MenuItemLink>
           <Divider />
           <MenuItemLink to="/settings/general">
             <MenuItem className={isRoute('/settings/general')}>
-              <Settings2 size={18} />
+              <Settings2 size={16} />
               {t('settings.general.label')}
             </MenuItem>
           </MenuItemLink>
           <MenuItemLink to="/settings/display">
             <MenuItem className={isRoute('/settings/display')}>
-              <MonitorCog size={18} />
+              <MonitorCog size={16} />
               {t('settings.display.title')}
             </MenuItem>
           </MenuItemLink>
           <MenuItemLink to="/settings/data">
             <MenuItem className={isRoute('/settings/data')}>
-              <HardDrive size={18} />
+              <HardDrive size={16} />
               {t('settings.data.title')}
             </MenuItem>
           </MenuItemLink>
           <Divider />
           <MenuItemLink to="/settings/api-server">
             <MenuItem className={isRoute('/settings/api-server')}>
-              <Server size={18} />
+              <Server size={16} />
               {t('apiServer.title')}
             </MenuItem>
           </MenuItemLink>
           <MenuItemLink to="/settings/shortcut">
             <MenuItem className={isRoute('/settings/shortcut')}>
-              <Command size={18} />
+              <Command size={16} />
               {t('settings.shortcuts.title')}
             </MenuItem>
           </MenuItemLink>
           <Divider />
           <MenuItemLink to="/settings/about">
             <MenuItem className={isRoute('/settings/about')}>
-              <Info size={18} />
+              <Info size={16} />
               {t('settings.about.label')}
             </MenuItem>
           </MenuItemLink>
@@ -102,27 +103,40 @@ const Container = styled.div`
   display: flex;
   flex-direction: column;
   flex: 1;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 `
 
 const ContentContainer = styled.div`
   display: flex;
   flex: 1;
   flex-direction: row;
-  height: calc(100vh - var(--navbar-height));
-  padding: 1px 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 `
 
 const SettingMenus = styled(Scrollbar)`
   display: flex;
   flex-direction: column;
-  min-width: var(--settings-width);
+  flex: 0 0 auto;
+  width: 176px;
+  min-width: 176px;
+  max-width: 176px;
+  min-height: 0;
+  padding: 10px 8px;
+  gap: 2px;
+  overflow-y: auto;
   border-right: 0.5px solid var(--color-border);
-  padding: 10px;
   user-select: none;
-  gap: 5px;
+  box-sizing: border-box;
 `
 
 const MenuItemLink = styled(Link)`
+  display: block;
+  flex: 0 0 auto;
   text-decoration: none;
   color: var(--color-text-1);
 `
@@ -132,15 +146,26 @@ const MenuItem = styled.li`
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 6px 8px;
   width: 100%;
+  box-sizing: border-box;
   cursor: pointer;
   border-radius: var(--list-item-border-radius);
   font-weight: 500;
+  font-size: 13px;
+  /* The row owns its text color: its wrapping link is an anchor element, and
+     antd's global anchor reset (emitted unhashed) makes the anchor hover and
+     active rules outrank the link's own class color, which would paint the
+     label blue. Keeping the neutral color on the row leaves hover and active
+     background-only, as the rest of the list items. */
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: all 0.2s ease-in-out;
   border: 0.5px solid transparent;
-  .anticon {
-    font-size: 16px;
+  svg {
+    flex: 0 0 auto;
     opacity: 0.8;
   }
   &:hover {
@@ -154,12 +179,15 @@ const MenuItem = styled.li`
 
 const SettingContent = styled.div`
   display: flex;
-  height: 100%;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 `
 
 const Divider = styled(AntDivider)`
-  margin: 3px 0;
+  margin: 4px 0;
+  flex: 0 0 auto;
 `
 
 export default SettingsPage

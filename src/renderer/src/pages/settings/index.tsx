@@ -8,8 +8,12 @@ export const SettingContainer = styled.div<{ theme?: ThemeMode }>`
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
   padding: 15px 18px;
-  overflow-y: scroll;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: ${(props) => (props.theme === 'dark' ? 'transparent' : 'var(--color-background-soft)')};
 
   &::-webkit-scrollbar {

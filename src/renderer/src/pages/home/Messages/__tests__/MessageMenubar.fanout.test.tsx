@@ -67,10 +67,6 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
   })
 }))
 
-vi.mock('@renderer/hooks/useNotesSettings', () => ({
-  useNotesSettings: () => ({ notesPath: '' })
-}))
-
 vi.mock('@renderer/hooks/useSettings', () => ({
   useMessageStyle: () => ({ isBubbleStyle: false }),
   useEnableDeveloperMode: () => ({ enableDeveloperMode: false }),
@@ -159,8 +155,6 @@ vi.mock('@renderer/utils/error', () => ({
 
 vi.mock('@renderer/utils/export', () => ({
   exportMessageAsMarkdown: vi.fn(),
-  exportMessageToNotes: vi.fn(),
-  messageToMarkdown: vi.fn(() => ''),
   messageToPlainText: vi.fn(() => ''),
   topicToMarkdown: vi.fn(() => ''),
   topicToPlainText: vi.fn(() => '')

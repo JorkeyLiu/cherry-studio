@@ -10,7 +10,6 @@ export type MessageMenubarButtonId =
   | 'assistant-mention-model'
   | 'translate'
   | 'useful'
-  | 'notes'
   // True topic branch creation: visible assistant-message toolbar button.
   // The ONLY true-branch creation method.
   | 'true-branch'
@@ -32,10 +31,10 @@ export type MessageMenubarScopeConfig = {
 
 export const DEFAULT_MESSAGE_MENUBAR_SCOPE: MessageMenubarScope = TopicType.Chat
 
-// Translate and Save to Notes live in the More menu (overflow), not as
-// visible buttons; their button renderers stay reusable for scopes that
-// still list them. The grouped-assistant `useful` toggle also lives in the
-// More menu (dropdown `useful` entry, never a visible button): its `useful`
+// Translate lives in the More menu (overflow), not as a visible button; the
+// grouped-assistant `useful` toggle also lives there (dropdown `useful`
+// entry, never a visible button): its `useful` renderer stub stays registered
+// but is unlisted here. Save to Notes was removed: no notes entries remain.
 // renderer stub stays registered but is unlisted here. Exact assistant
 // visible order around branch management:
 // Branch → Insert Message → Edit → Delete.

@@ -2045,6 +2045,7 @@
     "notes_placeholder": "输入此知识库的附加信息或上下文...",
     "provider_not_found": "未找到服务商",
     "rename": "重命名",
+    "reorder": "调整顺序",
     "search": "搜索知识库",
     "search_placeholder": "输入查询内容",
     "settings": {
@@ -4791,6 +4792,9 @@
       },
       "filter_agent": "筛选支持 Agent 的服务商",
       "get_api_key": "点击这里获取密钥",
+      "menu": {
+        "label": "连接操作"
+      },
       "misc": "其他",
       "no_models_for_check": "没有可以被检测的模型（例如对话模型）",
       "not_checked": "未检测",
@@ -4828,6 +4832,12 @@
       },
       "search": "搜索模型平台...",
       "search_placeholder": "搜索模型 ID 或名称",
+      "switcher": {
+        "add": "添加连接",
+        "empty": "没有匹配的连接",
+        "search": "搜索连接名称或 ID",
+        "toggle": "切换连接启用状态"
+      },
       "title": "模型服务",
       "vertex_ai": {
         "api_host_help": "Vertex AI 的 API 地址，不建议填写，通常适用于反向代理",

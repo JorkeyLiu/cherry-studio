@@ -1,5 +1,6 @@
 /**
- * FilesPage — nullable imported-row / file-browser boundary (LOCK-BROWSE-1/2/3).
+ * FilesPage — nullable imported-row / file-browser boundary (LOCK-BROWSE-1/2/3)
+ * plus bounded dialog selection transitions.
  *
  * Renders FilesPage with a functional `db.files` mock so the component's real
  * Dexie query callbacks run against it, and a deps-reactive `useLiveQuery`
@@ -7,10 +8,14 @@
  * - typed tabs exclude rows with null / non-matching source type;
  * - the all tab includes imported rows (null type and source-string type);
  * - null created_at renders a neutral em dash — never "Invalid Date"/NaN;
- * - imported rows expose valid open-path and edit/delete actions.
+ * - imported rows expose valid open-path and edit/delete actions;
+ * - search narrows visible rows without re-querying;
+ * - switching category or search clears row selection (no invisible ids);
+ * - batch delete reflects the visible selection count;
+ * - the image tab has no batch selection affordances.
  */
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -134,11 +139,6 @@ vi.mock('@renderer/services/FileAction', () => ({
   handleRename: vi.fn()
 }))
 
-vi.mock('@renderer/components/app/Navbar', () => ({
-  Navbar: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
-  NavbarCenter: ({ children }: { children?: ReactNode }) => <div>{children}</div>
-}))
-
 vi.mock('@renderer/components/VirtualList', () => ({
   DynamicVirtualList: ({
     list,
@@ -176,6 +176,8 @@ afterEach(() => {
   ;(window as unknown as { api: unknown }).api = originalApi
 })
 
+const rowOf = (name: string) => screen.getByText(name).closest('[data-testid="file-row"]') as HTMLElement | null
+
 describe('FilesPage — nullable imported rows (LOCK-BROWSE-1/2/3)', () => {
   it('typed tab (document, default) excludes null-type and source-string-type rows', async () => {
     render(<FilesPage />)
@@ -192,11 +194,9 @@ describe('FilesPage — nullable imported rows (LOCK-BROWSE-1/2/3)', () => {
       fireEvent.click(screen.getByText('files.image'))
     })
     // Image view renders thumbnails (no name text): exactly the image row.
-    await waitFor(() => {
-      const imgs = document.querySelectorAll('img')
-      expect(imgs.length).toBe(1)
-      expect(imgs[0]?.getAttribute('src')).toBe('file:///mock/files/f-img.png')
-    })
+    const imgs = document.querySelectorAll('img')
+    expect(imgs.length).toBe(1)
+    expect(imgs[0]?.getAttribute('src')).toBe('file:///mock/files/f-img.png')
     // Non-matching rows (null type, source-string type, other typed) are excluded.
     expect(document.body.textContent).not.toContain('imported.bin')
     expect(document.body.textContent).not.toContain('raw.png')
@@ -221,11 +221,10 @@ describe('FilesPage — nullable imported rows (LOCK-BROWSE-1/2/3)', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('files.all'))
     })
-    const name = await screen.findByText('imported.bin')
-    // The imported row's extra line (FileInfo) carries the neutral em dash.
-    const card = name.closest('div')?.parentElement?.parentElement?.parentElement
-    const extraText = (card as HTMLElement | null)?.textContent ?? ''
-    expect(extraText).toContain('—')
+    await screen.findByText('imported.bin')
+    const row = rowOf('imported.bin')
+    expect(row).not.toBeNull()
+    expect((row as HTMLElement).textContent).toContain('—')
     expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument()
   })
 
@@ -247,11 +246,97 @@ describe('FilesPage — nullable imported rows (LOCK-BROWSE-1/2/3)', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('files.all'))
     })
-    const name = await screen.findByText('imported.bin')
-    // FileItemCard > CardContent > Flex{FileName, FileInfo} | FileActions
-    const card = name.closest('div')?.parentElement?.parentElement?.parentElement
-    expect(card).not.toBeNull()
-    const actions = within(card as HTMLElement).getAllByRole('button')
+    await screen.findByText('imported.bin')
+    const row = rowOf('imported.bin')
+    expect(row).not.toBeNull()
+    const actions = within(row as HTMLElement).getAllByRole('button')
     expect(actions.length).toBe(2)
+  })
+})
+
+describe('FilesPage — bounded dialog selection transitions', () => {
+  it('search narrows visible rows without re-querying', async () => {
+    render(<FilesPage />)
+    await screen.findByText('doc.txt')
+    await act(async () => {
+      fireEvent.click(screen.getByText('files.all'))
+    })
+    await screen.findByText('imported.bin')
+
+    const search = screen.getByPlaceholderText('common.search')
+    await act(async () => {
+      fireEvent.change(search, { target: { value: 'imported' } })
+    })
+    expect(screen.getByText('imported.bin')).toBeInTheDocument()
+    expect(screen.queryByText('doc.txt')).not.toBeInTheDocument()
+    expect(screen.queryByText('raw.png')).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.change(search, { target: { value: '' } })
+    })
+    expect(await screen.findByText('doc.txt')).toBeInTheDocument()
+  })
+
+  it('search with no matches shows the empty state', async () => {
+    render(<FilesPage />)
+    await screen.findByText('doc.txt')
+    await act(async () => {
+      fireEvent.change(screen.getByPlaceholderText('common.search'), { target: { value: 'zzz-no-match' } })
+    })
+    expect(await screen.findByTestId('files-empty')).toBeInTheDocument()
+    expect(screen.queryByText('doc.txt')).not.toBeInTheDocument()
+  })
+
+  it('row selection drives the batch delete count and label', async () => {
+    render(<FilesPage />)
+    await screen.findByText('doc.txt')
+    await act(async () => {
+      fireEvent.click(screen.getByText('files.all'))
+    })
+    await screen.findByText('imported.bin')
+
+    const batch = screen.getByTestId('files-batch-delete')
+    expect(batch).toBeDisabled()
+
+    const boxes = screen.getAllByTestId('file-row-select')
+    await act(async () => {
+      fireEvent.click(boxes[0])
+    })
+    await act(async () => {
+      fireEvent.click(boxes[1])
+    })
+    expect(screen.getByTestId('files-batch-delete')).not.toBeDisabled()
+    expect(screen.getByTestId('files-batch-delete').textContent).toContain('(2)')
+  })
+
+  it('switching category clears the row selection', async () => {
+    render(<FilesPage />)
+    await screen.findByText('doc.txt')
+    await act(async () => {
+      fireEvent.click(screen.getByText('files.all'))
+    })
+    await screen.findByText('imported.bin')
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('file-row-select')[0])
+    })
+    expect(screen.getByTestId('files-batch-delete')).not.toBeDisabled()
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('files.document'))
+    })
+    await screen.findByText('doc.txt')
+    expect(screen.getByTestId('files-batch-delete')).toBeDisabled()
+  })
+
+  it('image tab exposes no batch selection affordances', async () => {
+    render(<FilesPage />)
+    await screen.findByText('doc.txt')
+    await act(async () => {
+      fireEvent.click(screen.getByText('files.image'))
+    })
+    expect(screen.queryByTestId('files-batch-delete')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('file-row-select')).not.toBeInTheDocument()
+    expect(screen.queryByText('files.batch_operation')).not.toBeInTheDocument()
   })
 })
