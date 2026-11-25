@@ -8,6 +8,8 @@ const { emitMock, state } = vi.hoisted(() => ({
   emitMock: vi.fn(),
   state: {
     routeKey: 'topic-1::main',
+    committedChrome: null,
+    acceptCommittedStructure: vi.fn(),
     // The drawer lists only the accepted projection; pending (isCurrent false)
     // is the empty-list case, never a stale route's rows.
     isCurrent: true,

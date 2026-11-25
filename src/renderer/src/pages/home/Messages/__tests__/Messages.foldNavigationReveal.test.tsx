@@ -155,7 +155,13 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
 // the real read fails closed (no read, no segments, `isCurrent` false); the
 // stub pins that state without pulling the structural read into the suite.
 vi.mock('../../ChatRouteStructure', () => {
-  const routeStructure = { segments: [], routeKey: '', isCurrent: false }
+  const routeStructure = {
+    segments: [],
+    routeKey: '',
+    isCurrent: false,
+    committedChrome: null,
+    acceptCommittedStructure: vi.fn()
+  }
   return { useChatRouteStructure: () => routeStructure }
 })
 vi.mock('@renderer/services/EventService', () => ({

@@ -153,7 +153,14 @@ const observed = {
  */
 function MessagesLikeConsumer({ displayedKey }: { displayedKey: string }) {
   const route = useChatRouteStructure()
-  const retained = useRetainedRouteSegments(TOPIC, route.routeKey, route.segments, route.isCurrent, displayedKey)
+  const retained = useRetainedRouteSegments(
+    TOPIC,
+    route.routeKey,
+    route.segments,
+    route.isCurrent,
+    displayedKey,
+    route.committedChrome ?? null
+  )
   observed.messages.push({
     route,
     segments: retained.segments.map((s) => s.id),
@@ -296,6 +303,110 @@ describe('ChatRouteStructureProvider shared surface read', () => {
     expect(lastMessageObservation().route.routeKey).toBe(`${TOPIC}::main`)
     expect(lastMessageObservation().route.isCurrent).toBe(true)
     expect(lastMessageObservation().isDisplayCurrent).toBe(true)
+  })
+
+  it('shares an accepted deferred structure: drawer follows selection, retained headers follow the displayed window', async () => {
+    const store = makeStore()
+    setBranch(store, null)
+    seedCatalog(store, [seg('s-main', 0, ['m1']), seg('s-child', 1, ['c1'])])
+    const childRead = deferred<Any>()
+    mockFetchWindow.mockImplementation(async (req: Any) =>
+      req.branchId === 'C' ? childRead.promise : structure(TOPIC, null, [group('s-main', ['m1'])])
+    )
+
+    const { rerender } = render(<Surface store={store} displayedKey={`${TOPIC}::main`} />)
+    await waitFor(() => expect(screen.getByText('g-s-main')).toBeTruthy(), WAIT)
+
+    act(() => setBranch(store, 'C'))
+    expect(screen.queryByText('g-s-main')).toBeNull()
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-main')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(false)
+
+    // Acceptance is the same owner's single write; the direct read issued by
+    // the route effect is still pending and must not overwrite it.
+    const accepted = structure(TOPIC, 'C', [group('s-child', ['c1'])])
+    act(() => void lastProbe().acceptCommittedStructure(TOPIC, 'C', accepted.structure))
+    expect(screen.getByText('g-s-child')).toBeTruthy()
+    expect(screen.getByTestId('route-probe').textContent).toBe(`${TOPIC}::C:true`)
+    // Displayed window still belongs to main: old headers remain, read-only.
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-main')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(false)
+
+    // Window commits for the accepted route in the same visible batch.
+    rerender(<Surface store={store} displayedKey={`${TOPIC}::C`} />)
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-child')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(true)
+
+    act(() => childRead.resolve(structure(TOPIC, 'C', [group('s-stale', ['x'])])))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-child')
+    expect(screen.queryByText('g-s-stale')).toBeNull()
+  })
+
+  it('supports the reverse skew: accepted main drawer with a displayed child window stays read-only', async () => {
+    const store = makeStore()
+    setBranch(store, null)
+    seedCatalog(store, [seg('s-main', 0, ['m1']), seg('s-child', 1, ['c1'])])
+    mockFetchWindow.mockImplementation(async (req: Any) =>
+      req.branchId === 'C'
+        ? structure(TOPIC, 'C', [group('s-child', ['c1'])])
+        : structure(TOPIC, null, [group('s-main', ['m1'])])
+    )
+
+    const { rerender } = render(<Surface store={store} displayedKey={`${TOPIC}::main`} />)
+    await waitFor(() => expect(screen.getByText('g-s-main')).toBeTruthy(), WAIT)
+
+    // Selected C first: co-commit its deferred structure and advance the
+    // displayed window to C, establishing child chrome in the shared owner.
+    act(() => setBranch(store, 'C'))
+    const child = structure(TOPIC, 'C', [group('s-child', ['c1'])])
+    act(() => void lastProbe().acceptCommittedStructure(TOPIC, 'C', child.structure, undefined, 2))
+    expect(screen.getByText('g-s-child')).toBeTruthy()
+    rerender(<Surface store={store} displayedKey={`${TOPIC}::C`} />)
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-child')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(true)
+
+    // Reverse direction: selection returns to main while the displayed window
+    // still holds child rows. The drawer is selected-only; retained headers
+    // keep the displayed route's projection and remain read-only.
+    act(() => setBranch(store, null))
+    const main = structure(TOPIC, null, [group('s-main', ['m1'])])
+    act(() => void lastProbe().acceptCommittedStructure(TOPIC, null, main.structure, undefined, 3))
+    expect(screen.getByText('g-s-main')).toBeTruthy()
+    expect(screen.queryByText('g-s-child')).toBeNull()
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-child')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(false)
+    expect(lastMessageObservation().segments).toEqual(['s-child'])
+
+    rerender(<Surface store={store} displayedKey={`${TOPIC}::main`} />)
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-main')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(true)
+  })
+
+  it('co-commits a receipt-first window with selected drawer and displayed headers in one render', async () => {
+    const store = makeStore()
+    setBranch(store, null)
+    seedCatalog(store, [seg('s-main', 0, ['m1']), seg('s-child', 1, ['c1'])])
+    const childRead = deferred<Any>()
+    mockFetchWindow.mockImplementation(async (req: Any) =>
+      req.branchId === 'C' ? childRead.promise : structure(TOPIC, null, [group('s-main', ['m1'])])
+    )
+
+    const { rerender } = render(<Surface store={store} displayedKey={`${TOPIC}::main`} />)
+    await waitFor(() => expect(screen.getByText('g-s-main')).toBeTruthy(), WAIT)
+    act(() => setBranch(store, 'C'))
+
+    const accepted = structure(TOPIC, 'C', [group('s-child', ['c1'])])
+    act(() => {
+      void lastProbe().acceptCommittedStructure(TOPIC, 'C', accepted.structure)
+      rerender(<Surface store={store} displayedKey={`${TOPIC}::C`} />)
+    })
+
+    expect(screen.getByText('g-s-child')).toBeTruthy()
+    expect(screen.getByTestId('flow-chrome').textContent).toBe('s-child')
+    expect(lastMessageObservation().isDisplayCurrent).toBe(true)
+    expect(lastMessageObservation().route).toBe(lastProbe())
+    expect(mockFetchWindow).toHaveBeenCalledTimes(2)
   })
 
   it('fails fast when a consumer is mounted outside the surface provider', () => {

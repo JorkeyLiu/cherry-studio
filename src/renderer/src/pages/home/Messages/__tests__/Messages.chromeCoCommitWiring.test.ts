@@ -21,8 +21,9 @@ import { describe, expect, it } from 'vitest'
  *   with mutable ids/cleared reference + chrome, synchronously inside the
  *   commit, AFTER the stale guards and BEFORE `window/apply`), so the first
  *   visible frame already hosts the target route's groups and structure;
- * - `publishCommittedChrome` itself never publishes on a null structure
- *   and never throws (retained/hook behavior survives).
+ * - `publishCommittedChrome` is now a thin forwarding seam into the provider's
+ *   single owner; `Messages` keeps neither local committed state nor a second
+ *   projection writer (the real hook/provider suite proves acceptance itself).
  *
  * The derivation itself (structure → committed chrome, hook equivalence,
  * single-flight) is proven behaviorally in
@@ -48,18 +49,14 @@ describe('Messages chrome co-commit wiring (structural)', () => {
   const topCommitSlice = (): string =>
     sliceOf('const commitTopVisibleAtomic = useCallback(', 'const endDividerSearchTerminal = useCallback(')
 
-  it('publish is fail-closed: null structure returns early, projection misses and throws never dispatch', () => {
+  it('forwards to the provider-owned writer without a second projection or local state', () => {
     const slice = publishSlice()
-    const earlyIdx = slice.indexOf('if (!structure) return')
-    const tryIdx = slice.indexOf('try {')
-    const guardedIdx = slice.indexOf('if (projected)')
-    for (const [name, index] of Object.entries({ earlyIdx, tryIdx, guardedIdx })) {
-      expect(index, `${name} must be present`).toBeGreaterThanOrEqual(0)
-    }
-    expect(earlyIdx).toBeLessThan(tryIdx)
-    expect(tryIdx).toBeLessThan(guardedIdx)
-    expect(slice).toMatch(/catch \{\s*\/\/ fail-closed/)
-    expect(slice).toContain('projectCommittedChromeFromStructure')
+    expect(slice).toContain(
+      'acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)'
+    )
+    expect(slice).not.toContain('projectCommittedChromeFromStructure')
+    expect(slice).not.toContain('setCommittedChrome')
+    expect(source).not.toContain('const [committedChrome, setCommittedChrome]')
   })
 
   it('no independent chrome fetch: no fetchRouteChromeWires, no listSegments, no wires join', () => {
@@ -108,14 +105,17 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     expect(source).toContain('const joint = toDeferredJointPayload(deferredReceipt)')
     expect(source).toContain('deferredStructure = joint.structure')
     expect(source).toContain("throw new Error('route structure missing in bundled window response')")
-    // The deferred batch publishes the structure before hydrating route messages.
+    // Acceptance happens after the joint publication dispatch (live getState
+    // rebaseline) but still inside the same sync onPublish before window/apply.
     expect(source).toMatch(/const publishDeferredProjection = \(unionMessages\?: readonly Message\[\]\): void/)
     const batch = sliceOf('const publishDeferredProjection = (', 'if (restoreEpoch === null)')
-    const publishIdx = batch.indexOf('publishCommittedChrome(topicIdAtStart, branchId, deferredStructure)')
+    const publishIdx = batch.indexOf(
+      'publishCommittedChrome(\n          topicIdAtStart,\n          branchId,\n          deferredStructure,\n          deferredReference,\n          deferredReceipt?.routeGeneration\n        )'
+    )
     const rebaseIdx = batch.indexOf('rebaseRouteMessages')
     expect(publishIdx).toBeGreaterThanOrEqual(0)
     expect(rebaseIdx).toBeGreaterThanOrEqual(0)
-    expect(publishIdx).toBeLessThan(rebaseIdx)
+    expect(rebaseIdx).toBeLessThan(publishIdx)
     // The deferred projection reaches commits as onPublish in both entries:
     // the visible path wraps the union order, the hidden path passes the
     // batch itself (which publishes the target window order).
@@ -136,7 +136,9 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     // Missing bundled structure fails closed: no publish, no backfill.
     expect(source).toContain('if (!topJoint.structure) {')
     expect(source).toContain('const topChromeStructure = topJoint.structure')
-    expect(source).toContain('publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeStructure)')
+    expect(source).toContain(
+      'publishCommittedChrome(\n          topicIdAtEffect,\n          routeAtEffect,\n          topChromeStructure,\n          topJoint.reference,\n          topReceipt?.routeGeneration\n        )'
+    )
     expect(source).toContain('mutableMessageIds: [...topJoint.mutableMessageIds]')
     expect(source).toContain('reference: topJoint.reference ?? null')
     // Visible fast path + hidden restore commit share the idempotent closure;
@@ -159,7 +161,9 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     // Missing bundled structure fails closed: no publish, no backfill.
     expect(source).toContain('if (!deletionJoint.structure) {')
     expect(source).toContain('const deletionChromeStructure = deletionJoint.structure')
-    expect(source).toContain('publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeStructure)')
+    expect(source).toContain('deletionChromeStructure,')
+    expect(source).toContain('deletionJoint.reference')
+    expect(source).toContain('deletionReceipt?.routeGeneration')
     expect(source).toContain('mutableMessageIds: [...deletionJoint.mutableMessageIds]')
     expect(source).toContain('reference: deletionJoint.reference ?? null')
     const commit = sliceOf('deletionEpoch = commitRouteWindowAtomic(', 'if (deletionEpoch === null)')

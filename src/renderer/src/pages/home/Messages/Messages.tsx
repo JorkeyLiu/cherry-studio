@@ -151,10 +151,7 @@ import { saveExportImage } from '@renderer/utils/exportFile'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
-import {
-  type CommittedChromeProjection,
-  projectCommittedChromeFromStructure
-} from '@renderer/utils/routeCommittedChrome'
+import type { CommittedChromeProjection } from '@renderer/utils/routeCommittedChrome'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
   FetchMessagesWindowRequest,
@@ -880,8 +877,9 @@ const MessagesContentInner: React.FC<MessagesContentProps> = ({
     routeKey: routeProjectionKey,
     isCurrent: isRouteProjectionCurrent
   } = useChatRouteStructure()
-  // Window-commit co-commit (Goal A): the target route's structure published in
-  // the SAME sync batch as its window commit (see publishCommittedChrome). The
+  // Window-commit co-commit (Goal A): the target route's structure published
+  // by the provider owner in the SAME sync batch as its window commit (see
+  // publishCommittedChrome). The
   // first visible frame of a route switch already hosts the target structure;
   // the scoped hook later accepts the identical projection with no visible
   // change. Never cleared per switch: keys carry topic+route, so a stale entry
@@ -1295,6 +1293,9 @@ const Messages = ({
   // Declared before the scroll hook so the route-keyed snapshot key can
   // include it.
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+  // Surface-owned structure: the committed window snapshot and its single
+  // write entry live in ChatRouteStructureProvider, shared with the drawer.
+  const { committedChrome, acceptCommittedStructure } = useChatRouteStructure()
 
   // One-shot deletion-fallback intent (branch subtree removal with active
   // fallback). Consumed exactly once by the deletion effect below with an
@@ -1841,6 +1842,8 @@ const Messages = ({
     wantOffset: number
     isAtBottom: boolean
     chromeStructure: FetchMessagesWindowStructure | null
+    chromeReference: HistoryReferenceMeta | null
+    chromeRouteGeneration: number
   } | null>(null)
   const topVisibleRafRef = useRef<number | null>(null)
   const cancelTopVisibleQuiet = useCallback(() => {
@@ -6593,50 +6596,23 @@ const Messages = ({
     },
     []
   )
-  // Window-commit co-committed target structure (Goal A): owned by the outer
-  // route pipelines (published inside the atomic window commits below) and
-  // read by the inner projection as the displayed route's structure. Keys
-  // carry topic+route, so a stale entry can never match another route.
-  const [committedChrome, setCommittedChrome] = useState<CommittedChromeProjection | null>(null)
-  // Window-commit chrome co-commit (Goal A): publish the target route's group
-  // structure in the SAME synchronous batch as its window commit. Every
-  // route-window pipeline fetches the lightweight qualification
-  // (bundled structure: neutral catalog + Main-computed per-group route
-  // blocks — no message bodies, no full preload; the bundled structure travels
-  // on the same receipt, so no second/qualification-only IPC is issued) alongside
-  // its window fetch, then calls this inside the commit's own `onPublish` (which
-  // runs synchronously inside the atomic commit, before `window/apply`). React
-  // batches both updates into one render: the first visible frame already
-  // hosts the target route's headers, and the hook's later acceptance changes
-  // nothing visible. Fail-closed: a null/failed fetch or a projection miss
-  // publishes nothing and the commit proceeds with the retained/hook behavior.
-  // Window-commit chrome co-commit (bundled structure): the target route's
-  // structure rides the window receipt in the same Main transaction — no
-  // second IPC, no store-catalog join. Fail-closed: a missing structure
-  // publishes nothing; an empty projection clears only the same-route
-  // residue (never another route's chrome).
+  // Window-commit chrome co-commit: a thin forwarder into the provider-owned
+  // writer. Every production caller below is a receipt late guard followed by
+  // an atomic `onPublish`, so an uncommitted receipt (including bootstrap
+  // dispatch) is never accepted. Projection, empty-route clear, catalog/
+  // reference rebaseline and debounce/generation handling belong to the single
+  // owner in `useRouteScopedSegments`; this component keeps no copy.
   const publishCommittedChrome = useCallback(
-    (targetTopicId: string, targetBranchId: string | null, structure: FetchMessagesWindowStructure | null): void => {
-      if (!structure) return
-      try {
-        const projected = projectCommittedChromeFromStructure({
-          topicId: targetTopicId,
-          branchId: targetBranchId,
-          structure
-        })
-        if (projected) {
-          setCommittedChrome(projected)
-          return
-        }
-        // Empty projection is known-empty: clear a stale same-route entry so
-        // the previous route's headers cannot linger on an empty route.
-        const targetKey = `${targetTopicId}::${targetBranchId ?? 'main'}`
-        setCommittedChrome((prev) => (prev && prev.routeKey === targetKey ? null : prev))
-      } catch {
-        // fail-closed: retain the pre-existing retained/hook behavior
-      }
+    (
+      targetTopicId: string,
+      targetBranchId: string | null,
+      structure: FetchMessagesWindowStructure | null,
+      reference?: HistoryReferenceMeta | null,
+      receiptRouteGeneration?: number
+    ): void => {
+      acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)
     },
-    []
+    [acceptCommittedStructure]
   )
   // Single route-window entry (provenance-bound atomic commit).
   // Records session epoch + target route + window identity as rendered,
@@ -7553,7 +7529,7 @@ const Messages = ({
         return
       }
       const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan, () =>
-        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeStructure)
+        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeStructure, fb.chromeReference, fb.chromeRouteGeneration)
       )
       if (hiddenEpoch === null) {
         topHiddenFallbackRef.current = null
@@ -7900,9 +7876,6 @@ const Messages = ({
       const publishDeferredProjection = (unionMessages?: readonly Message[]): void => {
         if (deferredPublished) return
         deferredPublished = true
-        // Chrome co-commit: target structure in the SAME sync batch as the
-        // window commit (the commit entry calls this before window/apply).
-        publishCommittedChrome(topicIdAtStart, branchId, deferredStructure)
         // The divider-visible union (preserved trunk prefix through the fork
         // anchor plus the target exclusive suffix) is the published resident
         // order: every preserved row is verified continuous against the
@@ -7925,6 +7898,16 @@ const Messages = ({
             mutableMessageIds: [...deferredMutable],
             reference: deferredReference ?? null
           })
+        )
+        // Accept the same receipt's structure AFTER the joint publication is
+        // dispatched, so the owner rebaselines catalog/reference from committed
+        // store state; still inside onPublish before window/apply.
+        publishCommittedChrome(
+          topicIdAtStart,
+          branchId,
+          deferredStructure,
+          deferredReference,
+          deferredReceipt?.routeGeneration
         )
       }
       try {
@@ -8400,7 +8383,6 @@ const Messages = ({
         const publishDeletionJointProjection = (): void => {
           if (deletionPublished) return
           deletionPublished = true
-          publishCommittedChrome(topicIdAtEffect, routeAtEffect, deletionChromeStructure)
           if (deletionJoint.blocks.length > 0) {
             dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deletionJoint.blocks), topicIdAtEffect)))
           }
@@ -8412,6 +8394,13 @@ const Messages = ({
               mutableMessageIds: [...deletionJoint.mutableMessageIds],
               reference: deletionJoint.reference ?? null
             })
+          )
+          publishCommittedChrome(
+            topicIdAtEffect,
+            routeAtEffect,
+            deletionChromeStructure,
+            deletionJoint.reference,
+            deletionReceipt?.routeGeneration
           )
         }
         // Atomic deletion fallback (single entry): provenance-bound commit —
@@ -9363,7 +9352,6 @@ const Messages = ({
       const publishTopJointProjection = (unionMessages?: readonly Message[]): void => {
         if (topJointPublished) return
         topJointPublished = true
-        publishCommittedChrome(topicIdAtEffect, routeAtEffect, topChromeStructure)
         if (topJoint.blocks.length > 0) {
           dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(topJoint.blocks), topicIdAtEffect)))
         }
@@ -9375,6 +9363,13 @@ const Messages = ({
             mutableMessageIds: [...topJoint.mutableMessageIds],
             reference: topJoint.reference ?? null
           })
+        )
+        publishCommittedChrome(
+          topicIdAtEffect,
+          routeAtEffect,
+          topChromeStructure,
+          topJoint.reference,
+          topReceipt?.routeGeneration
         )
       }
       try {
@@ -9557,7 +9552,9 @@ const Messages = ({
                           anchorMessageId: routeSavedRowAnchor,
                           wantOffset: savedOffset,
                           isAtBottom: !!saved?.isAtBottom,
-                          chromeStructure: topChromeStructure
+                          chromeStructure: topChromeStructure,
+                          chromeReference: topJoint.reference,
+                          chromeRouteGeneration: topReceipt?.routeGeneration ?? 0
                         }
                         // Visible path armed: the layout effect applies the
                         // first compensation, then the bounded quiet sequence

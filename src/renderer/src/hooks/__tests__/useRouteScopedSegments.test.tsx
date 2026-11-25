@@ -138,6 +138,23 @@ function setBranch(store: Any, topicId: string, branchId: string | null) {
   store.dispatch({ type: 'topicBranch/activeBranchSet', payload: { topicId, branchId } })
 }
 
+function seedTopic(store: Any) {
+  const assistantId = store.getState().assistants.assistants[0].id
+  store.dispatch({
+    type: 'assistants/addTopic',
+    payload: {
+      assistantId,
+      topic: {
+        id: TOPIC,
+        assistantId,
+        name: TOPIC,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+    }
+  })
+}
+
 const wrapperFor =
   (store: Any) =>
   ({ children }: { children: React.ReactNode }) =>
@@ -477,6 +494,192 @@ describe('useRouteScopedSegments bundled-structure scope and guards', () => {
     await new Promise((r) => setTimeout(r, 30))
     expect(result.current.segments).toEqual([])
     expect(mockFetchWindow).not.toHaveBeenCalled()
+  })
+})
+
+describe('useRouteScopedSegments committed-structure acceptance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockFetchWindow.mockReset()
+    mockListSegments.mockReset().mockResolvedValue([])
+    mockWholeSnapshot.mockReset().mockResolvedValue({ messages: [], blocks: [], snapshot: {} })
+  })
+
+  const reference = {
+    sourceTopicId: 'SRC',
+    sourceBranchId: null,
+    anchorMessageId: 'r1',
+    sourceName: 'Source',
+    status: 'available' as const,
+    boundaryMessageId: 'r1'
+  }
+
+  /** Store catalog that has the SAME chrome token as the bundled wire catalog. */
+  function catalogSeg(id: string, sortOrder: number, messageIds: string[]) {
+    return {
+      ...seg(id, sortOrder, messageIds),
+      name: `g-${id}`,
+      color: undefined,
+      headerMessageId: messageIds[0] ?? null,
+      ownerTopicId: TOPIC,
+      ownerBranchId: null
+    }
+  }
+
+  function seedReference(store: Any) {
+    store.dispatch(newMessagesActions.historyReferenceSet({ topicId: TOPIC, reference }))
+  }
+
+  it('accepts a committed window immediately, cancels the publication debounce and rejects a late same-route read', async () => {
+    const store = makeStore()
+    setBranch(store, TOPIC, null)
+    seedTopic(store)
+    seedCatalog(store, TOPIC, [catalogSeg('s-old', 0, ['m5'])])
+    const lateRead = deferred<Any>()
+    mockFetchWindow.mockImplementationOnce(() => lateRead.promise)
+
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(1), WAIT)
+
+    // Same common publication: catalog + reference already dispatched when the
+    // onPublish acceptance reaches the owner.
+    const nextStructure = structure(TOPIC, null, [group('s-new', ['n1'])])
+    act(() => {
+      seedCatalog(store, TOPIC, [catalogSeg('s-new', 0, ['n1'])])
+      seedReference(store)
+    })
+    act(() => result.current.acceptCommittedStructure(TOPIC, null, nextStructure.structure, reference))
+
+    expect(result.current.segments.map((s) => s.id)).toEqual(['s-new'])
+    expect(result.current.isCurrent).toBe(true)
+    expect(result.current.committedChrome?.routeKey).toBe(`${TOPIC}::main`)
+    expect(result.current.committedChrome?.segments.map((s) => s.id)).toEqual(['s-new'])
+
+    // The read that started before acceptance is stale even though it names the
+    // same route; its generation was superseded at acceptance.
+    act(() => lateRead.resolve(structure(TOPIC, null, [group('s-old', ['m5'])])))
+    await new Promise((r) => setTimeout(r, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS + 100))
+    expect(mockFetchWindow).toHaveBeenCalledTimes(1)
+    expect(result.current.segments.map((s) => s.id)).toEqual(['s-new'])
+
+    // Real terminal refresh is NOT swallowed by the rebaseline.
+    mockFetchWindow.mockResolvedValue(nextStructure)
+    act(() => {
+      void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { topicId: TOPIC })
+    })
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(2), WAIT)
+
+    // A genuine later catalog mutation is still merged, not mistaken for the
+    // accepted publication's catalog.
+    act(() => seedCatalog(store, TOPIC, [catalogSeg('s-catalog', 0, ['c1'])]))
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(3), WAIT)
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-new']), WAIT)
+
+    // The topic's own updatedAt is likewise a real same-route signal, even
+    // though the acceptance already rebaselined catalog and reference.
+    act(() => store.dispatch({ type: 'assistants/updateTopicUpdatedAt', payload: { topicId: TOPIC } }))
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(4), WAIT)
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-new']), WAIT)
+  })
+
+  it('does not let the route effect read or erase an acceptance that lands with the catalog arrival', async () => {
+    const store = makeStore()
+    setBranch(store, TOPIC, null)
+    // No catalog yet: the hook's initial read is intentionally not issued.
+    mockFetchWindow.mockResolvedValue(structure(TOPIC, null, [group('s-x', ['x1'])]))
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    expect(mockFetchWindow).not.toHaveBeenCalled()
+
+    const nextStructure = structure(TOPIC, null, [group('s-arrived', ['a1'])])
+    act(() => {
+      seedCatalog(store, TOPIC, [catalogSeg('s-arrived', 0, ['a1'])])
+      result.current.acceptCommittedStructure(TOPIC, null, nextStructure.structure)
+    })
+
+    expect(result.current.segments.map((s) => s.id)).toEqual(['s-arrived'])
+    expect(result.current.isCurrent).toBe(true)
+    await new Promise((r) => setTimeout(r, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS + 100))
+    expect(mockFetchWindow).not.toHaveBeenCalled()
+  })
+
+  it('keeps a real refresh when the current catalog token is already ahead of the receipt', async () => {
+    const store = makeStore()
+    setBranch(store, TOPIC, null)
+    seedCatalog(store, TOPIC, [catalogSeg('s-old', 0, ['m5'])])
+    mockFetchWindow.mockResolvedValue(structure(TOPIC, null, [group('s-old', ['m5'])]))
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(1), WAIT)
+
+    const receipt = structure(TOPIC, null, [group('s-old', ['m5'])])
+    mockFetchWindow.mockResolvedValue(structure(TOPIC, null, [group('s-new', ['n1'])]))
+    act(() => {
+      // A later mutation changed the store catalog; no receipt-bound token can
+      // prove this receipt is current, so the refresh must survive.
+      seedCatalog(store, TOPIC, [catalogSeg('s-old', 0, ['m5']), catalogSeg('s-new', 1, ['n1'])])
+      result.current.acceptCommittedStructure(TOPIC, null, receipt.structure)
+    })
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(2), WAIT)
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-new']), WAIT)
+  })
+
+  it('present-empty clears only the accepted route; missing and route-echo mismatch fail closed', async () => {
+    const store = makeStore()
+    setBranch(store, TOPIC, null)
+    seedCatalog(store, TOPIC, [catalogSeg('s-old', 0, ['m5'])])
+    mockFetchWindow.mockResolvedValue(structure(TOPIC, null, [group('s-old', ['m5'])]))
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-old']), WAIT)
+
+    act(() =>
+      result.current.acceptCommittedStructure(TOPIC, null, structure(TOPIC, null, [group('s-old', ['m5'])]).structure)
+    )
+    act(() => result.current.acceptCommittedStructure(TOPIC, null, null))
+    act(() =>
+      result.current.acceptCommittedStructure(TOPIC, null, structure(TOPIC, 'other', [group('s-x', ['x'])]).structure)
+    )
+    expect(result.current.segments.map((s) => s.id)).toEqual(['s-old'])
+    expect(result.current.committedChrome?.segments.map((s) => s.id)).toEqual(['s-old'])
+
+    act(() =>
+      result.current.acceptCommittedStructure(TOPIC, null, structure(TOPIC, null, [group('s-old', [])]).structure)
+    )
+    expect(result.current.segments).toEqual([])
+    expect(result.current.isCurrent).toBe(true)
+    expect(result.current.committedChrome).toBeNull()
+  })
+
+  it('rejects an old acceptance after A-B-A and never backfills under the returned route', async () => {
+    const store = makeStore()
+    setBranch(store, TOPIC, null)
+    seedCatalog(store, TOPIC, [catalogSeg('s-main', 0, ['m1']), catalogSeg('s-child', 1, ['c1'])])
+    let call = 0
+    mockFetchWindow.mockImplementation(async () => {
+      call += 1
+      if (call === 1) return structure(TOPIC, null, [group('s-main', ['m1'])])
+      if (call === 2) return structure(TOPIC, 'C', [group('s-child', ['c1'])])
+      return structure(TOPIC, null, [group('s-returned', ['r1'])])
+    })
+    const { result } = renderHook(() => useRouteScopedSegments(TOPIC), { wrapper: wrapperFor(store) })
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-main']), WAIT)
+    const staleMain = structure(TOPIC, null, [group('s-main', ['m1'])])
+
+    act(() => setBranch(store, TOPIC, 'C'))
+    expect(result.current.segments).toEqual([])
+    act(() => result.current.acceptCommittedStructure(TOPIC, null, staleMain.structure))
+    expect(result.current.segments).toEqual([])
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-child']), WAIT)
+
+    act(() => setBranch(store, TOPIC, null))
+    expect(result.current.segments).toEqual([])
+    await waitFor(() => expect(mockFetchWindow).toHaveBeenCalledTimes(3), WAIT)
+    expect(result.current.routeKey).toBe(`${TOPIC}::main`)
+    await waitFor(() => expect(result.current.segments.map((s) => s.id)).toEqual(['s-returned']), WAIT)
+
+    // The old receipt carries the pre-excursion routeGeneration token. Under
+    // the returned (identical) route value it still must not re-accept.
+    act(() => result.current.acceptCommittedStructure(TOPIC, null, staleMain.structure, undefined, 1))
+    expect(result.current.segments.map((s) => s.id)).toEqual(['s-returned'])
+    expect(result.current.committedChrome).toBeNull()
   })
 })
 

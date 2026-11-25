@@ -170,7 +170,13 @@ vi.mock('./Inputbar/Inputbar', () => ({
 
 vi.mock('./ChatRouteStructure', () => ({
   ChatRouteStructureProvider: ({ children }: { children: ReactModule.ReactNode }) => <>{children}</>,
-  useChatRouteStructure: () => ({ segments: [], routeKey: '', isCurrent: false })
+  useChatRouteStructure: () => ({
+    segments: [],
+    routeKey: '',
+    isCurrent: false,
+    committedChrome: null,
+    acceptCommittedStructure: vi.fn()
+  })
 }))
 
 // The chat surface's branch-catalog owner asks Main for the topic's branches;

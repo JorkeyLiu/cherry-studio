@@ -95,6 +95,9 @@ const mocks = vi.hoisted(() => {
   return {
     getPendingNavigate: vi.fn(() => pendingNavigate),
     deferredReadImpl,
+    // Provider write seam: the mounted component must forward an accepted
+    // receipt structure here from its atomic onPublish, not keep a local copy.
+    acceptCommittedStructure: vi.fn(),
     clearPendingNavigate: vi.fn(() => true),
     setPendingNavigate: (value: { messageId: string; topicId: string } | null) => {
       pendingNavigate = value
@@ -318,7 +321,13 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
 // the real read fails closed (no read, no segments, `isCurrent` false); the
 // stub pins that state without pulling the structural read into the suite.
 vi.mock('../../ChatRouteStructure', () => {
-  const routeStructure = { segments: [], routeKey: '', isCurrent: false }
+  const routeStructure = {
+    segments: [],
+    routeKey: '',
+    isCurrent: false,
+    committedChrome: null,
+    acceptCommittedStructure: mocks.acceptCommittedStructure
+  }
   return { useChatRouteStructure: () => routeStructure }
 })
 
@@ -2520,6 +2529,26 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     expect(projected?.segments.map((s) => s.id)).toEqual(['s1'])
     expect(projected?.segments[0].memberIds).toEqual(['u1', 'a1'])
     expect(projected?.segments[0].headerInRoute).toBe(true)
+    // Mounted wiring proof: the real onPublish forwards the committed receipt
+    // structure AND its receipt-bound reference into the provider write seam
+    // (the provider/hook implementation itself is proven in its own suites).
+    expect(mocks.acceptCommittedStructure).toHaveBeenCalledTimes(1)
+    expect(mocks.acceptCommittedStructure).toHaveBeenCalledWith(
+      topicB.id,
+      null,
+      expect.objectContaining({
+        catalog: expect.arrayContaining([expect.objectContaining({ id: 's1' })]),
+        route: {
+          topicId: topicB.id,
+          branchId: null,
+          qualifications: [
+            { segmentId: 's1', headerInRoute: true, headerOwnedByRoute: true, routeMemberMessageIds: ['u1', 'a1'] }
+          ]
+        }
+      }),
+      { kind: 'branch', source: 's1' },
+      receipt.routeGeneration
+    )
   })
 
   it('read pending across a topic switch commits nothing for the old response (no old data)', async () => {

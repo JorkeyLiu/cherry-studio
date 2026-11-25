@@ -1,12 +1,18 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { useAppSelector } from '@renderer/store'
+import { useAppSelector, useAppStore } from '@renderer/store'
 import { selectHistoryReferenceForTopic } from '@renderer/store/newMessage'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import type { TopicSegment } from '@renderer/types/topicSegment'
-import { projectCommittedChromeFromStructure } from '@renderer/utils/routeCommittedChrome'
+import {
+  type CommittedChromeProjection,
+  committedChromeRouteKey,
+  projectCommittedChromeFromStructure,
+  selectOrderedSegmentsForTopic,
+  type TopicSegmentCatalogState
+} from '@renderer/utils/routeCommittedChrome'
 import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
+import type { FetchMessagesWindowStructure, HistoryReferenceMeta } from '@shared/chatDb'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useTopicSegments } from './useTopicSegments'
@@ -41,6 +47,29 @@ export interface RouteScopedSegmentsResult {
    * always belong to the same accepted route.
    */
   isCurrent: boolean
+  /**
+   * Committed window structure owned by this hook (the single chat-surface
+   * owner) and shared through the provider. `Messages` reads it as the
+   * displayed route's retention fallback; it is never a second projection
+   * writer or a second read.
+   */
+  committedChrome: CommittedChromeProjection | null
+  /**
+   * Synchronous acceptance of an already-committed deferred window structure.
+   * Production callers invoke it only after the receipt late guard and inside
+   * the atomic commit's `onPublish`; the hook still re-validates topic/route
+   * echo, the current selected route, and (when supplied) the receipt-bound
+   * route generation from the existing topicBranch token — an away-and-back
+   * excursion therefore cannot re-accept an older receipt. A missing/mismatched
+   * structure fails closed; a present-but-empty structure clears only this route.
+   */
+  acceptCommittedStructure: (
+    topicId: string,
+    branchId: string | null,
+    structure: FetchMessagesWindowStructure | null,
+    reference?: HistoryReferenceMeta | null,
+    receiptRouteGeneration?: number
+  ) => void
 }
 
 interface TopicWithUpdatedAt {
@@ -72,7 +101,19 @@ interface TopicWithUpdatedAt {
  *   this hook reads its own bundled structure and never consumes the catalog's.
  * - `folded` — retired wire-compat field, never live state.
  */
-export function segmentCatalogChromeToken(segments: readonly TopicSegment[]): string {
+/** Minimal chrome identity slice, satisfied by both store segments and a bundled wire catalog. */
+export interface SegmentChromeTokenInput {
+  id: string
+  name?: string | null
+  color?: string | null
+  sortOrder: number
+  headerMessageId?: string | null
+  ownerTopicId?: string | null
+  ownerBranchId?: string | null
+  messageIds: readonly string[]
+}
+
+export function segmentCatalogChromeToken(segments: readonly SegmentChromeTokenInput[]): string {
   const parts: string[] = []
   for (const segment of segments) {
     parts.push(
@@ -90,6 +131,20 @@ export function segmentCatalogChromeToken(segments: readonly TopicSegment[]): st
   }
   return parts.join(';')
 }
+
+/** Chrome-relevant identity of a resident history reference relation. */
+export function routeReferenceChromeToken(reference: HistoryReferenceMeta | null | undefined): string {
+  if (!reference) return ''
+  return [
+    `${reference.sourceTopicId}|${reference.sourceBranchId ?? 'main'}|${reference.anchorMessageId}|${reference.status}|${reference.boundaryMessageId ?? ''}`,
+    ...(reference.layers ?? []).map(
+      (layer) =>
+        `${layer.targetTopicId}:${layer.sourceTopicId}:${layer.sourceBranchId ?? 'main'}:${layer.anchorMessageId}:${layer.boundaryMessageId ?? ''}`
+    )
+  ].join(',')
+}
+
+type RouteRefreshReason = 'updatedAt' | 'reference' | 'catalog' | 'complete'
 
 /**
  * Derive the Inputbar segment navigation list for the ACTIVE route only.
@@ -141,20 +196,13 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     }
     return undefined
   })
+  const appStore = useAppStore()
   const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topicId))
   // The token covers the relation AND every materialized chain layer, so a
   // deeper layer appearing/disappearing (an upstream boundary entering or
   // leaving the route) also invalidates the route list like any other
   // authority change of the same route.
-  const referenceToken = historyReference
-    ? [
-        `${historyReference.sourceTopicId}|${historyReference.sourceBranchId ?? 'main'}|${historyReference.anchorMessageId}|${historyReference.status}|${historyReference.boundaryMessageId ?? ''}`,
-        ...(historyReference.layers ?? []).map(
-          (layer) =>
-            `${layer.targetTopicId}:${layer.sourceTopicId}:${layer.sourceBranchId ?? 'main'}:${layer.anchorMessageId}:${layer.boundaryMessageId ?? ''}`
-        )
-      ].join(',')
-    : ''
+  const referenceToken = routeReferenceChromeToken(historyReference)
 
   const hasCatalog = orderedSegmentsForTopic.length > 0
   // Accepted-catalog identity for the same-route refresh trigger (see
@@ -165,10 +213,18 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
 
   const [acceptedSegments, setAcceptedSegments] = useState<RouteScopedSegment[]>([])
   const [structureKey, setStructureKey] = useState<string>('')
+  const [committedChrome, setCommittedChrome] = useState<CommittedChromeProjection | null>(null)
 
   const generationRef = useRef(0)
   const mountedRef = useRef(true)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const pendingRefreshReasonsRef = useRef<Set<RouteRefreshReason>>(new Set())
+  // Set only by acceptance of the selected route. The route effect skips its
+  // clear/refetch when the accepted key still matches the route it is running
+  // for (e.g. a same-commit catalog flip), so an accepted window is never
+  // erased by an effect that predates it. A real route switch changes the key
+  // and clears this marker before any later acceptance can apply.
+  const acceptedRouteKeyRef = useRef<string | null>(null)
   const topicRef = useRef(topicId)
   const branchRef = useRef<string | null>(activeBranchId)
   const hasCatalogRef = useRef(hasCatalog)
@@ -254,11 +310,14 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     []
   )
 
-  const scheduleDebouncedRefetch = useCallback(() => {
+  const armDebouncedRefetch = useCallback(() => {
     const targetTopic = topicRef.current
     const targetBranch = branchRef.current
     const targetRouteKey = `${targetTopic}::${targetBranch ?? 'main'}`
-    if (!targetTopic || !hasCatalogRef.current) return
+    if (!targetTopic || !hasCatalogRef.current) {
+      pendingRefreshReasonsRef.current.clear()
+      return
+    }
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
     }
@@ -266,31 +325,139 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
       debounceTimerRef.current = undefined
       if (!mountedRef.current) return
       if (topicRef.current !== targetTopic || branchRef.current !== targetBranch) return
-      if (!hasCatalogRef.current) return
+      if (!hasCatalogRef.current) {
+        pendingRefreshReasonsRef.current.clear()
+        return
+      }
+      pendingRefreshReasonsRef.current.clear()
       const gen = generationRef.current + 1
       generationRef.current = gen
       void fetchRouteStructure(targetTopic, targetBranch, targetRouteKey, gen)
     }, ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS)
   }, [fetchRouteStructure])
 
+  const scheduleDebouncedRefetch = useCallback(
+    (reason: RouteRefreshReason) => {
+      pendingRefreshReasonsRef.current.add(reason)
+      armDebouncedRefetch()
+    },
+    [armDebouncedRefetch]
+  )
+
+  /**
+   * Single writer for the surface's committed window structure. Kept in the
+   * hook so the provider is the one owner shared by `Messages` and the drawer:
+   * no local `useState` copy, no second projection path. Only already-committed
+   * deferred windows reach here (production callers invoke it from `onPublish`
+   * AFTER the receipt late guard), but the echo/current-route checks are
+   * repeated here so an out-of-turn caller can never poison this route.
+   *
+   * A receipt-bound route generation, when supplied, is checked against the
+   * existing topicBranch token before any write. Rebaselines catalog/reference
+   * from the LIVE store (`getState`, not a stale render closure) only when the
+   * receipt-bound token equals the current one;
+   * if the current token has already advanced, the refresh is deliberately
+   * kept instead of swallowing a later mutation. No new clock or cache.
+   */
+  const acceptCommittedStructure = useCallback(
+    (
+      targetTopicId: string,
+      targetBranchId: string | null,
+      structure: FetchMessagesWindowStructure | null,
+      reference?: HistoryReferenceMeta | null,
+      receiptRouteGeneration?: number
+    ): void => {
+      if (!mountedRef.current || !targetTopicId || !structure) return
+      if (targetTopicId !== topicRef.current || (targetBranchId ?? null) !== branchRef.current) return
+      if (structure.route.topicId !== targetTopicId) return
+      if ((structure.route.branchId ?? null) !== (targetBranchId ?? null)) return
+      const state = appStore.getState()
+      // Existing route token, not a new clock: a receipt captured before an
+      // A-B-A excursion cannot be re-accepted under the same route value.
+      if (typeof receiptRouteGeneration === 'number') {
+        const currentRouteGeneration =
+          (state as unknown as { topicBranch?: { routeGenerationByTopic?: Record<string, number> } }).topicBranch
+            ?.routeGenerationByTopic?.[targetTopicId] ?? 0
+        if (currentRouteGeneration !== receiptRouteGeneration) return
+      }
+      const targetRouteKey = committedChromeRouteKey(targetTopicId, targetBranchId)
+      if (targetRouteKey !== `${topicRef.current}::${branchRef.current ?? 'main'}`) return
+      try {
+        const projected = projectCommittedChromeFromStructure({
+          topicId: targetTopicId,
+          branchId: targetBranchId,
+          structure
+        })
+        // A late direct read for this same route must never overwrite the
+        // accepted window; advance the generation BEFORE publishing state.
+        generationRef.current += 1
+        setAcceptedSegments(projected?.segments ?? [])
+        setStructureKey(targetRouteKey)
+        acceptedRouteKeyRef.current = targetRouteKey
+        setCommittedChrome((prev) => {
+          if (projected) return projected
+          // Present-but-empty clears only the same route's committed residue.
+          return prev && prev.routeKey === targetRouteKey ? null : prev
+        })
+
+        const currentCatalogToken = segmentCatalogChromeToken(
+          selectOrderedSegmentsForTopic(state as unknown as TopicSegmentCatalogState, targetTopicId)
+        )
+        if (currentCatalogToken === segmentCatalogChromeToken(structure.catalog)) {
+          catalogBaselineRef.current = currentCatalogToken
+          latestCatalogTokenRef.current = currentCatalogToken
+          pendingRefreshReasonsRef.current.delete('catalog')
+        }
+        // The reference is receipt-bound at the four production call sites;
+        // when omitted (e.g. a direct hook consumer) it is not rebased at all.
+        if (reference !== undefined) {
+          const currentReferenceToken = routeReferenceChromeToken(selectHistoryReferenceForTopic(state, targetTopicId))
+          if (currentReferenceToken === routeReferenceChromeToken(reference)) {
+            referenceBaselineRef.current = currentReferenceToken
+            latestReferenceTokenRef.current = currentReferenceToken
+            pendingRefreshReasonsRef.current.delete('reference')
+          }
+        }
+        if (pendingRefreshReasonsRef.current.size === 0) {
+          if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current)
+            debounceTimerRef.current = undefined
+          }
+        } else if (!debounceTimerRef.current) {
+          armDebouncedRefetch()
+        }
+      } catch {
+        // Fail-closed: a malformed structure leaves the last accepted state.
+      }
+    },
+    [appStore, armDebouncedRefetch]
+  )
+
   // 1) mount / topic or branch switch: drop the previous route's projection at
   // once and load the new route. The synchronous key guard below already hides
   // the old list on the first render under the new key, before this runs. This
   // fetch also (re)establishes the same-route refresh baseline.
   useEffect(() => {
+    const routeKey = `${topicId}::${activeBranchId ?? 'main'}`
     updatedAtBaselineRef.current = latestUpdatedAtRef.current
     referenceBaselineRef.current = latestReferenceTokenRef.current
     catalogBaselineRef.current = latestCatalogTokenRef.current
+    // An acceptance for this exact route has already advanced the generation
+    // and rebaselined the publication tokens. A same-commit catalog/reference
+    // flip must not clear it or re-read the structure we just accepted.
+    if (acceptedRouteKeyRef.current === routeKey) return
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = undefined
     }
+    pendingRefreshReasonsRef.current.clear()
+    acceptedRouteKeyRef.current = null
     const gen = generationRef.current + 1
     generationRef.current = gen
     setAcceptedSegments([])
     setStructureKey('')
     if (!topicId || !hasCatalog) return
-    void fetchRouteStructure(topicId, activeBranchId, `${topicId}::${activeBranchId ?? 'main'}`, gen)
+    void fetchRouteStructure(topicId, activeBranchId, routeKey, gen)
   }, [topicId, activeBranchId, hasCatalog, fetchRouteStructure])
 
   // 2) same-route authority mutation metadata: refetch when the current
@@ -299,7 +466,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     if (!topicId) return
     if (topicUpdatedAt === updatedAtBaselineRef.current) return
     updatedAtBaselineRef.current = topicUpdatedAt
-    scheduleDebouncedRefetch()
+    scheduleDebouncedRefetch('updatedAt')
   }, [topicId, topicUpdatedAt, scheduleDebouncedRefetch])
 
   // 2b) resident reference relation: a reference target's effective route
@@ -310,7 +477,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     if (!topicId) return
     if (referenceToken === referenceBaselineRef.current) return
     referenceBaselineRef.current = referenceToken
-    scheduleDebouncedRefetch()
+    scheduleDebouncedRefetch('reference')
   }, [topicId, referenceToken, scheduleDebouncedRefetch])
 
   // 2c) accepted segment catalog changed for THIS topic: the collection
@@ -324,7 +491,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     if (!topicId) return
     if (catalogToken === catalogBaselineRef.current) return
     catalogBaselineRef.current = catalogToken
-    scheduleDebouncedRefetch()
+    scheduleDebouncedRefetch('catalog')
   }, [topicId, catalogToken, scheduleDebouncedRefetch])
 
   // 3) terminal streaming: MESSAGE_COMPLETE (filtered by topicId) coalesces
@@ -333,7 +500,7 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
     if (!topicId) return
     const handler = (payload: { topicId?: string } | undefined) => {
       if (!payload || payload.topicId !== topicId) return
-      scheduleDebouncedRefetch()
+      scheduleDebouncedRefetch('complete')
     }
     const unsubscribe = EventEmitter.on(EVENT_NAMES.MESSAGE_COMPLETE, handler)
     return () => {
@@ -344,5 +511,8 @@ export function useRouteScopedSegments(topicId: string): RouteScopedSegmentsResu
   const isCurrent = structureKey === activeRouteKey && hasCatalog
   const segments = useMemo(() => (isCurrent ? acceptedSegments : []), [isCurrent, acceptedSegments])
 
-  return useMemo(() => ({ segments, routeKey: activeRouteKey, isCurrent }), [segments, activeRouteKey, isCurrent])
+  return useMemo(
+    () => ({ segments, routeKey: activeRouteKey, isCurrent, committedChrome, acceptCommittedStructure }),
+    [segments, activeRouteKey, isCurrent, committedChrome, acceptCommittedStructure]
+  )
 }

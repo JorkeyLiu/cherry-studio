@@ -25,10 +25,19 @@ import { createContext, type FC, type ReactNode, use } from 'react'
  * - retention of the previous route's in-flow chrome stays a display concern
  *   of `Messages` (`useRetainedRouteSegments`), never a second read.
  *
+ * The value is also the ONE owner of a committed deferred window structure.
+ * `acceptCommittedStructure` is the synchronous write entry used by `Messages`
+ * from the four receipt-guarded atomic `onPublish` sites; the committed
+ * snapshot it publishes is the same retention fallback the drawer and
+ * in-flow chrome read. No second local state or projection writer is kept in
+ * `Messages`, and no new global bus/cache/clock is introduced.
+ *
  * This is caller-local structure, not authority: it publishes nothing to Redux
  * and holds no persistence, mirroring the projection/authority boundary.
  */
-const ChatRouteStructureContext = createContext<RouteScopedSegmentsResult | null>(null)
+export type ChatRouteStructureValue = RouteScopedSegmentsResult
+
+const ChatRouteStructureContext = createContext<ChatRouteStructureValue | null>(null)
 
 interface ChatRouteStructureProviderProps {
   topicId: string
@@ -46,7 +55,7 @@ export const ChatRouteStructureProvider: FC<ChatRouteStructureProviderProps> = (
  * Fail-fast: there is exactly one owner (`ChatRouteStructureProvider` mounted by
  * `Chat`), so a consumer outside it is a wiring defect, never a state to guess.
  */
-export function useChatRouteStructure(): RouteScopedSegmentsResult {
+export function useChatRouteStructure(): ChatRouteStructureValue {
   const value = use(ChatRouteStructureContext)
   if (!value) {
     throw new Error('useChatRouteStructure must be used inside ChatRouteStructureProvider')

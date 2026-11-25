@@ -233,7 +233,13 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
 }))
 
 vi.mock('../../ChatRouteStructure', () => {
-  const routeStructure = { segments: [], routeKey: '', isCurrent: false }
+  const routeStructure = {
+    segments: [],
+    routeKey: '',
+    isCurrent: false,
+    committedChrome: null,
+    acceptCommittedStructure: vi.fn()
+  }
   return { useChatRouteStructure: () => routeStructure }
 })
 
