@@ -488,3 +488,54 @@
   `git diff --check` exit 0。`biome lint` 对 main 文件不适用（linter 只作用于
   `src/renderer/**`）。未跑 full renderer/E2E/build（本切片纯 Main 内部等价查询，输出
   contract 未变；由主代理决定后续聚合）。
+
+## 48. 普通 topic 组目录读取改用集合式读取（`listSegments` unqualified 分支；已实现；未 commit）
+- 事实（切片前，`ChatDbAggregateService.listSegmentsInTx` 的 `branchId === undefined` 分支）：
+  `segments.listByTopic(topicId)` 之后逐组 `segments.getMessageIds(segment.id)` 取全组，再逐组
+  `resolveSegmentHeader`（每组建模一次 `messages.getById` 头行点查）。语句数随组数线性增长；
+  已核实 `segmentToWire` 不自读 membership，因此该分支的读取面只有「每组 membership + 每组头行」。
+- 共享 helper（唯一抽取点）：新增私有 `readCatalogRowsInTx(repos, topicId, segments, extraIds = [])`
+  （位于 `listSegmentsInTx` 与 `buildWindowStructureInTx` 之间）：catalog 为空且 `extraIds` 为空时直接
+  早返回（0 次 membership、0 次消息读）；否则一次 `TopicSegmentsRepository.listMembersByTopic(topicId)`
+  + 一个去重 id 集合（catalog 成员 ∪ `extraIds`）+ 每 bind chunk 一次
+  `MessagesRepository.findStructureRowsByIds`，返回 `{ membersBySegment, rowById }`。两个调用方：
+  普通目录传 `[]`（持久头按定义必为成员，不需要额外 id）；结构构建传
+  `routeSegments.map((seg) => seg.upperMessageId)`。只抽这一处明确 helper，未引入泛型框架/cache/clock；
+  `buildWindowStructureInTx` 原本重复的 collectIDs + bulkMap 逻辑被删除（净减 23 行重复代码）。
+- 语义保持（逐条核对）：
+  - `branchId === undefined` 仍是 unqualified（wire 无 `route` 键）；`null` 仍是 qualified，仍走原路径，
+    中性字段与 unqualified 逐值一致，另加 `route` 块。
+  - 不存在的 topic / 空 catalog 仍返回 `[]` 且只发 1 条 `topic_segments` 查询：不做存在性检查、不报错、
+    0 次 membership、0 次消息读。
+  - 组内顺序仍是 `(sort_order, message_id)`（`listMembersByTopic` 与 `getMessageIds` 完全相同），
+    同 sortOrder 由 message id 决序；空组在 Map 中缺席，调用方 `?? []` 与 `getMessageIds` 的空数组一致。
+  - 持久头规则不变：`persisted !== null && messageIds.includes(persisted)` 否则首成员；头行存在但属
+    别的 topic（legacy/import 跨话题成员）保留 foreign `ownerTopicId`/`ownerBranchId`（正因为集合读取
+    不按 topic/owner 过滤才保得住，加过滤会把「行存在」误判成「行缺失」）。
+  - 成员行缺失（legacy/import 悬挂 membership）：membership 与 `messageCount`/`lastMessageId` 仍完整，
+    `headerMessageId` 为 `null`，`ownerTopicId` 退回组自身 topic。
+  - `color` 仍是「overflow 里有合法 string 才输出」，否则完全缺席（不是 `color: undefined`）。
+- 明确未改：`assertSegmentOwnerInTx` 仍用 `resolveSegmentHeader` 点查（写守卫行为、true-branch 资格语义
+  不变）；qualified 分支与其 `resolveSegmentHeaderWithRows` 调用层不变；IPC contract/shared/preload/
+  renderer 零改动；`resolveSegmentHeader` 保留（mutation/历史快照等路径仍在用，单一语义、两套行源）。
+- 测试：新增 `src/main/services/chatDb/__tests__/segmentsCatalogQueryShape.test.ts`（7 例，真实
+  repository + 迁移后真实 SQLite；全字段 `toEqual` oracle 由原始 SQL 取 catalog 列 + 权威 membership
+  独立组装，不复用被测路径）：6 组普通目录 = 1 条 catalog + 1 条 membership + `ceil(唯一 id/256)` 条
+  投影（总计 `2 + chunks`），`getMessageIds` 0 次、`messages.getById` 0 次、`listMembersByTopic` 1 次；
+  300 成员跨 chunk = 2 条投影且值不变；持久头在组外（头行存在）回退首成员、同 sortOrder 由 id 决序；
+  跨话题持久头保留 foreign owner；成员行缺失保留 membership/计数且 header 为 null；空 catalog 与未知
+  topic 均 `[]` 且仅 1 条语句、0 membership/0 消息读；`undefined` vs `null` route 语义与中性字段一致。
+  既有 `aggregate`(231 例，含原 `listSegments` oracle)、`segmentHeadIdentity`(6 例)、
+  `window.structureQueryShape`(6)/`window.structureBundle`(12)/`window.branchRefBounded`(10) 全部保持通过。
+- 明确不声称：未做 benchmark，不宣称毫秒或 O() 收益；本轮收益是「普通目录的语句数不再随组数增长，
+  只随 bind chunk 数增长，且不读整行 payload」。
+- 实测（pinned Node 24.11.1 / pnpm 10.27.0，HEAD `4b02aee76e` 分支 `jorkey/refactor/chat-lightweight`，
+  dirty 为本切片 2 个改动文件 + 1 个新测试 + 本 doc）：focused 6 文件 272 passed exit 0；
+  `CI=1 pnpm test:main` exit 0（246 files：core 80 / native 163 / heavy 3；1742 + 3128 + 53 passed，
+  72 skipped）；`pnpm typecheck` exit 0（node/web/e2e/e2e-utils/aicore 五通道）；scoped
+  `oxlint`/`eslint`/`biome format`（2 个代码文件）exit 0（新测试首轮 `biome format` 报 1 处换行，
+  `--write` 修正后三件复检均 0）；`git diff --check` exit 0。`biome lint` 对 main 文件不适用
+  （linter 只作用于 `src/renderer/**`）。未跑 renderer/E2E/build（本切片纯 Main 内部等价查询，输出 contract
+  未变；由主代理决定后续聚合）。
+- 残余：未做性能度量；`listSegmentsInTx` 的写路径（`upsertSegment`/`updateSegmentMetadata`/
+  `replaceSegmentMembership` 的读回）仍是按组读，属等价但未优化范围（等价性由既有用例覆盖）；本切片未 commit（用户明确由主代理提交）。

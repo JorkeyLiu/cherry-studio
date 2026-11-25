@@ -9694,10 +9694,16 @@ export class ChatDbAggregateService {
   ): SegmentWire[] {
     const qualified = branchId !== undefined
     if (!qualified) {
+      // Ordinary catalog is route-independent: one set-based membership read
+      // for the whole topic plus one projection read per bind chunk, instead of
+      // a membership query and a header point lookup per group. Zero groups
+      // reads nothing at all (the shared helper early-returns), and an unknown
+      // topic stays an empty catalog because `listByTopic` reports no groups.
       const segments = repos.segments.listByTopic(topicId)
+      const { membersBySegment, rowById } = this.readCatalogRowsInTx(repos, topicId, segments, [])
       return segments.map((segment) => {
-        const messageIds = repos.segments.getMessageIds(segment.id)
-        const header = this.resolveSegmentHeader(repos, segment, messageIds)
+        const messageIds = membersBySegment.get(segment.id) ?? []
+        const header = this.resolveSegmentHeaderWithRows(segment, messageIds, (id) => rowById.get(id))
         return segmentToWire(segment, messageIds, header)
       })
     }
@@ -9728,6 +9734,52 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * One set-based read of everything a catalog wire needs: the complete
+   * membership of every group in the topic plus the projection rows of the
+   * stable ids this read will consult.
+   *
+   * `extraIds` carries ids a caller reads outside catalog membership (the
+   * window structure's route upper bounds). Membership-derived ids are added
+   * automatically because a group's effective head is a member by definition,
+   * so both callers resolve heads from the same rows.
+   *
+   * Groups with no member row are absent from `membersBySegment` — the exact
+   * value `getMessageIds` reports for them — and every caller's `?? []` keeps
+   * that identical. The id-keyed projection is deliberately NOT filtered by
+   * topic/owner: upper bounds may live in a referenced source topic and
+   * members may be owned by any branch of the topic (legacy/import rows may
+   * even be cross-topic), so a topic filter would drop rows both callers
+   * legitimately read and misreport an existing row as missing.
+   */
+  private readCatalogRowsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    segments: TopicSegmentData[],
+    extraIds: ReadonlyArray<string | null> = []
+  ): { membersBySegment: Map<string, string[]>; rowById: Map<string, MessageStructureRow> } {
+    // Known-empty catalog with nothing to bind: no membership and no message
+    // row is read at all (same as the per-group loop over zero groups).
+    if (segments.length === 0 && extraIds.length === 0) {
+      return { membersBySegment: new Map(), rowById: new Map() }
+    }
+    const membersBySegment = repos.segments.listMembersByTopic(topicId)
+    const ids: string[] = []
+    const seen = new Set<string>()
+    const addId = (id: string | null): void => {
+      if (id === null || seen.has(id)) return
+      seen.add(id)
+      ids.push(id)
+    }
+    for (const segment of segments) {
+      for (const mid of membersBySegment.get(segment.id) ?? []) addId(mid)
+    }
+    for (const id of extraIds) addId(id)
+    const rowById = new Map<string, MessageStructureRow>()
+    for (const row of repos.messages.findStructureRowsByIds(ids)) rowById.set(row.id, row)
+    return { membersBySegment, rowById }
+  }
+
+  /**
    * Bundled window structure for one addressed route, resolved in the
    * caller's snapshot (tx-bound repos + the already-resolved canonical route
    * segments — never a second full route read).
@@ -9752,27 +9804,16 @@ export class ChatDbAggregateService {
     if (segments.length === 0) {
       return { catalog: [], route: { topicId, branchId: route, qualifications: [] } }
     }
-    // Set-based reads only: ONE membership query for the whole catalog plus ONE
-    // projection query per bind chunk for every row this structure reads
-    // (catalog members — resolved headers are members by construction — and
-    // route upper bounds). The projection is id-keyed and deliberately NOT
-    // filtered by topic/owner: an upper bound may live in a referenced source
-    // topic and members may be owned by any branch of the topic, so a topic
-    // filter would drop rows this qualification legitimately reads.
-    const membersBySegment = repos.segments.listMembersByTopic(topicId)
-    const structureIds: string[] = []
-    const seenStructureIds = new Set<string>()
-    const addStructureId = (id: string | null): void => {
-      if (id === null || seenStructureIds.has(id)) return
-      seenStructureIds.add(id)
-      structureIds.push(id)
-    }
-    for (const segment of segments) {
-      for (const mid of membersBySegment.get(segment.id) ?? []) addStructureId(mid)
-    }
-    for (const seg of routeSegments) addStructureId(seg.upperMessageId)
-    const rowById = new Map<string, MessageStructureRow>()
-    for (const row of repos.messages.findStructureRowsByIds(structureIds)) rowById.set(row.id, row)
+    // Set-based reads only, shared with the ordinary catalog path: ONE
+    // membership query for the whole catalog plus ONE projection query per bind
+    // chunk for every row this structure reads (catalog members and route
+    // upper bounds).
+    const { membersBySegment, rowById } = this.readCatalogRowsInTx(
+      repos,
+      topicId,
+      segments,
+      routeSegments.map((seg) => seg.upperMessageId)
+    )
     // Upper-bound tuple once per route segment, from the rows read above.
     const upperCache = new Map<number, { sortOrder: number; id: string } | null | undefined>()
     const upperOf = (segIdx: number): { sortOrder: number; id: string } | null | undefined => {
