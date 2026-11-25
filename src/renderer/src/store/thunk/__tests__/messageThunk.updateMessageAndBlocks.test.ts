@@ -148,6 +148,7 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 
 // Import AFTER mocks
 import { getGlobalBlockGeneration, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
+import { consumeUpdateAckInvalidation } from '@renderer/services/db/authorityInvalidation'
 import { CLOSURE_AUTHORITY_HANDLED_META_KEY } from '@renderer/store/closureOwnership'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 
@@ -170,10 +171,24 @@ const makeBlock = (id: string, content: string): MessageBlock => ({
 describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
   const dispatch = mocks.dispatch
 
+  /**
+   * The dbService mock stands in for SqliteMessageDataSource, so it models that
+   * contract explicitly: a committed ack runs the caller's synchronous
+   * post-persist hook and is then consumed exactly once (success only).
+   */
+  const simulatedDataSourceAck =
+    (ack: unknown) =>
+    async (...args: unknown[]) => {
+      const onAckPersisted = args[6] as ((a: unknown) => void) | undefined
+      onAckPersisted?.(ack)
+      consumeUpdateAckInvalidation(ack as never)
+      return ack
+    }
+
   beforeEach(() => {
     vi.clearAllMocks()
     // Re-set default mock after clearAllMocks
-    mocks.dbUpdateMessageAndBlocks.mockResolvedValue(mocks.emptyCleanup)
+    mocks.dbUpdateMessageAndBlocks.mockImplementation(simulatedDataSourceAck(mocks.emptyCleanup))
   })
 
   it('uses SINGLE atomic dbService.updateMessageAndBlocks (not separate updateMessage + updateBlocks)', async () => {

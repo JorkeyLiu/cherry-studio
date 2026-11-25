@@ -169,9 +169,9 @@ import type {
 } from '@shared/chatDb'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
-import { consumeAppendAckInvalidation } from './authorityInvalidation'
+import { consumeAppendAckInvalidation, consumeUpdateAckInvalidation } from './authorityInvalidation'
 import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
-import type { BlockWriteRouteContext, MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource, UpdateAckPersistedHook } from './types'
 
 // ---------------------------------------------------------------------------
 // ChatDbApi — narrow typed interface for the preload bridge
@@ -574,7 +574,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete: string[] = [],
     resendAttemptId?: string,
-    branchId?: string | null
+    branchId?: string | null,
+    onAckPersisted?: UpdateAckPersistedHook
   ): Promise<UpdateMessageAndBlocksResponse> {
     // Clone and strip redundant identity/order fields for Dexie-compatible semantics
     const clonedUpdates = cloneForWire(messageUpdates as unknown as JsonObject) as Record<string, unknown>
@@ -591,14 +592,22 @@ export class SqliteMessageDataSource implements MessageDataSource {
       ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     await prepareOrderingBaseline(topicId)
-    // No default invalidation consumption here: the ordinary terminal
-    // execution must record its terminal token BEFORE the effect is consumed
-    // (see saveFinalUpdatesAtomicallyForExec), and non-terminal callers
-    // consume explicitly at their own authority-success points. A Main
-    // failure throws in unwrap and never invalidates.
-    const result = unwrap(await this.api.updateMessageAndBlocks(request))
+    // ONE renderer-side ack owner. `unwrap` throws on any Main failure (structured
+    // rejection or transport error), so a failed write never invalidates. On
+    // success the ack's conservative invalidation effect is consumed exactly once
+    // here, so ordinary callers never restate the rule; `onAckPersisted` is a
+    // synchronous post-persist/pre-invalidation hook (never part of the IPC
+    // request) where the ordinary terminal execution records its terminal token.
+    const ack = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
-    return result
+    try {
+      onAckPersisted?.(ack)
+    } finally {
+      // A hook throw still invalidates conservatively (a successful persistence
+      // is never silently treated as a failure or ignored) and then propagates.
+      consumeUpdateAckInvalidation(ack)
+    }
+    return ack
   }
 
   /**

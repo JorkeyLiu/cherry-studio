@@ -203,6 +203,15 @@ function ackResult(messageId: string, branchId: string | null = null): ChatDbRes
   })
 }
 
+/** Main-issued atomic update acknowledgment for one message + blocks write. */
+function updateAck(): ChatDbResult<UpdateMessageAndBlocksResponse> {
+  return ok({
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    contextInvalidation: { scope: 'all' as const }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1554,19 +1563,78 @@ describe('SqliteMessageDataSource', () => {
       expect(getGlobalBlockGeneration()).toBe(before)
     })
 
-    it('updateMessageAndBlocks does NOT consume by default (deferred to the ack owner)', async () => {
+    it('updateMessageAndBlocks success consumes the effect exactly once and keeps the ack', async () => {
       resetAllClosureStateForTests()
       const before = getGlobalBlockGeneration()
-      api.updateMessageAndBlocks.mockResolvedValue(
-        successResult({
-          affectedFileIds: [],
-          remainingReferenceCounts: {},
-          contextInvalidation: { scope: 'all' as const }
-        })
-      )
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
       const response = await ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [])
       expect(response.contextInvalidation).toEqual({ scope: 'all' })
+      expect(response.affectedFileIds).toEqual([])
+      expect(getGlobalBlockGeneration()).toBe(before + 1)
+    })
+
+    it('updateMessageAndBlocks failure consumes nothing and never runs the hook', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      const onAckPersisted = vi.fn()
+      api.updateMessageAndBlocks.mockResolvedValue(failureResult('STORAGE_ERROR', 'update failed'))
+      await expect(
+        ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
+      ).rejects.toThrow()
+      expect(onAckPersisted).not.toHaveBeenCalled()
       expect(getGlobalBlockGeneration()).toBe(before)
+    })
+
+    it('updateMessageAndBlocks runs onAckPersisted synchronously BEFORE invalidation', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      const observed: Array<{ generation: number; ack: UpdateMessageAndBlocksResponse }> = []
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
+      const response = await ds.updateMessageAndBlocks(
+        'topic-1',
+        { id: 'm-1' } as any,
+        [],
+        [],
+        undefined,
+        null,
+        (ack) => observed.push({ generation: getGlobalBlockGeneration(), ack })
+      )
+      // The hook received the already-unwrapped success ack and ran while the
+      // pre-invalidation generation was still current (synchronous ordering).
+      expect(observed).toHaveLength(1)
+      expect(observed[0].generation).toBe(before)
+      expect(observed[0].ack).toBe(response)
+      // The invalidation happened right after the hook, still exactly once.
+      expect(getGlobalBlockGeneration()).toBe(before + 1)
+    })
+
+    it('a throwing onAckPersisted still invalidates conservatively and propagates', async () => {
+      resetAllClosureStateForTests()
+      const before = getGlobalBlockGeneration()
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
+      const hookFailure = new Error('hook failed')
+      await expect(
+        ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, () => {
+          throw hookFailure
+        })
+      ).rejects.toBe(hookFailure)
+      // The committed write is never silently reported as a failed one.
+      expect(getGlobalBlockGeneration()).toBe(before + 1)
+    })
+
+    it('onAckPersisted never enters the IPC request payload', async () => {
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
+      const onAckPersisted = vi.fn()
+      await ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
+      const request = api.updateMessageAndBlocks.mock.calls[0][0]
+      expect(Object.keys(request)).toEqual([
+        'topicId',
+        'branchId',
+        'messageUpdates',
+        'blocksToUpdate',
+        'blockIdsToDelete'
+      ])
+      expect(onAckPersisted).toHaveBeenCalledOnce()
     })
   })
 

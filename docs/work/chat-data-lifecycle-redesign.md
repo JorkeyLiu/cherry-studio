@@ -494,3 +494,26 @@ ADR 澄清措辞本身（§8，实施前规范澄清）。
   非白名单家族 fail-closed、scope-all 清空各 route）；append publication
   fail-closed（echo 不匹配不发布）；terminal success 投影均带标记（流式不标记）；
   既有 overlay registry / read receipt / send handover / lifecycle 回归保持通过。 审阅补测（本切片内关闭）：F1——两条迁移通道各一条 IPC 级用例，aggregate 回 ok:true 但缺 `contextInvalidation` 的回执经真实 handler 路径被 `validateChatDbResult` 拒绝，返回无 value 的有效 `STORAGE_ERROR` envelope；F2——`evicted mid-execution` 增 ordinary-exec 路径用例，以真实 `saveFinalMessageAndBlocksAtomically` + 真实 overlay + 真实 consume 按生产顺序 （persist → `recordTerminalPersisted` → consume → projection dispatch 前）驱动真实 `onComplete`，断言 token 先于失效、可捕获 read witness、无重注；生产闭包本身未导出，故未为测试新增架构接缝。
+
+## 15 续补记：update-message-and-blocks 回执消费收归数据源（有界减熵切片）
+
+- 目标：`chatdb:update-message-and-blocks` 成功 ack 的 `contextInvalidation` 消费统一
+  由 `SqliteMessageDataSource` 负责，删除 `messageThunk` 中 5 处分散的
+  `consumeUpdateAckInvalidation`（普通流式终态、IM channel 终态、
+  `updateMessageAndBlocksThunk`、`removeBlocksThunk`、`initiateTranslationThunk`）。
+  append 的既有单点消费不变。
+- 接口：`MessageDataSource.updateMessageAndBlocks` 增可选尾参
+  `onAckPersisted?: UpdateAckPersistedHook` —— 同步 post-persist/pre-invalidation
+  回调，入参是已 `unwrap` 成功的 ack。`DbService` 仅透传；该回调是 renderer 方法参数，
+  永不被序列化进 IPC 请求。普通调用者无需了解消费规则（默认即消费恰一次）；未新增
+  布尔 opt-out 或去重 flag，返回类型不变（terminal ack metadata 原样保留）。
+- 语义：`unwrap` 先抛（结构化 reject / transport error）→ 失败既不消费也不回调；
+  成功 → 可选回调同步执行 → `finally` 内消费（回调抛错仍保守失效后再传播，既不把
+  成功的持久化悄悄当失败、也不忽略）。普通终态因此保持 persist →
+  `executionOverlay.recordTerminalPersisted` → consume/invalidate → Redux 投影。
+- 测试：dataSource（成功恰消费一次、失败不消费且不回调、回调同步先于失效、回调
+  抛错仍失效且传播、回调不入 IPC payload）；终态顺序回归保持（persist → token →
+  consume → invalidate，generation +1）。绕过真实 datasource 的上层测试（mock
+  dbService）显式模拟该约定（回调 + 恰一次消费），而不是删除关键断言。
+- 未改：Main / shared / preload 契约、middleware fallback、
+  `closureInvalidationHandled`、structure 读取、翻译乐观语义、其余 FileCleanup 通道。

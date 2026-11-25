@@ -69,6 +69,23 @@ export interface BlockWriteRouteContext {
 }
 
 /**
+ * Synchronous post-persist / pre-invalidation hook for
+ * `updateMessageAndBlocks`.
+ *
+ * Invoked exactly once, only after Main acknowledged the transaction (the ack
+ * already unwrapped to success) and immediately BEFORE the data source
+ * consumes the ack's authority context-invalidation effect. The ordinary
+ * terminal execution uses it to record its terminal-persisted token, so every
+ * accepted closure read witness is initiated after that token.
+ *
+ * It runs synchronously on the calling renderer thread and is never serialized
+ * into the IPC request. A throw still leaves the ack consumed conservatively
+ * (a successful persistence is neither reported as a failure nor silently
+ * ignored) and then propagates to the caller.
+ */
+export type UpdateAckPersistedHook = (ack: UpdateMessageAndBlocksResponse) => void
+
+/**
  * Message exchange data structure for persisting user-assistant conversations
  */
 export interface MessageExchange {
@@ -144,10 +161,14 @@ export interface MessageDataSource {
    * Update existing message and its blocks in one route.
    * Returns the UpdateMessageAndBlocksResponse: the aggregate
    * FileCleanupResult for post-commit consumption by the caller plus the
-   * required authority context-invalidation effect. The data source does NOT
-   * consume the effect itself — each caller consumes it explicitly after
-   * success (the ordinary terminal path only after recordTerminalPersisted),
-   * so the ack is consumed exactly once.
+   * required authority context-invalidation effect.
+   *
+   * Ack ownership: the data source consumes the context-invalidation effect
+   * exactly once on success and invalidates nothing on failure, so an ordinary
+   * caller never restates the rule. `onAckPersisted` is the only seam for a
+   * caller that must react to the committed write BEFORE the effect is
+   * consumed (the ordinary terminal execution records its terminal-persisted
+   * token there).
    */
   updateMessageAndBlocks(
     topicId: string,
@@ -155,7 +176,8 @@ export interface MessageDataSource {
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete?: string[],
     resendAttemptId?: string,
-    branchId?: BranchRoute
+    branchId?: BranchRoute,
+    onAckPersisted?: UpdateAckPersistedHook
   ): Promise<UpdateMessageAndBlocksResponse>
 
   /**

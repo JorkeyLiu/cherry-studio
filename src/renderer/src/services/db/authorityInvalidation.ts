@@ -60,10 +60,11 @@ export function consumeAppendAckInvalidation(ack: AppendMessageResponse | null |
 
 /**
  * Consume one successful update-message-and-blocks ack's invalidation effect.
- * Same conservative semantics as the append path. The ordinary terminal
- * execution calls this AFTER `recordTerminalPersisted` and BEFORE any
- * projection dispatch, so the closure read witness is always initiated after
- * the terminal token.
+ * Same conservative semantics as the append path. `SqliteMessageDataSource`
+ * owns this consumption: exactly once on success, after its optional
+ * post-persist hook (where the ordinary terminal execution records
+ * `recordTerminalPersisted`) and before any projection dispatch, so the
+ * closure read witness is always initiated after the terminal token.
  */
 export function consumeUpdateAckInvalidation(response: UpdateMessageAndBlocksResponse | null | undefined): boolean {
   try {

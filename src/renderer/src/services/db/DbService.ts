@@ -53,7 +53,7 @@ import type {
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
-import type { BlockWriteRouteContext, MessageDataSource } from './types'
+import type { BlockWriteRouteContext, MessageDataSource, UpdateAckPersistedHook } from './types'
 
 interface FileCountSource {
   updateFileCount(fileId: string, delta: number, deleteIfZero?: boolean): Promise<void>
@@ -230,7 +230,8 @@ class DbService implements MessageDataSource {
     blocks: MessageBlock[],
     blockIdsToDelete: string[] = [],
     resendAttemptId?: string,
-    branchId?: string | null
+    branchId?: string | null,
+    onAckPersisted?: UpdateAckPersistedHook
   ): Promise<UpdateMessageAndBlocksResponse> {
     return this.ordinarySource.updateMessageAndBlocks(
       topicId,
@@ -238,7 +239,8 @@ class DbService implements MessageDataSource {
       blocks,
       blockIdsToDelete,
       resendAttemptId,
-      branchId
+      branchId,
+      onAckPersisted
     )
   }
   selectAnswerMessage(

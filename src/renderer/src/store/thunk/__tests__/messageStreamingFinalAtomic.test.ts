@@ -523,7 +523,8 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       [expect.objectContaining({ id: 'b-text' })],
       [],
       ATTEMPT,
-      null
+      null,
+      undefined
     )
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledWith(cleanup)
 
@@ -544,7 +545,8 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       [],
       [],
       undefined,
-      null
+      null,
+      undefined
     )
   })
 })
@@ -927,14 +929,16 @@ describe('Detached execution: request-local state completes without Redux inject
 
   it('evicted mid-execution (ordinary exec path): terminal token recorded before invalidation consume, no re-injection', async () => {
     // Same eviction setup as above, but the terminal save goes through the
-    // ordinary-execution post-persist sequence (recordTerminalPersisted THEN
-    // consumeUpdateAckInvalidation) composed from the real production pieces:
-    // the real saveFinalMessageAndBlocksAtomically, a real overlay from the
-    // real registerExecutionOverlay, and the real consumeUpdateAckInvalidation.
-    // The production closure itself (saveFinalUpdatesAtomicallyForExec) is not
-    // exported, so no new architecture was dug for this test — the observable
-    // order (persist → terminal token → invalidation) and its witnesses are
-    // the claim under test.
+    // ordinary-execution post-persist sequence (persist → recordTerminalPersisted
+    // → invalidation consume → projection) composed from the real production
+    // pieces: the real saveFinalMessageAndBlocksAtomically forwarding the real
+    // post-persist hook, a real overlay from the real registerExecutionOverlay,
+    // and the real consumeUpdateAckInvalidation. The dbService mock stands in for
+    // SqliteMessageDataSource, so it models that contract explicitly (hook, then
+    // exactly-once consumption) instead of hiding it. The production closure
+    // itself (saveFinalUpdatesAtomicallyForExec) is not exported, so no new
+    // architecture was dug for this test — the observable order (persist →
+    // terminal token → invalidation) and its witnesses are the claim under test.
     const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
     const { createAssistantExecutionState } = await import('@renderer/services/messageStreaming/executionState')
     const {
@@ -979,6 +983,22 @@ describe('Detached execution: request-local state completes without Redux inject
     })
     const genBefore = getGlobalBlockGeneration()
 
+    // The dbService mock stands in for SqliteMessageDataSource: committed ack →
+    // synchronous post-persist hook → exactly-once invalidation consumption.
+    mocks.updateMessageAndBlocks.mockImplementation(async (...args: any[]) => {
+      const ack = {
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        contextInvalidation: { scope: 'all' as const }
+      }
+      order.push('persisted')
+      const onAckPersisted = args[6] as ((a: unknown) => void) | undefined
+      onAckPersisted?.(ack)
+      order.push('consume')
+      consumeUpdateAckInvalidation(ack as never)
+      return ack
+    })
+
     const manager = new BlockManager({
       dispatch: store.dispatch as any,
       getState: store.getState as any,
@@ -1000,17 +1020,15 @@ describe('Detached execution: request-local state completes without Redux inject
       topicId: TOPIC_ID,
       assistantMsgId: ASSISTANT_MSG_ID,
       saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
-      saveFinalUpdatesAtomically: async (mid: string, tid: string, mu: any, blocks: any[]) => {
-        const response = await saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT)
-        order.push('persisted')
-        const terminalStatus = (mu as { status?: unknown }).status
-        if (typeof terminalStatus === 'string') {
-          execOverlay.recordTerminalPersisted(terminalStatus)
-        }
-        order.push('consume')
-        consumeUpdateAckInvalidation(response as never)
-        return response
-      },
+      saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
+        saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT, undefined, [], () => {
+          // Production terminal checkpoint: recorded inside the data source's
+          // post-persist / pre-invalidation hook.
+          const terminalStatus = (mu as { status?: unknown }).status
+          if (typeof terminalStatus === 'string') {
+            execOverlay.recordTerminalPersisted(terminalStatus)
+          }
+        }),
       assistant: assistantStub
     })
     try {

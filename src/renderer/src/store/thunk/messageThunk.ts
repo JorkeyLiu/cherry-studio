@@ -28,11 +28,10 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { pushBranchCreateAction, pushBranchMoveAction } from '@renderer/services/branchOperationHistory'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
-import { consumeUpdateAckInvalidation } from '@renderer/services/db/authorityInvalidation'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
-import type { BlockWriteRouteContext } from '@renderer/services/db/types'
+import type { BlockWriteRouteContext, UpdateAckPersistedHook } from '@renderer/services/db/types'
 import { registerExecutionOverlay } from '@renderer/services/executionOverlayRegistry'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
@@ -284,6 +283,10 @@ export const saveUpdatedBlockToDB = async (
  * fire-and-forget helpers): the FileCleanupResult is consumed post-commit
  * per the existing paradigm, and any persistence failure is logged and
  * rethrown so onComplete never dispatches success Redux forked from DB.
+ *
+ * The ack's context-invalidation effect is consumed by the data source, so
+ * this wrapper never restates that rule. `onAckPersisted` is forwarded
+ * unchanged for the one caller that must record a token BEFORE invalidation.
  */
 export const saveFinalMessageAndBlocksAtomically = async (
   topicId: string,
@@ -297,24 +300,25 @@ export const saveFinalMessageAndBlocksAtomically = async (
    * finalize fold of adjacent main-text runs). Deleted inside the same
    * transaction as the roster rewrite, so no absorbed row is orphaned.
    */
-  blockIdsToDelete: readonly string[] = []
+  blockIdsToDelete: readonly string[] = [],
+  /**
+   * Optional synchronous post-persist / pre-invalidation hook, forwarded to
+   * the data source (see `UpdateAckPersistedHook`). Never serialized into IPC.
+   */
+  onAckPersisted?: UpdateAckPersistedHook
 ): Promise<UpdateMessageAndBlocksResponse> => {
   try {
     // An explicitly pinned null addresses the main route and is never
     // re-resolved; only an absent route falls back to the active route.
     const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
-    // Deferred invalidation consumption: this wrapper returns the full ack but
-    // never consumes its context-invalidation effect. Each caller consumes
-    // explicitly after ITS authority-success point — the ordinary terminal
-    // execution only AFTER recordTerminalPersisted — so the ack is consumed
-    // exactly once and the closure read witness is always post-terminal-token.
     const response = await dbService.updateMessageAndBlocks(
       topicId,
       { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
       blocksToUpdate,
       [...blockIdsToDelete],
       resendAttemptId,
-      route
+      route,
+      onAckPersisted
     )
     await consumeFileCleanupResult(response)
     return response
@@ -773,30 +777,27 @@ const fetchAndProcessAssistantResponseImpl = async (
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete?: readonly string[]
   ): Promise<UpdateMessageAndBlocksResponse> => {
-    const response = await saveFinalMessageAndBlocksAtomically(
+    const terminalStatus = messageUpdates.status
+    return saveFinalMessageAndBlocksAtomically(
       execTopicId,
       messageId,
       messageUpdates,
       blocksToUpdate,
       resendAttemptId,
       execRoute,
-      blockIdsToDelete
+      blockIdsToDelete,
+      // Terminal handoff checkpoint (success and landed error/cancel terminals
+      // alike): the Main transaction committed, so a later accepted closure read
+      // may retire the retained overlay. A persist failure never reaches this
+      // hook, so the overlay is never withdrawn for an unpublished terminal, and
+      // the data-source invalidation right after it is always post-token and
+      // pre-projection dispatch (baseCallbacks dispatches below).
+      () => {
+        if (typeof terminalStatus === 'string') {
+          execOverlay.recordTerminalPersisted(terminalStatus)
+        }
+      }
     )
-    // Terminal handoff checkpoint: the Main transaction committed (success
-    // and landed error/cancel terminals alike), so a later accepted closure
-    // read may retire the retained overlay. A persist failure throws above
-    // and never records a checkpoint, so the overlay is never withdrawn for
-    // an unpublished terminal.
-    const terminalStatus = messageUpdates.status
-    if (typeof terminalStatus === 'string') {
-      execOverlay.recordTerminalPersisted(terminalStatus)
-    }
-    // Authority-ack consumption AFTER the terminal token and BEFORE any
-    // projection dispatch (baseCallbacks dispatches below): the closure read
-    // witness is initiated after the token. A Main failure throws above and
-    // never invalidates.
-    consumeUpdateAckInvalidation(response)
-    return response
   }
   // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
   const isExecLoaded = () => {
@@ -2207,9 +2208,10 @@ export const initiateTranslationThunk =
       // 3. Update Database
       // Get the final message list from Redux state *after* updates.
       // The Redux dispatches above are optimistic (pre-ack) and stay
-      // unmarked: only the conservative invalidation effect is consumed here,
-      // never a handled exemption for a projection that preceded authority.
-      const translationResponse = await dbService.updateMessageAndBlocks(
+      // unmarked: the data source consumes the ack's conservative invalidation
+      // effect exactly once on success — never a handled exemption for a
+      // projection that preceded authority.
+      await dbService.updateMessageAndBlocks(
         topicId,
         { id: messageId, blocks: updatedBlockIds },
         [newBlock],
@@ -2217,7 +2219,6 @@ export const initiateTranslationThunk =
         undefined,
         activeRouteOf(getState, topicId)
       )
-      consumeUpdateAckInvalidation(translationResponse)
       return newBlock.id // Return the ID
     } catch (error) {
       logger.error(`[initiateTranslationThunk] Failed for message ${messageId}:`, error as Error)
@@ -3467,7 +3468,9 @@ export const updateMessageAndBlocksThunk =
 
     // 1. Atomic SQLite persistence (LOCK-001)
     // One IPC command: message patch + block upserts + block deletions in a single transaction.
-    // If this fails, the error propagates and Redux is never touched.
+    // If this fails, the error propagates and Redux is never touched. The data
+    // source consumes the ack's conservative invalidation effect exactly once
+    // on success, so this thunk never restates that rule.
     const response = await dbService.updateMessageAndBlocks(
       topicId,
       messageUpdates ?? { id: messageId! },
@@ -3476,14 +3479,10 @@ export const updateMessageAndBlocksThunk =
       undefined,
       activeRouteOf(getState, topicId)
     )
-    // Same-transaction authority success: consume the conservative effect
-    // before the DB-first Redux commits below (they are provably post-ack and
-    // carry the handled marker). A Main failure throws above and never
-    // invalidates; the missing-id early return has no ack to consume.
-    consumeUpdateAckInvalidation(response)
 
-    // 2. Commit to Redux AFTER successful SQLite persistence (+ ack consume
-    // above, so these same-ack commits carry the handled marker).
+    // 2. Commit to Redux AFTER successful SQLite persistence (the invalidation
+    // is already consumed by the data source, so these same-ack commits carry
+    // the handled marker).
     if (messageUpdates && messageId) {
       // Strip identity fields for Redux patch (LOCK-002: id, topicId, sortOrder must not be in changes)
       // oxlint-disable-next-line @typescript-eslint/no-unused-vars
@@ -3668,10 +3667,9 @@ export const removeBlocksThunk =
         activeRouteOf(getState, topicId)
       )
       await consumeFileCleanupResult(removeResponse)
-      // Same-transaction authority success: consume the conservative effect
-      // before the DB-first Redux commits below. A Main failure throws above
-      // and never invalidates.
-      consumeUpdateAckInvalidation(removeResponse)
+      // The data source already consumed the same-ack conservative invalidation
+      // (a Main failure throws above and never invalidates), so the DB-first
+      // Redux commits below carry the handled marker without a second signal.
       // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
       blockIdsToRemove.forEach((id) => cancelBlockEverywhere(id))
 
@@ -5057,11 +5055,11 @@ export const setupChannelStream = (
       blockIdsToDelete?: readonly string[]
     ): Promise<UpdateMessageAndBlocksResponse> => {
       // IM channel terminal: no execution-overlay record on this path, but the
-      // same explicit consume ordering as ordinary chat — effect consumed at
-      // authority success, before createCallbacks dispatches its terminal
+      // same single consumption point — the data source consumes the effect
+      // once on success, before createCallbacks dispatches its terminal
       // projection commits (which carry the handled marker). A Main failure
       // throws and never invalidates.
-      const channelResponse = await saveFinalMessageAndBlocksAtomically(
+      return saveFinalMessageAndBlocksAtomically(
         channelTopicId,
         messageId,
         messageUpdates,
@@ -5070,8 +5068,6 @@ export const setupChannelStream = (
         null,
         blockIdsToDelete
       )
-      consumeUpdateAckInvalidation(channelResponse)
-      return channelResponse
     },
     assistant
   })
