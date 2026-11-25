@@ -68,6 +68,28 @@ const COLUMN_MAP = buildColumnMap([
   ['sortOrder', 'sort_order']
 ])
 
+/**
+ * Route-structure projection of one message row: exactly the columns route
+ * qualification and group-header resolution read. It deliberately excludes
+ * the whole-row payload (`content`, timestamps, `extra` overflow) so a
+ * structure build never hydrates data it does not consume.
+ */
+export interface MessageStructureRow {
+  id: string
+  topicId: string
+  branchId: string | null
+  sortOrder: number
+  role: string | null
+  askId: string | null
+}
+
+/**
+ * Bind-chunk size for set-based id reads. One statement per chunk keeps the
+ * bind list small while leaving the statement count a function of the id
+ * count alone (never one statement per id).
+ */
+export const MESSAGE_STRUCTURE_ID_CHUNK = 256
+
 export class MessagesRepository {
   constructor(private db: BetterSQLite3Database<any>) {}
 
@@ -157,6 +179,44 @@ export class MessagesRepository {
       .map((id) => rowMap.get(id))
       .filter((r) => r !== undefined)
       .map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
+   * Set-based route-structure projection read.
+   *
+   * Returns only the columns route qualification and header resolution read
+   * (`id`/owner/order/role/askId), one statement per bind chunk of
+   * `MESSAGE_STRUCTURE_ID_CHUNK` ids — so the statement count is a function of
+   * the id count alone, never one statement per id, and no whole-row payload
+   * is hydrated.
+   *
+   * Membership is by id ONLY. The caller's ids are stable identities whose
+   * owner route may be any branch of the topic or, for route upper bounds, a
+   * referenced source topic: narrowing this read by topic/owner would drop
+   * rows that the qualification legitimately needs. Row order is not part of
+   * the contract; callers key by `id`.
+   */
+  findStructureRowsByIds(ids: string[]): MessageStructureRow[] {
+    if (ids.length === 0) return []
+    const rows: MessageStructureRow[] = []
+    for (let start = 0; start < ids.length; start += MESSAGE_STRUCTURE_ID_CHUNK) {
+      const chunk = ids.slice(start, start + MESSAGE_STRUCTURE_ID_CHUNK)
+      rows.push(
+        ...this.db
+          .select({
+            id: messages.id,
+            topicId: messages.topicId,
+            branchId: messages.branchId,
+            sortOrder: messages.sortOrder,
+            role: messages.role,
+            askId: messages.askId
+          })
+          .from(messages)
+          .where(inArray(messages.id, chunk))
+          .all()
+      )
+    }
+    return rows
   }
 
   /**

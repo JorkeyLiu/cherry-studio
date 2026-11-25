@@ -157,6 +157,7 @@ import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import { isOwnedByRoute } from './repository/helpers'
 import { createImportWriter } from './repository/ImportWriter'
+import type { MessageStructureRow } from './repository/MessagesRepository'
 import { SearchRepository } from './repository/SearchRepository'
 import * as schema from './schema'
 import {
@@ -9737,9 +9738,9 @@ export class ChatDbAggregateService {
    * intra-segment tuple (sortOrder, id) — never a cross-owner sortOrder
    * comparison. Reference missing/trashed/deleted/blocked/depth/cycle stay
    * faithful because the same `routeSegments` that drive the window drive
-   * the qualification, and every member is checked by stable-ID point lookup
-   * plus tuple bounds (the `isMessageInRouteSegmentsInTx` rule without a
-   * second lookup).
+   * the qualification, and every member is resolved from the same set-based
+   * projection read plus tuple bounds (the `isMessageInRouteSegmentsInTx` rule
+   * without a second lookup).
    */
   private buildWindowStructureInTx(
     repos: ChatDbRepositories,
@@ -9751,29 +9752,47 @@ export class ChatDbAggregateService {
     if (segments.length === 0) {
       return { catalog: [], route: { topicId, branchId: route, qualifications: [] } }
     }
-    // Cache upper-bound rows once per route segment (point lookups only).
-    const upperCache = new Map<number, { sortOrder: number; id: string } | null>()
+    // Set-based reads only: ONE membership query for the whole catalog plus ONE
+    // projection query per bind chunk for every row this structure reads
+    // (catalog members — resolved headers are members by construction — and
+    // route upper bounds). The projection is id-keyed and deliberately NOT
+    // filtered by topic/owner: an upper bound may live in a referenced source
+    // topic and members may be owned by any branch of the topic, so a topic
+    // filter would drop rows this qualification legitimately reads.
+    const membersBySegment = repos.segments.listMembersByTopic(topicId)
+    const structureIds: string[] = []
+    const seenStructureIds = new Set<string>()
+    const addStructureId = (id: string | null): void => {
+      if (id === null || seenStructureIds.has(id)) return
+      seenStructureIds.add(id)
+      structureIds.push(id)
+    }
+    for (const segment of segments) {
+      for (const mid of membersBySegment.get(segment.id) ?? []) addStructureId(mid)
+    }
+    for (const seg of routeSegments) addStructureId(seg.upperMessageId)
+    const rowById = new Map<string, MessageStructureRow>()
+    for (const row of repos.messages.findStructureRowsByIds(structureIds)) rowById.set(row.id, row)
+    // Upper-bound tuple once per route segment, from the rows read above.
+    const upperCache = new Map<number, { sortOrder: number; id: string } | null | undefined>()
     const upperOf = (segIdx: number): { sortOrder: number; id: string } | null | undefined => {
       if (upperCache.has(segIdx)) return upperCache.get(segIdx)
       const seg = routeSegments[segIdx]
+      let bound: { sortOrder: number; id: string } | null | undefined
       if (!seg || seg.upperMessageId === null) {
-        upperCache.set(segIdx, undefined as unknown as null)
-        return undefined
+        bound = undefined
+      } else {
+        const row = rowById.get(seg.upperMessageId)
+        bound = row ? { sortOrder: row.sortOrder, id: row.id } : null
       }
-      const row = repos.messages.getById(seg.upperMessageId)
-      if (!row.found) {
-        upperCache.set(segIdx, null)
-        return null
-      }
-      const val = { sortOrder: row.data.sortOrder, id: row.data.id }
-      upperCache.set(segIdx, val)
-      return val
+      upperCache.set(segIdx, bound)
+      return bound
     }
     const catalog: SegmentWire[] = []
     const qualifications: FetchMessagesWindowStructure['route']['qualifications'] = []
     for (const segment of segments) {
-      const messageIds = repos.segments.getMessageIds(segment.id)
-      const header = this.resolveSegmentHeader(repos, segment, messageIds)
+      const messageIds = membersBySegment.get(segment.id) ?? []
+      const header = this.resolveSegmentHeaderWithRows(segment, messageIds, (id) => rowById.get(id))
       catalog.push(segmentToWire(segment, messageIds, header))
       if (messageIds.length === 0) {
         qualifications.push({
@@ -9792,9 +9811,8 @@ export class ChatDbAggregateService {
         askId: string | null
       }> = []
       for (const mid of messageIds) {
-        const row = repos.messages.getById(mid)
-        if (!row.found) continue
-        const m = row.data
+        const m = rowById.get(mid)
+        if (!m) continue
         const segIdx = this.segmentIndexOfOwner(routeSegments, m.topicId, m.branchId ?? null)
         if (segIdx === -1) continue
         const upper = upperOf(segIdx)
@@ -9802,7 +9820,7 @@ export class ChatDbAggregateService {
         if (upper !== undefined) {
           if (this.compareRouteTuple(m.sortOrder, m.id, upper.sortOrder, upper.id) > 0) continue
         }
-        ordered.push({ id: mid, segIdx, sortOrder: m.sortOrder, role: m.role, askId: m.askId ?? null })
+        ordered.push({ id: mid, segIdx, sortOrder: m.sortOrder, role: m.role, askId: m.askId })
       }
       ordered.sort((a, b) => {
         if (a.segIdx !== b.segIdx) return a.segIdx - b.segIdx
@@ -9811,7 +9829,7 @@ export class ChatDbAggregateService {
         return a.id < b.id ? -1 : 1
       })
       // Conversation turn keys over the qualified members only, from the
-      // same-tx member rows already read above (point lookups bounded by
+      // same-tx member rows already read above (that read is bounded by
       // catalog membership — never a whole-route read). Keying mirrors
       // groupEffectiveTurnsInTx exactly (user → own id, assistant + askId →
       // askId, system → own id, unprefixed so cross-role askId joins merge
@@ -9860,16 +9878,37 @@ export class ChatDbAggregateService {
     segment: TopicSegmentData,
     messageIds: string[]
   ): { headerMessageId: string | null; ownerTopicId: string; ownerBranchId: string | null } {
+    return this.resolveSegmentHeaderWithRows(segment, messageIds, (id) => {
+      const row = repos.messages.getById(id)
+      return row.found ? row.data : undefined
+    })
+  }
+
+  /**
+   * One head-identity rule, two row sources.
+   *
+   * The rule is the `resolveSegmentHeader` contract above; the row source is
+   * injected so a set-based structure read resolves the same head from rows it
+   * already loaded (`buildWindowStructureInTx`) while point-lookup callers
+   * (`listSegmentsInTx`, `assertSegmentOwnerInTx`) keep reading one row. The
+   * accessor returns `undefined` for a missing row, exactly the condition the
+   * point-lookup form treated as `!row.found`.
+   */
+  private resolveSegmentHeaderWithRows(
+    segment: TopicSegmentData,
+    messageIds: string[],
+    rowOf: (id: string) => { topicId: string; branchId?: string | null } | undefined
+  ): { headerMessageId: string | null; ownerTopicId: string; ownerBranchId: string | null } {
     const persisted = segment.headerMessageId ?? null
     const effective = persisted !== null && messageIds.includes(persisted) ? persisted : (messageIds[0] ?? null)
-    const row = effective === null ? null : repos.messages.getById(effective)
-    if (effective === null || !row || !row.found) {
+    const row = effective === null ? undefined : rowOf(effective)
+    if (effective === null || !row) {
       // No resolvable head: either the group has no members (no identity yet)
       // or the resolved member row is gone. Report the group's own topic so the
       // wire stays typed and truthful instead of guessing an owner.
       return { headerMessageId: null, ownerTopicId: segment.topicId, ownerBranchId: null }
     }
-    return { headerMessageId: effective, ownerTopicId: row.data.topicId, ownerBranchId: row.data.branchId ?? null }
+    return { headerMessageId: effective, ownerTopicId: row.topicId, ownerBranchId: row.branchId ?? null }
   }
 
   /**

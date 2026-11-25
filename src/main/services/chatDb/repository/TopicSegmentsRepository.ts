@@ -181,6 +181,40 @@ export class TopicSegmentsRepository {
     }
   }
 
+  /**
+   * Complete membership of every group in one topic in a single set-based
+   * read, assembled per group.
+   *
+   * Intra-group order is exactly the order `getMessageIds` returns
+   * (`sortOrder`, then `messageId`), so a caller can replace one membership
+   * query per group with one query per topic without changing any value.
+   * Groups with no member row are absent from the map; callers read absence as
+   * the empty list `getMessageIds` returns for them.
+   */
+  listMembersByTopic(topicId: string): Map<string, string[]> {
+    const rows = this.db
+      .select({
+        segmentId: topicSegmentMessages.segmentId,
+        messageId: topicSegmentMessages.messageId
+      })
+      .from(topicSegmentMessages)
+      .innerJoin(topicSegments, eq(topicSegments.id, topicSegmentMessages.segmentId))
+      .where(eq(topicSegments.topicId, topicId))
+      .orderBy(
+        asc(topicSegmentMessages.segmentId),
+        asc(topicSegmentMessages.sortOrder),
+        asc(topicSegmentMessages.messageId)
+      )
+      .all()
+    const bySegment = new Map<string, string[]>()
+    for (const row of rows) {
+      const list = bySegment.get(row.segmentId)
+      if (list) list.push(row.messageId)
+      else bySegment.set(row.segmentId, [row.messageId])
+    }
+    return bySegment
+  }
+
   getMessageIds(segmentId: string): string[] {
     return this.db
       .select({ messageId: topicSegmentMessages.messageId })

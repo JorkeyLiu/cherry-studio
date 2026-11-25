@@ -439,3 +439,52 @@
    late fail-closed、accepted retain、B09 bound、terminal handoff/witness、空 route
    fallback/首发 anchor 建立集成场景保留。
  - 未跑 lint/fresh build/E2E（主代理后续聚合）；未动 Main/shared/IPC/ADR。
+
+## 47. Main 窗口结构判定收归集合式读取（已实现；未 commit）
+- 事实（切片前，`ChatDbAggregateService.buildWindowStructureInTx`）：每组
+  `segments.getMessageIds(id)` 取全组、每成员 `messages.getById` 整行点查判 route
+  qualification、每 route segment 一次 upper `getById`。查询次数随组数×成员数增长。
+  核实 `segmentToWire` 不自读 membership（只消费入参 `messageIds`/`header`），因此结构
+  构建的读取面就是 成员 + upper + 持久头 三者。
+- 范围：仅该结构构建 helper + 两处必要批量 API。`shared`/preload/renderer 输出 contract
+  不变，selected/displayed 语义、structure hook、`messageThunk` 未动；无 cache、无新 clock、
+  无 generic 框架；无 ADR 变更。
+- 批量 API：`TopicSegmentsRepository.listMembersByTopic(topicId)` 用一次
+  `topic_segment_messages ⋈ topic_segments`（按 topic 过滤，走 segment 索引）取全组，
+  组内顺序与 `getMessageIds` 完全相同（`sortOrder`，再 `messageId`），空组在 Map 中缺席
+  （调用方读作与 `getMessageIds` 相同的空数组）。`MessagesRepository.findStructureRowsByIds`
+  只投影 `id/topicId/branchId/sortOrder/role/askId` 六个必要列（整行 payload 不读），按
+  `MESSAGE_STRUCTURE_ID_CHUNK = 256` 分 bind chunk，语句数只是 id 数的函数。
+- 结构构建：同一 Main read transaction 内先按「catalog 成员 ∪ route upper」建 id 集合
+  （持久头按定义必为成员，故无额外 id），一次 Map 化后逐组判定；upper 的
+  `undefined`（无段/无 bound）与 `null`（bound 行缺失 ⇒ 整段排除）区分原样保留。
+  绝不按 topic/owner 过滤 id 集合：upper 可能在 reference 源话题、成员可属同话题任意
+  branch、legacy/import 还可能出现跨话题成员，加 topic 过滤会丢合法行（把「行存在」误判成
+  「行缺失」，从而谎报 header/upper 不存在）。路径解析（`resolveRouteSegmentsInTx`/`truncate`/
+  `branchPath`）
+  原样保留，其固定少量查询仍是允许的。
+- 不等价风险点逐一核对：成员行缺失（跳过）、upper 缺失（整段排除）、header 有效值
+  回退（`persisted ∈ membership` 否则首成员）、role/askId 的 `null`/`undefined` 等价性
+  （只参与次序与 turn key 真值判断，不进 wire）均与点查版逐值一致。
+- 测试：新增 `src/main/services/chatDb/__tests__/window.structureQueryShape.test.ts`（6 例，
+  真实 repository + 迁移后真实 SQLite，直接以 SQLite client 的 prepared-statement 清单
+  度量，不用 mock 数据）：成员语句恒 1 条（2/6/8 组同值）；消息投影恰
+  `ceil(唯一 id 数/256)` 条（含 300 成员跨 chunk = 2 条）；整构建 = 2 + chunks 条且消息
+  点查 0 条；upper 与「legacy 跨话题成员作持久头」两场景同样 0 点查并保持 foreign owner；
+  public `includeStructure` 相对轻量 window 增加 0 次 `getById`、0 次 `getMessageIds`、
+  1 次 `listMembersByTopic`。原有 `window.structureBundle`(12 例) 与
+  `window.branchRefBounded`(10 例) 的 hand-written 逐值 oracle（main+branch+reference、
+  off-window 成员、header 历史 fallback、空组、clipped window）全部保持通过。
+- 明确不声称：不承诺 O(window)、不宣称速度/毫秒收益（未做 benchmark）；输出必然含全部
+  `routeMemberMessageIds`，id 量随之增长，本轮收益是「查询次数与组/成员数无关（除 bind
+  chunk）且不读整行 payload」。未动 `listSegmentsInTx` 的 unqualified 分支（仍逐组
+  `getMessageIds` + 逐组 header 点查，属本轮范围外残余）。
+- 实测（pinned Node 24.11.1 / pnpm 10.27.0，HEAD e1517d315e 分支
+  `jorkey/refactor/chat-lightweight`，dirty 为本切片 4 文件）：focused
+  `window.structureQueryShape + window.structureBundle + window.branchRefBounded`
+  28 passed exit 0；`CI=1 pnpm test:main` exit 0（245 files：core 80 / native 162 /
+  heavy 3；1742 + 3121 + 53 passed，72 skipped）；`pnpm typecheck` exit 0（node/web/e2e/
+  e2e-utils/aicore 五通道）；scoped `oxlint`/`eslint`/`biome format`（4 个改动文件）exit 0，
+  `git diff --check` exit 0。`biome lint` 对 main 文件不适用（linter 只作用于
+  `src/renderer/**`）。未跑 full renderer/E2E/build（本切片纯 Main 内部等价查询，输出
+  contract 未变；由主代理决定后续聚合）。
