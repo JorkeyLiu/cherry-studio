@@ -4439,6 +4439,20 @@ export const dispatchDeferredRouteWindowRead = async (
   } catch {
     routeGeneration = 0
   }
+  // Fresh-topic deferred read: establish exactly one canonical resident
+  // applicability entry BEFORE the thunk captures its dispatch-source
+  // publication generation, so the receipt, the adopting bootstrap baseline
+  // and the joint publication all share one generation >= 1. A topic that
+  // already has an entry is never advanced here (no residency loss, no
+  // double generation advance).
+  try {
+    const registry = (getState() as any).residentRegistry
+    if (registry && registry.entries?.[topicId] === undefined) {
+      dispatch(bumpGeneration(topicId))
+    }
+  } catch {
+    // fail-closed: registration keeps its historic capture
+  }
   const thunkOpts = (
     opts && opts.kind === 'around'
       ? {

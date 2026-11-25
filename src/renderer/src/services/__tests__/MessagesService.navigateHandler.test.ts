@@ -8,7 +8,10 @@
  * will immediately fail.
  */
 import type { MessageNavigationResult, PendingEventDeps } from '@renderer/pages/home/Messages/messageNavigation'
-import { handlePendingNavigateEvent } from '@renderer/pages/home/Messages/messageNavigation'
+import {
+  handlePendingNavigateEvent,
+  isSamePendingNavigateTarget
+} from '@renderer/pages/home/Messages/messageNavigation'
 import { describe, expect, it, vi } from 'vitest'
 
 import { __testSetPendingNavigate, clearPendingNavigate, getPendingNavigate } from '../MessagesService'
@@ -21,7 +24,7 @@ const resetPending = () => __testSetPendingNavigate(null)
  */
 const createDeps = (navResult: MessageNavigationResult = 'success'): PendingEventDeps => ({
   getPending: getPendingNavigate,
-  clearPending: clearPendingNavigate,
+  clearPending: vi.fn(clearPendingNavigate),
   navigate: vi.fn(async () => navResult),
   onDone: vi.fn()
 })
@@ -237,4 +240,170 @@ describe('handlePendingNavigateEvent — production coordinator', () => {
     expect(deps.onDone).not.toHaveBeenCalled()
     expect(getPendingNavigate()).toBeNull()
   })
+
+  describe('handlePendingNavigateEvent — exact in-flight ownership', () => {
+    it('compares topic and message identity, never topic alone', () => {
+      expect(
+        isSamePendingNavigateTarget({ topicId: 'topic-A', messageId: 'm1' }, { topicId: 'topic-A', messageId: 'm1' })
+      ).toBe(true)
+      expect(
+        isSamePendingNavigateTarget({ topicId: 'topic-A', messageId: 'm1' }, { topicId: 'topic-A', messageId: 'm2' })
+      ).toBe(false)
+      expect(
+        isSamePendingNavigateTarget({ topicId: 'topic-A', messageId: 'm1' }, { topicId: 'topic-B', messageId: 'm1' })
+      ).toBe(false)
+    })
+
+    it('joins an exact in-flight pending without navigating, clearing, or releasing its owner', async () => {
+      resetPending()
+      const pending = { topicId: 'topic-A', messageId: 'msg-42' }
+      __testSetPendingNavigate(pending)
+      const deps: PendingEventDeps = {
+        ...createDeps(),
+        isPendingInFlight: vi.fn(() => true),
+        onStart: vi.fn(),
+        onEnd: vi.fn()
+      }
+
+      await expect(handlePendingNavigateEvent('topic-A', 'msg-42', deps)).resolves.toEqual({
+        result: 'cancelled',
+        source: 'pending-in-flight'
+      })
+      expect(deps.isPendingInFlight).toHaveBeenCalledWith(pending)
+      expect(deps.navigate).not.toHaveBeenCalled()
+      expect(deps.clearPending).not.toHaveBeenCalled()
+      expect(deps.onStart).not.toHaveBeenCalled()
+      expect(deps.onDone).not.toHaveBeenCalled()
+      expect(deps.onEnd).not.toHaveBeenCalled()
+      expect(getPendingNavigate()).toEqual(pending)
+    })
+
+    it.each([
+      ['same topic, different target', 'topic-A', 'msg-other'],
+      ['different topic, same target id', 'topic-B', 'msg-42']
+    ])('does not join %s and keeps the mounted event fallback', async (_label, topicId, messageId) => {
+      resetPending()
+      const pending = { topicId: 'topic-A', messageId: 'msg-42' }
+      __testSetPendingNavigate(pending)
+      const deps: PendingEventDeps = {
+        ...createDeps(),
+        isPendingInFlight: vi.fn((candidate) => isSamePendingNavigateTarget(candidate, pending)),
+        onStart: vi.fn(),
+        onEnd: vi.fn()
+      }
+
+      const outcome = await handlePendingNavigateEvent(topicId, messageId, deps)
+
+      expect(outcome).toEqual({ result: 'success', source: 'event' })
+      expect(deps.navigate).toHaveBeenCalledOnce()
+      expect(deps.onStart).toHaveBeenCalledWith({ topicId, messageId })
+      expect(deps.onEnd).toHaveBeenCalledWith(false, 'success')
+      expect(getPendingNavigate()).toEqual(pending)
+    })
+
+    it('absent pending still uses the event fallback', async () => {
+      resetPending()
+      const deps: PendingEventDeps = {
+        ...createDeps(),
+        isPendingInFlight: vi.fn(() => true),
+        onStart: vi.fn(),
+        onEnd: vi.fn()
+      }
+
+      await expect(handlePendingNavigateEvent('topic-A', 'msg-42', deps)).resolves.toEqual({
+        result: 'success',
+        source: 'event'
+      })
+      expect(deps.isPendingInFlight).not.toHaveBeenCalled()
+      expect(deps.navigate).toHaveBeenCalledOnce()
+      expect(deps.onEnd).toHaveBeenCalledWith(false, 'success')
+    })
+
+    it.each(['cancelled', 'thrown'] as const)(
+      '%s navigation releases its claim and preserves pending',
+      async (failure) => {
+        resetPending()
+        const pending = { topicId: 'topic-A', messageId: 'msg-42' }
+        __testSetPendingNavigate(pending)
+        let owner: { topicId: string; messageId: string } | null = null
+        const deps: PendingEventDeps = {
+          getPending: getPendingNavigate,
+          clearPending: vi.fn(clearPendingNavigate),
+          navigate: vi.fn(async (): Promise<MessageNavigationResult> => {
+            if (failure === 'thrown') throw new Error('navigation failed')
+            return 'cancelled'
+          }),
+          onDone: vi.fn(),
+          onStart: (target) => {
+            owner = { ...target }
+          },
+          onEnd: vi.fn((_consumed, _result) => {
+            owner = null
+          })
+        }
+
+        if (failure === 'thrown') {
+          await expect(handlePendingNavigateEvent('topic-A', 'msg-42', deps)).rejects.toThrow('navigation failed')
+        } else {
+          await expect(handlePendingNavigateEvent('topic-A', 'msg-42', deps)).resolves.toMatchObject({
+            result: 'cancelled'
+          })
+        }
+        expect(owner).toBeNull()
+        expect(deps.onEnd).toHaveBeenCalledWith(false, failure === 'thrown' ? null : 'cancelled')
+        expect(deps.clearPending).not.toHaveBeenCalled()
+        expect(deps.onDone).not.toHaveBeenCalled()
+        expect(getPendingNavigate()).toEqual(pending)
+      }
+    )
+
+    it('a superseded completion cannot clear or release the newer target owner', async () => {
+      resetPending()
+      const firstTarget = { topicId: 'topic-A', messageId: 'msg-first' }
+      const secondTarget = { topicId: 'topic-A', messageId: 'msg-second' }
+      __testSetPendingNavigate(firstTarget)
+      let resolveFirst: ((result: MessageNavigationResult) => void) | null = null
+      let owner: typeof firstTarget | null = null
+      let invocation = 0
+      const deps: PendingEventDeps = {
+        getPending: getPendingNavigate,
+        clearPending: clearPendingNavigate,
+        navigate: vi.fn(() => {
+          invocation += 1
+          if (invocation === 1) {
+            return new Promise<MessageNavigationResult>((resolve) => {
+              resolveFirst = resolve
+            })
+          }
+          return Promise.resolve<MessageNavigationResult>('success')
+        }),
+        onDone: vi.fn(),
+        isPendingInFlight: (candidate) => owner !== null && isSamePendingNavigateTarget(owner, candidate),
+        onStart: (target) => {
+          owner = { ...target }
+        },
+        onEnd: (_consumed, _result) => {
+          // The controller-local release is identity-guarded: an older request
+          // must not erase a newer owner when it settles late.
+          if (owner?.messageId === firstTarget.messageId) owner = null
+        }
+      }
+
+      const first = handlePendingNavigateEvent('topic-A', firstTarget.messageId, deps)
+      __testSetPendingNavigate(secondTarget)
+      await handlePendingNavigateEvent('topic-A', secondTarget.messageId, deps)
+      expect(owner).toEqual(secondTarget)
+      expect(getPendingNavigate()).toBeNull()
+
+      await actResolution(resolveFirst)
+      await expect(first).resolves.toMatchObject({ result: 'success', source: 'pending' })
+      expect(owner).toEqual(secondTarget)
+      expect(getPendingNavigate()).toBeNull()
+      expect(deps.onDone).toHaveBeenCalledOnce()
+    })
+  })
+
+  const actResolution = (resolve: ((result: MessageNavigationResult) => void) | null) => {
+    resolve?.('success')
+  }
 })

@@ -846,6 +846,13 @@ export interface PendingNavigateIdentity {
   messageId: string
   topicId: string
 }
+export interface PendingNavigationOwner extends PendingNavigateIdentity {
+  source: 'bootstrap' | 'event'
+}
+
+/** Exact target identity; topic-only matching must never join two different targets. */
+export const isSamePendingNavigateTarget = (left: PendingNavigateIdentity, right: PendingNavigateIdentity): boolean =>
+  left.topicId === right.topicId && left.messageId === right.messageId
 
 /** Dependencies accepted by {@link handlePendingNavigateEvent} for testability. */
 export interface PendingEventDeps {
@@ -857,13 +864,19 @@ export interface PendingEventDeps {
   navigate: (intent: MessageNavigationIntent) => Promise<MessageNavigationResult>
   /** Called after a matched pending is successfully consumed. */
   onDone: () => void
+  /** Join an exact target already owned by bootstrap or an earlier event. */
+  isPendingInFlight?: (pending: PendingNavigateIdentity) => boolean
+  /** Claim event ownership synchronously before navigate starts. */
+  onStart?: (target: PendingNavigateIdentity) => void
+  /** Release only the ownership claimed by this invocation. */
+  onEnd?: (consumedPending: boolean, result: MessageNavigationResult | null) => void
 }
 
 /** Result returned by {@link handlePendingNavigateEvent}. */
 export interface PendingEventResult {
   result: MessageNavigationResult
-  /** 'pending' when the event matched the current pending identity exactly, 'event' otherwise. */
-  source: 'pending' | 'event'
+  /** 'pending' when exact-matched, 'event' otherwise, 'pending-in-flight' when joined. */
+  source: 'pending' | 'event' | 'pending-in-flight'
 }
 
 /**
@@ -871,10 +884,10 @@ export interface PendingEventResult {
  *
  * Decision logic (single implementation — no duplicate in tests):
  *   1. Read the current pending; check exact match on both topicId AND messageId.
- *   2. If matched → source='pending'; otherwise → source='event'.
- *   3. Navigate with the chosen source.
+ *   2. If matched and already owned by the same exact target → join without navigating.
+ *   3. Otherwise claim event ownership, then navigate with source='pending' or 'event'.
  *   4. If matched AND result !== 'cancelled' → compare-and-clear the pending, call onDone.
- *   5. If cancelled → preserve the pending (no clear, no onDone).
+ *   5. Release only this invocation's claim; cancelled/failed navigation preserves pending.
  */
 export const handlePendingNavigateEvent = async (
   topicId: string,
@@ -882,19 +895,33 @@ export const handlePendingNavigateEvent = async (
   deps: PendingEventDeps
 ): Promise<PendingEventResult> => {
   const pending = deps.getPending()
-  const isPendingMatch = pending !== null && pending.topicId === topicId && pending.messageId === messageId
+  const isPendingMatch = pending !== null && isSamePendingNavigateTarget(pending, { topicId, messageId })
   const source: 'pending' | 'event' = isPendingMatch ? 'pending' : 'event'
-  const result = await deps.navigate({
-    kind: 'message',
-    targetId: messageId,
-    source
-  })
-  if (isPendingMatch && pending && result !== 'cancelled') {
-    if (deps.clearPending(pending)) {
-      deps.onDone()
-    }
+  if (isPendingMatch && pending && deps.isPendingInFlight?.(pending)) {
+    return { result: 'cancelled', source: 'pending-in-flight' }
   }
-  return { result, source }
+
+  let claimed = false
+  let consumedPending = false
+  let result: MessageNavigationResult | null = null
+  try {
+    deps.onStart?.({ topicId, messageId })
+    claimed = true
+    result = await deps.navigate({
+      kind: 'message',
+      targetId: messageId,
+      source
+    })
+    if (isPendingMatch && pending && result !== 'cancelled') {
+      if (deps.clearPending(pending)) {
+        consumedPending = true
+        deps.onDone()
+      }
+    }
+    return { result, source }
+  } finally {
+    if (claimed) deps.onEnd?.(consumedPending, result)
+  }
 }
 
 // ---------------------------------------------------------------------------

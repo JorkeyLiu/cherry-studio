@@ -98,6 +98,9 @@ const mocks = vi.hoisted(() => {
     // Provider write seam: the mounted component must forward an accepted
     // receipt structure here from its atomic onPublish, not keep a local copy.
     acceptCommittedStructure: vi.fn(),
+    ownershipEvents: [] as string[],
+    navigationBegins: [] as Array<{ stage: 'prepare' | 'full'; intent: any; targetId: string | null; source: string }>,
+    navigationResults: [] as Array<{ stage: 'prepare' | 'full'; result: string }>,
     clearPendingNavigate: vi.fn(() => true),
     setPendingNavigate: (value: { messageId: string; topicId: string } | null) => {
       pendingNavigate = value
@@ -149,6 +152,7 @@ const mocks = vi.hoisted(() => {
     // projection (`[]`), which is the atomic-visibility gate's observed-empty
     // evidence.
     topicMessages: [] as Message[],
+    renderProjectionRows: false,
     loadedResident: true,
     // Target-topic window-read busy state: an explicit pending identity list
     // means a read is in flight for that topic (the reducer slice shape).
@@ -157,6 +161,7 @@ const mocks = vi.hoisted(() => {
     // Unified navigation: controllable ensure + observable dispatches/toast.
     ensureMock: vi.fn(async () => ({ status: 'resident' }) as any),
     // Bootstrap prepare structure handoff: opt into the REAL ensure/prepare
+    useRealTransaction: false,
     // State used when the mounted component's mocked dispatch executes a real
     // thunk (bootstrap prepare's deferred around read).
     stateForThunk: null as any,
@@ -497,10 +502,6 @@ vi.mock('@renderer/utils/messageUtils/find', () => ({
   getMainTextContent: vi.fn(() => '')
 }))
 
-vi.mock('@renderer/utils/messageUtils/is', () => ({
-  isTextLikeBlock: vi.fn(() => false)
-}))
-
 vi.mock('@renderer/pages/home/Messages/domVisibility', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return {
@@ -510,6 +511,13 @@ vi.mock('@renderer/pages/home/Messages/domVisibility', async (importOriginal) =>
   }
 })
 
+vi.mock('@renderer/utils/messageUtils/is', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    isTextLikeBlock: vi.fn(() => false)
+  }
+})
 vi.mock('@renderer/pages/home/Messages/messageBranch', () => ({
   branchFromMessage: vi.fn()
 }))
@@ -532,14 +540,63 @@ const pendingTransactionResolvers: Array<(result: 'success' | 'not-found' | 'can
 
 vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
   const actual = (await vi.importActual('../messageNavigation')) as any
+  const recordBegin = (stage: 'prepare' | 'full', intent: any, deps: any) => ({
+    ...deps,
+    begin: (...args: any[]) => {
+      mocks.navigationBegins.push({
+        stage,
+        intent,
+        targetId: args[1] ?? null,
+        source: args[2] ?? intent?.source
+      })
+      return deps.begin(...args)
+    }
+  })
   return {
     ...actual,
-    runMessageNavigationTransaction: vi.fn(
-      (_intent: any, _deps: any): Promise<'success' | 'not-found' | 'cancelled'> =>
-        new Promise<'success' | 'not-found' | 'cancelled'>((resolve) => {
-          resolveTransactionControlled = resolve
-          pendingTransactionResolvers.push(resolve)
+    handlePendingNavigateEvent: vi.fn(async (topicId: string, messageId: string, deps: any) => {
+      const joined = deps.isPendingInFlight?.(deps.getPending()) === true
+      mocks.ownershipEvents.push(joined ? 'join' : 'claim')
+      try {
+        return await actual.handlePendingNavigateEvent(topicId, messageId, {
+          ...deps,
+          onStart: (target: any) => {
+            mocks.ownershipEvents.push(`start:${target.messageId}`)
+            deps.onStart?.(target)
+          },
+          onEnd: (consumed: boolean, result: string | null) => {
+            mocks.ownershipEvents.push(`end:${messageId}:${consumed}:${result}`)
+            deps.onEnd?.(consumed, result)
+          }
         })
+      } finally {
+        mocks.ownershipEvents.push(`return:${messageId}`)
+      }
+    }),
+    runMessageNavigationTransaction: vi.fn(
+      (_intent: any, _deps: any): Promise<'success' | 'not-found' | 'cancelled'> => {
+        mocks.navigationBegins.push({
+          stage: 'full',
+          intent: _intent,
+          targetId: _intent?.targetId ?? null,
+          source: _intent?.source
+        })
+        if ((mocks as any).useRealTransaction) {
+          return actual
+            .runMessageNavigationTransaction(_intent, recordBegin('full', _intent, _deps))
+            .then((result: string) => {
+              mocks.navigationResults.push({ stage: 'full', result })
+              return result
+            })
+        }
+        return new Promise<'success' | 'not-found' | 'cancelled'>((resolve) => {
+          resolveTransactionControlled = resolve
+          pendingTransactionResolvers.push((result) => {
+            mocks.navigationResults.push({ stage: 'full', result })
+            resolve(result)
+          })
+        })
+      }
     ),
     // Bootstrap-only prepare entry: same controllable seam as the full
     // transaction above. Test bodies keep resolving 'success' (the legacy
@@ -548,7 +605,13 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
     // under the prepare-only bootstrap contract.
     prepareMessageNavigationTarget: vi.fn(
       (_intent: any, _deps: any): Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }> => {
-        if ((mocks as any).useRealPrepare) return actual.prepareMessageNavigationTarget(_intent, _deps)
+        const deps = recordBegin('prepare', _intent, _deps)
+        if ((mocks as any).useRealPrepare) {
+          return actual.prepareMessageNavigationTarget(_intent, deps).then((result: { status: string }) => {
+            mocks.navigationResults.push({ stage: 'prepare', result: result.status })
+            return result
+          })
+        }
         return new Promise<{ status: 'prepared' | 'not-found' | 'cancelled' }>((resolve) => {
           pendingTransactionResolvers.push((result) => {
             if (result !== 'success') {
@@ -602,17 +665,40 @@ vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', async (importOr
 })
 
 vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
-  // Return empty projection to keep rendering empty while navigate logic uses
-  // `messagesRef` (topicMessages). The real projection is covered elsewhere;
-  // returning `groups` directly would mismatch the projected-tuple shape and
-  // crash on non-empty windows.
+  // Most transition tests keep rows mocked out. The cold-search proofs opt
+  // into a minimal projected tuple so the target is real mounted DOM inside
+  // the production scroll container, which FULL navigation requires.
   projectMessageViewportGroups: vi.fn(() => []),
-  createViewportProjectionCache: () => ({ project: () => [], clear: () => {}, size: () => 0 })
+  createViewportProjectionCache: () => ({
+    project: (displayMessages: Message[]) =>
+      mocks.renderProjectionRows && displayMessages.length > 0
+        ? [['fixture-group', displayMessages.map((message, index) => ({ ...message, index }))]]
+        : [],
+    clear: () => {},
+    size: () => 0
+  })
 }))
 
 // Child component mocks — render with data-testid for identity/structure assertions
 vi.mock('@renderer/pages/home/Messages/MessageGroup', () => ({
-  default: vi.fn(() => <div data-testid="message-group" />)
+  default: vi.fn(({ messages = [] }: any) => (
+    <div data-testid="message-group">
+      {mocks.renderProjectionRows
+        ? messages.map((message: Message) => (
+            <div
+              key={message.id}
+              id={`message-${message.id}`}
+              data-message-id={message.id}
+              ref={(element) => {
+                if (!element) return
+                element.getBoundingClientRect = () =>
+                  ({ top: 100, bottom: 130, left: 0, right: 200, width: 200, height: 30, x: 0, y: 100 }) as DOMRect
+              }}
+            />
+          ))
+        : null}
+    </div>
+  ))
 }))
 
 vi.mock('@renderer/pages/home/Messages/Prompt', () => ({
@@ -762,8 +848,13 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // Unified navigation defaults: resident (zero reads), empty projection.
     mocks.useRealEnsure = false
     mocks.useRealPrepare = false
+    mocks.useRealTransaction = false
+    mocks.navigationBegins.length = 0
+    mocks.navigationResults.length = 0
+    mocks.ownershipEvents.length = 0
     mocks.ensureMock.mockReset()
     mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
+    mocks.renderProjectionRows = false
     mocks.loadedResident = true
     mocks.pendingWindowReads = {}
     mocks.topicMessages = [] as any
@@ -2217,7 +2308,10 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     const assistant = makeAssistant()
     mocks.topicMessages = [] as any
     mocks.ensureMock.mockImplementation(async () => ({ status: 'error' }) as any)
-    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-target' })
+    // Mount settles first: the pending identity arrives on an already-mounted
+    // controller, so this proves the mounted same-topic event entrance (which
+    // must stay a first-class nav path, never a bootstrap duplicate).
+    mocks.setPendingNavigate(null)
     mocks.clearPendingNavigate.mockClear()
     isolateNav('topic-a')
     render(
@@ -2233,6 +2327,7 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     pendingTransactionResolvers.length = 0
     mocks.dispatchMock.mockClear()
     mocks.toastErrorMock.mockClear()
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-target' })
 
     const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
     const handlerPromise: Promise<any> = handler('msg-target')
@@ -2250,7 +2345,7 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     const assistant = makeAssistant()
     mocks.topicMessages = [] as any
     mocks.ensureMock.mockImplementation(async () => ({ status: 'not-found' }) as any)
-    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-missing' })
+    mocks.setPendingNavigate(null)
     mocks.clearPendingNavigate.mockClear()
     mocks.clearPendingNavigate.mockImplementation(() => true)
     isolateNav('topic-a')
@@ -2266,7 +2361,7 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
     pendingTransactionResolvers.length = 0
     mocks.dispatchMock.mockClear()
-    mocks.toastErrorMock.mockClear()
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-missing' })
 
     const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
     const handlerPromise: Promise<any> = handler('msg-missing')
@@ -2725,7 +2820,17 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
 
     const commitProjection = (ids: string[], topicId: string) => {
       mocks.topicMessages = ids.map((id) => makeMsg(id, topicId)) as any
-      installMessageRow(TARGET)
+      if (!mocks.renderProjectionRows) {
+        installMessageRow(TARGET)
+        return
+      }
+      const container = document.getElementById('messages')
+      if (container) {
+        container.getBoundingClientRect = () =>
+          ({ top: 0, bottom: 800, left: 0, right: 800, width: 800, height: 800, x: 0, y: 0 }) as DOMRect
+        Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 2000 })
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 800 })
+      }
     }
 
     it('accepts the fetched structure only at final apply, exactly once, with full receipt fields', async () => {
@@ -2907,6 +3012,208 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
         null,
         expect.any(Number)
       )
+    })
+
+    it('cold pending bootstrap owns the matching search event: one PREPARE, one around read, final structure accepted', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      installRealRead(topic.id)
+      // Per-test trace slice: a leaked async continuation from an earlier test
+      // must never make this test's coordination claim ambiguous.
+      const beginsAt = mocks.navigationBegins.length
+      const resultsAt = mocks.navigationResults.length
+      const ownershipAt = mocks.ownershipEvents.length
+      mocks.useRealTransaction = true
+      mocks.renderProjectionRows = true
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      const structure = structuredBundle({ topicId: topic.id, branchId: null }, [
+        { id: 's1', members: [OLD, TARGET, TAIL] }
+      ])
+      let resolveRead: ((value: any) => void) | null = null
+      const read = new Promise<any>((resolve) => {
+        resolveRead = resolve
+      })
+      let requested: any = null
+      mocks.fetchMessagesWindow.mockImplementation((req: any) => {
+        requested = req
+        return read
+      })
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await waitFor(() => expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1))
+
+      const eventPromise = mocks.eventHandlers['NAVIGATE_TO_MESSAGE'](TARGET)
+      await act(async () => {})
+      expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        resolveRead?.(aroundWindowResponse(requested, [OLD, TARGET, TAIL], { structure }))
+      })
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await eventPromise
+
+      await waitFor(() => expect(mocks.acceptCommittedStructure).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1))
+      expect(mocks.ownershipEvents.slice(ownershipAt)).toEqual(['join', `return:${TARGET}`])
+      expect(mocks.navigationResults.slice(resultsAt)).toEqual([{ stage: 'prepare', result: 'prepared' }])
+      expect(mocks.fetchMessagesWindow.mock.calls.filter((call: any) => call[0]?.kind === 'around')).toHaveLength(1)
+      expect(mocks.navigationBegins.slice(beginsAt).filter((entry) => entry.targetId === TARGET)).toEqual([
+        expect.objectContaining({ stage: 'prepare', targetId: TARGET, source: 'pending' })
+      ])
+      expect(document.getElementById(`message-${TARGET}`)).not.toBeNull()
+    })
+
+    it('matching search event arrives first: bootstrap joins it without a second PREPARE or around read', async () => {
+      const topic = makeTopic('topic-a')
+      const assistant = makeAssistant()
+      installRealRead(topic.id)
+      const beginsAt = mocks.navigationBegins.length
+      const resultsAt = mocks.navigationResults.length
+      const ownershipAt = mocks.ownershipEvents.length
+      // Controlled transaction seam: the test drives the FULL settle explicitly.
+      mocks.useRealTransaction = false
+      mocks.renderProjectionRows = true
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(OLD, topic.id)] as any
+      mocks.pendingWindowReads = { [topic.id]: ['bootstrap-read'] }
+      let resolveRead: ((value: any) => void) | null = null
+      const read = new Promise<any>((resolve) => {
+        resolveRead = resolve
+      })
+      let requested: any = null
+      mocks.fetchMessagesWindow.mockImplementation((req: any) => {
+        requested = req
+        return read
+      })
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
+
+      // The event claims the exact pending identity before bootstrap's read
+      // becomes ready. Clearing read-busy must not start a duplicate PREPARE.
+      const eventPromise = mocks.eventHandlers['NAVIGATE_TO_MESSAGE'](TARGET)
+      await waitFor(() => expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1))
+      mocks.pendingWindowReads = {}
+      await act(async () => {
+        rerender(view())
+      })
+      expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+      expect(mocks.navigationBegins.slice(beginsAt).filter((entry) => entry.stage === 'prepare')).toHaveLength(0)
+
+      await act(async () => {
+        resolveRead?.(aroundWindowResponse(requested, [OLD, TARGET, TAIL]))
+      })
+      commitProjection([OLD, TARGET, TAIL], topic.id)
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() =>
+        expect(
+          mocks.navigationBegins.filter((entry) => entry.stage === 'full' && entry.targetId === TARGET)
+        ).toHaveLength(1)
+      )
+      expect(mocks.fetchMessagesWindow.mock.calls.filter((call: any) => call[0]?.kind === 'around')).toHaveLength(1)
+
+      await act(async () => {
+        // The controlled seam records its result where it resolves, so the
+        // test settles through the recorded resolver, not the raw one.
+        pendingTransactionResolvers[pendingTransactionResolvers.length - 1]?.('success')
+      })
+      await eventPromise
+
+      expect(mocks.ownershipEvents.slice(ownershipAt)).toEqual([
+        'claim',
+        `start:${TARGET}`,
+        `end:${TARGET}:true:success`,
+        `return:${TARGET}`
+      ])
+      expect(mocks.navigationResults.slice(resultsAt)).toEqual([{ stage: 'full', result: 'success' }])
+      await waitFor(() => expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1))
+      expect(mocks.navigationBegins.slice(beginsAt).filter((entry) => entry.targetId === TARGET)).toEqual([
+        expect.objectContaining({ stage: 'full', targetId: TARGET, source: 'pending' })
+      ])
+      expect(document.getElementById(`message-${TARGET}`)).not.toBeNull()
+    })
+
+    it('a retained newer pending stays retryable after the older bootstrap session completes (no cross-consumption)', async () => {
+      // A dedicated topic keeps leaked continuations of earlier tests (which
+      // reuse topic-a) out of this case's observable trace.
+      const topic = makeTopic('topic-gap')
+      const assistant = makeAssistant()
+      const NEWER = 'msg-newer'
+      const beginsAt = mocks.navigationBegins.length
+      // Controlled prepare/ensure seams: this case is about phase ownership and
+      // retryability, not the around-receipt handoff exercised above.
+      mocks.useRealPrepare = false
+      mocks.useRealEnsure = false
+      // Per-test slices: an earlier test's leaked continuation may still push a
+      // resolver or consume a pending after the shared reset.
+      const resolversAt = pendingTransactionResolvers.length
+      const clearCallsAt = mocks.clearPendingNavigate.mock.calls.length
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: TARGET })
+      mocks.topicMessages = [makeMsg(TARGET, topic.id), makeMsg(TAIL, topic.id)] as any
+      installMessageRow(TARGET)
+      const view = () => (
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+      const { rerender } = render(view())
+      await act(async () => {})
+      // The cold pending bootstrap owns exactly one PREPARE for its own target.
+      expect(pendingTransactionResolvers.length).toBe(resolversAt + 1)
+
+      // A newer search hit replaces the pending identity while that PREPARE is
+      // still in flight: the in-flight session stays the only consumer.
+      mocks.setPendingNavigate({ topicId: topic.id, messageId: NEWER })
+      await act(async () => {
+        rerender(view())
+      })
+      expect(pendingTransactionResolvers.length).toBe(resolversAt + 1)
+
+      await act(async () => {
+        pendingTransactionResolvers[resolversAt]?.('success')
+      })
+      await waitFor(() => expect(mocks.clearPendingNavigate.mock.calls.length).toBe(clearCallsAt + 1))
+      // Only the identity the session armed is consumable; the newer pending
+      // identity set afterwards is never consumed by the session predating it.
+      const clearedArgs = mocks.clearPendingNavigate.mock.calls[clearCallsAt] as unknown[] | undefined
+      expect(clearedArgs?.[0]).toEqual({ topicId: topic.id, messageId: TARGET })
+
+      // Retryable: the next ordinary effect re-decision re-arms the retained
+      // pending instead of the mount staying terminally closed for this topic.
+      mocks.topicMessages = [makeMsg(TARGET, topic.id), makeMsg(TAIL, topic.id), makeMsg(NEWER, topic.id)] as any
+      await act(async () => {
+        rerender(view())
+      })
+      await waitFor(() => expect(pendingTransactionResolvers.length).toBe(resolversAt + 2))
+      // The retried arm is a PREPARE of the retained intent, never a second
+      // FULL transaction for the identity the older session already consumed.
+      expect(mocks.navigationBegins.slice(beginsAt).filter((entry) => entry.stage === 'full')).toHaveLength(0)
+      expect(mocks.clearPendingNavigate.mock.calls.length).toBe(clearCallsAt + 1)
+      expect(mocks.clearPendingNavigate).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: NEWER }))
     })
   })
 })

@@ -48,10 +48,12 @@ import {
   computeRestoreMessageScrollTop,
   findFoldedMarkerElement,
   handlePendingNavigateEvent,
+  isSamePendingNavigateTarget,
   type MessageNavigationIntent,
   type MessageNavigationPrepareStatus,
   type MessageNavigationResult,
   type MessageNavigationScrollOutcome,
+  type PendingNavigationOwner,
   prepareMessageNavigationTarget,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
@@ -1676,6 +1678,11 @@ const Messages = ({
   }, [topic.id, viewportState.topicGeneration])
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
+  // One exact-target owner coordinates the pending bootstrap and its search event.
+  // Runtime-only and controller-local: no persisted flag, global registry, or clock.
+  const pendingNavigationOwnerRef = useRef<
+    (PendingNavigationOwner & { transitionEpoch: number; sessionEpoch?: number }) | null
+  >(null)
   // S3.1 Blocker 4 correction: onFirstUpdateFiredRef must be declared before
   // useTopicTransition so the resetOnFirstUpdate callback can reference it.
   const onFirstUpdateFiredRef = useRef(false)
@@ -2667,6 +2674,7 @@ const Messages = ({
     viewportDispatch,
     resetBootstrapPhase: () => {
       bootstrapPhaseRef.current = 'idle'
+      pendingNavigationOwnerRef.current = null
       // A topic change invalidates any armed positioning transition: tear it
       // down (release exactly once) and fail visible so the new topic never
       // starts hidden. The bootstrap effect below arms a fresh transition.
@@ -5027,23 +5035,54 @@ const Messages = ({
         }
       ),
       EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
-        // S3.1: Capture epoch for stale-completion rejection. The viewport
-        // token invalidation from topic/reset already protects navigate(),
-        // but this adds defense in depth for the post-navigation persistence.
+        // Capture epoch for stale-completion rejection and ownership release.
         const navEpoch = transitionEpochRef.current
+        if (unmountedRef.current || transitionEpochRef.current !== navEpoch || topicIdRef.current !== topic.id) {
+          return
+        }
+        let eventOwner: (PendingNavigationOwner & { transitionEpoch: number }) | null = null
         const { source, result } = await handlePendingNavigateEvent(topic.id, messageId, {
           getPending: getPendingNavigate,
-          // S3.1 Blocker 1 correction: epoch-guard the clear so a stale
-          // matched event completion cannot consume a current-transition
-          // pending identity.
+          isPendingInFlight: (pending) => {
+            const owner = pendingNavigationOwnerRef.current
+            return owner !== null && owner.transitionEpoch === navEpoch && isSamePendingNavigateTarget(owner, pending)
+          },
+          onStart: (target) => {
+            const previous = pendingNavigationOwnerRef.current
+            if (
+              previous?.source === 'bootstrap' &&
+              previous.transitionEpoch === navEpoch &&
+              previous.sessionEpoch !== undefined &&
+              !isSamePendingNavigateTarget(previous, target)
+            ) {
+              // A different explicit target supersedes bootstrap's fetch-hold.
+              failVisibleTransition(previous.sessionEpoch)
+            }
+            eventOwner = { ...target, source: 'event', transitionEpoch: navEpoch }
+            pendingNavigationOwnerRef.current = eventOwner
+            bootstrapPhaseRef.current = 'pending-in-flight'
+          },
+          // Epoch-guard the clear so a stale matched event cannot consume a
+          // current-transition pending identity.
           clearPending: (expected) => {
             if (transitionEpochRef.current !== navEpoch) return false
             return clearPendingNavigate(expected)
           },
           navigate,
-          onDone: () => {
+          onDone: () => undefined,
+          onEnd: (consumedPending, navigationResult) => {
+            if (!eventOwner || pendingNavigationOwnerRef.current !== eventOwner) return
+            pendingNavigationOwnerRef.current = null
             if (transitionEpochRef.current !== navEpoch) return
-            bootstrapPhaseRef.current = 'done'
+            // A completed explicit event owns this mount cycle. A cancelled or
+            // failed event leaves a still-pending target retryable by bootstrap.
+            bootstrapPhaseRef.current =
+              consumedPending ||
+              navigationResult === 'success' ||
+              navigationResult === 'not-found' ||
+              getPendingNavigate() === null
+                ? 'done'
+                : 'idle'
           }
         })
         if (transitionEpochRef.current !== navEpoch) {
@@ -5062,6 +5101,7 @@ const Messages = ({
     dispatch,
     scrollToBottom,
     autoScrollToBottom,
+    failVisibleTransition,
     navigate,
     savePosition,
     topic,
@@ -5076,11 +5116,12 @@ const Messages = ({
    * Only one transaction is started per mount cycle.
    */
   useEffect(() => {
+    const pendingAtEffect = getPendingNavigate()
     const decision = resolveBootstrapDecision({
       phase: bootstrapPhaseRef.current,
       isTopicReadBusy,
       topicId: topic.id,
-      pending: getPendingNavigate(),
+      pending: pendingAtEffect,
       savedPosition: savedRestoreHandledRef.current ? null : getSavedPosition(),
       savedRestoreHandled: savedRestoreHandledRef.current
     })
@@ -5091,11 +5132,18 @@ const Messages = ({
     }
 
     if (decision.action === 'pending') {
-      const pending = getPendingNavigate()!
+      const pending = pendingAtEffect!
+      const activeOwner = pendingNavigationOwnerRef.current
+      if (
+        activeOwner?.source === 'event' &&
+        activeOwner.transitionEpoch === transitionEpochRef.current &&
+        isSamePendingNavigateTarget(activeOwner, pending)
+      ) {
+        return
+      }
       bootstrapPhaseRef.current = 'pending-in-flight'
-      // S3.1 Blocker 1 correction: capture the transition epoch at bootstrap
-      // start. If the topic changes before the async navigation completes (even
-      // to the same topic ID — A→B→A), the stale completion is rejected.
+      // Capture the transition epoch at bootstrap start. If the topic changes
+      // before async navigation completes (A→B→A included), reject completion.
       const bootstrapEpoch = transitionEpochRef.current
       // Atomic bootstrap: hide the target window until the pre-paint layout
       // reveal applies the first scroll. The transaction owns its own scroll
@@ -5111,118 +5159,170 @@ const Messages = ({
       // navigation completes (same session, see below), so the pre-paint
       // attempt cannot consume it on the stale projection.
       const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, pendingRouteAtArm)
-      void prepareNavigationTarget(decision.intent).then(
-        async (result) => {
-          if (controller.currentEpoch !== bootstrapRestoreEpoch) return
-          if (transitionEpochRef.current !== bootstrapEpoch) {
-            failVisibleTransition(bootstrapRestoreEpoch)
-            return
+      const bootstrapOwner: PendingNavigationOwner & { transitionEpoch: number; sessionEpoch: number } = {
+        ...pending,
+        source: 'bootstrap',
+        transitionEpoch: bootstrapEpoch,
+        sessionEpoch: bootstrapRestoreEpoch
+      }
+      pendingNavigationOwnerRef.current = bootstrapOwner
+      // Mount-level phase terminal for THIS bootstrap session. The phase is
+      // mount-scoped while the session is not, so a session that ends without
+      // consuming its armed pending must not close the mount while an
+      // unconsumed pending identity is still retained (a newer exact target
+      // included) — otherwise the retained intent can never be re-decided.
+      // Only the still-installed owner may release: a newer owner (event or
+      // bootstrap) owns both the owner slot and the phase. A released
+      // transition epoch already reset the phase, so never write across it.
+      const finishBootstrapPhase = (currencyLost: boolean): void => {
+        if (pendingNavigationOwnerRef.current !== bootstrapOwner) return
+        pendingNavigationOwnerRef.current = null
+        if (transitionEpochRef.current !== bootstrapEpoch) return
+        const livePending = getPendingNavigate()
+        const retainedPending = livePending !== null && livePending.topicId === pending.topicId ? livePending : null
+        const newerIntent = retainedPending !== null && !isSamePendingNavigateTarget(retainedPending, pending)
+        // Same-target failure/cancel keeps its existing terminal (no retry);
+        // a lost currency or a newer retained target stays retryable.
+        bootstrapPhaseRef.current = retainedPending !== null && (currencyLost || newerIntent) ? 'idle' : 'done'
+      }
+      void prepareNavigationTarget(decision.intent)
+        .then(
+          async (result) => {
+            // Owner loss: a newer owner (event or bootstrap) is in charge of
+            // the phase, so this session releases nothing here.
+            if (pendingNavigationOwnerRef.current !== bootstrapOwner) return
+            if (controller.currentEpoch !== bootstrapRestoreEpoch) {
+              // A newer session replaced ours in the same transition: the
+              // retained pending (if any) stays retryable, never closed.
+              finishBootstrapPhase(true)
+              return
+            }
+            if (transitionEpochRef.current !== bootstrapEpoch) {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              finishBootstrapPhase(true)
+              return
+            }
+            // Same-session plan delivery: the prepare finished (it commits the
+            // target projection) and this session is still current, so
+            // move fetch-hold → positioning and deliver the plan. Never a new
+            // epoch; a stale refusal fails visible without releasing a newer
+            // owner (failVisible is epoch-gated inert for them).
+            if (!commitBootstrapPositioningPlan(bootstrapRestoreEpoch, pendingPlan, topic.id, pendingRouteAtArm)) {
+              if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) {
+                finishBootstrapPhase(true)
+                return
+              }
+              // Same-epoch adoption: the route pipeline adopted this fetch-hold
+              // and drove it past fetch-hold itself — never release another
+              // driver's session; its own currency gates own the outcome.
+              if (controller.currentPhase !== 'fetch-hold') {
+                finishBootstrapPhase(false)
+                return
+              }
+              failVisibleTransition(bootstrapRestoreEpoch)
+              finishBootstrapPhase(false)
+              return
+            }
+            // Placement evidence (never trust the 'success' string alone): only
+            // the current transaction's actually placed target may commit. The
+            // shared helper records outcome + phase together (exactly-once with
+            // the pre-paint layout attempt); unplaced/refused/terminal fails
+            // visible preserving the prior lawful snapshot.
+            const pendingTransition = transitionPlanRef.current
+            if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
+              // First position belongs to the pre-paint layout gate, exactly-once.
+              // This completion must never attempt the plan itself: a direct
+              // attempt records the outcome before the target projection commit
+              // renders, so the layout pass would then exit on `outcome !== null`
+              // and complete the placement on a projection that is not the
+              // target's yet (the A->B->A stale-window reveal). Await the layout
+              // attempt instead - resolved by the same plan ack (a real event:
+              // pre-paint placement, or supersession/teardown settling it
+              // unobserved), then re-gate currency exactly as before.
+              const pendingRoute = pendingTransition.routeId
+              const stillTarget = (): boolean =>
+                topicIdRef.current === topic.id &&
+                routeRef.current === pendingRoute &&
+                !unmountedRef.current &&
+                controller.currentEpoch === bootstrapRestoreEpoch
+              const placementObserved = await awaitPlanPlacement(bootstrapRestoreEpoch, stillTarget)
+              if (!placementObserved) {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                finishBootstrapPhase(false)
+                return
+              }
+              if (!stillTarget()) {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                finishBootstrapPhase(false)
+                return
+              }
+            } else if ((controller.currentPhase as string) !== 'aligned') {
+              const phaseNow = controller.currentPhase as string
+              if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+                if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) {
+                  finishBootstrapPhase(true)
+                  return
+                }
+                failVisibleTransition(bootstrapRestoreEpoch)
+                finishBootstrapPhase(false)
+                return
+              }
+            }
+            if (result !== 'cancelled') {
+              // Positive placement required: the attempt above (or the pre-paint
+              // layout attempt it deduplicates) left aligned/searching. A success
+              // string with an unplaced target never forces placed. Final empty
+              // windows never commit (fail-visible preserves the lawful snapshot).
+              const phaseNow = controller.currentPhase as string
+              if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                finishBootstrapPhase(false)
+                return
+              }
+              if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                finishBootstrapPhase(false)
+                return
+              }
+              if (
+                topicIdRef.current !== topic.id ||
+                !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+                unmountedRef.current
+              ) {
+                failVisibleTransition(bootstrapRestoreEpoch)
+                // A session that lost its currency leaves the retained pending
+                // retryable; a withdrawing mount keeps the existing terminal.
+                finishBootstrapPhase(!controller.isSessionCurrent(bootstrapRestoreEpoch))
+                return
+              }
+              clearPendingNavigate(pending)
+              finishBootstrapPhase(false)
+              controller.revealed(bootstrapRestoreEpoch)
+              notifyViewport()
+              // Stable completion commit: the final visible viewport is the
+              // route's stable snapshot (no user input required). Gated by the
+              // same epoch; advances displayed provenance.
+              commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
+            } else {
+              finishBootstrapPhase(false)
+              // Cancelled transactions position nothing: terminate visibly
+              // without committing (release exactly once).
+              failVisibleTransition(bootstrapRestoreEpoch)
+            }
+          },
+          (err: unknown) => {
+            // Rethrow: the rejection bypass is never swallowed here.
+            throw err
           }
-          // Same-session plan delivery: the prepare finished (it commits the
-          // target projection) and this session is still current, so
-          // move fetch-hold → positioning and deliver the plan. Never a new
-          // epoch; a stale refusal fails visible without releasing a newer
-          // owner (failVisible is epoch-gated inert for them).
-          if (!commitBootstrapPositioningPlan(bootstrapRestoreEpoch, pendingPlan, topic.id, pendingRouteAtArm)) {
-            if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
-            // Same-epoch adoption: the route pipeline adopted this fetch-hold
-            // and drove it past fetch-hold itself — never release another
-            // driver's session; its own currency gates own the outcome.
-            if (controller.currentPhase !== 'fetch-hold') {
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            failVisibleTransition(bootstrapRestoreEpoch)
-            bootstrapPhaseRef.current = 'done'
-            return
-          }
-          // Placement evidence (never trust the 'success' string alone): only
-          // the current transaction's actually placed target may commit. The
-          // shared helper records outcome + phase together (exactly-once with
-          // the pre-paint layout attempt); unplaced/refused/terminal fails
-          // visible preserving the prior lawful snapshot.
-          const pendingTransition = transitionPlanRef.current
-          if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-            // First position belongs to the pre-paint layout gate, exactly-once.
-            // This completion must never attempt the plan itself: a direct
-            // attempt records the outcome before the target projection commit
-            // renders, so the layout pass would then exit on `outcome !== null`
-            // and complete the placement on a projection that is not the
-            // target's yet (the A->B->A stale-window reveal). Await the layout
-            // attempt instead - resolved by the same plan ack (a real event:
-            // pre-paint placement, or supersession/teardown settling it
-            // unobserved), then re-gate currency exactly as before.
-            const pendingRoute = pendingTransition.routeId
-            const stillTarget = (): boolean =>
-              topicIdRef.current === topic.id &&
-              routeRef.current === pendingRoute &&
-              !unmountedRef.current &&
-              controller.currentEpoch === bootstrapRestoreEpoch
-            const placementObserved = await awaitPlanPlacement(bootstrapRestoreEpoch, stillTarget)
-            if (!placementObserved) {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            if (!stillTarget()) {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-          } else if ((controller.currentPhase as string) !== 'aligned') {
-            const phaseNow = controller.currentPhase as string
-            if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
-              if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-          }
-          if (result !== 'cancelled') {
-            // Positive placement required: the attempt above (or the pre-paint
-            // layout attempt it deduplicates) left aligned/searching. A success
-            // string with an unplaced target never forces placed. Final empty
-            // windows never commit (fail-visible preserves the lawful snapshot).
-            const phaseNow = controller.currentPhase as string
-            if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            if (
-              topicIdRef.current !== topic.id ||
-              !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
-              unmountedRef.current
-            ) {
-              failVisibleTransition(bootstrapRestoreEpoch)
-              bootstrapPhaseRef.current = 'done'
-              return
-            }
-            clearPendingNavigate(pending)
-            bootstrapPhaseRef.current = 'done'
-            controller.revealed(bootstrapRestoreEpoch)
-            notifyViewport()
-            // Stable completion commit: the final visible viewport is the
-            // route's stable snapshot (no user input required). Gated by the
-            // same epoch; advances displayed provenance.
-            commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
-          } else {
-            bootstrapPhaseRef.current = 'done'
-            // Cancelled transactions position nothing: terminate visibly
-            // without committing (release exactly once).
-            failVisibleTransition(bootstrapRestoreEpoch)
-          }
-        },
-        (err: unknown) => {
-          // Rethrow: the rejection bypass is never swallowed here.
-          throw err
-        }
-      )
+        )
+        .finally(() => {
+          // Safety net only: every body exit releases through
+          // `finishBootstrapPhase` (an owner loss leaves the newer owner in
+          // charge and releases nothing here). A session that ended without
+          // consuming its pending must not close the mount while that pending
+          // identity is still retained.
+          finishBootstrapPhase(true)
+        })
       return
     }
 
