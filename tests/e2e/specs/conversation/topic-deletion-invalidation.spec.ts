@@ -180,7 +180,9 @@ async function assertProjectionPresent(page: Page, topic: SeededTopic): Promise<
   expect(projection.messageEntities.every(Boolean)).toBe(true)
   expect(projection.blockIds).toEqual(topic.blockIds)
   expect(projection.blockEntities.every(Boolean)).toBe(true)
-  expect(projection.domMessageIds).toEqual(topic.messageIds.toReversed())
+  // Normal document flow (`flex-direction: column`): the flow builder reverses
+  // once, so DOM order is oldest-first, identical to the projection order.
+  expect(projection.domMessageIds).toEqual(topic.messageIds)
 }
 
 async function assertProjectionInvalidated(page: Page, topic: SeededTopic): Promise<void> {
