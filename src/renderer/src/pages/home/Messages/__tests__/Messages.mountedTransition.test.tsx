@@ -17,6 +17,7 @@
  */
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import type { HistoryReferenceMeta } from '@shared/chatDb'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import type { RefObject } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -157,6 +158,7 @@ const mocks = vi.hoisted(() => {
     // Target-topic window-read busy state: an explicit pending identity list
     // means a read is in flight for that topic (the reducer slice shape).
     pendingWindowReads: {} as Record<string, unknown[]>,
+    historyReferenceByTopic: {} as Record<string, HistoryReferenceMeta>,
 
     // Unified navigation: controllable ensure + observable dispatches/toast.
     ensureMock: vi.fn(async () => ({ status: 'resident' }) as any),
@@ -377,7 +379,12 @@ vi.mock('@renderer/services/MessagesService', () => ({
 vi.mock('@renderer/store', () => ({
   default: {
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
+      messages: {
+        messageIdsByTopic: {},
+        entities: {},
+        pendingWindowReadsByTopic: mocks.pendingWindowReads,
+        historyReferenceByTopic: mocks.historyReferenceByTopic
+      },
       editMode: { enabled: false },
       // Production RootState always carries the resident-registry slice (its
       // initialState is { entries: {} }); the real selector then reads
@@ -391,13 +398,23 @@ vi.mock('@renderer/store', () => ({
   // this slice); the literals read the live knob so tests can inject a read.
   useAppSelector: (selector: any) =>
     selector({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
+      messages: {
+        messageIdsByTopic: {},
+        entities: {},
+        pendingWindowReadsByTopic: mocks.pendingWindowReads,
+        historyReferenceByTopic: mocks.historyReferenceByTopic
+      },
       editMode: { enabled: false },
       residentRegistry: { entries: {} }
     } as any),
   useAppStore: () => ({
     getState: vi.fn(() => ({
-      messages: { messageIdsByTopic: {}, entities: {}, pendingWindowReadsByTopic: mocks.pendingWindowReads },
+      messages: {
+        messageIdsByTopic: {},
+        entities: {},
+        pendingWindowReadsByTopic: mocks.pendingWindowReads,
+        historyReferenceByTopic: mocks.historyReferenceByTopic
+      },
       editMode: { enabled: false },
       // Same production-shape conformance as the default store mock above.
       residentRegistry: { entries: {} }
@@ -857,6 +874,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     mocks.renderProjectionRows = false
     mocks.loadedResident = true
     mocks.pendingWindowReads = {}
+    mocks.historyReferenceByTopic = {}
     mocks.topicMessages = [] as any
     cleanupMessageRows()
     ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
@@ -2451,6 +2469,7 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
   beforeEach(() => {
     mocks.deferredReadImpl.mockReset()
     mocks.deferredReadImpl.mockImplementation(async () => undefined)
+    mocks.historyReferenceByTopic = {}
   })
 
   /**
@@ -2491,9 +2510,15 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
   function validWindowResponse(
     req: any,
     ids: string[],
-    opts: { blocks?: unknown[]; mutableMessageIds?: string[]; reference?: unknown; structure?: unknown } = {}
+    opts: {
+      blocks?: unknown[]
+      mutableMessageIds?: string[]
+      reference?: unknown
+      structure?: unknown
+      messages?: Array<{ id: string; topicId?: string }>
+    } = {}
   ) {
-    const messages = ids.map((id) => ({ id }))
+    const messages = opts.messages ?? ids.map((id) => ({ id }))
     return {
       messages,
       blocks: opts.blocks ?? [],
@@ -2665,6 +2690,146 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
     )
   })
 
+  it('reveals a mixed reference receipt on the current route and keeps its inserted suffix visible after a rename re-read', async () => {
+    const source = makeTopic('topic-source')
+    const target = makeTopic('topic-target')
+    const assistant = makeAssistant()
+    const state = controlledState(target.id)
+    const receipts: any[] = []
+    installRealDeferredRead(state, [], receipts)
+    const previousRenderProjectionRows = mocks.renderProjectionRows
+    mocks.renderProjectionRows = true
+
+    const reference: HistoryReferenceMeta = {
+      sourceTopicId: source.id,
+      sourceBranchId: null,
+      anchorMessageId: 'source-new',
+      sourceName: source.name,
+      status: 'available',
+      boundaryMessageId: 'source-new'
+    }
+    const chronological = [
+      makeMsg('source-old', source.id),
+      makeMsg('source-new', source.id),
+      makeMsg('target-old', target.id),
+      makeMsg('target-new', target.id)
+    ]
+    const responseFor = (req: any, rows: Message[], ref: HistoryReferenceMeta) =>
+      validWindowResponse(
+        req,
+        rows.map((row) => row.id),
+        {
+          messages: rows.map((row) => ({ id: row.id, topicId: row.topicId })),
+          mutableMessageIds: rows.filter((row) => row.topicId === target.id).map((row) => row.id),
+          reference: ref,
+          structure: structuredBundle(req, [{ id: 'mixed-reference', members: rows.map((row) => row.id) }])
+        }
+      )
+    mocks.fetchMessagesWindow.mockImplementation(async (req: any) => responseFor(req, chronological, reference))
+
+    const previousApi = (window as any).api
+    const previousCapture = mocks.captureSnapshot.getMockImplementation()
+    let invalidate: ((event: { targetTopicIds: string[] }) => void) | undefined
+    ;(window as any).api = {
+      chatDb: {
+        onHistoryReferenceInvalidated: (callback: typeof invalidate) => {
+          invalidate = callback
+          return vi.fn()
+        }
+      }
+    }
+    const view = (topic: Topic) => (
+      <Messages
+        assistant={assistant}
+        topic={topic}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    const rebasesForTarget = () =>
+      mocks.dispatchMock.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (action: any) => action?.type === 'newMessages/rebaseRouteMessages' && action?.payload?.topicId === target.id
+        )
+
+    try {
+      const { rerender } = render(view(source))
+      await act(async () => {})
+      mocks.simulatePassiveKeyUpdate(`topic-${source.id}`)
+      mocks.captureSnapshot.mockReturnValue({
+        scrollTop: 0,
+        anchorId: null,
+        messageId: null,
+        intraRowOffset: null,
+        rawScrollTop: 0,
+        isAtBottom: true
+      } as any)
+      ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
+      mocks.fetchMessagesWindow.mockClear()
+      mocks.dispatchMock.mockClear()
+      mocks.commitStableViewport.mockClear()
+      await act(async () => {
+        rerender(view(target))
+      })
+      mocks.simulatePassiveKeyUpdate(`topic-${target.id}`)
+      await waitFor(() => expect(rebasesForTarget()).toHaveLength(1))
+      await waitFor(() =>
+        expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('positioning')
+      )
+      // The exact mixed window is attached but still hidden until its typed
+      // Main reference receipt authorizes the foreign prefix.
+      for (const row of chronological) {
+        expect(document.getElementById(`message-${row.id}`)).not.toBeNull()
+      }
+      const firstPayload = rebasesForTarget()[0].payload
+      expect(firstPayload.reference).toEqual(reference)
+      mocks.historyReferenceByTopic[target.id] = firstPayload.reference
+      await act(async () => {
+        rerender(view(target))
+      })
+      await waitFor(() =>
+        expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('revealed')
+      )
+      await waitFor(() => expect(mocks.commitStableViewport).toHaveBeenCalledTimes(1))
+
+      // A source rename invalidates the active target. The same-route re-read
+      // republishes the reference and an inserted target-owned suffix.
+      const renamedReference: HistoryReferenceMeta = { ...reference, sourceName: 'Renamed source' }
+      const withSuffix = [...chronological, makeMsg('target-inserted', target.id)]
+      mocks.fetchMessagesWindow.mockImplementation(async (req: any) => responseFor(req, withSuffix, renamedReference))
+      await act(async () => {
+        expect(invalidate).toBeTypeOf('function')
+        invalidate?.({ targetTopicIds: [target.id] })
+      })
+      await waitFor(() => expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(rebasesForTarget()).toHaveLength(2))
+      await waitFor(() => expect(document.getElementById('message-target-inserted')).not.toBeNull())
+      await waitFor(() =>
+        expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('revealed')
+      )
+      const secondPayload = rebasesForTarget()[1].payload
+      expect(secondPayload.reference).toEqual(renamedReference)
+      mocks.historyReferenceByTopic[target.id] = secondPayload.reference
+      await act(async () => {
+        rerender(view(target))
+      })
+      expect(mocks.acceptCommittedStructure).toHaveBeenLastCalledWith(
+        target.id,
+        null,
+        expect.any(Object),
+        renamedReference,
+        receipts.find((receipt) => receipt?.topicId === target.id)?.routeGeneration
+      )
+      expect(document.getElementById('messages')?.getAttribute('data-viewport-phase')).toBe('revealed')
+      expect(document.getElementById('message-target-inserted')).not.toBeNull()
+    } finally {
+      ;(window as any).api = previousApi
+      mocks.captureSnapshot.mockImplementation(previousCapture!)
+      mocks.renderProjectionRows = previousRenderProjectionRows
+    }
+  })
+
   it('read pending across a topic switch commits nothing for the old response (no old data)', async () => {
     const topicA = makeTopic('topic-a')
     const topicB = makeTopic('topic-b')
@@ -2776,6 +2941,7 @@ describe('deferred top refresh — real mounted proof (production receipt/commit
       mocks.topicMessages = [] as any
       mocks.loadedResident = true
       mocks.pendingWindowReads = {}
+      mocks.historyReferenceByTopic = {}
     })
 
     const mergedFor = (topicId: string) =>

@@ -1539,6 +1539,9 @@ const Messages = ({
   // (`undefined` stays at the API boundary).
   const loadedMessages = useLoadedTopicMessages(topic.id)
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
+  // The route pipeline consumes the same topic-scoped Main receipt that the
+  // content projection uses for reference dividers.
+  const historyReference = useAppSelector((state) => selectHistoryReferenceForTopic(state, topic.id))
   const isTopicReadBusy = useAppSelector((state) => selectIsTopicWindowReadBusy(state, topic.id))
   const { displayCount, createTopicBranchByAnchor, createBranch, createReferencedTopicByAnchor } =
     useMessageOperations(topic)
@@ -2063,7 +2066,11 @@ const Messages = ({
       if (controller.currentPhase !== 'fetch-hold') return false
       if (unmountedRef.current) return false
       if (topicIdRef.current !== topicIdAtStart || routeRef.current !== routeAtStart) return false
-      if (!controller.appliedWindow(epoch)) return false
+      const window = viewportStateRef.current.window
+      if (!window || !Array.isArray(window.displayMessages)) return false
+      const windowId = `${String(window.oldestMessageId ?? '')}::${String(window.newestMessageId ?? '')}::${window.displayMessages.length}`
+      if (!controller.applyTransitionWindow(epoch, { topicId: topicIdAtStart, route: routeAtStart }, windowId))
+        return false
       transitionPlanRef.current = { topicId: topicIdAtStart, routeId: routeAtStart, epoch, plan, outcome: null }
       // Same observable plan delivery as the atomic route-switch entry:
       // supersede any previous ack, arm this epoch's placement ack, and bump
@@ -2401,15 +2408,17 @@ const Messages = ({
       return
     }
     // Target-projection readiness (atomic-visibility boundary): only this
-    // session's OWN committed + rendered projection may place and reveal. A
-    // projection that is still being read, not committed yet, or proven only
-    // by a previous commit's state stays hidden with the plan unconsumed — the
-    // projection/read commits re-run this layout pass through the deps below
-    // (no timer, no poll loop).
+    // session's exact committed window may place and reveal - either its own
+    // target rows or the Main-attested canonical reference prefix plus target
+    // suffix. A projection still being read, not committed yet, or proven only
+    // by a previous commit stays hidden with the plan unconsumed; the
+    // projection/read/reference commits re-run this pass through the deps
+    // below (no timer, no poll loop).
     const readiness = resolveTargetProjectionReadiness({
       pending,
       rendered: controller.renderedProvenance,
       window: viewportState.window,
+      reference: historyReference,
       loadedProjection: loadedMessages,
       windowReadBusy: isTopicReadBusy
     })
@@ -2460,7 +2469,7 @@ const Messages = ({
     // release may follow until the requested identity is resident/aligned/
     // quiet (divider search coordinator owns that lifecycle). `refused`
     // (stale/wrong-phase) never touches the newer session: fail-visible is
-    // epoch-gated and stays inert for it.
+    // epoch-gated and stays inert for them.
     let attempt: ViewportFirstPositionOutcome | 'refused'
     try {
       attempt = attemptFirstPosition(controller, pending, live)
@@ -2538,8 +2547,9 @@ const Messages = ({
     // Projection-readiness retry (atomic-visibility boundary): a waiting pass
     // (see `resolveTargetProjectionReadiness`) must re-run when the target
     // projection actually commits — the projected window, the topic's loaded
-    // projection, and the in-flight window-read fact are therefore deps, not
-    // timers. Each of those is a real commit/read event of the same session.
+    // projection, the in-flight window-read fact, and the Main reference receipt
+    // are therefore deps, not timers. Each is a real commit/read event of the
+    // same session.
   }, [
     controller,
     controller.currentPhase,
@@ -2549,6 +2559,7 @@ const Messages = ({
     viewportState.window,
     loadedMessages,
     isTopicReadBusy,
+    historyReference,
     failVisibleTransition,
     scrollContainerRef,
     notifyViewport,

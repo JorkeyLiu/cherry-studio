@@ -13,6 +13,7 @@
  *   current session is `positioning` with an unrecorded outcome, so an async
  *   completion can never falsely stable/reveal before positive placement.
  */
+import type { HistoryReferenceChainLayer, HistoryReferenceMeta } from '@shared/chatDb'
 import { render } from '@testing-library/react'
 import { useLayoutEffect } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -21,7 +22,8 @@ import {
   attemptFirstPosition,
   type FirstPlacementPending,
   isFirstPlacementAwaitingAttempt,
-  resolveTargetProjectionReadiness
+  resolveTargetProjectionReadiness,
+  type TargetProjectionWindow
 } from '../routeFirstPlacement'
 import { type RenderedProvenance, RouteViewportController } from '../routeViewportController'
 
@@ -334,8 +336,9 @@ describe('routeFirstPlacement delivery', () => {
     // of consuming the exactly-once outcome on the stale projection.
     expect(isFirstPlacementAwaitingAttempt(c, null, fetchEpoch)).toBe(false)
     // commitBootstrapPositioningPlan shape: same epoch, still fetch-hold →
-    // appliedWindow moves to positioning; only then is the plan delivered.
-    expect(c.appliedWindow(fetchEpoch)).toBe(true)
+    // applyTransitionWindow binds the committed window identity and moves to
+    // positioning; only then is the plan delivered.
+    expect(c.applyTransitionWindow(fetchEpoch, { topicId: 't1', route: null }, 'm1::m3::3')).toBe(true)
     expect(c.currentPhase).toBe('positioning')
     const pending: FirstPlacementPending = {
       topicId: 't1',
@@ -360,7 +363,7 @@ describe('routeFirstPlacement delivery', () => {
     expect(newer).toBeGreaterThan(staleFetch)
     // Same-session commit for the stale epoch refuses: no dispatch, and the
     // newer owner is undisturbed.
-    expect(c.appliedWindow(staleFetch)).toBe(false)
+    expect(c.applyTransitionWindow(staleFetch, { topicId: 't1', route: null }, 'm1::m3::3')).toBe(false)
     expect(c.currentEpoch).toBe(newer)
     expect(c.currentPhase).toBe('fetch-hold')
     const stalePending: FirstPlacementPending = {
@@ -404,18 +407,28 @@ describe('routeFirstPlacement delivery', () => {
     Object.defineProperty(container, 'clientHeight', { configurable: true, get: () => geometry.clientHeight })
   }
 
+  const projectionWindow = (displayMessages: Array<{ id: string; topicId?: string }>) => ({
+    oldestMessageId: displayMessages.at(-1)?.id,
+    newestMessageId: displayMessages[0]?.id,
+    displayMessages
+  })
+
+  const windowIdentity = (window: TargetProjectionWindow): string =>
+    `${String(window.oldestMessageId ?? '')}::${String(window.newestMessageId ?? '')}::${window.displayMessages.length}`
+
   /** Projection facts a render commit exposes to the pre-paint layout pass. */
   interface ProjectionCommit {
-    window: { displayMessages: { id: string }[] } | null
+    window: ReturnType<typeof projectionWindow> | null
     loadedProjection: readonly unknown[] | undefined
     windowReadBusy: boolean
+    reference?: HistoryReferenceMeta | null
   }
 
   /**
    * Production-shaped pre-paint delivery: the real readiness gate, the real
    * exactly-once attempt, the real controller, and the real reveal. Deps are
-   * the commit facts (window / loaded projection / read busy) plus the
-   * controller's phase/epoch — never a timer.
+   * the commit facts (window / loaded projection / read busy / reference) plus
+   * the controller's phase/epoch — never a timer.
    */
   const ReadinessDeliveryHarness = ({
     controller,
@@ -423,6 +436,7 @@ describe('routeFirstPlacement delivery', () => {
     pendingHost,
     seq,
     projection,
+    reference,
     events
   }: {
     controller: RouteViewportController
@@ -430,6 +444,7 @@ describe('routeFirstPlacement delivery', () => {
     pendingHost: { current: FirstPlacementPending | null }
     seq: number
     projection: ProjectionCommit
+    reference?: HistoryReferenceMeta | null
     events: string[]
   }): null => {
     void seq
@@ -444,6 +459,7 @@ describe('routeFirstPlacement delivery', () => {
         pending,
         rendered: controller.renderedProvenance,
         window: projection.window,
+        reference: projection.reference ?? reference,
         loadedProjection: projection.loadedProjection,
         windowReadBusy: projection.windowReadBusy
       })
@@ -466,17 +482,20 @@ describe('routeFirstPlacement delivery', () => {
       seq,
       projection.window,
       projection.loadedProjection,
-      projection.windowReadBusy
+      projection.windowReadBusy,
+      projection.reference,
+      reference
     ])
     return null
   }
 
   describe('target-projection readiness (atomic-visibility boundary)', () => {
     const session = { topicId: 'A', routeId: null, epoch: 7 }
-    const rendered: Pick<RenderedProvenance, 'epoch' | 'topicId' | 'routeId'> = {
+    const rendered: Pick<RenderedProvenance, 'epoch' | 'topicId' | 'routeId' | 'windowId'> = {
       epoch: 7,
       topicId: 'A',
-      routeId: null
+      routeId: null,
+      windowId: 'm1::m2::2'
     }
     const rows = [
       { id: 'm2', topicId: 'A' },
@@ -488,15 +507,22 @@ describe('routeFirstPlacement delivery', () => {
         input: Partial<Omit<Parameters<typeof resolveTargetProjectionReadiness>[0], 'pending' | 'rendered'>> & {
           rendered?: typeof rendered | null
         }
-      ): string =>
-        resolveTargetProjectionReadiness({
+      ): string => {
+        const window = input.window === undefined ? projectionWindow(rows) : input.window
+        return resolveTargetProjectionReadiness({
           pending: session,
-          rendered,
-          window: { displayMessages: rows },
-          loadedProjection: rows,
-          windowReadBusy: false,
-          ...input
+          rendered:
+            input.rendered === undefined
+              ? window
+                ? { ...rendered, windowId: windowIdentity(window) }
+                : rendered
+              : input.rendered,
+          window,
+          reference: input.reference,
+          loadedProjection: input.loadedProjection === undefined ? rows : input.loadedProjection,
+          windowReadBusy: input.windowReadBusy ?? false
         })
+      }
 
       // Not-yet-observed target projection.
       expect(readiness({ window: null })).toBe('waiting')
@@ -512,15 +538,167 @@ describe('routeFirstPlacement delivery', () => {
       // Rows owned by the OUTGOING topic are the stale pre-commit window: a
       // topic return keeps the old window in viewportState until the target
       // window lands, whatever its length.
-      expect(readiness({ window: { displayMessages: [{ id: 'm9', topicId: 'B' }] } })).toBe('waiting')
-      expect(readiness({ window: { displayMessages: [{ id: 'm9' }] } })).toBe('waiting')
+      expect(readiness({ window: projectionWindow([{ id: 'm9', topicId: 'B' }]) })).toBe('waiting')
+      expect(readiness({ window: projectionWindow([{ id: 'm9' }]) })).toBe('waiting')
+      // Even an own/mixed row set cannot authorize a previous window identity.
+      expect(readiness({ rendered: { ...rendered, windowId: 'old::old::2' } })).toBe('waiting')
+      expect(
+        readiness({
+          window: projectionWindow([
+            { id: 'a2', topicId: 'A' },
+            { id: 'b1', topicId: 'B' }
+          ]),
+          rendered: { ...rendered, windowId: 'old::old::2' },
+          reference: {
+            sourceTopicId: 'B',
+            sourceBranchId: null,
+            anchorMessageId: 'b1',
+            sourceName: 'B',
+            status: 'available',
+            boundaryMessageId: 'b1'
+          }
+        })
+      ).toBe('waiting')
       // Empty own window: only an idle read plus a proven-empty resident
       // projection is an observed empty. A read in flight is still transient.
-      expect(readiness({ window: { displayMessages: [] }, windowReadBusy: true })).toBe('waiting')
-      expect(readiness({ window: { displayMessages: [] } })).toBe('waiting')
-      expect(readiness({ window: { displayMessages: [] }, loadedProjection: undefined })).toBe('waiting')
+      expect(readiness({ window: projectionWindow([]), windowReadBusy: true })).toBe('waiting')
+      expect(readiness({ window: projectionWindow([]) })).toBe('waiting')
+      expect(readiness({ window: projectionWindow([]), loadedProjection: undefined })).toBe('waiting')
       // Genuine observed empty (empty topic / deletion fallback tail).
-      expect(readiness({ window: { displayMessages: [] }, loadedProjection: [] })).toBe('observed-empty')
+      expect(readiness({ window: projectionWindow([]), loadedProjection: [] })).toBe('observed-empty')
+    })
+
+    it('accepts the current mixed target suffix plus Main-attested foreign prefix', () => {
+      const reference: HistoryReferenceMeta = {
+        sourceTopicId: 'B',
+        sourceBranchId: null,
+        anchorMessageId: 'b2',
+        sourceName: 'B',
+        status: 'available',
+        boundaryMessageId: 'b2'
+      }
+      const mixed = projectionWindow([
+        { id: 'a2', topicId: 'A' },
+        { id: 'a1', topicId: 'A' },
+        { id: 'b2', topicId: 'B' },
+        { id: 'b1', topicId: 'B' }
+      ])
+      const resolve = (window: ReturnType<typeof projectionWindow>, ref: HistoryReferenceMeta | null | undefined) =>
+        resolveTargetProjectionReadiness({
+          pending: session,
+          rendered: { ...rendered, windowId: windowIdentity(window) },
+          window,
+          reference: ref,
+          loadedProjection: window.displayMessages,
+          windowReadBusy: false
+        })
+
+      expect(resolve(mixed, reference)).toBe('ready')
+      // A newly-created reference target has a legal empty owned suffix.
+      expect(resolve(projectionWindow(mixed.displayMessages.slice(2)), reference)).toBe('ready')
+      // Foreign rows are never accepted without the matching Main relation.
+      expect(resolve(mixed, undefined)).toBe('waiting')
+      expect(resolve(mixed, { ...reference, status: 'missing', boundaryMessageId: null })).toBe('waiting')
+      expect(resolve(mixed, { ...reference, sourceTopicId: 'X' })).toBe('waiting')
+      expect(resolve(mixed, { ...reference, boundaryMessageId: 'b1' })).toBe('waiting')
+      // Target rows after the foreign prefix are not a canonical owned suffix.
+      expect(
+        resolve(
+          projectionWindow([
+            { id: 'a2', topicId: 'A' },
+            { id: 'b1', topicId: 'B' },
+            { id: 'a1', topicId: 'A' }
+          ]),
+          { ...reference, boundaryMessageId: 'b1' }
+        )
+      ).toBe('waiting')
+    })
+
+    it('rejects stale foreign and mixed windows for every session identity dimension', () => {
+      const reference: HistoryReferenceMeta = {
+        sourceTopicId: 'B',
+        sourceBranchId: null,
+        anchorMessageId: 'b2',
+        sourceName: 'B',
+        status: 'available',
+        boundaryMessageId: 'b2'
+      }
+      const resolve = (rows: Array<{ id: string; topicId: string }>, provenance: Partial<typeof rendered> = {}) => {
+        const window = projectionWindow(rows)
+        return resolveTargetProjectionReadiness({
+          pending: session,
+          rendered: { ...rendered, windowId: windowIdentity(window), ...provenance },
+          window,
+          reference,
+          loadedProjection: rows,
+          windowReadBusy: false
+        })
+      }
+      const foreign = [
+        { id: 'b2', topicId: 'B' },
+        { id: 'b1', topicId: 'B' }
+      ]
+      const mixed = [{ id: 'a2', topicId: 'A' }, { id: 'a1', topicId: 'A' }, ...foreign]
+      for (const rows of [foreign, mixed]) {
+        expect(resolve(rows)).toBe('ready')
+        expect(resolve(rows, { epoch: rendered.epoch + 1 })).toBe('waiting')
+        expect(resolve(rows, { topicId: 'C' })).toBe('waiting')
+        expect(resolve(rows, { routeId: 'branch' })).toBe('waiting')
+        expect(resolve(rows, { windowId: 'old::old::2' })).toBe('waiting')
+      }
+    })
+
+    it('accepts nested mixed windows in nearest-first canonical layer order', () => {
+      const layerA: HistoryReferenceChainLayer = {
+        targetTopicId: 'B',
+        sourceTopicId: 'C',
+        sourceBranchId: null,
+        anchorMessageId: 'c2',
+        sourceName: 'C',
+        status: 'available',
+        boundaryMessageId: 'c2'
+      }
+      const layerB: HistoryReferenceChainLayer = {
+        targetTopicId: 'A',
+        sourceTopicId: 'B',
+        sourceBranchId: null,
+        anchorMessageId: 'b2',
+        sourceName: 'B',
+        status: 'available',
+        boundaryMessageId: 'b2'
+      }
+      const reference: HistoryReferenceMeta = { ...layerB, layers: [layerB, layerA] }
+      const nested = projectionWindow([
+        { id: 'a2', topicId: 'A' },
+        { id: 'a1', topicId: 'A' },
+        { id: 'b2', topicId: 'B' },
+        { id: 'b1', topicId: 'B' },
+        { id: 'c2', topicId: 'C' },
+        { id: 'c1', topicId: 'C' }
+      ])
+      const resolve = (window: ReturnType<typeof projectionWindow>, ref: HistoryReferenceMeta) =>
+        resolveTargetProjectionReadiness({
+          pending: session,
+          rendered: { ...rendered, windowId: windowIdentity(window) },
+          window,
+          reference: ref,
+          loadedProjection: window.displayMessages,
+          windowReadBusy: false
+        })
+
+      expect(resolve(nested, reference)).toBe('ready')
+      // The captured B endpoint may truncate the upstream C layer entirely.
+      expect(resolve(projectionWindow(nested.displayMessages.slice(0, 4)), reference)).toBe('ready')
+      // The endpoint may itself be inherited from C, leaving no B-owned rows.
+      expect(
+        resolve(projectionWindow(nested.displayMessages.slice(0, 2).concat(nested.displayMessages.slice(4))), reference)
+      ).toBe('ready')
+      // Reversed layers and a broken chain are not authority for foreign rows.
+      expect(resolve(nested, { ...reference, layers: [layerA, layerB] })).toBe('waiting')
+      expect(resolve(nested, { ...reference, layers: [{ ...layerA, targetTopicId: 'X' }, layerB] })).toBe('waiting')
+      // The top-level relation and its nearest layer must describe the same source/boundary.
+      expect(resolve(nested, { ...reference, sourceTopicId: 'X' })).toBe('waiting')
+      expect(resolve(nested, { ...reference, boundaryMessageId: 'b1' })).toBe('waiting')
     })
 
     it('A→B→A return: transient empty projection stays hidden, then places the saved bottom once the target rows are positioned', () => {
@@ -541,7 +719,9 @@ describe('routeFirstPlacement delivery', () => {
         const ret = c.request({ kind: 'top', topicId: 'A', targetRoute: null, saved })
         expect(c.displayedRoute).toEqual({ topicId: 'B', route: null })
         // The return commits the target window identity pre-paint (still hidden).
-        expect(c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, '::0')).toBe(true)
+        expect(
+          c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, 'rrp-msg-00790::rrp-msg-00799::10')
+        ).toBe(true)
         expect(c.currentPhase).toBe('positioning')
 
         const pendingHost: { current: FirstPlacementPending | null } = {
@@ -556,7 +736,7 @@ describe('routeFirstPlacement delivery', () => {
             containerHost={host}
             pendingHost={pendingHost}
             seq={0}
-            projection={{ window: { displayMessages: [] }, loadedProjection, windowReadBusy: true }}
+            projection={{ window: projectionWindow([]), loadedProjection, windowReadBusy: true }}
             events={events}
           />
         )
@@ -576,7 +756,7 @@ describe('routeFirstPlacement delivery', () => {
             containerHost={host}
             pendingHost={pendingHost}
             seq={1}
-            projection={{ window: { displayMessages: [] }, loadedProjection, windowReadBusy: false }}
+            projection={{ window: projectionWindow([]), loadedProjection, windowReadBusy: false }}
             events={events}
           />
         )
@@ -588,7 +768,7 @@ describe('routeFirstPlacement delivery', () => {
         // React commit (rows installed before the layout pass reads the port).
         installStreamedRows(container, ids, { scrollHeight: 2717, clientHeight: 403 })
         const committedProjection: ProjectionCommit = {
-          window: { displayMessages: loadedProjection },
+          window: projectionWindow(loadedProjection),
           loadedProjection,
           windowReadBusy: false
         }
@@ -637,7 +817,7 @@ describe('routeFirstPlacement delivery', () => {
         }
         const events: string[] = []
         const projection = {
-          window: { displayMessages: ids.map((id) => ({ id, topicId: 't1' })) },
+          window: projectionWindow(ids.map((id) => ({ id, topicId: 't1' }))),
           loadedProjection: ids,
           windowReadBusy: false
         }
@@ -661,23 +841,38 @@ describe('routeFirstPlacement delivery', () => {
       }
     })
 
-    it('a late obsolete window from a superseded return never reveals or writes', () => {
+    it('A→B→A stale mixed window never reveals; the current recommit reveals once', () => {
       const container = document.createElement('div')
       document.body.appendChild(container)
       try {
-        const ids = ['m2', 'm1']
-        installStreamedRows(container, ids, { scrollHeight: 1000, clientHeight: 400 })
+        const rows = [
+          { id: 'a2', topicId: 'A' },
+          { id: 'a1', topicId: 'A' },
+          { id: 'b1', topicId: 'B' }
+        ]
+        const reference: HistoryReferenceMeta = {
+          sourceTopicId: 'B',
+          sourceBranchId: null,
+          anchorMessageId: 'b1',
+          sourceName: 'B',
+          status: 'available',
+          boundaryMessageId: 'b1'
+        }
+        installStreamedRows(
+          container,
+          rows.map((row) => row.id),
+          { scrollHeight: 1000, clientHeight: 400 }
+        )
         const writes = countScrollWrites(container).writes
         const c = new RouteViewportController({ topicId: 'B', route: null })
         const ret = c.request({
           kind: 'top',
           topicId: 'A',
           targetRoute: null,
-          saved: { scrollTop: 600, messageId: 'm1', intraRowOffset: -10, isAtBottom: false }
+          saved: { scrollTop: 600, messageId: 'a1', intraRowOffset: -10, isAtBottom: false }
         })
-        expect(c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, 'm1::m2::2')).toBe(true)
-        // A newer navigation supersedes the return before its projection lands;
-        // the late window still carries the obsolete epoch.
+        expect(c.applyTransitionWindow(ret.epoch, { topicId: 'A', route: null }, 'a1::a2::2')).toBe(true)
+        // A newer navigation supersedes the return before its projection lands.
         const newer = c.request({ kind: 'top', topicId: 'A', targetRoute: null })
         expect(newer.epoch).toBeGreaterThan(ret.epoch)
         const pendingHost: { current: FirstPlacementPending | null } = {
@@ -685,11 +880,12 @@ describe('routeFirstPlacement delivery', () => {
         }
         const events: string[] = []
         const projection = {
-          window: { displayMessages: ids.map((id) => ({ id, topicId: 'A' })) },
-          loadedProjection: ids,
-          windowReadBusy: false
+          window: projectionWindow(rows),
+          loadedProjection: rows,
+          windowReadBusy: false,
+          reference
         }
-        render(
+        const view = render(
           <ReadinessDeliveryHarness
             controller={c}
             containerHost={{ current: container }}
@@ -704,6 +900,32 @@ describe('routeFirstPlacement delivery', () => {
         expect(writes()).toBe(0)
         expect(c.displayedRoute).toEqual({ topicId: 'B', route: null })
         expect(c.currentEpoch).toBe(newer.epoch)
+
+        // Only the current epoch's exact mixed-window recommit may place/reveal.
+        expect(
+          c.applyTransitionWindow(newer.epoch, { topicId: 'A', route: null }, windowIdentity(projection.window))
+        ).toBe(true)
+        pendingHost.current = {
+          topicId: 'A',
+          routeId: null,
+          epoch: newer.epoch,
+          plan: { kind: 'bottom' },
+          outcome: null
+        }
+        view.rerender(
+          <ReadinessDeliveryHarness
+            controller={c}
+            containerHost={{ current: container }}
+            pendingHost={pendingHost}
+            seq={1}
+            projection={projection}
+            events={events}
+          />
+        )
+        expect(events).toEqual(['ready', 'placed'])
+        expect(writes()).toBe(1)
+        expect(c.displayedRoute).toEqual({ topicId: 'A', route: null })
+        view.unmount()
       } finally {
         container.remove()
       }

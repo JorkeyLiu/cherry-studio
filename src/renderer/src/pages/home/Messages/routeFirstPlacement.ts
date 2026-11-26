@@ -18,6 +18,8 @@
  *   dirty terminal: displayed stays on the old route while rendered already
  *   shows the new one, and no future user scroll can save).
  */
+import type { HistoryReferenceMeta } from '@shared/chatDb'
+
 import type { RouteViewportController } from './routeViewportController'
 import {
   applyViewportFirstPosition,
@@ -92,6 +94,8 @@ export const isFirstPlacementAwaitingAttempt = (
 
 /** Projected window of the CURRENT render commit (never a previous commit's). */
 export interface TargetProjectionWindow {
+  readonly oldestMessageId?: string
+  readonly newestMessageId?: string
   readonly displayMessages: readonly { readonly id: string; readonly topicId?: string }[]
 }
 
@@ -109,9 +113,16 @@ export interface TargetProjectionReadinessInput {
    * Controller's rendered (DOM) provenance record - which topic/route window
    * the committed DOM belongs to. `null` = dirty/unknown render.
    */
-  rendered: { readonly epoch: number; readonly topicId: string; readonly routeId: string | null } | null
+  rendered: {
+    readonly epoch: number
+    readonly topicId: string
+    readonly routeId: string | null
+    readonly windowId: string
+  } | null
   /** `viewportState.window` of the render commit that owns this layout pass. */
   window: TargetProjectionWindow | null | undefined
+  /** Main window receipt's reference facts for the addressed topic, if any. */
+  reference: HistoryReferenceMeta | null | undefined
   /**
    * The target topic's loaded projection (`undefined` = not resident, i.e. no
    * completeness fact). An explicit `[]` is a proven empty projection.
@@ -129,18 +140,92 @@ export interface TargetProjectionReadinessInput {
  */
 export type TargetProjectionReadiness = 'ready' | 'waiting' | 'observed-empty'
 
-/**
- * Ownership of a projected window: every row of an own projection carries the
- * target topic id (message entities are topic-scoped, `Message.topicId`).
- * A window whose rows belong to another topic is the outgoing topic's stale
- * pre-commit window still held by `viewportState` after a topic switch - never
- * the target's committed projection, whatever its length.
- */
-const isOwnProjectedWindow = (window: TargetProjectionWindow, topicId: string): boolean => {
-  for (const row of window.displayMessages) {
-    if (!row || typeof row.topicId !== 'string' || row.topicId !== topicId) return false
+const targetProjectionWindowIdentity = (window: TargetProjectionWindow): string =>
+  `${String(window.oldestMessageId ?? '')}::${String(window.newestMessageId ?? '')}::${window.displayMessages.length}`
+
+/** Main's materialized reference layers, nearest first, or null when untrusted. */
+const resolveReferenceLayers = (
+  reference: HistoryReferenceMeta | null | undefined,
+  targetTopicId: string
+): readonly HistoryReferenceMeta[] | null => {
+  if (!reference || reference.status !== 'available' || reference.sourceTopicId === targetTopicId) return null
+  if (reference.layers === undefined) return [reference]
+  if (!Array.isArray(reference.layers) || reference.layers.length === 0) return null
+  let expectedTarget = targetTopicId
+  for (const layer of reference.layers) {
+    if (
+      !layer ||
+      layer.targetTopicId !== expectedTarget ||
+      layer.status !== 'available' ||
+      typeof layer.sourceTopicId !== 'string' ||
+      layer.sourceTopicId.length === 0 ||
+      layer.sourceTopicId === expectedTarget ||
+      typeof layer.boundaryMessageId !== 'string' ||
+      layer.boundaryMessageId.length === 0
+    ) {
+      return null
+    }
+    expectedTarget = layer.sourceTopicId
   }
-  return true
+  const nearest = reference.layers[0]
+  if (nearest.sourceTopicId !== reference.sourceTopicId || nearest.boundaryMessageId !== reference.boundaryMessageId) {
+    return null
+  }
+  return reference.layers
+}
+
+/**
+ * A reference target's canonical foreign prefix is ordered oldest layer first
+ * in normal flow, hence nearest layer first in `displayMessages`. A layer may
+ * be absent when the captured endpoint truncates it; a materialized layer must
+ * end at its own Main-provided boundary. The target-owned suffix (possibly
+ * empty) is the newest-to-oldest prefix before those foreign rows.
+ */
+const isCanonicalReferencePrefix = (
+  rows: readonly { readonly id: string; readonly topicId?: string }[],
+  layers: readonly HistoryReferenceMeta[]
+): boolean => {
+  let layerIndex = 0
+  while (layerIndex < layers.length && layers[layerIndex].sourceTopicId !== rows[0].topicId) layerIndex += 1
+  if (layerIndex >= layers.length) return false
+  let currentTopicId = rows[0].topicId
+  let segmentStart = 0
+  for (let index = 1; index <= rows.length; index += 1) {
+    const row = rows[index]
+    if (row && row.topicId === currentTopicId) continue
+    if (rows[segmentStart].id !== layers[layerIndex].boundaryMessageId) return false
+    if (!row) return true
+    while (layerIndex < layers.length && layers[layerIndex].sourceTopicId !== row.topicId) layerIndex += 1
+    if (layerIndex >= layers.length) return false
+    currentTopicId = row.topicId
+    segmentStart = index
+  }
+  return false
+}
+
+/**
+ * The committed window belongs to the current effective route when it is all
+ * target-topic rows, or target-owned newest rows followed by the Main-attested
+ * canonical foreign prefix. Foreign rows never authorize readiness by
+ * themselves: an outgoing/stale window, unknown source, broken layer order, or
+ * wrong boundary stays `waiting`.
+ */
+const isCurrentProjectedWindow = (
+  window: TargetProjectionWindow,
+  topicId: string,
+  reference: HistoryReferenceMeta | null | undefined
+): boolean => {
+  const rows = window.displayMessages
+  let foreignStart = 0
+  while (foreignStart < rows.length) {
+    const row = rows[foreignStart]
+    if (!row || typeof row.id !== 'string' || typeof row.topicId !== 'string') return false
+    if (row.topicId !== topicId) break
+    foreignStart += 1
+  }
+  if (foreignStart === rows.length) return true
+  const layers = resolveReferenceLayers(reference, topicId)
+  return layers !== null && isCanonicalReferencePrefix(rows.slice(foreignStart), layers)
 }
 
 /**
@@ -150,21 +235,22 @@ const isOwnProjectedWindow = (window: TargetProjectionWindow, topicId: string): 
  * this transaction actually committed - never on a projection that is still
  * being fetched, not committed yet, or proven only by a previous commit's
  * state. Order matters:
- * - Provenance (`rendered` epoch/topic/route) must be this session's, or the
- *   projection cannot be attributed to it at all.
- * - A projected window whose rows belong to another topic is the outgoing
- *   topic's stale window (the A->B->A return keeps the old window in
- *   `viewportState` until the target commit lands) - `waiting`.
- * - A committed OWN non-empty window is immediately `ready`: its rows render
- *   in the same React commit as the window, and unrelated in-flight reads
+ * - Provenance (`rendered` epoch/topic/route/window identity) must be this
+ *   session's exact committed window, or the projection cannot be attributed
+ *   to it at all.
+ * - The window must be the target route's own rows or its Main-attested
+ *   canonical reference prefix plus target-owned suffix. A stale outgoing
+ *   window (including A->B->A) stays `waiting`.
+ * - A committed non-empty window is immediately `ready`: its rows render in
+ *   the same React commit as the window, and unrelated in-flight reads
  *   (topic-level window reads, pagination) cannot delay the atomic reveal.
  * - An empty own window is `observed-empty` only when a read is not in flight
  *   and the target's resident projection is proven empty (`[]`). Otherwise it
  *   is a transient pre-commit projection - `waiting`.
  *
  * Nothing is placed, revealed, acked, or committed while `waiting`; the
- * projection/read commit re-runs the layout pass through the same reactive
- * deps (no timer, no frame poll). No container geometry is consulted
+ * projection/read/reference commit re-runs the layout pass through the same
+ * reactive deps (no timer, no frame poll). No container geometry is consulted
  * (`scrollHeight == clientHeight` is legal for short real content) and no
  * speaker asserts emptiness from the absence of DOM rows.
  */
@@ -176,7 +262,8 @@ export const resolveTargetProjectionReadiness = (input: TargetProjectionReadines
   if (rendered.epoch !== input.pending.epoch) return 'waiting'
   if (rendered.topicId !== input.pending.topicId) return 'waiting'
   if (rendered.routeId !== input.pending.routeId) return 'waiting'
-  if (!isOwnProjectedWindow(win, input.pending.topicId)) return 'waiting'
+  if (rendered.windowId !== targetProjectionWindowIdentity(win)) return 'waiting'
+  if (!isCurrentProjectedWindow(win, input.pending.topicId, input.reference)) return 'waiting'
   if (win.displayMessages.length > 0) return 'ready'
   if (input.windowReadBusy) return 'waiting'
   if (!input.loadedProjection) return 'waiting'
