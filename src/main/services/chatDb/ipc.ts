@@ -207,7 +207,8 @@ function extractDeletedTopicIds(resultValue: unknown): string[] | undefined {
 /**
  * Source-mutation channels whose success may stale a reference target. The
  * handler resolves targets by the request `topicId` and broadcasts only when
- * at least one target exists.
+ * at least one target exists. Route and fold mutations are included because
+ * reference closure reads the source's effective route and folded prefix.
  */
 const REFERENCE_SOURCE_INVALIDATION_CHANNELS: ReadonlySet<string> = new Set<string>([
   IpcChannel.ChatDb_UpdateTopicMetadata,
@@ -225,6 +226,8 @@ const REFERENCE_SOURCE_INVALIDATION_CHANNELS: ReadonlySet<string> = new Set<stri
   IpcChannel.ChatDb_SelectAnswerMessage,
   IpcChannel.ChatDb_SelectUsefulAnswer,
   IpcChannel.ChatDb_ReorderAnswerGroup,
+  // Folding changes the source overflow.folded prefix read by target closure.
+  IpcChannel.ChatDb_SetTurnFolds,
   IpcChannel.ChatDb_InsertMessagesAfterAnchor,
   IpcChannel.ChatDb_InsertMessageGroups,
   IpcChannel.ChatDb_AppendMessage,
@@ -237,6 +240,8 @@ const REFERENCE_SOURCE_INVALIDATION_CHANNELS: ReadonlySet<string> = new Set<stri
   IpcChannel.ChatDb_UpdateSegmentMetadata,
   IpcChannel.ChatDb_DeleteSegment,
   IpcChannel.ChatDb_ReplaceSegmentMembership,
+  // Moving selected turns changes source branchId/sortOrder membership.
+  IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch,
   // Branch removal changes a source route: a target whose captured source
   // branch (or an ancestor of it) is removed stales to 'missing', so the
   // source topic's targets re-read.

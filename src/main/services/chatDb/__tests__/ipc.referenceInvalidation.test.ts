@@ -3,8 +3,8 @@
  *
  * Proves the IPC layer broadcasts `ChatDb_HistoryReferenceInvalidated` with the
  * aggregate `listReferenceTargets` result for every source-mutation lifecycle
- * path (rename, trash, restore, branch removal, hard delete), and never
- * broadcasts for unrelated channels, empty target sets, or failures. The
+ * path (rename, trash, restore, fold, move, branch removal, hard delete), and
+ * never broadcasts for unrelated channels, empty target sets, or failures. The
  * aggregate's transitive `listReferenceTargets` is covered separately in
  * crossTopicReference.test.ts.
  */
@@ -49,6 +49,8 @@ const {
   mockAggregateUpdateTopicMetadata,
   mockAggregateSoftDelete,
   mockAggregateRestore,
+  mockAggregateSetTurnFolds,
+  mockAggregateMoveSelectedTurnsToNewBranch,
   mockAggregateDeleteBranch,
   mockAggregateHardDelete,
   mockAggregateEnsureTopic,
@@ -58,6 +60,52 @@ const {
   mockAggregateUpdateTopicMetadata: vi.fn(() => ({ ok: true as const, value: null })),
   mockAggregateSoftDelete: vi.fn(() => ({ ok: true as const, value: null })),
   mockAggregateRestore: vi.fn(() => ({ ok: true as const, value: null })),
+  mockAggregateSetTurnFolds: vi.fn(() => ({
+    ok: true as const,
+    value: {
+      topicId: 'src-1',
+      folded: true,
+      turns: [{ groupId: 'group-1', messageIds: ['msg-1'], folded: true }],
+      affectedMessageIds: ['msg-1']
+    }
+  })),
+  mockAggregateMoveSelectedTurnsToNewBranch: vi.fn(() => ({
+    ok: true as const,
+    value: {
+      branch: {
+        id: 'branch-2',
+        topicId: 'src-1',
+        parentBranchId: 'branch-1',
+        anchorMessageId: 'msg-1',
+        name: null,
+        createdAt: null,
+        updatedAt: null
+      },
+      movedMessageIds: ['msg-1'],
+      anchorMessageId: 'msg-1',
+      parentMessages: [],
+      parentBlocks: [],
+      messages: [],
+      blocks: [],
+      branches: [],
+      historySnapshot: {
+        kind: 'move',
+        branch: {
+          id: 'branch-2',
+          parentBranchId: 'branch-1',
+          anchorMessageId: 'msg-1',
+          name: null,
+          createdAt: null,
+          updatedAt: null,
+          overflow: {}
+        },
+        sourceBranchId: 'branch-1',
+        movedMessageIds: ['msg-1'],
+        sourceOrderBefore: ['msg-1'],
+        reparented: []
+      }
+    }
+  })),
   mockAggregateDeleteBranch: vi.fn(() => ({
     ok: true as const,
     value: {
@@ -114,6 +162,8 @@ vi.mock('../ChatDbAggregateService', () => ({
       updateTopicMetadata: mockAggregateUpdateTopicMetadata,
       softDeleteTopic: mockAggregateSoftDelete,
       restoreTopic: mockAggregateRestore,
+      setTurnFolds: mockAggregateSetTurnFolds,
+      moveSelectedTurnsToNewBranch: mockAggregateMoveSelectedTurnsToNewBranch,
       deleteBranch: mockAggregateDeleteBranch,
       hardDeleteTopic: mockAggregateHardDelete,
       ensureTopic: mockAggregateEnsureTopic,
@@ -188,6 +238,35 @@ describe('ChatDb history-reference invalidation fan-out', () => {
     const result = await invoke(IpcChannel.ChatDb_RestoreTopic, { topicId: 'src-1' })
     expect(result.ok).toBe(true)
     expect(mockWin1Send).toHaveBeenCalledWith(IpcChannel.ChatDb_HistoryReferenceInvalidated, expectedPayload)
+  })
+
+  it('fold (set-turn-folds) broadcasts the source topic targets to every window', async () => {
+    disposer = registerChatDbIpc()
+    const result = await invoke(IpcChannel.ChatDb_SetTurnFolds, {
+      topicId: 'src-1',
+      branchId: 'branch-1',
+      selectedGroupIds: ['group-1'],
+      folded: true
+    })
+    expect(result.ok).toBe(true)
+    expect(mockAggregateListReferenceTargets).toHaveBeenCalledWith('src-1')
+    expect(mockWin1Send).toHaveBeenCalledWith(IpcChannel.ChatDb_HistoryReferenceInvalidated, expectedPayload)
+    expect(mockWin2Send).toHaveBeenCalledWith(IpcChannel.ChatDb_HistoryReferenceInvalidated, expectedPayload)
+  })
+
+  it('move (move-selected-turns-to-new-branch) broadcasts the source topic targets to every window', async () => {
+    disposer = registerChatDbIpc()
+    const result = await invoke(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch, {
+      topicId: 'src-1',
+      sourceBranchId: 'branch-1',
+      selectedGroupIds: ['group-1'],
+      expectedSelectedMessageIds: ['msg-1'],
+      name: 'Moved'
+    })
+    expect(result.ok).toBe(true)
+    expect(mockAggregateListReferenceTargets).toHaveBeenCalledWith('src-1')
+    expect(mockWin1Send).toHaveBeenCalledWith(IpcChannel.ChatDb_HistoryReferenceInvalidated, expectedPayload)
+    expect(mockWin2Send).toHaveBeenCalledWith(IpcChannel.ChatDb_HistoryReferenceInvalidated, expectedPayload)
   })
 
   it('branch removal (delete-branch) broadcasts the source topic targets', async () => {
