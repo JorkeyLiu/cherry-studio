@@ -4,8 +4,10 @@ import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { SpanContext } from '@opentelemetry/api'
 import type {
   AppendMessageRequest,
+  AppendMessageResponse,
   BranchMessagesToTopicRequest,
   BulkAddBlocksRequest,
+  ChatDbResult,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
@@ -68,6 +70,7 @@ import type {
   TransferTopicOwnershipRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
+  UpdateMessageAndBlocksResponse,
   UpdateMessageRequest,
   UpdateSegmentMetadataRequest,
   UpdateSingleBlockRequest,
@@ -584,9 +587,12 @@ const api = {
     getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
     topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
     ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),
-    appendMessage: (request: AppendMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_AppendMessage, request),
+    appendMessage: (request: AppendMessageRequest): Promise<ChatDbResult<AppendMessageResponse>> =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_AppendMessage, request),
     updateMessage: (request: UpdateMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessage, request),
-    updateMessageAndBlocks: (request: UpdateMessageAndBlocksRequest) =>
+    updateMessageAndBlocks: (
+      request: UpdateMessageAndBlocksRequest
+    ): Promise<ChatDbResult<UpdateMessageAndBlocksResponse>> =>
       ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessageAndBlocks, request),
     // PERF-100: one atomic multi-model answer-tab selection
     selectAnswerMessage: (request: SelectAnswerMessageRequest) =>

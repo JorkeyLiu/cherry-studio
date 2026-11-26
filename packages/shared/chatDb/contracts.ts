@@ -356,16 +356,23 @@ const APPEND_MESSAGE_VALUE_KEYS = new Set([
   'contextInvalidation'
 ])
 
-const CONTEXT_INVALIDATION_EFFECT_KEYS = new Set(['scope'])
+const CONTEXT_INVALIDATION_EFFECT_KEYS = new Set(['scope', 'topicIds'])
 
 /**
- * Conservative context-invalidation effect validation (shared by the two
+ * Topic-scoped context-invalidation effect validation (shared by the two
  * authority-mutation ack channels only).
  *
- * Closed-set: exactly `{ scope: 'all' }`. Missing, malformed, unknown-scope,
- * or unknown-key payloads reject. Request shape is unchanged.
+ * Closed-set: exactly `{ scope: 'topics', topicIds }`, with a non-empty,
+ * duplicate-free list of non-empty topic IDs. When the enclosing ack echoes
+ * its source topic, the list must include it. Missing, malformed, unknown-
+ * scope, or unknown-key payloads reject. Request shape is unchanged.
  */
-function validateContextInvalidationEffect(value: unknown, path: string, channel: string): void {
+function validateContextInvalidationEffect(
+  value: unknown,
+  path: string,
+  channel: string,
+  sourceTopicId?: string
+): void {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ValidationError(path, `[${channel}] Expected ContextInvalidationEffect object`)
   }
@@ -382,11 +389,31 @@ function validateContextInvalidationEffect(value: unknown, path: string, channel
   if (!('scope' in v)) {
     throw new ValidationError(`${path}.scope`, `[${channel}] Missing required field "scope"`)
   }
-  if (v.scope !== 'all') {
+  if (v.scope !== 'topics') {
     throw new ValidationError(
       `${path}.scope`,
       `[${channel}] Unknown contextInvalidation scope: ${JSON.stringify(v.scope)}`
     )
+  }
+  if (!('topicIds' in v)) {
+    throw new ValidationError(`${path}.topicIds`, `[${channel}] Missing required field "topicIds"`)
+  }
+  if (!Array.isArray(v.topicIds) || v.topicIds.length === 0) {
+    throw new ValidationError(`${path}.topicIds`, `[${channel}] Expected a non-empty topic ID array`)
+  }
+  const seen = new Set<string>()
+  for (let i = 0; i < v.topicIds.length; i++) {
+    const id = v.topicIds[i]
+    if (typeof id !== 'string' || id.trim().length === 0) {
+      throw new ValidationError(`${path}.topicIds[${i}]`, `[${channel}] Expected a non-empty topic ID`)
+    }
+    if (seen.has(id)) {
+      throw new ValidationError(`${path}.topicIds[${i}]`, `[${channel}] Duplicate topic ID`)
+    }
+    seen.add(id)
+  }
+  if (sourceTopicId !== undefined && !seen.has(sourceTopicId)) {
+    throw new ValidationError(`${path}.topicIds`, `[${channel}] Topic IDs must include the source topic`)
   }
 }
 
@@ -449,7 +476,12 @@ function validateAppendMessageResult(result: unknown): void {
         `[${channel}] Missing required field "contextInvalidation"`
       )
     }
-    validateContextInvalidationEffect(v.contextInvalidation, 'result.value.contextInvalidation', channel)
+    validateContextInvalidationEffect(
+      v.contextInvalidation,
+      'result.value.contextInvalidation',
+      channel,
+      v.topicId as string
+    )
   }
 }
 
@@ -1858,9 +1890,10 @@ const UPDATE_MESSAGE_AND_BLOCKS_VALUE_KEYS = new Set([
  * Result validator for `chatdb:update-message-and-blocks` ONLY.
  *
  * Same file-cleanup payload as the shared family plus a required
- * `contextInvalidation: { scope: 'all' }`. Unknown top-level keys, missing /
- * malformed effects, and unknown scopes reject. Other FileCleanup channels
- * keep the shared validator (unchanged behavior, new field rejected there).
+ * `contextInvalidation: { scope: 'topics', topicIds }`. Unknown top-level
+ * keys, missing/malformed effects, and unknown scopes reject. Other
+ * FileCleanup channels keep the shared validator (unchanged behavior, new
+ * field rejected there).
  */
 function validateUpdateMessageAndBlocksResult(result: unknown): void {
   const channel = 'chatdb:update-message-and-blocks'

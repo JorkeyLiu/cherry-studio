@@ -528,7 +528,7 @@ describe('ChatDbAggregateService', () => {
       expect(okValue(result)).toEqual({
         affectedFileIds: [],
         remainingReferenceCounts: {},
-        contextInvalidation: { scope: 'all' }
+        contextInvalidation: { scope: 'topics', topicIds: ['nonexistent'] }
       })
       expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
     })
@@ -616,7 +616,7 @@ describe('ChatDbAggregateService', () => {
       expect(okValue(result)).toEqual({
         affectedFileIds: ['file-same-message'],
         remainingReferenceCounts: { 'file-same-message': 0 },
-        contextInvalidation: { scope: 'all' }
+        contextInvalidation: { scope: 'topics', topicIds: [topicId] }
       })
       expect(() => validateChatDbResult('chatdb:update-message-and-blocks', result)).not.toThrow()
       const fetched = okValue(agg.fetchMessages(topicId))

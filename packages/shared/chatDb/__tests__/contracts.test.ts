@@ -1909,7 +1909,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
           messageId: 'm-1',
           createdMessageIds: ['m-1'],
           mutableMessageIds: ['m-1'],
-          contextInvalidation: { scope: 'all' }
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] }
         }
       })
     ).not.toThrow()
@@ -2385,7 +2385,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
-          contextInvalidation: { scope: 'all' }
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] }
         }
       })
     ).not.toThrow()
@@ -6111,12 +6111,13 @@ describe('tree-preserving clipboard contracts', () => {
 // ===========================================================================
 // Authority-mutation ack effects (minimal slice: append + update only)
 // ---------------------------------------------------------------------------
-// `contextInvalidation: { scope: 'all' }` is a REQUIRED conservative
-// notification on every success of the two migrated channels — including a
-// patch-existing no-op (notification, not an exactly-once proof of a true
-// change). Rollback/conflict/failure envelopes carry no success metadata.
-// Every other FileCleanup-family channel rejects the new field while keeping
-// its original shape acceptance (no global family widening, no drift).
+// `contextInvalidation: { scope: 'topics', topicIds }` is a REQUIRED
+// topic-scoped notification on every success of the two migrated channels —
+// including a patch-existing/missing-row no-op (notification, not an
+// exactly-once proof of a true change). The non-empty unique set includes the
+// source where the ack echoes it. Rollback/conflict/failure carry no metadata.
+// Every other FileCleanup-family channel rejects the field while keeping its
+// original shape acceptance (no global family widening, no drift).
 // ===========================================================================
 
 describe('authority-mutation ack effects', () => {
@@ -6141,6 +6142,21 @@ describe('authority-mutation ack effects', () => {
     }
   })
 
+  it('accepts a non-empty unique topic set on both migrated channels', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', appendAck({ scope: 'topics', topicIds: ['t-1', 't-2'] }))
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:update-message-and-blocks', updateAck({ scope: 'topics', topicIds: ['t-1', 't-2'] }))
+    ).not.toThrow()
+  })
+
+  it('append-message: rejects a topic set that omits the echoed source', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', appendAck({ scope: 'topics', topicIds: ['t-2'] }))
+    ).toThrow(ValidationError)
+  })
+
   it('append-message: rejects a missing effect', () => {
     expect(() =>
       validateChatDbResult('chatdb:append-message', {
@@ -6156,16 +6172,31 @@ describe('authority-mutation ack effects', () => {
     ).toThrow(ValidationError)
   })
 
-  it('append-message: rejects malformed effects', () => {
-    for (const effect of [null, 'all', ['all'], { scope: 'partial' }, {}, { revision: 3 }]) {
+  it('append-message: rejects malformed, empty, duplicate, and legacy all-scope effects', () => {
+    for (const effect of [
+      null,
+      'all',
+      ['all'],
+      { scope: 'all' },
+      { scope: 'partial', topicIds: ['t-1'] },
+      {},
+      { scope: 'topics' },
+      { scope: 'topics', topicIds: [] },
+      { scope: 'topics', topicIds: 't-1' },
+      { scope: 'topics', topicIds: [''] },
+      { scope: 'topics', topicIds: ['   '] },
+      { scope: 'topics', topicIds: ['t-1', 42] },
+      { scope: 'topics', topicIds: ['t-1', 't-1'] },
+      { revision: 3 }
+    ]) {
       expect(() => validateChatDbResult('chatdb:append-message', appendAck(effect))).toThrow(ValidationError)
     }
   })
 
   it('append-message: rejects unknown keys inside the effect', () => {
-    expect(() => validateChatDbResult('chatdb:append-message', appendAck({ scope: 'all', revision: 3 }))).toThrow(
-      ValidationError
-    )
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', appendAck({ scope: 'topics', topicIds: ['t-1'], revision: 3 }))
+    ).toThrow(ValidationError)
   })
 
   it('append-message: rejects unknown top-level keys', () => {
@@ -6178,7 +6209,7 @@ describe('authority-mutation ack effects', () => {
           messageId: 'm-1',
           createdMessageIds: ['m-1'],
           mutableMessageIds: ['m-1'],
-          contextInvalidation: { scope: 'all' },
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] },
           revision: 3
         }
       })
@@ -6194,15 +6225,33 @@ describe('authority-mutation ack effects', () => {
     ).toThrow(ValidationError)
   })
 
-  it('update-message-and-blocks: rejects malformed effects', () => {
-    for (const effect of [null, 'all', ['all'], { scope: 'partial' }, {}, { revision: 3 }]) {
+  it('update-message-and-blocks: rejects malformed, empty, duplicate, and legacy all-scope effects', () => {
+    for (const effect of [
+      null,
+      'all',
+      ['all'],
+      { scope: 'all' },
+      { scope: 'partial', topicIds: ['t-1'] },
+      {},
+      { scope: 'topics' },
+      { scope: 'topics', topicIds: [] },
+      { scope: 'topics', topicIds: 't-1' },
+      { scope: 'topics', topicIds: ['   '] },
+      { scope: 'topics', topicIds: [''] },
+      { scope: 'topics', topicIds: ['t-1', 42] },
+      { scope: 'topics', topicIds: ['t-1', 't-1'] },
+      { revision: 3 }
+    ]) {
       expect(() => validateChatDbResult('chatdb:update-message-and-blocks', updateAck(effect))).toThrow(ValidationError)
     }
   })
 
   it('update-message-and-blocks: rejects unknown keys inside the effect', () => {
     expect(() =>
-      validateChatDbResult('chatdb:update-message-and-blocks', updateAck({ scope: 'all', revision: 3 }))
+      validateChatDbResult(
+        'chatdb:update-message-and-blocks',
+        updateAck({ scope: 'topics', topicIds: ['t-1'], revision: 3 })
+      )
     ).toThrow(ValidationError)
   })
 
@@ -6213,7 +6262,7 @@ describe('authority-mutation ack effects', () => {
         value: {
           affectedFileIds: [],
           remainingReferenceCounts: {},
-          contextInvalidation: { scope: 'all' },
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] },
           deletedTopicIds: []
         }
       })
@@ -6223,7 +6272,12 @@ describe('authority-mutation ack effects', () => {
   it('unmigrated FileCleanup channels reject the new field but keep their shapes', () => {
     const withEffect = (extra: Record<string, unknown> = {}) => ({
       ok: true,
-      value: { affectedFileIds: [], remainingReferenceCounts: {}, ...extra, contextInvalidation: { scope: 'all' } }
+      value: {
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        ...extra,
+        contextInvalidation: { scope: 'topics', topicIds: ['t-1'] }
+      }
     })
     expect(() => validateChatDbResult('chatdb:delete-blocks', withEffect())).toThrow(ValidationError)
     expect(() => validateChatDbResult('chatdb:delete-messages-with-segments', withEffect())).toThrow(ValidationError)

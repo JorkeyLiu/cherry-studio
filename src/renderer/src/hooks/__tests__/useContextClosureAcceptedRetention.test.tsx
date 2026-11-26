@@ -1,5 +1,6 @@
 import {
   bumpAndInvalidate,
+  bumpAndInvalidateTopics,
   getFreshValidatedClosure,
   isAcceptedClosureForRoute,
   resetAllClosureStateForTests
@@ -147,7 +148,7 @@ describe('accepted complete-route projection retention (root regression correcti
     dispatchMock.mockReset()
   })
 
-  it('ordinary streamed content invalidation retains accepted counts/boundary (no blank interim), cache stays strict', async () => {
+  it('authority topic-scoped invalidation retains accepted UI during revalidation, cache stays strict', async () => {
     const topicId = 't-retain'
     const anchor = 'u1'
     const viewport = [{ id: 'u1', role: 'user', topicId, blocks: [] }]
@@ -168,8 +169,8 @@ describe('accepted complete-route projection retention (root regression correcti
     const retainedRef = result.current.closure
     fetchClosureMock.mockClear()
 
-    // Ordinary streamed text/status update: genuine block write bumps strict
-    // generation (cache invalidated) WITHOUT changing turn structure.
+    // Authority acknowledgment invalidates the affected topic. Defer the
+    // background revalidation so the accepted UI retention gap is observable.
     // Defer the background refetch so we can observe the retained gap.
     let resolveBg!: (v: FetchContextClosureResponse) => void
     const bgDeferred = new Promise<FetchContextClosureResponse>((res) => {
@@ -177,7 +178,7 @@ describe('accepted complete-route projection retention (root regression correcti
     })
     fetchClosureMock.mockImplementationOnce(() => bgDeferred)
     await act(async () => {
-      bumpAndInvalidate(topicId)
+      bumpAndInvalidateTopics([topicId])
       await Promise.resolve()
       await new Promise((r) => setTimeout(r, 0))
     })

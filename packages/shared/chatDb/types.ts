@@ -181,17 +181,18 @@ export interface AppendMessageRequest extends ResendAttemptIdCarrier {
 /**
  * Authority mutation acknowledgment effect for context-closure freshness.
  *
- * Conservative coarse signal: `scope: 'all'` means every accepted route
- * closure may be stale (cross-branch/reference effects are not precisely
- * scoped), so the renderer drops cached closures and requires a fresh
- * authoritative read. It never deletes data and is not a proof of a true
- * content change: a no-op success may still carry `all` as a notification,
- * never as an exactly-once or diff guarantee. No timestamps, revisions, or
- * commit ids; no versions, event bus, or sync protocol.
+ * A successful append/update invalidates the source topic plus its transitive
+ * outgoing reference targets. The set is a safe superset of affected routes:
+ * every branch of each named topic may compose the changed history. It never
+ * deletes data and is not a proof of a true content change: a no-op success may
+ * still notify. No timestamps, revisions, or commit ids; no versions, event
+ * bus, or sync protocol.
  */
 export interface ContextInvalidationEffect {
-  /** Coarse invalidation scope. Only `'all'` is defined. */
-  scope: 'all'
+  /** Topic-scoped invalidation. No global scope is defined on this contract. */
+  scope: 'topics'
+  /** Non-empty, unique topic IDs; always includes the mutated source topic. */
+  topicIds: string[]
 }
 
 /**
@@ -207,7 +208,7 @@ export interface ContextInvalidationEffect {
  * (always a subset of `createdMessageIds`). A failure publishes nothing.
  *
  * `contextInvalidation` is required on every success (including the
- * patch-existing no-op): a conservative notification, not an exactly-once
+ * patch-existing no-op): a topic-scoped notification, not an exactly-once
  * proof of a true change. Rollback/conflict/failure never carry it.
  */
 export interface AppendMessageResponse {
@@ -316,12 +317,12 @@ export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
  * @see IpcChannel.ChatDb_UpdateMessageAndBlocks
  *
  * Success envelope for the single atomic message+blocks finalization shape.
- * Extends the shared file-cleanup payload with a required conservative
- * context-cache invalidation notification (`scope: 'all'`). Only this
- * channel carries the extra field; the shared `FileCleanupResult` family is
- * unchanged. Rollback/conflict/failure never carry success metadata; the
- * missing-target no-op still succeeds conservatively with `all` (a
- * notification, never an exactly-once proof of a true change).
+ * Extends the shared file-cleanup payload with a required topic-scoped
+ * context-cache invalidation notification. Only this channel carries the
+ * extra field; the shared `FileCleanupResult` family is unchanged.
+ * Rollback/conflict/failure never carry success metadata; the missing-target
+ * no-op still succeeds with the source and its reference targets notified
+ * (a notification, never an exactly-once proof of a true change).
  */
 export interface UpdateMessageAndBlocksResponse extends FileCleanupResult {
   /** Required conservative context-cache invalidation notification. */

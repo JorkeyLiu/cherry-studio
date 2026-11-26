@@ -121,6 +121,33 @@ describe('appendMessage creation acknowledgment', () => {
     ;(chatDbService as never as { db: unknown }).db = null
   })
 
+  function seedReferenceChain() {
+    const a = 't-a'
+    const b = 't-b'
+    const c = 't-c'
+    const d = 't-d'
+    const incoming = 't-incoming'
+    expectSuccess(agg.ensureTopic(incoming, 'assistant-1', incoming))
+    expectSuccess(agg.ensureTopic(d, 'assistant-1', d))
+    expectSuccess(agg.appendMessage(incoming, msgJson('p0', incoming) as never, []))
+    expectSuccess(agg.appendMessage(d, msgJson('d0', d) as never, []))
+    // Incoming dependency: the incoming topic consumes A, but A does not
+    // consume it. A mutation must not invalidate the incoming topic.
+    expectSuccess(agg.createReferencedTopic(incoming, null, a, 'p0'))
+    const fileBlock = {
+      id: 'b-a0',
+      ...blockJson('b-a0', 'a0'),
+      type: 'file',
+      file: { id: 'file-a0', name: 'a.pdf', path: '/a.pdf', type: 'application/pdf' }
+    }
+    expectSuccess(agg.appendMessage(a, msgJson('a0', a) as never, [fileBlock as never]))
+    expectSuccess(agg.createReferencedTopic(a, null, b, 'a0'))
+    expectSuccess(agg.appendMessage(b, msgJson('b0', b) as never, []))
+    expectSuccess(agg.createReferencedTopic(b, null, c, 'b0'))
+    expectSuccess(agg.appendMessage(c, msgJson('c0', c) as never, []))
+    return { a, b, c, d, incoming, fileBlock }
+  }
+
   it('acknowledges a new main owner row with route, identity, and delta', () => {
     expect(agg.ensureTopic('t1', 'assistant-1', 'topic-t1').ok).toBe(true)
     const res = agg.appendMessage('t1', msgJson('m0', 't1') as never, [blockJson('b-m0', 'm0') as never])
@@ -132,7 +159,7 @@ describe('appendMessage creation acknowledgment', () => {
       messageId: 'm0',
       createdMessageIds: ['m0'],
       mutableMessageIds: ['m0'],
-      contextInvalidation: { scope: 'all' }
+      contextInvalidation: { scope: 'topics', topicIds: ['t1'] }
     })
     expect(branchOf(sqlite, 'm0')).toBeNull()
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
@@ -164,7 +191,7 @@ describe('appendMessage creation acknowledgment', () => {
       messageId: 'c0',
       createdMessageIds: ['c0'],
       mutableMessageIds: ['c0'],
-      contextInvalidation: { scope: 'all' }
+      contextInvalidation: { scope: 'topics', topicIds: ['t1'] }
     })
     expect(branchOf(sqlite, 'c0')).toBe(b1)
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
@@ -182,7 +209,7 @@ describe('appendMessage creation acknowledgment', () => {
       messageId: 'm0',
       createdMessageIds: [],
       mutableMessageIds: [],
-      contextInvalidation: { scope: 'all' }
+      contextInvalidation: { scope: 'topics', topicIds: ['t1'] }
     })
     const row = sqlite.prepare('SELECT content AS c FROM messages WHERE id=?').get('m0') as { c: string }
     expect(row.c).toBe('patched')
@@ -225,7 +252,7 @@ describe('appendMessage creation acknowledgment', () => {
     expect(res.value.createdMessageIds).toEqual(['m2'])
     expect(res.value.mutableMessageIds).toEqual(['m2'])
     expect(res.value.branchId).toBeNull()
-    expect(res.value.contextInvalidation).toEqual({ scope: 'all' })
+    expect(res.value.contextInvalidation).toEqual({ scope: 'topics', topicIds: ['t1'] })
     expect(branchOf(sqlite, 'm2')).toBeNull()
     expect(() => validateChatDbResult('chatdb:append-message', res)).not.toThrow()
   })
@@ -352,5 +379,59 @@ describe('appendMessage creation acknowledgment', () => {
     expectSuccess(route)
     if (!isSuccess(route)) throw new Error('expected route')
     expect((route.value.messages as Array<{ id: string }>).map((m) => m.id)).toEqual(['c0'])
+  })
+
+  it('append and patch-existing acks name A→B→C plus source, excluding unrelated D and incoming dependencies', () => {
+    const { a, b, c, d, incoming } = seedReferenceChain()
+    const expected = { scope: 'topics', topicIds: [a, b, c].sort() }
+
+    const appended = agg.appendMessage(a, msgJson('a1', a) as never, [blockJson('b-a1', 'a1') as never])
+    expectSuccess(appended)
+    expect(appended.value.createdMessageIds).toEqual(['a1'])
+    expect(appended.value.contextInvalidation).toEqual(expected)
+    expect(appended.value.contextInvalidation.topicIds).not.toContain(d)
+    expect(appended.value.contextInvalidation.topicIds).not.toContain(incoming)
+    expect(() => validateChatDbResult('chatdb:append-message', appended)).not.toThrow()
+
+    const patched = agg.appendMessage(a, msgJson('a0', a, { content: 'patched' }) as never, [
+      blockJson('b-a0', 'a0') as never
+    ])
+    expectSuccess(patched)
+    expect(patched.value.createdMessageIds).toEqual([])
+    expect(patched.value.mutableMessageIds).toEqual([])
+    expect(patched.value.contextInvalidation).toEqual(expected)
+    expect(() => validateChatDbResult('chatdb:append-message', patched)).not.toThrow()
+  })
+
+  it('update success, block/file payload, and missing-row no-op keep the same affected-topic set', () => {
+    const { a, b, c, d, incoming, fileBlock } = seedReferenceChain()
+    const expected = { scope: 'topics', topicIds: [a, b, c].sort() }
+
+    const upserted = agg.updateMessageAndBlocks(a, { id: 'a0', content: 'updated' } as never, [
+      blockJson('b-a1', 'a0') as never
+    ])
+    expectSuccess(upserted)
+    expect(upserted.value.contextInvalidation).toEqual(expected)
+    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', upserted)).not.toThrow()
+
+    const deletedFile = agg.updateMessageAndBlocks(a, { id: 'a0' } as never, [], [fileBlock.id])
+    expectSuccess(deletedFile)
+    expect(deletedFile.value).toEqual({
+      affectedFileIds: ['file-a0'],
+      remainingReferenceCounts: { 'file-a0': 0 },
+      contextInvalidation: expected
+    })
+    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', deletedFile)).not.toThrow()
+
+    const missing = agg.updateMessageAndBlocks(a, { id: 'missing' } as never, [])
+    expectSuccess(missing)
+    expect(missing.value).toEqual({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      contextInvalidation: expected
+    })
+    expect(missing.value.contextInvalidation.topicIds).not.toContain(d)
+    expect(missing.value.contextInvalidation.topicIds).not.toContain(incoming)
+    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', missing)).not.toThrow()
   })
 })

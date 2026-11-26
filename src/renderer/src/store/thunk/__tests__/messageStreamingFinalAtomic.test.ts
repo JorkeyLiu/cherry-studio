@@ -215,7 +215,7 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
     mocks.updateMessageAndBlocks.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
@@ -293,7 +293,7 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledWith({
       affectedFileIds: [],
       remainingReferenceCounts: {},
-      contextInvalidation: { scope: 'all' }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     })
 
     // Redux converges to the committed state only after success: both the
@@ -333,7 +333,7 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       return {
         affectedFileIds: [],
         remainingReferenceCounts: {},
-        contextInvalidation: { scope: 'all' as const }
+        contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
       }
     })
 
@@ -505,7 +505,7 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
     const cleanup = {
       affectedFileIds: ['f-1'],
       remainingReferenceCounts: { 'f-1': 0 },
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     }
 
     mocks.updateMessageAndBlocks.mockResolvedValueOnce(cleanup)
@@ -557,7 +557,7 @@ describe('Naming lifecycle: post-persist only', () => {
     mocks.updateMessageAndBlocks.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
@@ -690,7 +690,7 @@ describe('Detached execution: request-local state completes without Redux inject
     mocks.updateMessageAndBlocks.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     })
     mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
     mocks.getAssistantSettings.mockReturnValue({})
@@ -819,7 +819,7 @@ describe('Detached execution: request-local state completes without Redux inject
       saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({
         affectedFileIds: [],
         remainingReferenceCounts: {},
-        contextInvalidation: { scope: 'all' as const }
+        contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
       }),
       assistant: assistantStub
     })
@@ -948,7 +948,7 @@ describe('Detached execution: request-local state completes without Redux inject
       resetExecutionOverlayForTests
     } = await import('@renderer/services/executionOverlayRegistry')
     const { consumeUpdateAckInvalidation } = await import('@renderer/services/db/authorityInvalidation')
-    const { getGlobalBlockGeneration, subscribeClosureInvalidations, resetAllClosureStateForTests } = await import(
+    const { getClosureLoadGeneration, subscribeClosureInvalidations, resetAllClosureStateForTests } = await import(
       '@renderer/services/contextClosure'
     )
 
@@ -981,7 +981,7 @@ describe('Detached execution: request-local state completes without Redux inject
     const unsub = subscribeClosureInvalidations(() => {
       order.push('closure-invalidated')
     })
-    const genBefore = getGlobalBlockGeneration()
+    const genBefore = getClosureLoadGeneration(TOPIC_ID)
 
     // The dbService mock stands in for SqliteMessageDataSource: committed ack →
     // synchronous post-persist hook → exactly-once invalidation consumption.
@@ -989,7 +989,7 @@ describe('Detached execution: request-local state completes without Redux inject
       const ack = {
         affectedFileIds: [],
         remainingReferenceCounts: {},
-        contextInvalidation: { scope: 'all' as const }
+        contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
       }
       order.push('persisted')
       const onAckPersisted = args[6] as ((a: unknown) => void) | undefined
@@ -1066,7 +1066,7 @@ describe('Detached execution: request-local state completes without Redux inject
       expect(terminalAt).toBeGreaterThan(persistedAt)
       expect(consumeAt).toBeGreaterThan(terminalAt)
       expect(invalidatedAt).toBeGreaterThan(consumeAt)
-      expect(getGlobalBlockGeneration()).toBe(genBefore + 1)
+      expect(getClosureLoadGeneration(TOPIC_ID)).toBe(genBefore + 1)
 
       // The terminal token is capturable as a read witness for this route.
       const witness = captureTerminalReadWitness(routeKey)
@@ -1091,7 +1091,7 @@ describe('BlockManager local-first: transition + patch order/dedup', () => {
     mocks.updateMessageAndBlocks.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [TOPIC_ID] }
     })
   })
 

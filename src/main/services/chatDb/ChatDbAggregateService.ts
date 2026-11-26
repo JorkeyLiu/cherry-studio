@@ -45,6 +45,7 @@ import type {
   ClipboardTreeRouteProjection,
   ClipboardTreeSnapshot,
   ClipboardTreeSourceRemoval,
+  ContextInvalidationEffect,
   CreateReferencedTopicResponse,
   DeleteClipboardTreeRequest,
   DeleteClipboardTreeResponse,
@@ -7433,6 +7434,10 @@ export class ChatDbAggregateService {
         // opens (existing-id overwrites of a resend message).
         this.assertResendAttemptPreTx([messageData.id, ...this.blockParentIdsPreTx(blocksJson)], resendAttemptId)
         const syncCtx = this.syncCtxForTopic('appendMessage', topicId, route)
+        // appendMessage never mutates topic_references. Snapshot the affected
+        // set before committing so a read failure cannot turn a committed write
+        // into a reported failure; the stamp is published only on success.
+        const contextInvalidation = this.contextInvalidationForTopic(topicId)
         let syncNotify = false
         const unsupportedBlockIds: string[] = []
         let txResult: { created: boolean }
@@ -7748,10 +7753,11 @@ export class ChatDbAggregateService {
         // Main-issued creation acknowledgment. The created flag is derived
         // inside the same root transaction above (a throw publishes nothing);
         // the addressed route and row identity echo the authoritative stamp.
-        // The conservative context-invalidation effect is stamped only on this
-        // success path (including the patch-existing no-op below): a
-        // notification, never an exactly-once proof of a true change.
-        // Rollback/conflict/failure return no success metadata.
+        // The topic-scoped context-invalidation effect is stamped only on this
+        // success path (including the patch-existing no-op below): the source
+        // plus its transitive reference targets, never an exactly-once proof
+        // of a true change. Its pre-commit snapshot is safe because
+        // appendMessage does not mutate topic_references.
         const createdMessageIds = txResult.created ? [messageData.id] : []
         return {
           topicId,
@@ -7759,7 +7765,7 @@ export class ChatDbAggregateService {
           messageId: messageData.id,
           createdMessageIds,
           mutableMessageIds: [...createdMessageIds],
-          contextInvalidation: { scope: 'all' as const }
+          contextInvalidation
         }
       } catch (error) {
         outcomeOk = false
@@ -8139,10 +8145,14 @@ export class ChatDbAggregateService {
         resendAttemptId
       )
       const syncCtx = this.syncCtxForTopic('updateMessageAndBlocks', topicId, route)
+      // updateMessageAndBlocks never mutates topic_references. Snapshot before
+      // commit so a read failure cannot misreport an already-committed write;
+      // both normal success and missing-row no-op publish this same safe set.
+      const contextInvalidation = this.contextInvalidationForTopic(topicId)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
 
-      let txResult: UpdateMessageAndBlocksResponse
+      let txResult: Omit<UpdateMessageAndBlocksResponse, 'contextInvalidation'>
       try {
         txResult = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -8168,9 +8178,10 @@ export class ChatDbAggregateService {
           // Check message exists
           const existing = repos.messages.getInTopic(messageId, topicId)
           if (!existing.found) {
-            // No-op: follow Dexie-compatible semantics — empty cleanup with a
-            // conservative invalidation notification (not a proof of change).
-            return { affectedFileIds: [], remainingReferenceCounts: {}, contextInvalidation: { scope: 'all' as const } }
+            // No-op: follow Dexie-compatible semantics — empty cleanup. The
+            // post-commit ack still carries the conservative source + target
+            // notification (not a proof of change).
+            return { affectedFileIds: [], remainingReferenceCounts: {} }
           }
 
           // Phase 1: Resolve every block through its parent message and verify ownership.
@@ -8546,9 +8557,10 @@ export class ChatDbAggregateService {
             })
             if (issue.issued) syncNotify = true
           }
-          // Authority ack effect is stamped only on this success path;
-          // rollback/conflict/failure throw above and carry no success metadata.
-          return { ...buildFileCleanupResult(repos, affectedFileIds), contextInvalidation: { scope: 'all' as const } }
+          // Authority ack effect is shared by the normal success and
+          // missing-row no-op paths. Its pre-commit snapshot is safe because
+          // updateMessageAndBlocks does not mutate topic_references.
+          return buildFileCleanupResult(repos, affectedFileIds)
         })
       } catch (e) {
         this.recordSyncTxFailure('updateMessageAndBlocks', syncCtx, e)
@@ -8556,7 +8568,7 @@ export class ChatDbAggregateService {
       }
       if (syncNotify) syncService.notifyEnqueued()
       this.recordUnsupportedBlocksAfterCommit('updateMessageAndBlocks', unsupportedBlockIds)
-      return txResult
+      return { ...txResult, contextInvalidation }
     }, `updateMessageAndBlocks(${topicId}, ${messageUpdatesJson.id})`)
   }
 
@@ -13276,6 +13288,23 @@ export class ChatDbAggregateService {
       }
       return { sourceTopicId, targetTopicIds: [...seen].sort() }
     }, `listReferenceTargets(${sourceTopicId})`)
+  }
+
+  /**
+   * Build the authority ack's affected-topic set from the outgoing reference
+   * closure. The source is always included; targets are transitive, bounded,
+   * deterministic, unique, and cycle-safe via listReferenceTargets. Incoming
+   * references do not consume the source's history and are intentionally not
+   * added. append/update never mutate topic_references, so callers snapshot
+   * this set before commit and stamp it only after success.
+   */
+  private contextInvalidationForTopic(sourceTopicId: string): ContextInvalidationEffect {
+    const result = this.listReferenceTargets(sourceTopicId)
+    if (!result.ok) throw new Error(result.error.message)
+    return {
+      scope: 'topics',
+      topicIds: [...new Set([sourceTopicId, ...result.value.targetTopicIds])]
+    }
   }
 
   /**

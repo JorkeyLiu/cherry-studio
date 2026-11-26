@@ -502,7 +502,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const ack = unwrap(result)
     // Authority-success consumption (exactly once for this ack): the typed IPC
     // success already guarantees Main committed the root transaction. Consume
-    // the conservative invalidation effect BEFORE any local route-currency /
+    // the topic-scoped invalidation effect BEFORE any local route-currency /
     // loaded / projection guard (those live in the thunk publication path).
     // A Main failure throws in unwrap above and never invalidates.
     consumeAppendAckInvalidation(ack)
@@ -594,7 +594,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     await prepareOrderingBaseline(topicId)
     // ONE renderer-side ack owner. `unwrap` throws on any Main failure (structured
     // rejection or transport error), so a failed write never invalidates. On
-    // success the ack's conservative invalidation effect is consumed exactly once
+    // success the ack's topic-scoped invalidation effect is consumed exactly once
     // here, so ordinary callers never restate the rule; `onAckPersisted` is a
     // synchronous post-persist/pre-invalidation hook (never part of the IPC
     // request) where the ordinary terminal execution records its terminal token.
@@ -603,8 +603,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     try {
       onAckPersisted?.(ack)
     } finally {
-      // A hook throw still invalidates conservatively (a successful persistence
-      // is never silently treated as a failure or ignored) and then propagates.
+      // A hook throw still invalidates the ack's affected topics (a successful
+      // persistence is never silently treated as a failure or ignored) and then propagates.
       consumeUpdateAckInvalidation(ack)
     }
     return ack

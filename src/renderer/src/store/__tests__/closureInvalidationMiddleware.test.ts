@@ -1,4 +1,5 @@
 import {
+  bumpAndInvalidateAll,
   computeClosureFingerprint,
   getClosureLoadGeneration,
   getFreshValidatedClosure,
@@ -6,7 +7,7 @@ import {
   resetAllClosureStateForTests,
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
-import { bumpAndInvalidateAll } from '@renderer/services/contextClosure'
+import { consumeAppendAckInvalidation } from '@renderer/services/db/authorityInvalidation'
 import { closureInvalidationMiddleware } from '@renderer/store'
 import { markClosureReadOnly, withAuthorityHandled, withClosureTopics } from '@renderer/store/closureOwnership'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
@@ -214,6 +215,47 @@ describe('closureInvalidationMiddleware authority-handled dedup (minimal slice)'
       )
     )
     expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+  })
+
+  it('does not invalidate again after the ack consumer already handled source and reference targets', () => {
+    const fpA = seedFresh('topicA')
+    const fpB = seedFresh('topicB')
+    const fpC = seedFresh('topicC')
+    expect(
+      consumeAppendAckInvalidation({
+        topicId: 'topicA',
+        branchId: null,
+        messageId: 'u9',
+        createdMessageIds: ['u9'],
+        mutableMessageIds: ['u9'],
+        contextInvalidation: { scope: 'topics', topicIds: ['topicA', 'topicB'] }
+      })
+    ).toBe(true)
+    const generationA = getClosureLoadGeneration('topicA')
+    const generationB = getClosureLoadGeneration('topicB')
+    const generationC = getClosureLoadGeneration('topicC')
+
+    runMiddleware(
+      withAuthorityHandled(
+        newMessagesActions.applyAppendAcknowledgment({
+          topicId: 'topicA',
+          route: null,
+          message: { id: 'u9', topicId: 'topicA' },
+          createdMessageIds: ['u9'],
+          mutableMessageIds: ['u9']
+        } as any)
+      )
+    )
+    runMiddleware(
+      withAuthorityHandled(withClosureTopics(upsertManyBlocks([{ id: 'b9', messageId: 'u9' }] as any), 'topicB'))
+    )
+
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).toBeNull()
+    expect(getFreshValidatedClosure('topicC', 'u1', fpC)).not.toBeNull()
+    expect(getClosureLoadGeneration('topicA')).toBe(generationA)
+    expect(getClosureLoadGeneration('topicB')).toBe(generationB)
+    expect(getClosureLoadGeneration('topicC')).toBe(generationC)
   })
 
   it('an unmarked same-ack action keeps the fail-closed inference', () => {

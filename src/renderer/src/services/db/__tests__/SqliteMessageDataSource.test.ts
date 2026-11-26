@@ -17,7 +17,11 @@
  */
 
 import { loggerService } from '@logger'
-import { getGlobalBlockGeneration, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
+import {
+  getClosureLoadGeneration,
+  getGlobalBlockGeneration,
+  resetAllClosureStateForTests
+} from '@renderer/services/contextClosure'
 import type {
   AppendMessageRequest,
   AppendMessageResponse,
@@ -192,23 +196,27 @@ function failureResult(code = 'TEST_ERROR', message = 'test failure'): ChatDbRes
 }
 
 /** Main-issued creation acknowledgment for one appended message. */
-function ackResult(messageId: string, branchId: string | null = null): ChatDbResult<AppendMessageResponse> {
+function ackResult(
+  messageId: string,
+  branchId: string | null = null,
+  topicIds: string[] = ['topic-1']
+): ChatDbResult<AppendMessageResponse> {
   return ok({
-    topicId: 'topic-1',
+    topicId: topicIds[0],
     branchId,
     messageId,
     createdMessageIds: [messageId],
     mutableMessageIds: [messageId],
-    contextInvalidation: { scope: 'all' as const }
+    contextInvalidation: { scope: 'topics', topicIds }
   })
 }
 
 /** Main-issued atomic update acknowledgment for one message + blocks write. */
-function updateAck(): ChatDbResult<UpdateMessageAndBlocksResponse> {
+function updateAck(topicIds: string[] = ['topic-1']): ChatDbResult<UpdateMessageAndBlocksResponse> {
   return ok({
     affectedFileIds: [],
     remainingReferenceCounts: {},
-    contextInvalidation: { scope: 'all' as const }
+    contextInvalidation: { scope: 'topics', topicIds }
   })
 }
 
@@ -276,7 +284,7 @@ describe('SqliteMessageDataSource', () => {
         messageId: 'm-1',
         createdMessageIds: ['m-1'],
         mutableMessageIds: ['m-1'],
-        contextInvalidation: { scope: 'all' }
+        contextInvalidation: { scope: 'topics', topicIds: ['topic-1'] }
       })
     })
 
@@ -328,7 +336,7 @@ describe('SqliteMessageDataSource', () => {
         successResult({
           affectedFileIds: [],
           remainingReferenceCounts: {},
-          contextInvalidation: { scope: 'all' as const }
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] }
         })
       )
       const msgUpdates = { id: 'm-1', topicId: 't-1', sortOrder: 5, content: 'updated' } as any
@@ -1331,7 +1339,7 @@ describe('SqliteMessageDataSource', () => {
         successResult({
           affectedFileIds: [],
           remainingReferenceCounts: {},
-          contextInvalidation: { scope: 'all' as const }
+          contextInvalidation: { scope: 'topics', topicIds: ['t-1'] }
         })
       )
       await dispatchesAfter(() => ds.updateMessageAndBlocks('t-1', { id: 'm-1' } as any, []))
@@ -1531,100 +1539,113 @@ describe('SqliteMessageDataSource', () => {
   // =========================================================================
 
   describe('authority ack consumption (independent of projection acceptance)', () => {
-    it('append success consumes the effect once, before any publication guard', async () => {
+    const source = 'topic-1'
+    const target = 'topic-target'
+    const unrelated = 'topic-unrelated'
+    const branch = 'branch-1'
+
+    beforeEach(() => {
       resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
-      api.appendMessage.mockResolvedValue(ackResult('m-1'))
-      await ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])
-      expect(getGlobalBlockGeneration()).toBe(before + 1)
+      // Register cached and uncached routes so exactly-once is observable on
+      // each topic's existing per-route generation (no global clock involved).
+      getClosureLoadGeneration(source)
+      getClosureLoadGeneration(source, branch)
+      getClosureLoadGeneration(target)
+      getClosureLoadGeneration(unrelated)
+    })
+
+    it('append success invalidates the acknowledged topic set exactly once', async () => {
+      api.appendMessage.mockResolvedValue(ackResult('m-1', null, [source, target]))
+      await ds.appendMessage(source, { id: 'm-1', role: 'user' } as any, [])
+
+      expect(getClosureLoadGeneration(source)).toBe(1)
+      expect(getClosureLoadGeneration(source, branch)).toBe(1)
+      expect(getClosureLoadGeneration(target)).toBe(1)
+      expect(getClosureLoadGeneration(unrelated)).toBe(0)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
     it('a malformed effect on a success ack still invalidates conservatively', async () => {
-      resetAllClosureStateForTests()
       const before = getGlobalBlockGeneration()
       const malformed = ackResult('m-1')
       if (malformed.ok) {
         ;(malformed.value as unknown as Record<string, unknown>).contextInvalidation = { scope: 'partial' }
       }
       api.appendMessage.mockResolvedValue(malformed)
-      // Local echo guard lives in the thunk; here the typed success already
-      // failed closed at the IPC boundary, so the source serves the same
-      // conservative invalidation and keeps the ack's other fields intact.
-      await ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])
+      await ds.appendMessage(source, { id: 'm-1', role: 'user' } as any, [])
       expect(getGlobalBlockGeneration()).toBe(before + 1)
     })
 
     it('append failure invalidates nothing', async () => {
-      resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
       api.appendMessage.mockResolvedValue(failureResult('STORAGE_ERROR', 'append failed'))
-      await expect(ds.appendMessage('topic-1', { id: 'm-1', role: 'user' } as any, [])).rejects.toThrow()
-      expect(getGlobalBlockGeneration()).toBe(before)
+      await expect(ds.appendMessage(source, { id: 'm-1', role: 'user' } as any, [])).rejects.toThrow()
+      expect(getClosureLoadGeneration(source)).toBe(0)
+      expect(getClosureLoadGeneration(target)).toBe(0)
+      expect(getClosureLoadGeneration(unrelated)).toBe(0)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
     it('updateMessageAndBlocks success consumes the effect exactly once and keeps the ack', async () => {
-      resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
-      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
-      const response = await ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [])
-      expect(response.contextInvalidation).toEqual({ scope: 'all' })
+      const ack = updateAck([source, target])
+      api.updateMessageAndBlocks.mockResolvedValue(ack)
+      const response = await ds.updateMessageAndBlocks(source, { id: 'm-1' } as any, [])
+      expect(response).toEqual(ack.ok ? ack.value : undefined)
+      expect(response.contextInvalidation).toEqual({ scope: 'topics', topicIds: [source, target] })
       expect(response.affectedFileIds).toEqual([])
-      expect(getGlobalBlockGeneration()).toBe(before + 1)
+      expect(getClosureLoadGeneration(source)).toBe(1)
+      expect(getClosureLoadGeneration(source, branch)).toBe(1)
+      expect(getClosureLoadGeneration(target)).toBe(1)
+      expect(getClosureLoadGeneration(unrelated)).toBe(0)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
     it('updateMessageAndBlocks failure consumes nothing and never runs the hook', async () => {
-      resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
       const onAckPersisted = vi.fn()
       api.updateMessageAndBlocks.mockResolvedValue(failureResult('STORAGE_ERROR', 'update failed'))
       await expect(
-        ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
+        ds.updateMessageAndBlocks(source, { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
       ).rejects.toThrow()
       expect(onAckPersisted).not.toHaveBeenCalled()
-      expect(getGlobalBlockGeneration()).toBe(before)
+      expect(getClosureLoadGeneration(source)).toBe(0)
+      expect(getClosureLoadGeneration(target)).toBe(0)
+      expect(getClosureLoadGeneration(unrelated)).toBe(0)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
-    it('updateMessageAndBlocks runs onAckPersisted synchronously BEFORE invalidation', async () => {
-      resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
-      const observed: Array<{ generation: number; ack: UpdateMessageAndBlocksResponse }> = []
-      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
-      const response = await ds.updateMessageAndBlocks(
-        'topic-1',
-        { id: 'm-1' } as any,
-        [],
-        [],
-        undefined,
-        null,
-        (ack) => observed.push({ generation: getGlobalBlockGeneration(), ack })
+    it('updateMessageAndBlocks runs onAckPersisted synchronously BEFORE topic invalidation', async () => {
+      const observed: Array<{ source: number; target: number; ack: UpdateMessageAndBlocksResponse }> = []
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck([source, target]))
+      const response = await ds.updateMessageAndBlocks(source, { id: 'm-1' } as any, [], [], undefined, null, (ack) =>
+        observed.push({
+          source: getClosureLoadGeneration(source),
+          target: getClosureLoadGeneration(target),
+          ack
+        })
       )
-      // The hook received the already-unwrapped success ack and ran while the
-      // pre-invalidation generation was still current (synchronous ordering).
-      expect(observed).toHaveLength(1)
-      expect(observed[0].generation).toBe(before)
-      expect(observed[0].ack).toBe(response)
-      // The invalidation happened right after the hook, still exactly once.
-      expect(getGlobalBlockGeneration()).toBe(before + 1)
+      expect(observed).toEqual([{ source: 0, target: 0, ack: response }])
+      expect(getClosureLoadGeneration(source)).toBe(1)
+      expect(getClosureLoadGeneration(target)).toBe(1)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
-    it('a throwing onAckPersisted still invalidates conservatively and propagates', async () => {
-      resetAllClosureStateForTests()
-      const before = getGlobalBlockGeneration()
-      api.updateMessageAndBlocks.mockResolvedValue(updateAck())
+    it('a throwing onAckPersisted still invalidates affected topics and propagates', async () => {
+      api.updateMessageAndBlocks.mockResolvedValue(updateAck([source, target]))
       const hookFailure = new Error('hook failed')
       await expect(
-        ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, () => {
+        ds.updateMessageAndBlocks(source, { id: 'm-1' } as any, [], [], undefined, null, () => {
           throw hookFailure
         })
       ).rejects.toBe(hookFailure)
-      // The committed write is never silently reported as a failed one.
-      expect(getGlobalBlockGeneration()).toBe(before + 1)
+      expect(getClosureLoadGeneration(source)).toBe(1)
+      expect(getClosureLoadGeneration(target)).toBe(1)
+      expect(getClosureLoadGeneration(unrelated)).toBe(0)
+      expect(getGlobalBlockGeneration()).toBe(0)
     })
 
     it('onAckPersisted never enters the IPC request payload', async () => {
       api.updateMessageAndBlocks.mockResolvedValue(updateAck())
       const onAckPersisted = vi.fn()
-      await ds.updateMessageAndBlocks('topic-1', { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
+      await ds.updateMessageAndBlocks(source, { id: 'm-1' } as any, [], [], undefined, null, onAckPersisted)
       const request = api.updateMessageAndBlocks.mock.calls[0][0]
       expect(Object.keys(request)).toEqual([
         'topicId',

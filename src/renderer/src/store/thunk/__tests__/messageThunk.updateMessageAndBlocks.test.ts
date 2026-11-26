@@ -22,7 +22,7 @@ const { mocks } = vi.hoisted(() => {
   const emptyCleanup = {
     affectedFileIds: [],
     remainingReferenceCounts: {},
-    contextInvalidation: { scope: 'all' as const }
+    contextInvalidation: { scope: 'topics', topicIds: ['topic-123'] }
   }
   return {
     mocks: {
@@ -147,7 +147,11 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
 }))
 
 // Import AFTER mocks
-import { getGlobalBlockGeneration, resetAllClosureStateForTests } from '@renderer/services/contextClosure'
+import {
+  getClosureLoadGeneration,
+  getGlobalBlockGeneration,
+  resetAllClosureStateForTests
+} from '@renderer/services/contextClosure'
 import { consumeUpdateAckInvalidation } from '@renderer/services/db/authorityInvalidation'
 import { CLOSURE_AUTHORITY_HANDLED_META_KEY } from '@renderer/store/closureOwnership'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -378,7 +382,7 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
     const cleanupResult = {
       affectedFileIds: ['file-1'],
       remainingReferenceCounts: { 'file-1': 0 },
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [topicId] }
     }
     mocks.dbUpdateMessageAndBlocks.mockResolvedValue(cleanupResult)
 
@@ -421,7 +425,7 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
     const cleanupResult = {
       affectedFileIds: ['file-1'],
       remainingReferenceCounts: { 'file-1': 0 },
-      contextInvalidation: { scope: 'all' as const }
+      contextInvalidation: { scope: 'topics', topicIds: [topicId] }
     }
     mocks.dbUpdateMessageAndBlocks.mockResolvedValue(cleanupResult)
 
@@ -475,15 +479,15 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
 
   it('passes the authority effect through and marks same-ack commits handled', async () => {
     resetAllClosureStateForTests()
-    const before = getGlobalBlockGeneration()
+    const before = getClosureLoadGeneration(topicId)
     const messageUpdates = { id: messageId, updatedAt: '2026-07-29T00:00:00.000Z' }
     const blocks = [makeBlock('block-1', 'content')]
 
     const result = await updateMessageAndBlocksThunk(topicId, messageUpdates, blocks, ['gone-1'])(dispatch)
 
     // Full ack (cleanup + effect) is returned; the effect is consumed once.
-    expect((result as any).contextInvalidation).toEqual({ scope: 'all' })
-    expect(getGlobalBlockGeneration()).toBe(before + 1)
+    expect((result as any).contextInvalidation).toEqual({ scope: 'topics', topicIds: [topicId] })
+    expect(getClosureLoadGeneration(topicId)).toBe(before + 1)
     // Same-ack DB-first commits carry the handled marker; the timestamp
     // touch is outside the handled family and stays unmarked.
     const handled: string[] = []
@@ -500,13 +504,15 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
 
   it('consumes nothing when Main rejects (no bump, no dispatch)', async () => {
     resetAllClosureStateForTests()
-    const before = getGlobalBlockGeneration()
+    const before = getClosureLoadGeneration(topicId)
+    const globalBefore = getGlobalBlockGeneration()
     mocks.dbUpdateMessageAndBlocks.mockRejectedValue(new Error('CONFLICT_ERROR'))
 
     await expect(updateMessageAndBlocksThunk(topicId, { id: messageId }, [])(dispatch)).rejects.toThrow(
       'CONFLICT_ERROR'
     )
-    expect(getGlobalBlockGeneration()).toBe(before)
+    expect(getClosureLoadGeneration(topicId)).toBe(before)
+    expect(getGlobalBlockGeneration()).toBe(globalBefore)
     expect(dispatch).not.toHaveBeenCalled()
   })
 

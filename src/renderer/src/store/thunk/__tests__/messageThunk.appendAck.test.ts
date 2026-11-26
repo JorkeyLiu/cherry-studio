@@ -428,7 +428,7 @@ describe('sendMessage append acknowledgment publication', () => {
         messageId: 'ghost',
         createdMessageIds: ['ghost'],
         mutableMessageIds: ['ghost'],
-        contextInvalidation: { scope: 'all' }
+        contextInvalidation: { scope: 'topics', topicIds: [topicId] }
       })) as never)
       const { sendMessage } = await import('../messageThunk')
       const dispatch = vi.fn()

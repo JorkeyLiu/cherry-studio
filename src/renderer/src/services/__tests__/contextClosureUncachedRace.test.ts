@@ -1,6 +1,7 @@
 import {
   bumpAndInvalidate,
   bumpAndInvalidateAll,
+  bumpAndInvalidateTopics,
   computeClosureFingerprint,
   ensureClosureGeneration,
   getCachedContextClosure,
@@ -8,7 +9,8 @@ import {
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
   resetAllClosureStateForTests,
-  setCachedContextClosureWithFingerprint
+  setCachedContextClosureWithFingerprint,
+  subscribeClosureInvalidations
 } from '@renderer/services/contextClosure'
 import { closureInvalidationMiddleware } from '@renderer/store'
 import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
@@ -218,5 +220,39 @@ describe('uncached in-flight block mutation race (LOCK-R06-006 global epoch)', (
     )
     expect(getClosureLoadGeneration(topicId, freshBranch)).toBe(genBranchBeforeRO)
     expect(getFreshValidatedClosure(topicId, anchor, undefined, freshBranch)).not.toBeNull()
+  })
+})
+
+describe('topic-set authority invalidation', () => {
+  beforeEach(() => {
+    resetAllClosureStateForTests()
+  })
+
+  it('invalidates every branch of affected topics and rejects only their in-flight publications', () => {
+    const source = 't-source'
+    const target = 't-target'
+    const unrelated = 't-unrelated'
+    const fp = computeClosureFingerprint([{ id: 'u1', role: 'user', blocks: [] }] as any)
+    setCachedContextClosureWithFingerprint(source, makeResp(source), fp)
+    setCachedContextClosureWithFingerprint(source, makeResp(source), fp, 'b-source')
+    setCachedContextClosureWithFingerprint(target, makeResp(target), fp)
+    const unrelatedCached = getCachedContextClosure(unrelated)
+    setCachedContextClosureWithFingerprint(unrelated, makeResp(unrelated), fp)
+    const sourceInFlightGeneration = ensureClosureGeneration(source, 'b-uncached')
+    const unrelatedInFlightGeneration = ensureClosureGeneration(unrelated, 'b-uncached')
+    const listener = vi.fn()
+    const unsubscribe = subscribeClosureInvalidations(listener)
+
+    bumpAndInvalidateTopics([source, target])
+    unsubscribe()
+
+    expect(getCachedContextClosure(source)).toBeNull()
+    expect(getCachedContextClosure(source, 'b-source')).toBeNull()
+    expect(getCachedContextClosure(target)).toBeNull()
+    expect(getCachedContextClosure(unrelated)).not.toBe(unrelatedCached)
+    expect(getClosureLoadGeneration(source, 'b-uncached')).toBe(sourceInFlightGeneration + 1)
+    expect(getClosureLoadGeneration(unrelated, 'b-uncached')).toBe(unrelatedInFlightGeneration)
+    expect(getGlobalBlockGeneration()).toBe(0)
+    expect(listener).toHaveBeenCalledOnce()
   })
 })

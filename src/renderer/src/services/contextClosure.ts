@@ -517,6 +517,25 @@ export function resetContextClosureDiagnosticsForTests(): void {
   closureCacheMissCount = 0
 }
 
+/** Invalidate every registered route of one topic, preserving generations. */
+function invalidateTopicClosureRoutes(topicId: string): void {
+  const prefix = `${topicId}:`
+  const keys = new Set<string>([...closureCache.keys(), ...loadGenerations.keys()])
+  let touched = false
+  for (const key of keys) {
+    if (key === topicId || key.startsWith(prefix)) {
+      bumpClosureGenerationForKey(key)
+      closureCache.delete(key)
+      closureFingerprints.delete(key)
+      cachedGenerations.delete(key)
+      touched = true
+    }
+  }
+  if (!touched) {
+    bumpClosureGenerationForKey(topicId)
+  }
+}
+
 /**
  * Bump generation and invalidate cached entries for a topic.
  * Covers full closure freshness including same-length mutations outside viewport.
@@ -526,21 +545,7 @@ export function resetContextClosureDiagnosticsForTests(): void {
  */
 export function bumpAndInvalidate(topicId: string, branchId?: string | null): void {
   if (branchId === undefined) {
-    const prefix = `${topicId}:`
-    const keys = new Set<string>([...closureCache.keys(), ...loadGenerations.keys()])
-    let touched = false
-    for (const key of keys) {
-      if (key === topicId || key.startsWith(prefix)) {
-        bumpClosureGenerationForKey(key)
-        closureCache.delete(key)
-        closureFingerprints.delete(key)
-        cachedGenerations.delete(key)
-        touched = true
-      }
-    }
-    if (!touched) {
-      bumpClosureGenerationForKey(topicId)
-    }
+    invalidateTopicClosureRoutes(topicId)
     // Reactive refresh: notify even when no listener/route registered yet —
     // generation maps already advanced so a later mount observes the bump.
     emitClosureInvalidations()
@@ -552,6 +557,22 @@ export function bumpAndInvalidate(topicId: string, branchId?: string | null): vo
   closureFingerprints.delete(key)
   cachedGenerations.delete(key)
   emitClosureInvalidations()
+}
+
+/**
+ * Topic-scoped authority invalidation. Reuses the existing per-route
+ * loadGenerations and route keys: every branch of each affected topic is
+ * invalidated, while unrelated topic caches and in-flight reads keep their
+ * generation. One semantic notification is emitted for the whole set.
+ */
+export function bumpAndInvalidateTopics(topicIds: readonly string[]): void {
+  const seen = new Set<string>()
+  for (const topicId of topicIds) {
+    if (typeof topicId !== 'string' || topicId.length === 0 || seen.has(topicId)) continue
+    seen.add(topicId)
+    invalidateTopicClosureRoutes(topicId)
+  }
+  if (seen.size > 0) emitClosureInvalidations()
 }
 
 export function bumpAndInvalidateAll(): void {

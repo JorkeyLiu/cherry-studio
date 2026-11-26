@@ -616,4 +616,32 @@ describe('cross-topic history references', () => {
       expect(win.reference?.sourceTopicId).toBe(b)
     })
   })
+
+  it('authority ack closure stops at the 32-hop boundary and remains cycle-safe', () => {
+    const topics = Array.from({ length: 34 }, (_, i) => `t-depth-${i}-${uid()}`)
+    const anchors = topics.map((topicId) => {
+      okValue(agg.ensureTopic(topicId, 'assistant-1', topicId))
+      const message = makeMessageJson(topicId)
+      okValue(agg.appendMessage(topicId, message as any, []))
+      return message.id as string
+    })
+    const insertReference = sqlite.prepare(
+      'INSERT INTO topic_references (target_topic_id, source_topic_id, source_branch_id, anchor_message_id, created_at, updated_at, extra) VALUES (?, ?, NULL, ?, ?, ?, NULL)'
+    )
+    const now = new Date().toISOString()
+    for (let i = 0; i < topics.length - 1; i++) {
+      insertReference.run(topics[i + 1], topics[i], anchors[i], now, now)
+    }
+    // A back-edge inside the visited frontier must not duplicate or extend it.
+    insertReference.run(topics[0], topics[5], anchors[5], now, now)
+
+    const appended = agg.appendMessage(topics[0], makeMessageJson(topics[0]) as any, [])
+    const ack = okValue(appended)
+    expect(ack.contextInvalidation).toEqual({
+      scope: 'topics',
+      topicIds: topics.slice(0, 33).sort()
+    })
+    expect(ack.contextInvalidation.topicIds).toHaveLength(33)
+    expect(ack.contextInvalidation.topicIds).not.toContain(topics[33])
+  })
 })
