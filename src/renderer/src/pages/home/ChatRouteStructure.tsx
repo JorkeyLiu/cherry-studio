@@ -1,5 +1,7 @@
 import { type RouteScopedSegmentsResult, useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
-import { createContext, type FC, type ReactNode, use } from 'react'
+import { useAppStore } from '@renderer/store'
+import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
+import { createContext, type FC, type ReactNode, use, useEffect, useRef } from 'react'
 
 /**
  * Surface-owned route structure read, shared by every chat-surface consumer.
@@ -32,6 +34,16 @@ import { createContext, type FC, type ReactNode, use } from 'react'
  * in-flow chrome read. No second local state or projection writer is kept in
  * `Messages`, and no new global bus/cache/clock is introduced.
  *
+ * This provider also owns the topic ACTIVATION read. A cold topic's
+ * activation window is a real bounded read (`loadTopicMessagesThunk`) carrying
+ * `includeStructure` in its own Main transaction; the thunk hands that same
+ * route structure back after the joint publication, and this provider accepts
+ * it through `acceptCommittedStructure` before the catalog-driven effect can
+ * issue a second structural probe. The handoff exists only on a successful
+ * publication — resident hits, stale discards, and failures deliver nothing,
+ * so the hook's own per-route probe still runs exactly once. `useActiveTopic`
+ * therefore keeps no hidden loading side effect.
+ *
  * This is caller-local structure, not authority: it publishes nothing to Redux
  * and holds no persistence, mirroring the projection/authority boundary.
  */
@@ -46,6 +58,32 @@ interface ChatRouteStructureProviderProps {
 
 export const ChatRouteStructureProvider: FC<ChatRouteStructureProviderProps> = ({ topicId, children }) => {
   const routeStructure = useRouteScopedSegments(topicId)
+  const appStore = useAppStore()
+  // The hook's accept entry is a stable single owner; the ref keeps the
+  // activation effect independent of render identity.
+  const acceptCommittedStructureRef = useRef(routeStructure.acceptCommittedStructure)
+  acceptCommittedStructureRef.current = routeStructure.acceptCommittedStructure
+  // One activation read per selected topic id. Messages' own bootstrap effects
+  // run first (child before parent), so an in-flight saved-anchor around restore
+  // is registered before this dispatch and is adopted rather than competed with.
+  // A genuine A→B→A is a new id and re-activates; a same-ID metadata update
+  // (object identity change) never re-runs this effect.
+  useEffect(() => {
+    if (!topicId) return
+    void appStore.dispatch(
+      loadTopicMessagesThunk(topicId, false, {
+        onPublishedStructure: (handoff) => {
+          acceptCommittedStructureRef.current(
+            handoff.topicId,
+            handoff.route,
+            handoff.structure,
+            handoff.reference,
+            handoff.routeGeneration
+          )
+        }
+      })
+    )
+  }, [appStore, topicId])
   return <ChatRouteStructureContext value={routeStructure}>{children}</ChatRouteStructureContext>
 }
 

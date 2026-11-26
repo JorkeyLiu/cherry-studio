@@ -42,6 +42,14 @@ vi.mock('antd', () => ({
   )
 }))
 
+// This suite owns the shared-surface projection semantics, not the activation
+// read. The provider's activation dispatch is stubbed here so the suite's
+// structural-read assertions stay about the scoped hook; the real activation
+// handoff is proven end-to-end (real thunk publication + real provider accept)
+// in ChatRouteStructure.activationRead.test.tsx.
+vi.mock('@renderer/store/thunk/messageThunk', () => ({
+  loadTopicMessagesThunk: vi.fn(() => () => Promise.resolve())
+}))
 import { useRetainedRouteSegments } from '@renderer/hooks/useRetainedRouteSegments'
 import {
   ROUTE_SEGMENTS_REFRESH_DEBOUNCE_MS,

@@ -89,10 +89,14 @@ describe('per-topic selected branch restore', () => {
     expect((s.branchesByTopic as Record<string, unknown>)['t-1']).toBeUndefined()
   })
 
-  it('useTopic no longer resets the stored branch on topic switch (source check)', () => {
+  it('useTopic no longer resets the stored branch, and owns selection only (source + surface ownership)', () => {
     const source = fs.readFileSync('src/renderer/src/hooks/useTopic.ts', 'utf8')
     expect(source).not.toMatch(/activeBranchReset/)
-    expect(source).toMatch(/loadTopicMessagesThunk/)
+    // Selection-only hook: the message activation read is not a hidden side
+    // effect here — the mounted chat surface owns it.
+    expect(source).not.toMatch(/loadTopicMessagesThunk/)
+    const surface = fs.readFileSync('src/renderer/src/pages/home/ChatRouteStructure.tsx', 'utf8')
+    expect(surface).toMatch(/loadTopicMessagesThunk/)
   })
 
   it('topicBranch slice stays persisted (not blacklisted) for relaunch restore', () => {

@@ -52,7 +52,7 @@ export interface TopicTransitionOptions {
  * stale work from the old topic cannot commit into the new topic.
  *
  * This hook does NOT:
- * - Trigger loadTopicMessagesThunk (useActiveTopic dispatches that)
+ * - Trigger loadTopicMessagesThunk (the chat surface's provider owns that)
  * - Manage bootstrap restore (the existing bootstrap effect handles that)
  * - Introduce any persistent transition store or cross-process coordination
  */

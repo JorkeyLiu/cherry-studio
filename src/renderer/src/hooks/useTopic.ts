@@ -7,7 +7,6 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import store from '@renderer/store'
 import { updateTopic } from '@renderer/store/assistants'
 import { setNewlyRenamedTopics, setRenamingTopics } from '@renderer/store/runtime'
-import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { createSnapshotBlockMap, getMainTextSnapshotContent } from '@renderer/utils/messageUtils/snapshotBlocks'
@@ -35,26 +34,24 @@ export function useActiveTopic(assistantId: string, topic?: Topic) {
       prevActiveTopicIdRef.current = undefined
       return
     }
-    // Selected-topic identity gate: only a real ID change loads. Effect
+    // Selected-topic identity gate: only a real ID change notifies. Effect
     // reattach (Activity hide/show) or an innocuous same-ID object update
-    // (metadata sync) must not redispatch the cache-hit path, which would
-    // bump the shared same-topic sequence and supersede the viewport's
-    // correct in-flight around request. Initial mount (ref uninitialized)
-    // and genuine A→B→A changes still dispatch. Explicit refresh owns its
-    // own forceReload path elsewhere and never routes through this gate.
+    // (metadata sync) must not re-notify consumers, and must never bump the
+    // shared same-topic sequence of an in-flight activation read in the chat
+    // surface. Initial mount (ref uninitialized) and genuine A→B→A changes
+    // still notify. Explicit refresh owns its own forceReload path elsewhere
+    // and never routes through this gate.
     if (prevActiveTopicIdRef.current === activeTopic.id) {
       return
     }
     // Actual topic switch (ID change — not a metadata refresh of the same
-    // topic): restore the logical topic's previously active branch instead
-    // of resetting to main. `activeBranchIdByTopic` is persisted; the
-    // stored branch is kept as-is here and `loadTopicMessagesThunk`
-    // resolves the active route at read time. Catalog refresh/deletion
-    // (`branchesReceived`) invalidates stale IDs back to main, and the
-    // same-profile relaunch rehydrates the valid selection the same way.
-    // Sidebar remains logical-topic-only.
+    // topic): notify consumers that the selection moved. Message activation
+    // reads are owned by the chat surface (`ChatRouteStructureProvider`),
+    // which resolves the active route at read time: a genuine A→B→A
+    // re-activates there, while an innocuous same-ID metadata update never
+    // re-reads. This hook only selects the logical topic/metadata and keeps
+    // no hidden loading side effect of its own.
     prevActiveTopicIdRef.current = activeTopic.id
-    void store.dispatch(loadTopicMessagesThunk(activeTopic.id))
     void EventEmitter.emit(EVENT_NAMES.CHANGE_TOPIC, activeTopic)
   }, [activeTopic])
 

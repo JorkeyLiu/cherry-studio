@@ -3821,6 +3821,44 @@ function scheduleTopicAnchorEstablishment(
 }
 
 /**
+ * Topic-activation structure handoff (renderer-local, never a shared DTO).
+ *
+ * A topic activation reads a real bounded window with `includeStructure: true`
+ * (cold latest, or an adopted in-flight around restore). The same Main
+ * transaction already carries the neutral segment catalog plus the addressed
+ * route qualification, so after the joint window/structure publication
+ * succeeds the chat-surface caller may consume that structure in place instead
+ * of issuing a second structural probe. Delivered ONLY after the joint publish
+ * and the same currency guards that gate it: a resident hit, a stale discard,
+ * or a failed read delivers nothing (the caller keeps its own probe), and no
+ * read-start promise is ever made.
+ *
+ * Identity is the caller-local contract: `route`/`routeGeneration` bind the
+ * addressed route (branch switch or A→B→A excursion is rejected),
+ * `publicationGeneration` is the resident applicability generation the joint
+ * publication used, and `reference` is the relation that publication installed
+ * (the baseline the surface hook rebaselines from). No global cache, no Redux
+ * structure field, no persistence.
+ */
+export interface TopicBootstrapStructureHandoff {
+  topicId: string
+  route: string | null
+  routeGeneration: number
+  publicationGeneration: number
+  structure: FetchMessagesWindowStructure
+  reference: HistoryReferenceMeta | null
+}
+
+export interface LoadTopicMessagesOpts {
+  /**
+   * Called synchronously after this activation's joint window/structure
+   * publication succeeds and is currency-confirmed. Not called for a resident
+   * hit, a stale discard, or a failed read.
+   */
+  onPublishedStructure?: (handoff: TopicBootstrapStructureHandoff) => void
+}
+
+/**
  * Load messages for a topic using windowed reads (S6.1 R-02 latest).
  *
  * Cold bootstrap uses the existing renderer sizing (displayCount / INITIAL_MESSAGES_COUNT,
@@ -3831,8 +3869,8 @@ function scheduleTopicAnchorEstablishment(
  * data and never falling back to whole-topic fetch.
  */
 export const loadTopicMessagesThunk =
-  (topicId: string, forceReload: boolean = false) =>
-  async (dispatch: AppDispatch, getState: () => RootState) => {
+  (topicId: string, forceReload: boolean = false, opts?: LoadTopicMessagesOpts) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
     const state = getState()
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
@@ -3911,6 +3949,15 @@ export const loadTopicMessagesThunk =
       // still invalidates via mismatch. Latest-first (no pending) keeps the
       // historic bump+latest path.
       const adoptionRoute = activeRouteOf(getState, topicId)
+      // Minimal bootstrap route capture: this activation read addresses the
+      // active route at launch; the publication below refuses a window that
+      // belongs to a route the topic has already left (branch switch / ABA).
+      let bootstrapRouteGenerationAtStart = 0
+      try {
+        bootstrapRouteGenerationAtStart = selectRouteGeneration(getState(), topicId)
+      } catch {
+        bootstrapRouteGenerationAtStart = 0
+      }
       const pendingRestorePre = pendingRouteRestoreByTopic.get(topicId)
       const adoptRestorePre =
         pendingRestorePre !== undefined && pendingRestorePre.route === adoptionRoute ? pendingRestorePre : null
@@ -4048,6 +4095,25 @@ export const loadTopicMessagesThunk =
         logger.warn(`[loadTopicMessagesThunk] stale generation discard for ${topicId} (generation mismatch)`)
         return
       }
+      // Route currency: the read addressed `adoptionRoute` at launch. A branch
+      // switch or A→B→A excursion during the read must never publish an
+      // old-route window nor hand its structure to the surface consumer.
+      if (activeRouteOf(getState, topicId) !== adoptionRoute) {
+        recordResidentReadDiscard('superseded')
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (route moved)`)
+        return
+      }
+      let routeGenNow = 0
+      try {
+        routeGenNow = selectRouteGeneration(getState(), topicId)
+      } catch {
+        routeGenNow = 0
+      }
+      if (routeGenNow !== bootstrapRouteGenerationAtStart) {
+        recordResidentReadDiscard('generationMismatch')
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (route generation mismatch)`)
+        return
+      }
 
       // Adopted restores validate against their own issuing request (the
       // validator is kind-strict: an around window never satisfies a latest
@@ -4115,6 +4181,30 @@ export const loadTopicMessagesThunk =
         dispatch(syncAction)
       } catch {
         // best-effort StoreSync projection; never break joint publication
+      }
+
+      // Topic-activation structure handoff (caller-local only): the same Main
+      // transaction that produced the published window also returned the
+      // neutral catalog and this route's qualification. Deliver it
+      // synchronously before yielding so a structure-provider caller can
+      // accept it in this commit — after the catalog arrives the surface
+      // effect sees an already-accepted route and issues no second probe.
+      // Resident hits, stale discards, and failed reads never reach here, so
+      // those keep the caller's own structural probe.
+      if (opts?.onPublishedStructure) {
+        try {
+          opts.onPublishedStructure({
+            topicId,
+            route: adoptionRoute,
+            routeGeneration: bootstrapRouteGenerationAtStart,
+            publicationGeneration: generation,
+            structure: (response as unknown as { structure: FetchMessagesWindowStructure }).structure,
+            reference: (response as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
+          })
+        } catch {
+          // Fail-closed: the joint publication already landed; a handoff
+          // consumer error never breaks the activation path.
+        }
       }
 
       // Anchor/context work is scheduled after interactive completion and never blocks
