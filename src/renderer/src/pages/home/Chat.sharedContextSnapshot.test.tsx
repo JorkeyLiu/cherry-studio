@@ -222,6 +222,7 @@ const makeStore = () =>
   configureStore({
     reducer: {
       messageBlocks: messageBlocksSlice.reducer,
+      settings: () => ({ assistantsWidth: 300, showAssistants: true }),
       topicBranch: (state: any = { activeBranchIdByTopic: {}, routeGenerationByTopic: {} }) => state
     } as any,
     middleware: (getDefaultMiddleware) => getDefaultMiddleware({ serializableCheck: false })
