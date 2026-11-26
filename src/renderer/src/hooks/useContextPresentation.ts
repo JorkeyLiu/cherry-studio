@@ -14,7 +14,7 @@ import { useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
-import { createSnapshotBlockMap, type SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
+import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import { shallowEqual } from 'react-redux'
 
@@ -44,8 +44,6 @@ export function useContextPresentation(options: {
   assistant: Assistant | undefined
 }): {
   sharedContextInfo: ContextInfo
-  blockSnapshot: SnapshotBlockMap
-  freshClosure: ReturnType<typeof useContextClosure>['closure']
 } {
   const { topicId, anchorGroupKey, branchId, topicMessages, assistant } = options
   const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
@@ -120,7 +118,7 @@ export function useContextPresentation(options: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [freshClosure])
 
-  return { sharedContextInfo, blockSnapshot, freshClosure }
+  return { sharedContextInfo }
 }
 
 /** Loaded topic messages for the presentation input (stable empty identity while non-resident). */

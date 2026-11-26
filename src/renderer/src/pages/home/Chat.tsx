@@ -157,9 +157,8 @@ const Chat: FC<Props> = (props) => {
   const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
   const topicMessages = usePresentationTopicMessages(props.activeTopic.id)
-  // The whole presentation result is carried at Chat level (explicit
-  // blockSnapshot + shared context info); today only sharedContextInfo flows
-  // to Messages/Inputbar, whose token estimate pairs it with the same snapshot.
+  // Only the shared context derivation crosses this boundary; its explicit
+  // blockSnapshot remains paired with the messages used for token estimation.
   const contextPresentation = useContextPresentation({
     topicId: props.activeTopic.id,
     anchorGroupKey,

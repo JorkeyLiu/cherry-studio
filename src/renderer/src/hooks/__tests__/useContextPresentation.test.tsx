@@ -129,9 +129,12 @@ describe('useContextPresentation', () => {
       { wrapper: wrapper(store) }
     )
 
+    expect(Object.keys(result.current)).toEqual(['sharedContextInfo'])
     // Bodies come from the closure snapshot: the ordinary store was never seeded.
     expect(store.getState().messageBlocks.entities['a1-block']).toBeUndefined()
-    expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('closure-body')
+    expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+      'closure-body'
+    )
     expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
     expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 2, max: 2 })
     expect(result.current.sharedContextInfo.tokenEstimationMessages.map((m: any) => m.id)).toEqual(['u1', 'a1'])
@@ -150,7 +153,9 @@ describe('useContextPresentation', () => {
     act(() => {
       handle.notifyDelta()
     })
-    expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('live-body')
+    expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+      'live-body'
+    )
     expect(result.current.sharedContextInfo.tokenEstimationMessages.map((m: any) => m.id)).toEqual(['u1', 'a1'])
     expect(store.getState().messageBlocks.entities['a1-block']).toBeUndefined()
     // Non-member execution bodies never enter the snapshot.
@@ -176,14 +181,13 @@ describe('useContextPresentation', () => {
         }),
       { wrapper: wrapper(store), initialProps: { topicId: TOPIC } }
     )
-    expect(result.current.freshClosure).not.toBeNull()
+    expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
 
     rerender({ topicId: 't-other' })
-    expect(result.current.freshClosure).toBeNull()
     // No stale body rides along: the new route (no anchor, no loaded blocks)
     // takes the legitimate empty-route fallback — never pending-authority,
     // never viewport counts.
-    expect(result.current.blockSnapshot.has('a1-block')).toBe(false)
+    expect(result.current.sharedContextInfo.blockSnapshot.has('a1-block')).toBe(false)
     expect(result.current.sharedContextInfo.tokenEstimationMessages).toEqual([])
     expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
     expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 0, max: 0 })
@@ -225,8 +229,10 @@ describe('useContextPresentation', () => {
       )
       // The handoff effect retired the retained terminal: the accepted
       // closure body shows, not the overlay.
-      expect(getClosureReadReceipt(result.current.freshClosure)).toBeDefined()
-      expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('closure-body')
+      expect(getClosureReadReceipt(closure)).toBeDefined()
+      expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+        'closure-body'
+      )
     } finally {
       unsubscribe()
     }
@@ -264,11 +270,13 @@ describe('useContextPresentation', () => {
           }),
         { wrapper: wrapper(store) }
       )
-      expect(getClosureReadReceipt(result.current.freshClosure)).toBeUndefined()
-      expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('live-body')
+      expect(getClosureReadReceipt(hoisted.closure)).toBeUndefined()
+      expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+        'live-body'
+      )
       // Direct proof with an explicit stale witness also retains.
       expect(
-        tryHandoffAfterClosure(TOPIC, null, result.current.freshClosure as never, {
+        tryHandoffAfterClosure(TOPIC, null, hoisted.closure as never, {
           routeKey,
           terminals: []
         })
@@ -290,8 +298,8 @@ describe('useContextPresentation', () => {
         }),
       { wrapper: wrapper(store), initialProps: { msgs: [] as any[] } }
     )
-    expect(result.current.freshClosure).not.toBeNull()
-    const accepted = result.current.freshClosure
+    expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
+    const acceptedSnapshot = result.current.sharedContextInfo.blockSnapshot
     expect(hoisted.closureCalls.length).toBeGreaterThan(0)
     // Pages arrive 0→many with no identity/semantic change.
     const grown = [...topicMessages(TOPIC), ...topicMessages(TOPIC).map((m) => ({ ...m, id: `${m.id}-p2` }))] as any[]
@@ -301,10 +309,12 @@ describe('useContextPresentation', () => {
     for (const args of hoisted.closureCalls) {
       expect(args).toEqual([TOPIC, ANCHOR, null])
     }
-    // The accepted read is undisturbed: same reference, same counts/snapshot.
-    expect(result.current.freshClosure).toBe(accepted)
+    // The accepted read is undisturbed: same snapshot reference, same counts.
+    expect(result.current.sharedContextInfo.blockSnapshot).toBe(acceptedSnapshot)
     expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 2, max: 2 })
     expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
-    expect((result.current.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe('closure-body')
+    expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+      'closure-body'
+    )
   })
 })
