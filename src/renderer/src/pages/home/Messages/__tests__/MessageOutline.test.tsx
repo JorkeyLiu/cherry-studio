@@ -519,7 +519,11 @@ describe('MessageOutline textless dividers', () => {
 
   it('inserts the fork divider directly AFTER the marked message row, and only there', () => {
     const { container } = render(
-      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        forkAfter={new Map([['u2', { label: 'Research branch', taken: false }]])}
+      />
     )
     const body = bodyOf(container)
     // Sibling order in DOM: the group overlay, the marked row keeps its own
@@ -550,7 +554,7 @@ describe('MessageOutline textless dividers', () => {
         entries={ENTRIES}
         onNavigate={onNavigate}
         activeId="u2"
-        forkAfter={new Map([['u2', 'Research branch']])}
+        forkAfter={new Map([['u2', { label: 'Research branch', taken: false }]])}
       />
     )
     const fork = screen.getByTestId('conversation-nav-fork')
@@ -593,31 +597,29 @@ describe('MessageOutline textless dividers', () => {
     expect(screen.queryAllByTestId('conversation-nav-fork')).toHaveLength(0)
   })
 
-  it('draws a fixed 16px textless row: a 60% 1px rule, solid clear and dashed lighter', () => {
-    // Both variants mount so both interpolated rules are in the sheet.
+  it('draws fixed 8px textless rows: a solid context rule and three available-fork dots', () => {
     render(
       <MessageOutline
         entries={ENTRIES}
         onNavigate={vi.fn()}
-        forkAfter={new Map([['u2', 'Research branch']])}
+        forkAfter={new Map([['u2', { label: 'Research branch', taken: false }]])}
         contextRowId="u1"
       />
     )
     const norm = normalizedCss()
 
-    // The open row keeps its fixed 8px height with -2px top/bottom margins —
-    // it is spacing, never a message row — and centers the single rule at 60%
-    // of the usable width, short of the text span so the line never reads as
-    // long as the text. Footprint: 8 - 4 + 8 gaps = 12px total block.
+    // Divider rows keep their fixed 8px height with -2px top/bottom margins.
+    // The context rule stays 60% wide; the available fork has no length rule.
     expect(norm).toContain('height:8px')
     expect(norm).toContain('width:60%')
-    // The context solid is the clearer of the two dividers (message-flow
-    // form, ~0.6): a real 1px-high painted line.
     expect(norm).toContain('height:1px;background:var(--color-text-3)')
-    // The fork dashed is lighter (~0.4): a 1px dashed top border.
-    expect(norm).toContain('border-top:1pxdashedvar(--color-text-3)')
     expect(norm).toContain('opacity:0.6')
     expect(norm).toContain('opacity:0.4')
+    // Available forks are exactly three 2px dots, flex-centered with a 3px gap.
+    expect(norm).toContain('display:flex;align-items:center;justify-content:center;gap:3px')
+    expect(norm).toContain(
+      '[data-fork-dot]{width:2px;height:2px;flex-shrink:0;border-radius:50%;background:var(--color-text-3);}'
+    )
     // The dot column itself is untouched: still the 14px rail mark.
     expect(norm).toContain('width:14px;height:4px;background:var(--color-border);border-radius:2px')
     // No painted label anywhere in the new form: the old 11.5px fork name is
@@ -626,9 +628,87 @@ describe('MessageOutline textless dividers', () => {
     expect(norm).not.toContain('max-width:320px;opacity:1')
   })
 
+  it.each([
+    { taken: true, state: 'taken', line: 'dashed' },
+    { taken: false, state: 'available', line: 'dots' }
+  ])('renders the $state fork as a $line marker without an endpoint', ({ taken, state, line }) => {
+    const onNavigate = vi.fn()
+    const { container } = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={onNavigate}
+        forkAfter={new Map([['u2', { label: 'Research branch', taken }]])}
+      />
+    )
+    const body = bodyOf(container)
+    const fork = screen.getByTestId('conversation-nav-fork')
+    const marker = fork.firstElementChild as HTMLElement
+
+    expect(fork.getAttribute('data-fork-state')).toBe(state)
+    expect(fork.getAttribute('title')).toBe('Research branch')
+    expect(fork.getAttribute('aria-label')).toBe('Research branch')
+    expect(fork.getAttribute('aria-hidden')).toBe('true')
+    expect(fork.getAttribute('role')).toBeNull()
+    expect(fork.getAttribute('tabindex')).toBeNull()
+    expect(fork.textContent).toBe('')
+    expect(fork.children).toHaveLength(1)
+    expect(fork.querySelector('[data-fork-endpoint]')).toBeNull()
+    expect(getComputedStyle(fork).pointerEvents).toBe('none')
+    expect(getComputedStyle(fork).height).toBe('0px')
+    expect(getComputedStyle(fork).opacity).toBe('0')
+
+    expect(marker.getAttribute('data-fork-line')).toBe(line)
+    expect(getComputedStyle(marker).opacity).toBe('0.4')
+    const norm = normalizedCss()
+    if (taken) {
+      expect(getComputedStyle(marker).width).toBe('60%')
+      expect(getComputedStyle(marker).height).toBe('0px')
+      expect(norm).toContain('border-top:1pxdashedvar(--color-text-3)')
+      expect(marker.children).toHaveLength(0)
+      expect(marker.querySelector('[data-fork-dot]')).toBeNull()
+    } else {
+      const dotStyle = getComputedStyle(marker)
+      expect(dotStyle.display).toBe('flex')
+      expect(dotStyle.alignItems).toBe('center')
+      expect(dotStyle.justifyContent).toBe('center')
+      expect(dotStyle.gap).toBe('3px')
+      const dots = marker.querySelectorAll<HTMLElement>('[data-fork-dot]')
+      expect(dots).toHaveLength(3)
+      for (const dot of dots) {
+        expect(getComputedStyle(dot).width).toBe('2px')
+        expect(getComputedStyle(dot).height).toBe('2px')
+        expect(getComputedStyle(dot).borderRadius).toBe('50%')
+      }
+      expect(norm).toContain('background:var(--color-text-3)')
+    }
+
+    fireEvent.click(fork)
+    fireEvent.keyDown(fork, { key: 'Enter' })
+    fireEvent.keyDown(fork, { key: ' ' })
+    expect(onNavigate).not.toHaveBeenCalled()
+
+    fireEvent.mouseEnter(body)
+    const expandedStyle = getComputedStyle(fork)
+    expect(expandedStyle.height).toBe('8px')
+    expect(expandedStyle.marginTop).toBe('-2px')
+    expect(expandedStyle.marginBottom).toBe('-2px')
+    expect(expandedStyle.alignItems).toBe('center')
+    expect(expandedStyle.justifyContent).toBe('center')
+    expect(expandedStyle.overflow).toBe('hidden')
+    expect(fork.textContent).toBe('')
+    expect(getComputedStyle(screen.getByTestId('conversation-nav-item-u1')).height).toBe('24px')
+    expect(getComputedStyle(screen.getByTestId('conversation-nav-item-u3')).height).toBe('24px')
+    expect(fork.previousElementSibling).toBe(screen.getByTestId('conversation-nav-item-u2'))
+    expect(fork.nextElementSibling).toBe(screen.getByTestId('conversation-nav-item-u3'))
+  })
+
   it('keeps the caller label in title and accessible name only, in both states', () => {
     const { container } = render(
-      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', '此处有 2 条分支']])} />
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        forkAfter={new Map([['u2', { label: '此处有 2 条分支', taken: false }]])}
+      />
     )
     const body = bodyOf(container)
     const collapsed = screen.getByTestId('conversation-nav-fork')
@@ -792,7 +872,7 @@ describe('MessageOutline textless dividers', () => {
       <MessageOutline
         entries={ENTRIES}
         onNavigate={vi.fn()}
-        forkAfter={new Map([['u2', 'Research branch']])}
+        forkAfter={new Map([['u2', { label: 'Research branch', taken: true }]])}
         contextRowId="u1"
       />
     )
@@ -841,7 +921,7 @@ describe('MessageOutline textless dividers', () => {
       <MessageOutline
         entries={ENTRIES}
         onNavigate={vi.fn()}
-        forkAfter={new Map([['u1', 'branch']])}
+        forkAfter={new Map([['u1', { label: 'branch', taken: false }]])}
         contextRowId="u2"
       />
     )

@@ -50,6 +50,8 @@ const {
   deleteBranchSubtreeMock,
   copyBranchTreeMock,
   requestBranchesMock,
+  anchorRanksMock,
+  orderBranchTreeIndexMock,
   mockTree,
   popoverProps,
   popconfirmProps
@@ -59,6 +61,8 @@ const {
   deleteBranchSubtreeMock: vi.fn(),
   copyBranchTreeMock: vi.fn(),
   requestBranchesMock: vi.fn(),
+  anchorRanksMock: vi.fn(),
+  orderBranchTreeIndexMock: vi.fn(),
   popoverProps: [] as Array<{ align?: unknown; placement?: unknown }>,
   popconfirmProps: [] as Array<{ okText?: string; cancelText?: string }>,
   mockTree: {
@@ -111,6 +115,21 @@ vi.mock('@renderer/pages/home/Messages/useBranchTree', () => ({
   requestTopicBranches: (...args: unknown[]) => requestBranchesMock(...args),
   useBranchTree: () => mockTree
 }))
+
+vi.mock('@renderer/pages/home/Messages/branchSelector/useBranchAnchorRanks', () => ({
+  useBranchAnchorRanks: (...args: unknown[]) => anchorRanksMock(...args)
+}))
+
+vi.mock('@renderer/pages/home/Messages/branchSelector/branchTreeOrdering', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  orderBranchTreeIndexMock.mockImplementation(
+    actual.orderBranchTreeIndexByAnchorRanks as (...args: unknown[]) => unknown
+  )
+  return {
+    ...actual,
+    orderBranchTreeIndexByAnchorRanks: (...args: unknown[]) => orderBranchTreeIndexMock(...args)
+  }
+})
 
 vi.mock('@renderer/services/db/branchSubtree', () => ({
   deleteBranchSubtree: (...args: unknown[]) => deleteBranchSubtreeMock(...args)
@@ -338,6 +357,7 @@ const setViewportWidth = (width: number): void => {
 describe('TopicContent unified branch selector', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    anchorRanksMock.mockReturnValue(new Map())
     ;(window as unknown as { toast: { success: () => void; error: () => void } }).toast = {
       success: vi.fn(),
       error: vi.fn()
@@ -446,6 +466,59 @@ describe('TopicContent unified branch selector', () => {
     expect(screen.queryByTestId('branch-cascader-item-b-6')).not.toBeInTheDocument()
     expect(screen.queryByTestId('branch-cascader-item-b-5')).not.toBeInTheDocument()
     expect(rowOf('b-2')).toBeInTheDocument()
+  })
+
+  it('renders siblings by parent-route message rank with stable same-anchor order', async () => {
+    const late = {
+      ...wire('a-late', null, 'Late'),
+      anchorMessageId: 'm-late',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }
+    const sameFirst = {
+      ...wire('z-same-first', null, 'Same first'),
+      anchorMessageId: 'm-shared',
+      createdAt: '2026-01-02T00:00:00.000Z'
+    }
+    const sameSecond = {
+      ...wire('a-same-second', null, 'Same second'),
+      anchorMessageId: 'm-shared',
+      createdAt: '2026-01-03T00:00:00.000Z'
+    }
+    const early = {
+      ...wire('z-early', null, 'Early'),
+      anchorMessageId: 'm-early',
+      createdAt: '2026-01-04T00:00:00.000Z'
+    }
+    const branches = [late, sameFirst, sameSecond, early]
+    const ranks = new Map([
+      [
+        null,
+        new Map([
+          ['m-late', 2],
+          ['m-shared', 0],
+          ['m-early', 1]
+        ])
+      ]
+    ])
+    anchorRanksMock.mockReturnValue(ranks)
+    setTree(branches, [], null)
+
+    renderTopicContent()
+    expect(anchorRanksMock).toHaveBeenCalledWith('t-1', branches, false)
+    await openSelector()
+
+    expect(anchorRanksMock).toHaveBeenCalledWith('t-1', branches, true)
+    expect(orderBranchTreeIndexMock).toHaveBeenCalledWith(expect.anything(), branches, ranks)
+    const renderedOrder = within(screen.getByTestId('branch-selector-popover'))
+      .getAllByTestId(/^branch-cascader-item-/)
+      .map((row) => row.getAttribute('data-testid'))
+    expect(renderedOrder).toEqual([
+      'branch-cascader-item-main',
+      'branch-cascader-item-z-same-first',
+      'branch-cascader-item-a-same-second',
+      'branch-cascader-item-z-early',
+      'branch-cascader-item-a-late'
+    ])
   })
 
   it('expands only through the chevron, without switching route or closing the selector', async () => {

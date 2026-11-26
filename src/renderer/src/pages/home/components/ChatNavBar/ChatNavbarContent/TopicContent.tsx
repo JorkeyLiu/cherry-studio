@@ -10,7 +10,9 @@ import {
   buildBranchTreeIndex,
   planBranchPopoverFit
 } from '@renderer/pages/home/Messages/branchSelector/branchTreeModel'
+import { orderBranchTreeIndexByAnchorRanks } from '@renderer/pages/home/Messages/branchSelector/branchTreeOrdering'
 import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
+import { useBranchAnchorRanks } from '@renderer/pages/home/Messages/branchSelector/useBranchAnchorRanks'
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { useAppSelector } from '@renderer/store'
@@ -86,6 +88,7 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   // Only this entry's trigger, full-catalog scope and kept-open reaction stay
   // local. Branch names resolve from the live catalog for the rename history.
   const branches = branchTree.branches
+  const anchorRanks = useBranchAnchorRanks(activeTopic.id, branches, open)
   const resolveBeforeName = useCallback(
     (branchId: string): string | null => branches.find((branch) => branch.id === branchId)?.name ?? null,
     [branches]
@@ -155,7 +158,10 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const popoverAlign = useMemo(() => branchPopoverAlign(panelFit), [panelFit])
 
   const path = branchTree.path
-  const index = useMemo(() => buildBranchTreeIndex(branches), [branches])
+  const index = useMemo(
+    () => orderBranchTreeIndexByAnchorRanks(buildBranchTreeIndex(branches), branches, anchorRanks),
+    [anchorRanks, branches]
+  )
 
   const topicName = activeTopic.name && activeTopic.name.length > 0 ? activeTopic.name : activeTopic.id
   const segments = useMemo<BranchCrumbSegment[]>(() => {

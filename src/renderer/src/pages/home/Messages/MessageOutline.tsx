@@ -19,21 +19,24 @@ export interface MessageOutlineEntry {
   text: string
 }
 
+export interface MessageOutlineFork {
+  label: string
+  taken: boolean
+}
+
 interface MessageOutlineProps {
   entries: MessageOutlineEntry[]
   onNavigate: (id: string) => void
   activeId?: string | null
   /**
    * Rows that follow a fork: `forkAfter.has(id)` draws one non-interactive
-   * textless divider row directly AFTER that message row. The value is the
-   * caller's label (the branch this route travels, or the fork's
-   * children-here count from `forkMarkerLabel`) — kept as the row's
-   * `title`/accessible name only, never painted as text. The visible line is
-   * a dashed 1px rule at 60% of the usable width, lighter than the context
-   * solid; it never takes part in width measurement.
+   * textless divider row directly AFTER that message row. `label` is kept as
+   * the row's `title`/accessible name only, never painted as text. `taken`
+   * selects the current route's 60%-wide dashed rule or an available fork's
+   * three centered dots. Neither form paints text or adds a label width.
    * Keys are message ids that exist in `entries` (the caller owns that filter).
    */
-  forkAfter?: ReadonlyMap<string, string>
+  forkAfter?: ReadonlyMap<string, MessageOutlineFork>
   /**
    * Group runs to draw as node links in the rail's left whitespace.
    * Pure data in: geometry is measured from the rows at layout time.
@@ -162,8 +165,9 @@ const OUTLINE_MAX_WIDTH_INSET_PX = 24
  */
 const OUTLINE_MIN_WIDTH_PX = 200
 /**
- * Divider rows (context solid, fork dashed): textless 1px rules at 60% of the
- * usable width, centered, on a compact 8px row. Footprint math (expanded,
+ * Divider rows (context solid, fork dashed or dotted): textless markers on a
+ * compact 8px row. The taken fork keeps a 1px rule at 60% of the usable width;
+ * an available fork is three centered 2px dots. Footprint math (expanded,
  * flex column gap 4px): row 8px + margins -2px*2 = 4px effective, plus the
  * two 4px gaps minus the one baseline gap the rows would have anyway =
  * 4 + 4 = 8px extra beyond a plain row gap, 12px total block with neighbors.
@@ -177,6 +181,8 @@ const DIVIDER_ROW_HEIGHT_PX = 8
 const DIVIDER_ROW_MARGIN_EXPANDED_PX = -2
 const DIVIDER_ROW_MARGIN_COLLAPSED_PX = -1
 const DIVIDER_LINE_WIDTH_PERCENT = 60
+const FORK_DOT_SIZE_PX = 2
+const FORK_DOT_GAP_PX = 3
 
 /**
  * Sub-pixel tolerance for "this row is where it was": layout reports fractional
@@ -377,28 +383,16 @@ const applyGeometryAnchor = (container: HTMLElement, anchor: GeometryAnchor) => 
  * A fork marker (`forkAfter`) is a separate NON-interactive row inserted
  * directly after the marked message row: it is never a navigation target (no
  * role, stable id, tab stop, handler or active highlight), so the marked
- * message row keeps its own hitbox and stays reachable. Its row height matches
- * the message rows exactly (12px compact / 24px expanded, same row gap), so
- * compact and expanded rows line up 1:1.
- * Compact it is two 6px dashes with a 2px gap — 14px total, exactly the dot
- * band it sits in — with its label clipped to zero width and transparent.
- * Expanded it becomes `── <text> ──` in the message flow's divider form: two 1px
- * rules sharing the space above an 8px basis, an 8px gap and the fork's label in
- * the middle, left-aligned with the dot column. That basis is what makes the
- * rules part of the row's intrinsic width, so the rail always grows enough to
- * show both of them next to the label — even when every message preview is
- * shorter than the label (short messages) — and a wider rail still splits its
- * surplus between them. The row also keeps its stretched width in both states
- * and only its gap, its rules' flex basis and the label's clip switch, so the
- * marker spreads and fades instead of re-placing itself inside a still-open
- * panel.
- * The text is the message flow's own two states (`forkMarkerLabel`): the branch
- * this route travels at the fork, or the fork's `此处有 {{count}} 条分支` count
- * when the route took none — a fork is never drawn as a bare line. No caret:
- * the flow's `▾` belongs to a clickable popover trigger, and this row is not
- * interactive. The label stays in the DOM in both states (decorative,
- * `aria-hidden`, non-interactive) because mounting it on expansion would replace
- * the fade with a pop and take its width away from the measurement.
+ * message row keeps its own hitbox and stays reachable. Expanded it is an 8px
+ * textless marker row; collapsed it compresses to zero and stays hidden.
+ * A taken fork keeps the current route's dashed 1px rule at 60% width. An
+ * available fork is three 2px dots centered by flex with a 3px gap; it has no
+ * endpoint and no 60%-wide rule. Both forms use `--color-text-3` at 0.4
+ * opacity, so neither changes row geometry or neighboring message spacing.
+ * The caller's label is the message flow's own two states (`forkMarkerLabel`):
+ * the branch this route travels at the fork, or the fork's children-here count
+ * when the route took none. It stays in `title`/accessible name only — never
+ * painted, never a caret or interaction — in both compact and expanded states.
  *
  * Active highlight (`activeId`) is theme-colored with `aria-current` and the
  * outline container follows it only when the row is NOT fully visible inside
@@ -1129,8 +1123,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({
               </MessageOutlineGroupOverlay>
               {entries.map((entry) => {
                 const isActive = activeId != null && entry.id === activeId
-                const hasFork = forkAfter?.has(entry.id) ?? false
-                const forkText = forkAfter?.get(entry.id) ?? ''
+                const fork = forkAfter?.get(entry.id)
                 const hasContext = contextRowId != null && entry.id === contextRowId
                 return (
                   <Fragment key={entry.id}>
@@ -1168,16 +1161,25 @@ const MessageOutline: FC<MessageOutlineProps> = ({
                         {entry.text}
                       </MessageOutlineItemText>
                     </MessageOutlineItem>
-                    {/*Fork divider: a separate textless row directly AFTER the marked message row — never a message row itself (no stable id, role, tab stop or handler), so it can never be a navigation target, a highlight winner or a follow target. Decorative only (`aria-hidden`): the message row next to it is the navigation entry. The caller's label (branch name or the flow's children-here count) is kept as `title`/accessible name only — the visible line is a dashed 1px rule at 60% of the usable width, so it never takes part in width measurement.*/}
-                    {hasFork ? (
+                    {/*Fork divider: a separate textless row directly AFTER the marked message row — never a message row itself (no stable id, role, tab stop or handler), so it can never be a navigation target, a highlight winner or a follow target. Decorative only (`aria-hidden`): the message row next to it is the navigation entry. The caller's label stays in `title`/accessible name only; the dashed rule or three dots carry the taken/available state without painted text.*/}
+                    {fork !== undefined ? (
                       <MessageOutlineDividerRow
                         aria-hidden="true"
-                        aria-label={forkText}
-                        title={forkText}
+                        aria-label={fork.label}
+                        title={fork.label}
                         data-testid="conversation-nav-fork"
                         data-divider="fork"
+                        data-fork-state={fork.taken ? 'taken' : 'available'}
                         key={`fork-${entry.id}`}>
-                        <MessageOutlineDividerLine $variant="dashed" />
+                        {fork.taken ? (
+                          <MessageOutlineDividerLine $variant="dashed" data-fork-line="dashed" />
+                        ) : (
+                          <MessageOutlineForkDots data-fork-line="dots">
+                            <span data-fork-dot />
+                            <span data-fork-dot />
+                            <span data-fork-dot />
+                          </MessageOutlineForkDots>
+                        )}
                       </MessageOutlineDividerRow>
                     ) : null}
                   </Fragment>
@@ -1458,11 +1460,11 @@ const MessageOutlineDividerRow = styled.div`
  `
 
 /**
- * The divider rule itself. The context solid is the clearer of the two
- * (message-flow form, ~0.6); the fork dashed is lighter (~0.4). Percentage
- * widths resolve against the content box, so an empty rule contributes nothing
- * to the intrinsic width the panel is measured from. Theme tokens only, no
- * hard-coded hex.
+ * The context divider rule itself: a clearer solid 1px rule (~0.6). The taken
+ * fork keeps the existing lighter dashed 1px rule (~0.4). Percentage widths
+ * resolve against the content box, so an empty rule contributes nothing to the
+ * intrinsic width the panel is measured from. Theme tokens only, no hard-coded
+ * hex.
  */
 const MessageOutlineDividerLine = styled.div<{ $variant: 'solid' | 'dashed' }>`
    width: ${DIVIDER_LINE_WIDTH_PERCENT}%;
@@ -1471,6 +1473,24 @@ const MessageOutlineDividerLine = styled.div<{ $variant: 'solid' | 'dashed' }>`
    background: ${({ $variant }) => ($variant === 'solid' ? 'var(--color-text-3)' : 'transparent')};
    border-top: ${({ $variant }) => ($variant === 'solid' ? 'none' : '1px dashed var(--color-text-3)')};
    opacity: ${({ $variant }) => ($variant === 'solid' ? 0.6 : 0.4)};
+ `
+
+/** Available fork: three centered dots, with no endpoint or length rule. */
+const MessageOutlineForkDots = styled.div`
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   gap: ${FORK_DOT_GAP_PX}px;
+   flex-shrink: 0;
+   opacity: 0.4;
+
+   [data-fork-dot] {
+     width: ${FORK_DOT_SIZE_PX}px;
+     height: ${FORK_DOT_SIZE_PX}px;
+     flex-shrink: 0;
+     border-radius: 50%;
+     background: var(--color-text-3);
+   }
  `
 /**
  * `$expanded` and `$scrollbarVisible` are transient props (styled-components

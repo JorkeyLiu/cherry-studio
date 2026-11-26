@@ -12,7 +12,7 @@ import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 
 import { forkMarkerLabel, groupForkChildrenByParent, resolveForkPlacement, takenChildAtAnchor } from './forkPlacement'
-import MessageOutline from './MessageOutline'
+import MessageOutline, { type MessageOutlineFork } from './MessageOutline'
 import type { ReadingAnchorReport } from './Messages'
 import { buildNavGroupRuns, type NavGroupRun } from './navGroupRuns'
 import { useBranchTree } from './useBranchTree'
@@ -401,11 +401,12 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
   const itemIds = useMemo(() => new Set(items.map((item) => item.id)), [items])
 
   // Fork markers handed to the outline: `map.has(messageId)` means "draw one
-  // marker line directly after that row", and the value is the text the marker
-  // shows — the branch this route travels at that fork, or the fork's
-  // children-here count when it took none. That text is produced by
-  // `forkMarkerLabel`, the SAME two-state decision the message flow's divider
-  // renders, so the two surfaces can never name one thing and show another. The
+  // marker row directly after that row". The value carries the textless row's
+  // label (the branch this route travels, or the fork's children-here count
+  // when it took none) and whether this route took a child at that fork. The
+  // label comes from `forkMarkerLabel`, the SAME two-state decision the message
+  // flow's divider renders; `taken` comes from the same resolved child and
+  // selects the outline's dashed current-route or dotted available marker.
   // shared placement resolution decides the boundary id (never a second
   // ternary), so a marker cannot sit under a row whose divider the flow draws
   // somewhere else.
@@ -427,8 +428,8 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
   // iteration order keeps the row (one marker per row, and a stable winner
   // because `childrenByAnchor` and the group order are both deterministic), so
   // a rebuild can never flip which branch the marker names.
-  const forkAfter = useMemo<ReadonlyMap<string, string>>(() => {
-    const marked = new Map<string, string>()
+  const forkAfter = useMemo<ReadonlyMap<string, MessageOutlineFork>>(() => {
+    const marked = new Map<string, MessageOutlineFork>()
     if (!isSnapshotCurrent) return marked
     for (const [anchorMessageId, children] of childrenByAnchor) {
       for (const group of groupForkChildrenByParent(children)) {
@@ -437,8 +438,8 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
         const rowId = resolveOutlineRowId(boundaryMessageId, itemIds, precedingUserByMessageId)
         if (rowId === undefined) continue
         if (marked.has(rowId)) continue
-        const taken = takenChildAtAnchor(branchPath, anchorMessageId, group.children)
-        marked.set(rowId, forkMarkerLabel(taken, group.children, t))
+        const takenChild = takenChildAtAnchor(branchPath, anchorMessageId, group.children)
+        marked.set(rowId, { label: forkMarkerLabel(takenChild, group.children, t), taken: takenChild !== undefined })
       }
     }
     return marked
