@@ -151,12 +151,11 @@ describe('Messages chrome co-commit wiring (structural)', () => {
 
   it('the deletion fallback reads through a deferred receipt and commits it as the joint onPublish, refusing stale epochs', () => {
     expect(source).toContain('deletionReceipt = await dispatchDeferredRouteWindowRead(')
-    // Double late gate: after the fetch and again before publish (no new
-    // fetch, same-tick adjacency) — an ABA in between still refuses.
-    expect(
-      (source.match(/isDeferredRouteWindowReceiptCurrent\(\(\) => store\.getState\(\), deletionReceipt\)/g) ?? [])
-        .length
-    ).toBeGreaterThanOrEqual(2)
+    // Single late gate after the fetch, before any commit: a superseding
+    // request, route ABA, deletion or generation advance refuses with zero
+    const deletionGateChecks =
+      source.split('isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)').length - 1
+    expect(deletionGateChecks).toBe(1)
     expect(source).toContain('const deletionJoint = toDeferredJointPayload(deletionReceipt)')
     // Missing bundled structure fails closed: no publish, no backfill.
     expect(source).toContain('if (!deletionJoint.structure) {')

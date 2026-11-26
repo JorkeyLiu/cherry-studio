@@ -20,10 +20,12 @@ import { describe, expect, it } from 'vitest'
  *   read on the thunk rail, never the rebase joint payload.
  * - The FULL user-navigation entry keeps the direct caller-merge read (no
  *   `viaRouteThunk` flag): canonical ensure → staged merge.
- * - Same-request adoption is proven by the sync `onRawDispatched` hook
- *   (registration-time promise identity + route) promoting the prepare
- *   baseline from the dispatch-source publication token (never by
- *   re-reading the resident registry, never a second fetch).
+ * - Same-request adoption rides the proven-registration handoff: the deferred
+ *   entry proves its own dispatch registration in the sync prefix (same-tick
+ *   route + promise identity) and calls `onRegistrationProven` before the first
+ *   await, so the prepare baseline adopts the dispatch-source generation
+ *   (never by re-reading the resident registry, never by a second proof, never
+ *   a second fetch).
  * - The same receipt that carried the read guards the final merge commit
  *   via the shared pure checker `isDeferredRouteWindowReceiptCurrent`.
  * - All stale gates stay intact on the thunk rail (topic/navigate/
@@ -65,7 +67,7 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(dbImportIdx).toBeGreaterThan(railStart)
     expect(tailStart).toBeGreaterThan(dbImportIdx)
     expect(stageSource).toMatch(/viaRouteThunk\?: boolean/)
-    expect(stageSource).toMatch(/onDeferredAroundDispatched\?: \(dispatchedPromise: unknown\) => void/)
+    expect(stageSource).toMatch(/onDeferredRegistration\?: \(registration: DeferredRouteWindowRegistration\) => void/)
   })
 
   it('routes only the bootstrap prepare entry through the thunk rail', () => {
@@ -84,9 +86,9 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(prepareEntry).toMatch(/await ensureNavigationTargetReady\(/)
     // Only the prepare entry enables the thunk rail and the adoption hook.
     expect(prepareEntry).toMatch(/viaRouteThunk: true/)
-    expect(prepareEntry).toMatch(/onDeferredAroundDispatched: \(dispatchedPromise\) =>/)
+    expect(prepareEntry).toMatch(/onDeferredRegistration: \(registration\) =>/)
     expect(fullEntry).not.toMatch(/viaRouteThunk/)
-    expect(fullEntry).not.toMatch(/onDeferredAroundDispatched/)
+    expect(fullEntry).not.toMatch(/onDeferredRegistration/)
   })
 
   it('the thunk rail single-flights through the unique deferred entry and the stage keeps its merge', () => {
@@ -104,11 +106,11 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     // atomic staged-merge publication below (never the rebase joint payload).
     expect(deferred).not.toMatch(/toDeferredJointPayload/)
     expect(deferred).not.toMatch(/loadRouteMessagesThunk\(topicIdAtStart, routeAtStart/)
-    // Sync hook preserves registration-time promise identity: the wrapper
-    // invokes `onRawDispatched` synchronously after dispatch (before the
+    // Sync handoff of the registration the entry itself proved: the wrapper
+    // invokes `onRegistrationProven` synchronously after dispatch (before the
     // first await), and the stage forwards it to the adoption callback.
-    expect(deferred).toMatch(/onRawDispatched/)
-    expect(deferred).toMatch(/args\.onDeferredAroundDispatched\?/)
+    expect(deferred).toMatch(/onRegistrationProven/)
+    expect(deferred).toMatch(/args\.onDeferredRegistration/)
     // The receipt binds the same registration for the final currency check.
     expect(deferred).toMatch(/viaRouteReceipt/)
     // A stale-discarded deferred read (void) throws so the loader maps it to
@@ -143,8 +145,8 @@ describe('bootstrap prepare-around thunk-owner rail', () => {
     expect(rail).toMatch(/isStaleBeforeFetch: \(\) => isStale\(\) \|\| routeRef\.current !== routeAtStart/)
     expect(rail).toMatch(/isStaleAfterFetch: \(\) => isStale\(\) \|\| routeRef\.current !== routeAtStart/)
     // The synchronous handoff used for same-request adoption is present on the
-    // rail (dispatch → sync hook → await).
-    expect(rail).toMatch(/onRawDispatched/)
+    // rail (dispatch → proven registration → await).
+    expect(rail).toMatch(/onRegistrationProven/)
     // Shared terminal contract after the injected read: resident `ready`,
     // authoritative missing `not-found` with the single toast,
     // transport/unknown/malformed preserve pending via `cancelled`.

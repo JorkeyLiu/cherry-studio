@@ -13,16 +13,16 @@
  * Contract under test:
  * - Around-first + latest-second (real child-before-parent effect order):
  *   the latest adopts the in-flight around under the dispatch-source
- *   publication token with NO bump; the joint publication generation equals
- *   the registration token; the prepare baseline resolved via
- *   `resolveAdoptedResidentBaseline` (promise identity + route proof) stays
- *   applicable; a later external bump still stales.
+ *   publication generation with NO bump; the joint publication generation
+ *   equals the registration generation; the prepare baseline adopts the
+ *   registration the deferred entry itself proved (same-tick route + promise
+ *   identity) and stays applicable; a later external bump still stales.
  * - Latest-settled then prepare-around: the around fetches independently
  *   (no false adoption/reuse), deferred with zero publications.
- * - The token is transient dispatch/request-source identity only: the
+ * - The registration is transient dispatch/request-source identity only: the
  *   renderer never writes the resident registry to fix the gate (no
- *   `bumpGeneration` on the adopt path; baseline moves only via the proven
- *   token).
+ *   `bumpGeneration` on the adopt path; the baseline moves only via the
+ *   proven registration handed over by the deferred entry).
  */
 import type * as NewMessageModule from '@renderer/store/newMessage'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
@@ -247,71 +247,116 @@ describe('generation ownership: deferred-around adoption', () => {
     })
   })
 
-  it('around-first + latest-second: latest adopts under the dispatch-source token with no bump; prepare baseline stays applicable; external bump still stales', async () => {
-    const {
-      loadRouteMessagesThunk,
-      loadTopicMessagesThunk,
-      getPendingRouteRestorePublicationToken,
-      resolveAdoptedResidentBaseline
-    } = await import('../messageThunk')
+  it('around-first + latest-second: latest adopts under the proven registration with no bump; the handed registration keeps the prepare baseline applicable; external bump still stales', async () => {
+    const { dispatchDeferredRouteWindowRead, loadTopicMessagesThunk } = await import('../messageThunk')
     const { shouldDiscardPaginationForResident } = await import('@renderer/services/paginationResidentGuard')
     const state = baseStateWithResidentGen(2)
     const getState = () => state
     const { exec, seen } = execDispatch(getState)
 
-    // Prepare captures 2, then dispatches its deferred around (sync prefix
-    // registers the token before the first await).
+    // Prepare captures 2, then dispatches its deferred around through the only
+    // deferred entry. The entry proves its own registration in the sync prefix
+    // (same tick: route + promise identity) and hands it over before any await,
+    // so the caller never reads the pending map or repeats the proof.
     const prepareCaptured = 2
-    const pAround = exec(
-      loadRouteMessagesThunk('t1', 'b1', {
-        kind: 'around',
-        anchorMessageId: 'm7',
-        before: 10,
-        after: 19,
-        deferPublish: true
-      })
-    ) as unknown as Promise<FetchMessagesWindowResponse | void>
-    const token = getPendingRouteRestorePublicationToken('t1')
-    expect(token).not.toBeNull()
-    expect(token!.route).toBe('b1')
-    expect(token!.publicationGeneration).toBe(2)
-    // Same-request proof: the registered promise is the dispatched one.
-    expect(token!.promise).toBe(pAround)
+    let registration: any = null
+    const pDeferred = dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'around', anchorMessageId: 'm7', before: 10, after: 19 },
+      {
+        onRegistrationProven: (proven) => {
+          registration = proven
+        }
+      }
+    )
+    // Synchronous handoff: already delivered before the first await settles.
+    expect(registration).not.toBeNull()
+    expect(registration.topicId).toBe('t1')
+    expect(registration.route).toBe('b1')
+    expect(registration.publicationGeneration).toBe(prepareCaptured)
 
     // Bootstrap latest dispatched second adopts the same in-flight around.
     const pBoot = exec(loadTopicMessagesThunk('t1'))
-    const [aroundRes] = await Promise.all([pAround, pBoot])
+    const [deferredReceipt] = await Promise.all([pDeferred, pBoot])
 
     // Single flight: exactly one around fetch, zero latest fetches.
     const kinds = mocks.fetchMessagesWindow.mock.calls.map((c) => c[0].kind as string)
     expect(kinds.filter((k) => k === 'around').length).toBe(1)
     expect(kinds.filter((k) => k === 'latest').length).toBe(0)
-    expect((aroundRes as unknown as FetchMessagesWindowResponse).window.kind).toBe('around')
 
     // The adopting joint carries the anchor window under the registration
-    // token (2) — not a bumped 3 — and the adopter bumped nothing.
+    // generation (2) — not a bumped 3 — and the adopter bumped nothing.
     expect(jointMessages(seen)).toEqual([AROUND_IDS])
     expect(jointGenerations(seen)).toEqual([2])
     expect(bumpActions(seen).length).toBe(0)
 
-    // Prepare adopts the token into its local baseline on same-request proof:
-    // own publication no longer self-stales, external advance still stales.
-    const baseline = resolveAdoptedResidentBaseline(prepareCaptured, token, pAround, 'b1')
-    expect(baseline).toBe(2)
-    expect(shouldDiscardPaginationForResident(baseline, jointGenerations(seen)[0])).toBe(false)
-    expect(shouldDiscardPaginationForResident(baseline, 3)).toBe(true)
+    // The receipt repeats the handed registration: one proven identity, not a
+    // second map read.
+    expect(deferredReceipt).toBeTruthy()
+    expect((deferredReceipt as any).requestSeq).toBe(registration.requestSeq)
+    expect((deferredReceipt as any).publicationGeneration).toBe(registration.publicationGeneration)
+    expect((deferredReceipt as any).route).toBe(registration.route)
 
-    // Proof guards: unrelated route / promise / missing token never move the
-    // baseline (an external resident change still invalidates).
-    expect(resolveAdoptedResidentBaseline(2, token, {}, 'b1')).toBe(2)
-    expect(resolveAdoptedResidentBaseline(2, token, pAround, 'other')).toBe(2)
-    expect(resolveAdoptedResidentBaseline(2, null, pAround, 'b1')).toBe(2)
+    // Prepare adopts that registration into its local baseline: its own
+    // publication no longer self-stales, an external advance still stales.
+    expect(shouldDiscardPaginationForResident(registration.publicationGeneration, jointGenerations(seen)[0])).toBe(
+      false
+    )
+    expect(shouldDiscardPaginationForResident(registration.publicationGeneration, 3)).toBe(true)
+  })
+
+  it('same-tick newer registration: each dispatch is handed only its own proven registration and the superseded read yields no receipt', async () => {
+    const { dispatchDeferredRouteWindowRead } = await import('../messageThunk')
+    const state = baseStateWithResidentGen(2)
+    const getState = () => state
+    const { exec } = execDispatch(getState)
+
+    let firstRegistration: any = null
+    let secondRegistration: any = null
+    const pFirst = dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'latest', limit: 10 },
+      {
+        onRegistrationProven: (proven) => {
+          firstRegistration = proven
+        }
+      }
+    )
+    const pSecond = dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'latest', limit: 10 },
+      {
+        onRegistrationProven: (proven) => {
+          secondRegistration = proven
+        }
+      }
+    )
+
+    // Both handoffs already happened, each with its own dispatch identity: the
+    // newer registration never replaces the older one that was already handed.
+    expect(firstRegistration).not.toBeNull()
+    expect(secondRegistration).not.toBeNull()
+    expect(firstRegistration.requestSeq).toBeLessThan(secondRegistration.requestSeq)
+
+    const [firstReceipt, secondReceipt] = await Promise.all([pFirst, pSecond])
+    // Superseded: no receipt at all, so the older identity can never reach a
+    // later publication (no -1 sentinel identity is ever produced).
+    expect(firstReceipt).toBeUndefined()
+    expect((secondReceipt as any)?.requestSeq).toBe(secondRegistration.requestSeq)
+    expect((secondReceipt as any)?.publicationGeneration).toBe(secondRegistration.publicationGeneration)
   })
 
   it('latest-settled then prepare-around: independent around fetch, no false adoption or reuse', async () => {
-    const { loadRouteMessagesThunk, loadTopicMessagesThunk, getPendingRouteRestorePublicationToken } = await import(
-      '../messageThunk'
-    )
+    const { dispatchDeferredRouteWindowRead, loadTopicMessagesThunk } = await import('../messageThunk')
     const state = baseStateWithResidentGen(2)
     const getState = () => state
     const { exec, seen } = execDispatch(getState)
@@ -321,86 +366,102 @@ describe('generation ownership: deferred-around adoption', () => {
     // Latest-first (no pending) keeps the historic bump+latest path.
     expect(bumpActions(seen).length).toBe(1)
     expect(jointGenerations(seen).length).toBe(1)
-    // The settled latest leaves no map hold.
-    expect(getPendingRouteRestorePublicationToken('t1')).toBeNull()
 
     const jointsBefore = jointGenerations(seen).length
-    const aroundRes = (await exec(
-      loadRouteMessagesThunk('t1', 'b1', {
-        kind: 'around',
-        anchorMessageId: 'm7',
-        before: 10,
-        after: 19,
-        deferPublish: true
-      })
-    )) as unknown as FetchMessagesWindowResponse
-    expect(aroundRes.window.kind).toBe('around')
-    expect(aroundRes.window.anchorMessageId).toBe('m7')
+    let registration: any = null
+    const aroundReceipt = await dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'around', anchorMessageId: 'm7', before: 10, after: 19 },
+      {
+        onRegistrationProven: (proven) => {
+          registration = proven
+        }
+      }
+    )
+    // The settled latest left no adoptable hold: the around fetches on its own
+    // registration instead of reusing the completed read.
+    expect(registration).not.toBeNull()
+    expect(registration.requestSeq).toBeGreaterThan(0)
+    expect(aroundReceipt && (aroundReceipt as any).requestSeq).toBe(registration.requestSeq)
     expect(mocks.fetchMessagesWindow.mock.calls.map((c) => c[0].kind)).toEqual(['latest', 'around'])
     // Deferred: zero publications — the stage merges the returned window.
     expect(jointGenerations(seen).length).toBe(jointsBefore)
     expect(seen.filter((a) => a?.type === 'newMessages/rebaseRouteMessages').length).toBe(0)
   })
 
-  it('overlapping same-topic restores: an older settle never deletes the newer pending token', async () => {
-    const { loadRouteMessagesThunk, getPendingRouteRestorePublicationToken } = await import('../messageThunk')
+  it('overlapping same-topic restores: an older settle never reclaims the newer registration and the bootstrap still adopts the newer read', async () => {
+    const { dispatchDeferredRouteWindowRead, loadTopicMessagesThunk } = await import('../messageThunk')
     const state = baseStateWithResidentGen(2)
     const getState = () => state
-    const { exec } = execDispatch(getState)
+    const { exec, seen } = execDispatch(getState)
 
     // Both requests stay in flight until released below (the newer one must
-    // still hold the map token when the older settles).
-    let releaseFirst!: (v: FetchMessagesWindowResponse) => void
-    let releaseSecond!: (v: FetchMessagesWindowResponse) => void
-    const firstGate = new Promise<FetchMessagesWindowResponse>((resolve) => {
-      releaseFirst = resolve
-    })
-    const secondGate = new Promise<FetchMessagesWindowResponse>((resolve) => {
-      releaseSecond = resolve
-    })
+    // still own the shared single-flight entry when the older settles).
+    // Both requests stay in flight until released below (the newer one must
+    // still own the shared single-flight entry when the older settles). Each
+    // read is released with the response Main would build for ITS OWN request
+    // (the deferred read asks for the bundled structure), so the adopting
+    // bootstrap can consume it without a refetch.
     let calls = 0
-    mocks.fetchMessagesWindow.mockImplementation((_req: FetchMessagesWindowRequest) => {
-      calls += 1
-      if (calls === 1) return firstGate
-      return secondGate
-    })
+    const inFlight: Array<{
+      request: FetchMessagesWindowRequest
+      release: (response: FetchMessagesWindowResponse) => void
+    }> = []
+    mocks.fetchMessagesWindow.mockImplementation(
+      (req: FetchMessagesWindowRequest) =>
+        new Promise<FetchMessagesWindowResponse>((resolve) => {
+          calls += 1
+          inFlight.push({ request: req, release: resolve })
+        })
+    )
 
-    const pOld = exec(
-      loadRouteMessagesThunk('t1', 'b1', { kind: 'latest', limit: 10 })
-    ) as unknown as Promise<FetchMessagesWindowResponse | void>
-    const tokenOld = getPendingRouteRestorePublicationToken('t1')
-    expect(tokenOld).not.toBeNull()
-    expect(tokenOld!.promise).toBe(pOld)
-
-    // A newer same-topic request supersedes while the old one is in flight.
-    const pNew = exec(
-      loadRouteMessagesThunk('t1', 'b1', { kind: 'latest', limit: 10 })
-    ) as unknown as Promise<FetchMessagesWindowResponse | void>
-    const tokenNew = getPendingRouteRestorePublicationToken('t1')
-    expect(tokenNew).not.toBeNull()
-    expect(tokenNew!.promise).toBe(pNew)
+    let oldRegistration: any = null
+    let newRegistration: any = null
+    const pOld = dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'latest', limit: 10 },
+      {
+        onRegistrationProven: (proven) => {
+          oldRegistration = proven
+        }
+      }
+    )
+    const pNew = dispatchDeferredRouteWindowRead(
+      exec,
+      getState,
+      't1',
+      'b1',
+      { kind: 'latest', limit: 10 },
+      {
+        onRegistrationProven: (proven) => {
+          newRegistration = proven
+        }
+      }
+    )
+    expect(oldRegistration.requestSeq).toBeLessThan(newRegistration.requestSeq)
 
     // Old settles first: its requestSeq guard must not reclaim the new entry.
-    releaseFirst(
-      makeWindowResponse(
-        { kind: 'latest', topicId: 't1', branchId: 'b1', limit: 10 } as FetchMessagesWindowRequest,
-        LATEST_IDS
-      )
-    )
-    await pOld
-    const tokenAfterOld = getPendingRouteRestorePublicationToken('t1')
-    expect(tokenAfterOld).not.toBeNull()
-    expect(tokenAfterOld!.promise).toBe(pNew)
+    inFlight[0].release(makeWindowResponse(inFlight[0].request, LATEST_IDS))
+    const oldReceipt = await pOld
+    expect(oldReceipt).toBeUndefined()
 
-    // New settles: its own entry is reclaimed, nothing leaks.
-    releaseSecond(
-      makeWindowResponse(
-        { kind: 'latest', topicId: 't1', branchId: 'b1', limit: 10 } as FetchMessagesWindowRequest,
-        LATEST_IDS,
-        { hasMoreBefore: true, hasMoreAfter: false }
-      )
+    // The newer registration is still the single-flight owner: the bootstrap
+    // adopts it (no third fetch, no competing latest) and publishes the joint
+    // under its registration generation.
+    const pBoot = exec(loadTopicMessagesThunk('t1'))
+    inFlight[1].release(
+      makeWindowResponse(inFlight[1].request, LATEST_IDS, { hasMoreBefore: true, hasMoreAfter: false })
     )
-    await pNew
-    expect(getPendingRouteRestorePublicationToken('t1')).toBeNull()
+    const [newReceipt] = await Promise.all([pNew, pBoot])
+    expect(calls).toBe(2)
+    expect((newReceipt as any)?.requestSeq).toBe(newRegistration.requestSeq)
+    expect(jointGenerations(seen)).toEqual([newRegistration.publicationGeneration])
+    expect(bumpActions(seen).length).toBe(0)
   })
 })

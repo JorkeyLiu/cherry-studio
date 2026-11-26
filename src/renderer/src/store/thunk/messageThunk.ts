@@ -3740,60 +3740,57 @@ interface PendingRouteRestore {
 }
 const pendingRouteRestoreByTopic = new Map<string, PendingRouteRestore>()
 /**
- * Dispatch/request-source publication token for a pending route restore.
- * Transient in-flight identity only (the shared single-flight map); never
- * persisted, never written back into the resident registry by the renderer.
+ * Proven dispatch-source registration of a deferred route-window read.
+ *
+ * Renderer-local identity (never a shared DTO, never persisted): the per-topic
+ * single-flight entry a `loadRouteMessagesThunk` read registered in its sync
+ * prefix, plus the resident applicability generation captured at that same
+ * registration. The only producer is `dispatchDeferredRouteWindowRead`, which
+ * proves — in the same tick as the dispatch — that the observed entry is THIS
+ * execution, so a caller can adopt that registration without re-reading the
+ * pending map and without repeating the identity proof.
  */
-export interface RouteRestorePublicationToken {
+export interface DeferredRouteWindowRegistration {
+  topicId: string
   route: string | null
   requestSeq: number
   publicationGeneration: number
 }
 
 /**
- * Read the current pending restore's publication token without claiming it.
- * Returns a copy plus the in-flight promise for same-request proof; null
- * when no entry is registered. Read-only: never bumps or writes generations.
+ * Same-tick registration proof.
+ *
+ * The thunk writes its pending entry before its first await, so an entry read
+ * in the same tick as the dispatch carries this exact execution only when route
+ * and promise identity both match. Anything else is a fail-closed miss: a newer
+ * same-topic registration is never claimed by this read.
  */
-export function getPendingRouteRestorePublicationToken(
-  topicId: string
-): (RouteRestorePublicationToken & { promise: Promise<FetchMessagesWindowResponse | void> }) | null {
+function proveDeferredRouteWindowRegistration(
+  topicId: string,
+  route: string | null,
+  dispatchedPromise: Promise<FetchMessagesWindowResponse | void>
+): DeferredRouteWindowRegistration | null {
   const entry = pendingRouteRestoreByTopic.get(topicId)
   if (!entry) return null
+  if (entry.route !== route) return null
+  if ((entry.promise as unknown) !== (dispatchedPromise as unknown)) return null
   return {
-    route: entry.route,
+    topicId,
+    route,
     requestSeq: entry.requestSeq,
-    publicationGeneration: entry.publicationGeneration,
-    promise: entry.promise
+    publicationGeneration: entry.publicationGeneration
   }
 }
 
 /**
- * Resolve the resident-generation baseline a prepare gate may use after it
- * dispatched a deferred around. Returns the token's publication generation
- * only when `dispatchedPromise` is proven to be the same in-flight request
- * that registered the token (promise identity + route match); otherwise
- * returns the originally captured generation so an unrelated resident change
- * still invalidates. Pure: no store read, no dispatch, no global write.
+ * Single boundary predicate for a deferred read result: production responses
+ * always carry the Main window, and a stale discard resolves to `void`. Only a
+ * window-bearing response may become a receipt.
  */
-export function resolveAdoptedResidentBaseline(
-  capturedGeneration: number,
-  token: (RouteRestorePublicationToken & { promise?: unknown }) | null,
-  dispatchedPromise: unknown,
-  routeAtStart: string | null
-): number {
-  try {
-    if (!token) return capturedGeneration
-    if ((token.route ?? null) !== (routeAtStart ?? null)) return capturedGeneration
-    if (token.promise !== undefined && dispatchedPromise !== undefined && token.promise !== dispatchedPromise) {
-      return capturedGeneration
-    }
-    const gen = (token as { publicationGeneration?: unknown }).publicationGeneration
-    if (typeof gen !== 'number' || !Number.isFinite(gen)) return capturedGeneration
-    return gen
-  } catch {
-    return capturedGeneration
-  }
+function isDeferredRouteWindowResponse(
+  response: FetchMessagesWindowResponse | void
+): response is FetchMessagesWindowResponse {
+  return !!response && !!response.window
 }
 
 /**
@@ -4396,6 +4393,11 @@ export const loadRouteMessagesThunk =
  * re-identify an old response: the receipt is the only identity.
  */
 export interface DeferredRouteWindowReceipt {
+  /**
+   * Main window response for this registration. `window` is guaranteed present
+   * at runtime (the wrapper is the only producer and rejects a windowless/void
+   * read before building a receipt), so consumers never re-check it.
+   */
   response: FetchMessagesWindowResponse
   topicId: string
   route: string | null
@@ -4411,15 +4413,16 @@ export type DeferredRouteWindowReadOpts =
 
 export interface DeferredRouteWindowReadHooks {
   /**
-   * Sync-prefix adoption hook (renderer-local baseline only).
+   * Sync-prefix registration handoff (renderer-local adoption only).
    *
-   * Invoked synchronously after the underlying deferred dispatch, before the
-   * first await settles, with the exact raw execution promise. Lets a caller
-   * adopt the dispatch-source publication generation on same-request proof
-   * (promise identity + route) via `resolveAdoptedResidentBaseline` without
-   * touching the pending map itself. Never writes the resident registry.
+   * Invoked synchronously after the underlying deferred dispatch, before its
+   * first await settles, with the registration this wrapper itself proved for
+   * THIS dispatch (same-tick route + promise identity). Lets a caller adopt the
+   * dispatch-source applicability generation without reading the pending map
+   * and without repeating the proof. Never invoked on a proof miss (the caller
+   * keeps its pre-dispatch baseline), never writes the resident registry.
    */
-  onRawDispatched?: (rawPromise: Promise<FetchMessagesWindowResponse | void>) => void
+  onRegistrationProven?: (registration: DeferredRouteWindowRegistration) => void
 }
 
 /**
@@ -4478,38 +4481,34 @@ export const dispatchDeferredRouteWindowRead = async (
   const dispatched = dispatch(
     loadRouteMessagesThunk(topicId, branchId, thunkOpts)
   ) as unknown as Promise<FetchMessagesWindowResponse | void>
-  // Sync-prefix adoption handoff (same tick as registration): the thunk
-  // registered its pending entry before its first await, so a caller hook
-  // here observes the exact raw promise with registration-time identity.
-  // Best-effort only; hook failure never breaks the receipt path.
+  // Sync-prefix proof (same tick as the thunk's own registration): the entry
+  // observed here is THIS execution only when route and promise identity match.
+  // Proven once, then handed to the caller; a miss stays fail-closed (no hook,
+  // no receipt) and never claims a newer registration's identity.
+  const registration = proveDeferredRouteWindowRegistration(topicId, route, dispatched)
+  // Ownership handoff: the caller receives exactly the registration proven
+  // above, in the same tick, before any await. Best-effort only; hook failure
+  // never breaks the receipt path.
   try {
-    hooks?.onRawDispatched?.(dispatched)
+    if (registration) hooks?.onRegistrationProven?.(registration)
   } catch {
-    // fail-closed: baseline adoption stays on the pre-dispatch capture
+    // fail-closed: caller baseline adoption stays on its pre-dispatch capture
   }
-  // Sync-prefix proof: the thunk registers its pending entry before its
-  // first await, so the map entry captured here (same tick) is this exact
-  // registration. Promise identity + route narrow it; anything else is a
-  // fail-closed miss (never adopt a newer token for this response).
-  const token = pendingRouteRestoreByTopic.get(topicId) ?? null
-  const proven = token !== null && token.route === route && (token.promise as unknown) === (dispatched as unknown)
-  const requestSeq = proven ? token.requestSeq : -1
-  const publicationGeneration = proven ? token.publicationGeneration : -1
   const response = await dispatched
-  if (!response || !(response as unknown as { window?: unknown }).window) {
+  if (!isDeferredRouteWindowResponse(response)) {
     return undefined
   }
-  if (!proven) {
+  if (!registration) {
     return undefined
   }
   return {
     response,
     topicId,
     route,
-    requestSeq,
+    requestSeq: registration.requestSeq,
     deletionGeneration,
     routeGeneration,
-    publicationGeneration
+    publicationGeneration: registration.publicationGeneration
   }
 }
 
@@ -4529,7 +4528,9 @@ export function isDeferredRouteWindowReceiptCurrent(
   receipt: DeferredRouteWindowReceipt | null | undefined
 ): boolean {
   try {
-    if (!receipt || !receipt.response || !(receipt.response as unknown as { window?: unknown }).window) {
+    // The wrapper is the only receipt producer and already rejected a
+    // windowless/void read, so no window re-check is needed here.
+    if (!receipt) {
       return false
     }
     if (latestLoadTopicMessagesRequestByTopic.get(receipt.topicId) !== receipt.requestSeq) {

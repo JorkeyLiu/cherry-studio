@@ -130,11 +130,10 @@ import { type ResidentWindowCompleteness, selectTopicWindowCompleteness } from '
 import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import {
   type DeferredRouteWindowReceipt,
+  type DeferredRouteWindowRegistration,
   dispatchDeferredRouteWindowRead,
-  getPendingRouteRestorePublicationToken,
   isDeferredRouteWindowReceiptCurrent,
   loadRouteMessagesThunk,
-  resolveAdoptedResidentBaseline,
   toDeferredChromeStructure,
   toDeferredJointPayload,
   updateMessageAndBlocksThunk
@@ -3983,12 +3982,14 @@ const Messages = ({
       // `dispatchDeferredRouteWindowRead`. The FULL path omits it and keeps
       // the direct read.
       viaRouteThunk?: boolean
-      // Same-request adoption proof: invoked synchronously after the deferred
-      // around dispatch (sync prefix already registered the token) and before
-      // the first await settles, so the prepare baseline can adopt the
-      // dispatch-source publication generation. Pure local baseline only;
-      // never writes the resident registry.
-      onDeferredAroundDispatched?: (dispatchedPromise: unknown) => void
+      // Proven-registration handoff: invoked synchronously inside the deferred
+      // entry after it proved this dispatch's own registration (same-tick route
+      // + promise identity), before the first await settles, so the prepare
+      // baseline can adopt the dispatch-source applicability generation.
+      // Receives only the proven registration — the caller neither reads the
+      // pending map nor repeats the proof. Pure local baseline only; never
+      // writes the resident registry.
+      onDeferredRegistration?: (registration: DeferredRouteWindowRegistration) => void
       // Request-local structure handoff for the PREPARE deferred around
       // receipt. Called only after the committed projection is observable;
       // it records the payload for the final apply, never accepts it here.
@@ -4007,10 +4008,11 @@ const Messages = ({
         readAroundWindow: async (request) => {
           if (args.viaRouteThunk === true) {
             // Bootstrap-PREPARE single flight via the unique deferred entry.
-            // Sync hook preserves registration-time promise identity for the
-            // local resident baseline adoption; the receipt binds the same
-            // registration for the final currency check. Merge publication
-            // below stays the staged merge (never the joint rebase payload).
+            // The wrapper proves this dispatch's registration in its sync prefix
+            // and hands it to the caller for local resident-baseline adoption;
+            // the same receipt binds that registration for the final currency
+            // check. Merge publication below stays the staged merge (never the
+            // joint rebase payload).
             const receipt = await dispatchDeferredRouteWindowRead(
               dispatch,
               () => store.getState(),
@@ -4022,18 +4024,9 @@ const Messages = ({
                 before: (request as { before?: number }).before ?? NAVIGATION_VISUALLY_OLDER_GROUPS,
                 after: (request as { after?: number }).after ?? NAVIGATION_VISUALLY_NEWER_GROUPS
               },
-              {
-                onRawDispatched: (rawPromise) => {
-                  try {
-                    args.onDeferredAroundDispatched?.(rawPromise as unknown)
-                  } catch {
-                    // Fail-closed: baseline adoption is best-effort; the stale gate
-                    // below still guards on the originally captured generation.
-                  }
-                }
-              }
+              { onRegistrationProven: args.onDeferredRegistration }
             )
-            if (!receipt || !(receipt as unknown as { response?: unknown }).response) {
+            if (!receipt) {
               // Thunk stale discard (superseded / route-moved / current-moved /
               // deleted / generation mismatch): the deferred thunk published
               // nothing — throw so the loader maps it to retryable `error`
@@ -4041,8 +4034,8 @@ const Messages = ({
               // loader's own post-fetch stale gate runs first when it trips.
               throw new Error('around route read discarded as stale')
             }
-            viaRouteReceipt = receipt as unknown as DeferredRouteWindowReceipt
-            return (receipt as unknown as { response: FetchMessagesWindowResponse }).response
+            viaRouteReceipt = receipt
+            return receipt.response
           }
           const { dbService } = await import('@renderer/services/db')
           // Navigation reads address the current route (never main by
@@ -4132,12 +4125,14 @@ const Messages = ({
       // intent guards are re-checked before the provider sees it. Calling
       // this after the merge + projection wait keeps staged or cancelled
       // results out of the writer.
+      // Widened deliberately: this closure-local receipt is assigned inside the
+      // injected read above, which the checker does not track as a flow edge.
       const committedReceipt = viaRouteReceipt as DeferredRouteWindowReceipt | null
       if (args.viaRouteThunk === true && committedReceipt && args.onDeferredStructureReady) {
         args.onDeferredStructureReady({
           receipt: committedReceipt,
           structure: toDeferredChromeStructure(committedReceipt),
-          reference: (committedReceipt.response as { reference?: HistoryReferenceMeta | null }).reference ?? null
+          reference: committedReceipt.response.reference ?? null
         })
       }
 
@@ -4415,10 +4410,10 @@ const Messages = ({
         let structureHandoff: PrepareNavigationStructureHandoff | null = null
         const sessionEpoch = controller.currentEpoch
         // Adoptable baseline: starts at the pre-dispatch capture and moves to
-        // the dispatch-source publication generation only on same-request
-        // proof (dispatched deferred around promise identity + route). Any
-        // unrelated resident advance still stales. Local variable only —
-        // never dispatches or writes the resident registry.
+        // the dispatch-source applicability generation only through the
+        // registration the deferred entry itself proved for this dispatch. Any
+        // unrelated resident advance still stales. Local variable only — never
+        // dispatches or writes the resident registry.
         let residentGenBaseline = residentGenAtStart
         const isStale = (): boolean => {
           if (topicIdRef.current !== topicIdAtStart) return true
@@ -4443,22 +4438,13 @@ const Messages = ({
           routeAtStart,
           isStale,
           viaRouteThunk: true,
-          onDeferredAroundDispatched: (dispatchedPromise) => {
-            try {
-              // Same-request adoption: read the publication token and move the
-              // local baseline to the dispatch-source generation only on proof
-              // (promise identity + route). An unrelated resident advance still
-              // stales; the resident registry is never written.
-              const token = getPendingRouteRestorePublicationToken(topicIdAtStart)
-              residentGenBaseline = resolveAdoptedResidentBaseline(
-                residentGenBaseline,
-                token,
-                dispatchedPromise,
-                routeAtStart
-              )
-            } catch {
-              // Fail-closed: keep the pre-dispatch baseline on read failure.
-            }
+          onDeferredRegistration: (registration) => {
+            // Same-request adoption: the deferred entry hands over exactly the
+            // registration it proved for this dispatch (route + promise
+            // identity, same tick), so the local baseline needs no map read and
+            // no second proof. An unrelated resident advance still stales; the
+            // resident registry is never written.
+            residentGenBaseline = registration.publicationGeneration
           },
           onDeferredStructureReady: (deferredHandoff) => {
             structureHandoff = {
@@ -8017,7 +8003,7 @@ const Messages = ({
               kind: 'latest'
             }
           )
-          if (!latestReceipt || !(latestReceipt.response as unknown as { window?: unknown }).window) {
+          if (!latestReceipt) {
             throw new Error('latest route fallback discarded as stale')
           }
           return latestReceipt
@@ -8043,7 +8029,7 @@ const Messages = ({
             // Thunk void (superseded/route-moved/deleted/generation mismatch)
             // carries no identity: map to a retryable error so the caller can
             // fall back to latest instead of rendering a half state.
-            if (!aroundReceipt || !(aroundReceipt.response as unknown as { window?: unknown }).window) {
+            if (!aroundReceipt) {
               throw new Error('around route read discarded as stale')
             }
             deferredReceipt = aroundReceipt
@@ -8137,13 +8123,12 @@ const Messages = ({
         // due to deferPublish) so target viewport build is deterministic.
         const loaded = deferredMessages
         const routeWindow = deferredReceipt !== null ? deferredReceipt.response : null
-        const authoritative =
-          routeWindow && routeWindow.window
-            ? {
-                hasMoreBefore: routeWindow.window.hasMoreBefore,
-                hasMoreAfter: routeWindow.window.hasMoreAfter
-              }
-            : undefined
+        const authoritative = routeWindow
+          ? {
+              hasMoreBefore: routeWindow.window.hasMoreBefore,
+              hasMoreAfter: routeWindow.window.hasMoreAfter
+            }
+          : undefined
         const dividerRestore = applyWindowTransition({
           kind: 'restore',
           loaded,
@@ -8550,18 +8535,7 @@ const Messages = ({
       // read resolves to void and publishes nothing (receipt gate below
       // covers post-fetch ABA): keep the failed marker retryable instead of
       // applying a half viewport.
-      if (
-        !deletionReceipt ||
-        !(deletionReceipt.response as unknown as { window?: unknown }).window ||
-        !isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)
-      ) {
-        failVisibleTransition(deletionFetchEpoch)
-        loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
-        dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
-        return
-      }
-      // Final receipt gate before any publish below (covers post-fetch ABA).
-      if (!isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)) {
+      if (!deletionReceipt || !isDeferredRouteWindowReceiptCurrent(() => store.getState(), deletionReceipt)) {
         failVisibleTransition(deletionFetchEpoch)
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
@@ -8582,12 +8556,6 @@ const Messages = ({
           return
         }
         const deletionChromeStructure = deletionJoint.structure
-        const authoritative = deletionReceipt.response.window
-          ? {
-              hasMoreBefore: deletionReceipt.response.window.hasMoreBefore,
-              hasMoreAfter: deletionReceipt.response.window.hasMoreAfter
-            }
-          : undefined
         // Explicit latest viewport over the full displayCount window (never a
         // snapshot anchor, never a vicinity fallback). Empty fallback routes
         // atomically clear via the same constructor.
@@ -8595,7 +8563,10 @@ const Messages = ({
           kind: 'latest',
           messages: deletionJoint.messages,
           budget: displayCount,
-          ...(authoritative ? { authoritative } : {})
+          authoritative: {
+            hasMoreBefore: deletionReceipt.response.window.hasMoreBefore,
+            hasMoreAfter: deletionReceipt.response.window.hasMoreAfter
+          }
         })
         if (latestTransition.kind !== 'window') return
         const latestWindow = latestTransition.window
@@ -9553,11 +9524,7 @@ const Messages = ({
       }
       // Final receipt gate before any commit below: a superseding request,
       // route ABA, deletion or generation advance must not publish.
-      if (
-        !topReceipt ||
-        !(topReceipt.response as unknown as { window?: unknown }).window ||
-        !isDeferredRouteWindowReceiptCurrent(() => store.getState(), topReceipt)
-      ) {
+      if (!topReceipt || !isDeferredRouteWindowReceiptCurrent(() => store.getState(), topReceipt)) {
         failVisibleTransition(fetchEpoch)
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
         return
@@ -9643,20 +9610,17 @@ const Messages = ({
           return
         }
         const anchor = routeSavedRowAnchor ?? null
-        const authoritative =
-          topReceipt.response && topReceipt.response.window
-            ? {
-                hasMoreBefore: topReceipt.response.window.hasMoreBefore,
-                hasMoreAfter: topReceipt.response.window.hasMoreAfter
-              }
-            : undefined
+        const authoritative = {
+          hasMoreBefore: topReceipt.response.window.hasMoreBefore,
+          hasMoreAfter: topReceipt.response.window.hasMoreAfter
+        }
         const restoreTransition = applyWindowTransition({
           kind: 'restore',
           loaded,
           anchors: [anchor],
           older: NAVIGATION_VISUALLY_OLDER_GROUPS,
           newer: NAVIGATION_VISUALLY_NEWER_GROUPS,
-          ...(authoritative ? { authoritative } : {})
+          authoritative
         })
         const targetWindow = restoreTransition.kind === 'restored' ? restoreTransition.window : null
         let armedTopEpoch: number | null = null
