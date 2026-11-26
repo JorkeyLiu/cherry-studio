@@ -615,7 +615,6 @@ describe('residentDiagnostics pure adapter — bounded scalars, read-only', () =
       beforeSecondRead.missForced +
         beforeSecondRead.missNoIndex +
         beforeSecondRead.missDeletion +
-        beforeSecondRead.missLegacyEmpty +
         beforeSecondRead.missNoEntry +
         beforeSecondRead.missIncomplete
     )
@@ -641,7 +640,6 @@ describe('residentDiagnostics pure adapter — bounded scalars, read-only', () =
       missForced: 0,
       missNoIndex: 0,
       missDeletion: 0,
-      missLegacyEmpty: 0,
       missNoEntry: 0,
       missIncomplete: 0,
       stagedCount: 0,
@@ -701,7 +699,6 @@ describe('residentDiagnostics pure adapter — bounded scalars, read-only', () =
       'missForced',
       'missNoIndex',
       'missDeletion',
-      'missLegacyEmpty',
       'missNoEntry',
       'missIncomplete',
       'stagedCount',

@@ -215,12 +215,7 @@ function assertBoundScalarsInvariant(
 ) {
   // read-path derived invariants
   expect(diag.missCount).toBe(
-    diag.missForced +
-      diag.missNoIndex +
-      diag.missDeletion +
-      diag.missLegacyEmpty +
-      diag.missNoEntry +
-      diag.missIncomplete
+    diag.missForced + diag.missNoIndex + diag.missDeletion + diag.missNoEntry + diag.missIncomplete
   )
   expect(diag.totalRequests).toBe(diag.hitCount + diag.missCount)
   expect(diag.discardedCount).toBe(

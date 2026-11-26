@@ -352,28 +352,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       delete storeState.messages.messageIdsByTopic['t-del']
     }
 
-    // legacyEmpty (registry absent, empty array)
-    {
-      const { resetResidentReadDiagnosticsForTests } = await import('@renderer/services/residentReadDiagnostics')
-      resetResidentReadDiagnosticsForTests()
-      // temporarily use a store without residentRegistry
-      const legacyState = {
-        ...storeState,
-        messages: {
-          ...storeState.messages,
-          messageIdsByTopic: { ...storeState.messages.messageIdsByTopic, 't-legacy-empty': [] }
-        }
-      }
-      delete legacyState.residentRegistry
-      const dispatch = vi.fn((a: any) => (typeof a === 'function' ? a(dispatch, () => legacyState) : a))
-      const getState = () => legacyState
-      // ensure fetch succeeds
-      mocks.fetchMessagesWindow.mockClear()
-      await loadTopicMessagesThunk('t-legacy-empty')(dispatch, getState as any)
-      const d = getResidentReadDiagnostics()
-      expect(d.missLegacyEmpty).toBe(1)
-    }
-
     // noEntry (registry present but no entry)
     {
       const { resetResidentReadDiagnosticsForTests } = await import('@renderer/services/residentReadDiagnostics')
@@ -1137,14 +1115,9 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       // totalRequests = hitCount + missCount
       expect(diag.totalRequests).toBe(diag.hitCount + diag.missCount)
       expect(diag.hitCount).toBe(1)
-      // missCount equals six miss-reason sum
+      // missCount equals the five miss-reason sum
       expect(diag.missCount).toBe(
-        diag.missForced +
-          diag.missNoIndex +
-          diag.missDeletion +
-          diag.missLegacyEmpty +
-          diag.missNoEntry +
-          diag.missIncomplete
+        diag.missForced + diag.missNoIndex + diag.missDeletion + diag.missNoEntry + diag.missIncomplete
       )
       expect(diag.missCount).toBe(4)
       expect(diag.missForced).toBe(1)
@@ -1284,7 +1257,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(afterUnknown.missForced).toBe(before.missForced)
     expect(afterUnknown.missNoIndex).toBe(before.missNoIndex)
     expect(afterUnknown.missDeletion).toBe(before.missDeletion)
-    expect(afterUnknown.missLegacyEmpty).toBe(before.missLegacyEmpty)
     expect(afterUnknown.missNoEntry).toBe(before.missNoEntry)
     expect(afterUnknown.missIncomplete).toBe(before.missIncomplete)
     expect(afterUnknown.stagedCount).toBe(before.stagedCount)
@@ -1310,7 +1282,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       'missForced',
       'missNoIndex',
       'missDeletion',
-      'missLegacyEmpty',
       'missNoEntry',
       'missIncomplete',
       'stagedCount',
@@ -1362,7 +1333,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       afterStaged.missForced +
         afterStaged.missNoIndex +
         afterStaged.missDeletion +
-        afterStaged.missLegacyEmpty +
         afterStaged.missNoEntry +
         afterStaged.missIncomplete
     )
@@ -1405,7 +1375,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(afterReset.discardedCount).toBe(0)
   })
 
-  it('comprehensive bounded identities: all six miss reasons + five discard reasons accumulate with exact derived sums, avg, finite, privacy, scalar-only, snapshot parity', async () => {
+  it('comprehensive bounded identities: all five miss reasons + five discard reasons accumulate with exact derived sums, avg, finite, privacy, scalar-only, snapshot parity', async () => {
     const {
       getResidentReadDiagnostics,
       resetResidentReadDiagnosticsForTests,
@@ -1420,13 +1390,12 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
     resetAllDeletionGenerationsForTests()
 
-    // Deterministic accumulation: 1 hit + 6 distinct miss reasons + 5 staged (3 success + 2 fail) + 5 discard reasons
+    // Deterministic accumulation: 1 hit + 5 distinct miss reasons + 5 staged (3 success + 2 fail) + 5 discard reasons
     recordResidentReadHit()
     expect(getResidentReadDiagnostics().hitCount).toBe(1)
     recordResidentReadMiss('forced')
     recordResidentReadMiss('noIndex')
     recordResidentReadMiss('deletion')
-    recordResidentReadMiss('legacyEmpty')
     recordResidentReadMiss('noEntry')
     recordResidentReadMiss('incomplete')
     // staged latency: durations chosen to make avg = total/count within tolerance, max/median checks deterministic
@@ -1448,20 +1417,14 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(diag.missForced).toBe(1)
     expect(diag.missNoIndex).toBe(1)
     expect(diag.missDeletion).toBe(1)
-    expect(diag.missLegacyEmpty).toBe(1)
     expect(diag.missNoEntry).toBe(1)
     expect(diag.missIncomplete).toBe(1)
-    expect(diag.missCount).toBe(6)
+    expect(diag.missCount).toBe(5)
     expect(diag.missCount).toBe(
-      diag.missForced +
-        diag.missNoIndex +
-        diag.missDeletion +
-        diag.missLegacyEmpty +
-        diag.missNoEntry +
-        diag.missIncomplete
+      diag.missForced + diag.missNoIndex + diag.missDeletion + diag.missNoEntry + diag.missIncomplete
     )
     expect(diag.totalRequests).toBe(diag.hitCount + diag.missCount)
-    expect(diag.totalRequests).toBe(7)
+    expect(diag.totalRequests).toBe(6)
     // staged derived identities
     expect(diag.stagedCount).toBe(5)
     expect(diag.stagedSuccessCount).toBe(3)
@@ -1503,7 +1466,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       'missForced',
       'missNoIndex',
       'missDeletion',
-      'missLegacyEmpty',
       'missNoEntry',
       'missIncomplete',
       'stagedCount',
@@ -1559,7 +1521,6 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(scalars.readMissForced).toBe(diag.missForced)
     expect(scalars.readMissNoIndex).toBe(diag.missNoIndex)
     expect(scalars.readMissDeletion).toBe(diag.missDeletion)
-    expect(scalars.readMissLegacyEmpty).toBe(diag.missLegacyEmpty)
     expect(scalars.readMissNoEntry).toBe(diag.missNoEntry)
     expect(scalars.readMissIncomplete).toBe(diag.missIncomplete)
     expect(scalars.readStagedCount).toBe(diag.stagedCount)
@@ -1588,7 +1549,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(afterReset.stagedAvgMs).toBeNull()
   })
 
-  it('legacy non-empty hit parity: absent registry + non-empty index records hit, not legacyEmpty, avoids staged/discard, privacy-safe', async () => {
+  it('resident complete hit parity: complete resident entry + non-empty index records hit, no miss reason, avoids staged/discard, privacy-safe', async () => {
     const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
       '@renderer/services/residentReadDiagnostics'
     )
@@ -1609,38 +1570,43 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     })
     mocks.listSegments.mockResolvedValue([])
 
-    const legacyTopicId = 't-legacy-hit-nonempty-unique-99'
-    // state without residentRegistry, but with non-empty cached index (legacy hit condition)
-    const legacyState: any = {
-      assistants: { assistants: [{ id: 'asst-1', topics: [{ id: legacyTopicId }] }] },
+    const residentHitTopicId = 't-resident-hit-nonempty-unique-99'
+    // Complete resident entry + non-empty cached index — the only cache-hit condition.
+    const residentHitState: any = {
+      ...storeState,
+      assistants: { assistants: [{ id: 'asst-1', topics: [{ id: residentHitTopicId }] }] },
       messages: {
-        entities: {},
-        messageIdsByTopic: { [legacyTopicId]: ['m-0', 'm-1'] },
-        loadingByTopic: {},
-        fulfilledByTopic: {},
-        currentTopicId: legacyTopicId,
-        displayCount: 10
+        ...storeState.messages,
+        messageIdsByTopic: { ...storeState.messages.messageIdsByTopic, [residentHitTopicId]: ['m-0', 'm-1'] },
+        currentTopicId: residentHitTopicId
       },
-      messageBlocks: { entities: {} },
-      topicSegments: { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }
-      // residentRegistry intentionally absent to simulate legacy store shape
+      residentRegistry: {
+        entries: {
+          ...storeState.residentRegistry.entries,
+          [residentHitTopicId]: {
+            chatData: true,
+            segments: true,
+            residentTopic: true,
+            applicabilityGeneration: 1
+          }
+        }
+      }
     }
 
     const dispatch = vi.fn((a: unknown) => {
-      if (typeof a === 'function') return (a as any)(dispatch, () => legacyState)
+      if (typeof a === 'function') return (a as any)(dispatch, () => residentHitState)
       return a
     })
-    const getState = () => legacyState
+    const getState = () => residentHitState
 
     const before = getResidentReadDiagnostics()
-    await loadTopicMessagesThunk(legacyTopicId)(dispatch, getState as any)
+    await loadTopicMessagesThunk(residentHitTopicId)(dispatch, getState as any)
 
     // hit increments, no miss, no staged, no discard
     const after = getResidentReadDiagnostics()
     expect(after.hitCount - before.hitCount).toBe(1)
     expect(after.missCount - before.missCount).toBe(0)
     expect(after.totalRequests - before.totalRequests).toBe(1)
-    expect(after.missLegacyEmpty - before.missLegacyEmpty).toBe(0)
     expect(after.missForced - before.missForced).toBe(0)
     expect(after.missNoIndex - before.missNoIndex).toBe(0)
     expect(after.missDeletion - before.missDeletion).toBe(0)
@@ -1664,12 +1630,7 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     // derived identities hold
     expect(after.totalRequests).toBe(after.hitCount + after.missCount)
     expect(after.missCount).toBe(
-      after.missForced +
-        after.missNoIndex +
-        after.missDeletion +
-        after.missLegacyEmpty +
-        after.missNoEntry +
-        after.missIncomplete
+      after.missForced + after.missNoIndex + after.missDeletion + after.missNoEntry + after.missIncomplete
     )
     expect(after.discardedCount).toBe(
       after.discardedSuperseded +
@@ -1687,17 +1648,16 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       }
     }
     expect((after as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
-    expect(JSON.stringify(after)).not.toContain(legacyTopicId)
+    expect(JSON.stringify(after)).not.toContain(residentHitTopicId)
     expect(JSON.stringify(after)).not.toContain('m-0')
     // snapshot/bound composition mirrors diagnostics, privacy-safe
     const snap = getPhase4Snapshot(null)
     expect(snap.residentRead.hitCount).toBe(after.hitCount)
     expect(snap.residentRead.missCount).toBe(after.missCount)
     expect(snap.residentRead.totalRequests).toBe(after.totalRequests)
-    expect(snap.residentRead.missLegacyEmpty).toBe(after.missLegacyEmpty)
     expect(snap.residentRead.stagedCount).toBe(after.stagedCount)
     expect(snap.residentRead.discardedCount).toBe(after.discardedCount)
-    expect(JSON.stringify(snap.residentRead)).not.toContain(legacyTopicId)
+    expect(JSON.stringify(snap.residentRead)).not.toContain(residentHitTopicId)
     const scalars = getPhase4BoundScalars(null)
     expect(scalars.readHitCount).toBe(after.hitCount)
     expect(scalars.readMissCount).toBe(after.missCount)

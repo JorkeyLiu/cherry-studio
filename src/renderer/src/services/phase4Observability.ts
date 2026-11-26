@@ -180,7 +180,6 @@ export function getPhase4BoundScalars(
   readMissForced: number
   readMissNoIndex: number
   readMissDeletion: number
-  readMissLegacyEmpty: number
   readMissNoEntry: number
   readMissIncomplete: number
   readStagedCount: number
@@ -224,7 +223,6 @@ export function getPhase4BoundScalars(
     readMissForced: snap.residentRead.missForced,
     readMissNoIndex: snap.residentRead.missNoIndex,
     readMissDeletion: snap.residentRead.missDeletion,
-    readMissLegacyEmpty: snap.residentRead.missLegacyEmpty,
     readMissNoEntry: snap.residentRead.missNoEntry,
     readMissIncomplete: snap.residentRead.missIncomplete,
     readStagedCount: snap.residentRead.stagedCount,

@@ -10,11 +10,13 @@
  * explicit repair.
  *
  * Compatibility repair (docs/adr/context-window.md §10): `loadTopicMessagesThunk`
- * initializes a missing/unresolvable anchor exactly once AFTER a successful
- * load into Redux — on BOTH the fetch path (after `messagesReceived`) and the
- * cached path (a non-empty cached topic, e.g. a fresh branch pre-populated by
- * `cloneMessagesToNewTopicThunk`, runs repair BEFORE the cached early return).
- * Empty cached topics fall through to the fetch path. No render effects exist.
+ * initializes a missing/unresolvable anchor exactly once AFTER the joint
+ * publication that made the topic resident — on BOTH the fetch path (after
+ * `publishResidentComplete`) and the cached path (a complete resident entry,
+ * e.g. a fresh branch pre-populated by `cloneMessagesToNewTopicThunk`, runs
+ * repair BEFORE the cached early return). An index without a complete resident
+ * entry is NOT a cache hit: it falls through to the fetch path. No render
+ * effects exist.
  *
  * The actual persisted-result semantics (valid anchor → no write, empty topic
  * → no write) are proven against the REAL `ensureTopicAnchorEstablished` in
@@ -22,9 +24,12 @@
  * sequence with the hook mocked.
  */
 import type * as AnchorServiceModule from '@renderer/services/anchorService'
+import { JOINT_PUBLISH_COMPLETE } from '@renderer/store/residentRegistry'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { type ChatReadFixture, createChatReadFixture } from './helpers/chatReadStoreFixture'
 
 // --- Mocks ----------------------------------------------------------------
 
@@ -127,12 +132,17 @@ vi.mock('@renderer/utils/messageUtils/create', () => ({
   resetAssistantMessage: vi.fn()
 }))
 
-vi.mock('@renderer/store/messageBlock', () => ({
-  upsertManyBlocks: mocks.upsertManyBlocks,
-  removeManyBlocks: vi.fn(),
-  updateOneBlock: vi.fn(),
-  upsertOneBlock: vi.fn()
-}))
+vi.mock('@renderer/store/messageBlock', async () => {
+  const actual = await vi.importActual<any>('@renderer/store/messageBlock')
+  return {
+    // Real slice reducer: the read-path fixture publishes through it.
+    default: actual.default,
+    upsertManyBlocks: mocks.upsertManyBlocks,
+    removeManyBlocks: vi.fn(),
+    updateOneBlock: vi.fn(),
+    upsertOneBlock: vi.fn()
+  }
+})
 
 vi.mock('@renderer/store/assistants', () => ({
   updateTopicUpdatedAt: mocks.updateTopicUpdatedAt
@@ -180,6 +190,8 @@ vi.mock('i18next', () => ({
   t: (k: string) => k
 }))
 
+// Legacy send-path tests below drive their own minimal state object; the
+// read-path (loadTopicMessagesThunk) cases use the real-reducer fixture instead.
 interface StoreState {
   assistants: {
     assistants: Array<{
@@ -206,6 +218,7 @@ interface StoreState {
 }
 
 let storeState: StoreState
+let fixture: ChatReadFixture
 
 vi.mock('@renderer/store', () => ({
   default: {
@@ -310,6 +323,10 @@ describe('messageThunk anchor hooks', () => {
         currentTopicId: null
       }
     }
+    // Read-path cases drive the real reducers (messages/messageBlocks/
+    // topicSegments/residentRegistry) instead of a hand-rolled index, so a
+    // cache hit is a genuine complete resident entry.
+    fixture = createChatReadFixture([{ id: 'asst-1', settings: { contextCount: 5 }, topics: [{ id: 'topic-1' }] }])
   })
 
   describe('sendMessage first establishment', () => {
@@ -937,37 +954,36 @@ describe('messageThunk anchor hooks', () => {
   })
 
   describe('loadTopicMessagesThunk compatibility repair', () => {
-    it('runs the repair AFTER messagesReceived for the topic-owning assistant', async () => {
-      // window fetch already mocked to empty window by default; explicit mock keeps compat
-      const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
-        messages: [],
-        blocks: [],
-        window: {
-          kind: 'latest',
-          completeness: 'window',
-          topicId: 'topic-1',
-          anchorMessageId: null,
-          requested: { limit: 20 },
-          firstMessageId: null,
-          lastMessageId: null,
-          returnedCount: 0,
-          hasMoreBefore: false,
-          hasMoreAfter: false
-        },
-        // Bundled empty catalog (known-empty) for the structured bootstrap read.
-        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
-      } as any)
+    // The dbService mock already answers with a valid empty structured `latest`
+    // window that echoes the requested limit — the shape Main returns for a
+    // known-empty topic — so a cold load publishes a real (empty) resident
+    // window without a per-case stub.
 
+    // The joint publication is the only runtime publication, so the call
+    // sequence is measured on it (the segment follow-up carries a different
+    // action type and never counts as the publication).
+    const jointPublishOrder = (dispatch: ReturnType<typeof vi.fn>) => {
+      const index = dispatch.mock.calls.findIndex(
+        ([action]) => (action as { type?: string } | undefined)?.type === JOINT_PUBLISH_COMPLETE
+      )
+      expect(index).toBeGreaterThanOrEqual(0)
+      return dispatch.mock.invocationCallOrder[index]
+    }
+
+    it('publishes the resident window and then runs the repair for the topic-owning assistant', async () => {
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const dispatch = vi.fn()
-      const getState = () => storeState as never
+      // Dispatches reach the real reducers: the publication must actually land,
+      // not merely be attempted.
+      const dispatch = vi.fn((action: unknown) => fixture.dispatch(action as never))
+      const getState = () => fixture.getState() as never
 
       await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
-      const receivedCall = mocks.messagesReceived.mock.invocationCallOrder[0]
-      const repairCall = mocks.ensureTopicAnchorEstablished.mock.invocationCallOrder[0]
-      expect(receivedCall).toBeLessThan(repairCall)
+      // The registry-less legacy two-dispatch publication is gone.
+      expect(mocks.messagesReceived).not.toHaveBeenCalled()
+      const publishOrder = jointPublishOrder(dispatch)
+      const repairOrder = mocks.ensureTopicAnchorEstablished.mock.invocationCallOrder[0]
+      expect(publishOrder).toBeLessThan(repairOrder)
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
         expect.any(Function),
         expect.any(Function),
@@ -975,21 +991,37 @@ describe('messageThunk anchor hooks', () => {
         'topic-1',
         null
       )
-      // Joint publication now loads segments atomically; no separate fire-and-forget segment load
+      // Cold topic → initial generation bump → guarded joint publication: the
+      // complete resident entry exists and the empty window is projected.
+      const entry = fixture.getState().residentRegistry.entries['topic-1']
+      expect(entry?.applicabilityGeneration).toBe(1)
+      expect(entry?.residentTopic).toBe(true)
+      expect(entry?.chatData).toBe(true)
+      expect(entry?.segments).toBe(true)
+      expect(fixture.getState().messages.messageIdsByTopic['topic-1']).toEqual([])
+      // Joint publication loads segments atomically; no separate fire-and-forget segment load
       expect(mocks.loadTopicSegmentsThunk).not.toHaveBeenCalled()
     })
 
-    it('runs repair for a NON-EMPTY cached topic before the cached early return (no refetch)', async () => {
-      storeState.messages.messageIdsByTopic['topic-1'] = ['user-1']
+    it('runs repair for a COMPLETE resident topic before the cached early return (no refetch)', async () => {
+      const { dbService } = await import('@renderer/services/db')
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const dispatch = vi.fn()
-      const getState = () => storeState as never
+      // Real cache-hit precondition: a complete resident entry plus its window.
+      fixture.seedResidentComplete('topic-1', [{ id: 'user-1', role: 'user', topicId: 'topic-1', blocks: [] } as never])
+      const dispatch = vi.fn((action: unknown) => fixture.dispatch(action as never))
+      const getState = () => fixture.getState() as never
 
       await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
-      // Cached path: no refetch, but the repair hook still runs so a
-      // pre-populated branch/cached topic missing an anchor is initialized.
-      expect(mocks.messagesReceived).not.toHaveBeenCalled()
+      // Cached path: no refetch and no second publication, but the repair hook
+      // still runs so a pre-populated branch/cached topic missing an anchor is
+      // initialized.
+      expect(vi.mocked(dbService.fetchMessagesWindow)).not.toHaveBeenCalled()
+      expect(
+        dispatch.mock.calls.some(
+          ([action]) => (action as { type?: string } | undefined)?.type === JOINT_PUBLISH_COMPLETE
+        )
+      ).toBe(false)
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
         expect.any(Function),
@@ -1000,73 +1032,45 @@ describe('messageThunk anchor hooks', () => {
       )
     })
 
-    it('an EMPTY cached topic is not treated as cached — falls through to the fetch path', async () => {
-      storeState.messages.messageIdsByTopic['topic-1'] = []
-      const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
-        messages: [],
-        blocks: [],
-        window: {
-          kind: 'latest',
-          completeness: 'window',
-          topicId: 'topic-1',
-          anchorMessageId: null,
-          requested: { limit: 20 },
-          firstMessageId: null,
-          lastMessageId: null,
-          returnedCount: 0,
-          hasMoreBefore: false,
-          hasMoreAfter: false
-        },
-        // Bundled empty catalog (known-empty) for the structured bootstrap read.
-        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
-      } as any)
+    it('an index-only (cold) empty topic is not a cache hit — it falls through to the fetch path', async () => {
+      // Present-empty index without any resident entry: a cold projection, not
+      // a cache hit (the deleted registry-less branch used to treat it as one).
+      fixture.seedCachedIndexOnly('topic-1', [])
+      expect(fixture.getState().residentRegistry.entries['topic-1']).toBeUndefined()
 
+      const { dbService } = await import('@renderer/services/db')
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const dispatch = vi.fn()
-      const getState = () => storeState as never
+      const dispatch = vi.fn((action: unknown) => fixture.dispatch(action as never))
+      const getState = () => fixture.getState() as never
 
       await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
-      // Empty cached topic: the fetch path runs (messagesReceived dispatched);
-      // the repair hook is invoked after it and no-ops on empty turns (proven
-      // by the ensureTopicAnchorEstablished unit tests).
-      expect(mocks.messagesReceived).toHaveBeenCalled()
+      expect(vi.mocked(dbService.fetchMessagesWindow)).toHaveBeenCalled()
+      // The fetch path publishes the resident window first; the repair hook is
+      // invoked after it and no-ops on empty turns (proven by the
+      // ensureTopicAnchorEstablished unit tests).
+      expect(jointPublishOrder(dispatch)).toBeLessThan(mocks.ensureTopicAnchorEstablished.mock.invocationCallOrder[0])
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
-      const receivedCall = mocks.messagesReceived.mock.invocationCallOrder[0]
-      const repairCall = mocks.ensureTopicAnchorEstablished.mock.invocationCallOrder[0]
-      expect(receivedCall).toBeLessThan(repairCall)
+      const entry = fixture.getState().residentRegistry.entries['topic-1']
+      expect(entry?.applicabilityGeneration).toBe(1)
+      expect(entry?.residentTopic).toBe(true)
+      expect(entry?.chatData).toBe(true)
+      expect(entry?.segments).toBe(true)
     })
 
     it('skips repair when no assistant owns the topic', async () => {
-      storeState.assistants.assistants = []
+      fixture.setAssistants([])
       const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
-        messages: [],
-        blocks: [],
-        window: {
-          kind: 'latest',
-          completeness: 'window',
-          topicId: 'topic-1',
-          anchorMessageId: null,
-          requested: { limit: 20 },
-          firstMessageId: null,
-          lastMessageId: null,
-          returnedCount: 0,
-          hasMoreBefore: false,
-          hasMoreAfter: false
-        },
-        // Bundled empty catalog (known-empty) for the structured bootstrap read.
-        structure: { catalog: [], route: { topicId: 'topic-1', branchId: null, qualifications: [] } }
-      } as any)
-
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const dispatch = vi.fn()
-      const getState = () => storeState as never
+      const dispatch = vi.fn((action: unknown) => fixture.dispatch(action as never))
+      const getState = () => fixture.getState() as never
 
       await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
-      expect(mocks.messagesReceived).toHaveBeenCalled()
+      expect(vi.mocked(dbService.fetchMessagesWindow)).toHaveBeenCalled()
+      // The publication still lands; only the anchor work is skipped.
+      jointPublishOrder(dispatch)
+      expect(fixture.getState().residentRegistry.entries['topic-1']?.residentTopic).toBe(true)
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
     })
   })

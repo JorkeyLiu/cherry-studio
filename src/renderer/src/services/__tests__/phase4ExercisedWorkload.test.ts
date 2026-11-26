@@ -310,7 +310,6 @@ function assertSnapshotPrivacySafe(snap: ReturnType<typeof getPhase4Snapshot>, s
     'missDeletion',
     'missForced',
     'missIncomplete',
-    'missLegacyEmpty',
     'missNoEntry',
     'missNoIndex',
     'stagedAvgMs',
@@ -980,7 +979,6 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     recordResidentReadMiss('forced')
     recordResidentReadMiss('noIndex')
     recordResidentReadMiss('deletion')
-    recordResidentReadMiss('legacyEmpty')
     recordResidentReadMiss('noEntry')
     recordResidentReadMiss('incomplete')
     recordStagedLatency(12, true)
@@ -989,8 +987,8 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     recordResidentReadDiscard('generationMismatch')
     const readDiag = getResidentReadDiagnostics()
     expect(readDiag.hitCount).toBe(1)
-    expect(readDiag.missCount).toBe(6)
-    expect(readDiag.totalRequests).toBe(7)
+    expect(readDiag.missCount).toBe(5)
+    expect(readDiag.totalRequests).toBe(6)
     expect(readDiag.stagedCount).toBe(2)
     expect(readDiag.stagedSuccessCount).toBe(1)
     expect(readDiag.stagedFailedCount).toBe(1)
@@ -1022,7 +1020,7 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     expect(snap.resident.residentCount).toBe(1)
     expect(snap.resident.maxGeneration).toBe(1)
     expect(snap.residentRead.hitCount).toBe(1)
-    expect(snap.residentRead.missCount).toBe(6)
+    expect(snap.residentRead.missCount).toBe(5)
     expect(snap.residentRead.stagedCount).toBe(2)
     expect(snap.residentRead.discardedCount).toBe(2)
 
@@ -1033,7 +1031,7 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     expect(scalars.b09Retained).toBeLessThanOrEqual(1)
     expect(scalars.residentEntryCount).toBe(1)
     expect(scalars.readHitCount).toBe(1)
-    expect(scalars.readMissCount).toBe(6)
+    expect(scalars.readMissCount).toBe(5)
     expect(scalars.readStagedCount).toBe(2)
     expect(scalars.readDiscardedCount).toBe(2)
 

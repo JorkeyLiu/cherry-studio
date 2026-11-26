@@ -16,7 +16,7 @@
  * numbers; latency is summarized as bounded scalars (count/total/max/last).
  */
 
-export type ResidentReadMissReason = 'forced' | 'noIndex' | 'deletion' | 'legacyEmpty' | 'noEntry' | 'incomplete'
+export type ResidentReadMissReason = 'forced' | 'noIndex' | 'deletion' | 'noEntry' | 'incomplete'
 
 export type ResidentReadDiscardReason =
   | 'superseded'
@@ -36,7 +36,6 @@ export interface ResidentReadDiagnostics {
   missForced: number
   missNoIndex: number
   missDeletion: number
-  missLegacyEmpty: number
   missNoEntry: number
   missIncomplete: number
   /** Staged fetch latency summaries — bounded scalars, ms */
@@ -64,7 +63,6 @@ let hitCount = 0
 let missForced = 0
 let missNoIndex = 0
 let missDeletion = 0
-let missLegacyEmpty = 0
 let missNoEntry = 0
 let missIncomplete = 0
 
@@ -87,7 +85,7 @@ function finiteNonNegative(n: unknown): number {
 }
 
 export function getResidentReadDiagnostics(): ResidentReadDiagnostics {
-  const missCount = missForced + missNoIndex + missDeletion + missLegacyEmpty + missNoEntry + missIncomplete
+  const missCount = missForced + missNoIndex + missDeletion + missNoEntry + missIncomplete
   const totalRequests = hitCount + missCount
   const discardedCount =
     discardedSuperseded +
@@ -104,7 +102,6 @@ export function getResidentReadDiagnostics(): ResidentReadDiagnostics {
     missForced: finiteNonNegative(missForced),
     missNoIndex: finiteNonNegative(missNoIndex),
     missDeletion: finiteNonNegative(missDeletion),
-    missLegacyEmpty: finiteNonNegative(missLegacyEmpty),
     missNoEntry: finiteNonNegative(missNoEntry),
     missIncomplete: finiteNonNegative(missIncomplete),
     stagedCount: finiteNonNegative(stagedCount),
@@ -128,7 +125,6 @@ export function resetResidentReadDiagnosticsForTests(): void {
   missForced = 0
   missNoIndex = 0
   missDeletion = 0
-  missLegacyEmpty = 0
   missNoEntry = 0
   missIncomplete = 0
   stagedCount = 0
@@ -159,8 +155,6 @@ export function recordResidentReadMiss(reason: ResidentReadMissReason): void {
     case 'deletion':
       missDeletion += 1
       break
-    case 'legacyEmpty':
-      missLegacyEmpty += 1
       break
     case 'noEntry':
       missNoEntry += 1

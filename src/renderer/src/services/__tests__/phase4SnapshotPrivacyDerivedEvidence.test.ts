@@ -434,7 +434,7 @@ describe('Phase 4 snapshot privacy & bounded composition (renderer-local)', () =
       expect(JSON.stringify(snap.resident)).not.toContain(SENTINEL_CREDENTIAL)
     }
 
-    // residentRead full shape — 22 scalar keys
+    // residentRead full shape — 21 scalar keys
     {
       const rrKeys = [
         'discardedCount',
@@ -448,7 +448,6 @@ describe('Phase 4 snapshot privacy & bounded composition (renderer-local)', () =
         'missDeletion',
         'missForced',
         'missIncomplete',
-        'missLegacyEmpty',
         'missNoEntry',
         'missNoIndex',
         'stagedAvgMs',
@@ -497,7 +496,6 @@ describe('Phase 4 snapshot privacy & bounded composition (renderer-local)', () =
         'readMissDeletion',
         'readMissForced',
         'readMissIncomplete',
-        'readMissLegacyEmpty',
         'readMissNoEntry',
         'readMissNoIndex',
         'readStagedAvgMs',
@@ -666,7 +664,6 @@ describe('Phase 4 snapshot privacy & bounded composition (renderer-local)', () =
       'readMissDeletion',
       'readMissForced',
       'readMissIncomplete',
-      'readMissLegacyEmpty',
       'readMissNoEntry',
       'readMissNoIndex',
       'readStagedAvgMs',

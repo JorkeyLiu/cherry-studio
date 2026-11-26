@@ -108,7 +108,7 @@ import {
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
-import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
+import { bumpGeneration, publishResidentComplete, selectGeneration, selectResidentEntry } from '../residentRegistry'
 import {
   isMutableForActiveRoute,
   requireAnswerGroupForMember,
@@ -3849,57 +3849,30 @@ export const loadTopicMessagesThunk =
       if (deletionGen !== 0) {
         // fall through to fetch — do not early return on potentially stale cache
       } else {
-        const registry = (getState() as any).residentRegistry
-        if (!registry) {
-          // Test environment without registry slice (legacy tests) — preserve legacy hit semantics
-          // Legacy: only non-empty cached topics are hits; empty falls through to fetch
-          if (cachedIds.length > 0) {
-            recordResidentReadHit()
-            // A fetchless hit must not supersede an in-flight same-target
-            // restore: the restore owns the window, the hit publishes
-            // nothing. Bump only when no same-route restore is in flight.
-            const pendingRestore = pendingRouteRestoreByTopic.get(topicId)
-            if (!pendingRestore || pendingRestore.route !== activeRouteOf(getState, topicId)) {
-              // Supersede any older in-flight same-topic staged load before completing cache-hit activation
-              const requestSeq = ++loadTopicMessagesRequestSeq
-              latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
-            }
-            const cachedState = getState()
-            const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-              asst.topics.some((t) => t.id === topicId)
-            )
-            if (cachedTopicOwner) {
-              scheduleTopicAnchorEstablishment(dispatch, getState, cachedTopicOwner.id, topicId)
-            }
-            return
+        const residentEntry = selectResidentEntry(getState(), topicId)
+        const isResidentHit =
+          !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
+        if (isResidentHit) {
+          recordResidentReadHit()
+          // A fetchless hit must not supersede an in-flight same-target
+          // restore: the restore owns the window, the hit publishes
+          // nothing. Bump only when no same-route restore is in flight.
+          const pendingRestore = pendingRouteRestoreByTopic.get(topicId)
+          if (!pendingRestore || pendingRestore.route !== activeRouteOf(getState, topicId)) {
+            // Supersede any older in-flight same-topic staged load before completing cache-hit activation
+            const requestSeq = ++loadTopicMessagesRequestSeq
+            latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
           }
-          // empty legacy -> miss, fall through (reason captured below)
-        } else {
-          const residentEntry = registry.entries?.[topicId]
-          const isResidentHit =
-            !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
-          if (isResidentHit) {
-            recordResidentReadHit()
-            // A fetchless hit must not supersede an in-flight same-target
-            // restore: the restore owns the window, the hit publishes
-            // nothing. Bump only when no same-route restore is in flight.
-            const pendingRestore = pendingRouteRestoreByTopic.get(topicId)
-            if (!pendingRestore || pendingRestore.route !== activeRouteOf(getState, topicId)) {
-              // Supersede any older in-flight same-topic staged load before completing cache-hit activation
-              const requestSeq = ++loadTopicMessagesRequestSeq
-              latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
-            }
-            const cachedState = getState()
-            const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-              asst.topics.some((t) => t.id === topicId)
-            )
-            if (cachedTopicOwner) {
-              scheduleTopicAnchorEstablishment(dispatch, getState, cachedTopicOwner.id, topicId)
-            }
-            return
+          const cachedState = getState()
+          const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+            asst.topics.some((t) => t.id === topicId)
+          )
+          if (cachedTopicOwner) {
+            scheduleTopicAnchorEstablishment(dispatch, getState, cachedTopicOwner.id, topicId)
           }
-          // miss -> fall through to staged fetch (including absent vs empty distinction preserved)
+          return
         }
+        // miss -> fall through to staged fetch (absent vs empty index distinction preserved)
       }
     }
 
@@ -3915,20 +3888,13 @@ export const loadTopicMessagesThunk =
         if (deletionGenForMiss !== 0) {
           recordResidentReadMiss('deletion')
         } else {
-          const registryForMiss = (getState() as any).residentRegistry
-          if (!registryForMiss) {
-            // legacy empty (non-empty would have returned hit above)
-            recordResidentReadMiss('legacyEmpty')
+          const entryForMiss = selectResidentEntry(getState(), topicId)
+          if (!entryForMiss) {
+            recordResidentReadMiss('noEntry')
           } else {
-            const entryForMiss = registryForMiss.entries?.[topicId]
-            if (!entryForMiss) {
-              recordResidentReadMiss('noEntry')
-            } else if (!entryForMiss.residentTopic || !entryForMiss.chatData || !entryForMiss.segments) {
-              recordResidentReadMiss('incomplete')
-            } else {
-              // Should have been hit above; fallback generic
-              recordResidentReadMiss('incomplete')
-            }
+            // Present-but-incomplete is the only reachable case here: a resident
+            // entry would have returned as a cache hit above.
+            recordResidentReadMiss('incomplete')
           }
         }
       }
@@ -3953,7 +3919,7 @@ export const loadTopicMessagesThunk =
         generation = adoptRestorePre.publicationGeneration
       } else {
         dispatch(bumpGeneration(topicId))
-        generation = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0) as number
+        generation = selectGeneration(getState(), topicId)
       }
       const limitRaw = getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT
       const limit = clampWindowLimit(limitRaw)
@@ -4076,8 +4042,7 @@ export const loadTopicMessagesThunk =
         return
       }
 
-      const currentGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
-        0) as number
+      const currentGeneration = selectGeneration(getState(), topicId)
       if (currentGeneration !== generation) {
         recordResidentReadDiscard('generationMismatch')
         logger.warn(`[loadTopicMessagesThunk] stale generation discard for ${topicId} (generation mismatch)`)
@@ -4121,53 +4086,35 @@ export const loadTopicMessagesThunk =
         return mapped
       })
 
-      const hasRegistry = !!(getState() as any).residentRegistry
       // Authoritative window completeness is committed exactly once, atomically
       // inside the joint publication (the resident-registry slice reducer writes
       // it after the same generation guard). No separate write exists here.
-      if (hasRegistry) {
-        // Single controlled Redux publication consumed by relevant projection slices and registry.
-        // Topic activation is interactively complete at this point: bounded latest
-        // window + segment catalog are atomically published. Route capability
-        // rides atomically via the joint payload (fail-closed when absent).
-        dispatch(
-          publishResidentComplete({
-            topicId,
-            generation,
-            windowResponse: response!,
-            segments,
-            route: activeRouteOf(getState, topicId)
-          })
-        )
-        // Preserve existing topicSegments/ StoreSync projection behavior when joint publication
-        // updates segments, without broadcasting/syncing resident registry lifecycle state itself.
-        // The joint publication atomically updates local segments via its extraReducer; a separate
-        // syncable topicSegments/ action carries the same segments across windows via StoreSync.
-        // An identical follow-up commits no second local segment state (rootReducer dedups);
-        // only a differing catalog applies locally. Inbound StoreSync copies
-        // (meta.fromSync:true) still invalidate receiving windows (LOCK-302).
-        try {
-          const syncAction = replaceSegmentsForTopic({ topicId, segments }) as any
-          syncAction.meta = { ...syncAction.meta, isJointFollowUp: true }
-          dispatch(syncAction)
-        } catch {
-          // best-effort StoreSync projection; never break joint publication
-        }
-      } else {
-        // Legacy fallback for test environments without registry slice — preserve old two-dispatch path
-        const blocks = response!.blocks as unknown as MessageBlock[]
-        const messages = response!.messages as unknown as Message[]
-        if (blocks.length > 0) {
-          // Read-only window hydration: must not invalidate the semantic closure.
-          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks as any), topicId)))
-        }
-        dispatch(
-          newMessagesActions.messagesReceived({
-            topicId,
-            messages,
-            reference: (response as { reference?: HistoryReferenceMeta | null }).reference ?? null
-          } as any)
-        )
+      // Single controlled Redux publication consumed by relevant projection slices and registry.
+      // Topic activation is interactively complete at this point: bounded latest
+      // window + segment catalog are atomically published. Route capability
+      // rides atomically via the joint payload (fail-closed when absent).
+      dispatch(
+        publishResidentComplete({
+          topicId,
+          generation,
+          windowResponse: response!,
+          segments,
+          route: activeRouteOf(getState, topicId)
+        })
+      )
+      // Preserve existing topicSegments/ StoreSync projection behavior when joint publication
+      // updates segments, without broadcasting/syncing resident registry lifecycle state itself.
+      // The joint publication atomically updates local segments via its extraReducer; a separate
+      // syncable topicSegments/ action carries the same segments across windows via StoreSync.
+      // An identical follow-up commits no second local segment state (rootReducer dedups);
+      // only a differing catalog applies locally. Inbound StoreSync copies
+      // (meta.fromSync:true) still invalidate receiving windows.
+      try {
+        const syncAction = replaceSegmentsForTopic({ topicId, segments }) as any
+        syncAction.meta = { ...syncAction.meta, isJointFollowUp: true }
+        dispatch(syncAction)
+      } catch {
+        // best-effort StoreSync projection; never break joint publication
       }
 
       // Anchor/context work is scheduled after interactive completion and never blocks
