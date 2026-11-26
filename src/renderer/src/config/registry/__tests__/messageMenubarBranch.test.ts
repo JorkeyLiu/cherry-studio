@@ -30,22 +30,27 @@ describe('true-branch toolbar registry', () => {
     expect(positions[3]).toBe(positions[2] + 1)
   })
 
-  it('Translate and Save to Notes are overflow-only (not visible by default)', () => {
+  it('Translate is overflow-only and Save to Notes is removed (no notes entries remain)', () => {
     const ids = getMessageMenubarConfig(DEFAULT_MESSAGE_MENUBAR_SCOPE).buttonIds
     expect(ids).not.toContain('translate')
-    expect(ids).not.toContain('notes')
     const source = fs.readFileSync('src/renderer/src/pages/home/Messages/MessageMenubar.tsx', 'utf8')
-    // Render code stays reusable for scopes that still list them.
+    // Translate renderer stays reusable for scopes that still list it.
     expect(source).toMatch(/translate:/)
-    expect(source).toMatch(/notes:/)
-    // Overflow membership: translate + save-to-notes live in the More menu.
+    // Overflow membership: translate lives in the More menu.
     const dropdownStart = source.indexOf('const dropdownItems')
     expect(dropdownStart).toBeGreaterThanOrEqual(0)
     const dropdown = source.slice(dropdownStart, dropdownStart + 4000)
     expect(dropdown).toMatch(/key: 'translate'/)
-    expect(dropdown).toMatch(/key: 'save-to-notes'/)
     expect(dropdown).toMatch(/message-translate-menu-btn/)
-    expect(dropdown).toMatch(/message-save-notes-menu-btn/)
+    // Save to Notes removed: no menu entry, no renderer, no export call.
+    expect(source).not.toMatch(/save-to-notes/)
+    expect(source).not.toMatch(/message-save-notes-menu-btn/)
+    expect(source).not.toMatch(/exportMessageToNotes/)
+    expect(source).not.toMatch(/notes:/)
+    const topics = fs.readFileSync('src/renderer/src/pages/home/Tabs/components/Topics.tsx', 'utf8')
+    expect(topics).not.toMatch(/exportTopicToNotes/)
+    expect(topics).not.toMatch(/key: 'notes'/)
+    expect(topics).not.toMatch(/notes\.save/)
   })
 
   it('Edit and Insert Message are visible toolbar buttons (not More menu items)', () => {

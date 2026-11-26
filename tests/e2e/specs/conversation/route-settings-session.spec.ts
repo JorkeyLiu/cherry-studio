@@ -5,8 +5,9 @@
  * profile, mock provider, fresh build):
  * - Seed one topic (30 msgs) + one branch route with distinct exclusive
  *   anchors/snapshots on main vs branch (BEFORE settings, distinguishable).
- * - Chat→Settings→Chat roundtrip through the production Sidebar (Activity
- *   hidden boundary): the Chat DOM session persists hidden, no remount.
+ * - Chat→Settings→Chat roundtrip through the production Sidebar (task-dialog
+ *   boundary above the always-visible base): the Chat DOM session persists
+ *   mounted and visible, no remount.
  * - AFTER the roundtrip: >=2 ordinary top-selector route cycles restore each
  *   target's last legal stable messageId+offset (never outgoing geometry).
  * - User wheel to a NEW stable location on the branch, switch away/back:
@@ -25,6 +26,7 @@
  */
 import { expect, test } from '../../fixtures/electron.fixture'
 import { SidebarPage } from '../../pages/sidebar.page'
+import { TaskDialogPage } from '../../pages/task-dialog.page'
 import { pageWaitSettled, pageWheelAndSettle } from '../../utils/viewport-scroll-sync'
 import { waitForAppReady, waitForChatReady, waitForSettingsLoad } from '../../utils/wait-helpers'
 import {
@@ -55,6 +57,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     await waitForAppReady(page)
     await waitForChatReady(page)
     const sidebarPage = new SidebarPage(page)
+    const taskDialog = new TaskDialogPage(page)
     const assistantId = await prepareAssistant(page, TOTAL)
     const topicId = `route-sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const ids = await seedSourceTopic(page, {
@@ -405,23 +408,28 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     expect(bSnapBefore).toBe(bIdBefore)
     expect(aIdBefore).not.toBe(bIdBefore)
 
-    // Settings roundtrip through the production Sidebar (Activity boundary).
+    // Settings roundtrip through the production Sidebar (dialog boundary):
+    // settings renders inside the centered task shell above the
+    // always-mounted, always-visible Home base (no hidden/detached leg).
     const homeHandle = await page.locator('#home-page').elementHandle()
     expect(homeHandle).not.toBeNull()
     await sidebarPage.goToSettings()
     await waitForSettingsLoad(page)
     expect(page.url()).toContain('/settings')
     await expect(page.locator('[data-testid="settings-page"]')).toBeVisible({ timeout: 15000 })
-    await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+    await taskDialog.expectOpen()
+    await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
     await sidebarPage.goToHome()
     await waitForChatReady(page)
     await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
+    await taskDialog.waitForClosed()
     expect(await homeHandle!.evaluate((node: Node) => node.isConnected)).toBe(true)
 
-    // CG1: immediate same-route reconnect restores BEFORE any topTo. The
-    // detached lifetime renews with a fresh guarded own-target activation on
-    // return: live id/offset plus the persisted snapshot must already equal
-    // the pre-detour main baseline with no intervening route switch.
+    // CG1: immediate same-route reconnect restores BEFORE any topTo. Base and
+    // dialog never detach Chat now, so return re-establishes with a fresh
+    // guarded own-target activation: live id/offset plus the persisted
+    // snapshot must already equal the pre-detour main baseline with no
+    // intervening route switch.
     await waitViewportVisible()
     const immediateBack = await settled()
     expect(immediateBack, 'immediate reconnect must leave a measurable anchor').not.toBeNull()
@@ -520,9 +528,10 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     // CG2b true in-flight Settings detour: hold the target window provider via
     // the existing safe store.dispatch gate (contextBridge freezes
     // window.api.chatDb, so dispatch is the closest faithful seam), start a
-    // branch restore, then navigate to Settings WHILE its load is held
-    // (deterministic held >=1, never settled). Detach cancels it; return
-    // reactivates to the newest completion with no stale reveal/capture. The
+    // branch restore, then open the settings task dialog WHILE its load is
+    // held (deterministic held >=1, never settled). The dialog leg starts no
+    // new restore of its own; the close returns to the newest completion with
+    // no stale reveal/capture. The
     // late held resolution must void without publishing or mutating.
     // Baseline on main first WITHOUT the gate (the gate would hold this
     // re-establish); install only before the held branch restore below.
@@ -549,10 +558,12 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
       )
       // Disarm so the reactivation passes; the already-held branch load stays held.
       await disarmInFlightGate(page, gateKey)
-      // Navigate while the restore is genuinely in-flight (held, never settled).
+      // Navigate while the restore is genuinely in-flight (held, never settled):
+      // settings opens the task shell above the still-visible Home base.
       await sidebarPage.goToSettings()
       await waitForSettingsLoad(page)
-      await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+      await taskDialog.expectOpen()
+      await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
       await sidebarPage.goToHome()
       await waitForChatReady(page)
       await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })

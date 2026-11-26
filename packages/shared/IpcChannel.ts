@@ -383,49 +383,6 @@ export enum IpcChannel {
   // Phase 5 authoritative deletion propagation — Main → all renderers
   ChatDb_TopicDeleted = 'chatdb:topic-deleted',
 
-  // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
-  // Independent of the ChatDb_* channels. Prefix: chat-import:*
-  ChatImport_Ready = 'chat-import:ready',
-  ChatImport_Discover = 'chat-import:discover',
-  ChatImport_ReadPage = 'chat-import:read-page',
-  ChatImport_Cancel = 'chat-import:cancel',
-  ChatImport_Complete = 'chat-import:complete',
-  ChatImport_Error = 'chat-import:error',
-  // ChatImport_Projection — renderer → main: source Local Storage
-  // `persist:cherry-studio` payload for the L2 navigation projection
-  // (LOCK-PROD-2/6). Main-only parse/validation; never crosses IPC back.
-  ChatImport_Projection = 'chat-import:projection',
-
-  // CherryImport — L2 Cherry Studio ZIP compatibility-import control IPC.
-  // Command-oriented bridge from the main renderer to the Phase 4 import
-  // service. Independent of the 6 ChatImport_* channels (source-reader
-  // pipeline) and the Backup_* channels (L3 backup/restore). Prefix:
-  // cherry-import:*
-  CherryImport_GetPlatformSupport = 'cherry-import:get-platform-support',
-  CherryImport_Start = 'cherry-import:start',
-  CherryImport_Cancel = 'cherry-import:cancel',
-  CherryImport_GetStatus = 'cherry-import:get-status',
-  CherryImport_StatusChanged = 'cherry-import:status-changed',
-  // L2 one-shot navigation projection (LOCK-PROD-6): renderer reads the
-  // pending projection after Redux rehydration, applies it, flushes, then
-  // durably acks so a crash-before-ack retries on next startup.
-  CherryImport_GetProjection = 'cherry-import:get-projection',
-  CherryImport_AckProjection = 'cherry-import:ack-projection',
-  // L2 files catalog handoff boundary (Phase 2, LOCK-PROMO-5/7): Main →
-  // renderer request events and the renderer → Main typed response invoke.
-  // The renderer owns the only handle to the live Dexie files table, so
-  // Main drives capture/apply/restore/query through this minimal boundary.
-  // The main renderer's MAIN FRAME only; ordinary UI is blocked while the
-  // catalog-pending apply/recovery is in flight.
-  // LOCK-BRIDGE-1: renderer → main ready handshake. The recovery renderer
-  // invokes this ONLY after its catalog request handler is installed (App
-  // mount after PersistGate); Main awaits it with a bounded timeout before
-  // sending any catalog request so the recovery window never races the
-  // handler registration (the previous 60s per-request timeout race).
-  CherryImport_CatalogRequest = 'cherry-import:catalog-request',
-  CherryImport_CatalogRespond = 'cherry-import:catalog-respond',
-  CherryImport_CatalogReady = 'cherry-import:catalog-ready',
-
   // Sync — explicit service connection + registration + hidden channel pairing (SYNC-CC-*)
   Sync_GetConfig = 'sync:get-config',
   Sync_SetConfig = 'sync:set-config',

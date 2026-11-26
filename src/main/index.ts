@@ -13,9 +13,6 @@ import installExtension, { REACT_DEVELOPER_TOOLS, REDUX_DEVTOOLS } from 'electro
 import { isDev, isLinux, isWin } from './constant'
 
 import process from 'node:process'
-import { join } from 'node:path'
-
-import { DATA_PATH } from '@main/config'
 import { appIdentity } from '@shared/config/identity'
 
 import { registerIpc } from './ipc'
@@ -38,13 +35,8 @@ import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
-import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
 import { syncService } from './services/sync/SyncService'
 import { syncAutoService } from './services/sync/syncAuto'
-import { disposeCherryImportControl } from './services/chatDbImport/importControlIpc'
-import { runStartupRecoveryGate } from './services/chatDbImport/promotion/gate'
-import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
-import type { PromotionJournalObservation } from './services/chatDbImport/promotion/recovery'
 import { runAsyncFunction } from './utils'
 import { installStdioBrokenPipeGuard } from './utils/stdioErrorGuard'
 import { extractRtkBinaries } from './utils/rtk'
@@ -186,170 +178,19 @@ if (!app.requestSingleInstanceLock()) {
       // Non-fatal — orphan cleanup is best-effort
     }
 
-    // Phase 4.4.3 (LOCK-4431): promotion recovery gate runs AFTER restore
-    // and BEFORE chatDbService.init(). Disk journal/artifacts decide the
-    // action for both in-process continuation and restart after crash.
-    //
-    // Startup ordering:
-    //   1. BackupManager.handleStartupRestore() [completed above]
-    //   2. Promotion recovery gate (this block)
-    //   3. chatDbService.init()
-    //   4. Ordinary orphan cleanup / window startup
-    let promotionGateRepairRequired = false
-    // LOCK-F2: when the catalog recovery window exhausted its bounded retry
-    // budget, it stays up showing the bounded terminal repair surface. The
-    // app must NOT boot ordinary UI nor init chatDb — the whole ordinary
-    // startup path below is skipped.
-    let catalogRecoveryTerminal = false
-    try {
-      const gateResult = await runStartupRecoveryGate(false)
-      if (gateResult.repairRequired) {
-        promotionGateRepairRequired = true
-        logger.warn(
-          `Promotion recovery gate: repair required (${gateResult.decision.reason}) — ` +
-            'chatDbService init will be skipped until repair is completed'
-        )
-      }
-      if (gateResult.relaunchPending) {
-        // Relaunch was triggered — the process is exiting.
-        // Return early; no further init should proceed.
-        logger.info('Promotion recovery gate: relaunch pending — process will exit')
-        return
-      }
-      // LOCK-PROMO-7: v2 catalog-dependent recovery — boot the recovery-only
-      // window surface, run the three-artifact recovery to convergence
-      // (all-new or all-old), then continue normal startup. Ordinary UI is
-      // blocked until the handoff completes or the old generation is
-      // restored.
-      if (gateResult.catalogRecoveryRequired) {
-        logger.warn(
-          `Promotion recovery gate: catalog recovery required (${String(gateResult.catalogRecoveryAction)}, ` +
-            `phase ${String(gateResult.catalogRecoveryPhase)}) — booting the recovery-only surface; ` +
-            'ordinary UI stays blocked (LOCK-PROMO-7)'
-        )
-        try {
-          const { runCatalogStartupRecovery } = await import('./services/chatDbImport/catalogStartupRecovery')
-          const { BrowserWindow } = await import('electron')
-          const recoveryResult = await runCatalogStartupRecovery({
-            dataRoot: DATA_PATH,
-            createWindow: () =>
-              new BrowserWindow({
-                width: 480,
-                height: 300,
-                // LOCK-CAT-8: the recovery window stays hidden — the renderer
-                // only needs to run the catalog handoff in the background; it
-                // is shown only when the bounded terminal repair surface is
-                // raised (LOCK-F2).
-                show: false,
-                autoHideMenuBar: true,
-                backgroundColor: '#181818',
-                webPreferences: {
-                  preload: join(__dirname, '../preload/index.js'),
-                  // Mirror the main window webPreferences (house style):
-                  // sandbox/webSecurity follow the existing window bootstrap
-                  // patterns; webviewTag stays disabled on the minimal surface.
-                  sandbox: false,
-                  webSecurity: false,
-                  webviewTag: false,
-                  contextIsolation: true
-                }
-              }),
-            liveDb: chatDbService
-          })
-          if (!recoveryResult.ok) {
-            // LOCK-F2: terminal recovery failure — fail closed (LOCK-4431):
-            // chatDb init is blocked and, when the bounded repair surface is
-            // shown, the ordinary app window is NOT created.
-            promotionGateRepairRequired = true
-            catalogRecoveryTerminal = recoveryResult.terminalSurface
-            logger.error(
-              `Catalog startup recovery failed (${recoveryResult.code}) — failing closed: ` +
-                'chatDbService init will be skipped until repair is completed',
-              recoveryResult.safeCode ? new Error(recoveryResult.safeCode) : undefined
-            )
-          } else if (recoveryResult.restartRequested) {
-            // Packaged relaunch path: the process is exiting.
-            logger.info('Catalog startup recovery: relaunch pending — process will exit')
-            return
-          }
-          // Non-packaged: the recovery window is destroyed; normal startup
-          // (chatDb init + main window) proceeds below.
-        } catch (error) {
-          promotionGateRepairRequired = true
-          logger.error(
-            'Catalog startup recovery failed unexpectedly — failing closed (LOCK-4431): ' +
-              'chatDbService init will be skipped. Error:',
-            error as Error
-          )
-        }
-      }
-    } catch (error) {
-      // LOCK-4431: unexpected gate failures must fail closed — no unverified
-      // DB init. Set repair-required so chatDbService.init() is skipped.
-      promotionGateRepairRequired = true
-      logger.error(
-        'Promotion recovery gate failed unexpectedly — failing closed (LOCK-4431): ' +
-          'chatDbService init will be skipped. Error:',
-        error as Error
-      )
-    }
-
-    // LOCK-F2: terminal catalog recovery — the recovery window is showing the
-    // bounded repair surface (or no window could be shown at all). Ordinary
-    // UI, chatDb init, and every downstream service stay off; the process
-    // stays alive on the repair surface and the will-quit cleanup below still
-    // runs.
-    if (catalogRecoveryTerminal) {
-      logger.warn('Catalog recovery terminal — ordinary startup skipped (bounded repair surface shown, LOCK-F2)')
-      return
-    }
-
-    // Initialise chat database after restore and recovery gate, before normal
-    // app availability. If init fails (e.g., integrity check after restore),
-    // the app continues but chat DB is marked unavailable for normal operations.
-    // If restore failed or repair is required, skip init entirely.
-    if (restoreSucceeded && !promotionGateRepairRequired) {
+    // Initialise the chat database after startup restore, before normal app
+    // availability. If init fails (e.g., integrity check after restore), the
+    // app continues but chat DB is marked unavailable for normal operations.
+    // A failed restore skips init entirely to prevent unchecked use.
+    if (restoreSucceeded) {
       try {
         await chatDbService.init()
       } catch (error) {
         logger.error('ChatDbService initialisation failed (app continues, chat DB unavailable):', error as Error)
       }
-    } else if (promotionGateRepairRequired) {
-      logger.warn('ChatDbService init skipped due to promotion repair requirement — chat DB unavailable this session')
     } else {
       logger.warn('ChatDbService init skipped due to restore failure — chat DB unavailable this session')
     }
-
-    // Recover orphaned import artifacts from prior crashes: temp workspaces
-    // (R-2) then owned candidate directories (Phase 4.2). Failures are
-    // contained/logged inside the helper and never block startup (LOCK-L3).
-    //
-    // Phase 4.4.1 (LOCK-4413/4414): read the promotion journal to determine
-    // whether a promoting candidate must be protected from age-based cleanup.
-    // Invalid/I/O-failed journal reads are classified as repair/block per
-    // existing app repair conventions — they do NOT silently continue.
-    let journalObservation: PromotionJournalObservation = { status: 'absent' }
-    try {
-      const journalResult = await readPromotionJournal()
-      if (journalResult.status === 'absent') {
-        journalObservation = { status: 'absent' }
-      } else if (journalResult.status === 'invalid') {
-        journalObservation = { status: 'invalid' }
-        logger.warn(`Promotion journal is invalid (${journalResult.code}): candidate cleanup blocked until repair`)
-      } else {
-        journalObservation = journalResult
-      }
-    } catch (error) {
-      // I/O failure reading the journal: treat as invalid (repair-block path).
-      // LOCK-4414: an unreadable journal is NOT absent — promotion may have
-      // begun and its progress is unknowable.
-      journalObservation = { status: 'invalid' }
-      logger.warn(
-        'Failed to read promotion journal (I/O failure): candidate cleanup blocked until repair',
-        error as Error
-      )
-    }
-    await recoverOrphanedImportArtifacts(journalObservation)
 
     const mainWindow = windowService.createMainWindow()
 
@@ -406,7 +247,7 @@ if (!app.requestSingleInstanceLock()) {
       // Start API server if enabled. LOCK-005: auto-start first awaits Redux
       // readiness without a fixed timeout (the store is selectable right
       // after rehydration, LOCK-003), then loads the real config — a slow
-      // renderer/import projection can no longer force the disabled fallback
+      // renderer readiness can no longer force the disabled fallback
       // for the whole run. Fire-and-forget relative to global app startup;
       // failures are logged here, never propagated into startup.
       try {
@@ -462,25 +303,6 @@ if (!app.requestSingleInstanceLock()) {
       saveDataHandshake.dispose()
     } catch (error) {
       logger.warn('Error disposing save-data handshake:', error as Error)
-    }
-
-    // L2 control layer (poller, terminal ownership, webContents ref) must be
-    // settled BEFORE the underlying import session is torn down. This stops
-    // the state poller and releases any unclaimed terminal promotion ownership
-    // (LOCK-6015/6018) so the session disposal below cannot race a stale poller
-    // callback or leave terminal capability unreleased.
-    try {
-      disposeCherryImportControl()
-    } catch (error) {
-      logger.warn('Error disposing import control:', error as Error)
-    }
-
-    // Dispose any active import session (non-fatal) — must run BEFORE
-    // chatDbService.close() so the isolated session is torn down first.
-    try {
-      disposeActiveImport()
-    } catch (error) {
-      logger.warn('Error disposing active import session:', error as Error)
     }
 
     // Stop sync synchronously (abort SSE/timers + invalidate in-flight

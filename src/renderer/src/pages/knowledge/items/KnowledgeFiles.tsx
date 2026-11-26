@@ -1,5 +1,7 @@
 import { loggerService } from '@logger'
 import Ellipsis from '@renderer/components/Ellipsis'
+import { DeleteIcon } from '@renderer/components/Icons'
+import { DynamicVirtualList } from '@renderer/components/VirtualList'
 import { useFiles } from '@renderer/hooks/useFiles'
 import { useKnowledge } from '@renderer/hooks/useKnowledge'
 import FileItem from '@renderer/pages/files/FileItem'
@@ -12,28 +14,27 @@ import { formatFileSize, mime2type, uuid } from '@renderer/utils'
 import { bookExts, documentExts, textExts, thirdPartyApplicationExts } from '@shared/config/constant'
 import { Button, Tooltip, Upload } from 'antd'
 import dayjs from 'dayjs'
-import type { FC } from 'react'
-import { useCallback, useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import styled from 'styled-components'
-
-const logger = loggerService.withContext('KnowledgeFiles')
-
-import { DeleteIcon } from '@renderer/components/Icons'
-import { DynamicVirtualList } from '@renderer/components/VirtualList'
 import { PlusIcon } from 'lucide-react'
+import type { FC } from 'react'
+import { useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 
+import {
+  KnowledgeSourceBody,
+  KnowledgeSourceContent,
+  KnowledgeSourceDropPad,
+  KnowledgeSourceToolbar
+} from '../components/KnowledgeSourceLayout'
 import {
   ClickableSpan,
   FlexAlignCenter,
-  ItemContainer,
-  ItemHeader,
   KnowledgeEmptyView,
   RefreshIcon,
   ResponsiveButton,
   StatusIconWrapper
 } from '../KnowledgeContent'
 
+const logger = loggerService.withContext('KnowledgeFiles')
 const { Dragger } = Upload
 
 interface KnowledgeContentProps {
@@ -49,21 +50,11 @@ const getDisplayTime = (item: KnowledgeItem) => {
 
 const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   const { t } = useTranslation()
-  const [windowHeight, setWindowHeight] = useState(window.innerHeight)
   const { onSelectFile, selecting } = useFiles({ extensions: fileTypes })
 
   const { base, fileItems, addFiles, refreshItem, removeItem, getProcessingStatus } = useKnowledge(
     selectedBase.id || ''
   )
-
-  useEffect(() => {
-    const handleResize = () => {
-      setWindowHeight(window.innerHeight)
-    }
-
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
 
   const providerName = getProviderName(base?.model)
   const disabled = !base?.version || !providerName
@@ -127,11 +118,13 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
   }
 
   return (
-    <ItemContainer>
-      <ItemHeader>
+    <KnowledgeSourceBody>
+      <KnowledgeSourceToolbar>
+        <span>{t('knowledge.drag_file')}</span>
         <ResponsiveButton
           type="primary"
-          icon={<PlusIcon size={16} />}
+          size="small"
+          icon={<PlusIcon size={14} />}
           onClick={(e) => {
             e.stopPropagation()
             void handleAddFile()
@@ -139,9 +132,8 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
           disabled={disabled}>
           {t('knowledge.add_file')}
         </ResponsiveButton>
-      </ItemHeader>
-
-      <ItemFlexColumn>
+      </KnowledgeSourceToolbar>
+      <KnowledgeSourceDropPad>
         <div
           onClick={(e) => {
             e.stopPropagation()
@@ -159,6 +151,8 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
             </p>
           </Dragger>
         </div>
+      </KnowledgeSourceDropPad>
+      <KnowledgeSourceContent>
         {fileItems.length === 0 ? (
           <KnowledgeEmptyView />
         ) : (
@@ -166,7 +160,8 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
             list={fileItems.reverse()}
             estimateSize={estimateSize}
             overscan={2}
-            scrollerStyle={{ height: windowHeight - 270 }}
+            scrollerStyle={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: '12px 16px 16px 2px' }}
+            itemContainerStyle={{ paddingBottom: 10 }}
             autoHideScrollbar>
             {(item) => {
               if (!isKnowledgeFileItem(item)) {
@@ -174,57 +169,49 @@ const KnowledgeFiles: FC<KnowledgeContentProps> = ({ selectedBase }) => {
               }
               const file = item.content
               return (
-                <div style={{ height: '75px', paddingTop: '12px' }}>
-                  <FileItem
-                    key={item.id}
-                    fileInfo={{
-                      name: (
-                        <ClickableSpan onClick={() => window.api.file.openFileWithRelativePath(file)}>
-                          <Ellipsis>
-                            <Tooltip title={file.origin_name}>{file.origin_name}</Tooltip>
-                          </Ellipsis>
-                        </ClickableSpan>
-                      ),
-                      ext: file.ext,
-                      extra: `${getDisplayTime(item)} · ${formatFileSize(file.size)}`,
-                      actions: (
-                        <FlexAlignCenter>
-                          {item.uniqueId && (
-                            <Button type="text" icon={<RefreshIcon />} onClick={() => refreshItem(item)} />
-                          )}
-                          <StatusIconWrapper>
-                            <StatusIcon
-                              sourceId={item.id}
-                              base={base}
-                              getProcessingStatus={getProcessingStatus}
-                              type="file"
-                            />
-                          </StatusIconWrapper>
-                          <Button
-                            type="text"
-                            danger
-                            onClick={() => removeItem(item)}
-                            icon={<DeleteIcon size={14} className="lucide-custom" />}
+                <FileItem
+                  key={item.id}
+                  fileInfo={{
+                    name: (
+                      <ClickableSpan onClick={() => window.api.file.openFileWithRelativePath(file)}>
+                        <Ellipsis>
+                          <Tooltip title={file.origin_name}>{file.origin_name}</Tooltip>
+                        </Ellipsis>
+                      </ClickableSpan>
+                    ),
+                    ext: file.ext,
+                    extra: `${getDisplayTime(item)} · ${formatFileSize(file.size)}`,
+                    actions: (
+                      <FlexAlignCenter>
+                        {item.uniqueId && (
+                          <Button type="text" size="small" icon={<RefreshIcon />} onClick={() => refreshItem(item)} />
+                        )}
+                        <StatusIconWrapper>
+                          <StatusIcon
+                            sourceId={item.id}
+                            base={base}
+                            getProcessingStatus={getProcessingStatus}
+                            type="file"
                           />
-                        </FlexAlignCenter>
-                      )
-                    }}
-                  />
-                </div>
+                        </StatusIconWrapper>
+                        <Button
+                          type="text"
+                          size="small"
+                          danger
+                          onClick={() => removeItem(item)}
+                          icon={<DeleteIcon size={14} className="lucide-custom" />}
+                        />
+                      </FlexAlignCenter>
+                    )
+                  }}
+                />
               )
             }}
           </DynamicVirtualList>
         )}
-      </ItemFlexColumn>
-    </ItemContainer>
+      </KnowledgeSourceContent>
+    </KnowledgeSourceBody>
   )
 }
-
-const ItemFlexColumn = styled.div`
-  display: flex;
-  flex-direction: column;
-  padding: 20px 16px;
-  gap: 10px;
-`
 
 export default KnowledgeFiles

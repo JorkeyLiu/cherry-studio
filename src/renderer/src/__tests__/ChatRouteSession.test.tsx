@@ -12,7 +12,10 @@ vi.mock('react-i18next', () => ({
         'route.error.title': 'Failed to load page',
         'route.error.description': 'The page failed to load. Please try again or return home.',
         'route.error.retry': 'Retry',
-        'route.error.back_to_home': 'Back to Home'
+        'route.error.back_to_home': 'Back to Home',
+        'title.files': 'Files',
+        'title.knowledge': 'Knowledge Base',
+        'settings.title': 'Settings'
       }
       return map[key] ?? key
     },
@@ -24,12 +27,11 @@ vi.mock('@renderer/databases', () => ({}))
 vi.mock('@renderer/components/app/Sidebar', () => ({ default: () => <div data-testid="sidebar">Sidebar</div> }))
 vi.mock('@renderer/handler/NavigationHandler', () => ({ default: () => null }))
 
-// Representative Home effect inventory for the activation-boundary proof: the
-// stub mirrors HomePage's real hidden-relevant effects (native minimum-size
-// with reset cleanup + a global keydown listener standing in for the shortcut
-// overlap) so the test proves the Activity boundary deactivates them while
-// hidden and reactivates them on return — naturally via effect cleanup, with
-// no per-handler gating.
+// Representative Home effect inventory for the dialog-overlay proof: the stub
+// mirrors HomePage's real hidden-relevant effects (native minimum-size with
+// reset cleanup + a global keydown listener standing in for the shortcut
+// overlap) so the test proves the overlay keeps them active — with no
+// detach/reattach cycle — while a task dialog is open.
 const homeEffects = vi.hoisted(() => ({
   setMinimumSize: vi.fn(),
   resetMinimumSize: vi.fn(),
@@ -61,20 +63,13 @@ vi.mock('@renderer/pages/home/HomePage', async () => {
 vi.mock('@renderer/pages/files/FilesPage', () => ({
   default: () => <div data-testid="files-page">Files</div>
 }))
-vi.mock('@renderer/pages/notes/NotesPage', () => ({
-  default: () => <div data-testid="notes-page">Notes</div>
-}))
 vi.mock('@renderer/pages/knowledge/KnowledgePage', () => ({
   default: () => <div data-testid="knowledge-page">Knowledge</div>
 }))
 vi.mock('@renderer/pages/settings/SettingsPage', () => ({
   default: () => <div data-testid="settings-page">Settings</div>
 }))
-vi.mock('@renderer/pages/launchpad/LaunchpadPage', () => ({
-  default: () => <div data-testid="launchpad-page">Launchpad</div>
-}))
 
-import { LazyRoute } from '../components/LazyRoute'
 import { AppRoutes } from '../Router'
 
 let navigateFn: ((path: string) => void) | null = null
@@ -100,7 +95,7 @@ const go = (path: string) => {
   })
 }
 
-const fireHiddenKey = () => {
+const fireVisibleKey = () => {
   act(() => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }))
   })
@@ -110,6 +105,7 @@ beforeEach(() => {
   homeEffects.setMinimumSize.mockClear()
   homeEffects.resetMinimumSize.mockClear()
   homeEffects.keyHandler.mockClear()
+  document.body.innerHTML = ''
   ;(window as any).api = {
     window: {
       setMinimumSize: (...args: unknown[]) => {
@@ -124,8 +120,8 @@ beforeEach(() => {
   }
 })
 
-describe('Chat route session — Chat -> Settings -> Chat preserves component identity', () => {
-  it('keeps the same Home DOM session hidden while on Settings and restores it with state on return', async () => {
+describe('Chat base session — task dialogs never hide or remount Chat', () => {
+  it('keeps the same Home DOM session visible with state while a task dialog is open', async () => {
     renderAt('/')
 
     expect(await screen.findByTestId('home-page')).toBeInTheDocument()
@@ -136,77 +132,91 @@ describe('Chat route session — Chat -> Settings -> Chat preserves component id
     go('/settings/provider')
     await waitFor(() => expect(screen.getByTestId('settings-page')).toBeInTheDocument())
 
-    // Same session persists hidden (not unmounted): identical node, inert to AT.
+    // Same session stays visible (attached, never hidden) behind the dialog.
     expect(screen.getByTestId('home-page')).toBe(homeEl)
-    expect(screen.getByTestId('home-page')).not.toBeVisible()
-    // Activity owns hidden semantics: no manual CSS/inert mechanics remain.
-    expect(screen.getByTestId('chat-workspace')).not.toHaveAttribute('aria-hidden')
-    expect(screen.getByTestId('chat-workspace')).not.toHaveAttribute('inert')
+    expect(screen.getByTestId('home-page')).toBeVisible()
+    // Awaited: the shell's appear motion is scheduler-timed; visibility is
+    // still required, but not that the animation already finished.
+    await waitFor(() => expect(screen.getByTestId('task-dialog')).toBeVisible())
 
     go('/')
-    await waitFor(() => expect(screen.getByTestId('home-page')).toBeVisible())
+    await waitFor(() => expect(screen.queryByTestId('task-dialog')).not.toBeInTheDocument())
 
     // No remount: identical node, uncontrolled draft state intact.
     expect(screen.getByTestId('home-page')).toBe(homeEl)
     expect(screen.getByTestId('home-draft')).toHaveValue('draft-kept')
   })
 
-  it('deactivates Home effects while hidden (min-size reset, shortcuts detached) and reactivates on return', async () => {
+  it('keeps Home effects active under the dialog (no min-size reset, no shortcut detach)', async () => {
     renderAt('/')
 
     expect(await screen.findByTestId('home-page')).toBeInTheDocument()
     expect(homeEffects.setMinimumSize).toHaveBeenCalledTimes(1)
 
-    // Active Home shortcut fires while visible.
-    fireHiddenKey()
+    // Home shortcut fires while visible.
+    fireVisibleKey()
     expect(homeEffects.keyHandler).toHaveBeenCalledTimes(1)
 
     go('/settings/provider')
     await waitFor(() => expect(screen.getByTestId('settings-page')).toBeInTheDocument())
-    expect(screen.getByTestId('home-page')).not.toBeVisible()
+    expect(screen.getByTestId('home-page')).toBeVisible()
 
-    // Hidden-subtree effects cleaned up: native min-size reset, no fresh
-    // setMinimumSize while hidden.
-    expect(homeEffects.resetMinimumSize).toHaveBeenCalledTimes(1)
+    // No hidden-subtree effect cleanup: no min-size reset, no fresh
+    // setMinimumSize, listener still attached.
+    expect(homeEffects.resetMinimumSize).not.toHaveBeenCalled()
     expect(homeEffects.setMinimumSize).toHaveBeenCalledTimes(1)
 
-    // Hidden Home cannot fire global shortcuts: the listener is detached, so
-    // no duplicate/overlapping shortcut handling from the hidden subtree.
-    fireHiddenKey()
-    expect(homeEffects.keyHandler).toHaveBeenCalledTimes(1)
+    // Home still receives global shortcuts: the listener was never detached.
+    fireVisibleKey()
+    expect(homeEffects.keyHandler).toHaveBeenCalledTimes(2)
 
     go('/')
-    await waitFor(() => expect(screen.getByTestId('home-page')).toBeVisible())
+    await waitFor(() => expect(screen.queryByTestId('task-dialog')).not.toBeInTheDocument())
 
-    // Reactivated on return: min-size re-applied, shortcut listener re-attached.
-    expect(homeEffects.setMinimumSize).toHaveBeenCalledTimes(2)
-    fireHiddenKey()
-    expect(homeEffects.keyHandler).toHaveBeenCalledTimes(2)
+    // Closing the dialog is not a remount: still no reset, still one setup.
+    expect(homeEffects.resetMinimumSize).not.toHaveBeenCalled()
+    expect(homeEffects.setMinimumSize).toHaveBeenCalledTimes(1)
+    fireVisibleKey()
+    expect(homeEffects.keyHandler).toHaveBeenCalledTimes(3)
   })
 
-  it('does not eagerly mount Chat on a direct secondary entry, then preserves the session once visited', async () => {
+  it('initializes chat on a direct secondary entry, then treats dialog close as explicit / navigation', async () => {
     renderAt('/settings/provider')
 
+    // No eager Chat data loading gate: the chat workspace mounts with the
+    // dialog on a direct secondary entry.
     await waitFor(() => expect(screen.getByTestId('settings-page')).toBeInTheDocument())
-    // No eager Chat data loading surface: Chat workspace stays unmounted.
-    expect(screen.queryByTestId('chat-workspace')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument()
-    expect(homeEffects.setMinimumSize).not.toHaveBeenCalled()
+    expect(screen.getByTestId('chat-workspace')).toBeInTheDocument()
+    expect(screen.getByTestId('home-page')).toBeInTheDocument()
+    expect(homeEffects.setMinimumSize).toHaveBeenCalled()
 
-    go('/')
-    expect(await screen.findByTestId('home-page')).toBeInTheDocument()
     const homeEl = screen.getByTestId('home-page')
     fireEvent.change(screen.getByTestId('home-draft'), { target: { value: 'after-first-visit' } })
 
-    go('/settings/provider')
-    await waitFor(() => expect(screen.getByTestId('settings-page')).toBeInTheDocument())
+    go('/knowledge')
+    await waitFor(() => expect(screen.getByTestId('knowledge-page')).toBeInTheDocument())
     expect(screen.getByTestId('home-page')).toBe(homeEl)
-    expect(screen.getByTestId('home-page')).not.toBeVisible()
+    expect(screen.getByTestId('home-page')).toBeVisible()
 
     go('/')
-    await waitFor(() => expect(screen.getByTestId('home-page')).toBeVisible())
+    await waitFor(() => expect(screen.queryByTestId('task-dialog')).not.toBeInTheDocument())
     expect(screen.getByTestId('home-page')).toBe(homeEl)
     expect(screen.getByTestId('home-draft')).toHaveValue('after-first-visit')
+  })
+
+  it('closes the top task dialog with Escape and lands explicitly on /', async () => {
+    renderAt('/files')
+
+    expect(await screen.findByTestId('files-page')).toBeInTheDocument()
+    const homeEl = screen.getByTestId('home-page')
+
+    const wrap = document.querySelector('.ant-modal-wrap')
+    expect(wrap).not.toBeNull()
+    fireEvent.keyDown(wrap!, { key: 'Escape', keyCode: 27, which: 27 })
+
+    await waitFor(() => expect(screen.queryByTestId('task-dialog')).not.toBeInTheDocument())
+    expect(screen.getByTestId('home-page')).toBe(homeEl)
+    expect(screen.getByTestId('home-page')).toBeVisible()
   })
 
   it('renders the resolved Settings module synchronously on revisit (no fresh fallback)', async () => {
@@ -218,7 +228,7 @@ describe('Chat route session — Chat -> Settings -> Chat preserves component id
     await waitFor(() => expect(screen.getByTestId('settings-page')).toBeInTheDocument())
 
     go('/')
-    await waitFor(() => expect(screen.getByTestId('home-page')).toBeVisible())
+    await waitFor(() => expect(screen.queryByTestId('task-dialog')).not.toBeInTheDocument())
 
     go('/settings/provider')
     // Stable lazy identity: the already-resolved module renders without
@@ -226,37 +236,5 @@ describe('Chat route session — Chat -> Settings -> Chat preserves component id
     expect(screen.queryByTestId('route-loading-fallback')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('settings-page')).toBeVisible())
     expect(screen.queryByTestId('route-loading-fallback')).not.toBeInTheDocument()
-  })
-})
-
-describe('LazyRoute — stable resolved identity across remounts', () => {
-  it('reuses the resolved module on remount without re-invoking the importer or flashing fallback', async () => {
-    let calls = 0
-    const Page = () => <div data-testid="cached-page">Cached</div>
-    const importer = () => {
-      calls += 1
-      return Promise.resolve({ default: Page })
-    }
-
-    const { unmount } = render(
-      <MemoryRouter>
-        <LazyRoute importer={importer} />
-      </MemoryRouter>
-    )
-    await waitFor(() => expect(screen.getByTestId('cached-page')).toBeInTheDocument())
-    expect(calls).toBe(1)
-    unmount()
-    document.body.innerHTML = ''
-
-    render(
-      <MemoryRouter>
-        <LazyRoute importer={importer} />
-      </MemoryRouter>
-    )
-    // Already resolved: synchronous render, no fallback, no second import.
-    expect(screen.queryByTestId('route-loading-fallback')).not.toBeInTheDocument()
-    expect(screen.getByTestId('cached-page')).toBeInTheDocument()
-    expect(calls).toBe(1)
-    document.body.innerHTML = ''
   })
 })

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -120,34 +120,35 @@ import { ProviderAvatarPrimitive } from '@renderer/components/ProviderAvatar'
 
 import ProviderList from '../ProviderList'
 
-describe('ProviderList logo alignment (size 32) — behavioral', () => {
+describe('ProviderList avatar size contract (size 32) — behavioral', () => {
   beforeEach(() => {
     cleanup()
     providerAvatarSpy.mockClear()
   })
 
-  it('forwards size=32 to ProviderAvatar for each row', () => {
+  it('forwards size=32 to the resolved current connection avatar on initial render', () => {
     render(React.createElement(ProviderList, null as any))
 
+    // No permanent connection rail: only the current connection avatar is
+    // visible before the switcher is opened.
     const avatars = screen.getAllByTestId('provider-avatar-mock')
-    expect(avatars).toHaveLength(2)
-    expect(providerAvatarSpy).toHaveBeenCalledTimes(2)
-
-    for (const call of providerAvatarSpy.mock.calls) {
-      expect(call[0].size).toBe(32)
-    }
-
-    for (const el of avatars) {
-      expect(el.getAttribute('data-size')).toBe('32')
-    }
+    expect(avatars).toHaveLength(1)
+    expect(avatars[0].getAttribute('data-size')).toBe('32')
+    expect(avatars[0].getAttribute('data-provider-id')).toBe('openai')
   })
 
-  it('passes correct provider identity alongside size 32', () => {
+  it('forwards size=32 to every connection option inside the switcher popover', () => {
     render(React.createElement(ProviderList, null as any))
-    const firstCall = providerAvatarSpy.mock.calls[0]?.[0]
-    expect(firstCall).toBeDefined()
-    expect(firstCall.provider.id).toBe('openai')
-    expect(firstCall.size).toBe(32)
+
+    fireEvent.click(screen.getByTestId('provider-switcher'))
+
+    // Trigger avatar + one avatar per filtered connection, all at size 32.
+    const avatars = screen.getAllByTestId('provider-avatar-mock')
+    expect(avatars).toHaveLength(3)
+    expect(avatars.map((el) => el.getAttribute('data-size'))).toEqual(['32', '32', '32'])
+    expect(avatars.map((el) => el.getAttribute('data-provider-id'))).toEqual(['openai', 'openai', 'anthropic'])
+    // No provider row avatar leaked outside the switcher (no rail).
+    expect(screen.queryByTestId('provider-list-view')).toBeNull()
   })
 })
 

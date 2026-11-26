@@ -213,7 +213,15 @@ describe('MessageOutline reading-anchor follow', () => {
     vi.restoreAllMocks()
   })
 
-  it('marks only the active row with aria-current and theme highlight CSS', () => {
+  it('marks only the active row with aria-current, primary text and a primary dash — never a background chip', () => {
+    // Corrected current-row form: primary green text at a stable 500 weight,
+    // and the current dash itself takes primary. The collapsed rail reads
+    // the dots alone, so without the dash rule the current row was
+    // indistinguishable there (user-reported: all-gray dashes, no green
+    // mark). The weight never animates, so switching the current row cannot
+    // jitter the measured panel width. The row itself carries no background
+    // chip — expanded the dots are fully transparent, so the open panel's
+    // current stays text-only.
     renderOutline('u2')
     expect(screen.getByTestId('conversation-nav-item-u2').getAttribute('aria-current')).toBe('true')
     expect(screen.getByTestId('conversation-nav-item-u1').getAttribute('aria-current')).toBeNull()
@@ -223,26 +231,37 @@ describe('MessageOutline reading-anchor follow', () => {
       .map((el) => el.textContent ?? '')
       .join('\n')
     const norm = css.replace(/\s+/g, '')
-    expect(norm).toContain('color:var(--color-text-1)')
+    expect(norm).toContain('color:var(--color-primary)')
+    expect(norm).toContain('font-weight:500')
     expect(norm).toContain('background:var(--color-primary)')
+    // No chip on the row itself: its own background stays fully transparent.
+    // The dash tint is covered by the stylesheet assertion above.
+    const activeRow = screen.getByTestId('conversation-nav-item-u2')
+    expect(getComputedStyle(activeRow).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    // The dash tint itself is stylesheet-level evidence above: jsdom cannot
+    // resolve var() colors to a computed value (both dashes compute to
+    // transparent here), so the visible green-vs-gray difference is left to
+    // the Electron observation run, not claimed from this suite.
   })
 
-  it('keeps the active dot on the theme color under row hover', () => {
-    // Specificity battle: the generic `&:hover` dot rule (item:hover dot)
-    // outranks the plain active dot rule, so without an explicit
-    // active-hover dot rule the hovered active dot turns neutral gray.
-    // Require a second theme-primary dot rule for the hovered active row;
-    // the single neutral hover rule for non-active rows must remain.
+  it('keeps the active text primary under row hover; hover brightens text only', () => {
+    // Approved hover form: the settled switch brightens the hovered row's
+    // text alone (neutral, no background chip and no hover dot recolor — the
+    // only primary dash is the current row's own), and a hovered current row
+    // stays on its primary color. The plain active rule loses to the generic
+    // hover rule on specificity, so the current row carries its own
+    // aria-current hover rule — exactly the two primary-text rules below.
     renderOutline('u2')
     const css = Array.from(document.querySelectorAll('style'))
       .map((el) => el.textContent ?? '')
       .join('\n')
     const norm = css.replace(/\s+/g, '')
-    const primaryDots = norm.match(/background:var\(--color-primary\)/g) ?? []
-    expect(primaryDots.length).toBeGreaterThanOrEqual(2)
-    expect(norm).toContain('background:var(--color-text-3)')
-    expect(norm).toContain('color:var(--color-text-2)')
+    const primaryTexts = norm.match(/color:var\(--color-primary\)/g) ?? []
+    expect(primaryTexts.length).toBeGreaterThanOrEqual(2)
+    // Neutral hover for non-current rows; the idle dot keeps its border fill
+    // while the current row's dash carries the primary rule restored above.
     expect(norm).toContain('color:var(--color-text-1)')
+    expect(norm).toContain('background:var(--color-primary)')
   })
 
   it('leaves the outline scroll alone when the active row is fully visible', () => {
@@ -472,7 +491,7 @@ describe('MessageOutline expand/collapse grace margin', () => {
   })
 })
 
-describe('MessageOutline fork markers', () => {
+describe('MessageOutline textless dividers', () => {
   const ENTRIES = [
     { id: 'u1', text: 'First question' },
     { id: 'u2', text: 'Second question' },
@@ -483,7 +502,8 @@ describe('MessageOutline fork markers', () => {
     outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
 
   // Rows sit in the measured content box: body (clip/scroll) > panel (animated
-  // width) > content (intrinsic width) > rows.
+  // width) > content (intrinsic width) > rows. The group overlay mounts first
+  // and stays mounted, so every row list below starts with it.
   const rowListOf = (body: HTMLElement) => body.firstElementChild!.firstElementChild as HTMLElement
 
   const childTestIds = (body: HTMLElement) =>
@@ -497,14 +517,15 @@ describe('MessageOutline fork markers', () => {
       .join('\n')
       .replace(/\s+/g, '')
 
-  it('inserts the fork row directly AFTER the marked message row, and only there', () => {
+  it('inserts the fork divider directly AFTER the marked message row, and only there', () => {
     const { container } = render(
       <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
     )
     const body = bodyOf(container)
-    // Sibling order in DOM: the marked row keeps its own row, the fork row
-    // follows it, the next message row is unchanged.
+    // Sibling order in DOM: the group overlay, the marked row keeps its own
+    // row, the divider follows it, the next message row is unchanged.
     expect(childTestIds(body)).toEqual([
+      'conversation-nav-group-overlay',
       'conversation-nav-item-u1',
       'conversation-nav-item-u2',
       'conversation-nav-fork',
@@ -522,7 +543,7 @@ describe('MessageOutline fork markers', () => {
     expect(screen.getAllByTestId('conversation-nav-fork')).toHaveLength(1)
   })
 
-  it('keeps the fork row out of navigation: no role, ID, tab stop, handler or interactive content', () => {
+  it('keeps the fork divider out of navigation: no role, ID, tab stop, handler or painted text', () => {
     const onNavigate = vi.fn()
     render(
       <MessageOutline
@@ -539,12 +560,13 @@ describe('MessageOutline fork markers', () => {
     // Never a highlight winner, and never announced.
     expect(fork.getAttribute('aria-current')).toBeNull()
     expect(fork.getAttribute('aria-hidden')).toBe('true')
-    // The label is mounted in both states — swapping it on expansion would
-    // replace its fade with a pop — so the compact marker is two dashes around a
-    // clipped, transparent label, never an interactive target.
-    expect(fork.children).toHaveLength(3)
-    expect(fork.textContent).toBe('Research branch')
-    expect(fork.querySelector('[data-outline-fork-label]')).not.toBeNull()
+    // Approved textless form: the caller label is the accessible and hover
+    // name only — nothing paints. The one child is the 1px rule, so width
+    // measurement never sees a word.
+    expect(fork.children).toHaveLength(1)
+    expect(fork.textContent).toBe('')
+    expect(fork.getAttribute('title')).toBe('Research branch')
+    expect(fork.getAttribute('aria-label')).toBe('Research branch')
 
     fireEvent.click(fork)
     fireEvent.keyDown(fork, { key: 'Enter' })
@@ -557,6 +579,7 @@ describe('MessageOutline fork markers', () => {
   it('renders byte-identical DOM when nothing is marked (empty map or absent prop)', () => {
     const withEmptyMap = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map()} />)
     expect(childTestIds(bodyOf(withEmptyMap.container))).toEqual([
+      'conversation-nav-group-overlay',
       'conversation-nav-item-u1',
       'conversation-nav-item-u2',
       'conversation-nav-item-u3'
@@ -570,95 +593,60 @@ describe('MessageOutline fork markers', () => {
     expect(screen.queryAllByTestId('conversation-nav-fork')).toHaveLength(0)
   })
 
-  it('sits on the dot band collapsed: 6px + a 2px gap + 6px = the 14px dot width', () => {
-    render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />)
-    const norm = normalizedCss()
-
-    const dot = /width:(\d+)px;height:4px;background:var\(--color-border\);border-radius:2px/.exec(norm)
-    const row = /height:12px;align-self:stretch;display:flex;align-items:center;gap:(\d+)px/.exec(norm)
-    const segment = /width:(\d+)px;height:1px;background:var\(--color-border\);border-radius:2px/.exec(norm)
-    expect(dot).not.toBeNull()
-    expect(row).not.toBeNull()
-    expect(segment).not.toBeNull()
-
-    const dotWidth = Number(dot![1])
-    const gap = Number(row![1])
-    const dashWidth = Number(segment![1])
-    expect(dashWidth).toBe(6)
-    // One gap either side of the clipped label: 6 + 1 + 0 + 1 + 6 = 14.
-    expect(gap).toBe(1)
-    expect(norm).toContain('max-width:0;overflow:hidden')
-    const markerWidth = dashWidth * 2 + gap * 2
-    // Two 6px dashes a 2px visual gap apart add up to exactly the dot width, so
-    // the collapsed marker still reads as part of the same rail. (The row itself
-    // stays as wide as the content in both states, so the marker's own boxes do
-    // not re-place themselves inside a still-open panel.)
-    expect(markerWidth).toBe(14)
-    expect(markerWidth).toBe(dotWidth)
-    // The dash keeps the dot's own radius so it reads as part of the same rail.
-    expect(norm).toContain('border-radius:2px')
-  })
-
-  it('expands into the message flow form: line + name + line at the 24px row height', () => {
-    const { container } = render(
-      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+  it('draws a fixed 16px textless row: a 60% 1px rule, solid clear and dashed lighter', () => {
+    // Both variants mount so both interpolated rules are in the sheet.
+    render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        forkAfter={new Map([['u2', 'Research branch']])}
+        contextRowId="u1"
+      />
     )
-    // Expanded geometry: the label is mounted in both states, so the row's rules
-    // and its height are the switch, not the label's existence.
-    fireEvent.mouseEnter(bodyOf(container))
     const norm = normalizedCss()
 
-    // The message-row height and the flow's 8px gap around the name, which
-    // interpolates out of the compact 1px band gap. The rules grow, so they need
-    // no space-between: they own the row's two ends once the rail is wider than
-    // the label.
-    expect(norm).toContain('height:24px;gap:8px')
-    // Both rules reserve a definite base size, then grow into whatever width
-    // the row has left, with an 8px floor. The base keeps them part of the
-    // row's intrinsic width (a zero-basis rule contributes nothing, so a rail
-    // whose widest content was the label sized itself to the label plus the two
-    // gaps and left the rules at 0px — the divider lost its lines on short
-    // messages); the growth is what still draws long dividers around the name
-    // on a wide message rather than two short dashes beside a wide gap; the
-    // floor keeps a visible line when a capped panel has to shrink the row.
-    // (Declared geometry only: jsdom performs no flex layout, so the resulting
-    // pixel widths are proven by the runtime observation run, not here.)
-    expect(norm).toContain('flex:118px;min-width:8px')
-    expect(norm).not.toContain('flex:018px')
-    expect(norm).not.toContain('flex:110;')
-    // Name typography matches the flow's selected-fork label.
-    expect(norm).toContain('font-size:11.5px;color:var(--color-text-2);white-space:nowrap')
+    // The open row keeps its fixed 8px height with -2px top/bottom margins —
+    // it is spacing, never a message row — and centers the single rule at 60%
+    // of the usable width, short of the text span so the line never reads as
+    // long as the text. Footprint: 8 - 4 + 8 gaps = 12px total block.
+    expect(norm).toContain('height:8px')
+    expect(norm).toContain('width:60%')
+    // The context solid is the clearer of the two dividers (message-flow
+    // form, ~0.6): a real 1px-high painted line.
+    expect(norm).toContain('height:1px;background:var(--color-text-3)')
+    // The fork dashed is lighter (~0.4): a 1px dashed top border.
+    expect(norm).toContain('border-top:1pxdashedvar(--color-text-3)')
+    expect(norm).toContain('opacity:0.6')
+    expect(norm).toContain('opacity:0.4')
+    // The dot column itself is untouched: still the 14px rail mark.
+    expect(norm).toContain('width:14px;height:4px;background:var(--color-border);border-radius:2px')
+    // No painted label anywhere in the new form: the old 11.5px fork name is
+    // gone, and no divider grows or clips text on the switch.
+    expect(norm).not.toContain('font-size:11.5px')
+    expect(norm).not.toContain('max-width:320px;opacity:1')
   })
 
-  it('keeps the taken branch name mounted between the two rules and only switches its clip', () => {
+  it('keeps the caller label in title and accessible name only, in both states', () => {
     const { container } = render(
-      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', 'Research branch']])} />
+      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', '此处有 2 条分支']])} />
     )
     const body = bodyOf(container)
     const collapsed = screen.getByTestId('conversation-nav-fork')
-    // Same three children in both states: nothing is mounted or unmounted, so
-    // there is no frame in which the label appears or vanishes.
-    expect(collapsed.children).toHaveLength(3)
-    expect(collapsed.textContent).toBe('Research branch')
-    const collapsedLabel = collapsed.querySelector('[data-outline-fork-label]') as HTMLElement
-    expect(collapsedLabel).not.toBeNull()
-    // Declared geometry of the two states (both rules are always in the sheet):
-    // compact clips the label to nothing and keeps it transparent, expanded
-    // opens the clip and fades it in. The pixel result is the runtime
-    // observation run's to prove.
-    const norm = normalizedCss()
-    expect(norm).toContain('max-width:0;overflow:hidden')
-    expect(norm).toContain('max-width:320px;opacity:1')
+    // One child in both states: nothing is mounted or unmounted, so there is
+    // no frame in which a label appears or vanishes.
+    expect(collapsed.children).toHaveLength(1)
+    expect(collapsed.textContent).toBe('')
+    expect(collapsed.getAttribute('title')).toBe('此处有 2 条分支')
+    expect(collapsed.getAttribute('aria-label')).toBe('此处有 2 条分支')
 
     fireEvent.mouseEnter(body)
 
     const expanded = screen.getByTestId('conversation-nav-fork')
-    expect(expanded.children).toHaveLength(3)
-    const [leadingRule, name, trailingRule] = Array.from(expanded.children)
-    expect(leadingRule.textContent).toBe('')
-    expect(name.textContent).toBe('Research branch')
-    expect(trailingRule.textContent).toBe('')
-    expect(expanded.textContent).toBe('Research branch')
+    expect(expanded.children).toHaveLength(1)
+    expect(expanded.textContent).toBe('')
+    expect(expanded.getAttribute('title')).toBe('此处有 2 条分支')
+    // No caret: the flow's `▾` belongs to its clickable popover trigger.
+    expect(expanded.getAttribute('title')).not.toContain('▾')
     // Expanded it is still decorative, never a navigation target.
     expect(expanded.getAttribute('aria-hidden')).toBe('true')
     expect(expanded.getAttribute('role')).toBeNull()
@@ -668,26 +656,231 @@ describe('MessageOutline fork markers', () => {
     expect(expanded.previousElementSibling).toBe(screen.getByTestId('conversation-nav-item-u2'))
   })
 
-  it('renders the caller-supplied fork text, including the untaken-fork count form', () => {
+  it('draws the context divider directly ABOVE the mapped row, as a solid rule', () => {
+    // The caller resolves the accepted boundary to an outline row; the solid
+    // divider sits above that row — beside the DOM-before anchor, the way the
+    // message flow draws it above its own anchor.
+    const { container } = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} contextRowId="u2" />)
+    const body = bodyOf(container)
+    expect(childTestIds(body)).toEqual([
+      'conversation-nav-group-overlay',
+      'conversation-nav-item-u1',
+      'conversation-nav-context',
+      'conversation-nav-item-u2',
+      'conversation-nav-item-u3'
+    ])
+    const divider = screen.getByTestId('conversation-nav-context')
+    expect(divider.getAttribute('data-divider')).toBe('context')
+    expect(divider.getAttribute('aria-hidden')).toBe('true')
+    expect(divider.children).toHaveLength(1)
+    expect(divider.textContent).toBe('')
+    expect(divider.nextElementSibling).toBe(screen.getByTestId('conversation-nav-item-u2'))
+    expect(divider.previousElementSibling).toBe(screen.getByTestId('conversation-nav-item-u1'))
+  })
+
+  it('mounts the group overlay once, with one node link per run', () => {
+    // Geometry itself is proven by the navGroupRuns unit tests and the
+    // runtime observation run (jsdom performs no layout, so line/circle
+    // attributes stay at their hidden mounts here); what this case pins is
+    // the wiring: one node link per run, carrying the run's group color on
+    // the single low-contrast 1px stroke, a non-scaling stroke so a resized
+    // viewport never distorts it, and hollow end nodes filled with the panel
+    // surface so the line never shows through. The runs below are a two-row and
+    // a single-row one, so each keeps its bare endpoints and no hooks — an
+    // interior node appears only from three rows up (the case after this one) —
+    // and a single-row run is one node with no line. The SVG carries
+    // no viewBox: user units are CSS px aligned to the content box.
+    render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[
+          { segmentId: 's1', color: '#1a2b3c', rowIds: ['u1', 'u2'], lane: 0 },
+          { segmentId: 's2', color: '#4d5e6f', rowIds: ['u3'], lane: 0 }
+        ]}
+      />
+    )
+    const overlay = screen.getByTestId('conversation-nav-group-overlay')
+    expect(overlay.tagName).toBe('svg')
+    expect(overlay.getAttribute('viewBox')).toBeNull()
+    expect(overlay.querySelectorAll('path[data-group-run]')).toHaveLength(0)
+    const groups = overlay.querySelectorAll('g[data-group-run]')
+    expect(Array.from(groups).map((g) => g.getAttribute('data-group-run'))).toEqual(['s1', 's2'])
+    const multi = groups[0]
+    expect(multi.getAttribute('stroke')).toBe('#1a2b3c')
+    expect(multi.getAttribute('stroke-opacity')).toBe('0.7')
+    expect(multi.getAttribute('stroke-width')).toBe('1')
+    const lines = multi.querySelectorAll('line[data-group-run-line]')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].getAttribute('vector-effect')).toBe('non-scaling-stroke')
+    const multiNodes = multi.querySelectorAll('circle[data-group-run-node]')
+    expect(multiNodes).toHaveLength(2)
+    for (const node of multiNodes) {
+      expect(node.getAttribute('r')).toBe('2.5')
+      expect(node.getAttribute('fill')).toBe('var(--color-background)')
+      expect(node.getAttribute('vector-effect')).toBe('non-scaling-stroke')
+    }
+    // Single-row run: exactly one hollow node, never a doubled pair, no line.
+    const single = groups[1]
+    expect(single.querySelectorAll('line[data-group-run-line]')).toHaveLength(0)
+    const singleNodes = single.querySelectorAll('circle[data-group-run-node]')
+    expect(singleNodes).toHaveLength(1)
+    expect(singleNodes[0].getAttribute('r')).toBe('2.5')
+    expect(singleNodes[0].getAttribute('fill')).toBe('var(--color-background)')
+    const norm = normalizedCss()
+    expect(norm).toContain('vector-effect:non-scaling-stroke')
+  })
+
+  it('adds one hollow interior node per middle row from three rows up, and none below that', () => {
+    // The node contract is uniform across a run: the first row, the last row,
+    // and every row between them carry the same r2.5 hollow node — 1px group
+    // stroke, panel-surface fill, 6px outer ring. A run of two rows is its two
+    // ends, a single-row run is one node, and every node in the overlay belongs
+    // to a run, so a row in no run paints nothing.
+    render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[
+          { segmentId: 's3', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 },
+          { segmentId: 's2', color: '#4d5e6f', rowIds: ['u1', 'u2'], lane: 0 },
+          { segmentId: 's1', color: '#7a8b9c', rowIds: ['u3'], lane: 0 }
+        ]}
+      />
+    )
+    const overlay = screen.getByTestId('conversation-nav-group-overlay')
+    const groups = overlay.querySelectorAll('g[data-group-run]')
+    expect(Array.from(groups).map((g) => g.getAttribute('data-group-run'))).toEqual(['s3', 's2', 's1'])
+
+    // Three rows: two hollow ends plus exactly one identical interior node (N - 2).
+    const threeRows = groups[0]
+    const ends = threeRows.querySelectorAll('circle[data-group-run-node="first"], circle[data-group-run-node="last"]')
+    expect(ends).toHaveLength(2)
+    const middle = threeRows.querySelectorAll('circle[data-group-run-node="middle"]')
+    expect(middle).toHaveLength(1)
+    for (const node of middle) {
+      expect(node.getAttribute('r')).toBe('2.5')
+      expect(node.getAttribute('fill')).toBe('var(--color-background)')
+      // Same stroke as the ends, inherited from the group (no fill tint, no
+      // override): one 1px ring, never a doubled or wider stroke.
+      expect(node.getAttribute('stroke')).toBeNull()
+      expect(node.getAttribute('stroke-width')).toBeNull()
+    }
+
+    // Two rows: no interior row, so no middle node.
+    expect(groups[1].querySelectorAll('circle[data-group-run-node="middle"]')).toHaveLength(0)
+    // Single row: one hollow node, still no middle node.
+    expect(groups[2].querySelectorAll('circle[data-group-run-node="middle"]')).toHaveLength(0)
+    // One group stroke for the whole run: the ends and the interior node share
+    // r2.5, so every ring is 6px.
+    expect(threeRows.getAttribute('stroke')).toBe('#1a2b3c')
+    expect(threeRows.getAttribute('stroke-width')).toBe('1')
+
+    // Endpoints keep their hollow form everywhere, and no circle sits outside
+    // a run (an ungrouped row never gets a node).
+    for (const node of overlay.querySelectorAll(
+      'circle[data-group-run-node="first"], circle[data-group-run-node="last"]'
+    )) {
+      expect(node.getAttribute('r')).toBe('2.5')
+      expect(node.getAttribute('fill')).toBe('var(--color-background)')
+    }
+    expect(overlay.querySelectorAll('circle').length).toBe(6)
+  })
+
+  it('compresses divider rows to zero when collapsed: no blank bands in the dot column', () => {
     const { container } = render(
-      <MessageOutline entries={ENTRIES} onNavigate={vi.fn()} forkAfter={new Map([['u2', '此处有 2 条分支']])} />
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        forkAfter={new Map([['u2', 'Research branch']])}
+        contextRowId="u1"
+      />
     )
     const body = bodyOf(container)
-    expect(screen.getByTestId('conversation-nav-fork').children).toHaveLength(3)
+    expect(body.getAttribute('data-expanded')).toBe('false')
+    // Both divider rows hold no height with -1px margins and clip their rule:
+    // collapsed they add 0 extra beyond the ordinary 2px gap (0 - 2 + 4 - 2),
+    // never a blank band.
+    for (const testId of ['conversation-nav-fork', 'conversation-nav-context']) {
+      const divider = screen.getByTestId(testId)
+      expect(getComputedStyle(divider).height).toBe('0px')
+      expect(getComputedStyle(divider).overflow).toBe('hidden')
+      expect(getComputedStyle(divider).opacity).toBe('0')
+    }
+    // The user rows keep the compact 12px rhythm around them.
+    for (const row of ['u1', 'u2', 'u3']) {
+      expect(getComputedStyle(screen.getByTestId(`conversation-nav-item-${row}`)).height).toBe('12px')
+    }
+    // The group overlay is an absolute layer: it never takes flex space, in
+    // either state.
+    expect(getComputedStyle(screen.getByTestId('conversation-nav-group-overlay')).position).toBe('absolute')
 
+    // Expanded the dividers return to their 8px rule rows with -2px margins;
+    // collapsing again restores zero with the same DOM — no mount swap.
     fireEvent.mouseEnter(body)
+    expect(body.getAttribute('data-expanded')).toBe('true')
+    for (const testId of ['conversation-nav-fork', 'conversation-nav-context']) {
+      expect(getComputedStyle(screen.getByTestId(testId)).height).toBe('8px')
+      expect(getComputedStyle(screen.getByTestId(testId)).opacity).toBe('1')
+    }
+    expect(childTestIds(body)).toEqual([
+      'conversation-nav-group-overlay',
+      'conversation-nav-context',
+      'conversation-nav-item-u1',
+      'conversation-nav-item-u2',
+      'conversation-nav-fork',
+      'conversation-nav-item-u3'
+    ])
+  })
 
-    // The marker owns no text decision of its own: whatever label the caller
-    // resolved (branch name or the flow's children-here form) is what renders
-    // between the two rules, so a fork the route did not take is never a bare
-    // line.
-    const expanded = screen.getByTestId('conversation-nav-fork')
-    expect(expanded.children).toHaveLength(3)
-    const [, label] = Array.from(expanded.children)
-    expect(label.textContent).toBe('此处有 2 条分支')
-    expect(expanded.textContent).toBe('此处有 2 条分支')
-    // No caret: the flow's `▾` belongs to its clickable popover trigger.
-    expect(expanded.textContent).not.toContain('▾')
+  it('stacks adjacent context and fork dividers as two rules without merging semantics', () => {
+    // u1's fork marker sits after u1 while the context boundary sits above u2:
+    // the two rows are adjacent but stay two DOM rows with their own gap, so
+    // neither boundary is dropped nor painted twice at one position.
+    const { container } = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        forkAfter={new Map([['u1', 'branch']])}
+        contextRowId="u2"
+      />
+    )
+    const body = bodyOf(container)
+    expect(childTestIds(body)).toEqual([
+      'conversation-nav-group-overlay',
+      'conversation-nav-item-u1',
+      'conversation-nav-fork',
+      'conversation-nav-context',
+      'conversation-nav-item-u2',
+      'conversation-nav-item-u3'
+    ])
+  })
+
+  it('paints the current dash primary in the collapsed rail and keeps it across a reverse', () => {
+    vi.useFakeTimers()
+    try {
+      const { container } = render(<MessageOutline entries={ENTRIES} onNavigate={vi.fn()} activeId="u2" />)
+      const body = bodyOf(container)
+      // The collapsed rail reads the dots alone, so the current row's dash
+      // takes primary here — the rule the rewrite dropped, leaving all
+      // dashes gray.
+      expect(normalizedCss()).toContain('background:var(--color-primary)')
+      expect(screen.getByTestId('conversation-nav-item-u2').getAttribute('aria-current')).toBe('true')
+
+      // Expand and collapse again: the same prop-driven rule applies in both
+      // states, so the reversal cannot drop the current mark.
+      fireEvent.mouseEnter(body)
+      expect(body.getAttribute('data-expanded')).toBe('true')
+      fireEvent.mouseLeave(body)
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(body.getAttribute('data-expanded')).toBe('false')
+      expect(screen.getByTestId('conversation-nav-item-u2').getAttribute('aria-current')).toBe('true')
+      expect(normalizedCss()).toContain('background:var(--color-primary)')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -895,6 +1088,59 @@ describe('MessageOutline follow across the expand/collapse geometry switch', () 
     flushRaf()
     expect(body.scrollTop).toBe(344 - 60)
     expect(rowOf('u2').getBoundingClientRect().top).toBe(60)
+  })
+
+  it('re-measures the interior node from its row on every overlay tick', () => {
+    // A run of three rows carries exactly one interior node of the same 6px
+    // hollow form as its ends, and
+    // overlay is pure measurement: the dot sits on its row's content-space
+    // center and is rewritten on every geometry tick of the switch, so growing
+    // rows and a scroll moving under them never leave it behind.
+    const { container } = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[{ segmentId: 's1', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 }]}
+      />
+    )
+    const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
+    stubScrollable(body, 5000, 100)
+    stubRect(body, 0, 100)
+    // The overlay measures against the content box the rows live in.
+    stubRect(body.firstElementChild!.firstElementChild!, 0, 500)
+    const rowOf = (id: string) => body.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    modelRow(body, rowOf('u1'), 100, 12)
+    const middleRow = modelRow(body, rowOf('u2'), 116, 12)
+    modelRow(body, rowOf('u3'), 132, 12)
+
+    const group = screen.getByTestId('conversation-nav-group-overlay').querySelector('g[data-group-run]')!
+    const firstDot = group.querySelector('circle[data-group-run-node="first"]')!
+    const middleDot = group.querySelector('circle[data-group-run-node="middle"]')!
+    const lastDot = group.querySelector('circle[data-group-run-node="last"]')!
+    const line = group.querySelector('line[data-group-run-line]')!
+
+    // Expanding starts the tick loop, which re-measures as the rows move: one
+    // spine for the line and both node kinds, row centers snapped to n+0.5.
+    fireEvent.mouseEnter(body)
+    flushRaf()
+    expect(line.getAttribute('x1')).toBe('-13.5')
+    expect(firstDot.getAttribute('cy')).toBe('106.5')
+    expect(middleDot.getAttribute('cy')).toBe('122.5')
+    expect(lastDot.getAttribute('cy')).toBe('138.5')
+    expect(middleDot.getAttribute('cx')).toBe(line.getAttribute('x1'))
+    expect(middleDot.getAttribute('visibility')).toBe('visible')
+
+    // The rows move (a switch's own geometry): the interior node follows its
+    // row instead of a remembered offset.
+    middleRow.contentTop = 150
+    flushRaf()
+    expect(middleDot.getAttribute('cy')).toBe('156.5')
+
+    // A scroll moves the rows under the overlay: the content-space write on
+    // the next tick keeps the dot on its row on screen.
+    body.scrollTop = 40
+    flushRaf()
+    expect(middleDot.getAttribute('cy')).toBe('116.5')
   })
 
   it('keeps a single writer when a ResizeObserver callback lands mid-switch', () => {
@@ -1335,47 +1581,99 @@ describe('MessageOutline single reversible compact/expanded transition', () => {
     expect(content.style.maxWidth).toBe('250px')
   })
 
+  it('floors a short preview at the 200px minimum so a current-row change never jitters the width', () => {
+    // Short text needs far less than the floor; the floor still wins while
+    // the column cap stays above it — a pure color/weight row change cannot
+    // move the panel edge.
+    const { nav, body, panel, content } = renderOutline()
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 50)
+    stubGutter(body, 6)
+    fireEvent.mouseEnter(body)
+    expect(panel.style.width).toBe('200px')
+  })
+
+  it('yields to a narrow column cap below the floor instead of forcing 200px', () => {
+    // 200px host column: 200 - 24 host inset - 20 body padding - 6 reserved
+    // gutter leaves a 150px cap, and the floor follows it down.
+    const { nav, body, panel, content } = renderOutline()
+    stubBox(nav, 0, 100, 200)
+    stubBox(content, 0, 100, 50)
+    stubGutter(body, 6)
+    fireEvent.mouseEnter(body)
+    expect(panel.style.width).toBe('150px')
+    expect(content.style.maxWidth).toBe('150px')
+  })
+
+  it('reserves the group gutter while a run is drawn without moving the cap', () => {
+    // The node links live in the rail's own left whitespace: the measured width
+    // reserves the 18px gutter (8px offset + 6px text gap) on top of the text,
+    // so the left-shifted line is never clipped and never presses the
+    // text. Dividers carry no text and reserve nothing.
+    const utils = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={vi.fn()}
+        groupRuns={[{ segmentId: 's1', color: '#1a2b3c', rowIds: ['u1'], lane: 0 }]}
+      />
+    )
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]') as HTMLElement
+    const body = outlineBody(nav)
+    const panel = utils.getByTestId('conversation-nav-panel')
+    const content = panel.firstElementChild as HTMLElement
+    stubBox(nav, 0, 100, 400)
+    stubBox(content, 0, 100, 200)
+    stubGutter(body, 6)
+    fireEvent.mouseEnter(body)
+    // Text alone would measure 200px; the gutter reserves the links' own
+    // whitespace on top, and the column cap is untouched.
+    expect(panel.style.width).toBe('218px')
+    expect(content.style.maxWidth).toBe('294px')
+  })
+
   it('turns a mid-collapse re-entry around at once, on the same single target', () => {
     const { nav, body, panel, content, advance } = renderOutline()
     stubBox(nav, 0, 100, 400)
     stubBox(content, 0, 100, 200)
     fireEvent.mouseEnter(body)
     expect(panel.style.width).toBe('200px')
-
-    // The grace expires and the collapse lands: the panel's own target is the
-    // compact rail again, and the running width transition heads there.
     fireEvent.mouseLeave(body)
     advance(COLLAPSE_GRACE_MS)
     expect(body.getAttribute('data-expanded')).toBe('false')
     expect(panel.style.width).toBe('18px')
-
-    // Re-enter while the collapse is still on screen: expansion is immediate and
-    // the target is the same single measured width again — the transition turns
-    // around from the width that is drawn right now, because the width it is
-    // heading for is the only state there is.
     fireEvent.mouseEnter(body)
     expect(body.getAttribute('data-expanded')).toBe('true')
     expect(panel.style.width).toBe('200px')
-
-    // Nothing was held back waiting for the collapse to finish.
     advance(1000)
     expect(body.getAttribute('data-expanded')).toBe('true')
     expect(panel.style.width).toBe('200px')
   })
 
-  it('declares one timeline for width, rows, fades and chrome — and none under reduced motion', () => {
+  it('declares a staged handoff inside one 180ms geometry timeline — and none under reduced motion', () => {
     const { content } = renderOutline()
     expect(content.style.maxWidth).toBe('')
     const norm = Array.from(document.querySelectorAll('style'))
       .map((el) => el.textContent ?? '')
       .join('\n')
       .replace(/\s+/g, '')
-    // Width, rows, gap, text fade, chrome: the same 180ms ease-out.
+    // Geometry stays one 180ms line: width, rows, gap, margins.
     expect(norm).toContain('transition:width180msease-out')
     expect(norm).toContain('transition:height180msease-out')
     expect(norm).toContain('gap180msease-out')
-    expect(norm).toContain('opacity180msease-out')
-    expect(norm).toContain('background-color180msease-out')
+    expect(norm).toContain('margin-top180msease-out')
+    // Staged handoff, not one shared fade: outgoing layers fade in 40ms with
+    // no delay; incoming layers wait 40ms then fade over 140ms (40+140=180),
+    // so dot and text/nodes/divider are never both clearly visible and a
+    // reversal starts from the current value with at most ~40ms of blank.
+    expect(norm).toContain('opacity40msease-out0ms')
+    expect(norm).toContain('opacity140msease-out40ms')
+    // Opaque surface without interpolation: expanding lands in the same commit
+    // (0s, no delay); collapsing holds through the 180ms switch with a delayed
+    // 0s flip, then drops to transparent — no translucent mid-frame.
+    expect(norm).toContain('background-color0s')
+    expect(norm).toContain('background-color0slinear180ms')
+    // Light halo, not the heavy gray ring: small dark blur at 8%.
+    expect(norm).toContain('0 2px 8px 0 rgba(0,0,0,0.08)'.replace(/\s+/g, ''))
     // Neither the text nor the fork label is display-swapped, so neither can pop.
     expect(norm).not.toContain('display:none')
     // Reduced motion drops every one of them, so the switch settles at once.
@@ -1383,7 +1681,23 @@ describe('MessageOutline single reversible compact/expanded transition', () => {
     expect(norm).toContain('transition:none')
   })
 
-  it('settles a reduced-motion switch at once, with no settle wait armed', () => {
+  it('hands markers without overlap or long blank on a rapid reverse', () => {
+    // Static CSS proof of the handoff contract: the two expanded/collapsed
+    // opacity rules carry opposite delays, so at any instant at most one layer
+    // is clearly visible, and a mid-fade reversal resumes from the drawn value
+    // (CSS transitions reverse in place — no flash, no mount swap). The worst
+    // fully-hidden window is the 40ms delay itself.
+    const norm = Array.from(document.querySelectorAll('style'))
+      .map((el) => el.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+    const out40 = (norm.match(/opacity40msease-out0ms/g) ?? []).length
+    const in140 = (norm.match(/opacity140msease-out40ms/g) ?? []).length
+    // Dots, text, overlay and divider rows each carry both directions.
+    expect(out40).toBeGreaterThanOrEqual(4)
+    expect(in140).toBeGreaterThanOrEqual(3)
+  })
+  it('settles at once under reduced motion', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: query.includes('prefers-reduced-motion'),
       media: query,
@@ -1604,10 +1918,6 @@ describe('MessageOutline navigation hover halo', () => {
       expect(zoneRule).not.toContain(declaration)
     }
     expect(body.getAttribute('data-expanded')).toBe('false')
-    // The chat column and its footer keep the same reserved strip.
-    const norm = normalizedCss()
-    expect(norm).toContain('padding-left:46px!important')
-    expect(norm).toContain('margin-left:46px!important')
   })
 
   it('expands from the halo alone and treats the halo and the panel as one surface', () => {

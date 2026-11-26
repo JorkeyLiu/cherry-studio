@@ -131,7 +131,6 @@ vi.mock('@renderer/hooks/useAssistant', () => ({
 vi.mock('@renderer/hooks/useInPlaceEdit', () => ({
   useInPlaceEdit: () => ({ startEdit: vi.fn(), isEditing: false, inputProps: {} })
 }))
-vi.mock('@renderer/hooks/useNotesSettings', () => ({ useNotesSettings: () => ({ notesPath: '' }) }))
 vi.mock('@renderer/hooks/useRuntime', () => ({ modelGenerating: vi.fn(async () => {}) }))
 vi.mock('@renderer/hooks/useTopic', () => ({ finishTopicRenaming: vi.fn(), startTopicRenaming: vi.fn() }))
 vi.mock('@renderer/services/ApiService', () => ({ fetchMessagesSummary: vi.fn() }))
@@ -175,7 +174,6 @@ vi.mock('@renderer/utils', () => ({
 }))
 vi.mock('@renderer/utils/export', () => ({
   exportTopicAsMarkdown: vi.fn(),
-  exportTopicToNotes: vi.fn(),
   topicToMarkdown: vi.fn()
 }))
 vi.mock('@renderer/utils/messageUtils/snapshotBlocks', () => ({ createSnapshotBlockMap: vi.fn(() => new Map()) }))

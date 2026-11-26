@@ -171,9 +171,6 @@ vi.mock('node:fs', () => ({
     unlinkSync: vi.fn((p: string) => {
       delete memfs[p]
     }),
-    openSync: vi.fn((_p: string, _flags: string) => 1),
-    fsyncSync: vi.fn((_fd: number) => {}),
-    closeSync: vi.fn((_fd: number) => {}),
     createReadStream: vi.fn(),
     createWriteStream: vi.fn()
   },
@@ -188,9 +185,6 @@ vi.mock('node:fs', () => ({
   unlinkSync: vi.fn((p: string) => {
     delete memfs[p]
   }),
-  openSync: vi.fn((_p: string, _flags: string) => 1),
-  fsyncSync: vi.fn((_fd: number) => {}),
-  closeSync: vi.fn((_fd: number) => {}),
   promises: {
     mkdir: vi.fn(async (p: string) => {
       memfs[p] = memfs[p] || ''
@@ -224,12 +218,10 @@ import { resetDiagnosticCounters } from '@shared/diagnostics/sendTiming'
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { ChatDbService, chatDbService } from '../index'
 import {
-  acquirePromotionLease,
   createMaintenanceCoordinator,
   getSharedMaintenanceCoordinator,
   isMaintenanceBusyError,
-  MaintenanceBusyError,
-  type PromotionLeaseHandle
+  MaintenanceBusyError
 } from '../maintenanceCoordination'
 import {
   MIGRATION_004_FTS_SMOKE_SQL,
@@ -732,8 +724,8 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly twenty migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012 + 013 + 014 + 015 + 016 + 017 + 018 + 019 + 020)', () => {
-    expect(MIGRATIONS).toHaveLength(20)
+  it('should have exactly twenty-one migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012 + 013 + 014 + 015 + 016 + 017 + 018 + 019 + 020 + 021)', () => {
+    expect(MIGRATIONS).toHaveLength(21)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
@@ -754,6 +746,7 @@ describe('Migration registry', () => {
     expect(MIGRATIONS[17].key).toBe('018_topic_references')
     expect(MIGRATIONS[18].key).toBe('019_retire_segment_fold')
     expect(MIGRATIONS[19].key).toBe('020_topic_segment_header_identity')
+    expect(MIGRATIONS[20].key).toBe('021_topic_segment_single_membership')
   })
 
   it('001_initial_schema should have SQL statements', () => {
@@ -997,20 +990,20 @@ describe('ChatDbService maintenance coordination wiring (LOCK-4416)', () => {
     expect(svc.isInitialised()).toBe(false)
   })
 
-  it('candidate ChatDbService instances stay uncoordinated (not live maintenance)', async () => {
+  it('non-live ChatDbService instances stay uncoordinated', async () => {
     const coordinator = createMaintenanceCoordinator()
     // Foreign lease held — a coordinated instance would be refused.
-    coordinator.acquire('promotion', 'import-session-1')
+    coordinator.acquire('backup', 'backup-manager')
 
-    // Candidate construction passes NO coordinator (matches candidateDb factory).
+    // Non-live construction passes no coordinator.
     const candidate = new ChatDbService('/mock/candidate')
     await candidate.init()
     expect(candidate.isInitialised()).toBe(true)
     candidate.close()
     expect(candidate.isInitialised()).toBe(false)
 
-    // The coordinator never saw the candidate lifecycle.
-    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+    // The coordinator never saw the non-live lifecycle.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'backup', ownerId: 'backup-manager' })
   })
 
   it('the live singleton is joined to the shared coordinator', async () => {
@@ -1031,307 +1024,6 @@ describe('ChatDbService maintenance coordination wiring (LOCK-4416)', () => {
     expect(shared.currentHolder()).toBeNull()
     chatDbService.close()
     expect(shared.currentHolder()).toBeNull()
-  })
-})
-
-// ===========================================================================
-// Promotion-owned live lifecycle (Phase 4.4.2, LOCK-4422)
-// ===========================================================================
-
-describe('ChatDbService promotion-owned live lifecycle (LOCK-4422)', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockSqliteInstances.length = 0
-    appliedMigrationKeys.length = 0
-    clearMemfs()
-  })
-
-  it('the same continuously held promotion lease authorizes internal close AND reopen', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
-
-    // Internal close: no nested lease acquisition — the promotion lease
-    // stays the holder throughout (no release/reacquire, no second mutex).
-    expect(svc.closeForPromotion(promotion)).toBe(true)
-    expect(svc.isInitialised()).toBe(false)
-    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
-
-    // Internal reopen under the SAME lease.
-    await svc.reopenForPromotion(promotion)
-    expect(svc.isInitialised()).toBe(true)
-    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
-
-    // Only the owner's release frees the slot.
-    expect(promotion.release()).toBe(true)
-    expect(coordinator.currentHolder()).toBeNull()
-    svc.close()
-  })
-
-  it('public init/close mutual exclusion is unchanged while promotion holds the lease', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-
-    // Public close() must NOT bypass the promotion lease (close-busy).
-    expect(svc.close()).toBe(false)
-    expect(svc.isInitialised()).toBe(true)
-
-    // Internal promotion-owned close works, then public init() is still
-    // refused with a structured busy error while promotion holds the slot.
-    expect(svc.closeForPromotion(promotion)).toBe(true)
-    await expect(svc.init()).rejects.toSatisfy((e: unknown) => isMaintenanceBusyError(e))
-    expect(svc.isInitialised()).toBe(false)
-
-    promotion.release()
-    // With the slot free, public init/close coordinate normally again.
-    await svc.init()
-    expect(svc.isInitialised()).toBe(true)
-    expect(svc.close()).toBe(true)
-    expect(coordinator.currentHolder()).toBeNull()
-  })
-
-  it('released (stale) promotion authorization cannot close the live DB', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-    promotion.release()
-
-    expect(() => svc.closeForPromotion(promotion)).toThrow(/promotion authorization invalid \(released\)/)
-    // Refused BEFORE lifecycle mutation: the live DB stays open.
-    expect(svc.isInitialised()).toBe(true)
-    svc.close()
-  })
-
-  it('released (stale) promotion authorization cannot reopen the live DB', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-    expect(svc.closeForPromotion(promotion)).toBe(true)
-    promotion.release()
-
-    await expect(svc.reopenForPromotion(promotion)).rejects.toThrow(/promotion authorization invalid \(released\)/)
-    expect(svc.isInitialised()).toBe(false)
-  })
-
-  it('a forged handle is refused: an ownerId string alone is never authorization', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    // A REAL promotion lease is held by someone else…
-    const genuine = acquirePromotionLease('import-session-1', coordinator)
-    // …and a forged structural handle claims the same ownerId.
-    const forged: PromotionLeaseHandle = {
-      ownerId: 'import-session-1',
-      isReleased: () => false,
-      release: () => true
-    }
-
-    expect(() => svc.closeForPromotion(forged)).toThrow(/promotion authorization invalid \(unrecognized-handle\)/)
-    await expect(svc.reopenForPromotion(forged)).rejects.toThrow(
-      /promotion authorization invalid \(unrecognized-handle\)/
-    )
-    expect(svc.isInitialised()).toBe(true)
-
-    genuine.release()
-    svc.close()
-  })
-
-  it('authorization granted on a foreign coordinator is refused', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const foreign = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const foreignPromotion = acquirePromotionLease('import-session-1', foreign)
-    expect(() => svc.closeForPromotion(foreignPromotion)).toThrow(
-      /promotion authorization invalid \(foreign-coordinator\)/
-    )
-    expect(svc.isInitialised()).toBe(true)
-
-    foreignPromotion.release()
-    svc.close()
-  })
-
-  it('uncoordinated (candidate) instances refuse promotion-owned lifecycle entirely', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-
-    const candidate = new ChatDbService('/mock/candidate')
-    await candidate.init()
-
-    expect(() => candidate.closeForPromotion(promotion)).toThrow(/not joined to a maintenance coordinator/)
-    await expect(candidate.reopenForPromotion(promotion)).rejects.toThrow(/not joined to a maintenance coordinator/)
-    expect(candidate.isInitialised()).toBe(true)
-
-    candidate.close()
-    promotion.release()
-  })
-
-  it('reopenForPromotion is idempotent while already open and refuses under the repair marker', async () => {
-    const coordinator = createMaintenanceCoordinator()
-    const svc = new ChatDbService('/mock/coord', coordinator)
-    await svc.init()
-
-    const promotion = acquirePromotionLease('import-session-1', coordinator)
-
-    // Already open: fast path, no second sqlite handle constructed.
-    const constructedBefore = MockDatabase.mock.calls.length
-    await svc.reopenForPromotion(promotion)
-    expect(MockDatabase.mock.calls.length).toBe(constructedBefore)
-
-    // Repair marker gates reopen exactly like public init().
-    expect(svc.closeForPromotion(promotion)).toBe(true)
-    memfs['/mock/coord/chat.db.repair'] = 'marker'
-    await expect(svc.reopenForPromotion(promotion)).rejects.toThrow(/repair-required/)
-    delete memfs['/mock/coord/chat.db.repair']
-
-    promotion.release()
-  })
-
-  // =========================================================================
-  // Phase 4.4.3 — markRepairRequiredBeforeInit (LOCK-4437)
-  // =========================================================================
-
-  describe('markRepairRequiredBeforeInit (Phase 4.4.3)', () => {
-    it('writes repair marker and blocks subsequent init', async () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443')
-
-      // Precondition: no repair marker, init should succeed.
-      expect(svc.isRepairRequired()).toBe(false)
-      await svc.init()
-      expect(svc.isInitialised()).toBe(true)
-      svc.close()
-
-      // Mark repair-required before init.
-      svc.markRepairRequiredBeforeInit()
-      expect(svc.isRepairRequired()).toBe(true)
-
-      // Subsequent init refuses.
-      await expect(svc.init()).rejects.toThrow(/repair-required/)
-      expect(svc.isInitialised()).toBe(false)
-    })
-
-    it('is idempotent — no-op when marker already exists', () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-idempotent')
-
-      // First call writes the marker.
-      svc.markRepairRequiredBeforeInit()
-      expect(svc.isRepairRequired()).toBe(true)
-
-      // Second call is a no-op (idempotent).
-      svc.markRepairRequiredBeforeInit()
-      expect(svc.isRepairRequired()).toBe(true)
-    })
-
-    it('refuses to write marker if service is already initialized', async () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-refuse')
-      await svc.init()
-
-      // Cannot mark repair-required while DB is open.
-      expect(() => svc.markRepairRequiredBeforeInit()).toThrow(
-        /Cannot mark repair-required: ChatDbService is already initialized/
-      )
-      expect(svc.isRepairRequired()).toBe(false)
-
-      svc.close()
-    })
-
-    it('creates parent directory if it does not exist', () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-newdir')
-
-      // Parent directory does not exist yet.
-      expect(memfs['/mock/phase443-newdir']).toBeUndefined()
-
-      svc.markRepairRequiredBeforeInit()
-
-      // Marker written and parent directory created.
-      expect(svc.isRepairRequired()).toBe(true)
-      expect(memfs['/mock/phase443-newdir']).toBeDefined()
-    })
-
-    it('blocks getDatabase() and getSqlite() when repair marker exists', async () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-blockers')
-      await svc.init()
-      svc.close()
-
-      svc.markRepairRequiredBeforeInit()
-
-      // Public getters refuse operation while repair is pending.
-      expect(() => svc.getDatabase()).toThrow(/repair-required/)
-      expect(() => svc.getSqlite()).toThrow(/repair-required/)
-      expect(() => svc.getBackup()).toThrow(/repair-required/)
-
-      // isInitialised returns false even though handles exist.
-      expect(svc.isInitialised()).toBe(false)
-    })
-
-    it('maintenance coordination interaction — repair marker does not affect coordinator', async () => {
-      clearMemfs()
-      const coordinator = createMaintenanceCoordinator()
-      const svc = new ChatDbService('/mock/phase443-coord', coordinator)
-
-      // Init acquires its own lease on the coordinator.
-      await svc.init()
-      expect(svc.isInitialised()).toBe(true)
-
-      // Close acquires its own lease.
-      expect(svc.close()).toBe(true)
-
-      // Mark repair-required — coordinator is unaffected.
-      svc.markRepairRequiredBeforeInit()
-      expect(svc.isRepairRequired()).toBe(true)
-
-      // Init still refuses due to repair marker.
-      expect(svc.isRepairRequired()).toBe(true)
-      await expect(svc.init()).rejects.toThrow(/repair-required/)
-    })
-
-    it('marker write failure propagates (does not swallow)', () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-fail')
-
-      // Override writeFileSync to throw on the repair marker path.
-      const originalWriteFileSync = (fs as any).writeFileSync
-      ;(fs as any).writeFileSync = vi.fn((p: string, _data: string) => {
-        if (p.includes('chat.db.repair')) {
-          throw new Error('ENOSPC: no space left on device')
-        }
-        return originalWriteFileSync(p, _data)
-      })
-
-      expect(() => svc.markRepairRequiredBeforeInit()).toThrow(/Failed to write durable repair marker/)
-      expect(svc.isRepairRequired()).toBe(false)
-
-      // Restore.
-      ;(fs as any).writeFileSync = originalWriteFileSync
-    })
-
-    it('marker does not allow arbitrary path — only dbDir is used', () => {
-      clearMemfs()
-      const svc = new ChatDbService('/mock/phase443-fixedpath')
-
-      svc.markRepairRequiredBeforeInit()
-
-      // Marker is always at dbDir/chat.db.repair — never at an arbitrary path.
-      expect(memfs['/mock/phase443-fixedpath/chat.db.repair']).toBeDefined()
-      expect(memfs['/arbitrary/path/chat.db.repair']).toBeUndefined()
-    })
   })
 })
 

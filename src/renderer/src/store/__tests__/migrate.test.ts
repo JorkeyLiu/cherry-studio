@@ -2554,4 +2554,23 @@ describe('store migrations', () => {
       }
     })
   })
+  describe('migration 230: notebook nav entry removal (sidebar icons only)', () => {
+    const iconsState = (visible: unknown[], disabled: unknown[]) => ({
+      settings: { sidebarIcons: { visible, disabled } },
+      _persist: { version: 229, rehydrated: false }
+    })
+
+    it('strips notes from persisted visible/disabled icon lists', async () => {
+      const migrated: any = await migrate(iconsState(['assistants', 'notes', 'files'], ['notes']) as any, 230)
+      expect(migrated.settings.sidebarIcons.visible).toEqual(['assistants', 'files'])
+      expect(migrated.settings.sidebarIcons.disabled).toEqual([])
+    })
+
+    it('leaves icon lists without notes untouched and tolerates missing sidebarIcons', async () => {
+      const clean: any = await migrate(iconsState(['assistants', 'files'], []) as any, 230)
+      expect(clean.settings.sidebarIcons.visible).toEqual(['assistants', 'files'])
+      const missing: any = await migrate({ settings: {}, _persist: { version: 229 } } as any, 230)
+      expect(missing.settings.sidebarIcons).toBeUndefined()
+    })
+  })
 })

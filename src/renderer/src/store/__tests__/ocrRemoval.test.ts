@@ -141,9 +141,7 @@ describe('removed capabilities stay removed: OCR surface, document preprocessing
       const deps = { ...pkg.dependencies, ...pkg.devDependencies } as Record<string, string>
       // form-data was used only by the removed Open MinerU provider.
       expect(deps['form-data']).toBeUndefined()
-      // adm-zip is shared by ZIP import/E2E fixture tooling, pdf-lib by FileStorage.
-      expect(deps['adm-zip']).toBeDefined()
-      expect(deps['@types/adm-zip']).toBeDefined()
+      // pdf-lib is used by FileStorage.
       expect(deps['pdf-lib']).toBeDefined()
     })
 

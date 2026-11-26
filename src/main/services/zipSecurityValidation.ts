@@ -12,7 +12,7 @@
  * LOCK-6012: Treat every local/provider ZIP and entry name as untrusted.
  * No extraction or downloaded temporary file may escape an operation-owned root.
  *
- * Reused by BackupManager restore and chatDbImport zipIntake.
+ * Reused by BackupManager restore extraction paths.
  */
 
 import path from 'node:path'

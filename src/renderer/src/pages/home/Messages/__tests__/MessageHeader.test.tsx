@@ -51,9 +51,10 @@ vi.mock('@renderer/hooks/useChatContext', () => ({
   useChatContext: () => ({ isMultiSelectMode: false, selectedMessageIds: [], handleSelectMessage: vi.fn() })
 }))
 
+const bubbleStyleState = vi.hoisted(() => ({ isBubbleStyle: false }))
 vi.mock('@renderer/hooks/useSettings', () => ({
   useSettings: () => ({ userName: 'TestUser' }),
-  useMessageStyle: () => ({ isBubbleStyle: false })
+  useMessageStyle: () => ({ isBubbleStyle: bubbleStyleState.isBubbleStyle })
 }))
 
 vi.mock('@renderer/services/MessagesService', () => ({
@@ -70,14 +71,31 @@ vi.mock('@renderer/utils', () => ({
   removeLeadingEmoji: (s: string) => s
 }))
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (k: string) => k })
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    useTranslation: () => ({ t: (k: string) => k })
+  }
+})
+
+const { isMessageInSegmentMock } = vi.hoisted(() => ({
+  isMessageInSegmentMock: vi.fn()
+}))
+
+// The hook's store chain (redux + catalog convergence) is not this
+// component's contract: the header only reads group membership for the
+// indent, so tests drive that one function directly.
+vi.mock('@renderer/hooks/useTopicSegments', () => ({
+  useTopicSegments: () => ({ isMessageInSegment: isMessageInSegmentMock })
 }))
 
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import { useLayoutEffect, useRef } from 'react'
 
 import MessageHeader from '../MessageHeader'
+import { SegmentGroupPresentationProvider, useSegmentGroupLayoutManager } from '../SegmentGroupPresentation'
 
 const assistant = { id: 'a1', name: 'Jarvis' } as Assistant
 const topic = { id: 't1' } as Topic
@@ -98,7 +116,40 @@ function makeMessage(role: Message['role'], overrides?: Partial<Message>): Messa
 describe('MessageHeader', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    isMessageInSegmentMock.mockReset().mockReturnValue(null)
+    bubbleStyleState.isBubbleStyle = false
   })
+
+  /**
+   * Rules the component CSS declares for a given element's own classes: the
+   * indent is a generated-class rule (a CSS-variable margin), so the assertion
+   * reads the stylesheet exactly like the group-boundary tests do.
+   */
+  function ownRules(element: HTMLElement): string[] {
+    const css = Array.from(document.querySelectorAll('style'))
+      .map((node) => node.textContent ?? '')
+      .join('\n')
+      .replace(/\s+/g, '')
+    return (css.match(/[^{}]+\{[^}]*\}/g) ?? []).filter((rule) =>
+      Array.from(element.classList).some((name) => rule.includes(`.${name}`))
+    )
+  }
+
+  /**
+   * A mounted slot run for the group: the header-registered host whose first
+   * rendered message the pill shares its band with. Registration happens in a
+   * child layout effect, so the provider's own commit-time pass measures it
+   * before paint — the same ordering as production.
+   */
+  function SlotRegistrar({ groupId, messageId }: { groupId: string; messageId: string | null }) {
+    const manager = useSegmentGroupLayoutManager()
+    const ref = useRef<HTMLDivElement>(null)
+    useLayoutEffect(() => {
+      if (!manager || !ref.current) return
+      return manager.registerRun(groupId, ref.current, { runId: 'run-header', isHeader: true, endsGroup: true })
+    }, [manager, groupId])
+    return <div ref={ref}>{messageId ? <div data-message-id={messageId} /> : null}</div>
+  }
 
   it('renders ModelAvatar with model/provider when model present (assistant message)', () => {
     const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
@@ -167,6 +218,61 @@ describe('MessageHeader', () => {
     render(<MessageHeader assistant={undefined} message={message} topic={topic} />)
     expect(screen.queryByTestId('model-avatar')).toBeNull()
     expect(document.body.textContent).toContain('g')
+  })
+
+  it('indents the headed-first message by the pill width with an ellipsis name (the group shares its band)', () => {
+    isMessageInSegmentMock.mockReturnValue({ id: 'seg-1' })
+    const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
+    const message = makeMessage('assistant', { model } as any)
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <SlotRegistrar groupId="seg-1" messageId="m1" />
+        <MessageHeader assistant={assistant} model={model} message={message} topic={topic} />
+      </SegmentGroupPresentationProvider>
+    )
+    // The header starts past the pill's own measured box (a CSS variable the
+    // run host publishes); every other header keeps a zero margin.
+    const header = container.querySelector('.message-header') as HTMLElement
+    expect(ownRules(header).some((rule) => rule.includes('var(--seg-head-pill-w'))).toBe(true)
+    // The reserved room narrows this row: the name stays on one line
+    // (ellipsis, full name on `title`) instead of wrapping into a taller
+    // header — the band height never changes with or without a group.
+    const name = container.querySelector('.message-header-username') as HTMLElement
+    expect(name).not.toBeNull()
+    expect(ownRules(name).some((rule) => rule.includes('text-overflow:ellipsis'))).toBe(true)
+  })
+  it('leaves a headed-first USER bubble header untouched (absolute avatar reserves nothing; the label clamps instead)', () => {
+    bubbleStyleState.isBubbleStyle = true
+    isMessageInSegmentMock.mockReturnValue({ id: 'seg-1' })
+    const message = makeMessage('user', { id: 'm1' } as any)
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <SlotRegistrar groupId="seg-1" messageId="m1" />
+        <MessageHeader assistant={assistant} message={message} topic={topic} />
+      </SegmentGroupPresentationProvider>
+    )
+    // Even as the slot run's first message, a user bubble header keeps a zero
+    // indent: its avatar is absolutely positioned and reserves no room — the
+    // bubble body never shrinks for the group (the label clamps to the free
+    // gap instead). Only the in-flow assistant header indents.
+    const header = container.querySelector('.message-header') as HTMLElement
+    expect(header.classList.contains('user-bubble-header')).toBe(true)
+    expect(ownRules(header).some((rule) => rule.includes('var(--seg-head-pill-w'))).toBe(false)
+  })
+
+  it('leaves a non-headed message untouched (no indent, no ellipsis rules)', () => {
+    isMessageInSegmentMock.mockReturnValue({ id: 'seg-1' })
+    // The slot run's first rendered message is m1; this message is m2, so it
+    // is not the pill's band partner even inside the same headed group.
+    const message = makeMessage('user', { id: 'm2' } as any)
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <SlotRegistrar groupId="seg-1" messageId="m1" />
+        <MessageHeader assistant={assistant} message={message} topic={topic} />
+      </SegmentGroupPresentationProvider>
+    )
+    const header = container.querySelector('.message-header') as HTMLElement
+    expect(ownRules(header).some((rule) => rule.includes('var(--seg-head-pill-w'))).toBe(false)
   })
 
   it('case-sensitive: "GPT-4o" vs "gpt-4o" still name-only', () => {

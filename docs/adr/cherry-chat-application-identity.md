@@ -1,27 +1,27 @@
 # Cherry Chat 应用身份（Application Identity）ADR — 单一目标身份、兼容边界与退役记录
 
-> **文档状态**：Approved。**Cherry Chat 是唯一目标应用**（LOCK-RETIRE-001）；**IDENTITY-001 已退役**（LOCK-RETIRE-002）：双 flavor 架构是已否决的临时工程决策，不再存在任何 Cherry Studio 目标 flavor 或内部 legacy 构建。Cherry Studio 仅作为**源格式 / profile 保护兼容域**保留（LOCK-COMPAT-003）。Phase A–C 的既有实现与验证为**历史证据**（flavor 架构下取得）；**退役后单一目标构建的打包产物与 packaged 身份/隔离 E2E 已在版本/构建身份实现（VERSION-001..005）落地后重跑并通过**（§9、§11）。本 ADR 是身份治理的单一事实源。
-> **最后更新**：2026-08-07
+> **文档状态**：Approved。**Cherry Chat 是唯一目标应用**（LOCK-RETIRE-001）；**IDENTITY-001 已退役**（LOCK-RETIRE-002）：双 flavor 架构是已否决的临时工程决策，不再存在任何 Cherry Studio 目标 flavor 或内部 legacy 构建。Cherry Studio 名称仅保留为本地持久化标识、schema 与旧 profile 保护兼容域（LOCK-COMPAT-003）。Phase A–C 的既有实现与验证为**历史证据**（flavor 架构下取得）；**退役后单一目标构建的打包产物与 packaged 身份/隔离 E2E 已在版本/构建身份实现（VERSION-001..005）落地后重跑并通过**（§9、§11）。本 ADR 是身份治理的单一事实源。
+> **最后更新**：2026-11-25
 > **Owner**：Personal fork（jorkeyliu）
 > **分支**：`jorkey/integration`
-> **关联**：`docs/archived/sqlite-migration.md` 治理 L1（SQLite 运行时）/ L2（Cherry Studio ZIP 兼容导入）/ L3（Cherry Chat 备份/恢复）；**应用身份由本文档治理**，二者互补，不互改。`sqlite-migration.md` 第 41 行对本文档的交叉引用仍写「决策锁 IDENTITY-001…006」及其 flavor 措辞——该行是历史交叉引用，语义以本文档当前决策表为准（见 §2）。
-> **仓库迁移治理（REPO-MIGRATION-001/002/003）**：当前仓库（名称/路径 `cherry-studio`）是**过渡性载体**——当前工作区/分支状态将被治理为一个新的 **Cherry Chat 仓库**，既有 Cherry Studio 仓库随后退役；源格式/profile 兼容标识（LOCK-COMPAT-003）不变。**创建/更名仓库本身不授权 updater/发布**（REPO-MIGRATION-002）；未来激活需显式审批的 endpoint 与协调变更（REPO-MIGRATION-003）。`electron-builder.yml` 的 `publish: null`（见 §2、§7）抑制 git-remote 推断，在 endpoint 获批前必须保持。
+> **关联**：`docs/archived/sqlite-migration.md` 治理 L1（SQLite 运行时）/ L3（Cherry Chat 备份/恢复）；**应用身份由本文档治理**，二者互补，不互改。`sqlite-migration.md` 第 41 行对本文档的交叉引用仍写「决策锁 IDENTITY-001…006」及其 flavor 措辞——该行是历史交叉引用，语义以本文档当前决策表为准（见 §2）。
+> **仓库迁移治理（REPO-MIGRATION-001/002/003）**：当前仓库（名称/路径 `cherry-studio`）是**过渡性载体**——当前工作区/分支状态将被治理为一个新的 **Cherry Chat 仓库**，既有 Cherry Studio 仓库随后退役；本地持久化/profile 兼容标识不变。**创建/更名仓库本身不授权 updater/发布**（REPO-MIGRATION-002）；未来激活需显式审批的 endpoint 与协调变更（REPO-MIGRATION-003）。`electron-builder.yml` 的 `publish: null`（见 §2、§7）抑制 git-remote 推断，在 endpoint 获批前必须保持。
 
 ---
 
 ## 1. 背景与目标（Context）
 
-个人 fork（jorkeyliu）是**未来独立 Cherry Chat 应用**的开发载体（与 `sqlite-migration.md` 顶层定位一致）。该迁移记录已覆盖运行时与数据层（L1/L2/L3）；**应用身份**是独立关注点：它决定 Cherry Chat「是什么应用、如何与既有 Cherry Studio 安装/数据安全并排存在、用户数据落在哪、更新走哪」——这些约束必须在实现开始前锁定，避免身份与数据层互相污染。
+个人 fork（jorkeyliu）是**未来独立 Cherry Chat 应用**的开发载体（与 `sqlite-migration.md` 顶层定位一致）。该迁移记录已覆盖运行时与数据层（L1/L3）；**应用身份**是独立关注点：它决定 Cherry Chat「是什么应用、如何与既有 Cherry Studio 安装/数据安全并排存在、用户数据落在哪、更新走哪」——这些约束必须在实现开始前锁定，避免身份与数据层互相污染。
 
 **已批准的完整退役（2026-08-07）**：核心实现移除了双 flavor 选择机制，将 Chat 身份并入默认/base 构建。因此：
 
 - **Cherry Chat 是唯一目标应用**：产品名 `Cherry Chat`、appId `com.jorkeyliu.CherryChat`、协议 `cherrychat://`、独立 profile/home/temp、updater 禁用（LOCK-RETIRE-001）。
 - **IDENTITY-001 是已退役的错误临时决策**（LOCK-RETIRE-002）：曾要求「保留默认 Cherry Studio 构建不变、以显式 Cherry Chat flavor 新增」，该路线已被否决并整体移除；不存在任何 Studio 目标 flavor，也不存在内部 legacy 构建。退役理由：双目标并行安装从未被完整验证（旧 AC-5），且同时维护两个目标身份使身份契约、打包路径与发布语义分裂；单一目标显著简化并消除该未验证分支。
-- **Cherry Studio 名称仅保留于源格式 / profile 安全契约**（LOCK-COMPAT-003）：Dexie `CherryStudio`、redux/localStorage `cherry-studio`/`persist:cherry-studio`、ZIP/origin/schema/import 声明、受保护 profile 名——这些是兼容契约，不承担目标应用身份。
+- **Cherry Studio 名称仅保留于本地持久化与 profile 安全契约**：Dexie `CherryStudio`、redux/localStorage `cherry-studio`/`persist:cherry-studio`、既有本地 schema 字面量与受保护 profile 名——这些是现存本地数据的兼容契约，不承担目标应用身份。
 
 本 ADR 记录已批准决策与退役记录，不改变既有 SQLite 迁移记录的任何历史事实与 Phase 0–6 状态。
 
-**仓库迁移（REPO-MIGRATION-001）**：当前仓库名/路径（`cherry-studio`）是**过渡性**的——当前分支/worktree 状态日后将成为一个新的 **Cherry Chat 仓库**，既有 Cherry Studio 仓库将退役。该迁移只改变仓库载体，**不改变**应用身份（§3）、源格式/profile 兼容标识（§6）、打包配置或任何锁定决策。仓库迁移本身**不授权** updater/发布（REPO-MIGRATION-002），也不自动继承或推断任何发布 endpoint。
+**仓库迁移（REPO-MIGRATION-001）**：当前仓库名/路径（`cherry-studio`）是**过渡性**的——当前分支/worktree 状态日后将成为一个新的 **Cherry Chat 仓库**，既有 Cherry Studio 仓库将退役。该迁移只改变仓库载体，**不改变**应用身份（§3）、本地持久化/profile 兼容标识（§6）、打包配置或任何锁定决策。仓库迁移本身**不授权** updater/发布（REPO-MIGRATION-002），也不自动继承或推断任何发布 endpoint。
 
 ---
 
@@ -32,7 +32,7 @@
 | **IDENTITY-001** | ~~保留现有默认 Cherry Studio 构建与身份不变；以显式 Cherry Chat build flavor 新增，而非替换默认构建~~ | **Retired / Superseded**（LOCK-RETIRE-002）——错误临时决策，已整体移除；无 Studio 目标 flavor、无内部 legacy 构建 |
 | **LOCK-RETIRE-001** | **Cherry Chat 是唯一目标应用身份**：产品名 `Cherry Chat`、appId `com.jorkeyliu.CherryChat`、URL 协议 `cherrychat://`、独立派生的 profile/home/temp、updater 禁用（替代并吸收原 IDENTITY-002 的语义） | **Locked** |
 | **LOCK-RETIRE-002** | IDENTITY-001 为退役的错误遗留决策；无 Cherry Studio 目标 flavor，无内部 legacy 构建；构建期不存在 flavor 选择机制（`VITE_APP_FLAVOR`/`__APP_FLAVOR__`/`buildFlavor`/overlay 配置已全部移除） | **Locked** |
-| **LOCK-COMPAT-003** | 保留源格式/兼容标识（原 IDENTITY-003 语义）：Dexie `CherryStudio`、localStorage `persist:cherry-studio`、ZIP/origin/schema/import 声明、受保护 profile 名——它们是兼容契约，不是目标应用身份 | **Locked** |
+| **LOCK-COMPAT-003** | 保留既有本地持久化标识（原 IDENTITY-003 语义）：Dexie `CherryStudio`、localStorage `persist:cherry-studio`、既有本地 schema 字面量、受保护 profile 名——它们是现存本地数据的兼容契约，不是目标应用身份 | **Locked** |
 | **LOCK-UPDATER-004** | Cherry Chat 不得消费 Cherry Studio 的 updater/release feed；在独立 release endpoint 存在并获批前，updater 禁用或显式不配置（原 IDENTITY-004 语义） | **Locked** |
 | **LOCK-PLATFORM-005** | 首期交付目标为 macOS arm64；Windows/Linux 身份落地推迟（原 IDENTITY-005 语义） | **Locked** |
 | **LOCK-PROFILE-006** | 无自动磁盘扫描、无静默迁移、无共享 userData、不删除/修改既有 Cherry Studio profile（原 IDENTITY-006 语义） | **Locked** |
@@ -43,7 +43,7 @@
 | **VERSION-003** | **每个构建自动生成唯一 Build ID**：一个捕获的 UTC 时间戳 + 短 Git SHA + 可选 dirty 标记；Git 元数据不可用时显式降级（不声称有效 SHA）。同一构建内所有消费方（electron-vite 编译 + electron-builder 打包）复用同一身份。含数字 macOS 构建版本（CFBundleVersion） | **Locked** |
 | **VERSION-004** | **`app.getVersion()` 保持产品版本（0.1.0）；Build ID 是独立字段**，进入 App_Info 契约（`buildId` / `buildVersion`），不混入产品版本 | **Locked** |
 | **VERSION-005** | **不因版本/构建身份引入发布基础设施**：updater 保持禁用，不新增 publish feed、release 工作流、打标签、提交或推送（承接 LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE） | **Locked** |
-| **REPO-MIGRATION-001** | **当前仓库状态将迁移为一个新的 Cherry Chat 仓库**：当前分支/worktree 状态日后成为新的 Cherry Chat 仓库；当前仓库名/路径（`cherry-studio`）是过渡性的；既有 Cherry Studio 仓库随后退役。仓库迁移是载体变更，不改变应用身份、源格式/profile 兼容标识（LOCK-COMPAT-003）或任何锁定决策 | **Locked** |
+| **REPO-MIGRATION-001** | **当前仓库状态将迁移为一个新的 Cherry Chat 仓库**：当前分支/worktree 状态日后成为新的 Cherry Chat 仓库；当前仓库名/路径（`cherry-studio`）是过渡性的；既有 Cherry Studio 仓库随后退役。仓库迁移是载体变更，不改变应用身份、本地持久化/profile 兼容标识（LOCK-COMPAT-003）或任何锁定决策 | **Locked** |
 | **REPO-MIGRATION-002** | **创建/更名仓库（或变更 remote）本身不授权 updater/发布**：仓库迁移不使发布 endpoint 获批，不改变 LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE 冻结 | **Locked** |
 | **REPO-MIGRATION-003** | **未来 updater 激活必须使用显式审批的 endpoint**（预期仓库 namespace 可能为 `JorkeyLiu/cherry-chat`，但 owner/大小写未经用户审批前不锁定），并协调运行时（`updaterEnabled`）、release 工作流、签名/公证、渠道与回滚验证的同步变更；`publish: null` 在 endpoint 获批前必须保持 | **Locked** |
 
@@ -53,16 +53,16 @@
 
 ## 3. 身份矩阵（Identity Matrix）
 
-| 维度 | 目标应用（Cherry Chat，唯一） | 源兼容标识（兼容契约，不变） |
+| 维度 | 目标应用（Cherry Chat，唯一） | 保留的本地兼容标识（不变） |
 |---|---|---|
 | 产品名 productName | `Cherry Chat`（`packages/shared/config/identity.ts` `appIdentity.productName`；`electron-builder.yml` `productName`） | — |
 | bundle / app ID | `com.jorkeyliu.CherryChat`（`identity.ts` `appIdentity.appId`；`electron-builder.yml` `appId`；`scripts/notarize.js` `resolveAppBundleId()` 从 packager appInfo 动态解析） | — |
-| URL 协议 | `cherrychat://`（`identity.ts` `appIdentity.protocolScheme`/`protocolUrlScheme`；`electron-builder.yml` `protocols`；`APP_PROTOCOL`，`src/main/services/ProtocolClient.ts`） | `cherrystudio://` 深度链接格式仍出现在 `urlschema` 处理注释/既有格式引用（LOCK-COMPAT-003），不注册为目标 scheme |
+| URL 协议 | `cherrychat://`（`identity.ts` `appIdentity.protocolScheme`/`protocolUrlScheme`；`electron-builder.yml` `protocols`；`APP_PROTOCOL`，`src/main/services/ProtocolClient.ts`） | — |
 | home 目录 | `~/.cherrychat`（`identity.ts` `appIdentity.homeDirName`；`constant.ts` `HOME_CHERRY_DIR`） | — |
 | userData / profile | 单一身份派生：默认 `<appDataRoot>/Cherry Chat`（`userData.ts` `resolveUserDataBase` identity-default；`init.ts` `initAppDataDir()` 在 bootstrap 早期应用）；dev 叠加 `Dev` 后缀（`config.ts` `applyDevSuffix`）；显式 `--user-data-dir=<path>` 优先级最高且逐字节保留（packaged/dev 均生效、dev 不叠加 `Dev` 后缀）；LOCK-PROFILE-006 守卫在最终 userData 上运行，保护 `Cherry Studio` 与 `CherryStudio` 两个默认 profile 名（`userData.ts` `CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES` / `isCherryStudioDefaultUserData`，`init.ts` 拒绝守卫） | — |
 | temp 目录 | `cherry-chat`（`identity.ts` `appIdentity.tempDirName`，BackupManager 备份临时根）；generic temp 字面量 `CherryChat`（`genericTempDirName`，历史默认，二者为不同契约） | — |
 | Dexie 数据库名 | — | `CherryStudio`（`src/renderer/src/databases/index.ts` `new Dexie('CherryStudio')`） |
-| localStorage persist key | — | `persist:cherry-studio`（redux-persist key `cherry-studio`，`src/renderer/src/store/index.ts`；L2 源 Local Storage 读取，`src/renderer/src/windows/chatImport/entryPoint.ts` `PERSISTED_STATE_KEY`） |
+| localStorage persist key | — | `persist:cherry-studio`（redux-persist key `cherry-studio`，`src/renderer/src/store/index.ts`） |
 | 更新 / release feed | 禁用或不配置（`identity.ts` `appIdentity.updaterEnabled=false`；`electron-builder.yml` **`publish: null`**——显式抑制 git-remote 推断，无 `releaseInfo`；LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE / REPO-MIGRATION-002/003） | — |
 | analytics / UA / API 身份 | analytics channel `cherry-chat`、UA product `CherryChat`、API title `Cherry Chat API`（`identity.ts`；`generate-openapi-spec.ts` `resolveSpecIdentity()` 恒返回 `appIdentity`） | — |
 | 首期目标平台 | macOS arm64（LOCK-PLATFORM-005）；Windows/Linux 推迟，不做平台承诺 | — |
@@ -88,9 +88,9 @@
 | 隔离面 | 不变量 |
 |---|---|
 | userData / profile 目录 | Cherry Chat 的 userData 由单一 Cherry Chat 身份独立派生（默认 `<appDataRoot>/Cherry Chat`；显式 `app.setPath('userData', …)` 仅在 bootstrap/config/运行时 IPC 处按身份计算）；显式 `--user-data-dir=<path>` 优先级最高（Electron 在 JS 运行前应用，bootstrap 逐字节保留、不叠加 `Dev` 后缀）；最终 userData 经守卫拒绝 Cherry Studio 默认 profile（`Cherry Studio` 与 `CherryStudio` 双名保护，LOCK-PROFILE-006） |
-| IndexedDB / localStorage | 位于各自 profile 内；数据库名 `CherryStudio` 与 key `persist:cherry-studio` 为源兼容契约（§6），隔离来自 profile/session 而非改名 |
-| Session / partition | L2 导入沿用隔离 `session.fromPath()` 源 profile（sqlite-migration.md Phase 4 / A-8）；Cherry Chat 正常运行 profile 与导入源 profile 永不混用 |
-| 协议注册 | `cherrychat://` 是唯一注册的目标 scheme（`ProtocolClient.ts` `APP_PROTOCOL`）；`cherrystudio://` 仅作为源数据/既有功能格式引用存在，不注册 |
+| IndexedDB / localStorage | 位于各自 profile 内；数据库名 `CherryStudio` 与 key `persist:cherry-studio` 为本地持久化兼容契约（§6），隔离来自 profile/session 而非改名 |
+| Session / partition | 正常运行 profile 与会话按 Cherry Chat 身份隔离 |
+| 协议注册 | `cherrychat://` 是唯一注册的 scheme（`ProtocolClient.ts` `APP_PROTOCOL`） |
 | 更新 feed | Cherry Chat 不消费 Cherry Studio feed；updater 禁用直至独立 endpoint 获批（LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE） |
 | 应用产物 / 名称 | bundle ID、artifact 名、菜单/Dock 名均来自单一 Cherry Chat 身份（`electron-builder.yml` artifactName 模板 `\${productName}-…`） |
 
@@ -99,19 +99,18 @@
 
 ---
 
-## 6. 源兼容例外（Source-Compatibility Exceptions，LOCK-COMPAT-003）
+## 6. 本地兼容例外（Local Compatibility Exceptions，LOCK-COMPAT-003）
 
-以下标识符是 **L2 兼容导入的源格式契约**，不是目标应用身份；不得因身份引入而改名或删除。
+以下标识符是既有本地数据格式、持久化或 profile 保护契约，不是目标应用身份；不得因身份变更而改名或删除。
 
 | 标识符 | 用途 | 证据 |
 |---|---|---|
-| Dexie 数据库名 `CherryStudio` | L2 导入源 IndexedDB 的识别与读取；现有 Dexie files catalog 运行时架构名（post-closure，LOCK-DOC-1） | `src/renderer/src/databases/index.ts`（`new Dexie('CherryStudio')`） |
-| localStorage key `persist:cherry-studio` | redux-persist 持久化（key `cherry-studio`，version 217）；L2 源 Local Storage 导航投影读取 | `src/renderer/src/store/index.ts`（key）；`src/renderer/src/windows/chatImport/entryPoint.ts`（`PERSISTED_STATE_KEY`） |
-| `cherrystudio://` deep link 格式 | 既有功能/源数据格式引用（navigate/providers/mcp-install），非 Cherry Chat 目标身份 | `src/main/services/urlschema/` 处理注释（LOCK-COMPAT-003） |
-| 其他 L2 导入管线消费的源格式标识符 | 兼容契约（如源 IndexedDB file-origin 映射、投影格式） | LOCK-D2：`src/main/services/chatDbImport/importDataPlane.ts`、`tests/e2e/utils/disposable-dev-origin-seed-zip.ts`（`SEED_DB_NAME='CherryStudio'`、`SEED_PERSIST_KEY='persist:cherry-studio'`）；LOCK-E3：`tests/e2e/utils/disposable-seed-zip.ts`（同）；LOCK-PROD-2：`src/renderer/src/windows/chatImport/entryPoint.ts`、`src/main/services/chatDbImport/navigationProjection.ts` |
-| 受保护 profile 名 `Cherry Studio` / `CherryStudio` | LOCK-PROFILE-006 拒绝守卫的兼容保护名（ADR 规范形式 + Electron/包实际派生形式） | `packages/shared/config/userData.ts`（`CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES`） |
+| Dexie 数据库名 `CherryStudio` | 现有 Dexie files catalog 运行时架构名 | `src/renderer/src/databases/index.ts`（`new Dexie('CherryStudio')`） |
+| localStorage key `persist:cherry-studio` | redux-persist 持久化（key `cherry-studio`，version 217） | `src/renderer/src/store/index.ts`（key） |
+| 受保护 profile 名 `Cherry Studio` / `CherryStudio` | 启动拒绝守卫的保护名（ADR 规范形式 + Electron/包实际派生形式） | `packages/shared/config/userData.ts`（`CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES`） |
+| L3 备份/恢复归档 schema 字面量 | 同应用备份/恢复的既有归档格式兼容契约 | §2 决策表（LOCK-L3-COMPAT） |
 
-**边界**：若实现期发现清单外的新源格式标识符，须按兼容契约追加记录（§12 开放项），不得静默改名。
+**边界**：本清单只包含仍需保护既有本地数据的标识符；清单外标识符不得借身份变更静默改名。新增标识符或变更既有契约须由本 ADR 明确治理。
 
 ---
 
@@ -186,12 +185,12 @@
 |---|---|---|---|
 | **P-A 集中身份与运行时隔离** | 集中 `appIdentity`（productName `Cherry Chat`、appId `com.jorkeyliu.CherryChat`、`cherrychat://`、home/temp/userData 派生、更新门）；显式早期 userData 解析（`Cherry Chat` / dev `Cherry ChatDev`）；Cherry Studio 默认 profile 拒绝守卫（LOCK-PROFILE-006）；updater 与 assistant release-feed 门（LOCK-UPDATER-004）；聚焦测试（16 个 `initAppDataDir()` 直连测试等） | 集中身份输入与运行时隔离由源码与聚焦测试证明（flavor 时代）；退役后由单一身份常量 + 同套聚焦测试继续覆盖 | **已完成（历史）**；退役后语义由当前源码/测试持续锁定（§4 当前证据） |
 | **P-B 打包与构建产物** | 曾以 Cherry Chat flavor 的 packaged `.app` / bundle ID 落地（`electron-builder.cherry-chat.yml` overlay + `build:chat:mac:arm64`）；退役后 base 配置直接携带 Cherry Chat 身份（`electron-builder.yml`），打包命令为普通 `build:mac:arm64`，无 flavor 选择 | 打包产物具备 Cherry Chat 身份，且不含 Cherry Studio feed / release notes（LOCK-UPDATER-004）；无 git-remote 推断的 updater metadata（`publish: null`） | **当前证据（post-fix，结论性）**：退役后以规范包装命令重跑通过（Node 24.12.0 / pnpm 10.27.0）——`pnpm native:check:electron` 通过（Electron 41.2.1 / ABI 145 / darwin arm64）；`pnpm build:unpack` 通过（Build ID `20260807114538113-ff1a9a7-dirty` / buildVersion `20260807114538113`）产出 `dist/mac-arm64/Cherry Chat.app`；`pnpm build:mac:arm64` 通过（Build ID `20260807114817393-ff1a9a7-dirty` / buildVersion `20260807114817393`）产出完整 DMG/ZIP 产物（见下）；Info.plist 身份与 LOCK-UPDATER-004 冻结已验证（见下）。**updater 元数据结论性验证**：两次构建后均无 `app-update.yml` / `latest-mac.yml`，无 owner/repo/feed endpoint 字符串——`publish: null` 抑制 git-remote 推断被**结论性验证**（§7、§12）。pre-fix 产物（`20260807104723578-ff1a9a7-dirty` / `20260807104836723-ff1a9a7-dirty`，携推断的 `JorkeyLiu/cherry-studio` metadata）为**被取代的历史证据**；flavor 时代产物仍为历史证据 |
-| **P-C 打包一次性 profile 隔离验证** | packaged 一次性 profile 隔离：显式 `--user-data-dir` 优先级契约、空 profile 首启（无磁盘扫描 / 无静默迁移 / 不共享目录）、同 profile 二次实例单实例锁、真实 Cherry Studio（`CherryStudio` 实际派生名 + ADR 形式 `Cherry Studio`）/ 默认 `Cherry Chat` profile 零改动、owned 资源精确清理 | 一次性 profile harness 可验证者全部通过；完整并行安装（已随 IDENTITY-001 退役取消）与打包环境 L2 导入不在本范围 | **当前证据**：packaged E2E 在退役后单一目标打包产物上重跑通过 1/1（23.0s，见下）；flavor 时代证据仍为历史 |
+| **P-C 打包一次性 profile 隔离验证** | packaged 一次性 profile 隔离：显式 `--user-data-dir` 优先级契约、空 profile 首启（无磁盘扫描 / 无静默迁移 / 不共享目录）、同 profile 二次实例单实例锁、真实 Cherry Studio（`CherryStudio` 实际派生名 + ADR 形式 `Cherry Studio`）/ 默认 `Cherry Chat` profile 零改动、owned 资源精确清理 | 一次性 profile harness 可验证者全部通过；完整并行安装（已随 IDENTITY-001 退役取消）不在本范围 | **当前证据**：packaged E2E 在退役后单一目标打包产物上重跑通过 1/1（23.0s，见下）；flavor 时代证据仍为历史 |
 | **P-D 平台扩展（推迟）** | Windows / Linux 身份落地 | **非目标**：明确推迟（LOCK-PLATFORM-005），不做平台承诺 | **推迟** |
 | **P-E 版本与构建身份（VERSION-001..005）** | 产品版本 `0.1.0`（根 package.json，VERSION-002）；每构建唯一 Build ID（UTC 时间戳 + 短 SHA + 可选 dirty，Git 不可用 `nogit` 降级，VERSION-003）；`scripts/build-identity.ts` 生成器 + `--spawn` 包装命令，一次构建一个身份经 `CHERRY_CHAT_BUILD_ID`/`CHERRY_CHAT_BUILD_VERSION` 环境桥复用；electron-vite `define` → App_Info `buildId`/`buildVersion`；`mac.artifactName` 含 `${env.CHERRY_CHAT_BUILD_ID}`；`apply-build-version.js`（beforePack）→ CFBundleVersion；About 界面 + i18n + 反馈邮件含 Build ID | 源码/config/编译层由聚焦测试锁定（build-identity / apply-build-version / electron-builder 测试 + 双 typecheck + i18n:check）；`app.getVersion()` 保持产品版本；updater/feed/release 冻结不变（LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE，`publish: null`） | **当前证据（源码/config/编译层）**：已完成并测试锁定；**打包产物与 packaged 运行验证已在 post-fix（`publish: null` 生效后）重跑通过**——两次独立调用各捕获一次身份：`pnpm build:unpack`（完整 Build ID `20260807114538113-ff1a9a7-dirty`，数字 buildVersion/CFBundleVersion `20260807114538113`）与 `pnpm build:mac:arm64`（完整 Build ID `20260807114817393-ff1a9a7-dirty`，数字 buildVersion/CFBundleVersion `20260807114817393`）身份互不相同；完整 DMG/ZIP 产物文件名（含各自完整 Build ID）已在可分发目标上直接实测（见下，`Cherry-Chat-0.1.0-20260807114817393-ff1a9a7-dirty-arm64.dmg` / `.zip` / `.zip.blockmap`）。**Build ID 定义边界**：完整 Build ID 是「UTC 时间戳-短SHA[-dirty]」复合串（如 `20260807114817393-ff1a9a7-dirty`）；纯数字 buildVersion/CFBundleVersion（如 `20260807114817393`）**不等于 Build ID**，仅是其数字分量，不得单独称为 Build ID。运行时 App_Info `buildId=20260807093507259-ff1a9a7-dirty`/`buildVersion=20260807093507259`/`version=0.1.0`/`isPackaged=true`/arch `arm64` 为先前 unpacked 产物上 E2E 取得（见下）。artifact 文件名（DMG/ZIP 含完整 Build ID）已在可分发目标上实测。**updater 元数据结论性验证**：post-fix 两次构建后均无 `app-update.yml` / `latest-mac.yml`，无 owner/repo/feed endpoint 字符串（LOCK-UPDATER-004；§7、§12）——pre-fix 推断的 `JorkeyLiu/cherry-studio` metadata 是已解决验证发现，pre-fix 产物为被取代的历史证据 |
 
-> **P-B 历史产物证据**（flavor 时代，`--dir --mac --arm64`，macOS arm64）：`dist/mac-arm64/Cherry Chat.app`；Info.plist CFBundleIdentifier=`com.jorkeyliu.CherryChat`、CFBundleName/DisplayName=`Cherry Chat`；CFBundleURLSchemes 仅含 `cherrychat`（无 `cherrystudio`）；输出目录无 app-update.yml / latest-mac.yml（既有 dist 复核确认）；app.asar 内烘焙 cherry-chat 身份（`com.jorkeyliu.CherryChat`、`Cherry Chat`、`updaterEnabled: false`）。产物为 **ad-hoc 签名、未公证**（无公证凭据）。**注意**：该产物构建于退役前（app.asar 仍含 `resolveAppIdentity`/`FLAVOR_IDENTITIES`/`appFlavor`），是历史证据；退役后产物已另行构建验证（见下「退役后当前证据」）。**完整并行安装（默认构建 + Cherry Chat 并发启动）已随 IDENTITY-001 退役而取消**；打包环境 L2 导入仍为残余缺口（AC-6）。
-> **P-C 历史证据（packaged E2E，flavor 时代，macOS arm64）**：`tests/e2e/specs/identity/packaged-isolation.spec.ts` 以真实打包产物对精确一次性 `--user-data-dir=<token>` 验证并**通过 1/1（约 22.6s）**：运行时 `isPackaged=true`、arch arm64；CLI userData 逐字节保留（renderer `getAppInfo()` 与主进程 probe 双通道一致，且不含 `Cherry Studio`/`CherryStudio`/`Cherry Chat` 任一路径段）；主窗口标题精确为 `Cherry Chat` 且 React 根挂载；关闭后 `chat.db`（自动创建时）topics/messages/message_blocks 全为 0（空首启）；同 profile 二次实例 exit 0 且首实例存活（单实例锁）；真实 `<appData>/CherryStudio`、ADR 形式 `Cherry Studio`、默认 `Cherry Chat` 三个 profile 的指纹（存在性 + 有界元数据）前后一致——零创建/零修改/零删除（LOCK-PROFILE-006）；owned 临时根精确清理、无进程残留。守卫现同时保护 `Cherry Studio` 与 `CherryStudio` 两个默认 profile 名。**该 harness 未执行 L2 ZIP 导入，也未并发启动两个打包应用（后者随 IDENTITY-001 退役取消）。该证据在 flavor 时代产物上取得，仅作历史参照；退役后重跑证据见下。**
+> **P-B 历史产物证据**（flavor 时代，`--dir --mac --arm64`，macOS arm64）：`dist/mac-arm64/Cherry Chat.app`；Info.plist CFBundleIdentifier=`com.jorkeyliu.CherryChat`、CFBundleName/DisplayName=`Cherry Chat`；CFBundleURLSchemes 仅含 `cherrychat`（无 `cherrystudio`）；输出目录无 app-update.yml / latest-mac.yml（既有 dist 复核确认）；app.asar 内烘焙 cherry-chat 身份（`com.jorkeyliu.CherryChat`、`Cherry Chat`、`updaterEnabled: false`）。产物为 **ad-hoc 签名、未公证**（无公证凭据）。**注意**：该产物构建于退役前（app.asar 仍含 `resolveAppIdentity`/`FLAVOR_IDENTITIES`/`appFlavor`），是历史证据；退役后产物已另行构建验证（见下「退役后当前证据」）。**完整并行安装（默认构建 + Cherry Chat 并发启动）已随 IDENTITY-001 退役而取消**。
+> **P-C 历史证据（packaged E2E，flavor 时代，macOS arm64）**：`tests/e2e/specs/identity/packaged-isolation.spec.ts` 以真实打包产物对精确一次性 `--user-data-dir=<token>` 验证并**通过 1/1（约 22.6s）**：运行时 `isPackaged=true`、arch arm64；CLI userData 逐字节保留（renderer `getAppInfo()` 与主进程 probe 双通道一致，且不含 `Cherry Studio`/`CherryStudio`/`Cherry Chat` 任一路径段）；主窗口标题精确为 `Cherry Chat` 且 React 根挂载；关闭后 `chat.db`（自动创建时）topics/messages/message_blocks 全为 0（空首启）；同 profile 二次实例 exit 0 且首实例存活（单实例锁）；真实 `<appData>/CherryStudio`、ADR 形式 `Cherry Studio`、默认 `Cherry Chat` 三个 profile 的指纹（存在性 + 有界元数据）前后一致——零创建/零修改/零删除（LOCK-PROFILE-006）；owned 临时根精确清理、无进程残留。守卫现同时保护 `Cherry Studio` 与 `CherryStudio` 两个默认 profile 名。**该 harness 未并发启动两个打包应用。该证据在 flavor 时代产物上取得，仅作历史参照；退役后重跑证据见下。**
 > **退役后当前证据（打包构建 + packaged E2E，单一目标，macOS arm64，Node 24.12.0 / pnpm 10.27.0，post-fix 结论性）**：以**规范包装命令**重跑——`pnpm native:check:electron` 先行通过（Electron 41.2.1 / ABI 145 / darwin arm64），随后两条**独立调用**各捕获一次身份（VERSION-003）：
 > - `pnpm build:unpack` **通过**：完整 Build ID `20260807114538113-ff1a9a7-dirty`、数字 buildVersion/CFBundleVersion `20260807114538113`，产出 `dist/mac-arm64/Cherry Chat.app`（unpacked 辅助产物）。
 > - `pnpm build:mac:arm64` **通过**：完整 Build ID `20260807114817393-ff1a9a7-dirty`、数字 buildVersion/CFBundleVersion `20260807114817393`，产出完整可分发产物（**文件名已在可分发目标上直接实测**，VERSION-003 artifact 文件名残余关闭）：
@@ -202,26 +201,26 @@
 > - **Info.plist（产物身份，DMG 挂载复核一致）**：product version（CFBundleShortVersionString）`0.1.0`；CFBundleVersion（数字构建版本）`20260807114817393`；CFBundleName/DisplayName 等均为 `Cherry Chat` 名；CFBundleIdentifier=`com.jorkeyliu.CherryChat`；CFBundleURLSchemes 仅含 `cherrychat`（无 `cherrystudio`）；产物为 **ad-hoc 签名、未公证**（codesign `adhoc`、spctl rejected）——不构成发布就绪（LOCK-RELEASE-FREEZE）。
 > - **updater 元数据结论性验证（LOCK-UPDATER-004 冻结面，post-fix）**：`updaterEnabled=false`（identity.ts），AppUpdater 与 assistant 门零 feed/网络调用。干净状态验证仅移除陈旧 `latest-mac.yml`/builder metadata 后，`publish: null`（显式抑制 git-remote 推断，§7）生效的两次构建均通过，且构建后 **`app-update.yml` 与 `latest-mac.yml` 均不存在**（`dist/` 与应用 Resources 内均无）；无 owner/repo/feed endpoint 字符串。**pre-fix 验证发现（resolved）**：`publish` 缺失/undefined 时期 electron-builder 26.8.1 从 git remote 推断 `JorkeyLiu/cherry-studio` 并自动生成 app-update.yml / latest-mac.yml——是已解决验证发现（resolved validation finding），不是当前行为；pre-fix 产物（Build ID `20260807104723578-ff1a9a7-dirty` / `20260807104836723-ff1a9a7-dirty`）为**被取代的历史证据（superseded evidence）**，不构成当前证据。
 > - **packaged E2E**：`tests/e2e/specs/identity/packaged-isolation.spec.ts` 在先前退役后 unpacked 产物上**通过 1/1（23.0s）**：运行时 App_Info `buildId=20260807093507259-ff1a9a7-dirty`、`buildVersion=20260807093507259`、`version=0.1.0`、`isPackaged=true`、arch `arm64`；空 profile 首启、同 profile 单实例锁、真实 `CherryStudio`/`Cherry Studio`/默认 `Cherry Chat` profile 零改动、owned 资源精确清理全部通过（AC-3/AC-7/AC-8 打包面）。
-> - **未覆盖（残余）**：打包环境 L2 ZIP 导入仍未实测（AC-6 / §12）；release 就绪（签名/公证）未声称（LOCK-RELEASE-FREEZE）。
+> - **未覆盖（残余）**：release 就绪（签名/公证）未声称（LOCK-RELEASE-FREEZE）。
 
 ---
 
 ## 10. 安装 / 迁移 / 回滚 Runbook
 
-> **状态**：退役后单一目标打包产物已构建并通过 packaged 身份/隔离 E2E（§9，post-fix 结论性证据）；以下安装步骤中的「L2 导入」尚未以打包应用实测——仍为计划行为。并行安装（双目标并发）已随 IDENTITY-001 退役取消。仓库迁移（REPO-MIGRATION-001）不影响本 runbook——新 Cherry Chat 仓库中的构建仍使用同一身份与同一 `publish: null` 冻结。
+> **状态**：退役后单一目标打包产物已构建并通过 packaged 身份/隔离 E2E（§9，post-fix 结论性证据）；并行安装（双目标并发）已随 IDENTITY-001 退役取消。仓库迁移（REPO-MIGRATION-001）不影响本 runbook——新 Cherry Chat 仓库中的构建仍使用同一身份与同一 `publish: null` 冻结。
 
 **安装（macOS arm64）**
 1. 构建单一 Cherry Chat 应用（普通 `build:mac:arm64`，base 配置即 Cherry Chat 身份）。
 2. 安装于 macOS arm64 主机：独立 App 目录、独立 userData、`cherrychat://` 协议注册。
 3. Cherry Chat 首启以**自身空 profile** 启动——无静默迁移、无磁盘扫描（LOCK-PROFILE-006）。若解析到 Cherry Studio 默认 profile，启动拒绝（LOCK-PROFILE-006 守卫）。
 
-**迁移（用户主动，一次性）**
-1. 用户在 Cherry Chat 中选定一个 Cherry Studio ZIP 备份 → 走 L2 兼容导入（sqlite-migration.md Phase 4 / 6 语义；replace-all；promotion 保留回滚快照）。
-2. 迁移是显式用户操作，绝无启动时自动迁移。
+**数据使用与恢复**
+1. Cherry Chat 以自身 profile 持久化聊天数据，并提供同应用备份/恢复（L3）。
+2. 旧 profile 不自动扫描、不迁移、不修改、不删除（LOCK-PROFILE-006）。
 
 **回滚**
 1. 应用级：删除 Cherry Chat 应用及其独立 userData；Cherry Studio profile 不受影响（不被删除/修改，LOCK-PROFILE-006）。
-2. 导入级：沿用 L2 promotion 回滚快照与恢复矩阵（sqlite-migration.md §10）。
+2. 备份/恢复级：沿用 L3 同应用备份/恢复与归档 schema（§2、§6）。
 
 ---
 
@@ -234,7 +233,7 @@
 | AC-3 | Cherry Chat userData/profile 独立派生，绝不解析到 Cherry Studio profile | **已实现（config 层 + 当前 packaged 证据）** | `initAppDataDir()` 16 个直连测试：packaged/dev 均解析到 `Cherry Chat`（dev 后缀 `Dev`）；配置路径 profile 隔离；解析到 Cherry Studio 默认 profile 时抛 LOCK-PROFILE-006（`init.test.ts`、`userData.test.ts`）。packaged E2E 零改动证据为当前证据（§9 P-C，退役后产物重跑 1/1） |
 | AC-4 | Cherry Chat 不消费 Cherry Studio updater/release feed；独立 endpoint 前 updater 禁用或显式不配置 | **已实现** | `updaterEnabled=false`（identity.ts）；AppUpdater 与 assistant MCP 门零 feed/网络/analytics 调用（`AppUpdater.identityGate.test.ts`、`assistant.identity.test.ts`）；base 配置**显式 `publish: null`**（抑制 git-remote 推断，无 release notes，`electron-builder.test.ts` 经真实加载器验证）；LOCK-RELEASE-FREEZE / REPO-MIGRATION-002 生效 |
 | AC-5 | ~~macOS arm64 并行安装验证通过（两应用并存、profile 隔离、scheme 互不覆盖）~~ | **Retired**——所要求的第二个目标（默认 Cherry Studio 打包应用）已随 IDENTITY-001 退役，不再存在；无并发双目标场景 | 由 LOCK-RETIRE-002 取代；单目标 profile 隔离与 scheme 唯一性分别由 AC-3 / AC-2 覆盖 |
-| AC-6 | 源兼容标识（Dexie `CherryStudio`、`persist:cherry-studio` 及其他）完整保留，L2 导入可读 | **部分完成** | 标识符未被身份实现改名，默认值断言保留（`identity.test.ts`）；「L2 导入可读」由既有 L2 管线（sqlite-migration.md）支撑。**打包环境下的 L2 导入端到端仍未实测**——遗留缺口（§9、§12） |
+| AC-6 | 既有本地持久化标识、schema 字面量与同应用备份/恢复保持兼容 | **已治理** | Dexie 数据库名、persist key 与受保护 profile 名列于 §6；L3 归档 schema 兼容契约列于 §2 |
 | AC-7 | 无自动磁盘扫描、无静默迁移、无共享 userData；Cherry Studio profile 不被删除/修改 | **已实现（config 层 + 当前 packaged 证据）** | 源层：拒绝守卫不共享 userData；`init.test.ts` 合成根守卫断言仅触碰 mock 路径、默认 profile 零 setPath。产品行为（packaged E2E 当前证据）：空 profile 首启零数据；真实 `CherryStudio`、ADR 形式 `Cherry Studio`、默认 `Cherry Chat` 三个 profile 指纹前后一致零改动；owned 资源精确清理（`packaged-isolation.spec.ts`，退役后单一目标产物重跑 1/1，23.0s） |
 | AC-8 | **产品版本 0.1.0 且 `app.getVersion()` 稳定返回；每构建唯一 Build ID（UTC 时间戳 + 短 SHA + 可选 dirty，Git 不可用显式降级）；macOS CFBundleVersion 为数字构建版本；artifact 文件名含 Build ID；updater/feed/release 冻结不变** | **已实现（源码/config/编译层 + 打包/运行验证）** | 根 `package.json` `version=0.1.0`；`build-identity.test.ts`（确定性/UTC/dirty/降级/数字构建版本/产品版本断言）；`electron-builder.test.ts`（artifactName 含 `${env.CHERRY_CHAT_BUILD_ID}`、保留 `${version}`、`publish: null` 显式抑制）；`apply-build-version.test.ts`（beforePack → CFBundleVersion）；`assert-build-identity-env.test.ts`（部分环境打包守卫 fail-fast，re-audit Finding A）；App_Info 契约含 `buildId`/`buildVersion`/`notesPath`；`AppUpdater.identityGate.test.ts` 不变。**打包/运行验证（退役后重跑，post-fix 结论性，§9 P-B/P-E）**：两次独立调用完整 Build ID 互不相同（`build:unpack`=`20260807114538113-ff1a9a7-dirty`、`build:mac:arm64`=`20260807114817393-ff1a9a7-dirty`）；**artifact 文件名（DMG/ZIP 含完整 Build ID）已在可分发目标上直接实测**——`dist/Cherry-Chat-0.1.0-20260807114817393-ff1a9a7-dirty-arm64.dmg` / `.zip` / `.zip.blockmap`（VERSION-003）；Info.plist product version `0.1.0`、CFBundleVersion（数字构建版本）`20260807114817393`、CFBundleIdentifier=`com.jorkeyliu.CherryChat`、scheme `cherrychat`、无配置的发布 feed / releaseInfo（LOCK-UPDATER-004）；**updater 元数据结论性验证**：post-fix 两次构建后均无 `app-update.yml` / `latest-mac.yml`、无 owner/repo/feed endpoint 字符串——pre-fix 推断的 `JorkeyLiu/cherry-studio` metadata 是已解决验证发现，pre-fix 产物（`20260807104723578-ff1a9a7-dirty` / `20260807104836723-ff1a9a7-dirty`）为被取代的历史证据（见 §7、§9、§12）；运行时 App_Info `buildId=20260807093507259-ff1a9a7-dirty`、`buildVersion=20260807093507259`、`version=0.1.0`、`isPackaged=true`、`arm64`（`packaged-isolation.spec.ts` 1/1，23.0s，先前 unpacked 产物）。**DMG/ZIP artifact 文件名验证残余已关闭** |
 
@@ -251,14 +250,12 @@
 | Windows / Linux 身份落地 | Deferred | 明确推迟（LOCK-PLATFORM-005），不做平台承诺 |
 | **退役后打包构建与 packaged 身份/隔离 E2E 重验证** | **已完成（post-fix 结论性）** | 退役后以规范包装命令重跑（Node 24.12.0 / pnpm 10.27.0）：`pnpm native:check:electron` 通过（Electron 41.2.1 / ABI 145 / darwin arm64）；`pnpm build:unpack` 通过（完整 Build ID `20260807114538113-ff1a9a7-dirty` / buildVersion `20260807114538113`）并产出 `dist/mac-arm64/Cherry Chat.app`；`pnpm build:mac:arm64` 通过（完整 Build ID `20260807114817393-ff1a9a7-dirty` / buildVersion `20260807114817393`）并产出完整 DMG/ZIP/blockmap；Info.plist 身份（product version `0.1.0`、CFBundleVersion `20260807114817393`、`com.jorkeyliu.CherryChat`、scheme `cherrychat`、无配置的发布 feed/releaseInfo）与 packaged E2E（`packaged-isolation.spec.ts` 1/1，23.0s：buildId/buildVersion、`isPackaged=true`、arm64、空 profile/单实例/零改动/清理全过）均验证通过；post-fix 两次构建后均无 app-update.yml / latest-mac.yml（LOCK-UPDATER-004 结论性验证）（§9、AC-2/3/7/8） |
 | **DMG/ZIP artifact 文件名运行时验证** | **已完成（post-fix 结论性）** | 完整可分发产物（`build:mac:arm64`，完整 Build ID `20260807114817393-ff1a9a7-dirty`）已产出并**直接实测文件名**：`dist/Cherry-Chat-0.1.0-20260807114817393-ff1a9a7-dirty-arm64.dmg`、`…-arm64.zip`、`…-arm64.zip.blockmap`——artifact 文件名（含完整 Build ID）已在可分发目标上观测（VERSION-003）；原「静态/单元证明」残余关闭 |
-| L2 打包环境导入实测 | Open | Phase C packaged harness 未执行 L2 ZIP 导入；打包产物 + 源兼容标识完整前提下 L2 导入端到端仍未在 packaged 环境实测（AC-6 残余） |
-| 源兼容标识符清单 | Open | 实现期需精确枚举全部被 L2 消费的源格式标识符并追加记录（§6），不得静默改名（LOCK-COMPAT-003） |
-| `cherrychat://` deep link 语义 | Open | 导航/处理契约（对应既有 `cherrystudio://navigate/…` 语义格式）需定义；本 ADR 只锁定 scheme 本身 |
+| `cherrychat://` deep link 语义 | Open | 导航/处理契约需定义；本 ADR 只锁定 scheme 本身 |
 | L3 归档 schema 字面量 | Locked | 既有 L3 备份/恢复归档 schema 字面量为兼容契约，除非另行版本化否则保持不变（LOCK-L3-COMPAT） |
 
 ---
 
 ## 13. 关联文档
 
-- `docs/archived/sqlite-migration.md` — L1/L2/L3 运行时与导入演进记录；本文档不修改其历史事实与 Phase 0–6 状态。其第 41 行对本文档的交叉引用（「决策锁 IDENTITY-001…006」及 flavor 措辞）为历史交叉引用，语义以本文档当前决策表为准。
-- 本文档治理应用身份（单一目标 Cherry Chat + 退役记录 + 兼容边界）；`sqlite-migration.md` 治理 SQLite 运行时、L2 导入、L3 备份/恢复。身份问题以本文档为准。
+- `docs/archived/sqlite-migration.md` — SQLite 运行时、外部导入和同应用备份恢复的历史记录（历史归档）；本文档不修改其历史事实与 Phase 0–6 状态。其第 41 行对本文档的交叉引用（「决策锁 IDENTITY-001…006」及 flavor 措辞）为历史交叉引用，语义以本文档当前决策表为准。
+- 本文档治理应用身份（单一目标 Cherry Chat + 退役记录 + 兼容边界）；`sqlite-migration.md` 治理 SQLite 运行时、L3 备份/恢复。身份问题以本文档为准。

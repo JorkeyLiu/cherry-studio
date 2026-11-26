@@ -77,7 +77,8 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
 
   return (
     <>
-      <ListItem ref={ref}>
+      {/* Serving ids are long: keep the row text selectable so the full id can be copied by selection, with no copy button. */}
+      <ListItem ref={ref} className="selectable">
         <HStack alignItems="center" gap={10} style={{ flex: 1 }}>
           <ModelAvatar model={model} provider={provider} size={24} />
           <ModelIdWithTags

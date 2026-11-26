@@ -74,17 +74,6 @@ import type {
   UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from '@shared/chatDb'
-import type {
-  CatalogRecoveryReadyResult,
-  CatalogRecoveryRequest,
-  CatalogRecoveryResponse,
-  CherryImportAckProjectionResult,
-  CherryImportCancelResult,
-  CherryImportGetProjectionResult,
-  CherryImportPlatformSupport,
-  CherryImportStartResult,
-  CherryImportStatusEvent
-} from '@shared/chatImport/types'
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
 import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
@@ -486,52 +475,6 @@ const api = {
     cleanLocalData: () => ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_LOCAL_DATA),
     addStreamMessage: (spanId: string, modelName: string, context: string, message: any) =>
       ipcRenderer.invoke(IpcChannel.TRACE_ADD_STREAM_MESSAGE, spanId, modelName, context, message)
-  },
-  cherryImport: {
-    getPlatformSupport: (): Promise<CherryImportPlatformSupport> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_GetPlatformSupport),
-    start: (zipPath: string): Promise<CherryImportStartResult> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_Start, zipPath),
-    cancel: (sessionId: string): Promise<CherryImportCancelResult> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_Cancel, sessionId),
-    getStatus: (sessionId: string): Promise<CherryImportStatusEvent | null> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_GetStatus, sessionId),
-    getProjection: (): Promise<CherryImportGetProjectionResult> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_GetProjection),
-    ackProjection: (): Promise<CherryImportAckProjectionResult> =>
-      ipcRenderer.invoke(IpcChannel.CherryImport_AckProjection),
-    onStatusChanged: (callback: (event: CherryImportStatusEvent) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, data: CherryImportStatusEvent) => {
-        callback(data)
-      }
-      ipcRenderer.on(IpcChannel.CherryImport_StatusChanged, listener)
-      return () => {
-        ipcRenderer.removeListener(IpcChannel.CherryImport_StatusChanged, listener)
-      }
-    },
-    // L2 files catalog handoff boundary (Phase 2, LOCK-PROMO-5/7). Main
-    // drives capture/apply/restore/query through this minimal typed surface;
-    // the renderer owns the live Dexie files table. Only the registered main
-    // renderer's main frame may respond.
-    catalog: {
-      onRequest: (callback: (request: CatalogRecoveryRequest) => void): (() => void) => {
-        const listener = (_event: Electron.IpcRendererEvent, data: CatalogRecoveryRequest) => {
-          if (data && typeof data === 'object') {
-            callback(data)
-          }
-        }
-        ipcRenderer.on(IpcChannel.CherryImport_CatalogRequest, listener)
-        return () => {
-          ipcRenderer.removeListener(IpcChannel.CherryImport_CatalogRequest, listener)
-        }
-      },
-      respond: (requestId: string, response: CatalogRecoveryResponse) =>
-        ipcRenderer.invoke(IpcChannel.CherryImport_CatalogRespond, requestId, response),
-      // LOCK-BRIDGE-1: ready handshake — the renderer signals Main that its
-      // catalog request handler is installed (only then may Main send
-      // requests). Main rejects stale/duplicate/post-dispose signals.
-      ready: (): Promise<CatalogRecoveryReadyResult> => ipcRenderer.invoke(IpcChannel.CherryImport_CatalogReady)
-    }
   },
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Minimize),

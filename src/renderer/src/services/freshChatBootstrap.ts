@@ -13,12 +13,10 @@
  *   `persist:cherry-studio` compatibility key is absent — i.e. before
  *   redux-persist can write for this boot. Stored OUTSIDE the Redux persist
  *   payload (plain localStorage key) so it is independent of persist writes.
- * - SURVIVES apply/ensure failure and renderer restart (localStorage is
+ * - SURVIVES ensure failure and renderer restart (localStorage is
  *   per-profile durable storage).
- * - CLEARED only after (a) a pending import was successfully applied (the
- *   imported navigation supersedes the initial Redux topics — no ensure), or
- *   (b) verified-no-pending AND every current initial topic was successfully
- *   ensured create-only. Never cleared on unknown/read/apply/ensure failure.
+ * - CLEARED only after every current initial topic was successfully ensured
+ *   create-only. Never cleared on read/ensure failure.
  * - ABSENT on an existing profile means never ensure/recreate topics.
  *
  * The module is dependency-free (no store/SQLite/i18n imports) so both the
@@ -84,7 +82,7 @@ export function markFreshBootstrapPendingIfFreshProfile(): boolean {
   return isFreshBootstrapPending()
 }
 
-/** Clear the pending marker after a successful finalize (applied or ensured). */
+/** Clear the pending marker after a successful finalize. */
 export function clearFreshBootstrapPending(): void {
   safeRemoveItem(FRESH_CHAT_BOOTSTRAP_PENDING_KEY)
 }
@@ -119,41 +117,27 @@ export function collectFreshTopicTargets(
 }
 
 export interface FreshBootstrapFinalizeDeps {
-  /**
-   * The one-shot projection outcome: `true` when a pending import was
-   * applied, `false` only on verified no-pending. Unknown/failure never
-   * reaches the finalizer (the caller settles `failed` first).
-   */
-  applied: boolean
   /** Current initial-topic projection to ensure (injected; no store import). */
   collectTargets: () => FreshTopicTarget[]
   /** Create-only ensure of one topic (injected; partial ensures are safe). */
   ensureTopic: (target: FreshTopicTarget) => Promise<void>
 }
 
-export type FreshBootstrapFinalizeResult = 'import-applied' | 'ensured' | 'not-pending'
+export type FreshBootstrapFinalizeResult = 'ensured' | 'not-pending'
 
 /**
- * Finalize a fresh-chat bootstrap after the projection outcome is known.
+ * Finalize a fresh-chat bootstrap.
  *
- * - `applied === true` → the imported navigation supersedes the initial
- *   Redux topics: clear the marker WITHOUT ensuring, return
- *   `'import-applied'`.
- * - `applied === false` + marker pending → ensure every current target
- *   create-only (Main-side ensure never overwrites an existing binding, so
- *   partial ensures and retries are safe), then clear the marker, return
- *   `'ensured'`. A rejection propagates with the marker RETAINED for
- *   next-boot/retry.
+ * - marker pending → ensure every current target create-only (Main-side
+ *   ensure never overwrites an existing binding, so partial ensures and
+ *   retries are safe), then clear the marker, return `'ensured'`. A rejection
+ *   propagates with the marker RETAINED for next-boot/retry.
  * - marker absent → return `'not-pending'` without touching anything (an
  *   existing profile never ensures/recreates missing topics).
  */
 export async function finalizeFreshChatBootstrap(
   deps: FreshBootstrapFinalizeDeps
 ): Promise<FreshBootstrapFinalizeResult> {
-  if (deps.applied) {
-    clearFreshBootstrapPending()
-    return 'import-applied'
-  }
   if (!isFreshBootstrapPending()) {
     return 'not-pending'
   }
@@ -163,4 +147,76 @@ export async function finalizeFreshChatBootstrap(
   }
   clearFreshBootstrapPending()
   return 'ensured'
+}
+
+export type FreshChatBootstrapReadinessState = 'ready' | 'pending' | 'failed'
+
+let finalizer: (() => Promise<FreshBootstrapFinalizeResult>) | null = null
+let bootstrapPromise: Promise<FreshBootstrapFinalizeResult> | null = null
+let readinessState: FreshChatBootstrapReadinessState | null = null
+const readinessListeners = new Set<() => void>()
+
+function setFreshBootstrapReadinessState(state: FreshChatBootstrapReadinessState): void {
+  if (readinessState === state) return
+  readinessState = state
+  for (const listener of readinessListeners) listener()
+}
+
+/**
+ * Register the store-backed finalizer once. The readiness singleton owns the
+ * only in-session bootstrap promise; startup and UI retry share it.
+ */
+export function configureFreshChatBootstrapFinalizer(nextFinalizer: () => Promise<FreshBootstrapFinalizeResult>): void {
+  finalizer = nextFinalizer
+}
+
+/** The durable marker is authoritative; failure is the only non-ready pending state. */
+export function getFreshChatBootstrapReadinessState(): FreshChatBootstrapReadinessState {
+  if (!isFreshBootstrapPending()) return 'ready'
+  return readinessState === 'failed' ? 'failed' : 'pending'
+}
+
+export function subscribeFreshChatBootstrapReadiness(listener: () => void): () => void {
+  readinessListeners.add(listener)
+  return () => readinessListeners.delete(listener)
+}
+
+/**
+ * Start bootstrap after Redux rehydration, or retry it from the readiness UI.
+ * Existing profiles settle immediately without invoking the finalizer. While
+ * pending, all callers receive the same promise; a failure retains the marker
+ * and a later call starts a new create-only attempt.
+ */
+export function runFreshChatBootstrap(): Promise<FreshBootstrapFinalizeResult> {
+  if (bootstrapPromise) return bootstrapPromise
+  if (!isFreshBootstrapPending()) {
+    setFreshBootstrapReadinessState('ready')
+    return Promise.resolve('not-pending')
+  }
+  if (!finalizer) {
+    const error = new Error('Fresh-chat bootstrap finalizer is not configured')
+    setFreshBootstrapReadinessState('failed')
+    return Promise.reject(error)
+  }
+
+  const activeFinalizer = finalizer
+  const promise = Promise.resolve()
+    .then(activeFinalizer)
+    .then(
+      (result) => {
+        setFreshBootstrapReadinessState('ready')
+        return result
+      },
+      (error: unknown) => {
+        setFreshBootstrapReadinessState('failed')
+        throw error
+      }
+    )
+    .finally(() => {
+      if (bootstrapPromise === promise) bootstrapPromise = null
+    })
+
+  bootstrapPromise = promise
+  setFreshBootstrapReadinessState('pending')
+  return promise
 }

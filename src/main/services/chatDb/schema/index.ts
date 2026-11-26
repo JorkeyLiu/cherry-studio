@@ -123,7 +123,11 @@ export const topicSegmentMessages = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.segmentId, table.messageId] }),
     index('topic_segment_messages_segment_id_sort_order_idx').on(table.segmentId, table.sortOrder),
-    index('topic_segment_messages_message_id_idx').on(table.messageId)
+    index('topic_segment_messages_message_id_idx').on(table.messageId),
+    // Migration 021 single-membership invariant: a message belongs to at most
+    // one group. The legacy lookup index above is kept; this unique index
+    // enforces the constraint.
+    uniqueIndex('topic_segment_messages_message_id_uniq').on(table.messageId)
   ]
 )
 

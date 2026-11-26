@@ -1796,98 +1796,6 @@
     "preview": "プレビュー",
     "split": "分割"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "ChatGPTインポート",
-      "button": "ファイルを選択",
-      "description": "会話のテキストのみをインポートし、画像や添付ファイルは含まれません",
-      "error": {
-        "invalid_json": "無効なJSONファイル形式",
-        "no_conversations": "ファイルに会話が見つかりません",
-        "no_valid_conversations": "インポートする有効な会話がありません",
-        "unknown": "インポートに失敗しました。ファイル形式を確認してください。"
-      },
-      "help": {
-        "step1": "1. ChatGPTにログインし、設定 > データ管理 > データをエクスポートへ進みます",
-        "step2": "2. エクスポートファイルが届くまでメールでお待ちください",
-        "step3": "3. ダウンロードしたファイルを展開し、conversations.jsonを探してください",
-        "title": "ChatGPTの会話をエクスポートする方法は？"
-      },
-      "importing": "会話をインポートしています...",
-      "selecting": "ファイルを選択中...",
-      "success": "{{topics}}件の会話と{{messages}}件のメッセージを正常にインポートしました",
-      "title": "ChatGPTの会話をインポート",
-      "untitled_conversation": "無題の会話"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "インポートがキャンセルされました。データに変更は加えられませんでした。",
-        "title": "インポートキャンセル"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "インポート開始",
-      "confirm_description": "これにより、既存のすべてのチャットデータがCherry Studioバックアップのデータに置き換えられます。この操作は元に戻せません。",
-      "confirm_title": "インポートの確認",
-      "confirm_warning": "警告：現在のすべての会話とメッセージが置き換えられます。",
-      "description": "Cherry Studio ZIPバックアップファイルから会話、メッセージ、添付ファイルをインポートします。これにより、既存のすべてのチャットデータが置き換えられます。",
-      "error": {
-        "title": "インポートエラー",
-        "unknown": "インポートに失敗しました。ZIPファイルの形式を確認して、もう一度お試しください。"
-      },
-      "phase": {
-        "cancelled": "インポートがキャンセルされました",
-        "discovering": "データベース構造を検出中...",
-        "error": "インポートに失敗しました",
-        "extracting": "ZIPアーカイブを展開中...",
-        "idle": "インポート準備完了",
-        "processing": "データを処理・検証中...",
-        "promoting": "インポートを適用中（データを置き換え中）...",
-        "reading": "チャットデータを読み込み中...",
-        "success": "インポートが正常に完了しました！アプリケーションが再起動されます。",
-        "unsupported": "サポートされていないプラットフォーム"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "ファイルを選択",
-      "select_file": "Cherry Studio ZIPバックアップを選択",
-      "steps": {
-        "confirm": "確認",
-        "import": "インポート",
-        "promote": "適用",
-        "select": "ファイルを選択"
-      },
-      "success": {
-        "description": "Cherry Studioのバックアップがインポートされました。変更を適用するためにアプリケーションが再起動されます。",
-        "title": "インポート成功"
-      },
-      "title": "Cherry Studio ZIPバックアップをインポート",
-      "unsupported": {
-        "description": "Cherry Studio ZIPインポートは現在macOSのみサポートされています。現在のプラットフォームはまだサポートされていません。",
-        "title": "サポートされていないプラットフォーム"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "このインポートにより、既存のすべてのチャットデータが置き換えられます。必要に応じて、現在のデータのバックアップを取ってください。",
-        "title": "すべて置き換え"
-      }
-    },
-    "confirm": {
-      "button": "ファイルのインポートを選択",
-      "label": "外部データをインポートしてもよろしいですか？"
-    },
-    "content": "外部アプリケーションの会話ファイルを選択してインポートします。現在、ChatGPT JSON形式ファイルのみサポートしています。",
-    "title": "外部会話をインポート"
-  },
   "knowledge": {
     "add": {
       "title": "ナレッジベースを追加"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "基本データ設定",
         "cloud_storage": "クラウドバックアップ設定",
-        "export_settings": "エクスポート設定",
-        "import_settings": "設定のインポート"
+        "export_settings": "エクスポート設定"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} 時間",
       "hour_interval_other": "{{count}} 時間",
-      "import_settings": {
-        "button": "JSONファイルをインポート",
-        "chatgpt": "ChatGPTからインポート",
-        "cherrystudio": "Cherry Studio ZIPからインポート",
-        "cherrystudio_button": "ZIPバックアップをインポート",
-        "title": "外部アプリケーションデータをインポート"
-      },
       "limit": {
         "appDataDiskQuota": "ディスク容量警告",
         "appDataDiskQuotaDescription": "データディレクトリの容量がほぼ満杯になっており、新しいデータの保存ができなくなる可能性があります。まずデータをバックアップしてから、ディスク容量を整理してください。"

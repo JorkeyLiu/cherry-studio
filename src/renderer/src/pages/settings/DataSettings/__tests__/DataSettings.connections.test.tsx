@@ -1,10 +1,10 @@
 /**
  * Data Settings connection/export surface.
  *
- * Guards what the page still offers: the retained built-in sections, the
- * single export-options section (the retired export-menu page and Markdown
- * export page are gone), and the absence of the removed third-party
- * note-connection settings.
+ * Guards what the page still offers: the retained built-in sections in a
+ * compact section rail beside the selected section's content (both visible at
+ * once, no tab strip), the single export-options section, and the absence of
+ * the removed third-party note-connection settings.
  */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -19,10 +19,6 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('@renderer/context/ThemeProvider', () => ({
   useTheme: () => ({ theme: 'dark' })
-}))
-
-vi.mock('@renderer/components/Layout', () => ({
-  HStack: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>
 }))
 
 vi.mock('@renderer/pages/settings', () => ({
@@ -43,7 +39,6 @@ vi.mock('../BasicDataSettings', () => ({ default: () => <div>basic-panel</div> }
 vi.mock('../SyncSettings', () => ({ default: () => <div>sync-panel</div> }))
 vi.mock('../WebDavSettings', () => ({ default: () => <div>webdav-panel</div> }))
 vi.mock('../S3Settings', () => ({ default: () => <div>s3-panel</div> }))
-vi.mock('../ImportMenuSettings', () => ({ default: () => <div>import-panel</div> }))
 vi.mock('../ExportOptionsSettings', () => ({ default: () => <div>export-options-panel</div> }))
 vi.mock('../LocalBackupSettings', () => ({ default: () => <div>local-backup-panel</div> }))
 
@@ -56,8 +51,17 @@ const RETAINED_MENU_TITLES = [
   'settings.data.local.title',
   'settings.data.webdav.title',
   'settings.data.s3.title.label',
-  'settings.data.import_settings.title',
   'settings.data.export_options.title'
+]
+
+/** Section rail hooks → the panel that must be rendered when selected. */
+const SECTION_CASES: Array<[testId: string, panelText: string]> = [
+  ['data-section-data', 'basic-panel'],
+  ['data-menu-sync', 'sync-panel'],
+  ['data-section-local_backup', 'local-backup-panel'],
+  ['data-section-webdav', 'webdav-panel'],
+  ['data-section-s3', 's3-panel'],
+  ['data-section-export_options', 'export-options-panel']
 ]
 
 const readLocale = (name: string) => JSON.parse(fs.readFileSync(`src/renderer/src/i18n/locales/${name}.json`, 'utf-8'))
@@ -84,10 +88,51 @@ describe('DataSettings', () => {
     expect(screen.queryByText('Synchronization')).toBeNull()
   })
 
-  it('keeps the retained section dividers', () => {
+  it('no longer offers external application import entry points', () => {
     render(<DataSettings />)
-    for (const divider of ['basic', 'cloud_storage', 'import_settings', 'export_settings']) {
+    expect(screen.queryByText('settings.data.import_settings.title')).toBeNull()
+    expect(screen.queryByTestId('data-section-import_settings')).toBeNull()
+    expect(screen.queryByText('settings.data.divider.import_settings')).toBeNull()
+  })
+
+  it('shows the section rail and the selected section content at the same time', () => {
+    render(<DataSettings />)
+
+    // A section rail (not a tab strip) beside the content area.
+    const nav = screen.getByRole('navigation', { name: 'settings.data.title' })
+    expect(nav).toBeInTheDocument()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.queryAllByRole('tab')).toHaveLength(0)
+
+    // All retained sections are reachable from the rail.
+    for (const [testId] of SECTION_CASES) {
+      expect(screen.getByTestId(testId)).toBeInTheDocument()
+    }
+
+    // Rail and content coexist: the default section renders next to the rail.
+    expect(screen.getByText('basic-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('data-section-data').className).toContain('active')
+
+    // The group dividers of the previous sidebar layout are restored.
+    for (const divider of ['basic', 'cloud_storage', 'export_settings']) {
       expect(screen.getByText(`settings.data.divider.${divider}`)).toBeInTheDocument()
+    }
+  })
+
+  it('opens each section on selection and marks only the selected rail item', () => {
+    render(<DataSettings />)
+
+    for (const [testId, panelText] of SECTION_CASES) {
+      fireEvent.click(screen.getByTestId(testId))
+
+      expect(screen.getByText(panelText)).toBeInTheDocument()
+      expect(screen.getByTestId(testId).className).toContain('active')
+
+      for (const [otherTestId] of SECTION_CASES) {
+        if (otherTestId !== testId) {
+          expect(screen.getByTestId(otherTestId).className).not.toContain('active')
+        }
+      }
     }
   })
 
@@ -105,24 +150,6 @@ describe('DataSettings', () => {
     expect(screen.queryByText('settings.data.export_menu.title')).toBeNull()
     expect(screen.queryByText('settings.data.markdown_export.title')).toBeNull()
     expect(screen.getAllByText('settings.data.export_options.title')).toHaveLength(1)
-  })
-
-  it('still opens the data-sync panel on selection', () => {
-    render(<DataSettings />)
-    fireEvent.click(screen.getByText('Data Sync'))
-    expect(screen.getByText('sync-panel')).toBeInTheDocument()
-  })
-
-  it('still opens the import settings panel on selection', () => {
-    render(<DataSettings />)
-    fireEvent.click(screen.getByText('settings.data.import_settings.title'))
-    expect(screen.getByText('import-panel')).toBeInTheDocument()
-  })
-
-  it('opens the single export-options panel on selection', () => {
-    render(<DataSettings />)
-    fireEvent.click(screen.getByText('settings.data.export_options.title'))
-    expect(screen.getByText('export-options-panel')).toBeInTheDocument()
   })
 })
 

@@ -1664,6 +1664,32 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
         const worst = finite.length > 0 ? Math.max(...finite.map((s) => s.drift as number)) : Number.NaN
         const post = await captureTabGeometry(page, tail.tallId)
         const finalDrift = Math.abs(post.offset - (pre as TabGeometry).offset)
+        // Bounded diagnostics BEFORE the stationary assert: a multi-thousand-px
+        // drift can only come from the container scrolling / changing its row
+        // window, not from a jittering tab, so record both container rects and
+        // the live scroll/row shape alongside it.
+        const a1ScrollDiag = await page.evaluate(() => {
+          const c = document.getElementById('messages') as HTMLElement | null
+          const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')).map((el) =>
+            el.getAttribute('data-message-id')
+          )
+          return {
+            scrollTop: c ? Math.round(c.scrollTop) : null,
+            scrollHeight: c ? Math.round(c.scrollHeight) : null,
+            clientHeight: c ? Math.round(c.clientHeight) : null,
+            phase: c?.getAttribute('data-viewport-phase') ?? null,
+            rowCount: rows.length,
+            rowHead: rows.slice(0, 3),
+            rowTail: rows.slice(-3)
+          }
+        })
+        test.info().annotations.push({
+          type: 'csi-a1-final-geometry',
+          description:
+            `preOffset=${(pre as TabGeometry).offset.toFixed(2)} postOffset=${post.offset.toFixed(2)} ` +
+            `drift=${finalDrift.toFixed(2)} preContainer=${JSON.stringify((pre as TabGeometry).containerRect)} ` +
+            `postContainer=${JSON.stringify(post.containerRect)} scroll=${JSON.stringify(a1ScrollDiag)}`
+        })
         expect(finalDrift, 'A1 final tab offset stationary').toBeLessThanOrEqual(TAB_TOL)
         expect(worst, 'A1 painted transition frames never jump').toBeLessThanOrEqual(TRANSITION_TOL)
         expect(
@@ -1768,7 +1794,7 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
       const sidebar = new SidebarPage(page)
       await sidebar.goToSettings()
       await waitForSettingsLoad(page)
-      await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+      await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
       await sidebar.goToHome()
       await waitForChatReady(page)
       await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })

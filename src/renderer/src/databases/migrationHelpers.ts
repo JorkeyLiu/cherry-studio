@@ -6,7 +6,7 @@
  * timestamps, content, error/citation/file/tool/translation shapes) WITHOUT
  * any of its runtime dependencies (LoggerService, `@renderer/types` value
  * exports, `uuid`, ...). They exist so the v7 upgrade can run inside the
- * isolated chatImport renderer without evaluating the main renderer bundle.
+ * isolated renderer contexts without evaluating the main renderer bundle.
  *
  * The module has NO runtime imports at all: the leaf enums
  * `MessageBlockStatus` / `MessageBlockType` from `@renderer/types/newMessage`

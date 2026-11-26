@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { droppableReorder, sortByEnglishFirst } from '../sort'
+import { droppableReorder, selectDefaultTopic, sortByEnglishFirst } from '../sort'
 
 describe('sort', () => {
   describe('droppableReorder', () => {
@@ -106,5 +106,44 @@ describe('sort', () => {
       expect(sortByEnglishFirst('#apple', 'banana')).toBeGreaterThan(0) // 特殊字符不算英文字母
       expect(sortByEnglishFirst('apple', '#banana')).toBeLessThan(0)
     })
+  })
+})
+
+describe('selectDefaultTopic', () => {
+  const topic = (id: string, pinned?: boolean) => ({ id, pinned })
+
+  it('returns the first ordinary topic when pinned topics lead', () => {
+    const topics = [topic('p1', true), topic('o1'), topic('o2')]
+    expect(selectDefaultTopic(topics)?.id).toBe('o1')
+  })
+
+  it('keeps ordinary order across multiple ordinary topics', () => {
+    const topics = [topic('p1', true), topic('o1'), topic('o2'), topic('o3')]
+    expect(selectDefaultTopic(topics)?.id).toBe('o1')
+  })
+
+  it('falls back to topics[0] when every topic is pinned', () => {
+    const topics = [topic('p1', true), topic('p2', true)]
+    expect(selectDefaultTopic(topics)?.id).toBe('p1')
+  })
+
+  it('treats an unset pinned flag as ordinary', () => {
+    const topics = [topic('o1'), topic('o2')]
+    expect(selectDefaultTopic(topics)?.id).toBe('o1')
+  })
+
+  it('returns undefined for an empty list', () => {
+    expect(selectDefaultTopic([])).toBeUndefined()
+  })
+
+  it('keeps a still-valid remembered id, including a pinned one', () => {
+    const topics = [topic('p1', true), topic('o1'), topic('o2')]
+    expect(selectDefaultTopic(topics, 'p1')?.id).toBe('p1')
+    expect(selectDefaultTopic(topics, 'o2')?.id).toBe('o2')
+  })
+
+  it('falls back to the default when the remembered id is stale', () => {
+    const topics = [topic('p1', true), topic('o1')]
+    expect(selectDefaultTopic(topics, 'gone')?.id).toBe('o1')
   })
 })

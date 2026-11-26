@@ -97,7 +97,7 @@ function blockJson(id: string, messageId: string): Record<string, unknown> {
 
 describe('020_topic_segment_header_identity', () => {
   it('is registered last and only adds and backfills the head column', () => {
-    expect(MIGRATIONS.length).toBe(20)
+    expect(MIGRATIONS.length).toBe(21)
     expect(MIGRATIONS[19].key).toBe(MIGRATION_KEY)
     const joined = MIGRATIONS[19].sql.join(' ')
     expect(joined).toContain('ADD COLUMN header_message_id')
@@ -110,7 +110,7 @@ describe('020_topic_segment_header_identity', () => {
 
   it('fresh DB: column exists, shipped backfill follows authority order, empty group keeps NULL head', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(20)
+    expect(runMigrations(db as never, sqlite)).toBe(21)
 
     const columns = sqlite.prepare(`PRAGMA table_info(topic_segments)`).all() as Array<{ name: string }>
     expect(columns.map((c) => c.name)).toContain('header_message_id')

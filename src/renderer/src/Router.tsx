@@ -1,42 +1,33 @@
 import '@renderer/databases'
 
 import type { CSSProperties, FC } from 'react'
-import { Activity, useEffect, useState } from 'react'
-import { HashRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 
 import Sidebar from './components/app/Sidebar'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { LazyRoute } from './components/LazyRoute'
 import { importSettingsPage } from './components/routeImporters'
+import TaskDialog from './components/TaskDialog'
 import NavigationHandler from './handler/NavigationHandler'
 import HomePage from './pages/home/HomePage'
 
-// S7.1 renderer-only lazy boundary: keep Home eager, defer secondary routes.
-// Eager critical path: HomePage, Sidebar, NavigationHandler, HashRouter, App providers remain eager.
-// Lazy secondary routes: Files, Notes, Knowledge, Settings, Launchpad each in own chunk.
+// Chat-only base with centered in-app modal task dialogs: Home is the only
+// full-page route and stays mounted. Secondary tasks (Files, Knowledge,
+// Settings) render inside a TaskDialog overlay; the URL stays on the task
+// path so shortcut/deeplink/provider query semantics keep working, and close
+// navigates explicitly to '/' (never history-back out of the app). Settings
+// module preload chunk loading/errors stay inside the dialog; home itself
+// stays eager. Notes page/entries removed (storage/migration/import
+// compatibility preserved); launchpad removed as a full page (legacy entries
+// redirect to chat via LaunchpadRedirect below).
 const importFilesPage = () => import('./pages/files/FilesPage')
-const importNotesPage = () => import('./pages/notes/NotesPage')
 const importKnowledgePage = () => import('./pages/knowledge/KnowledgePage')
-const importLaunchpadPage = () => import('./pages/launchpad/LaunchpadPage')
 
-// Bounded Chat session workspace: after Chat (Home) has mounted, its component
-// session (Home/Messages/ThinkingBlock timers, mount-time topic activation)
-// survives secondary-route navigation instead of unmount/remount. Home stays
-// mounted inside React Activity: while a secondary route is active the Activity
-// is hidden, which preserves component state/refs/DOM identity but unmounts
-// the hidden subtree's effects — Home global shortcuts/listeners detach and
-// the native minimum-size constraint resets via the existing effect cleanup —
-// and re-runs them on return. Launching directly into a secondary route mounts
-// no Chat until '/' is first visited (no eager Chat data loading); from then
-// on the session persists. Request/stream execution lives outside the UI tree
-// and is unaffected; Redux projections, SQLite authority, and retention are
-// unchanged. The thinking timer needs no change: its wall-clock anchor is a
-// retained ref that survives the hidden interval, so the restarted interval
-// resumes elapsed time instead of resetting (covered by
-// ThinkingBlock.activity.test). Activity owns hidden semantics
-// (display:none + AT/focus hiding), so no manual CSS/inert mechanics remain;
-// the wrapper div is layout only. Route URLs, Sidebar behavior, and per-route
-// lazy bundle splitting are unchanged.
+// Dialog width buckets: settings narrower, file/knowledge management wider.
+const SETTINGS_DIALOG_WIDTH = 1000
+const MANAGEMENT_DIALOG_WIDTH = 1100
+
 const chatWorkspaceStyle: CSSProperties = {
   display: 'flex',
   flex: 1,
@@ -44,38 +35,74 @@ const chatWorkspaceStyle: CSSProperties = {
   minHeight: 0
 }
 
-// S7.1 stable test seam: eager Home vs lazy secondary routes.
-// AppRoutes is the route outlet without HashRouter/Sidebar/NavigationHandler so
-// focused tests can render it inside MemoryRouter with controlled entries.
+interface TaskRouteProps {
+  importer: () => Promise<{ default: React.ComponentType<any> }>
+  titleKey: string
+  width: number
+}
+
+// Route-dialog overlay: Home stays mounted exactly once (outside <Routes>)
+// so opening/switching/closing tasks never remounts it — draft, viewport
+// and effects survive. The task owns its centered bounded surface; '/*'
+// route shapes (e.g. '/settings/*') reuse the same shell; the task always
+// closes to '/'.
+const TaskRoute: FC<TaskRouteProps> = ({ importer, titleKey, width }) => {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+
+  const handleClose = () => {
+    navigate('/')
+  }
+
+  return (
+    <TaskDialog title={t(titleKey)} width={width} onClose={handleClose}>
+      <LazyRoute importer={importer} />
+    </TaskDialog>
+  )
+}
+
+// Launchpad is not a full page: any legacy '/launchpad' entry (bookmark,
+// deeplink, persisted history) lands back on chat instead of a blank route.
+const LaunchpadRedirect: FC = () => <Navigate to="/" replace />
+
+// Secondary routes keep their paths (/files, /knowledge, /settings/*) so
+// shortcut/deeplink/provider query semantics keep working; '/launchpad',
+// '/notes' and unknown paths redirect to '/'. AppRoutes is the route outlet
+// without HashRouter/Sidebar/NavigationHandler so focused tests can render
+// it inside MemoryRouter with controlled entries.
+// Chat viewport governance: Home is mounted once and stays visible — secondary
+// tasks are dialog overlays, never a hidden Activity workspace. Opening a task
+// suspends the in-flight viewport activation; closing it revalidates through
+// the existing validated-continuation/read lanes, so no persisted-snapshot save
+// runs and no cross-route restore intent is created from the dialog. Unknown
+// paths redirect explicitly to '/' (chat-only base: no blank route).
 export const AppRoutes: FC = () => {
-  const location = useLocation()
-  const isHome = location.pathname === '/'
-  const [hasVisitedHome, setHasVisitedHome] = useState(() => isHome)
-
-  useEffect(() => {
-    if (isHome) {
-      setHasVisitedHome(true)
-    }
-  }, [isHome])
-
-  // Render Home on '/' (including the navigation that first visits it) and keep
-  // it mounted hidden afterwards; never mount it for a direct secondary entry.
-  const shouldRenderHome = isHome || hasVisitedHome
   return (
     <ErrorBoundary>
-      {shouldRenderHome && (
-        <Activity mode={isHome ? 'visible' : 'hidden'}>
-          <div data-testid="chat-workspace" style={chatWorkspaceStyle}>
-            <HomePage />
-          </div>
-        </Activity>
-      )}
+      <div data-testid="chat-workspace" style={chatWorkspaceStyle}>
+        <HomePage />
+      </div>
       <Routes>
-        <Route path="/files" element={<LazyRoute importer={importFilesPage} />} />
-        <Route path="/notes" element={<LazyRoute importer={importNotesPage} />} />
-        <Route path="/knowledge" element={<LazyRoute importer={importKnowledgePage} />} />
-        <Route path="/settings/*" element={<LazyRoute importer={importSettingsPage} />} />
-        <Route path="/launchpad" element={<LazyRoute importer={importLaunchpadPage} />} />
+        <Route
+          path="/files"
+          element={<TaskRoute importer={importFilesPage} titleKey="title.files" width={MANAGEMENT_DIALOG_WIDTH} />}
+        />
+        <Route
+          path="/knowledge"
+          element={
+            <TaskRoute importer={importKnowledgePage} titleKey="title.knowledge" width={MANAGEMENT_DIALOG_WIDTH} />
+          }
+        />
+        <Route
+          path="/settings/*"
+          element={<TaskRoute importer={importSettingsPage} titleKey="settings.title" width={SETTINGS_DIALOG_WIDTH} />}
+        />
+        <Route path="/launchpad" element={<LaunchpadRedirect />} />
+        <Route path="/launchpad/*" element={<LaunchpadRedirect />} />
+        <Route path="/notes" element={<Navigate to="/" replace />} />
+        <Route path="/notes/*" element={<Navigate to="/" replace />} />
+        <Route path="/" element={null} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </ErrorBoundary>
   )

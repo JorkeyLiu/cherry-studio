@@ -13,10 +13,10 @@
  *   actually needs one of those upgrades. A database already at v11 never loads
  *   the upgrades chunk.
  *
- * The isolated chatImport renderer dynamic-imports THIS module directly (see
- * `src/renderer/src/windows/chatImport/entryPoint.ts`) so it can open the
- * source database and execute historical v5/v7/v8 upgrades without evaluating
- * the main renderer bundle or any window.api/window.electron side effects.
+ * Isolated renderer contexts can import THIS module directly so they can open
+ * a source database and execute historical v5/v7/v8 upgrades without
+ * evaluating the main renderer bundle or any window.api/window.electron side
+ * effects.
  */
 import type {
   CustomTranslateLanguage,
@@ -30,8 +30,8 @@ import type {
 import type { Message as NewMessage, MessageBlock } from '@renderer/types/newMessage'
 import { Dexie, type EntityTable } from 'dexie'
 
-// Database declaration (canonical singleton for both the ordinary renderer and
-// the chatImport hidden renderer)
+// Database declaration (canonical singleton usable from isolated renderer
+// contexts)
 export const db = new Dexie('CherryStudio', {
   chromeTransactionDurability: 'strict'
 }) as Dexie & {

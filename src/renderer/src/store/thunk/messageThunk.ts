@@ -76,6 +76,7 @@ import { addAbortController } from '@renderer/utils/abortController'
 import { createAssistantMessage, createTranslationBlock } from '@renderer/utils/messageUtils/create'
 import { NO_MODEL_ERROR_NAME } from '@renderer/utils/noModelError'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
+import { convergeTopicSegmentCatalog } from '@renderer/utils/topicSegmentCatalog'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
   AppendMessageResponse,
@@ -2582,6 +2583,12 @@ export const insertMessagesThunk =
           mutableMessageIds: insertResult.mutableMessageIds
         })
       )
+      // Fresh complete segment catalog after the committed insert: Main may
+      // have auto-joined the new pair to the anchor group in the same
+      // transaction, so converge through the preserving publication (the
+      // message window committed above stays intact; stale reads discard
+      // silently, genuine list failure throws typed).
+      await convergeTopicSegmentCatalog(dispatch, topicId, getState)
 
       logger.info(`[insertMessagesThunk] Inserted messages after ${afterMessageId} via Main-authoritative anchor`)
     } catch (error) {

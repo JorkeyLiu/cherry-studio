@@ -68,7 +68,7 @@ vi.mock('../../S3Storage', () => ({
   default: vi.fn()
 }))
 
-vi.mock('../chatDbImport/promotion/readonlyDbValidation', () => ({
+vi.mock('../../chatDb/readonlyDbValidation', () => ({
   validateReadonlyChatDb: mockValidateReadonlyChatDb
 }))
 

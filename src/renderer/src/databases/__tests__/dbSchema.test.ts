@@ -31,7 +31,7 @@ import indexDefault, { db as barrelDb } from '../index'
  * The four database modules must only ever `import type` from
  * `@renderer/types` (erased at transform time). A runtime value import would
  * evaluate the whole renderer types barrel (and its i18n/LoggerService chain)
- * inside the isolated chatImport renderer — the exact regression this file
+ * inside isolated renderer contexts — the exact regression this file
  * guards against. The throwing factory is file-wide; it fires if any module in
  * this file's graph (dbSchema/upgrades/migrationHelpers/index) runtime-imports
  * the barrel.
@@ -170,7 +170,7 @@ describe('static import isolation (source contract)', () => {
       .replace(/import\s+type\s*\w+\s*from\s*['"][^'"]+['"]/g, '')
 
   it('keeps every @renderer import type-only in the database modules', () => {
-    // The isolated chatImport renderer loads dbSchema/upgrades/migrationHelpers
+    // Isolated renderer contexts load dbSchema/upgrades/migrationHelpers
     // outside the main bundle, so ANY non-type `@renderer/*` import would pull
     // main-renderer runtime code into the lazy historical-upgrades chunk. This
     // static check fails the moment a runtime import is reintroduced, even

@@ -21,7 +21,7 @@
  *   import db from '@renderer/databases'
  *   import { db } from '@renderer/databases'
  *
- * The isolated chatImport renderer dynamic-imports `./dbSchema` directly so it
- * never evaluates the main renderer bundle.
+ * Isolated renderer contexts can import `./dbSchema` directly so they never
+ * evaluate the main renderer bundle.
  */
 export { db, default } from './dbSchema'

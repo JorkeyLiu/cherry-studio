@@ -6457,6 +6457,53 @@ export class ChatDbAggregateService {
             }
           }
 
+          // Segment auto-membership: a message belongs to at most one group.
+          // The anchor resolves to zero groups (no catalog write — the
+          // established no-group behavior), exactly one group (the truly
+          // inserted rows join that same group in this same transaction), or
+          // more than one group (legacy overlap: fail closed with zero writes
+          // rather than silently choosing one owner). The merged membership is
+          // ordered by the post-insert effective route so the pair lands after
+          // the anchor group tail instead of appending blindly. Head-owner and
+          // per-member route checks are the same authority segment writes use:
+          // when they reject, the whole insert fails instead of inserting
+          // without membership.
+          const autoSegmentIds = newMessages.map((message) => message.id)
+          if (autoSegmentIds.length > 0) {
+            const catalog = repos.segments.listByTopic(topicId)
+            const anchorOwners: TopicSegmentData[] = []
+            for (const candidate of catalog) {
+              if (repos.segments.getMessageIds(candidate.id).includes(afterMessageId)) {
+                anchorOwners.push(candidate)
+              }
+            }
+            if (anchorOwners.length > 1) {
+              throw new ChatDbValidationError(
+                `Insert anchor ${afterMessageId} is filed under ${anchorOwners.length} groups; a message belongs to at most one group — insert rejected with zero writes`
+              )
+            }
+            const anchorSegment = anchorOwners.length === 1 ? anchorOwners[0] : null
+            if (anchorSegment !== null) {
+              const currentMemberIds = repos.segments.getMessageIds(anchorSegment.id)
+              this.assertSegmentOwnerInTx(repos, anchorSegment, currentMemberIds, route)
+              const mergedMemberIds = [...currentMemberIds]
+              for (const id of autoSegmentIds) {
+                if (!mergedMemberIds.includes(id)) mergedMemberIds.push(id)
+              }
+              this.assertGroupRangeOwnedInTx(repos, topicId, route, mergedMemberIds)
+              const routePosition = new Map(
+                this.resolveRouteMessagesInTx(repos, topicId, route).messages.map(
+                  (message, index) => [message.id, index] as const
+                )
+              )
+              mergedMemberIds.sort(
+                (a, b) =>
+                  (routePosition.get(a) ?? Number.MAX_SAFE_INTEGER) - (routePosition.get(b) ?? Number.MAX_SAFE_INTEGER)
+              )
+              repos.segments.replaceMessageIds(anchorSegment.id, mergedMemberIds)
+            }
+          }
+
           // Phase 4 — harvest prior refs (existing entries only), then upsert blocks + sync file refs in ORIGINAL order
           for (const plan of phase4Plans) {
             if (plan.blocks.length === 0) continue

@@ -577,6 +577,18 @@ describe('topic-data JSON exchange (whole-logical-topic export/import)', () => {
         })()
       },
       {
+        name: 'segment member filed under two groups',
+        payload: (() => {
+          const p = clone()
+          const member = p.segments[0].messageIds[0]
+          p.segments = [
+            p.segments[0],
+            { ...p.segments[0], id: `seg-${uid('s')}`, sortOrder: p.segments[0].sortOrder + 1, messageIds: [member] }
+          ]
+          return p
+        })()
+      },
+      {
         name: 'file ref with unknown block',
         payload: (() => {
           const p = clone()

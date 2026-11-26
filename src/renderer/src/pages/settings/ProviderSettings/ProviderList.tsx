@@ -1,53 +1,52 @@
 import type { DropResult } from '@hello-pangea/dnd'
 import { loggerService } from '@logger'
-import {
-  DraggableVirtualList,
-  type DraggableVirtualListRef,
-  useDraggableReorder
-} from '@renderer/components/DraggableList'
+import { useDraggableReorder } from '@renderer/components/DraggableList'
 import { DeleteIcon, EditIcon } from '@renderer/components/Icons'
-import { ProviderAvatar } from '@renderer/components/ProviderAvatar'
 import { useAllProviders, useProviders } from '@renderer/hooks/useProvider'
-import { useTimer } from '@renderer/hooks/useTimer'
 import ImageStorage from '@renderer/services/ImageStorage'
 import type { Provider, ProviderType } from '@renderer/types'
-import { getFancyProviderName, matchKeywordsInModel, matchKeywordsInProvider, uuid } from '@renderer/utils'
-import { isAnthropicSupportedProvider } from '@renderer/utils/provider'
+import { matchKeywordsInProvider, uuid } from '@renderer/utils'
 import type { MenuProps } from 'antd'
-import { Button, Dropdown, Input, Tag } from 'antd'
-import { Check, Filter, GripVertical, PlusIcon, Search, UserPen } from 'lucide-react'
-import type { FC } from 'react'
-import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
+import { Bolt } from 'lucide-react'
+import type { FC, Key } from 'react'
+import { startTransition, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
 import styled from 'styled-components'
 
 import AddProviderPopup from './AddProviderPopup'
-import ModelNotesPopup from './ModelNotesPopup'
+import ApiOptionsSettingsPopup from './ApiOptionsSettings/ApiOptionsSettingsPopup'
+import ConnectionSwitcher from './ConnectionSwitcher'
 import ProviderSetting from './ProviderSetting'
 import UrlSchemaInfoPopup from './UrlSchemaInfoPopup'
 
 const logger = loggerService.withContext('ProviderList')
 
-const BUTTON_WRAPPER_HEIGHT = 50
-
-interface ProviderListProps {}
-
-const ProviderList: FC<ProviderListProps> = () => {
+/**
+ * Provider settings inside the bounded settings dialog: one continuous content
+ * pane with a connection switcher at the top. There is no permanent connection
+ * rail — the switcher popover holds connection search, ordering and add/menu
+ * operations, and selecting a connection retargets the content area in place
+ * (no list page, no back control, no pane tabs).
+ */
+const ProviderList: FC = () => {
   const [searchParams, setSearchParams] = useSearchParams()
   const providers = useAllProviders()
   const { updateProviders, addProvider, removeProvider, updateProvider } = useProviders()
-  const { setTimeoutTimer } = useTimer()
-  const [selectedProvider, _setSelectedProvider] = useState<Provider | undefined>(providers[0])
+  const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(() => providers[0]?.id)
   const { t } = useTranslation()
   const [searchText, setSearchText] = useState<string>('')
   const [dragging, setDragging] = useState(false)
-  const [agentFilterEnabled, setAgentFilterEnabled] = useState(false)
   const [providerLogos, setProviderLogos] = useState<Record<string, string>>({})
-  const listRef = useRef<DraggableVirtualListRef>(null)
 
-  const setSelectedProvider = useCallback((provider: Provider | undefined) => {
-    startTransition(() => _setSelectedProvider(provider))
+  // Singular resolved active connection: the store is the source of truth, so a
+  // removed or renamed connection never leaves a stale selection behind.
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderId) ?? providers[0]
+
+  const selectProvider = useCallback((provider: Provider) => {
+    startTransition(() => {
+      setSelectedProviderId(provider.id)
+    })
   }, [])
 
   useEffect(() => {
@@ -73,31 +72,22 @@ const ProviderList: FC<ProviderListProps> = () => {
 
   useEffect(() => {
     let shouldUpdate = false
-    const hasFilterParam = searchParams.get('filter') === 'agent'
 
-    // Handle filter param first - when filter is enabled, ignore id param
-    if (hasFilterParam) {
-      setAgentFilterEnabled(true)
+    // Legacy `?filter=agent` deep links are still accepted and consumed so the
+    // parameter is not re-applied on later renders, but the switcher no longer
+    // exposes an agent filter control (the underlying agent capability stays).
+    if (searchParams.get('filter')) {
       searchParams.delete('filter')
-      searchParams.delete('id') // Clear id param when filter is enabled
       shouldUpdate = true
-    } else if (searchParams.get('id')) {
+    }
+
+    if (searchParams.get('id')) {
       const providerId = searchParams.get('id')
       const provider = providers.find((p) => p.id === providerId)
-      if (provider) {
-        setSelectedProvider(provider)
-        // 滚动到选中的 provider
-        const index = providers.findIndex((p) => p.id === providerId)
-        if (index >= 0) {
-          setTimeoutTimer(
-            'scroll-to-selected-provider',
-            () => listRef.current?.scrollToIndex(index, { align: 'center' }),
-            100
-          )
-        }
-      } else {
-        setSelectedProvider(providers[0])
-      }
+      // A provider id in the URL selects that connection in the switcher and
+      // retargets the content area (deep links from provider-key imports keep
+      // working); there is no separate list page to open.
+      selectProvider(provider ?? providers[0])
       searchParams.delete('id')
       shouldUpdate = true
     }
@@ -105,7 +95,7 @@ const ProviderList: FC<ProviderListProps> = () => {
     if (shouldUpdate) {
       setSearchParams(searchParams)
     }
-  }, [providers, searchParams, setSearchParams, setSelectedProvider, setTimeoutTimer])
+  }, [providers, searchParams, setSearchParams, selectProvider])
 
   // Handle provider add key from URL schema
   useEffect(() => {
@@ -131,7 +121,7 @@ const ProviderList: FC<ProviderListProps> = () => {
         updateProvider(updatedProvider)
       }
 
-      setSelectedProvider(updatedProvider)
+      selectProvider(updatedProvider)
       window.toast.success(t('settings.models.provider_key_added', { provider: displayName }))
     }
 
@@ -191,122 +181,144 @@ const ProviderList: FC<ProviderListProps> = () => {
     }
 
     addProvider(provider)
-    setSelectedProvider(provider)
+    // A newly added connection needs key/host setup first, so it is selected
+    // immediately: the unified pane starts with the configuration sections.
+    selectProvider(provider)
   }
 
-  const getDropdownMenus = (provider: Provider): MenuProps['items'] => {
-    const noteMenu = {
-      label: t('settings.provider.notes.title'),
-      key: 'notes',
-      icon: <UserPen size={14} />,
-      onClick: () => ModelNotesPopup.show({ provider })
+  const onRenameProvider = async (provider: Provider) => {
+    const { name, type, logoFile, logo } = await AddProviderPopup.show(provider)
+
+    if (!name) {
+      return
     }
 
-    const editMenu = {
-      label: t('common.edit'),
-      key: 'edit',
-      icon: <EditIcon size={14} />,
-      async onClick() {
-        const { name, type, logoFile, logo } = await AddProviderPopup.show(provider)
+    updateProvider({ id: provider.id, name, type })
 
-        if (name) {
-          updateProvider({ ...provider, name, type })
-          if (provider.id) {
-            if (logo) {
-              try {
-                await ImageStorage.set(`provider-${provider.id}`, logo)
-                setProviderLogos((prev) => ({
-                  ...prev,
-                  [provider.id]: logo
-                }))
-              } catch (error) {
-                logger.error('Failed to save logo', error as Error)
-                window.toast.error(t('message.error.update_provider_logo'))
-              }
-            } else if (logo === undefined && logoFile === undefined) {
-              try {
-                await ImageStorage.set(`provider-${provider.id}`, '')
-                setProviderLogos((prev) => {
-                  const newLogos = { ...prev }
-                  delete newLogos[provider.id]
-                  return newLogos
-                })
-              } catch (error) {
-                logger.error('Failed to reset logo', error as Error)
-              }
-            }
-          }
+    if (provider.id) {
+      if (logo) {
+        try {
+          await ImageStorage.set(`provider-${provider.id}`, logo)
+          setProviderLogos((prev) => ({
+            ...prev,
+            [provider.id]: logo
+          }))
+        } catch (error) {
+          logger.error('Failed to save logo', error as Error)
+          window.toast.error(t('message.error.update_provider_logo'))
+        }
+      } else if (logo === undefined && logoFile === undefined) {
+        try {
+          await ImageStorage.set(`provider-${provider.id}`, '')
+          setProviderLogos((prev) => {
+            const newLogos = { ...prev }
+            delete newLogos[provider.id]
+            return newLogos
+          })
+        } catch (error) {
+          logger.error('Failed to reset logo', error as Error)
         }
       }
     }
+  }
 
-    const deleteMenu = {
-      label: t('common.delete'),
-      key: 'delete',
-      icon: <DeleteIcon size={14} className="lucide-custom" />,
-      danger: true,
-      async onClick() {
-        window.modal.confirm({
-          title: t('settings.provider.delete.title'),
-          content: t('settings.provider.delete.content'),
-          okButtonProps: { danger: true },
-          okText: t('common.delete'),
-          centered: true,
-          onOk: async () => {
-            // 删除provider前先清理其logo
-            if (provider.id) {
-              try {
-                await ImageStorage.remove(`provider-${provider.id}`)
-                setProviderLogos((prev) => {
-                  const newLogos = { ...prev }
-                  delete newLogos[provider.id]
-                  return newLogos
-                })
-              } catch (error) {
-                logger.error('Failed to delete logo', error as Error)
-              }
-            }
-
-            // Custom-connection bootstrap: no system providers are guaranteed
-            // to exist, so fall back to the first remaining entry instead of
-            // assuming a system provider is present.
-            const remaining = providers.filter((p) => p.id !== provider.id)
-            setSelectedProvider(remaining[0])
-            removeProvider(provider)
+  const onDeleteProvider = (provider: Provider) => {
+    window.modal.confirm({
+      title: t('settings.provider.delete.title'),
+      content: t('settings.provider.delete.content'),
+      okButtonProps: { danger: true },
+      okText: t('common.delete'),
+      centered: true,
+      onOk: async () => {
+        // 删除provider前先清理其logo
+        if (provider.id) {
+          try {
+            await ImageStorage.remove(`provider-${provider.id}`)
+            setProviderLogos((prev) => {
+              const newLogos = { ...prev }
+              delete newLogos[provider.id]
+              return newLogos
+            })
+          } catch (error) {
+            logger.error('Failed to delete logo', error as Error)
           }
-        })
+        }
+
+        // Custom-connection bootstrap: no system providers are guaranteed to
+        // exist, so fall back to the first remaining entry instead of
+        // assuming a system provider is present.
+        const remaining = providers.filter((p) => p.id !== provider.id)
+        setSelectedProviderId(remaining[0]?.id)
+        removeProvider(provider)
       }
+    })
+  }
+
+  const moveProviderToTop = useCallback(
+    (providerId: string) => {
+      const reorderedProviders = [...providers]
+      const index = reorderedProviders.findIndex((p) => p.id === providerId)
+
+      if (index !== -1) {
+        const updatedProvider = { ...reorderedProviders[index], enabled: true }
+        reorderedProviders.splice(index, 1)
+        reorderedProviders.unshift(updatedProvider)
+        updateProviders(reorderedProviders)
+      }
+    },
+    [providers, updateProviders]
+  )
+
+  const onToggleEnabled = useCallback(
+    (provider: Provider, enabled: boolean) => {
+      updateProvider({ id: provider.id, enabled })
+      if (enabled) {
+        moveProviderToTop(provider.id)
+      }
+    },
+    [moveProviderToTop, updateProvider]
+  )
+
+  const getConnectionMenu = (): MenuProps['items'] => {
+    if (!selectedProvider) {
+      return []
     }
 
-    // Custom-connection product: every provider is an ordinary connection.
-    // All entries are editable/deletable regardless of any legacy `isSystem`
-    // flag left by pre-221 persisted state.
-    const menus = [editMenu, noteMenu, deleteMenu]
-
-    if (providers.filter((p) => p.id === provider.id).length > 1) {
-      return menus
-    }
-
-    return menus
+    return [
+      {
+        label: t('common.edit'),
+        key: 'edit',
+        icon: <EditIcon size={14} />,
+        onClick: () => onRenameProvider(selectedProvider)
+      },
+      {
+        label: t('settings.provider.api.options.label'),
+        key: 'api-settings',
+        icon: <Bolt size={14} />,
+        onClick: () => ApiOptionsSettingsPopup.show({ providerId: selectedProvider.id })
+      },
+      { type: 'divider' },
+      {
+        label: t('common.delete'),
+        key: 'delete',
+        icon: <DeleteIcon size={14} className="lucide-custom" />,
+        danger: true,
+        onClick: () => onDeleteProvider(selectedProvider)
+      }
+    ]
   }
 
   const filteredProviders = providers.filter((provider) => {
-    // Filter by agent support
-    if (agentFilterEnabled && !isAnthropicSupportedProvider(provider)) {
-      return false
-    }
-
     const keywords = searchText.toLowerCase().split(/\s+/).filter(Boolean)
-    const isProviderMatch = matchKeywordsInProvider(keywords, provider)
-    const isModelMatch = provider.models.some((model) => matchKeywordsInModel(keywords, model))
-    return isProviderMatch || isModelMatch
+    // Connection search covers the stored connection name and id.
+    return matchKeywordsInProvider(keywords, provider)
   })
 
   const { onDragEnd: handleReorder, itemKey } = useDraggableReorder({
     originalList: providers,
     filteredList: filteredProviders,
     onUpdate: updateProviders,
-    itemKey: 'id'
+    itemKey: 'id' as keyof Provider
   })
 
   const handleDragStart = useCallback(() => {
@@ -322,196 +334,55 @@ const ProviderList: FC<ProviderListProps> = () => {
   )
 
   return (
-    <Container className="selectable">
-      <ProviderListContainer>
-        <AddButtonWrapper>
-          <Input
-            type="text"
-            placeholder={t('settings.provider.search')}
-            value={searchText}
-            style={{ borderRadius: 'var(--list-item-border-radius)', height: 35 }}
-            prefix={<Search size={14} />}
-            suffix={
-              <Dropdown
-                menu={{
-                  items: [
-                    {
-                      label: t('settings.provider.filter.all'),
-                      key: 'all',
-                      icon: agentFilterEnabled ? <CheckPlaceholder /> : <Check size={14} />,
-                      onClick: () => setAgentFilterEnabled(false)
-                    },
-                    {
-                      label: t('settings.provider.filter.agent'),
-                      key: 'agent',
-                      icon: agentFilterEnabled ? <Check size={14} /> : <CheckPlaceholder />,
-                      onClick: () => setAgentFilterEnabled(true)
-                    }
-                  ]
-                }}
-                trigger={['click']}>
-                <FilterButton>
-                  <Filter
-                    size={14}
-                    className={agentFilterEnabled ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-3)]'}
-                  />
-                </FilterButton>
-              </Dropdown>
-            }
-            onChange={(e) => setSearchText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                e.stopPropagation()
-                setSearchText('')
-              }
-            }}
-            allowClear
-            disabled={dragging}
-          />
-        </AddButtonWrapper>
-        <DraggableVirtualList
-          ref={listRef}
-          list={filteredProviders}
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
-          estimateSize={useCallback(() => 40, [])}
-          itemKey={itemKey}
-          overscan={3}
-          style={{
-            height: `calc(100% - 2 * ${BUTTON_WRAPPER_HEIGHT}px)`
-          }}
-          scrollerStyle={{
-            padding: 8,
-            paddingRight: 5
-          }}
-          itemContainerStyle={{ paddingBottom: 5 }}>
-          {(provider) => (
-            <Dropdown menu={{ items: getDropdownMenus(provider) }} trigger={['contextMenu']}>
-              <ProviderListItem
-                key={provider.id}
-                className={provider.id === selectedProvider?.id ? 'active' : ''}
-                onClick={() => setSelectedProvider(provider)}>
-                <DragHandle>
-                  <GripVertical size={12} />
-                </DragHandle>
-                <ProviderAvatar size={32} provider={provider} customLogos={providerLogos} />
-                <ProviderItemName className="text-nowrap">{getFancyProviderName(provider)}</ProviderItemName>
-                {provider.enabled && (
-                  <Tag color="green" style={{ marginLeft: 'auto', marginRight: 0, borderRadius: 16 }}>
-                    ON
-                  </Tag>
-                )}
-              </ProviderListItem>
-            </Dropdown>
-          )}
-        </DraggableVirtualList>
-        <AddButtonWrapper>
-          <Button
-            style={{ width: '100%', borderRadius: 'var(--list-item-border-radius)' }}
-            icon={<PlusIcon size={16} />}
-            onClick={onAddProvider}
-            disabled={dragging}>
-            {t('button.add')}
-          </Button>
-        </AddButtonWrapper>
-      </ProviderListContainer>
-      {selectedProvider ? (
-        <ProviderSetting providerId={selectedProvider.id} key={selectedProvider.id} />
-      ) : (
-        <EmptyProviderHint>
-          <span>{t('settings.no_provider_selected')}</span>
-        </EmptyProviderHint>
-      )}
+    <Container data-testid="provider-settings">
+      <ConnectionSwitcher
+        providers={filteredProviders}
+        currentProvider={selectedProvider}
+        providerLogos={providerLogos}
+        searchText={searchText}
+        onSearchTextChange={setSearchText}
+        onSelect={selectProvider}
+        onToggleEnabled={onToggleEnabled}
+        menuItems={getConnectionMenu()}
+        onAddProvider={onAddProvider}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        itemKey={itemKey as (index: number) => Key}
+        searchDisabled={dragging}
+      />
+      <ContentPane data-testid="provider-content-pane">
+        {selectedProvider ? (
+          <ProviderSetting key={selectedProvider.id} providerId={selectedProvider.id} />
+        ) : (
+          <EmptyProviderHint>
+            <span>{t('settings.no_provider_selected')}</span>
+          </EmptyProviderHint>
+        )}
+      </ContentPane>
     </Container>
   )
 }
 
 const Container = styled.div`
-  width: 100%;
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-`
-
-const ProviderListContainer = styled.div`
   display: flex;
   flex-direction: column;
-  min-width: calc(var(--settings-width) + 10px);
-  padding-bottom: 5px;
-  border-right: 0.5px solid var(--color-border);
-`
-
-const ProviderListItem = styled.div`
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  padding: 5px 10px;
+  flex: 1;
   width: 100%;
-  border-radius: var(--list-item-border-radius);
-  font-size: 14px;
-  transition: all 0.2s ease-in-out;
-  border: 0.5px solid transparent;
-  user-select: none;
-  cursor: pointer;
-  &:hover {
-    background: var(--color-background-soft);
-  }
-  &.active {
-    background: var(--color-background-soft);
-    border: 0.5px solid var(--color-border);
-    font-weight: bold !important;
-  }
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 `
 
-const DragHandle = styled.div`
+const ContentPane = styled.div`
   display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: -8px;
-  width: 12px;
-  color: var(--color-text-3);
-  opacity: 0;
-  transition: opacity 0.2s ease-in-out;
-  cursor: grab;
-
-  ${ProviderListItem}:hover & {
-    opacity: 1;
-  }
-
-  &:active {
-    cursor: grabbing;
-  }
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 `
-
-const ProviderItemName = styled.div`
-  margin-left: 10px;
-  font-weight: 500;
-`
-
-const AddButtonWrapper = styled.div`
-  height: ${BUTTON_WRAPPER_HEIGHT}px;
-  flex-direction: row;
-  justify-content: center;
-  align-items: center;
-  padding: 10px 8px;
-`
-
-const FilterButton = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  cursor: pointer;
-`
-
-const CheckPlaceholder = styled.span`
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-`
-
 const EmptyProviderHint = styled.div`
   flex: 1;
   display: flex;

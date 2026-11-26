@@ -38,7 +38,15 @@ import {
   renderEditFlowNodes,
   SelectionBlock
 } from '../messageEditSelectionLayout'
-import { SEGMENT_GROUP_HEADER_HEIGHT_PX, SegmentGroupPresentationProvider } from '../SegmentGroupPresentation'
+import {
+  GroupSlotContinuation,
+  SEGMENT_GROUP_HEADER_HEIGHT_PX,
+  SEGMENT_GROUP_RAIL_TAIL_TRIM_PX,
+  SEGMENT_GROUP_RAIL_TOP_PX,
+  type SegmentGroupGeometry,
+  SegmentGroupPresentationProvider,
+  useSegmentGroupGeometry
+} from '../SegmentGroupPresentation'
 
 const { capturedFoldedSectionProps } = vi.hoisted(() => ({
   capturedFoldedSectionProps: [] as Array<{ isUnfoldAllowed?: boolean }>
@@ -1529,8 +1537,9 @@ describe('route-stable group header placement', () => {
     )
 
   // Rects keyed by the body a run host carries: the manager measures from
-  // these, so the continuation overlay can paint in jsdom. Newest→oldest
-  // render order means the LAST run is the mounted visual top.
+  // these, so the continuation overlay can paint in jsdom. Production flow
+  // order is oldest→newest (messageFlowNodes reverses once), so the FIRST run
+  // is the mounted visual top — the headless geometry anchor.
   const stubHostRects = (rectByBodyTestId: Record<string, { top: number; bottom: number }>) =>
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const body = this.querySelector('[data-testid^="body-"]')
@@ -1580,18 +1589,33 @@ describe('route-stable group header placement', () => {
     view2.unmount()
   })
 
-  it('renders no temporary header when the stable start leaves the window (continuation only)', async () => {
+  it('anchors the rail-only continuation to the same run geometry uses (production oldest→newest order)', async () => {
     stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
     const seg = routeSeg('seg-route')
     const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
     const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    let observed: SegmentGroupGeometry | null = null
+    const GeometryProbe = () => {
+      observed = useSegmentGroupGeometry('seg-route')
+      return null
+    }
     // m-head (the stable start) is NOT mounted: no 32px header placeholder may
-    // be elected from m-a/m-b. The visual-top run (m-a, last in render order)
-    // carries the rail-only continuation with zero in-flow occupancy.
-    const { container } = renderRouteFlow(
-      [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
-      routeMap,
-      chromeProbe
+    // be elected from m-a/m-b. Production flow order is oldest→newest, so the
+    // visual-top run (m-a, FIRST in flow order — the same run the layout
+    // manager anchors headless geometry to) carries the rail-only continuation
+    // with zero in-flow occupancy.
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes: [routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })],
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+          <GeometryProbe />
+        </>
+      </SegmentGroupPresentationProvider>
     )
     expect(chromeProbe).not.toHaveBeenCalled()
     const continuation = await screen.findByTestId('topic-segment-rail-continuation')
@@ -1602,6 +1626,117 @@ describe('route-stable group header placement', () => {
     expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(1)
     // A window-first member never takes the slot: no `32px` row is elected.
     expect(container.querySelectorAll('[data-testid="topic-segment-slot-continuation"]').length).toBe(0)
+    // Measurable anchor/carrier agreement: geometry is published relative to
+    // the visual-top run (pill offset from its top) and the rail bottom stays
+    // within the group's mounted extent — so the absolute overlay can never
+    // extend past the in-flow bottom and grow scrollHeight. (Painting this
+    // same geometry in the visual-bottom run would overshoot by the inter-run
+    // gap: the keep-last true-branch scrollHeight regression, 1395 vs 1042.)
+    expect(observed).not.toBeNull()
+    expect(observed!.top).toBe(SEGMENT_GROUP_RAIL_TOP_PX)
+    expect(observed!.height).toBe(260 - (100 + SEGMENT_GROUP_RAIL_TOP_PX) - SEGMENT_GROUP_RAIL_TAIL_TRIM_PX)
+    expect(observed!.top + observed!.height).toBeLessThanOrEqual(260 - 100)
+  })
+  it('paints the rail-only continuation in the measured anchor when input order disagrees with visual order', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    // Input array order is newest-first here (m-b BEFORE m-a) while the
+    // stubbed visual tops keep m-a on top: the composition elects no carrier
+    // from order, so only the measured anchor (m-a) paints.
+    const { container } = render(
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes: [routeTurn('g-b', 'm-b', seg, { isLast: true }), routeTurn('g-a', 'm-a', seg)],
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    expect(chromeProbe).not.toHaveBeenCalled()
+    const continuation = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(continuation.getAttribute('data-segment-id')).toBe('seg-route')
+    expect(continuation.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    expect(container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]').length).toBe(1)
+  })
+  it('moves the rail-only continuation to the new anchor when visual tops swap with identical numbers', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 260 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    let observed: SegmentGroupGeometry | null = null
+    const GeometryProbe = () => {
+      observed = useSegmentGroupGeometry('seg-route')
+      return null
+    }
+    const flow = (nodes: FlowNode[]) => (
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+          <GeometryProbe />
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    const nodes = [routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })]
+    const view = render(flow(nodes))
+    const first = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(first.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    const firstTop = observed!.top
+    const firstHeight = observed!.height
+    const firstRunId = first.getAttribute('data-run-id')
+    // Swap the visual positions: the union (100..260) is unchanged, so the
+    // numbers stay identical while the measured anchor moves to m-b.
+    stubHostRects({ 'body-m-a': { top: 200, bottom: 260 }, 'body-m-b': { top: 100, bottom: 260 } })
+    view.rerender(flow(nodes))
+    await vi.waitFor(() => {
+      const live = view.container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]')
+      expect(live.length).toBe(1)
+      expect(live.item(0)?.parentElement?.querySelector('[data-testid="body-m-b"]')).not.toBeNull()
+    })
+    expect(observed!.top).toBe(firstTop)
+    expect(observed!.height).toBe(firstHeight)
+    const second = view.container.querySelector('[data-testid="topic-segment-rail-continuation"]')!
+    expect(second.getAttribute('data-run-id')).not.toBe(firstRunId)
+    view.unmount()
+  })
+  it('hands the rail-only continuation to the survivor when the anchor run unmounts', async () => {
+    stubHostRects({ 'body-m-a': { top: 100, bottom: 160 }, 'body-m-b': { top: 200, bottom: 260 } })
+    const seg = routeSeg('seg-route')
+    const routeMap = new Map([['seg-route', routeEntry('seg-route')]])
+    const chromeProbe = vi.fn(() => <div data-testid="route-chrome" />)
+    const flow = (nodes: FlowNode[]) => (
+      <SegmentGroupPresentationProvider>
+        <>
+          {renderEditFlowNodes({
+            nodes,
+            isEditMode: true,
+            renderSegmentChrome: chromeProbe,
+            routeSegmentsById: routeMap
+          })}
+        </>
+      </SegmentGroupPresentationProvider>
+    )
+    const view = render(flow([routeTurn('g-a', 'm-a', seg), routeTurn('g-b', 'm-b', seg, { isLast: true })]))
+    const first = await screen.findByTestId('topic-segment-rail-continuation')
+    expect(first.parentElement?.querySelector('[data-testid="body-m-a"]')).not.toBeNull()
+    // Window replacement drops the anchor run: the publication is invalidated
+    // synchronously, so no stale paint survives; the next pass elects m-b.
+    view.rerender(flow([routeTurn('g-b', 'm-b', seg, { isLast: true })]))
+    await vi.waitFor(() => {
+      const live = view.container.querySelectorAll('[data-testid="topic-segment-rail-continuation"]')
+      expect(live.length).toBe(1)
+      expect(live.item(0)?.parentElement?.querySelector('[data-testid="body-m-b"]')).not.toBeNull()
+    })
+    view.unmount()
   })
 
   it('hosts the route-stable slot, replacing the header with an equal-height continuation row', () => {
@@ -1712,11 +1847,11 @@ describe('route-stable group header placement', () => {
     onResidual.unmount()
   })
 
-  it('gives the continuation slot the header row height, so routes cannot drift', () => {
-    // The header row's own height is asserted independently where it renders
-    // (`TopicSegmentLine.folded`), and both rows are built from
-    // `SEGMENT_GROUP_HEADER_HEIGHT_PX`; asserting the continuation here pins
-    // that the two presentations occupy the same normal-flow height.
+  it('keeps the continuation slot height equal to the header row in both states, so routes cannot drift', () => {
+    // The header row's own heights are asserted independently where it renders
+    // (`TopicSegmentLine.folded`: zero-height expanded sharing the message
+    // band, `32px` collapsed keeping its own row); asserting the continuation
+    // here pins that the two presentations stay interchangeable per state.
     const seg = routeSeg('seg-height')
     const residualMap = new Map([
       [
@@ -1741,10 +1876,25 @@ describe('route-stable group header placement', () => {
     expect(row).not.toBeNull()
     const cs = window.getComputedStyle(row)
     expect(cs.position).toBe('relative')
-    expect(cs.height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    // Expanded: zero in-flow height, exactly like the expanded header variant.
+    expect(cs.height).toBe('0px')
     // Slot occupancy only: no pill, no group menu, no invented head identity.
     expect(container.querySelectorAll('[data-testid="topic-segment-label"]').length).toBe(0)
     expect(container.querySelectorAll('[data-testid="topic-segment-actions"]').length).toBe(0)
+
+    // Collapsed browse view: bodies are hidden and no message band is
+    // available, so the slot keeps its own 32px row — same as the header.
+    const collapsed = render(
+      <div data-seg-bodies-hidden="true">
+        <GroupSlotContinuation groupId="seg-height" color="#808080" />
+      </div>
+    )
+    const collapsedRow = collapsed.container.querySelector(
+      '[data-testid="topic-segment-slot-continuation"]'
+    ) as HTMLElement
+    expect(collapsedRow).not.toBeNull()
+    expect(window.getComputedStyle(collapsedRow).height).toBe(`${SEGMENT_GROUP_HEADER_HEIGHT_PX}px`)
+    collapsed.unmount()
   })
 
   it('a stale qualification never renders a header here (fail-closed coverage)', () => {

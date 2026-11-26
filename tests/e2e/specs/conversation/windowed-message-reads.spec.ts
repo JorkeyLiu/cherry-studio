@@ -22,12 +22,11 @@
  *   write, no fake scroll event, no spacer, no instrumentation.
  * - R-04 whole-topic snapshot via real export-as-Markdown — INTEGRATED snapshot
  *   action with independent fetchWholeTopicSnapshot oracle; loaded window
- *   unchanged (snapshot never publishes). The removed copy-as-Markdown menu
- *   path is NOT used: the whole-topic read goes through the production
- *   export submenu (Export → Export as markdown) with the file-save dialog
- *   captured in-page. The same case also asserts the topic-menu contract
- *   (no prompt item, no copy submenu, no top-level notes item; Save nests
- *   notes + knowledge) and the Save → notes click behavior.
+ *   unchanged (snapshot never publishes). The whole-topic read goes through
+ *   the production export submenu (Export → Export as markdown) with the
+ *   file-save dialog captured in-page. The same case also asserts the
+ *   topic-menu contract (no prompt item, no copy submenu, no notes item
+ *   anywhere; Save nests only the retained knowledge entry).
  * - R-05 conversation-navigation whole-route user list — INTEGRATED UI
  *   evidence: enable messageNavigation via existing settings action,
  *   cold-activate the same 50/20 seed, assert the LEFT conversation list
@@ -962,16 +961,15 @@ test.describe('windowed reads: latest and around', () => {
     }
   })
 
-  test('R-04 whole-topic snapshot via real export-as-Markdown + save-submenu contract — bounded window preserved', async ({
+  test('R-04 whole-topic snapshot via real export-as-Markdown + save-submenu (knowledge-only) contract — bounded window preserved', async ({
     mainWindow,
     ownedTmpRoot
   }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-04 INTEGRATED: real topic-item context menu contract (no prompt item, no copy submenu, no top-level notes item; Save nests notes + knowledge) → real Save → notes click (toast + captured file write holds head+tail) → real Export → Export-as-markdown with captured file-save payload (whole-topic Main snapshot holds head+tail); independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
+        'R-04 INTEGRATED: real topic-item context menu contract (no prompt item, no copy submenu, no notes item anywhere; Save nests only the retained knowledge entry) → real Export → Export-as-markdown with captured file-save payload (whole-topic Main snapshot holds head+tail); independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
     })
-
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
     const topicId = `window-copy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -1019,10 +1017,12 @@ test.describe('windowed reads: latest and around', () => {
     console.log(`[E2E] R-04 pre window ids=${pre.ids.length} dom=${pre.domCount} blocks=${pre.blockIdsInOrder.length}`)
 
     // Real user-visible menu contract: topic-item context menu must NOT offer
-    // the removed prompt/copy entries, must NOT offer top-level notes, and
-    // must nest notes + knowledge under Save. Locale-robust (zh-CN per
-    // trace): prompt `chat.topics.prompt.label` (话题提示词|Topic Prompts),
-    // copy parent `chat.topics.copy.title` (复制|Copy), copy child
+    // Real user-visible menu contract: topic-item context menu must NOT offer
+    // the removed prompt/copy entries and must NOT offer a notes entry
+    // anywhere (top level or nested under Save); the Save submenu retains
+    // only the knowledge entry. Locale-robust (zh-CN per trace): prompt
+    // `chat.topics.prompt.label` (话题提示词|Topic Prompts), copy parent
+    // `chat.topics.copy.title` (复制|Copy), copy child
     // `chat.topics.copy.md` (复制为 Markdown|Copy as markdown), notes
     // `notes.save` (保存到笔记|Save to Notes), save parent
     // `chat.save.label` (保存|Save), knowledge
@@ -1035,8 +1035,8 @@ test.describe('windowed reads: latest and around', () => {
     await expect(page.getByRole('menuitem', { name: /^(话题提示词|Topic Prompts)$/ })).toHaveCount(0)
     await expect(page.locator('.ant-dropdown-menu-submenu').filter({ hasText: /^(复制|Copy)$/ })).toHaveCount(0)
     await expect(page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ })).toHaveCount(0)
-    // Top-level notes entry is gone: with every submenu still closed the
-    // nested notes item is not rendered, so the count is exactly zero here.
+    // No notes entry at the top level: with every submenu still closed the
+    // removed notes item is not rendered, so the count is exactly zero here.
     await expect(page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ })).toHaveCount(0)
     const saveParent = page
       .locator('.ant-dropdown-menu-submenu')
@@ -1044,89 +1044,39 @@ test.describe('windowed reads: latest and around', () => {
       .first()
     await saveParent.waitFor({ state: 'visible', timeout: 10000 })
     await saveParent.hover()
-    const notesItem = page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ }).first()
+    // Save nests only the retained knowledge entry: the removed notes entry
+    // must stay absent even with the submenu open.
+    await expect(page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ })).toHaveCount(0)
     const knowledgeItem = page
       .getByRole('menuitem', { name: /^(保存话题到知识库|Save Topic to Knowledge Base)$/ })
       .first()
-    await notesItem.waitFor({ state: 'visible', timeout: 10000 })
     await knowledgeItem.waitFor({ state: 'visible', timeout: 10000 })
-    console.log('[E2E] R-04 menu contract ok (no prompt/copy/top-notes; Save nests notes+knowledge)')
-
-    // Real Save → notes click: the production path writes a real markdown
-    // file under the disposable-profile notes dir (no personal files).
-    // Snapshot the candidate notes dirs first, then assert the user-visible
-    // success toast plus a newly written payload holding heading +
-    // authority head + tail in order.
-    const notesInfo = await page.evaluate(async () => {
-      const s = (window as any).store.getState()
-      const info = await (window as any).api.getAppInfo()
-      return { storeNotesPath: (s.note?.notesPath ?? '') as string, defaultNotesPath: info.notesPath as string }
-    })
-    expect(notesInfo.defaultNotesPath, 'runtime default notes path must be known').toBeTruthy()
-    console.log(
-      `[E2E] R-04 notes dirs store=${notesInfo.storeNotesPath || '(empty)'} default=${notesInfo.defaultNotesPath}`
-    )
-    const notesDirs = [notesInfo.storeNotesPath, notesInfo.defaultNotesPath].filter(
-      (p): p is string => typeof p === 'string' && p.length > 0
-    )
-    const notesBefore = new Map<string, Set<string>>()
-    for (const dir of notesDirs) {
-      try {
-        notesBefore.set(dir, new Set(fs.existsSync(dir) ? fs.readdirSync(dir) : []))
-      } catch {
-        notesBefore.set(dir, new Set())
-      }
-    }
-    await notesItem.click()
-
-    // User-visible notes success toast (`message.success.notes.export`: zh-CN 成功导出到笔记 / en-US Successfully exported to notes).
-    await expect(page.locator('.ant-message')).toContainText(/(成功导出到笔记|Successfully exported to notes)/, {
-      timeout: 15000
-    })
-    console.log('[E2E] R-04 notes success toast visible')
-    const findFreshNoteFile = (): string | null => {
-      for (const dir of notesDirs) {
-        let entries: string[] = []
-        try {
-          entries = fs.existsSync(dir) ? fs.readdirSync(dir) : []
-        } catch {
-          continue
-        }
-        const before = notesBefore.get(dir) ?? new Set<string>()
-        const fresh = entries.filter((e) => !before.has(e) && e.endsWith('.md'))
-        if (fresh.length > 0) {
-          return path.join(dir, fresh[0])
-        }
-      }
-      return null
-    }
-    await expect.poll(() => findFreshNoteFile() !== null, { timeout: 15000 }).toBe(true)
-    const noteFile = findFreshNoteFile()
-    if (noteFile === null || noteFile.length === 0) {
-      throw new Error('a new markdown note file must appear under the disposable notes dir')
-    }
-    const noteContent = fs.readFileSync(noteFile, 'utf-8')
-    expect(noteContent.includes(heading), 'notes payload must contain the topic heading').toBe(true)
-    expect(noteContent.includes(headContent), 'notes payload must contain authority head content').toBe(true)
-    expect(noteContent.includes(tailContent), 'notes payload must contain the tail content (no truncation)').toBe(true)
-    expect(noteContent.indexOf(headContent)).toBeGreaterThan(noteContent.indexOf(heading))
-    expect(noteContent.indexOf(tailContent)).toBeGreaterThan(noteContent.indexOf(headContent))
-    console.log(`[E2E] R-04 notes write ok file=${noteFile} len=${noteContent.length}`)
-
+    console.log('[E2E] R-04 menu contract ok (no prompt/copy/notes; Save nests knowledge only)')
+    // Save-to-notes is removed: the menu contract above proves the notes entry
+    // is gone, and the whole-topic file-write evidence below goes through the
+    // retained Export-as-markdown path with the same heading + authority head
+    // + tail strength (stored notes data itself is preserved, not exercised
+    // here).
     // Real user-visible action: topic-item context menu → Export submenu →
     // Export as markdown. The production preconfigured-path branch is used:
-    // `settings/exportPath` points at a spec-local dir under the
-    // fixture-owned root (no personal files, no native save dialog), so the
+    // `settings.exportPath` — the field the retired `markdownExportPath` was
+    // folded into by the settings migration — points at a spec-local dir under
+    // the fixture-owned root (no personal files, no native save dialog), so the
     // written file is the whole-topic evidence. Locale-robust: parent
     // `chat.topics.export.title` (导出|Export), child
     // `chat.topics.export.md.label` (导出为 Markdown|Export as markdown).
     const exportDir = path.join(ownedTmpRoot, 'r04-export')
     fs.mkdirSync(exportDir, { recursive: true })
     await page.evaluate((dir: string) => {
+      // Slice action names are part of the renderer store contract:
+      // `settings/setExportPath` is the reducer the export UI itself dispatches.
       ;(window as any).store.dispatch({ type: 'settings/setExportPath', payload: dir })
     }, exportDir)
     const exportPathOk = await page.evaluate(() => (window as any).store.getState().settings?.exportPath)
-    expect(exportPathOk).toBe(exportDir)
+    expect(
+      exportPathOk,
+      'preconfigured export path must land in the live settings.exportPath (production preconf branch)'
+    ).toBe(exportDir)
     await topicItem.scrollIntoViewIfNeeded()
     await topicItem.click({ button: 'right' })
     const exportParent = page

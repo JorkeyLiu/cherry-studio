@@ -6,9 +6,8 @@
  * constraints: depth limit, cycle detection, sparse array rejection,
  * plain object enforcement, and insertion order preservation.
  *
- * These tests validate the shared implementation used by both
- * SqliteMessageDataSource (renderer→Main IPC) and the chatImport
- * entry point (Dexie→Main IPC).
+ * These tests validate the shared cloneForWire implementation used by
+ * SqliteMessageDataSource.
  */
 import { describe, expect, it } from 'vitest'
 

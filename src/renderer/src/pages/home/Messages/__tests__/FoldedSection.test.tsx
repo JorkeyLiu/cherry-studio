@@ -288,6 +288,29 @@ describe('FoldedSection', () => {
       expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
     })
 
+    it('paints no aggregate outline on the expanded block when fully selected', () => {
+      const { unmount } = renderSection({ isExpanded: true, turnCount: 2, isSelected: true, selectedTurnCount: 2 })
+      const expanded = screen.getByTestId('folded-section-expanded')
+      expect(expanded).toHaveAttribute('data-folded-section-selected', 'false')
+      expect(expanded).toHaveAttribute('data-folded-section-partial', 'false')
+      expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
+      unmount()
+    })
+
+    it('paints no aggregate outline or hint on the expanded block when partially selected', () => {
+      const { unmount } = renderSection({
+        isExpanded: true,
+        turnCount: 3,
+        isPartiallySelected: true,
+        selectedTurnCount: 1
+      })
+      const expanded = screen.getByTestId('folded-section-expanded')
+      expect(expanded).toHaveAttribute('data-folded-section-selected', 'false')
+      expect(expanded).toHaveAttribute('data-folded-section-partial', 'false')
+      expect(screen.queryByTestId('folded-section-partial-hint')).not.toBeInTheDocument()
+      unmount()
+    })
+
     it('expands on collapsed marker click in edit mode without selecting or writing', () => {
       const onToggleExpand = vi.fn()
       const onSectionSelect = vi.fn()
@@ -705,7 +728,7 @@ describe('FoldedSection', () => {
       useLayoutEffect(() => {
         const element = ref.current
         if (!manager || !element) return
-        return manager.registerRun(groupId, element, { isHeader: true, endsGroup: true })
+        return manager.registerRun(groupId, element, { runId: 'run-header', isHeader: true, endsGroup: true })
       }, [manager, groupId])
       return <div ref={ref} data-testid="probe-run-host" />
     }
@@ -754,8 +777,8 @@ describe('FoldedSection', () => {
       stubRect(screen.getByTestId('folded-section-header'), { top: 309.55, bottom: 335.55 })
       view.rerender(tree({ rangeScopeIds: [] }))
 
-      // Run-only rule, unchanged: the rail starts just below the header pill.
-      expect(screen.getByTestId('probe-geometry').textContent).toBe('28/0')
+      // Run-only rule, unchanged: the rail starts at the pill's own top.
+      expect(screen.getByTestId('probe-geometry').textContent).toBe('10/10')
       view.unmount()
     })
 
@@ -767,7 +790,7 @@ describe('FoldedSection', () => {
       expect(Number(screen.getByTestId('probe-geometry').textContent.split('/')[0])).toBeLessThan(0)
 
       collapsed.rerender(tree({ rangeScopeIds: ['seg-1'], isExpanded: true }))
-      expect(screen.getByTestId('probe-geometry').textContent).toBe('28/0')
+      expect(screen.getByTestId('probe-geometry').textContent).toBe('10/10')
       collapsed.unmount()
     })
   })

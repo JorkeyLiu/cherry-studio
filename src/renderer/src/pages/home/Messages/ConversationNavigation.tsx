@@ -1,17 +1,20 @@
 import { loggerService } from '@logger'
+import { getClosureSemanticToken, subscribeClosureInvalidations } from '@renderer/services/contextClosure'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
+import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { FC } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 
 import { forkMarkerLabel, groupForkChildrenByParent, resolveForkPlacement, takenChildAtAnchor } from './forkPlacement'
 import MessageOutline from './MessageOutline'
 import type { ReadingAnchorReport } from './Messages'
+import { buildNavGroupRuns, type NavGroupRun } from './navGroupRuns'
 import { useBranchTree } from './useBranchTree'
 import {
   type AttachmentLabelFormatters,
@@ -35,6 +38,22 @@ interface ConversationNavigationProps {
   topicId: string
   readingAnchor?: ReadingAnchorReport | null
   onNavigate: (messageId: string) => void
+  /**
+   * Route-scoped segment projection for this route (Chat wires
+   * `useRouteScopedSegments`; defaults to none). The outline maps each
+   * member to its user row and splits non-contiguous membership into
+   * separate runs — it never rewrites catalog membership or order.
+   */
+  segments?: readonly RouteScopedSegment[]
+  /**
+   * Accepted context boundary from Chat's shared projection
+   * (`sharedContextInfo.boundaryMessageId`): the same Main-reported id the
+   * message flow draws its context divider from. The outline draws its own
+   * textless divider ABOVE the mapped user row — DOM-before the anchor
+   * turn, exactly like the flow — whether the boundary is a user message
+   * (its own row) or an assistant message (its preceding user row).
+   */
+  contextBoundaryMessageId?: string | null
 }
 
 /**
@@ -42,12 +61,17 @@ interface ConversationNavigationProps {
  * caller-local whole-topic snapshot (effective active-branch route order).
  * Pure entry for focused tests; production passes the loaded snapshot.
  *
+ * A folded user row (`Message.folded === true`, the Main-authoritative
+ * whole-turn flag present on every member row) drops its entry until it
+ * unfolds — collapsed turns leave the request context and the outline alike.
+ * The flag is read only; this module never writes fold state.
+ *
  * Display rules: a filtered nonempty body shows WITH its attachment kind
  * prefix (sequential labels in original block order, joined directly with
  * the body — no added space/dot/count); a no-body (or quote-only) message
  * with attachments keeps a navigable stable-ID row with a meaningful
- * attachment label; quote-only without attachments keeps the localized
- * fallback.
+ * attachment label; quote-only without attachments keeps the bracketed
+ * localized fallback (e.g. `[引用消息]`).
  */
 export const buildConversationNavItems = (
   messages: Message[],
@@ -59,6 +83,9 @@ export const buildConversationNavItems = (
   const items: ConversationNavItem[] = []
   for (const message of messages) {
     if (!message || message.role !== 'user') continue
+    // Folded turns leave the outline until unfolded: Main writes the
+    // whole-turn flag on every member row, so a folded user row drops here.
+    if (message.folded === true) continue
     const preview = summarizeUserMessage(message, blocksById, options)
     const hasAttachment = hasNavigableAttachment(message, blocksById)
     if (preview) {
@@ -101,9 +128,17 @@ const resolveOutlineRowId = (
   precedingUserByMessageId: ReadonlyMap<string, string>
 ): string | undefined => (itemIds.has(messageId) ? messageId : precedingUserByMessageId.get(messageId))
 
-const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, readingAnchor, onNavigate }) => {
+const ConversationNavigation: FC<ConversationNavigationProps> = ({
+  topicId,
+  readingAnchor,
+  onNavigate,
+  segments = [],
+  contextBoundaryMessageId = null
+}) => {
   const { t } = useTranslation()
-  const fallback = t('chat.navigation.user_message_fallback')
+  // Bracketed quote-only placeholder (locales stay raw — same wrap-at-call-site
+  // convention as attachment kind labels); mixed text+quote previews pass through.
+  const fallback = `[${t('chat.navigation.user_message_fallback')}]`
   // Localized link word for in-place external-link replacement in body
   // previews (the pure preview module interpolates nothing itself).
   const linkLabel = t('chat.navigation.user_message_link')
@@ -136,6 +171,17 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // and the list derives empty — no post-effect flash of old IDs under the
   // new route. Same-route refetches keep the key, so the list stays coherent.
   const activeRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
+  // Fold/context-participation signal for the viewed route. `setTurnFolds`
+  // advances this route's semantic token through `bumpAndInvalidate` without
+  // touching `topic.updatedAt` or emitting MESSAGE_COMPLETE, so neither
+  // existing trigger observes a fold. The token is per-route (`routeGen` for
+  // this route plus the global epoch): unrelated topics/routes keep their
+  // token and bail out without refetch. Same pattern as
+  // `useClosureSemanticSignal`, read directly so this module stays a
+  // caller-local data controller.
+  const closureSignal = useSyncExternalStore(subscribeClosureInvalidations, () =>
+    getClosureSemanticToken(topicId, activeBranchId)
+  )
   const [messages, setMessages] = useState<Message[]>([])
   const [blocksById, setBlocksById] = useState<SnapshotBlockMap>(new Map())
   const [snapshotKey, setSnapshotKey] = useState<string>('')
@@ -152,6 +198,13 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
   // the first real timestamp that follows is a genuine update, not a baseline.
   const lastUpdatedAtRef = useRef<string | undefined>(undefined)
   const hasUpdatedAtBaselineRef = useRef(false)
+  // Semantic-token baseline for the loaded route, mirroring the updatedAt
+  // baseline above: the first observed token after a route load is whatever
+  // the snapshot already represents, so it becomes the baseline without a
+  // refetch; the first CHANGED token after that is a genuine fold/context
+  // mutation. Presence and value stay separate for the same reason.
+  const lastClosureSignalRef = useRef<string | undefined>(undefined)
+  const hasClosureBaselineRef = useRef(false)
   topicRef.current = topicId
   branchRef.current = activeBranchId
 
@@ -217,6 +270,8 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     const targetRouteKey = `${topicId}::${activeBranchId ?? 'main'}`
     routeRef.current = targetRouteKey
     lastUpdatedAtRef.current = undefined
+    lastClosureSignalRef.current = undefined
+    hasClosureBaselineRef.current = false
     hasUpdatedAtBaselineRef.current = false
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
@@ -286,6 +341,28 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
       unsubscribe()
     }
   }, [topicId, scheduleDebouncedRefetch])
+
+  // 4) fold/context-participation mutation: the semantic token changes only
+  // when THIS route's generation (or the global epoch) advances — the same
+  // `bumpAndInvalidate` the turn-fold thunk already performs — so the same
+  // coalesced refetch re-reads the authoritative snapshot and the folded row
+  // leaves (or rejoins) the list without relying on unrelated activity.
+  // The baseline discipline mirrors (2): the route identity is a dependency
+  // on purpose so the switch commit re-captures the baseline from the newly
+  // loaded snapshot instead of refetching for the switch itself, and the
+  // shared debounce plus the fetch guards keep a stale bump from writing
+  // under a newer route.
+  useEffect(() => {
+    if (!topicId) return
+    if (!hasClosureBaselineRef.current) {
+      hasClosureBaselineRef.current = true
+      lastClosureSignalRef.current = closureSignal
+      return
+    }
+    if (closureSignal === lastClosureSignalRef.current) return
+    lastClosureSignalRef.current = closureSignal
+    scheduleDebouncedRefetch()
+  }, [topicId, activeBranchId, closureSignal, scheduleDebouncedRefetch])
 
   // Caller-local only: derived per snapshot, never a per-token full scan.
   // Route-boundary provenance: whenever the loaded snapshot key differs from
@@ -393,12 +470,43 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, read
     [snapshotKey, activeRouteKey, topicId, activeBranchId, onNavigate]
   )
 
+  // Group runs: each segment's members map to outline rows through the same
+  // single resolver the highlight and the fork markers share; non-contiguous
+  // membership splits into separate continuous runs. Gated on the loaded
+  // route like every other derivation, so a pending route never shows the
+  // previous route's groups.
+  const groupRuns = useMemo<NavGroupRun[]>(
+    () =>
+      isSnapshotCurrent
+        ? buildNavGroupRuns({
+            rowIds: items.map((item) => item.id),
+            resolveRowId: (messageId) => resolveOutlineRowId(messageId, itemIds, precedingUserByMessageId),
+            segments
+          })
+        : [],
+    [isSnapshotCurrent, items, itemIds, precedingUserByMessageId, segments]
+  )
+  // Context divider row: drawn ABOVE the mapped user row (the same row the
+  // highlight would land on), matching the flow's DOM-before-anchor divider.
+  // Unresolvable or absent boundaries draw no divider.
+  const contextRowId = useMemo<string | null>(() => {
+    if (!isSnapshotCurrent || !contextBoundaryMessageId) return null
+    return resolveOutlineRowId(contextBoundaryMessageId, itemIds, precedingUserByMessageId) ?? null
+  }, [isSnapshotCurrent, contextBoundaryMessageId, itemIds, precedingUserByMessageId])
   if (items.length === 0) return null
-
   // Presentation is the restored original MessageOutline (verbatim styles);
   // this module stays a caller-local data controller only.
   const entries = items.map((item) => ({ id: item.id, text: item.preview }))
-  return <MessageOutline entries={entries} onNavigate={handleNavigate} activeId={activeId} forkAfter={forkAfter} />
+  return (
+    <MessageOutline
+      entries={entries}
+      onNavigate={handleNavigate}
+      activeId={activeId}
+      forkAfter={forkAfter}
+      groupRuns={groupRuns}
+      contextRowId={contextRowId}
+    />
+  )
 }
 
 export default ConversationNavigation

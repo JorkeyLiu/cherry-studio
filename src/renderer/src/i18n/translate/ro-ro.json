@@ -1796,98 +1796,6 @@
     "preview": "Previzualizare",
     "split": "Divizat"
   },
-  "import": {
-    "chatgpt": {
-      "assistant_name": "Import ChatGPT",
-      "button": "Selectează fișierul",
-      "description": "Importă doar textul conversației, nu include imagini și atașamente",
-      "error": {
-        "invalid_json": "Format fișier JSON invalid",
-        "no_conversations": "Nu s-au găsit conversații în fișier",
-        "no_valid_conversations": "Nu există conversații valide de importat",
-        "unknown": "Importul a eșuat, te rugăm să verifici formatul fișierului"
-      },
-      "help": {
-        "step1": "1. Conectează-te la ChatGPT, mergi la Settings > Data controls > Export data",
-        "step2": "2. Așteaptă fișierul de export pe e-mail",
-        "step3": "3. Extrage arhiva descărcată și găsește conversations.json",
-        "title": "Cum export conversațiile ChatGPT?"
-      },
-      "importing": "Se importă conversațiile...",
-      "selecting": "Se selectează fișierul...",
-      "success": "S-au importat cu succes {{topics}} conversații cu {{messages}} mesaje",
-      "title": "Importă conversații ChatGPT",
-      "untitled_conversation": "Conversație fără titlu"
-    },
-    "cherrystudio": {
-      "cancelled": {
-        "description": "Importul a fost anulat. Nu s-au efectuat modificări asupra datelor dvs.",
-        "title": "Import anulat"
-      },
-      "catalog_recovery": {
-        "description": "[to be translated]:Please wait — the application will reopen shortly.",
-        "error_code": "[to be translated]:Error code",
-        "repair_required": {
-          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
-          "title": "[to be translated]:Data recovery incomplete"
-        },
-        "title": "[to be translated]:Recovering imported data…"
-      },
-      "confirm_button": "Pornire import",
-      "confirm_description": "Acesta va înlocui toate datele de conversație existente cu datele din backupul Cherry Studio. Această acțiune nu poate fi anulată.",
-      "confirm_title": "Confirmare import",
-      "confirm_warning": "Atenție: Toate conversațiile și mesajele curente vor fi înlocuite.",
-      "description": "Importați conversații, mesaje și atașamente dintr-un fișier de backup ZIP Cherry Studio. Aceasta va înlocui toate datele de conversație existente.",
-      "error": {
-        "title": "Eroare de import",
-        "unknown": "Importul a eșuat. Verificați formatul fișierului ZIP și încercați din nou."
-      },
-      "phase": {
-        "cancelled": "Importul a fost anulat",
-        "discovering": "Se descoperă structura bazei de date...",
-        "error": "Importul a eșuat",
-        "extracting": "Se extrage arhiva ZIP...",
-        "idle": "Gata de import",
-        "processing": "Se procesează și validează datele...",
-        "promoting": "Se aplică importul (se înlocuiesc datele)...",
-        "reading": "Se citesc datele de conversație...",
-        "success": "Importul s-a finalizat cu succes! Aplicația va reporni.",
-        "unsupported": "Platformă neacceptată"
-      },
-      "recovered": {
-        "assistant_name": "[to be translated]:Recovered conversations",
-        "topic_name": "[to be translated]:Recovered conversation {{index}}"
-      },
-      "select_button": "Selectare fișier",
-      "select_file": "Selectare backup ZIP Cherry Studio",
-      "steps": {
-        "confirm": "Confirmare",
-        "import": "Import",
-        "promote": "Aplicare",
-        "select": "Selectare fișier"
-      },
-      "success": {
-        "description": "Backupul Cherry Studio a fost importat. Aplicația va reporni pentru a aplica modificările.",
-        "title": "Import reușit"
-      },
-      "title": "Importare backup ZIP Cherry Studio",
-      "unsupported": {
-        "description": "Importul ZIP Cherry Studio este momentan acceptat doar pe macOS. Platforma dvs. curentă nu este încă acceptată.",
-        "title": "Platformă neacceptată"
-      },
-      "untitled_topic": "[to be translated]:Untitled Topic",
-      "warning": {
-        "description": "Acest import va înlocui toate datele de conversație existente. Asigurați-vă că aveți un backup al datelor curente dacă este necesar.",
-        "title": "Înlocuiește tot"
-      }
-    },
-    "confirm": {
-      "button": "Selectează fișierul de import",
-      "label": "Ești sigur că vrei să imporți date externe?"
-    },
-    "content": "Selectează fișierul de conversație din aplicația externă pentru import; momentan acceptă doar fișiere în format JSON ChatGPT",
-    "title": "Importă conversații externe"
-  },
   "knowledge": {
     "add": {
       "title": "Adaugă bază de cunoștințe"
@@ -3750,8 +3658,7 @@
       "divider": {
         "basic": "Setări date de bază",
         "cloud_storage": "Setări backup în cloud",
-        "export_settings": "Setări export",
-        "import_settings": "Setări import"
+        "export_settings": "Setări export"
       },
       "export_options": {
         "exclude_citations": {
@@ -3843,13 +3750,6 @@
       },
       "hour_interval_one": "{{count}} oră",
       "hour_interval_other": "{{count}} ore",
-      "import_settings": {
-        "button": "Importă fișier Json",
-        "chatgpt": "Importă din ChatGPT",
-        "cherrystudio": "Import din ZIP Cherry Studio",
-        "cherrystudio_button": "Import backup ZIP",
-        "title": "Importă date din aplicație externă"
-      },
       "limit": {
         "appDataDiskQuota": "Avertisment spațiu pe disc",
         "appDataDiskQuotaDescription": "Spațiul directorului de date este aproape plin, te rugăm să eliberezi spațiu pe disc, altfel datele se vor pierde"

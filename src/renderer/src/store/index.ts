@@ -26,11 +26,11 @@ import { clearCachedContextClosure as clearClosureCache } from '../services/cont
 import * as closureCache from '../services/contextClosure'
 import {
   collectFreshTopicTargets,
+  configureFreshChatBootstrapFinalizer,
   finalizeFreshChatBootstrap,
-  markFreshBootstrapPendingIfFreshProfile
+  markFreshBootstrapPendingIfFreshProfile,
+  runFreshChatBootstrap
 } from '../services/freshChatBootstrap'
-import { applyPendingImportProjection } from '../services/importProjection'
-import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
@@ -478,7 +478,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 229,
+    version: 230,
     transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',
@@ -632,25 +632,22 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
 // Fresh-chat bootstrap pending marker: set synchronously here at module
 // evaluation when the persist compatibility key is absent — before
 // redux-persist can write for this boot. Outside the Redux persist payload,
-// so it survives apply/ensure failure and renderer restart; cleared only by
-// the boot finalizer. Full lifecycle contract in `freshChatBootstrap`.
+// so it survives ensure failure and renderer restart; cleared only by
+// the boot finalizer. Lifecycle contract in `freshChatBootstrap`.
 markFreshBootstrapPendingIfFreshProfile()
 
 /**
- * Fresh-bootstrap finalizer for the boot readiness gate.
+ * Finalize a fresh-chat bootstrap after rehydration.
  *
- * Runs after the pending import outcome is known (`applied`) and before
- * `ImportProjectionGate` readiness, so HomePage can never mount a NOT_FOUND
- * initial topic read. An applied import clears the marker without ensuring
- * (imported navigation supersedes initial topics); verified-no-pending with
- * a pending marker ensures every current initial topic create-only, then
- * clears. A rejection retains the marker (next-boot/retry) and the caller
- * keeps the ordinary tree gated. Dynamic import keeps the store free of a
- * static cycle into the SQLite lifecycle module.
+ * With a pending marker, ensure every current initial topic create-only
+ * (Main-side ensure never overwrites an existing binding, so partial ensures
+ * and retries are safe), then clear the marker. A rejection retains the
+ * marker for next-boot/retry. Without a marker, nothing is touched. Dynamic
+ * import keeps the store free of a static cycle into the SQLite lifecycle
+ * module.
  */
-async function finalizeFreshChatBootstrapForBoot(applied: boolean): Promise<void> {
-  await finalizeFreshChatBootstrap({
-    applied,
+async function finalizeFreshChatBootstrapForBoot() {
+  return finalizeFreshChatBootstrap({
     collectTargets: () => collectFreshTopicTargets(store.getState().assistants?.assistants ?? []),
     ensureTopic: async (target) => {
       const { ensureOrdinaryTopicOwnership } = await import('../services/db/topicTrashLifecycle')
@@ -658,6 +655,8 @@ async function finalizeFreshChatBootstrapForBoot(applied: boolean): Promise<void
     }
   })
 }
+
+configureFreshChatBootstrapFinalizer(finalizeFreshChatBootstrapForBoot)
 
 const store = configureStore({
   // @ts-ignore store type is unknown
@@ -694,43 +693,23 @@ export const persistor = persistStore(store, undefined, () => {
   }
 
   // The rehydrated store is safely selectable the moment
-  // persistStore rehydration completes — signal ReduxStoreReady IMMEDIATELY,
-  // independently of the one-shot projection outcome. Main's startup config
-  // reads consume config slices (settings/llm) which rehydration already
-  // provides; the projection affects navigation/assistants and stays gated
-  // by ImportProjectionReadiness below.
-  // The ordinary chat tree remains gated on the
-  // one-shot L2 navigation projection settlement. runReduxStoreBoot fires the
-  // Main notification first, then runImportProjectionBoot settles readiness
-  // ONLY when the apply returns applied (true) or verified no-pending
-  // (false) without an API failure; on failure the pending row stays unacked
-  // (next-startup retry) and the tree stays gated so no stale topic load can
-  // run before the imported navigation is projected. dispatch/flush are
-  // injected to keep the apply module free of a static cycle back into this
-  // store module. The callback stays synchronous — the boot promise is
-  // fire-and-forget (no promise is returned to redux-persist); .catch is a
-  // defensive guard because runReduxStoreBoot never rejects.
-  void runReduxStoreBoot({
-    notifyMain: () => {
-      // Notify Main right after rehydration — not gated on the
-      // projection. ReduxStoreReady means "the rehydrated store is safely
-      // selectable".
-      void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
-      logger.info('Redux store rehydrated, notified main process')
-    },
-    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }),
-    finalizeFreshBootstrap: finalizeFreshChatBootstrapForBoot
-  })
+  // persistStore rehydration completes. Notify Main immediately: its startup
+  // config reads consume config slices that rehydration already provides.
+  void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
+  logger.info('Redux store rehydrated, notified main process')
+
+  // Fresh-profile bootstrapping shares one readiness promise with the UI retry
+  // surface. Start it only after the immediate Main notification; the ordinary
+  // chat tree stays unmounted until this promise settles successfully.
+  void runFreshChatBootstrap()
     .then(() => {
       // Baseline for the "by update time" policy (the default) and the one-time
       // default application for assistants that never chose an order: one batch
-      // read of the enabled assistants' topics, AFTER rehydration and the
-      // one-shot import projection (so an assistant that arrived through the
-      // import without a mode is covered too), followed by the single default
-      // sort of the undecided assistants' non-pinned topics. After that, only a
-      // topic whose latest message instant really changed moves. Dynamic import
-      // keeps the store free of a static cycle into the ordering service (which
-      // reads the store).
+      // read of the enabled assistants' topics after rehydration, followed by
+      // the single default sort of the undecided assistants' non-pinned topics.
+      // After that, only a topic whose latest message instant really changed
+      // moves. Dynamic import keeps the store free of a static cycle into the
+      // ordering service (which reads the store).
       void import('../services/topicMessageTimes')
         .then(async (module) => {
           await module.primeTopicMessageTimesBaseline()
@@ -746,7 +725,7 @@ export const persistor = persistStore(store, undefined, () => {
         })
     })
     .catch((error) => {
-      logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
+      logger.error('Fresh-chat bootstrap failed unexpectedly (retained for retry):', error as Error)
     })
 })
 

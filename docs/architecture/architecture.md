@@ -2,9 +2,9 @@
 
 > **Scope**: This document describes **implemented architecture only** — what exists in the codebase today. It does not describe target architecture, planned evolution, or unimplemented design decisions. For the architecture evolution program (target qualities, phased evolution, debt registry), see [`architecture-evolution-program.md`](../archived/architecture-evolution-program.md).
 
-This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
+This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, retained local compatibility).
 
-Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](../adr/cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](../archived/sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), the [Context window governance](../adr/context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary), the [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md) (loaded projection semantics, typed completeness capabilities, stable-ID navigation/mutation, caller-local complete reads, request-local execution overlay), the [Topic Branches ADR](../adr/topic-branches.md) (true-branch single-entity/owner/reference, effective-route resolution, owner-only mutation with butterfly effect and missing-anchor fail-closed), and the [Chat Viewport Position](../adr/chat-viewport-position.md) (chat viewport position: route-local stable viewport, page reactivation, same-route in-place continuity, streaming reading/follow and intent priority, restore intent/ownership lifecycle, snapshot/default positioning, divider stable completion, atomic visibility). Multi-client synchronization progress is tracked in the active [Personal Multi-Device Sync](../work/multi-device-sync.md) work document (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](../adr/sync-connection-channel.md); the [Sync Architecture Selection](../archived/sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
+Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](../adr/cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](../archived/sqlite-migration.md) (SQLite chat authority), the [Context window governance](../adr/context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary), the [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md) (loaded projection semantics, typed completeness capabilities, stable-ID navigation/mutation, caller-local complete reads, request-local execution overlay), the [Topic Branches ADR](../adr/topic-branches.md) (true-branch single-entity/owner/reference, effective-route resolution, owner-only mutation with butterfly effect and missing-anchor fail-closed), and the [Chat Viewport Position](../adr/chat-viewport-position.md) (chat viewport position: route-local stable viewport, page reactivation, same-route in-place continuity, streaming reading/follow and intent priority, restore intent/ownership lifecycle, snapshot/default positioning, divider stable completion, atomic visibility). Multi-client synchronization progress is tracked in the active [Personal Multi-Device Sync](../work/multi-device-sync.md) work document (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](../adr/sync-connection-channel.md); the [Sync Architecture Selection](../archived/sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
 
 ## Contents
 
@@ -20,7 +20,7 @@ Governance is owned by the canonical decision documents, not restated as canonic
 - [Logging](#logging)
 - [Tracing (OpenTelemetry)](#tracing-opentelemetry)
 - [Tech Stack](#tech-stack)
-- [Source Compatibility Boundary](#source-compatibility-boundary)
+- [Retained Local Compatibility Boundary](#retained-local-compatibility-boundary)
 
 ## Top-Level Layout
 
@@ -62,7 +62,6 @@ Node.js backend services. Key services:
 | `BackupManager` | Data backup/restore (WebDAV, S3, Nutstore) |
 | `ChatDbService` | SQLite chat database (`Data/chat.db`) connection lifecycle, schema migrations, integrity checks, and maintenance coordination — see `src/main/services/chatDb/` |
 | `ChatDbAggregateService` | Command-oriented typed access to the chat database (topics, messages, blocks, topic_segments, file references); the `ChatDb_*` IPC channels map 1:1 onto its capabilities |
-| `ChatDbImport` | L2 Cherry Studio ZIP compatibility import pipeline (ZIP intake, candidate build, verification, atomic promotion) — see `src/main/services/chatDbImport/` |
 | `SyncService` / `SyncClient` / `chatDbHook` | Sync — Main-owned operation-log outbox, LWW/field-merge apply, manual endpoint-driven HTTP relay sync (automatic online convergence + cursor recovery is target; additive `005_sync_metadata` + `006_sync_field_merge`; filtered payloads; `SyncService.ts`, `SyncClient.ts`, `chatDbHook.ts`); IPC `sync:*`; reference relay `scripts/sync-relay/server.ts` (non-production); limited validation, not production-ready full sync (see [Personal Multi-Device Sync](../work/multi-device-sync.md)) |
 | `ApiServerService` | Express HTTP API server (Swagger docs at `/api-docs`) |
 | `AppUpdater` | electron-updater auto-update (frozen; see the Application Identity ADR) |
@@ -86,10 +85,10 @@ services/        # Frontend services (ApiService, ModelService, etc.) consuming 
 store/           # Redux Toolkit slices
 types/           # TypeScript type definitions
 workers/         # Web Workers
-windows/         # Multi-window entry points (mini, chat import)
+windows/         # Multi-window entry points (mini, trace viewer)
 ```
 
-Route loading (implemented 2026-08-30, renderer-only): `HomePage` eager; `FilesPage`/`NotesPage`/`KnowledgePage`/`SettingsPage`/`LaunchpadPage` lazy-loaded as separate production chunks via `React.lazy`/`Suspense` with bounded localized fallback; tagged chunk-load failures show explicit retry/Home recovery, untagged render errors bubble to the global boundary — no Main/preload/shared IPC/SQLite/Dexie/StoreSync/identity/sync governance crossing.
+Route loading (implemented 2026-08-30, renderer-only; task-dialog overlay since chat-only base): `HomePage` eager and always mounted and visible; `FilesPage`/`KnowledgePage`/`SettingsPage` lazy-loaded as separate production chunks via `React.lazy`/`Suspense` and rendered inside a centered in-app modal task dialog (`TaskDialog`) above the visible chat base — never as full-page routes and never in a hidden `Activity` workspace. Tagged chunk-load failures show explicit retry/Home recovery inside the dialog, untagged render errors bubble to the global boundary — no Main/preload/shared IPC/SQLite/Dexie/StoreSync/identity/sync governance crossing. Dialog close navigates explicitly to `/`; legacy `/launchpad` entries redirect to `/`; the notebook page and its nav entries are removed (storage/migration compatibility preserved).
 
 ## Redux Store (`src/renderer/src/store/`)
 
@@ -101,7 +100,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 | `settings` | App-wide settings |
 | `llm` | LLM provider/model configs |
 | `messageBlock` | Message block rendering state (block entities may cover a broader cache than the loaded message projection; block presence never proves message completeness — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md)) |
-| `messages` | Ordinary topic message projection — loaded ID lists per topic (`messageIdsByTopic`) with entity dictionary; completeness is always `'loaded-projection'` (resident/loaded vs explicit-empty vs unloaded are distinct); never the whole topic — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md). Route-switch scroll position (per-route stable viewport session, restore lifecycle, divider completion including explicit continuation, atomic visibility; sessions survive page deactivation/reconnect) and same-route in-place continuity plus streaming reading/follow intent priority is owned by [Chat Viewport Position](../adr/chat-viewport-position.md), not by this slice. Implementation mapping (locations only, no call chains): renderer Messages viewport is a normal document-flow column (oldest-first DOM top→bottom) under the single `flowScrollGeometry` positive-coordinate primitive (top/oldest 0, bottom/newest max(0, sh - ch)); legacy Main saved-position records are coordinate-gated by `normalizeSaved` (tagged flow-v1 numbers intact, foreign-space numerics dropped, identity anchor + bottom classification preserved, anchorless foreign numbers fall through to bottom/latest); viewport controller/context plus interaction region keeper (duties still history/follow/restore/nav) and intent/streaming helpers with the DPR residual threshold retained; contract-level regression in the conversation scroll-intent/streaming/edit-region/fold-region E2E specs with focused component suites alongside. Major-page navigation is an active page change rather than session destruction: a chat-session secondary roundtrip returns to the same chat route's stable position with first-visible correctness, and retained-projection validation stays presentation-only |
+| `messages` | Ordinary topic message projection — loaded ID lists per topic (`messageIdsByTopic`) with entity dictionary; completeness is always `'loaded-projection'` (resident/loaded vs explicit-empty vs unloaded are distinct); never the whole topic — see [Projection Completeness and Authority Intents](../adr/projection-completeness-authority.md). Route-switch scroll position (per-route stable viewport session, restore lifecycle, divider completion including explicit continuation, atomic visibility; the chat base stays mounted and visible — secondary tasks are centered in-app modal dialogs, never a hidden Activity workspace, so opening/closing a task is not a page deactivation: it saves no snapshot and creates no cross-route restore intent, while the provider-owned overlay handoff suspends the in-flight activation on open and re-arms the same validated-continuation/read pipeline on close) and same-route in-place continuity plus streaming reading/follow intent priority is owned by [Chat Viewport Position](../adr/chat-viewport-position.md), not by this slice. Implementation mapping (locations only, no call chains): renderer Messages viewport is a normal document-flow column (oldest-first DOM top→bottom) under the single `flowScrollGeometry` positive-coordinate primitive (top/oldest 0, bottom/newest max(0, sh - ch)); legacy Main saved-position records are coordinate-gated by `normalizeSaved` (tagged flow-v1 numerics intact, foreign-space numerics dropped, identity anchor + bottom classification preserved, anchorless foreign numbers fall through to bottom/latest); viewport controller/context plus interaction region keeper (duties still history/follow/restore/nav) and intent/streaming helpers with the DPR residual threshold retained; the route viewport provider owns the task-dialog open/close activation handoff and carries the single location/task signal (`isTaskDialogPath`), supplied once by `HomePage`, with no page-local pathname checks inside the conversation tree; contract-level regression in the conversation scroll-intent/streaming/edit-region/fold-region E2E specs with focused component suites alongside. Major-page navigation is no longer a page change: the chat base never deactivates, and a task-dialog roundtrip returns to the same chat route's stable position with first-visible correctness (revalidated on close through the existing lanes, zero writes while the retained viewport is valid), and retained-projection validation stays presentation-only. |
 | `knowledge` | Knowledge base entries |
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
@@ -117,7 +116,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
   short-lived capabilities whose complete messages/blocks never enter ordinary Redux. Window-outside navigation uses stable message ID + `around` reads with atomic merge;
   Main mutations resolve stable-ID authority intents transactionally while the renderer commits only the loaded intersection;
   resend/regenerate executes under a request-local overlay that survives renderer eviction (Redux is an optional mirror).
-- See `src/main/services/chatDb/` (connection lifecycle, migrations, repositories, import) and `src/main/services/chatDbImport/` (L2 ZIP compatibility import). Governance: [SQLite migration governance](../archived/sqlite-migration.md).
+- See `src/main/services/chatDb/` (connection lifecycle, migrations, repositories). Governance: [SQLite migration governance](../archived/sqlite-migration.md).
 - Sync (2026-09-03, `cef4689726` plus audited hardening): additive sync metadata migrations `005_sync_metadata` (`sync_outbox`, `sync_applied`, `sync_state`, `sync_entity_clock`) + `006_sync_field_merge` (`sync_field_clock`, `sync_conflict_log`); Main-owned better-sqlite3 remains local authority; sync runs manual endpoint-driven with automatic online convergence + cursor recovery as target — limited validation, not production-ready full sync (see [Personal Multi-Device Sync](../work/multi-device-sync.md)).
 
 ### IndexedDB (Dexie)
@@ -125,9 +124,9 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 `src/renderer/src/databases/index.ts`:
 
 - **Live tables**: `files` (catalog), `settings`, `knowledge_notes`, `translate_history`, `translate_languages`, `quick_phrases`
-- **Exceptions (compatibility, not ordinary runtime chat authority)**:
-  - `topics` / `message_blocks` — message-block UI and the legacy renderer-side conversation import path (not an active agents subsystem)
-  - `topic_segments` — isolated L2 import compatibility
+- **Exceptions (retained local compatibility, not ordinary runtime chat authority)**:
+  - `topics` / `message_blocks` — message-block UI and retained legacy renderer-side structures (not an active agents subsystem)
+  - `topic_segments` — retained legacy local schema
 - Schema is versioned with upgrade functions (`upgradeToV5`, `upgradeToV7`, `upgradeToV8`).
 
 ## IPC Communication
@@ -167,7 +166,6 @@ The renderer builds multiple HTML entry points (inputs declared in `electron.vit
 
 - `index.html` — Main application window
 - `traceWindow.html` — trace viewer (`src/renderer/src/trace/`)
-- `chatImport.html` — L2 ZIP import window (`src/renderer/src/windows/chatImport/`, hidden sandboxed window over the extracted ZIP's IndexedDB)
 
 ## Logging
 
@@ -210,12 +208,12 @@ logger.error("message", error);
 | Tracing | OpenTelemetry |
 | i18n | i18next + react-i18next |
 
-## Source Compatibility Boundary
+## Retained Local Compatibility Boundary
 
-The following source-format identifiers are **compatibility contracts**, not target application identity. They must never be renamed or repurposed; data isolation comes from profiles, not from renaming these. Governance: [Application Identity ADR](../adr/cherry-chat-application-identity.md).
+The following identifiers are retained local formats, persistence keys, schemas, or profile guards — not target application identity. They protect existing local data and same-application backup/restore; governance is defined by the [Application Identity ADR](../adr/cherry-chat-application-identity.md). Current implementation locations are listed here only.
 
 - Dexie database name `CherryStudio` (`src/renderer/src/databases/index.ts`).
 - redux-persist key `persist:cherry-studio` (`src/renderer/src/store/index.ts`).
-- ZIP/origin/schema/import declarations and the L2 import pipeline's source-format identifiers (`src/main/services/chatDbImport/`, `tests/e2e/utils/`).
+- Existing local SQLite/Dexie schema literals, including the same-application backup/restore archive schema.
 - Protected default profile names `Cherry Studio` / `CherryStudio` — the startup guard rejects these as Cherry Studio default profiles (per the Application Identity ADR).
-- `cherrystudio://` deep-link format — legacy source-format reference, not a registered target scheme. The current compatibility wording is governed by the [Application Identity ADR](../adr/cherry-chat-application-identity.md) (URL protocol table); it is not asserted as a live source path here.
+- `cherrystudio://` deep-link format — legacy functional format reference, not a registered target scheme.

@@ -14,6 +14,7 @@ import {
   runInstallScript,
   validateGitBashPath
 } from '@main/utils/process'
+import { setMinimumSizeEnsuringBounds } from '@main/utils/windowBounds'
 import { handleZoomFactor } from '@main/utils/zoom'
 import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { UpgradeChannel } from '@shared/config/constant'
@@ -33,8 +34,6 @@ import appService from './services/AppService'
 import AppUpdater from './services/AppUpdater'
 import BackupManager from './services/BackupManager'
 import { registerChatDbIpc } from './services/chatDb/ipc'
-import { registerChatImportIpc } from './services/chatDbImport'
-import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import { ConfigKeys, configManager } from './services/ConfigManager'
 import { externalAppsService } from './services/ExternalAppsService'
 import { fileStorage as fileManager } from './services/FileStorage'
@@ -665,7 +664,9 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // window
   ipcMain.handle(IpcChannel.Windows_SetMinimumSize, (_, width: number, height: number) => {
     checkMainWindow()
-    mainWindow.setMinimumSize(width, height)
+    // A raised floor must be satisfiable now: the window may currently sit below
+    // it (closed-panels mode), so apply the minimum together with one bounded grow.
+    setMinimumSizeEnsuringBounds(mainWindow, width, height, [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
   })
 
   ipcMain.handle(IpcChannel.Windows_ResetMinimumSize, () => {
@@ -766,12 +767,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // ChatDB — 23 command-oriented IPC handlers for SQLite message persistence
   registerChatDbIpc()
-
-  // ChatImport — 6 import-only IPC handlers for Phase 4 source-reader pipeline
-  registerChatImportIpc()
-
-  // CherryImport — L2 Cherry Studio ZIP import control (Phase 6.3)
-  registerCherryImportControlIpc(mainWindow.webContents)
 
   // Sync — app-level operation log + HTTP relay (MVP)
   const { registerSyncIpc } = await import('./services/sync/syncIpc')

@@ -301,8 +301,8 @@ describe('fetchMessagesWindow bundled structure (hand-computed oracles)', () => 
       )
       expect(r.ok, `append ${id}`).toBe(true)
     }
-    // u1 + answer a1 share one turn, u2 is one turn, askId-less a2 is
-    // unmapped, system s1 is one turn, dangling-askId a3 is one turn.
+    // u1 + answer a1 share one turn, u2 is one turn, system s1 is one turn,
+    // dangling-askId a3 is one turn; askId-less a2/a2b contribute no key.
     expect(agg.ensureTopic('t8', 'a1', 'topic-t8').ok).toBe(true)
     appendRole('t8', 'u1', 'user')
     appendRole('t8', 'a1', 'assistant', 'u1')
@@ -310,8 +310,9 @@ describe('fetchMessagesWindow bundled structure (hand-computed oracles)', () => 
     appendRole('t8', 'a2', 'assistant')
     appendRole('t8', 's1', 'system')
     appendRole('t8', 'a3', 'assistant', 'ghost')
+    appendRole('t8', 'a2b', 'assistant')
     upsert('sTurn', 't8', ['u1', 'a1', 'u2', 'a2', 's1', 'a3'], null)
-    upsert('sUnmapped', 't8', ['a2'], null)
+    upsert('sUnmapped', 't8', ['a2b'], null)
 
     const spies = fullScanSpies()
     const onMain = okValue(
@@ -331,7 +332,7 @@ describe('fetchMessagesWindow bundled structure (hand-computed oracles)', () => 
     expect(qualOf(onMain, 'sTurn').routeMemberMessageIds).toEqual(['u1', 'a1', 'u2', 'a2', 's1', 'a3'])
     expect(qualOf(onMain, 'sTurn').turnCount).toBe(4)
     // All-unmapped members yield absent — never zero, never a member count.
-    expect(qualOf(onMain, 'sUnmapped').routeMemberMessageIds).toEqual(['a2'])
+    expect(qualOf(onMain, 'sUnmapped').routeMemberMessageIds).toEqual(['a2b'])
     expect('turnCount' in qualOf(onMain, 'sUnmapped')).toBe(false)
 
     // Branch route: the main-only suffix drops out, so the turn total follows
@@ -377,10 +378,13 @@ describe('fetchMessagesWindow bundled structure (hand-computed oracles)', () => 
   })
 
   it('deleted member leaves the catalog via cascade and repairs the header to the first survivor', () => {
-    seedMain('t4', ['m1', 'm2', 'm3'])
+    seedMain('t4', ['m1', 'm2', 'm3', 'm4'])
     upsert('sA', 't4', ['m1', 'm2'], null)
-    upsert('sC', 't4', ['m2', 'm3'], null)
-    okValue(agg.deleteMessages('t4', ['m2']))
+    // Single membership: the second group files its own rows, and m4 is its
+    // creation head, so deleting it exercises the head repair to the first
+    // survivor (m3) alongside sA's plain cascade removal.
+    upsert('sC', 't4', ['m4', 'm3'], null)
+    okValue(agg.deleteMessages('t4', ['m2', 'm4']))
 
     const bundled = okValue(
       agg.fetchMessagesWindow({ kind: 'latest', topicId: 't4', limit: 10, includeStructure: true })

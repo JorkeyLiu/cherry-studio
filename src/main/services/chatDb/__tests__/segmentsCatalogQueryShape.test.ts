@@ -292,13 +292,15 @@ describe('ordinary segment catalog set-based reads (real repositories, real tran
 
   it('legacy persisted head outside the group falls back to the first (sortOrder, id) member', () => {
     ensureTopic('c2')
-    insertRows('c2', ['m1', 'm2', 'mOut'])
+    insertRows('c2', ['m1', 'm2', 'm3', 'm4', 'mOut'])
     // Membership order m2 -> m1 is authoritative; the persisted head is a real
-    // message of this topic that is simply not a member of this group.
+    // message of this topic that is simply not a member of this group. A
+    // message belongs to at most one group, so the tie-break case files its
+    // own rows instead of re-filing m1/m2.
     upsert('sOutside', 'c2', ['m2', 'm1'])
     setHeader('sOutside', 'mOut')
-    // Same group, both membership rows on one sortOrder: the tie breaks by id.
-    upsert('sTie', 'c2', ['m2', 'm1'])
+    // Both membership rows on one sortOrder: the tie breaks by id.
+    upsert('sTie', 'c2', ['m4', 'm3'])
     setMembershipOrder('sTie', 7)
     setHeader('sTie', 'mOut')
 
@@ -309,8 +311,8 @@ describe('ordinary segment catalog set-based reads (real repositories, real tran
         ownerTopicId: 'c2',
         ownerBranchId: null
       }),
-      wireFromAuthority('sTie', ['m1', 'm2'], {
-        headerMessageId: 'm1',
+      wireFromAuthority('sTie', ['m3', 'm4'], {
+        headerMessageId: 'm3',
         ownerTopicId: 'c2',
         ownerBranchId: null
       })
@@ -318,7 +320,7 @@ describe('ordinary segment catalog set-based reads (real repositories, real tran
     // The out-of-group head row exists, so this is the fallback rule and not the
     // missing-row rule: the wire names the surviving member, not null.
     expect(wires[0].headerMessageId).toBe('m2')
-    expect(wires[1].headerMessageId).toBe('m1')
+    expect(wires[1].headerMessageId).toBe('m3')
   })
 
   it('foreign-topic member carried as the persisted head keeps its foreign owner', () => {

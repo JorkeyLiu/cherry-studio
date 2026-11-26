@@ -138,7 +138,7 @@ vi.mock('../chatDb/index', () => ({
   }
 }))
 
-vi.mock('../chatDbImport/promotion/readonlyDbValidation', () => ({
+vi.mock('../chatDb/readonlyDbValidation', () => ({
   validateReadonlyChatDb: vi.fn().mockReturnValue(null)
 }))
 
@@ -154,18 +154,18 @@ import BackupManager, {
   safeCleanupWorkspace,
   validateLocalBackupDir
 } from '../BackupManager'
-import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from '../chatDbImport/promotion/filesSnapshot'
 import {
   FILES_CATALOG_SNAPSHOT_FILENAME,
   FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
   FILES_PROMOTE_STAGING_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME,
   FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
   PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_STAGING_FILENAME,
   ROLLBACK_SNAPSHOT_FILENAME,
   ROLLBACK_SNAPSHOT_STAGING_FILENAME
-} from '../chatDbImport/promotion/journal'
-import { PROMOTION_JOURNAL_STAGING_FILENAME } from '../chatDbImport/promotion/journalStore'
+} from '../chatDb/backupArtifactNames'
 
 const createDirent = (name: string) => ({ name })
 

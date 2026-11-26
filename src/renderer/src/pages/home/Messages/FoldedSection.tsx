@@ -155,8 +155,13 @@ const FoldShell = styled.div<{ $selected?: boolean; $partial?: boolean }>`
    padding: 0;
    margin: 4px 0;
    user-select: none;
-   ${(props) => (props.$selected ? selectionRing : props.$partial ? partialSelectionRing : null)}
- `
+  ${(props) => (props.$selected ? selectionRing : props.$partial ? partialSelectionRing : null)}
+  // No layer of its own in either mode: the shell is ordinary message
+  // content, so sibling order under the Chat row already paints it above
+  // the collapsed nav rail, and the expanded nav panel covers it. The rail
+  // hit target above keeps its own local level (z5) against the shell
+  // background only.
+`
 
 /**
  * The ONE rail box, identical in both modes (collapsed/expanded share the
@@ -216,7 +221,7 @@ const FoldHeaderRow = styled.div`
 /**
  * Edit-mode collapsed selection surface: the summary row's own natural click
  * area. A transparent absolute layer over the row's whitespace ONLY — the
- * rail hit target lives outside this row (shell-level, z-index 5) and the
+ * rail hit target lives outside this row (shell-level local z5) and the
  * summary label paints above this layer (z-index 1), so neither browse
  * affordance is ever swallowed. Rendered ONLY collapsed + edit mode:
  * expanded turns keep their own per-turn covers, and ordinary-mode blank
@@ -1073,15 +1078,19 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
         data-expanded={visualExpanded ? 'true' : 'false'}
         data-fold-nested={isNested ? 'true' : 'false'}
         className="folded-section-shell"
-        data-folded-section-selected={isSelected ? 'true' : 'false'}
-        data-folded-section-partial={isPartiallySelected ? 'true' : 'false'}
+        // Expanded browse expresses selection per turn (see the carried
+        // SelectionBlock runs): the shell never paints an aggregate outline
+        // and never reports one, whether the block is fully or partially
+        // selected. Collapsed keeps the whole-section feedback.
+        data-folded-section-selected={isSelected && !visualExpanded ? 'true' : 'false'}
+        data-folded-section-partial={isPartiallySelected && !visualExpanded ? 'true' : 'false'}
         data-fold-region-active={railActive ? 'true' : 'false'}
         data-folded-group-ids={groupIds.join(' ') || undefined}
         data-folded-message-ids={messageIds.length > 0 ? messageIds.join(' ') : undefined}
         onContextMenu={handleShellContextMenu}
         onClickCapture={handleMenuDismissCapture}
-        $selected={isSelected}
-        $partial={isPartiallySelected}>
+        $selected={isSelected && !visualExpanded}
+        $partial={isPartiallySelected && !visualExpanded}>
         <FoldRailBox
           $nested={isNested}
           className="folded-section-railbox"
@@ -1152,7 +1161,11 @@ export const FoldedSection: React.FC<FoldedSectionProps> = memo(
                   ? t('chat.folded_preview_hint', { count: turnCount })
                   : t('chat.folded_turns_summary', { count: turnCount })}
               </span>
-              {partialHint ? <PartialHint data-testid="folded-section-partial-hint">{partialHint}</PartialHint> : null}
+              {/* Aggregate counts belong to the collapsed whole-section feedback
+                   only: expanded browse already shows each turn's own outline. */}
+              {!visualExpanded && partialHint ? (
+                <PartialHint data-testid="folded-section-partial-hint">{partialHint}</PartialHint>
+              ) : null}
             </FoldSummaryLabel>
           </FoldHeaderRow>
           {/* The turned-off bodies' hosts: group chrome and rail stay mounted,

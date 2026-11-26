@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     insertMessagesAfterAnchor: vi.fn(),
+    listSegments: vi.fn(),
     appendMessage: vi.fn(),
     dispatch: vi.fn(),
     upsertOneBlock: vi.fn((p: unknown) => ({ type: 'upsertOneBlock', payload: p })),
@@ -56,6 +57,7 @@ vi.mock('@logger', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     insertMessagesAfterAnchor: mocks.insertMessagesAfterAnchor,
+    listSegments: mocks.listSegments,
     appendMessage: mocks.appendMessage
   }
 }))
@@ -96,6 +98,7 @@ vi.mock('i18next', async (importOriginal) => {
 describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.listSegments.mockResolvedValue([])
     mocks.insertMessagesAfterAnchor.mockResolvedValue(authoritativeResult())
   })
 
@@ -300,5 +303,44 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     }
     await expect(thunk(mocks.dispatch as any, (() => state) as any)).rejects.toThrow()
     expect(mocks.insertMessagesAfterAnchor).not.toHaveBeenCalled()
+  })
+
+  it('converges the segment catalog after a successful insert (projection carries the pair)', async () => {
+    mocks.listSegments.mockResolvedValue([
+      {
+        id: 'seg-1',
+        topicId: 't-1',
+        name: 'g',
+        messageIds: ['m-anchor', 'm-u', 'm-a', 'm-next'],
+        sortOrder: 0,
+        firstMessageId: 'm-anchor',
+        lastMessageId: 'm-next',
+        messageCount: 4,
+        headerMessageId: 'm-anchor',
+        ownerTopicId: 't-1',
+        ownerBranchId: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ])
+    const { SEGMENT_CATALOG_PUBLISH_COMPLETE } = await import('@renderer/store/residentRegistry')
+    const { insertMessagesThunk } = await import('../messageThunk')
+    const thunk = insertMessagesThunk('t-1', 'm-anchor', 'assistant-1')
+    await thunk(mocks.dispatch as any, (() => ({})) as any)
+    expect(mocks.listSegments).toHaveBeenCalledWith('t-1')
+    const published = (mocks.dispatch as any).mock.calls
+      .map((call: any[]) => call[0])
+      .find((action: any) => action?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE)
+    expect(published).toBeDefined()
+    const segment = published.payload.segments.find((s: any) => s.id === 'seg-1')
+    expect(segment.messageIds).toEqual(['m-anchor', 'm-u', 'm-a', 'm-next'])
+  })
+
+  it('skips catalog convergence when Main rejects (no read after a failed insert)', async () => {
+    mocks.insertMessagesAfterAnchor.mockRejectedValue(new Error('NOT_FOUND'))
+    const { insertMessagesThunk } = await import('../messageThunk')
+    const thunk = insertMessagesThunk('t-1', 'm-anchor', 'assistant-1')
+    await expect(thunk(mocks.dispatch as any, (() => ({})) as any)).rejects.toThrow()
+    expect(mocks.listSegments).not.toHaveBeenCalled()
   })
 })

@@ -4,7 +4,7 @@
 > **决策锁**：CW-1 … CW-10（§3 决策表，durable decision IDs）。
 > **最后更新**：2026-11-17（CW-10 遗留消息组折叠退休：旧标记默认失效，组正常展示并恢复上下文参与）
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
 > **分支澄清（BRANCH-8 链接，不重复）**：上下文算法 branch-neutral，只关注当前 route 的 effective message sequence 与稳定 IDs，不判定 ownership/permission；每 route 有独立 `contextWindowAnchor[routeKey]`/state，不同分支可有不同窗口。Branch anchor（fork 消息，immutable 路由构成）与 context-window anchor（起始 turn 的 group key，窗口起点）严格区分；context capability 永不作为 mutation permission。
 
@@ -161,7 +161,7 @@
 
 ## 10. 兼容性修复（Compatibility Repair）
 
-- **触发条件**：非空 topic 无锚点——即遗留数据（旧版 `contextStartOverride` 表达、无锚点的历史/导入数据）。
+- **触发条件**：非空 topic 无锚点——即遗留数据（旧版 `contextStartOverride` 表达、无锚点的历史数据）。
 - **触发时机**：topic 消息成功载入 Redux 后（`loadTopicMessagesThunk`）——**包括缓存命中路径**（消息已在 Redux 中的非空缓存 topic，如分支克隆预填充）与取数路径；**空缓存 topic 不触发**（落入取数路径，仍为空则保持无锚点）。
 - **行为**：以当前 `contextCount` 在默认窗口位置**恰好一次**初始化锚点（CW-5）。
 - **约束**：有效锚点**永不重算**（CW-5）；修复幂等（exactly-once）；不得批量改写已有锚点的 topic。

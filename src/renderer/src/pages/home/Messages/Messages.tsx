@@ -1130,8 +1130,10 @@ const MessagesContentInner: React.FC<MessagesContentProps> = ({
         // from the first frame of the enter motion.
         //
         // No reserved tail slot exists any more: every group — the flow
-        // terminal one included — owns a normal-flow header row in both
-        // presentation states (see TopicSegmentLine), so a collapsed group
+        // terminal one included — owns a normal-flow slot row in both
+        // presentation states (zero-height expanded sharing the first
+        // message's band, its own 32px row collapsed; see TopicSegmentLine),
+        // so a collapsed group
         // simply settles its BODY content to zero height below that row. The
         // collapsed label therefore always stays inside the scrollport without
         // opening a blank band, and no flow-order/window fact is needed here.
@@ -8718,7 +8720,8 @@ const Messages = ({
   // marker keeps loadedRouteRef diverged so the route effect (or a subsequent
   // route/topic switch) retries with a fresh load instead of believing the
   // new route is loaded.
-  // Validated-continuation pre-paint (same-route page return, PRE-PAINT ONLY):
+  // Validated-continuation pre-paint (same-route return after a task dialog,
+  // PRE-PAINT ONLY):
   // when the retained viewport provably shows its legal target — same
   // selected/displayed route, target-owned snapshot, retained + loaded +
   // connected coverage, live measurable geometry at the 1px production
@@ -8923,17 +8926,18 @@ const Messages = ({
     windowIdentityKey
   ])
   useEffect(() => {
-    // Disconnected lifetime (Activity hidden cleanup ran, show setup not yet
-    // re-run): stay inert without consuming the armed activation. The show's
-    // pre-paint layout effect above owns the single validated continuation
-    // before first paint; consuming here while disconnected would force a
-    // hidden first paint. Mirrors the pre-paint `unmountedRef` guard.
+    // Disconnected lifetime (lifetime cleanup ran, setup not yet re-run): stay
+    // inert without consuming the armed activation. The pre-paint layout effect
+    // above owns the single validated continuation before first paint;
+    // consuming here while disconnected would force a hidden first paint.
+    // Mirrors the pre-paint `unmountedRef` guard.
     if (unmountedRef.current) return
     if (topic.id !== topicIdRef.current) return
     // Deletion-fallback intents own their route: the dedicated latest effect
     // above claims and reloads. Never issue a concurrent snapshot-around here.
     if (deletionFallbackIntent && deletionFallbackIntent.route === activeBranchId) return
-    // Single-entry reconnect activation (Activity Chat→Settings→Chat):
+    // Single-entry reconnect activation (task-dialog close over the still
+    // visible chat base; formerly the hidden Activity roundtrip):
     // the provider `detach()` armed `isActivationRequired` while preserving
     // displayed + cache + persisted snapshots. The strict pre-paint layout
     // effect above may already have consumed the activation (validated exact

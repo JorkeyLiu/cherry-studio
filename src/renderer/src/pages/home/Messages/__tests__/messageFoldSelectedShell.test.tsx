@@ -108,7 +108,7 @@ describe('folded shell survives range selection', () => {
     expect(expandedFoldSectionIds.size).toBe(0)
   })
 
-  it('manual expand keeps the selection on the block and mounts its bodies', () => {
+  it('manual expand moves the selection onto the inner turns with no aggregate shell outline', () => {
     const selected = ['u2', 'u3', 'u4', 'u5']
     const { nodes } = buildFlow(selected)
     const ordered = buildOrderedFlowItems(nodes)
@@ -130,10 +130,93 @@ describe('folded shell survives range selection', () => {
     )
     const expanded = container.querySelectorAll('[data-testid="folded-section-expanded"]')
     expect(expanded.length).toBe(1)
-    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-selected')).toBe('true')
-    // Expanded browse mounts the folded bodies; the selection is retained.
+    // No aggregate outline in the browse view: the shell reports no selection.
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-selected')).toBe('false')
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-partial')).toBe('false')
+    expect(container.querySelector('[data-testid="folded-section-partial-hint"]')).toBeNull()
+    // Expanded browse mounts the folded bodies; each selected turn keeps its
+    // own ordinary outline (the same SelectionBlock the unfolded turns use).
     for (const id of ['u3', 'a3', 'u4', 'a4']) {
       expect(container.querySelector(`[data-testid="body-${id}"]`)).not.toBeNull()
+    }
+    const innerTurns = Array.from(
+      (expanded[0] as HTMLElement).querySelectorAll('[data-testid="edit-turn"]')
+    ) as HTMLElement[]
+    expect(innerTurns.map((el) => el.getAttribute('data-turn-ask')).sort()).toEqual(['u3', 'u4'])
+    for (const turn of innerTurns) {
+      expect(turn.className).toContain('edit-turn-selected')
+    }
+  })
+
+  it('partial expanded selection highlights only the selected inner turn', () => {
+    // Only turn 3 of the folded 3+4 block is selected: the browse view must
+    // express exactly that turn, with no aggregate shell hint or outline.
+    const selected = ['u3']
+    const { nodes } = buildFlow(selected)
+    const ordered = buildOrderedFlowItems(nodes)
+    const firstFoldedRun = ordered.find(
+      (o) => o.kind === 'turn-run' && o.run.length > 0 && o.run.every((e) => e.isFolded === true)
+    )
+    expect(firstFoldedRun?.kind).toBe('turn-run')
+    const sectionKey = firstFoldedRun?.kind === 'turn-run' ? `folded-section:${deriveTurnKey(firstFoldedRun.run)}` : ''
+    const { container } = render(
+      <Provider store={store}>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          selectedTurnAskIds: new Set(selected),
+          expandedFoldSectionIds: new Set([sectionKey])
+        })}
+      </Provider>
+    )
+    const expanded = container.querySelectorAll('[data-testid="folded-section-expanded"]')
+    expect(expanded.length).toBe(1)
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-selected')).toBe('false')
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-partial')).toBe('false')
+    expect(container.querySelector('[data-testid="folded-section-partial-hint"]')).toBeNull()
+    for (const id of ['u3', 'a3', 'u4', 'a4']) {
+      expect(container.querySelector(`[data-testid="body-${id}"]`)).not.toBeNull()
+    }
+    const byAsk = new Map(
+      Array.from((expanded[0] as HTMLElement).querySelectorAll('[data-testid="edit-turn"]')).map((el) => [
+        (el as HTMLElement).getAttribute('data-turn-ask'),
+        el as HTMLElement
+      ])
+    )
+    expect(byAsk.get('u3')?.className).toContain('edit-turn-selected')
+    expect(byAsk.get('u4')?.className).not.toContain('edit-turn-selected')
+  })
+
+  it('full expanded selection highlights every inner turn with no aggregate ring', () => {
+    const selected = ['u3', 'u4']
+    const { nodes } = buildFlow(selected)
+    const ordered = buildOrderedFlowItems(nodes)
+    const firstFoldedRun = ordered.find(
+      (o) => o.kind === 'turn-run' && o.run.length > 0 && o.run.every((e) => e.isFolded === true)
+    )
+    expect(firstFoldedRun?.kind).toBe('turn-run')
+    const sectionKey = firstFoldedRun?.kind === 'turn-run' ? `folded-section:${deriveTurnKey(firstFoldedRun.run)}` : ''
+    const { container } = render(
+      <Provider store={store}>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          selectedTurnAskIds: new Set(selected),
+          expandedFoldSectionIds: new Set([sectionKey])
+        })}
+      </Provider>
+    )
+    const expanded = container.querySelectorAll('[data-testid="folded-section-expanded"]')
+    expect(expanded.length).toBe(1)
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-selected')).toBe('false')
+    expect((expanded[0] as HTMLElement).getAttribute('data-folded-section-partial')).toBe('false')
+    expect(container.querySelector('[data-testid="folded-section-partial-hint"]')).toBeNull()
+    const innerTurns = Array.from(
+      (expanded[0] as HTMLElement).querySelectorAll('[data-testid="edit-turn"]')
+    ) as HTMLElement[]
+    expect(innerTurns.map((el) => el.getAttribute('data-turn-ask')).sort()).toEqual(['u3', 'u4'])
+    for (const turn of innerTurns) {
+      expect(turn.className).toContain('edit-turn-selected')
     }
   })
 

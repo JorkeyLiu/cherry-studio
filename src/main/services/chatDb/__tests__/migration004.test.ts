@@ -334,7 +334,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(20)
+    expect(applied).toBe(21)
 
     // New normalized schema: INTEGER PRIMARY KEY rowid + UNIQUE block_id.
     const normalizedCols = getColumnInfo(sqlite, 'message_blocks_normalized')
@@ -620,7 +620,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     registerNormalizeFunction(sqlite)
     const db = wrapDrizzle(sqlite)
 
-    expect(runMigrations(db, sqlite)).toBe(20)
+    expect(runMigrations(db, sqlite)).toBe(21)
     expect(runMigrations(db, sqlite)).toBe(0)
 
     const states = sqlite.prepare('SELECT * FROM migration_state ORDER BY key').all() as Array<{ key: string }>
@@ -644,7 +644,8 @@ describe('Migration 004 — FTS rowid identity', () => {
       '017_cleanup_route_message_overlay',
       '018_topic_references',
       '019_retire_segment_fold',
-      '020_topic_segment_header_identity'
+      '020_topic_segment_header_identity',
+      '021_topic_segment_single_membership'
     ])
 
     sqlite.close()

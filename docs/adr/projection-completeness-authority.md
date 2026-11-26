@@ -4,7 +4,7 @@
 > **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
 > **最后更新**：2026-11-20
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，多端同步收敛由 [Personal Multi-Device Sync](../work/multi-device-sync.md)（现状）与 [Sync Connection & Channel ADR](./sync-connection-channel.md)、[Sync Data Convergence ADR](./sync-data-convergence.md)（目标）治理——本文档不改变、不重述这些治理域的边界。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，多端同步收敛由 [Personal Multi-Device Sync](../work/multi-device-sync.md)（现状）与 [Sync Connection & Channel ADR](./sync-connection-channel.md)、[Sync Data Convergence ADR](./sync-data-convergence.md)（目标）治理——本文档不改变、不重述这些治理域的边界。
 
 ---
 
@@ -159,11 +159,11 @@
 
 ## 9. 持久化与迁移边界（Persistence and Migration Boundary）
 
-- 聊天权威持久化是 Main SQLite（Drizzle + better-sqlite3），经版本化迁移治理；本文档不改变其 schema、迁移流程与 L2 兼容导入语义，一律以 [SQLite migration governance](../archived/sqlite-migration.md) 为准。
+- 聊天权威持久化是 Main SQLite（Drizzle + better-sqlite3），经版本化迁移治理；本文档不改变其 schema、迁移流程，一律以 [SQLite migration governance](../archived/sqlite-migration.md) 为准。
 - 上下文锚点与 `contextCount` 属普通 renderer 设置持久化（`assistants` slice + redux-persist），不是聊天权威；其有效性/默认位置/继承/闭包派生由 Main 解析，详见 [Context window governance](./context-window.md)。分支路由的上下文锚点键是路由隔离的（main 用 topicId，分支用 `topicId:branchId`）；有效源 turn 序号在目标分支内可映射时按索引映射（clone ID 重映射后索引保留），被排除/缺失的非空新分支锚点以**当前** `contextCount` 在默认窗口位置建立——由 Main `inherit` 解析器拥有，此处仅说明锚点继承的归属，不混淆“上下文锚点”（context-window 的单稳定锚点）与“分支锚点”（true-branch 的 fork 消息）。
 - 驻留注册、视口 `MessageWindow`、本地最新窗口完备性、闭包缓存、调用者本地读取结果、请求本地执行覆盖、暂定候选均为不持久化、可丢弃、可重建的状态；不得经 StoreSync 或任何持久化通道变成第二权威。
 - **视口定位区分**：聊天视口定位（路由本地稳定视口归属、页面重激活、同路由在位交互连续性、流式阅读/跟随、意图优先级、恢复意图/所有权、快照/默认定位、分隔线稳定完成与可见性原子性）由 [Chat Viewport Position](./chat-viewport-position.md)（VIEWPORT-1…VIEWPORT-16）治理；`MessageWindow` 仍是本地有界投影，稳定视口语义不在本文档定义。
-- Dexie 表（文件目录、设置、知识笔记、翻译历史/语言、快捷短语）与消息块 UI / 遗留导入兼容例外保持现状；任何跨存储的聊天权威移动都属于迁移治理域，不属于本文档。
+- Dexie 表（文件目录、设置、知识笔记、翻译历史/语言、快捷短语）与消息块 UI / 遗留本地持久化兼容例外保持现状；任何跨存储的聊天权威移动都属于迁移治理域，不属于本文档。
 
 ---
 
@@ -192,7 +192,7 @@
 ## 12. 非目标（Non-goals）
 
 - 不定义应用身份、兼容性标识、发布/更新、平台范围——由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理。
-- 不定义 SQLite schema、迁移 mechanics、L2 ZIP 导入管线——由 [SQLite migration governance](../archived/sqlite-migration.md) 治理。
+- 不定义 SQLite schema、迁移 mechanics——由 [SQLite migration governance](../archived/sqlite-migration.md) 治理。
 - 不定义上下文锚点的详细有效性/默认/继承/修复策略——由 [Context window governance](./context-window.md) 治理。
 - 不定义同步收敛（基线/操作日志/帧合并/水位）——现状由 [Personal Multi-Device Sync](../work/multi-device-sync.md) 治理，目标由 [Sync Connection & Channel ADR](./sync-connection-channel.md) 与 [Sync Data Convergence ADR](./sync-data-convergence.md) 治理。
 - 不重复实现位置与调用链细节（见 `AGENTS.md` 与 `docs/architecture/architecture.md`）；不引入性能阈值、基线或容量策略。

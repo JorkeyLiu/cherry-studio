@@ -14,11 +14,13 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
+import { sidebarDragMax } from '@renderer/pages/home/Messages/pairedGroupSizing'
+import { usePairedReadingMin } from '@renderer/pages/home/Messages/pairedReadingMinContext'
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { setTopicListWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
+import { setTopicListWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
@@ -31,10 +33,11 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import { ChatBranchCatalogProvider } from './ChatBranchCatalog'
-import { ChatRouteStructureProvider } from './ChatRouteStructure'
+import { ChatRouteStructureProvider, useChatRouteStructure } from './ChatRouteStructure'
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
 import ConversationNavigation from './Messages/ConversationNavigation'
+import { NAV_GUTTER_WIDTH_PX } from './Messages/MessageOutline'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
 import Tabs from './Tabs'
 
@@ -45,6 +48,7 @@ interface Props {
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
   setActiveAssistant: (assistant: Assistant) => void
+  chatColumnMin?: number
 }
 
 const Chat: FC<Props> = (props) => {
@@ -55,10 +59,40 @@ const Chat: FC<Props> = (props) => {
   const { messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
   const dispatch = useAppDispatch()
+  const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
+  const showAssistants = useAppSelector((s) => s.settings.showAssistants)
+  const chatColumnMin = props.chatColumnMin ?? 0
+  // Live window width shared with the home layout: the fixed-window budget must
+  // follow real resize events, not a render-time snapshot.
+  const { windowWidth: liveWindowWidth } = usePairedReadingMin()
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
+  // Gutter-strip wheel: the nav gutter below is this row's own padding (only
+  // while the navigator is mounted), so a wheel parked over the strip
+  // (outside the rail's halo) lands on this host instead of the chat
+  // scroller. Forward it to #messages so the strip keeps the scroll behavior
+  // the full-width message boxes used to give it. Wheels bubbling up from
+  // message content already scrolled natively and are left alone (target
+  // check), so nothing scrolls twice. Pinch-zoom gestures are never
+  // forwarded; line/page wheel modes are normalized to pixels (16px per
+  // line, one viewport per page) and both axes are forwarded.
+  const handleNavGutterWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return
+    if (event.ctrlKey || event.metaKey) return
+    const scroller = event.currentTarget.querySelector('#messages')
+    if (!scroller) return
+    let { deltaX, deltaY } = event
+    if (event.deltaMode === 1) {
+      deltaX *= 16
+      deltaY *= 16
+    } else if (event.deltaMode === 2) {
+      deltaX *= scroller.clientHeight
+      deltaY *= scroller.clientHeight
+    }
+    scroller.scrollBy({ left: deltaX, top: deltaY })
+  }
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
   const [readingAnchor, setReadingAnchor] = useState<ReadingAnchorReport | null>(null)
   // S3.5: ContentSearch is parent-owned lazy activation — zero instance before invocation.
@@ -134,7 +168,6 @@ const Chat: FC<Props> = (props) => {
     assistant
   })
   const { sharedContextInfo } = contextPresentation
-
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {
       // Already mounted — forward imperatively without losing focus/text.
@@ -350,12 +383,35 @@ const Chat: FC<Props> = (props) => {
                 className="flex flex-1 flex-col justify-between"
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
                 <ChatRouteStructureProvider topicId={props.activeTopic.id}>
-                  <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+                  {/*
+                     Nav/content layer boundary (single contract, no per-component
+                     z-fix). While the navigator is mounted the message column is
+                     offset by the nav gutter as this row's own padding, so no
+                     message box ever covers the rail strip; the overlay nav sorts
+                     before the column with no layer of its own while collapsed, so
+                     sibling order paints all ordinary content above it (overlapping
+                     pixels hit the message, only the exposed rail hovers) and its
+                     expanded panel rises above content by its own rule. The gutter
+                     strip belongs to this host's box (below the overlay), with
+                     wheel forwarded so the strip keeps scrolling the chat. With
+                     navigation off there is no padding and no forwarder: native
+                     content width is restored and no dead indent remains.
+                   */}
+                  <div
+                    style={{
+                      position: 'relative',
+                      display: 'flex',
+                      flex: 1,
+                      minHeight: 0,
+                      paddingLeft: messageNavigation ? NAV_GUTTER_WIDTH_PX : 0
+                    }}
+                    onWheel={messageNavigation ? handleNavGutterWheel : undefined}>
                     {messageNavigation && (
-                      <ConversationNavigation
+                      <RouteScopedConversationNavigation
                         topicId={props.activeTopic.id}
                         readingAnchor={readingAnchor}
                         onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                        contextBoundaryMessageId={sharedContextInfo.boundaryMessageId ?? null}
                       />
                     )}
                     <Messages
@@ -392,14 +448,23 @@ const Chat: FC<Props> = (props) => {
             </ChatBranchCatalogProvider>
           </Main>
         </motion.div>
-        {showTopics && (
-          <ResizableHandle
-            cssVar="--topic-list-width"
-            minWidth={SIDEBAR_MIN_WIDTH}
-            onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
-            side="right"
-          />
-        )}
+        {showTopics &&
+          (() => {
+            const leftVisible = showAssistants ? assistantsWidth : 0
+            const winW = liveWindowWidth
+            // Same chat-budget clamp as the left panel: a fixed window is never
+            // squeezed below the reading minimum by widening the topic list.
+            const rightMax = winW > 0 ? sidebarDragMax(winW, leftVisible, chatColumnMin) : SIDEBAR_MAX_WIDTH
+            return (
+              <ResizableHandle
+                cssVar="--topic-list-width"
+                minWidth={SIDEBAR_MIN_WIDTH}
+                maxWidth={rightMax}
+                onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
+                side="right"
+              />
+            )
+          })()}
         <AnimatePresence initial={false}>
           {showTopics && (
             <motion.div
@@ -439,5 +504,29 @@ const Main = styled(Flex)`
   transform: translateZ(0);
   position: relative;
 `
+
+/**
+ * Navigation wiring for the chat surface: the surface owns ONE route structure
+ * read (`ChatRouteStructureProvider`), so the outline receives that provider's
+ * accepted segment projection instead of issuing a second structural read for
+ * the same route. Mounted only inside the provider.
+ */
+const RouteScopedConversationNavigation: FC<{
+  topicId: string
+  readingAnchor: ReadingAnchorReport | null
+  onNavigate: (messageId: string) => void
+  contextBoundaryMessageId: string | null
+}> = ({ topicId, readingAnchor, onNavigate, contextBoundaryMessageId }) => {
+  const { segments } = useChatRouteStructure()
+  return (
+    <ConversationNavigation
+      topicId={topicId}
+      readingAnchor={readingAnchor}
+      onNavigate={onNavigate}
+      segments={segments}
+      contextBoundaryMessageId={contextBoundaryMessageId}
+    />
+  )
+}
 
 export default Chat

@@ -300,9 +300,9 @@ export async function primeTopicMessageTimesBaseline(): Promise<boolean> {
 /**
  * One-time default application for assistants that never chose an order.
  *
- * Runs at the existing boot initialization boundary (after rehydration and the
- * one-shot import projection, so imported assistants that arrived without a
- * mode are covered too), never per render. It is not a new persistence marker:
+ * Runs at the existing boot initialization boundary (after rehydration, so a
+ * newly provisioned assistant is covered too), never per render. It is not a
+ * new persistence marker: the persisted `topicOrderMode` IS the marker, so an
  * the persisted `topicOrderMode` IS the marker, so an assistant that already
  * carries an explicit `manual`/`updated` is skipped and never re-sorted — and a
  * list the user dragged afterwards stays exactly where it was placed.

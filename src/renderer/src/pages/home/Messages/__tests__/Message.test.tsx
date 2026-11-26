@@ -183,6 +183,11 @@ vi.mock('../MessageErrorBoundary', () => ({
 vi.mock('../MessageHeader', () => ({ default: () => <div>header</div> }))
 vi.mock('../MessageMenubar', () => ({ default: () => <div>menubar</div> }))
 
+// Grouping never changes user-bubble body width: the message container
+// carries NO headed-first mark — the group label clamps to the free gap
+// instead of shrinking the bubble (see `TopicSegmentLine`), so grouped and
+// ungrouped bubbles share the identical generic width rule.
+
 // ── Import real MessageItem (after mocks) ──────────────────────────────────
 
 const { default: MessageItem } = await import('../Message')
@@ -223,6 +228,15 @@ describe('MessageItem without EditModeProvider', () => {
     const { container } = render(<MessageItem message={message} topic={topic} />)
 
     expect(container.textContent).toContain('content')
+  })
+
+  it('carries no headed-first mark: grouped and ungrouped bodies share the identical generic width', () => {
+    for (const role of ['user', 'assistant'] as const) {
+      const message = makeMessage({ role, askId: role === 'user' ? undefined : 'ask-1' })
+      const { container, unmount } = render(<MessageItem message={message} topic={topic} />)
+      expect(container.querySelector('.headed-first-message')).toBeNull()
+      unmount()
+    }
   })
 
   it('selectedGroupIds defaults to empty array without provider (no crash on .includes)', () => {

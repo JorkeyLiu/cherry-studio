@@ -12,9 +12,7 @@ import {
   acquireMaintenanceLeaseOrThrow,
   getSharedMaintenanceCoordinator,
   type MaintenanceCoordinator,
-  type MaintenanceLease,
-  type PromotionLeaseHandle,
-  validatePromotionAuthorization
+  type MaintenanceLease
 } from './maintenanceCoordination'
 import { registerChatDbNormalize, runMigrations } from './migration'
 import * as schema from './schema'
@@ -68,11 +66,9 @@ class ChatDbService {
   private generation = 0
 
   /**
-   * Shared maintenance coordinator (Phase 4.4.1, LOCK-4416). ONLY the live
-   * singleton receives one — init/close then coordinate with backup,
-   * restore, and promotion. Candidate ChatDbService instances (import
-   * candidate DBs, tests) pass no coordinator and stay uncoordinated
-   * because candidate init/close are not live maintenance.
+   * Shared maintenance coordinator. ONLY the live singleton receives one —
+   * init/close coordinate with backup and restore. Non-live instances pass
+   * no coordinator and stay uncoordinated.
    */
   private readonly coordinator: MaintenanceCoordinator | null
 
@@ -140,10 +136,10 @@ class ChatDbService {
     // If init is in progress, wait for it
     if (this.initPromise) return this.initPromise
 
-    // Live maintenance coordination (LOCK-4416): the live singleton's init
-    // must not overlap backup, restore, promotion, or close. Throws a
-    // structured MaintenanceBusyError when the slot is held. Candidate
-    // instances have no coordinator and skip this entirely.
+    // Live maintenance coordination: the live singleton's init must not
+    // overlap backup, restore, or close. Throws a structured
+    // MaintenanceBusyError when the slot is held. Non-live instances have
+    // no coordinator and skip this entirely.
     let lease: MaintenanceLease | null = null
     if (this.coordinator) {
       lease = acquireMaintenanceLeaseOrThrow(this.coordinator, 'init', LIVE_MAINTENANCE_OWNER_ID)
@@ -167,10 +163,8 @@ class ChatDbService {
 
   /**
    * Lifecycle init core — runs doInit with the shared-promise and
-   * failure-cleanup semantics, WITHOUT any lease acquisition. Callers must
-   * already be authorized: public init() holds the init lease; promotion-
-   * owned reopen (Phase 4.4.2, LOCK-4422) validated the currently held
-   * promotion lease and must NOT nest a second acquisition.
+   * failure-cleanup semantics. Called by public init() while it holds the
+   * init lease.
    */
   private async runInitCore(): Promise<void> {
     this.initPromise = this.doInit()
@@ -421,11 +415,10 @@ class ChatDbService {
    * state: if close throws, the caller knows the handle is still live
    * and can handle accordingly.
    *
-   * LOCK-4416 compliance: close() MUST hold the exclusive maintenance
-   * lease. When another maintenance operation (backup, restore, promotion,
-   * init) holds the slot, close() MUST NOT proceed — foreign lease bypass
-   * violates LOCK-4416. The function returns without closing the handle;
-   * the process teardown (Electron will-quit) terminates the process.
+   * Live maintenance coordination: close() MUST hold the exclusive
+   * maintenance lease. When backup, restore, or init holds the slot,
+   * close() MUST NOT proceed. The function returns without closing the
+   * handle; process teardown terminates the process.
    *
    * WARNING: Do NOT put any `await` before this call in will-quit.
    * Electron does not await async will-quit listeners; close() must
@@ -475,10 +468,8 @@ class ChatDbService {
 
   /**
    * Lifecycle close core — closes the handle with the retry-preserving
-   * failure semantics, WITHOUT any lease acquisition. Callers must already
-   * be authorized: public close() holds the close lease; promotion-owned
-   * close (Phase 4.4.2, LOCK-4422) validated the currently held promotion
-   * lease and must NOT nest a second acquisition.
+   * failure semantics, WITHOUT any lease acquisition. Called by public
+   * close() while it holds the close lease.
    */
   private closeCore(): boolean {
     if (!this.sqlite) {
@@ -500,92 +491,6 @@ class ChatDbService {
     this.db = null
     this.initPromise = null
     return true
-  }
-
-  // ---------------------------------------------------------------------------
-  // Promotion-owned live lifecycle (Phase 4.4.2, LOCK-4422)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Assert that `authorization` is the CURRENTLY HELD promotion lease on
-   * THIS instance's coordinator (LOCK-4422). Refuses candidate instances
-   * (no coordinator — never promotion-owned), forged/foreign handles,
-   * released/stale authorization, and superseded holders — always BEFORE
-   * any lifecycle mutation. An ownerId string alone is never accepted.
-   */
-  private assertPromotionAuthorized(authorization: PromotionLeaseHandle, action: string): void {
-    if (!this.coordinator) {
-      throw new Error(
-        `ChatDbService.${action} refused: this instance is not joined to a maintenance coordinator ` +
-          '(candidate instances are never promotion-owned).'
-      )
-    }
-    const verdict = validatePromotionAuthorization(authorization, this.coordinator)
-    if (!verdict.authorized) {
-      throw new Error(
-        `ChatDbService.${action} refused: promotion authorization invalid (${verdict.reason}). ` +
-          'Only the currently held promotion lease may close/reopen the live chat DB (LOCK-4422).'
-      )
-    }
-  }
-
-  /**
-   * Main-internal, promotion-owned close (Phase 4.4.2, LOCK-4422).
-   *
-   * Validates that `authorization` is the currently held promotion lease,
-   * then runs the lifecycle close core WITHOUT acquiring the close lease —
-   * the promotion lease itself is the exclusive maintenance authorization
-   * and stays continuously held (no release/reacquire, no second mutex).
-   * Public close() semantics are unchanged: it still refuses (close-busy)
-   * while the promotion lease is held.
-   *
-   * Throws before any lifecycle mutation when authorization is stale,
-   * released, forged, or foreign. Returns the close-core result (false when
-   * the underlying handle close failed; handles preserved for retry).
-   *
-   * @internal Never exposed over IPC/preload/renderer.
-   */
-  closeForPromotion(authorization: PromotionLeaseHandle): boolean {
-    this.assertPromotionAuthorized(authorization, 'closeForPromotion')
-
-    // Supersede any in-flight init before touching handles (same generation
-    // contract as public close()). While the promotion lease is held, a
-    // coordinated init cannot be in flight (its lease acquisition would have
-    // been refused), so no init-lease handoff is needed here.
-    this.generation++
-    return this.closeCore()
-  }
-
-  /**
-   * Main-internal, promotion-owned reopen (Phase 4.4.2, LOCK-4422).
-   *
-   * Validates that `authorization` is the currently held promotion lease,
-   * then runs the lifecycle init core WITHOUT acquiring the init lease —
-   * the same continuously held promotion lease authorizes the whole
-   * close→reopen window. Repair gating and idempotent fast paths match
-   * public init(). Public init() semantics are unchanged: it still refuses
-   * (busy) while the promotion lease is held.
-   *
-   * @internal Never exposed over IPC/preload/renderer.
-   */
-  async reopenForPromotion(authorization: PromotionLeaseHandle): Promise<void> {
-    this.assertPromotionAuthorized(authorization, 'reopenForPromotion')
-
-    // Refuse reopen while repair marker exists (same gate as public init()).
-    if (this.isRepairRequired()) {
-      throw new Error(
-        'ChatDbService is in repair-required state. ' +
-          'Clear the repair marker (chat.db.repair) and fix the database before initialising.'
-      )
-    }
-
-    // Fast path: already initialised
-    if (this.db) return
-
-    // If init is in progress, wait for it
-    if (this.initPromise) return this.initPromise
-
-    await this.runInitCore()
   }
 
   /**
@@ -692,78 +597,6 @@ class ChatDbService {
   }
 
   /**
-   * Main-internal durable repair-required marker write (Phase 4.4.3,
-   * LOCK-4437).
-   *
-   * Writes the repair marker file with durable sync (file sync + parent
-   * dir sync) so the marker survives process crashes. Idempotent: if the
-   * marker already exists, this is a no-op. After this call, subsequent
-   * `init()` calls refuse with a descriptive error until the marker is
-   * explicitly cleared.
-   *
-   * Refuses to write the marker if the service is already initialized
-   * (unsafe state — the live DB handle is open and must be closed first
-   * by the promotion executor or recovery path). This prevents accidental
-   * repair-marker writes while the DB is in use.
-   *
-   * Main-internal only: never exposed over IPC/preload/renderer. The
-   * caller is responsible for ensuring this is called at the right point
-   * in the promotion/recovery lifecycle (before init, after close).
-   *
-   * @throws Error if the service is already initialized.
-   * @throws Error if the marker file write or sync fails.
-   */
-  markRepairRequiredBeforeInit(): void {
-    // Refuse if already initialized — the live DB handle is open and must
-    // be closed first. Writing a repair marker while the DB is in use
-    // would create an inconsistent state (LOCK-4437).
-    if (this.db !== null) {
-      throw new Error(
-        'Cannot mark repair-required: ChatDbService is already initialized. ' +
-          'Close the database first before marking repair-required.'
-      )
-    }
-
-    const markerPath = path.join(this.dbDir, REPAIR_MARKER_FILENAME)
-
-    // Idempotent: if marker already exists, no-op.
-    if (fs.existsSync(markerPath)) {
-      logger.info('Repair marker already exists — idempotent no-op')
-      return
-    }
-
-    // Ensure parent directory exists (durable write contract).
-    if (!fs.existsSync(this.dbDir)) {
-      fs.mkdirSync(this.dbDir, { recursive: true })
-    }
-
-    // Write the marker with durable sync.
-    try {
-      fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8')
-      // Durable sync: flush the file to disk.
-      const fd = fs.openSync(markerPath, 'r')
-      try {
-        fs.fsyncSync(fd)
-      } finally {
-        fs.closeSync(fd)
-      }
-      // Sync the parent directory to ensure the directory entry is durable.
-      const dirFd = fs.openSync(this.dbDir, 'r')
-      try {
-        fs.fsyncSync(dirFd)
-      } finally {
-        fs.closeSync(dirFd)
-      }
-      logger.warn('Chat DB marked as repair-required (durable, before init)')
-    } catch (error) {
-      // Propagate — do NOT swallow marker write/sync failures.
-      throw new Error(
-        `Failed to write durable repair marker: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
-  }
-
-  /**
    * Get a ChatDbBackup instance for backup coordination.
    * Throws if not initialised or if repair state is active.
    */
@@ -779,8 +612,8 @@ class ChatDbService {
 
 /**
  * Singleton instance — the ONLY ChatDbService joined to the shared
- * maintenance coordinator (LOCK-4416). Candidate instances are constructed
- * elsewhere without a coordinator and remain uncoordinated.
+ * maintenance coordinator. Non-live instances are constructed without a
+ * coordinator and remain uncoordinated.
  */
 export const chatDbService = new ChatDbService(undefined, getSharedMaintenanceCoordinator())
 

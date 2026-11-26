@@ -5,7 +5,7 @@ import CustomTag from '@renderer/components/Tags/CustomTag'
 import { useKnowledge } from '@renderer/hooks/useKnowledge'
 import { getProviderName } from '@renderer/services/ProviderService'
 import type { KnowledgeBase } from '@renderer/types'
-import { Button, Empty, Tabs, Tag, Tooltip } from 'antd'
+import { Button, Segmented, Tag, Tooltip } from 'antd'
 import { Book, Folder, Globe, Link, Notebook, Search, Settings, Video } from 'lucide-react'
 import type { FC } from 'react'
 import { useEffect, useState } from 'react'
@@ -15,12 +15,16 @@ import styled from 'styled-components'
 import NavbarIcon from '../../components/NavbarIcon'
 import EditKnowledgeBasePopup from './components/EditKnowledgeBasePopup'
 import KnowledgeSearchPopup from './components/KnowledgeSearchPopup'
+import { KnowledgeEmptyView, KnowledgeSourceBody } from './components/KnowledgeSourceLayout'
 import KnowledgeDirectories from './items/KnowledgeDirectories'
 import KnowledgeFiles from './items/KnowledgeFiles'
 import KnowledgeNotes from './items/KnowledgeNotes'
 import KnowledgeSitemaps from './items/KnowledgeSitemaps'
 import KnowledgeUrls from './items/KnowledgeUrls'
 import KnowledgeVideos from './items/KnowledgeVideos'
+
+// Re-exported so source-tab items keep their existing import site.
+export { KnowledgeEmptyView }
 
 const logger = loggerService.withContext('KnowledgeContent')
 interface KnowledgeContentProps {
@@ -53,7 +57,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'files',
       title: t('files.title'),
-      icon: activeKey === 'files' ? <Book size={16} color="var(--color-primary)" /> : <Book size={16} />,
+      icon: activeKey === 'files' ? <Book size={14} color="var(--color-primary)" /> : <Book size={14} />,
       items: fileItems,
       content: <KnowledgeFiles selectedBase={selectedBase} />,
       show: true
@@ -62,7 +66,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'notes',
       title: t('knowledge.notes'),
-      icon: activeKey === 'notes' ? <Notebook size={16} color="var(--color-primary)" /> : <Notebook size={16} />,
+      icon: activeKey === 'notes' ? <Notebook size={14} color="var(--color-primary)" /> : <Notebook size={14} />,
       items: noteItems,
       content: <KnowledgeNotes selectedBase={selectedBase} />,
       show: true
@@ -70,7 +74,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'directories',
       title: t('knowledge.directories'),
-      icon: activeKey === 'directories' ? <Folder size={16} color="var(--color-primary)" /> : <Folder size={16} />,
+      icon: activeKey === 'directories' ? <Folder size={14} color="var(--color-primary)" /> : <Folder size={14} />,
       items: directoryItems,
       content: <KnowledgeDirectories selectedBase={selectedBase} progressMap={progressMap} />,
       show: true
@@ -78,7 +82,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'urls',
       title: t('knowledge.urls'),
-      icon: activeKey === 'urls' ? <Link size={16} color="var(--color-primary)" /> : <Link size={16} />,
+      icon: activeKey === 'urls' ? <Link size={14} color="var(--color-primary)" /> : <Link size={14} />,
       items: urlItems,
       content: <KnowledgeUrls selectedBase={selectedBase} />,
       show: true
@@ -86,7 +90,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'sitemaps',
       title: t('knowledge.sitemaps'),
-      icon: activeKey === 'sitemaps' ? <Globe size={16} color="var(--color-primary)" /> : <Globe size={16} />,
+      icon: activeKey === 'sitemaps' ? <Globe size={14} color="var(--color-primary)" /> : <Globe size={14} />,
       items: sitemapItems,
       content: <KnowledgeSitemaps selectedBase={selectedBase} />,
       show: true
@@ -95,7 +99,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     {
       key: 'videos',
       title: t('knowledge.videos'),
-      icon: activeKey === 'videos' ? <Video size={16} color="var(--color-primary)" /> : <Video size={16} />,
+      icon: activeKey === 'videos' ? <Video size={14} color="var(--color-primary)" /> : <Video size={14} />,
       items: videoItems,
       content: <KnowledgeVideos selectedBase={selectedBase} />,
       show: false
@@ -106,31 +110,19 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     return null
   }
 
-  const tabItems = knowledgeItems
-    .filter((item) => item.show)
-    .map((item) => ({
-      key: item.key,
-      label: (
-        <TabLabel>
-          {item.icon}
-          <span>{item.title}</span>
-          <CustomTag size={10} color={item.items.length > 0 ? '#00b96b' : '#cccccc'}>
-            {item.items.length}
-          </CustomTag>
-        </TabLabel>
-      ),
-      children: <TabContent>{item.content}</TabContent>
-    }))
+  const visibleItems = knowledgeItems.filter((item) => item.show)
+  const activeItem = visibleItems.find((item) => item.key === activeKey) ?? visibleItems[0]
 
   return (
-    <MainContainer>
+    <MainContainer data-testid="knowledge-content">
       <HeaderContainer>
         <ModelInfo>
           <Button
             type="text"
-            icon={<Settings size={18} color="var(--color-icon)" />}
-            onClick={() => EditKnowledgeBasePopup.show({ base })}
             size="small"
+            icon={<Settings size={16} color="var(--color-icon)" />}
+            aria-label={t('common.settings')}
+            onClick={() => EditKnowledgeBasePopup.show({ base })}
           />
           <div className="model-row">
             <div className="label-column">
@@ -151,12 +143,30 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
           </NavbarIcon>
         </HStack>
       </HeaderContainer>
-      <StyledTabs activeKey={activeKey} onChange={setActiveKey} items={tabItems} type="line" size="small" />
+      <SourceBar>
+        <SourceSegmented
+          data-testid="knowledge-source-switch"
+          size="small"
+          value={activeItem.key}
+          onChange={(value) => setActiveKey(value as string)}
+          options={visibleItems.map((item) => ({
+            value: item.key,
+            label: (
+              <SourceLabel>
+                {item.icon}
+                <span>{item.title}</span>
+                <CustomTag size={10} color={item.items.length > 0 ? '#00b96b' : '#cccccc'}>
+                  {item.items.length}
+                </CustomTag>
+              </SourceLabel>
+            )
+          }))}
+        />
+      </SourceBar>
+      <SourceBody key={activeItem.key}>{activeItem.content ?? <KnowledgeEmptyView />}</SourceBody>
     </MainContainer>
   )
 }
-
-export const KnowledgeEmptyView = () => <Empty style={{ margin: 20 }} styles={{ image: { display: 'none' } }} />
 
 export const ItemHeaderLabel = ({ label }: { label: string }) => {
   return (
@@ -168,60 +178,35 @@ export const ItemHeaderLabel = ({ label }: { label: string }) => {
 
 const MainContainer = styled.div`
   display: flex;
-  width: 100%;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   position: relative;
 `
 
-const TabLabel = styled.div`
+const SourceLabel = styled.div`
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 4px;
-  font-size: 14px;
+  font-size: 13px;
 `
 
-const TabContent = styled.div``
+const SourceBar = styled.div`
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 0.5px solid var(--color-border);
+  flex-shrink: 0;
+  overflow-x: auto;
+`
 
-const StyledTabs = styled(Tabs)`
-  flex: 1;
+const SourceSegmented = styled(Segmented)`
+  max-width: 100%;
+`
 
-  .ant-tabs-nav {
-    padding: 0 16px;
-    margin: 0;
-    min-height: 48px;
-  }
-
-  .ant-tabs-tab {
-    padding: 12px 12px;
-    margin-right: 0;
-    font-size: 13px;
-
-    &:hover {
-      color: var(--color-primary);
-    }
-  }
-
-  .ant-tabs-tab-btn {
-    font-size: 13px;
-  }
-
-  .ant-tabs-content {
-    position: initial !important;
-  }
-
-  .ant-tabs-content-holder {
-    overflow: hidden;
-  }
-
-  .ant-tabs-tabpane {
-    height: 100%;
-    overflow: hidden;
-  }
-
-  .ant-tabs-ink-bar {
-    height: 2px;
-  }
+const SourceBody = styled(KnowledgeSourceBody)`
+  padding: 0;
 `
 
 const HeaderContainer = styled.div`

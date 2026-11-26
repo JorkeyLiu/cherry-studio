@@ -60,6 +60,19 @@ vi.mock('@renderer/hooks/useContextClosure', () => ({
   useClosureSemanticSignal: () => '0:0'
 }))
 
+// Chat reads the route-scoped segment projection for the nav (Chat.tsx wires
+// `useRouteScopedSegments` into ConversationNavigation). This stability-timing
+// test stubs ConversationNavigation itself to null, so the projection is
+// irrelevant here: isolate the hook at the module boundary with an empty
+// projection instead of pulling its store/IPC chain into the timer oracle.
+vi.mock('@renderer/hooks/useRouteScopedSegments', () => ({
+  useRouteScopedSegments: (topicId: string) => ({
+    segments: [],
+    routeKey: `${topicId}::main`,
+    isCurrent: false
+  })
+}))
+
 vi.mock('@renderer/services/AssistantService', () => ({
   getAssistantSettings: () => ({})
 }))
