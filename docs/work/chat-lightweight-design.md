@@ -672,3 +672,8 @@
 - 验证：`messageWindow` 6 文件 103/103；scheduler 等 5 文件 46/46；`pnpm typecheck` pass；提交 hooks pass；未跑全量 renderer/E2E，不声称延迟/帧率收益。
 - 残余：全量 renderer 仍未完成；本切片无新增行为风险。
 - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
+## 63. 尾部窗口模型复用与执行态单块写入（已实现）
+- 尾部窗口模型复用（7f82c0007）：`appendTailWindow` fallback 直接复用已建 model，删除二次分组；guards/零组/容量路径不变。
+- 执行态单块写入（35e2a854f）：`saveUpdatedBlockToDB` 去 `getState`/Redux fallback 与忽略 attempt 参数，`localBlock` 必填且来自 BlockManager 执行态；`resendAttempt`/`branchId`/pinned null/DB 先行/fail-closed 不变。
+- 验证：tail 3 文件 29/29、写入 5 文件 53/53、`pnpm typecheck` pass、hooks pass；不声称性能数字，未跑全量 renderer/E2E。
+- 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
