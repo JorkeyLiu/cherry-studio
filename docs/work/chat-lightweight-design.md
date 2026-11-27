@@ -677,3 +677,9 @@
 - 执行态单块写入（35e2a854f）：`saveUpdatedBlockToDB` 去 `getState`/Redux fallback 与忽略 attempt 参数，`localBlock` 必填且来自 BlockManager 执行态；`resendAttempt`/`branchId`/pinned null/DB 先行/fail-closed 不变。
 - 验证：tail 3 文件 29/29、写入 5 文件 53/53、`pnpm typecheck` pass、hooks pass；不声称性能数字，未跑全量 renderer/E2E。
 - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
+ ## 64. 批量写入死参清理与停止边界（已实现）
+ - 批量写入死参清理（109373075f）：`BlockManager saveUpdatesToDB` 去第 5 `resendAttemptId` 形参、`deps.resendAttemptId` 字段与 transition 实参；ordinary/channel 仍 4 参闭包绑定 attempt+route，pinned null/fail-closed/节律不变。
+ - 验证：最终提交状态 3 文件 34/34、`pnpm typecheck` 全 5 lane 通过、hooks 通过。
+ - 停止边界：窗口侧无同 commit 重复建模；执行侧剩余 `getState` 仅 loaded 门控，quiesce/barrier/原子终态/overlay handoff 为正确性必需，不再为提交删测试专属 export 或零引用 getter。
+ - 未声称：不声称性能数字，全量 renderer/E2E 仍未完成。
+ - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
