@@ -1461,7 +1461,7 @@ const appendTailWindow = (
   const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
   const capacity = clampViewportCapacity(currentWindow.groupCapacity)
   const fallback = (): ReconciledWindowOutcome => ({
-    window: createLatestMessageWindow(messages, capacity, cleanAuth),
+    window: createLatestWindowFromModel(model, capacity, cleanAuth),
     followsAppendedTail: false
   })
   if (model.groups.length === 0 || capacity === 0) return fallback()
