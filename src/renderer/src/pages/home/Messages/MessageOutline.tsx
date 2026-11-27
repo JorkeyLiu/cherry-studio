@@ -236,10 +236,13 @@ interface GeometryCompensation {
   anchor: GeometryAnchor
 }
 
-/** Stable-ID row lookup: IDs never pass through the selector parser. */
-const findRow = (container: HTMLElement, id: string) =>
-  Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]')).find((el) => el.dataset.messageId === id) ??
-  null
+/**
+ * Render-batch row index contract: row IDs never pass through the selector
+ * parser, and hot paths never scan the DOM per lookup. The component maintains
+ * `rowIndexRef` (id -> row) plus `rowOrderRef` (document order) from one
+ * `querySelectorAll` per commit; every lookup below is an O(1) map read plus an
+ * `isConnected` guard, so a removed row can never resolve stale.
+ */
 
 /**
  * A row counts as visible when the body shows all of it. A row cut by the
@@ -267,13 +270,17 @@ const isFullyVisible = (row: HTMLElement, containerRect: DOMRect) => {
  */
 const resolveGeometryAnchor = (
   container: HTMLElement,
+  rows: readonly HTMLElement[],
+  findRowById: (id: string) => HTMLElement | null,
   activeId: string | null | undefined,
   paused: boolean
 ): GeometryAnchor | null => {
   const containerRect = container.getBoundingClientRect()
   const containerHeight = containerRect.height || containerRect.bottom - containerRect.top
   if (containerHeight <= 0) return null
-  const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
+  // `rows` arrives in document order from the render-batch row index: no DOM
+  // scan here. A row that left the list is already absent from the index, and
+  // the `isConnected` guard at lookup time covers the commit in between.
   // Genuinely at the end of the list: hold that end instead of a row top, so
   // the rows grow into the space the body already reserved and the last row
   // stays whole rather than the switch chasing a row the growth pushes past the
@@ -283,7 +290,7 @@ const resolveGeometryAnchor = (
   if (endRow && bottomDistance <= BOTTOM_DISTANCE_TOLERANCE_PX) {
     return { mode: 'end', row: endRow, offset: Math.max(bottomDistance, 0) }
   }
-  const activeRow = activeId ? findRow(container, activeId) : null
+  const activeRow = activeId ? findRowById(activeId) : null
   if (activeRow && !paused && !isFullyVisible(activeRow, containerRect)) {
     const activeRect = activeRow.getBoundingClientRect()
     const rowHeight = activeRect.height || activeRect.bottom - activeRect.top
@@ -462,6 +469,33 @@ const MessageOutline: FC<MessageOutlineProps> = ({
   // the ResizeObserver on every row list change.
   const groupRunsCountRef = useRef(0)
   groupRunsCountRef.current = groupRuns.length
+  // Render-batch row index: no state, no observers, no timers, no global
+  // cache. One `querySelectorAll` per commit rebuilds id -> row plus a
+  // document-order array; every hot path below reads it O(1). The
+  // `isConnected` guard at lookup time drops rows removed between commits,
+  // and rebuilding on every row-DOM input (entries/fold filter/route switch
+  // via `entries`, dividers via `forkAfter`/`contextRowId`) synchronously
+  // removes stale ids. Same element references and DOM order are preserved;
+  // SVG overlay and geometry anchors still measure only real rects, never
+  // estimated or unmounted rows.
+  const rowIndexRef = useRef<Map<string, HTMLElement>>(new Map())
+  const rowOrderRef = useRef<HTMLElement[]>([])
+  useLayoutEffect(() => {
+    const content = contentRef.current
+    const next = new Map<string, HTMLElement>()
+    const order: HTMLElement[] = []
+    if (content) {
+      const rows = content.querySelectorAll<HTMLElement>('[data-message-id]')
+      rows.forEach((row) => {
+        const id = row.dataset.messageId
+        if (!id || next.has(id)) return
+        next.set(id, row)
+        order.push(row)
+      })
+    }
+    rowIndexRef.current = next
+    rowOrderRef.current = order
+  }, [entries, expanded, forkAfter, contextRowId, groupRuns])
   // Overlay geometry loop handle: the single transient group-geometry tick in
   // flight, if any (see `startGroupGeometryTick`). Static geometry writes no
   // frames — the loop only runs across the expand/collapse switch.
@@ -620,8 +654,11 @@ const MessageOutline: FC<MessageOutlineProps> = ({
       const lastNode = group.querySelector<SVGCircleElement>('[data-group-run-node="last"]')
       const centers: number[] = []
       for (const rowId of run.rowIds) {
-        const row = findRow(content, rowId)
-        if (!row) continue
+        // O(1) render-batch index read: no per-frame `querySelectorAll` scan.
+        // A row removed by entries/fold/route cleanup is already absent, and
+        // the `isConnected` guard covers the commit in between — never stale.
+        const row = rowIndexRef.current.get(rowId) ?? null
+        if (!row || !row.isConnected) continue
         const rect = row.getBoundingClientRect()
         if (rect.height <= 0) continue
         centers.push(snapGroupCoord(rect.top - contentRect.top + rect.height / 2))
@@ -693,9 +730,10 @@ const MessageOutline: FC<MessageOutlineProps> = ({
       const tick = () => {
         if (groupTickRef.current == null) return
         updateGroupOverlay()
-        const content = contentRef.current
-        const row = content?.querySelector<HTMLElement>('[data-message-id]')
-        const rowHeight = row?.isConnected === true ? row.getBoundingClientRect().height : targetHeight
+        // Settle probe reads the index's live first row: no per-frame DOM
+        // scan. A detached probe falls back to the target height (settled).
+        const probe = rowOrderRef.current.find((candidate) => candidate.isConnected) ?? null
+        const rowHeight = probe ? probe.getBoundingClientRect().height : targetHeight
         if (Math.abs(rowHeight - targetHeight) <= ROW_HEIGHT_SETTLE_TOLERANCE_PX) {
           finish()
           return
@@ -727,8 +765,11 @@ const MessageOutline: FC<MessageOutlineProps> = ({
     if (geometryCompensationRef.current) return
     const container = containerRef.current
     if (!container) return
-    const row = findRow(container, targetId)
-    if (!row) return
+    // O(1) render-batch index read: no `querySelectorAll` scan per follow. A
+    // row removed by entries/fold/route cleanup is already absent, and the
+    // `isConnected` guard covers the commit in between — never stale.
+    const row = rowIndexRef.current.get(targetId) ?? null
+    if (!row || !row.isConnected) return
     const containerRect = container.getBoundingClientRect()
     const containerHeight = containerRect.height || containerRect.bottom - containerRect.top
     if (containerHeight <= 0) return
@@ -857,8 +898,20 @@ const MessageOutline: FC<MessageOutlineProps> = ({
     (expandedTarget: boolean) => {
       stopGeometryCompensation(false)
       const container = containerRef.current
+      // Indexed rows in document order: one filter over live refs, no DOM scan.
+      const anchorRows = rowOrderRef.current.filter((row) => row.isConnected)
+      const findIndexedRow = (id: string) => {
+        const candidate = rowIndexRef.current.get(id) ?? null
+        return candidate && candidate.isConnected ? candidate : null
+      }
       const anchor = container
-        ? resolveGeometryAnchor(container, latestActiveIdRef.current, followPausedRef.current)
+        ? resolveGeometryAnchor(
+            container,
+            anchorRows,
+            findIndexedRow,
+            latestActiveIdRef.current,
+            followPausedRef.current
+          )
         : null
       const targetHeight = expandedTarget ? ROW_HEIGHT_EXPANDED_PX : ROW_HEIGHT_COLLAPSED_PX
       let done = false

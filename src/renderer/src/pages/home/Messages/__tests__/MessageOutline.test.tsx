@@ -2143,3 +2143,188 @@ describe('MessageOutline pointer gate across the switch', () => {
     expect(onNavigate).toHaveBeenCalledTimes(3)
   })
 })
+describe('MessageOutline render-batch row index', () => {
+  const ENTRIES = [
+    { id: 'u1', text: 'First question' },
+    { id: 'u2', text: 'Second question' },
+    { id: 'u3', text: 'Third question' }
+  ]
+
+  let rafQueue: FrameRequestCallback[]
+
+  const flushRaf = () => {
+    const pending = [...rafQueue]
+    rafQueue.length = 0
+    for (const cb of pending) cb(0)
+  }
+
+  const stubRect = (el: Element, top: number, bottom: number) => {
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+      toJSON: () => ({})
+    } as DOMRect)
+  }
+
+  const stubScrollable = (el: HTMLElement, scrollHeight: number, clientHeight: number) => {
+    Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
+  }
+
+  const rowListScansOf = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.filter((args) => typeof args[0] === 'string' && args[0].includes('data-message-id')).length
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rafQueue = []
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((cb: FrameRequestCallback): number => {
+        rafQueue.push(cb)
+        return rafQueue.length
+      })
+    )
+    vi.stubGlobal(
+      'cancelAnimationFrame',
+      vi.fn(() => {
+        rafQueue.length = 0
+      })
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('drops removed rows on entries change: follow never lands on a stale element', () => {
+    const onNavigate = vi.fn()
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} activeId="u2" />)
+    const body = outlineBody(utils.container.querySelector('[data-testid="conversation-navigation"]'))
+    stubScrollable(body, 500, 100)
+    stubRect(body, 0, 100)
+    // Below: row center 132 deviates +82 from the container center 50.
+    const liveU2 = body.querySelector<HTMLElement>('[data-message-id="u2"]')!
+    stubRect(liveU2, 120, 144)
+    flushRaf()
+    expect(body.scrollTop).toBe(82)
+
+    // A fold filter removes u2 while the anchor moves to u3 (same shape as a
+    // route switch that replaces the row list): the old element detaches and
+    // the index rebuilds without it.
+    const filtered = ENTRIES.filter((entry) => entry.id !== 'u2')
+    utils.rerender(<MessageOutline entries={filtered} onNavigate={onNavigate} activeId="u3" />)
+    expect(liveU2.isConnected).toBe(false)
+    const liveU3 = body.querySelector<HTMLElement>('[data-message-id="u3"]')!
+    stubRect(liveU3, 120, 144)
+    body.scrollTop = 0
+    flushRaf()
+    // Follow lands on the live u3 row by the same centering rule — never on
+    // the detached u2 element the previous anchor held.
+    expect(body.scrollTop).toBe(82)
+
+    // A follow for the removed id is a no-op, not a stale jump: the index no
+    // longer resolves u2 at all.
+    utils.rerender(<MessageOutline entries={filtered} onNavigate={onNavigate} activeId="u2" />)
+    body.scrollTop = 0
+    flushRaf()
+    expect(body.scrollTop).toBe(0)
+  })
+
+  it('keeps the same element references in document order across refreshes, and keyboard navigation follows a route switch', () => {
+    const onNavigate = vi.fn()
+    const utils = render(<MessageOutline entries={ENTRIES} onNavigate={onNavigate} />)
+    const nav = utils.container.querySelector('[data-testid="conversation-navigation"]')
+    const body = outlineBody(nav)
+    const idsOf = () =>
+      Array.from(body.querySelectorAll<HTMLElement>('div[data-message-id]')).map((row) =>
+        row.getAttribute('data-message-id')
+      )
+    const before = Array.from(body.querySelectorAll<HTMLElement>('div[data-message-id]'))
+    expect(idsOf()).toEqual(['u1', 'u2', 'u3'])
+
+    // Streaming-style refresh: fresh entry objects, same ids — React keeps
+    // the row elements, and the rebuilt index must keep their references in
+    // the same document order.
+    utils.rerender(<MessageOutline entries={ENTRIES.map((entry) => ({ ...entry }))} onNavigate={onNavigate} />)
+    const after = Array.from(body.querySelectorAll<HTMLElement>('div[data-message-id]'))
+    expect(idsOf()).toEqual(['u1', 'u2', 'u3'])
+    expect(after).toHaveLength(before.length)
+    for (let i = 0; i < before.length; i++) expect(after[i]).toBe(before[i])
+
+    // Route switch: the row list is replaced wholesale. The old elements
+    // detach, the new rows read in route order, and keyboard activation
+    // navigates by the new stable ids.
+    const switched = [
+      { id: 'u4', text: 'Fourth question' },
+      { id: 'u5', text: 'Fifth question' }
+    ]
+    utils.rerender(<MessageOutline entries={switched} onNavigate={onNavigate} />)
+    expect(before[0].isConnected).toBe(false)
+    expect(idsOf()).toEqual(['u4', 'u5'])
+    const rowU4 = utils.container.querySelector<HTMLElement>('[data-message-id="u4"]')!
+    fireEvent.keyDown(rowU4, { key: 'Enter' })
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+    expect(onNavigate).toHaveBeenLastCalledWith('u4')
+  })
+
+  it('adds no row-list scan per overlay tick frame or follow: one scan per commit only', () => {
+    // Count only the row-list selector: the overlay's own group/text lookups
+    // never carry it, so any hit here is a row scan.
+    const queryAllSpy = vi.spyOn(Element.prototype, 'querySelectorAll')
+    const onNavigate = vi.fn()
+    const utils = render(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={onNavigate}
+        groupRuns={[{ segmentId: 's1', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 }]}
+      />
+    )
+    const body = outlineBody(utils.container.querySelector('[data-testid="conversation-navigation"]'))
+    stubScrollable(body, 5000, 100)
+    stubRect(body, 0, 100)
+    // Mount builds the index in a single commit scan; the mount overlay
+    // write already reads the index instead of scanning.
+    expect(rowListScansOf(queryAllSpy)).toBe(1)
+
+    // Expanding re-renders once: the commit rebuilds the index a single time,
+    // while the overlay write and the geometry/compensation ticks it arms add
+    // no scan of their own.
+    queryAllSpy.mockClear()
+    fireEvent.mouseEnter(body)
+    expect(rowListScansOf(queryAllSpy)).toBe(1)
+
+    // Every tick frame re-measures live rects only: three full overlay +
+    // compensation frames add no row-list scan.
+    queryAllSpy.mockClear()
+    flushRaf()
+    flushRaf()
+    flushRaf()
+    expect(rowListScansOf(queryAllSpy)).toBe(0)
+
+    // The follow path (anchor change -> next-frame reveal) also adds none,
+    // and still lands on the live row.
+    utils.rerender(
+      <MessageOutline
+        entries={ENTRIES}
+        onNavigate={onNavigate}
+        activeId="u3"
+        groupRuns={[{ segmentId: 's1', color: '#1a2b3c', rowIds: ['u1', 'u2', 'u3'], lane: 0 }]}
+      />
+    )
+    const liveU3 = body.querySelector<HTMLElement>('[data-message-id="u3"]')!
+    stubRect(liveU3, 120, 144)
+    body.scrollTop = 0
+    queryAllSpy.mockClear()
+    flushRaf()
+    expect(body.scrollTop).toBe(82)
+    expect(rowListScansOf(queryAllSpy)).toBe(0)
+  })
+})
