@@ -5,35 +5,6 @@ import type { WriteBarrier } from './writeBarrier'
 
 const logger = loggerService.withContext('StreamWriteScheduler')
 
-/**
- * Per-call overrides for one scheduled block write. Absent fields fall back
- * to the execution-bound defaults captured at scheduler construction, so the
- * trailing write of a lodash throttle always carries this execution's context
- * — never a cross-execution mix.
- */
-export interface ScheduledWriteContext {
-  /** Immutable execution attempt; absent for ordinary writes (carrier omitted). */
-  resendAttemptId?: string
-  /** Execution barrier tracking the produced DB-write promise. */
-  barrier?: WriteBarrier
-  /**
-   * Runtime Redux-mirror gate. Evaluated when the throttled write runs (not at
-   * call time) so a mid-generation topic eviction stops mirroring without
-   * stopping the DB patch. Absent = fall back to the scheduler default.
-   */
-  shouldMirrorToRedux?: () => boolean
-  /**
-   * Trustworthy topic ownership for scoped closure invalidation.
-   * Absent = unknown ownership -> deliberate global fallback in middleware.
-   */
-  topicId?: string
-  /**
-   * Addressed route owner for the block-only DB write, paired with `topicId`.
-   * The source execution pins its captured route here (never the active route).
-   */
-  branchId?: string | null
-}
-
 /** Resolved write target passed to the injected persistence callback. */
 export interface ResolvedWriteTarget {
   resendAttemptId?: string
@@ -52,7 +23,7 @@ export interface StreamWriteSchedulerOptions {
   topicId?: string
   /** Captured execution route bound to every write (never re-resolved). */
   branchId?: string | null
-  /** Default live-loaded gate for the Redux mirror. */
+  /** Live-loaded gate for the Redux mirror. */
   isLoaded?: () => boolean
   /** Execution persistence: the block-only DB write channel. */
   performWrite: (id: string, update: any, target: ResolvedWriteTarget) => Promise<unknown> | unknown
@@ -129,16 +100,14 @@ export class StreamWriteScheduler {
   }
 
   /**
-   * Schedule one throttled block write. The trailing invocation (lodash
-   * semantics: latest call wins) resolves every context field against this
-   * execution's bound defaults, so a trailing write always carries this
-   * execution's attempt/barrier/route/mirror-gate.
+   * Schedule one throttled block write. Every write carries this execution's
+   * bound attempt/barrier/route/mirror-gate — there is no per-call override.
    */
-  schedule = (id: string, blockUpdate: any, ctx?: ScheduledWriteContext): void => {
+  schedule = (id: string, blockUpdate: any): void => {
     if (this.disposed) {
       return
     }
-    this.getThrottler(id)(blockUpdate, ctx)
+    this.getThrottler(id)(blockUpdate)
   }
 
   /**
@@ -224,18 +193,17 @@ export class StreamWriteScheduler {
     if (existing) {
       return existing
     }
-    // The trailing invocation reuses the LATEST call args (lodash semantics),
-    // so each field falls back to this execution's bound default when the
-    // call carries no override.
-    const throttler = throttle(async (blockUpdate: any, ctx?: ScheduledWriteContext) => {
+    // The trailing invocation reuses the LATEST call args (lodash semantics);
+    // every write carries this execution's bound values (no per-call override).
+    const throttler = throttle(async (blockUpdate: any) => {
       if (this.disposed) {
         return
       }
-      const resendAttemptId = ctx?.resendAttemptId ?? this.resendAttemptId
-      const barrier = ctx?.barrier ?? this.barrier
-      const shouldMirrorGate = ctx?.shouldMirrorToRedux ?? this.isLoaded
-      const topicId = ctx?.topicId ?? this.topicId
-      const branchId = ctx?.branchId !== undefined ? ctx.branchId : this.branchId
+      const resendAttemptId = this.resendAttemptId
+      const barrier = this.barrier
+      const shouldMirrorGate = this.isLoaded
+      const topicId = this.topicId
+      const branchId = this.branchId
 
       const prev = this.pendingFrames.get(id)
       if (prev !== undefined) {

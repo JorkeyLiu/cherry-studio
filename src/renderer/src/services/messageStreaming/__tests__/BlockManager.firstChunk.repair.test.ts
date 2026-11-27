@@ -95,13 +95,7 @@ describe('BlockManager first-frame immediate vs throttled repair', () => {
 
     expect(dispatch).not.toHaveBeenCalled()
     expect(throttledBlockUpdate).toHaveBeenCalledTimes(1)
-    expect(throttledBlockUpdate).toHaveBeenCalledWith(
-      'b-think',
-      { content: 'hello world' },
-      undefined,
-      undefined,
-      expect.any(Function)
-    )
+    expect(throttledBlockUpdate).toHaveBeenCalledWith('b-think', { content: 'hello world' })
     // local executionState still updated immediately despite throttled mirror
     expect((exec.getBlock('b-think') as any).content).toBe('hello world')
   })

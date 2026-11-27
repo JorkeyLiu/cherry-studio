@@ -858,18 +858,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       resendAttemptId,
       barrier: writeBarrier,
       executionState,
-      throttledBlockUpdate: (
-        id: string,
-        blockUpdate: any,
-        attemptId?: string,
-        barrier?: WriteBarrier,
-        shouldMirror?: () => boolean
-      ) =>
-        writeScheduler.schedule(id, blockUpdate, {
-          resendAttemptId: attemptId,
-          barrier,
-          shouldMirrorToRedux: shouldMirror
-        }),
+      throttledBlockUpdate: (id: string, blockUpdate: any) => writeScheduler.schedule(id, blockUpdate),
       flushThrottledBlockUpdate: (id: string) => writeScheduler.flush(id),
       cancelThrottledBlockUpdate: (id: string) => writeScheduler.cancel(id),
       drainMirrors: () => writeScheduler.drainMirrors(),
@@ -5079,13 +5068,7 @@ export const setupChannelStream = (
     topicId,
     barrier: channelBarrier,
     executionState: channelExecutionState,
-    throttledBlockUpdate: (
-      id: string,
-      blockUpdate: any,
-      _attemptId?: string,
-      barrier?: WriteBarrier,
-      shouldMirror?: () => boolean
-    ) => channelScheduler.schedule(id, blockUpdate, { barrier, shouldMirrorToRedux: shouldMirror }),
+    throttledBlockUpdate: (id: string, blockUpdate: any) => channelScheduler.schedule(id, blockUpdate),
     flushThrottledBlockUpdate: (id: string) => channelScheduler.flush(id),
     cancelThrottledBlockUpdate: (id: string) => channelScheduler.cancel(id),
     drainMirrors: () => channelScheduler.drainMirrors()

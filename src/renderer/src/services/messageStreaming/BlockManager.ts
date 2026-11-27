@@ -63,13 +63,7 @@ interface BlockManagerDependencies {
    */
   executionState: AssistantExecutionState
   // 节流器管理从外部传入
-  throttledBlockUpdate: (
-    id: string,
-    blockUpdate: any,
-    resendAttemptId?: string,
-    barrier?: WriteBarrier,
-    shouldMirrorToRedux?: () => boolean
-  ) => void
+  throttledBlockUpdate: (id: string, blockUpdate: any) => void
   /**
    * Flush (never drop) a block's pending throttled trailing write, preserving
    * the last state. Always wired to the execution scheduler.
@@ -260,9 +254,7 @@ export class BlockManager {
     } else {
       this._activeBlockInfo = { id: blockId, type: blockType } // 更新活跃块信息
       this.touchedThrottledBlocks.add(blockId)
-      this.deps.throttledBlockUpdate(blockId, changes, this.deps.resendAttemptId, this.deps.barrier, () =>
-        this.isLoaded()
-      )
+      this.deps.throttledBlockUpdate(blockId, changes)
       // Throttled streaming chunks also advance the local execution fact
       // immediately; the throttler only mirrors to Redux/DB on its cadence.
       void localAfter

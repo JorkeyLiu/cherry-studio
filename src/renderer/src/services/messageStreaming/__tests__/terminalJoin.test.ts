@@ -223,13 +223,7 @@ async function createHarness(opts: { deferTerminalPersist?: boolean } = {}): Pro
     topicId: TOPIC_ID,
     barrier,
     executionState,
-    throttledBlockUpdate: (
-      id: string,
-      blockUpdate: any,
-      _attemptId?: string,
-      trackBarrier?: WriteBarrier,
-      shouldMirror?: () => boolean
-    ) => scheduler.schedule(id, blockUpdate, { barrier: trackBarrier, shouldMirrorToRedux: shouldMirror }),
+    throttledBlockUpdate: (id: string, blockUpdate: any) => scheduler.schedule(id, blockUpdate),
     flushThrottledBlockUpdate: (id: string) => scheduler.flush(id),
     cancelThrottledBlockUpdate: (id: string) => scheduler.cancel(id),
     drainMirrors: () => scheduler.drainMirrors()

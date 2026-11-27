@@ -301,18 +301,30 @@ describe('StreamWriteScheduler per-execution ownership', () => {
     expect(h.mirrors).toHaveLength(0)
   })
 
-  it('per-call overrides win over execution defaults for one write', () => {
+  it('execution-bound values flow straight through with no per-call override', () => {
     const mirrorGate = vi.fn(() => true)
-    const h = own(createScheduler({ resendAttemptId: 'attempt-exec', topicId: 't-exec' }))
-    h.scheduler.schedule(
-      'b-1',
-      { content: 'override' },
-      { resendAttemptId: 'attempt-call', shouldMirrorToRedux: mirrorGate }
+    const h = own(
+      createScheduler({
+        resendAttemptId: 'attempt-exec',
+        topicId: 't-exec',
+        branchId: 'br-exec',
+        isLoaded: mirrorGate
+      })
     )
+    h.scheduler.schedule('b-1', { content: 'leading' })
+    h.scheduler.schedule('b-1', { content: 'trailing' })
+    h.scheduler.flush('b-1')
     fireRafs()
 
-    expect(h.writes[0].target.resendAttemptId).toBe('attempt-call')
-    expect(mirrorGate).toHaveBeenCalledTimes(1)
+    // Leading and trailing writes both carry the execution bindings; only the
+    // latest (trailing) mirror survives, since a newer write cancels the
+    // withheld RAF before scheduling its own.
+    expect(h.writes).toHaveLength(2)
+    for (const write of h.writes) {
+      expect(write.target).toEqual({ resendAttemptId: 'attempt-exec', topicId: 't-exec', branchId: 'br-exec' })
+    }
+    expect(mirrorGate).toHaveBeenCalled()
     expect(h.mirrors).toHaveLength(1)
+    expect(h.mirrors[0]).toMatchObject({ id: 'b-1', update: { content: 'trailing' } })
   })
 })
