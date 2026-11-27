@@ -109,7 +109,7 @@ vi.mock('i18next', () => ({
 
 import { rootReducer } from '@renderer/store'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
-import { bumpGeneration, publishResidentComplete } from '@renderer/store/residentRegistry'
+import { bumpGeneration, publishResidentComplete, selectGeneration } from '@renderer/store/residentRegistry'
 import type { FetchMessagesWindowResponse as WindowResponse } from '@shared/chatDb'
 
 const TOPIC = 't-cold'
@@ -372,5 +372,14 @@ describe('cold deferred route read — resident generation establishment', () =>
       'm4',
       'm5'
     ])
+  })
+
+  it('cold topic without a registry entry: the typed selector falls back to 0 like the legacy read', () => {
+    const { store } = makeStore()
+    const state = store.getState()
+    expect(selectGeneration(state, 'never-loaded')).toBe(0)
+    expect(selectGeneration(state, 'never-loaded')).toBe(
+      (state as any).residentRegistry?.entries?.['never-loaded']?.applicabilityGeneration ?? 0
+    )
   })
 })

@@ -4284,8 +4284,7 @@ export const loadRouteMessagesThunk =
     // latest adopts this token for its joint publication.
     let publicationGeneration = 0
     try {
-      publicationGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
-        0) as number
+      publicationGeneration = selectGeneration(getState(), topicId)
     } catch {
       publicationGeneration = 0
     }
@@ -4594,11 +4593,7 @@ export function isDeferredRouteWindowReceiptCurrent(
     }
     let publicationGenNow = 0
     try {
-      publicationGenNow = ((
-        getState() as unknown as {
-          residentRegistry?: { entries?: Record<string, { applicabilityGeneration?: unknown }> }
-        }
-      ).residentRegistry?.entries?.[receipt.topicId]?.applicabilityGeneration ?? 0) as number
+      publicationGenNow = selectGeneration(getState(), receipt.topicId)
     } catch {
       return false
     }

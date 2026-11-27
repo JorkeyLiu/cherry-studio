@@ -658,3 +658,11 @@
 - 测试（不只 source-string 断言，均以调用计数/标量证明）：`historyTokenEstimateSession.test.ts` 新增 5 例——同 prompt 3 次 estimate 只调 1 次 tokenizer（`tokenxCalls == ['abc']`，history stub 不触 tokenx）；A→B→A 按单 entry 语义调 3 次（明确不保留多 entry）；空串/undefined 同 entry 且标量正确；overlapping 同 message 下 A/B 各自 closed（13/15）且后续 B 复用无新增调用；reset 后重算（history 与 prompt 各 +1 次）。`usePromptTokenEstimate.session.test.ts` 新增 1 例 + `tokenx` 长度 mock（该文件原先未 mock tokenx，`''` 在两种实现下均为 0，既有断言不受影响）：assistant `''`→`'hello'` 后 messageMock 仍 1 次、标量 101→106（history+draft 正确合并）。Focused 两文件 25/25 exit 0。
 - 未声称：只消除重复 prompt 分词，不宣称端到端延迟收益；history 仍是每 entry 全量轻遍历（tokenizer 非线性，不做增量拼），残余全量轻遍历保留。
 - 边界：除本切片 conventional signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）；未新增 E2E 资产（纯 renderer 计算，无 UI 行为变化）。
+
+## 61. 收拢流式帧记录与代际读取（已实现）
+- 已证重复：`streamWriteScheduler.ts` 内 `rafIds: Map<topicId, rafId>` 与 `pendingMirrors: Map<topicId, mirror>` 为同键双表——schedule/cancel/drain/dispose/loaded/barrier 每处都需双表同增同删同查；`messageThunk.ts` 两处 `applicabilityGeneration` 读取仍走 `(getState() as any).residentRegistry?…` 非类型化路径，与 §55 已收敛的 typed 读取并存。
+- 收敛（最小面，仅 2 个生产文件 + 其测试同义调整）：双表合并为 `pendingFrames: Map<topicId, { rafId, mirror }>` 单记录表；schedule（已存在即复用 raf、仅更新 mirror）、cancel（单表删）、drain（单表读后删）、dispose（遍历单表 cancel）、loaded/barrier 快照与执行顺序不变；overlay 写入、receipt 落地、fail-closed discard 语义未碰。两处代际读取改走 typed `selectGeneration`，既有 `try/catch → 0/false` 回退保留；新增冷 topic 无 registry entry 回退用例（无 entry 时按 0/false 走原失败语义，不抛）。
+- 未声称：这是私有结构/表达式层面的减熵，不是性能收益——不声称延迟/帧率/内存改进，也没减少读取守卫层数（守卫数量与顺序不变）。
+- 实测（pinned Node 24.11.1 / pnpm 10.27.0，均为前台原始 exit，值为传入的验证结论、本文档追加时未重跑）：最终聚焦 4 文件 31/31 exit 0；`pnpm typecheck` exit 0；Biome lint/format、ESLint、`git diff --check` exit 0；文件级 oxlint exit 1 为 `messageThunk.ts:2692,3497-3499,4142` 的 5 个既有 `no-unused-vars`。`CI=1 pnpm test:renderer` 跑 15 分钟被工具终止、无最终 exit，记 unverified（日志：session scratch `ccl-renderer-final.log`）。`generationOwnership` 单跑 20s 超时、还原 hunk 后复现，记 baseline candidate / known issue，未在本切片修。
+- 残余：全量 renderer 未完成（最终态证据只有 focused + typecheck + 静态检查）；既有 warning 未清；未跑 E2E（纯私有结构/表达式重构，无 UI 行为变化，无新增资产）。
+- 边界：本文档追加不改任何代码/测试，不运行测试，不 commit（不 push/amend/rebase/reset）。

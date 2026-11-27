@@ -82,6 +82,12 @@ export interface StreamWriteSchedulerOptions {
  * scheduler. There is no shared throttler, no shared trailing context, no
  * persistent cache, and no TTL resurrection.
  */
+/** Withheld per-block frame: RAF handle plus its Redux-mirror callback. */
+interface PendingFrame {
+  rafId: number
+  mirror: () => void
+}
+
 export class StreamWriteScheduler {
   private readonly throttleMs: number
   private readonly resendAttemptId?: string
@@ -92,9 +98,12 @@ export class StreamWriteScheduler {
   private readonly performWrite: StreamWriteSchedulerOptions['performWrite']
   private readonly mirrorToRedux: StreamWriteSchedulerOptions['mirrorToRedux']
   private readonly throttlers = new Map<string, ReturnType<typeof throttle>>()
-  private readonly rafIds = new Map<string, number>()
-  /** Pending Redux-mirror callbacks keyed by block id (drained inline on terminal). */
-  private readonly pendingMirrors = new Map<string, () => void>()
+  /**
+   * Pending per-block frame keyed by block id (mirror drained inline on terminal).
+   * A single record keeps the withheld RAF handle and its Redux-mirror callback
+   * in step: set together, replaced together, dropped together.
+   */
+  private readonly pendingFrames = new Map<string, PendingFrame>()
   private disposed = false
 
   constructor(options: StreamWriteSchedulerOptions) {
@@ -152,12 +161,11 @@ export class StreamWriteScheduler {
 
   /** Cancel one block's pending throttle + RAF without running the trailing write. */
   cancel = (id: string): void => {
-    const rafId = this.rafIds.get(id)
-    if (rafId !== undefined) {
-      cancelAnimationFrame(rafId)
-      this.rafIds.delete(id)
+    const pending = this.pendingFrames.get(id)
+    if (pending !== undefined) {
+      cancelAnimationFrame(pending.rafId)
+      this.pendingFrames.delete(id)
     }
-    this.pendingMirrors.delete(id)
     const throttler = this.throttlers.get(id)
     if (throttler) {
       throttler.cancel()
@@ -176,16 +184,12 @@ export class StreamWriteScheduler {
     if (this.disposed) {
       return
     }
-    const pending = [...this.pendingMirrors.entries()]
-    this.pendingMirrors.clear()
-    for (const [id, mirror] of pending) {
-      const rafId = this.rafIds.get(id)
-      if (rafId !== undefined) {
-        cancelAnimationFrame(rafId)
-        this.rafIds.delete(id)
-      }
+    const pending = [...this.pendingFrames.entries()]
+    this.pendingFrames.clear()
+    for (const [id, frame] of pending) {
+      cancelAnimationFrame(frame.rafId)
       try {
-        mirror()
+        frame.mirror()
       } catch (error) {
         logger.warn(`[drainMirrors] Mirror callback failed for block ${id}:`, error as Error)
       }
@@ -204,11 +208,10 @@ export class StreamWriteScheduler {
       return
     }
     this.disposed = true
-    for (const [, rafId] of this.rafIds) {
-      cancelAnimationFrame(rafId)
+    for (const [, frame] of this.pendingFrames) {
+      cancelAnimationFrame(frame.rafId)
     }
-    this.rafIds.clear()
-    this.pendingMirrors.clear()
+    this.pendingFrames.clear()
     for (const [, throttler] of this.throttlers) {
       throttler.cancel()
     }
@@ -234,14 +237,12 @@ export class StreamWriteScheduler {
       const topicId = ctx?.topicId ?? this.topicId
       const branchId = ctx?.branchId !== undefined ? ctx.branchId : this.branchId
 
-      const existingRAF = this.rafIds.get(id)
-      if (existingRAF !== undefined) {
-        cancelAnimationFrame(existingRAF)
+      const prev = this.pendingFrames.get(id)
+      if (prev !== undefined) {
+        cancelAnimationFrame(prev.rafId)
       }
-      this.pendingMirrors.delete(id)
       const mirror = (): void => {
-        this.rafIds.delete(id)
-        this.pendingMirrors.delete(id)
+        this.pendingFrames.delete(id)
         if (this.disposed) {
           return
         }
@@ -258,8 +259,12 @@ export class StreamWriteScheduler {
         }
       }
       const rafId = requestAnimationFrame(mirror)
-      this.rafIds.set(id, rafId)
-      this.pendingMirrors.set(id, mirror)
+      if (prev !== undefined) {
+        prev.rafId = rafId
+        prev.mirror = mirror
+      } else {
+        this.pendingFrames.set(id, { rafId, mirror })
+      }
 
       const write = this.performWrite(id, blockUpdate, { resendAttemptId, topicId, branchId })
       if (barrier && isThenable(write)) {
