@@ -179,6 +179,7 @@ describe('cross-topic history references', () => {
     expect(targetTopic).toBeTruthy()
     win = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: target, limit: 50 }))
     expect(win.reference?.status).toBe('missing')
+    expect(win.reference?.sourceName).toBeNull()
     expect(win.window.returnedCount).toBe(1)
 
     // Deleted endpoint: the captured boundary advances to the nearest

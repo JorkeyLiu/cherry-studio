@@ -1397,14 +1397,15 @@ export class ChatDbAggregateService {
           undefined,
           referenceChain
         )
+        const sourceTopic = windowRouteStruct.reference
+          ? repos.topics.getById(windowRouteStruct.reference.sourceTopicId)
+          : null
         let referenceMeta: HistoryReferenceMeta | null = windowRouteStruct.reference
           ? {
               sourceTopicId: windowRouteStruct.reference.sourceTopicId,
               sourceBranchId: windowRouteStruct.reference.sourceBranchId,
               anchorMessageId: windowRouteStruct.reference.anchorMessageId,
-              sourceName: repos.topics.getById(windowRouteStruct.reference.sourceTopicId).found
-                ? (repos.topics.getById(windowRouteStruct.reference.sourceTopicId).data?.name ?? null)
-                : null,
+              sourceName: sourceTopic && sourceTopic.found ? (sourceTopic.data?.name ?? null) : null,
               status: windowRouteStruct.status === 'available' ? 'available' : 'missing',
               // Nearest-layer boundary without reading the prefix: the depth-0
               // chain plan carries the same endpoint-or-predecessor boundary
