@@ -1,14 +1,13 @@
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
-import { ComposerIconButton } from '@renderer/components/Buttons'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
+import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useProviders } from '@renderer/hooks/useProvider'
 import ToolPopover from '@renderer/pages/home/Inputbar/components/ToolPopover'
 import { getModelUniqId } from '@renderer/services/ModelService'
-import type { FileMetadata, Model } from '@renderer/types'
+import type { Assistant, Model } from '@renderer/types'
 import { getFancyProviderName } from '@renderer/utils'
-import { Tooltip } from 'antd'
 import { sortBy } from 'lodash'
-import { AtSign, Plus } from 'lucide-react'
+import { ChevronDown, Plus } from 'lucide-react'
 import type { FC } from 'react'
 import { Fragment, memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -16,58 +15,47 @@ import { useNavigate } from 'react-router'
 import styled from 'styled-components'
 
 interface Props {
-  mentionedModels: Model[]
-  setMentionedModels: React.Dispatch<React.SetStateAction<Model[]>>
-  files: FileMetadata[]
-  setText: React.Dispatch<React.SetStateAction<string>>
+  assistant: Assistant
 }
 
-const MentionModelsButton: FC<Props> = ({ mentionedModels, setMentionedModels }) => {
+/**
+ * Inputbar single-model selector: a compact trigger (current model/provider
+ * icon + current model name + chevron) on the independent model row,
+ * opening the same lightweight, provider-grouped Popover list as the
+ * former @ entry (downwards, the row sits at the composer top). A click
+ * selects exactly one current model (persisted on the assistant) and
+ * closes the popover. No multi-select, no clear-all, no mention state.
+ */
+const MentionModelsButton: FC<Props> = ({ assistant }) => {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { providers } = useProviders()
+  const { updateAssistant } = useAssistant(assistant.id)
   const [open, setOpen] = useState(false)
 
-  const onMentionModel = useCallback(
-    (model: Model) => {
-      setMentionedModels((prev) => {
-        const modelId = getModelUniqId(model)
-        const exists = prev.some((m) => getModelUniqId(m) === modelId)
-        return exists ? prev.filter((m) => getModelUniqId(m) !== modelId) : [...prev, model]
-      })
-    },
-    [setMentionedModels]
+  const currentModelId = assistant.model ? getModelUniqId(assistant.model) : null
+  const currentProvider = useMemo(
+    () =>
+      (currentModelId
+        ? providers.find((p) => p.models.some((m) => getModelUniqId(m) === currentModelId))
+        : undefined) ?? null,
+    [providers, currentModelId]
   )
+  const placeholder = t('assistants.presets.edit.model.select.title')
 
-  /**
-   * 清空已提及模型：只作用于 @ 模型选择，不影响会话默认模型；
-   * 保留弹层打开状态，便于清空后继续选择。
-   */
-  const onClearMentionModels = useCallback(() => {
-    setMentionedModels([])
-  }, [setMentionedModels])
+  const onSelectModel = useCallback(
+    (model: Model) => {
+      updateAssistant({ model })
+      setOpen(false)
+    },
+    [updateAssistant]
+  )
 
   const content = useMemo(() => {
     return (
       <div data-testid="mention-models-popover">
         <PopoverHeaderRow>
           <span>{t('assistants.presets.edit.model.select.title')}</span>
-          {/* 清空操作位于标题行右侧、可滚动列表之外，且仅在有选中模型时出现 */}
-          {mentionedModels.length > 0 && (
-            <Tooltip title={t('settings.input.clear.models')} mouseLeaveDelay={0}>
-              <ClearButton
-                type="button"
-                aria-label={t('settings.input.clear.models')}
-                data-testid="mention-clear-all"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onClearMentionModels()
-                }}
-                onMouseDown={(e) => e.stopPropagation()}>
-                {t('settings.input.clear.all')}
-              </ClearButton>
-            </Tooltip>
-          )}
         </PopoverHeaderRow>
         <List data-testid="mention-model-list">
           {providers.map((provider) => {
@@ -84,14 +72,12 @@ const MentionModelsButton: FC<Props> = ({ mentionedModels, setMentionedModels })
                   {fancyProviderName}
                 </ProviderGroupHeader>
                 {providerModels.map((model) => {
-                  const isSelected = mentionedModels.some(
-                    (selected) => getModelUniqId(selected) === getModelUniqId(model)
-                  )
+                  const isSelected = currentModelId === getModelUniqId(model)
                   return (
                     <ListItem
                       key={getModelUniqId(model)}
                       $selected={isSelected}
-                      onClick={() => onMentionModel(model)}
+                      onClick={() => onSelectModel(model)}
                       data-testid={`mention-model-${model.id}`}
                       data-provider-id={provider.id}
                       data-selected={isSelected}>
@@ -128,33 +114,60 @@ const MentionModelsButton: FC<Props> = ({ mentionedModels, setMentionedModels })
         </List>
       </div>
     )
-  }, [t, providers, mentionedModels, onMentionModel, onClearMentionModels, navigate])
+  }, [t, providers, currentModelId, onSelectModel, navigate])
 
   return (
-    <ToolPopover open={open} onOpenChange={setOpen} content={content} width={320}>
-      <Tooltip
-        placement="top"
-        title={t('assistants.presets.edit.model.select.title')}
-        mouseLeaveDelay={0}
-        arrow
-        open={open ? false : undefined}>
-        <ComposerIconButton
-          data-testid="mention-models-button"
-          active={mentionedModels.length > 0}
-          aria-label={t('assistants.presets.edit.model.select.title')}>
-          <AtSign size={16} />
-        </ComposerIconButton>
-      </Tooltip>
+    <ToolPopover open={open} onOpenChange={setOpen} content={content} width={320} placement="bottom">
+      <ModelButton
+        type="button"
+        data-testid="mention-models-button"
+        aria-label={placeholder}
+        onClick={() => setOpen((v) => !v)}>
+        {assistant.model && <ModelAvatar model={assistant.model} provider={currentProvider} size={16} />}
+        <ModelName className="truncate">{assistant.model?.name ?? placeholder}</ModelName>
+        <ChevronDown size={14} />
+      </ModelButton>
     </ToolPopover>
   )
 }
+
+/**
+ * 紧凑模型触发按钮：聊天客户端常见的“图标 + 当前模型名 + 下拉箭头”
+ * 形态。文字 13px/半粗、最大约 190px 省略；容器自适应宽度（ToolPopover
+ * 的 Trigger 已放宽为 min 28px），方形工具按钮不受影响。
+ */
+const ModelButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text);
+  &:hover {
+    background: var(--color-background-soft);
+  }
+`
+
+const ModelName = styled.span`
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`
 
 const CheckMark = styled.span`
   font-size: 14px;
 `
 
 /**
- * 标题行：左侧为弹层标题，右侧承载清空操作；两者都在可滚动列表之外。
+ * 标题行：左侧为弹层标题。单选语义下没有清除操作，标题独占头部。
  * 沿用应用内其他输入栏弹层的标题行样式（13px、半粗、底部间距）。
  */
 const PopoverHeaderRow = styled.div`
@@ -165,34 +178,6 @@ const PopoverHeaderRow = styled.div`
   font-weight: 600;
   font-size: 13px;
   margin-bottom: 8px;
-`
-
-/**
- * 清空按钮：中性的文字按钮，非破坏性样式，参与键盘焦点链（原生 button）。
- */
-const ClearButton = styled.button`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border: none;
-  background: transparent;
-  color: var(--color-text-3);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.2;
-  padding: 2px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  &:hover {
-    background: var(--color-background-soft);
-    color: var(--color-text-1);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 1px;
-  }
 `
 
 const List = styled.div`

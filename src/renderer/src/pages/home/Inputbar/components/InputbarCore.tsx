@@ -59,6 +59,9 @@ export interface InputbarCoreProps {
   // Toolbar sections
   leftToolbar?: React.ReactNode
   rightToolbar?: React.ReactNode
+  // Independent model row rendered first inside the composer (current
+  // model selector with model name); the toolbar keeps the 28px tool slots.
+  modelRow?: React.ReactNode
 
   // Preview sections (attachments, mentions, etc.)
   topContent?: React.ReactNode
@@ -91,6 +94,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   handleSendMessage,
   leftToolbar,
   rightToolbar,
+  modelRow,
   topContent,
   pinnedContent,
   topRightOverlay
@@ -358,6 +362,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
             <HolderOutlined style={{ fontSize: 12 }} />
           </DragHandle>
           {topRightOverlay}
+          {modelRow && <ModelRow data-testid="inputbar-model-row">{modelRow}</ModelRow>}
           {files.length > 0 && (
             <AttachmentPreview files={files} setFiles={setFiles} onAttachmentContextMenu={appendTxtContentToInput} />
           )}
@@ -431,16 +436,31 @@ const Container = styled.div`
   flex-direction: column;
   position: relative;
   z-index: 2;
-  padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
+  // Single window-bottom gap: 12px between the composer outer box and the
+  // canvas bottom edge (sides keep the nav-rail geometry constant). The
+  // plane itself sits at bottom:0, so this padding is the only owner of the
+  // gap, and the overlay measurement includes it exactly once. Never folded
+  // into the floating-control band: gap is spacing, band is trigger strip.
+  padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px 12px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
 `
 
 const InputBarContainer = styled.div`
+  // Non-draggable content island: only the top titlebar bands drag; the
+  // inputbar (model controls, tools) never does.
+  -webkit-app-region: none;
   border: 0.5px solid var(--color-border);
   transition: all 0.2s ease;
   position: relative;
-  border-radius: 17px;
-  padding-top: 8px;
-  background-color: var(--color-background-opacity);
+  // One plate, one radius: same token as the assistant-switcher panel, so
+  // all four plate corners share one uniform arc; ModelRow/textarea/
+  // BottomBar all live inside this plate, never floating on their own.
+  border-radius: var(--list-item-border-radius);
+  padding-top: 6px;
+  background-color: var(--color-background);
+  // Solid plate: the composer floats over the message flow, so any
+  // translucency bleeds messages through. Only the top titlebar fade stays
+  // translucent; this surface never is. Edge separation comes from the
+  // hairline border above — no box-shadow on the composer.
   &.file-dragging {
     border: 2px dashed #2ecc71;
     &::before {
@@ -451,7 +471,7 @@ const InputBarContainer = styled.div`
       right: 0;
       bottom: 0;
       background-color: rgba(46, 204, 113, 0.03);
-      border-radius: 14px;
+      border-radius: var(--list-item-border-radius);
       z-index: 5;
       pointer-events: none;
     }
@@ -459,6 +479,11 @@ const InputBarContainer = styled.div`
 `
 
 const Textarea = styled(TextArea)`
+  // Single paint owner: the plate (InputBarContainer) owns the only solid
+  // background. This textarea and its inner .ant-input stay transparent on
+  // all states so no square inner layer intrudes on the plate arcs; text,
+  // resize and selection behavior untouched.
+  background-color: transparent;
   padding: 0;
   border-radius: 0;
   display: flex;
@@ -469,6 +494,14 @@ const Textarea = styled(TextArea)`
   transition: none !important;
   &.ant-input {
     line-height: 1.4;
+    background-color: transparent;
+  }
+  &.ant-input:hover,
+  &.ant-input:focus,
+  &.ant-input:focus-within,
+  textarea.ant-input:hover,
+  textarea.ant-input:focus {
+    background-color: transparent;
   }
   &::-webkit-scrollbar {
     width: 3px;
@@ -479,11 +512,25 @@ const BottomBar = styled.div`
   display: flex;
   flex-direction: row;
   justify-content: space-between;
-  padding: 5px 8px;
-  height: 40px;
+  padding: 3px 8px;
+  height: 34px;
   gap: 16px;
   position: relative;
   z-index: 2;
+  flex-shrink: 0;
+`
+
+// Independent model row: the single-model selector owns this slim row at the
+// composer top (icon + current model name + chevron), clear of the crowded
+// 28px toolbar slots below the textarea.
+const ModelRow = styled.div`
+  // Single paint owner: transparent so the plate shows through; the plate
+  // keeps the only solid background.
+  background-color: transparent;
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 8px;
   flex-shrink: 0;
 `
 

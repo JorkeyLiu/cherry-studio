@@ -2573,4 +2573,32 @@ describe('store migrations', () => {
       expect(missing.settings.sidebarIcons).toBeUndefined()
     })
   })
+  describe('migration 231: unified workspace sidebar state', () => {
+    const legacyState = (settings: Record<string, unknown>) => ({
+      settings,
+      _persist: { version: 230, rehydrated: false }
+    })
+
+    it('maps legacy visibility and width onto the unified fields', async () => {
+      const migrated: any = await migrate(legacyState({ showAssistants: false, assistantsWidth: 350 }) as any, 231)
+      expect(migrated.settings.workspaceSidebarVisible).toBe(false)
+      expect(migrated.settings.workspaceSidebarCollapsed).toBe(false)
+      expect(migrated.settings.workspaceSidebarWidth).toBe(350)
+    })
+
+    it('falls back to the topic-list width and heals narrow widths', async () => {
+      const migrated: any = await migrate(legacyState({ topicListWidth: 180 }) as any, 231)
+      expect(migrated.settings.workspaceSidebarVisible).toBe(true)
+      expect(migrated.settings.workspaceSidebarWidth).toBe(220)
+    })
+
+    it('preserves an already-unified state and normalizes it', async () => {
+      const migrated: any = await migrate(
+        legacyState({ workspaceSidebarVisible: false, workspaceSidebarWidth: 900 }) as any,
+        231
+      )
+      expect(migrated.settings.workspaceSidebarVisible).toBe(false)
+      expect(migrated.settings.workspaceSidebarWidth).toBe(600)
+    })
+  })
 })

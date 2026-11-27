@@ -1,4 +1,5 @@
 import DefaultAvatar from '@renderer/assets/images/avatar.png'
+import DefaultUserAvatar, { isDefaultUserAvatar } from '@renderer/components/Avatar/DefaultUserAvatar'
 import EmojiAvatar from '@renderer/components/Avatar/EmojiAvatar'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -159,6 +160,8 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
                 <EmojiAvatar size={80} fontSize={40}>
                   {avatar}
                 </EmojiAvatar>
+              ) : isDefaultUserAvatar(avatar) ? (
+                <DefaultUserAvatar size={80} testId="user-popup-default-avatar" title={t('common.avatar')} />
               ) : (
                 <UserAvatar src={avatar} />
               )}

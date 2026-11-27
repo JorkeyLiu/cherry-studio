@@ -199,7 +199,7 @@ const Plate = styled.div`
   border: 1px solid var(--color-border-soft);
   border-left: 0;
   border-radius: 0 8px 8px 0;
-  background: var(--color-background-soft);
+  background: var(--color-background);
   overflow: hidden;
 `
 
@@ -212,22 +212,24 @@ const List = styled.div`
 `
 
 const Segment = styled.button`
-  flex: none;
-  max-width: ${SEGMENT_MAX_WIDTH}px;
-  min-width: 0;
-  padding: 2px 6px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: var(--color-text-2);
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+   flex: none;
+   max-width: ${SEGMENT_MAX_WIDTH}px;
+   min-width: 0;
+   padding: 2px 6px;
+   border: 0;
+   border-radius: 6px;
+   background: none;
+   color: var(--color-text-2);
+   font-family: inherit;
+   font-size: 12px;
+   line-height: 1.5;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
   cursor: pointer;
-
+  // Navigation control inside the draggable chat header: opt out so the
+  // click reaches the segment instead of starting a window drag.
+  -webkit-app-region: no-drag;
   &:hover {
     background: var(--color-hover);
     color: var(--color-text-1);

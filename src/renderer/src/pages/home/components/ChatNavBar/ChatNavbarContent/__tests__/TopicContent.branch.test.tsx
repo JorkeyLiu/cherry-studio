@@ -149,8 +149,6 @@ vi.mock('@renderer/components/EmojiIcon', () => ({ default: () => <div data-test
 vi.mock('@renderer/components/HorizontalScrollContainer', () => ({
   default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>
 }))
-vi.mock('../../../SelectModelButton', () => ({ default: () => <div data-testid="mock-model-btn" /> }))
-vi.mock('../../Tools', () => ({ default: () => <div data-testid="mock-tools" /> }))
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -1157,30 +1155,22 @@ describe('TopicContent unified branch selector', () => {
     expect(screen.getByTestId('branch-selector-popover')).toBeInTheDocument()
   })
 
-  it('orders the row model selector, branch entry, then path, with the entry outside the right tool group', () => {
+  it('orders the branch-only row entry, then path, with no model selector or tool group', () => {
     setTree([b1(), b2()], [], null)
     renderTopicContent()
     expect(screen.queryByTestId('mock-emoji')).not.toBeInTheDocument()
     expect(screen.getByTestId('branch-selector-breadcrumb')).toHaveTextContent('Runtopic')
 
-    const model = screen.getByTestId('mock-model-btn')
+    // The top-bar model selector and edit/settings tools moved out of this
+    // row (inputbar @ selector, chat floating group): neither renders here.
+    expect(screen.queryByTestId('mock-model-btn')).toBeNull()
+    expect(screen.queryByTestId('navbar-tools-right')).toBeNull()
+
     const entry = screen.getByTestId('branch-selector-entry')
     const crumbSlot = screen.getByTestId('branch-crumb-slot')
-    const tools = screen.getByTestId('navbar-tools-right')
 
-    // The tool group is still the right-aligned end of the row, and the branch
-    // entry is no longer one of its tools.
-    expect(tools.className).toMatch(/ml-auto/)
-    expect(within(tools).getByTestId('mock-tools')).toBeInTheDocument()
-    expect(within(tools).queryByTestId('branch-selector-entry')).not.toBeInTheDocument()
-    // The path plate is its own element: the tool group is not inside it.
-    expect(within(tools).queryByTestId('branch-selector-breadcrumb')).not.toBeInTheDocument()
-
-    // DOM order: model selector, the entry immediately before the path, then
-    // the path, then the tool group.
-    expect(precedes(model, entry)).toBe(true)
+    // DOM order: the entry immediately before the path.
     expect(precedes(entry, crumbSlot)).toBe(true)
-    expect(precedes(crumbSlot, tools)).toBe(true)
   })
 
   it('renders the branch entry as an icon-only button that reports its open state', async () => {
@@ -1221,8 +1211,8 @@ describe('TopicContent unified branch selector', () => {
     expect(plate).not.toBeNull()
     const css = styleText()
     // The accepted navigation base: one dark rounded plate with a thin border
-    // around the whole path…
-    expect(css).toMatch(/background:\s*var\(--color-background-soft\)/)
+    // around the whole path, on the same solid surface as the right tool capsule…
+    expect(css).toMatch(/background:\s*var\(--color-background\)/)
     expect(css).toMatch(/border:\s*1px solid var\(--color-border-soft\)/)
     expect(css).toMatch(/border-radius:\s*8px/)
     // …that hugs its content instead of stretching across the row.
@@ -1231,8 +1221,9 @@ describe('TopicContent unified branch selector', () => {
     expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*color:\s*var\(--color-text-1\)/)
     expect(css).toMatch(/\[data-current='true'\][^{}]*\{[^{}]*font-weight:\s*600/)
     expect(css).not.toMatch(/\[data-current='true'\][^{}]*\{[^{}]*background:\s*var\(--color-primary-mute\)/)
-    // The plate wraps the path only: the tool group is outside it.
-    expect(plate?.contains(screen.getByTestId('navbar-tools-right'))).toBe(false)
+    // The plate wraps the path only: no model selector or tool group inside it.
+    expect(plate?.querySelector('[data-testid="navbar-tools-right"]')).toBeNull()
+    expect(plate?.querySelector('[data-testid="mock-model-btn"]')).toBeNull()
   })
 })
 

@@ -15,11 +15,17 @@ import { NotificationProvider } from './context/NotificationProvider'
 import StyleSheetManager from './context/StyleSheetManager'
 import { ThemeProvider } from './context/ThemeProvider'
 import Router from './Router'
-import { normalizeSidebarWidth } from './store/settings'
+import {
+  normalizeSidebarWidth,
+  normalizeWorkspaceSidebarWidth,
+  WORKSPACE_SIDEBAR_DEFAULT_WIDTH
+} from './store/settings'
 
 const logger = loggerService.withContext('App.tsx')
 
 const formatSidebarWidth = (width: unknown) => `${normalizeSidebarWidth(width)}px`
+
+const formatWorkspaceSidebarWidth = (width: unknown) => `${normalizeWorkspaceSidebarWidth(width)}px`
 
 // 创建 React Query 客户端
 const queryClient = new QueryClient({
@@ -38,11 +44,16 @@ const queryClient = new QueryClient({
 function SidebarWidthInitializer() {
   const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
   const topicListWidth = useAppSelector((s) => s.settings.topicListWidth)
+  const workspaceSidebarWidth = useAppSelector((s) => s.settings.workspaceSidebarWidth)
 
   useEffect(() => {
     document.documentElement.style.setProperty('--assistants-width', formatSidebarWidth(assistantsWidth))
     document.documentElement.style.setProperty('--topic-list-width', formatSidebarWidth(topicListWidth))
-  }, [assistantsWidth, topicListWidth])
+    document.documentElement.style.setProperty(
+      '--workspace-sidebar-width',
+      formatWorkspaceSidebarWidth(workspaceSidebarWidth ?? WORKSPACE_SIDEBAR_DEFAULT_WIDTH)
+    )
+  }, [assistantsWidth, topicListWidth, workspaceSidebarWidth])
 
   return null
 }

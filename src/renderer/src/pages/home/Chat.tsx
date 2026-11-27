@@ -1,36 +1,32 @@
 import { loggerService } from '@logger'
 import type { ContentSearchLocatedMatch, ContentSearchRef } from '@renderer/components/ContentSearch'
 import { ContentSearch } from '@renderer/components/ContentSearch'
-import { HStack } from '@renderer/components/Layout'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
-import ResizableHandle from '@renderer/components/ResizableHandle'
 import { importSettingsPage } from '@renderer/components/routeImporters'
 import { useRouteIdlePreload } from '@renderer/components/useRouteIdlePreload'
+import { isMac } from '@renderer/config/constant'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
+import { useFullscreen } from '@renderer/hooks/useFullscreen'
 import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
-import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { sidebarDragMax } from '@renderer/pages/home/Messages/pairedGroupSizing'
-import { usePairedReadingMin } from '@renderer/pages/home/Messages/pairedReadingMinContext'
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { isAcceptedClosureForRoute } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { setTopicListWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
 import { debounce } from 'lodash'
-import { AnimatePresence, motion } from 'motion/react'
+import { motion } from 'motion/react'
 import type { FC } from 'react'
 import React, { useMemo, useState } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
@@ -40,10 +36,15 @@ import styled from 'styled-components'
 
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
+import {
+  COMPOSER_OVERLAY_HEIGHT_VAR,
+  COMPOSER_TAIL_INSET_VAR,
+  resolveComposerTailInset,
+  useComposerOverlayHeight
+} from './Messages/composerOverlayGeometry'
 import ConversationNavigation from './Messages/ConversationNavigation'
 import { NAV_GUTTER_WIDTH_PX } from './Messages/MessageOutline'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
-import Tabs from './Tabs'
 
 const logger = loggerService.withContext('Chat')
 
@@ -61,18 +62,17 @@ const Chat: FC<Props> = (props) => {
   // LOCK-105: message style is always bubble; messageNavigation is a boolean
   // off/on toggle for the conversation navigation list.
   const { messageNavigation } = useSettings()
-  const { showTopics } = useShowTopics()
-  const dispatch = useAppDispatch()
-  const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
-  const showAssistants = useAppSelector((s) => s.settings.showAssistants)
-  const chatColumnMin = props.chatColumnMin ?? 0
-  // Live window width shared with the home layout: the fixed-window budget must
-  // follow real resize events, not a render-time snapshot.
-  const { windowWidth: liveWindowWidth } = usePairedReadingMin()
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
+  const composerRef = React.useRef<HTMLDivElement>(null)
+  // Floating composer overlay: single measured border-box height (layout-phase
+  // first measure + ResizeObserver updates; local state only, never Redux).
+  // The tail inset (measured height + existing control band) is published as
+  // local CSS vars on the canvas below; scroll padding reads the same vars.
+  const composerOverlayHeight = useComposerOverlayHeight(composerRef)
+  const composerTailInset = resolveComposerTailInset(composerOverlayHeight)
   // Gutter-strip wheel: the nav gutter below is this row's own padding (only
   // while the navigator is mounted), so a wheel parked over the strip
   // (outside the rail's halo) lands on this host instead of the chat
@@ -398,75 +398,85 @@ const Chat: FC<Props> = (props) => {
     firstUpdateOrNoFirstUpdateHandler()
   }, [firstUpdateOrNoFirstUpdateHandler, setTimeoutTimer])
 
-  const mainHeight = 'calc(100vh - var(--navbar-height))'
+  const isFullscreen = useFullscreen()
+  // Single source for the overlay band height: the mac traffic-light strip
+  // (titlebar-area) outside fullscreen, navbar-height everywhere else.
+  // Published as --chat-band on #chat-main so the overlay titlebar root,
+  // the fade and the message top safe area derive from the same value.
+  // max() keeps a reliable 30px floor: a missing or zero
+  // env(titlebar-area-height) never collapses the band (or the sidebar
+  // band synced to the same expression).
+  const chatBand = !isMac || isFullscreen ? 'var(--navbar-height)' : 'max(30px, env(titlebar-area-height, 30px))'
 
   return (
     // LOCK-105: message style is always bubble.
     <Container id="chat" className="bubble">
-      <HStack>
+      <ChatRow>
         <motion.div
           layout
           transition={{ duration: 0.3, ease: 'easeInOut' }}
-          style={{ flex: 1, display: 'flex', minWidth: 0, overflow: 'hidden' }}>
+          style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, alignSelf: 'stretch', overflow: 'hidden' }}>
           <Main
             ref={mainRef}
             id="chat-main"
             vertical
             flex={1}
             justify="space-between"
-            style={{ height: mainHeight, width: '100%' }}>
-            {/* Viewport scope is owned by HomePage (single provider above Navbar/Tabs/Chat). */}
-            <ChatNavbar
-              activeAssistant={props.assistant}
-              activeTopic={props.activeTopic}
-              setActiveTopic={props.setActiveTopic}
-            />
-            <div
-              className="flex flex-1 flex-col justify-between"
-              style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-              {/*
-                 Nav/content layer boundary (single contract, no per-component
-                 z-fix). While the navigator is mounted the message column is
-                 offset by the nav gutter as this row's own padding, so no
-                 message box ever covers the rail strip; the overlay nav sorts
-                 before the column with no layer of its own while collapsed, so
-                 sibling order paints all ordinary content above it (overlapping
-                 pixels hit the message, only the exposed rail hovers) and its
-                 expanded panel rises above content by its own rule. The gutter
-                 strip belongs to this host's box (below the overlay), with
-                 wheel forwarded so the strip keeps scrolling the chat. With
-                 navigation off there is no padding and no forwarder: native
-                 content width is restored and no dead indent remains.
-               */}
-              <div
-                style={{
-                  position: 'relative',
-                  display: 'flex',
-                  flex: 1,
-                  minHeight: 0,
-                  paddingLeft: messageNavigation ? NAV_GUTTER_WIDTH_PX : 0
-                }}
-                onWheel={messageNavigation ? handleNavGutterWheel : undefined}>
-                {messageNavigation && (
-                  <ConversationNavigation
-                    topicId={props.activeTopic.id}
-                    readingAnchor={readingAnchor}
-                    onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
-                    segments={routeSegments}
-                    contextBoundaryMessageId={sharedContextInfo.boundaryMessageId ?? null}
+            style={{ width: '100%', '--chat-band': chatBand } as React.CSSProperties}>
+            {/* Viewport scope is owned by HomePage (single provider above WorkspaceSidebar/Chat). */}
+            <ChatCanvas
+              style={
+                {
+                  [COMPOSER_OVERLAY_HEIGHT_VAR]: `${composerOverlayHeight}px`,
+                  [COMPOSER_TAIL_INSET_VAR]: `${composerTailInset}px`
+                } as React.CSSProperties
+              }>
+              <MessagePlane>
+                {/*
+                   Message/composer plane boundary (single contract, no per-component
+                   z-fix). MessagePlane fills the canvas; ComposerPlane floats above it.
+                   While the navigator is mounted the message column is offset by the
+                   nav gutter as this row's own padding, so no message box ever covers
+                   the rail strip; the overlay nav sorts
+                   before the column with no layer of its own while collapsed, so
+                   sibling order paints all ordinary content above it (overlapping
+                   pixels hit the message, only the exposed rail hovers) and its
+                   expanded panel rises above content by its own rule. The gutter
+                   strip belongs to this host's box (below the overlay), with
+                   wheel forwarded so the strip keeps scrolling the chat. With
+                   navigation off there is no padding and no forwarder: native
+                   content width is restored and no dead indent remains.
+                 */}
+                <div
+                  style={{
+                    position: 'relative',
+                    display: 'flex',
+                    flex: 1,
+                    minHeight: 0,
+                    paddingLeft: messageNavigation ? NAV_GUTTER_WIDTH_PX : 0
+                  }}
+                  onWheel={messageNavigation ? handleNavGutterWheel : undefined}>
+                  {messageNavigation && (
+                    <ConversationNavigation
+                      topicId={props.activeTopic.id}
+                      readingAnchor={readingAnchor}
+                      onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                      segments={routeSegments}
+                      contextBoundaryMessageId={sharedContextInfo.boundaryMessageId ?? null}
+                    />
+                  )}
+                  <Messages
+                    ref={messagesRef}
+                    assistant={assistant}
+                    topic={props.activeTopic}
+                    setActiveTopic={props.setActiveTopic}
+                    onComponentUpdate={messagesComponentUpdateHandler}
+                    onFirstUpdate={messagesComponentFirstUpdateHandler}
+                    sharedContextInfo={sharedContextInfo}
+                    onReadingAnchor={setReadingAnchor}
                   />
-                )}
-                <Messages
-                  ref={messagesRef}
-                  assistant={assistant}
-                  topic={props.activeTopic}
-                  setActiveTopic={props.setActiveTopic}
-                  onComponentUpdate={messagesComponentUpdateHandler}
-                  onFirstUpdate={messagesComponentFirstUpdateHandler}
-                  sharedContextInfo={sharedContextInfo}
-                  onReadingAnchor={setReadingAnchor}
-                />
-              </div>
+                </div>
+              </MessagePlane>
               {isContentSearchActive && (
                 <ContentSearch
                   ref={contentSearchRef}
@@ -479,70 +489,105 @@ const Chat: FC<Props> = (props) => {
                   onClose={disableContentSearch}
                 />
               )}
-              <Inputbar
-                assistant={assistant}
-                setActiveTopic={props.setActiveTopic}
-                topic={props.activeTopic}
-                sharedContextInfo={sharedContextInfo}
-              />
-            </div>
+              <ComposerPlane ref={composerRef}>
+                <Inputbar
+                  assistant={assistant}
+                  setActiveTopic={props.setActiveTopic}
+                  topic={props.activeTopic}
+                  sharedContextInfo={sharedContextInfo}
+                />
+              </ComposerPlane>
+            </ChatCanvas>
+            {/* Overlay titlebar: last sibling above the canvas so no later
+            content region can cover its blank-pixel drag hits. Wraps no
+            message or composer content; the drag range stays the band. */}
+            <ChatNavbar
+              activeAssistant={assistant}
+              activeTopic={props.activeTopic}
+              setActiveTopic={props.setActiveTopic}
+            />
           </Main>
         </motion.div>
-        {showTopics &&
-          (() => {
-            const leftVisible = showAssistants ? assistantsWidth : 0
-            const winW = liveWindowWidth
-            // Same chat-budget clamp as the left panel: a fixed window is never
-            // squeezed below the reading minimum by widening the topic list.
-            const rightMax = winW > 0 ? sidebarDragMax(winW, leftVisible, chatColumnMin) : SIDEBAR_MAX_WIDTH
-            return (
-              <ResizableHandle
-                cssVar="--topic-list-width"
-                minWidth={SIDEBAR_MIN_WIDTH}
-                maxWidth={rightMax}
-                onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
-                side="right"
-              />
-            )
-          })()}
-        <AnimatePresence initial={false}>
-          {showTopics && (
-            <motion.div
-              key="right-tabs"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 'var(--topic-list-width, 275px)', opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.3, ease: 'easeInOut' }}
-              style={{
-                overflow: 'hidden'
-              }}>
-              <Tabs
-                activeAssistant={assistant}
-                activeTopic={props.activeTopic}
-                setActiveAssistant={props.setActiveAssistant}
-                setActiveTopic={props.setActiveTopic}
-                position="right"
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </HStack>
+      </ChatRow>
     </Container>
   )
 }
 
 const Container = styled.div`
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - var(--navbar-height));
-  flex: 1;
-  overflow: hidden;
-`
+   display: flex;
+   flex-direction: column;
+   flex: 1;
+   min-height: 0;
+   min-width: 0;
+   overflow: hidden;
+ `
+/**
+ * The single height-constrained row of the chat column: explicit stretch
+ * replaces the ambiguous shared HStack (which defaults to
+ * align-items: flex-start and lets children size to content, pushing the
+ * composer out of the window). Every level keeps min-height/min-width: 0 so
+ * #messages stays the only scroller.
+ */
+const ChatRow = styled.div`
+   display: flex;
+   flex: 1;
+   flex-direction: row;
+   align-items: stretch;
+   min-height: 0;
+   min-width: 0;
+   overflow: hidden;
+ `
 
 const Main = styled(Flex)`
-  height: calc(100vh - var(--navbar-height));
-  transform: translateZ(0);
-  position: relative;
+   flex: 1;
+   min-height: 0;
+   min-width: 0;
+   position: relative;
+ `
+
+// The two planes inside the canvas. MessagePlane fills the whole canvas and
+// owns the message column (navigator + Messages); ComposerPlane floats over
+// its bottom and owns the measured composer box. Plane z (1 below 2) is the
+// only order that matters here: every internal message z (labels 1000, nav
+// 999/expanded 1001, drawer 1004/1005) keeps its relative order but paints
+// below the composer, with no per-component fix. Neither plane declares a
+// drag region: they were never inside a drag header, and the overlay
+// titlebar stays the canvas's sibling above.
+const MessagePlane = styled.div`
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
 `
+
+const ComposerPlane = styled.div`
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+`
+
+/**
+ * The single positioning content plane of the chat column: the sibling the
+ * overlay titlebar (ChatNavBar) floats above. One isolation boundary here
+ * keeps overlay/message/nav/composer paint order local to this canvas, so
+ * nothing inside #messages needs its own context or z-index fix.
+ */
+const ChatCanvas = styled.div`
+   position: relative;
+   z-index: 0;
+   isolation: isolate;
+   display: flex;
+   flex: 1;
+   flex-direction: column;
+   justify-content: space-between;
+   min-height: 0;
+   min-width: 0;
+ `
 
 export default Chat

@@ -9,6 +9,9 @@ interface ToolPopoverProps {
   content: ReactNode
   children: ReactNode
   width?: number
+  /** Popover side. Toolbar triggers sit at the composer bottom (top); the
+   * independent model row sits at the composer top (bottom). */
+  placement?: 'top' | 'bottom'
 }
 
 /**
@@ -16,7 +19,14 @@ interface ToolPopoverProps {
  * Visual/position reuses InputbarSettings antd Popover: top placement, no arrow.
  * Not a generic menu framework - each tool renders its own content.
  */
-const ToolPopover: FC<ToolPopoverProps> = ({ open, onOpenChange, content, children, width = 297 }) => {
+const ToolPopover: FC<ToolPopoverProps> = ({
+  open,
+  onOpenChange,
+  content,
+  children,
+  width = 297,
+  placement = 'top'
+}) => {
   useEffect(() => {
     if (!open) return
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -49,7 +59,7 @@ const ToolPopover: FC<ToolPopoverProps> = ({ open, onOpenChange, content, childr
 
   return (
     <Popover
-      placement="top"
+      placement={placement}
       trigger="click"
       arrow={false}
       open={open}
@@ -69,12 +79,16 @@ const ToolPopover: FC<ToolPopoverProps> = ({ open, onOpenChange, content, childr
   )
 }
 
+// Wide-trigger safe: square icon tools keep their 28px floor via min sizes
+// while wider triggers (the compact model button) size to content.
 const Trigger = styled.span`
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  width: auto;
+  height: auto;
   vertical-align: middle;
   line-height: 0;
   flex-shrink: 0;

@@ -1,4 +1,4 @@
-import type { FileMetadata, KnowledgeBase, Model } from '@renderer/types'
+import type { FileMetadata, KnowledgeBase } from '@renderer/types'
 import React, { createContext, use, useEffect, useMemo, useRef, useState } from 'react'
 
 /**
@@ -8,8 +8,6 @@ import React, { createContext, use, useEffect, useMemo, useRef, useState } from 
 export interface InputbarToolsState {
   /** Attached files */
   files: FileMetadata[]
-  /** Models mentioned in the input */
-  mentionedModels: Model[]
   /** Selected knowledge base items */
   selectedKnowledgeBases: KnowledgeBase[]
 
@@ -26,7 +24,6 @@ export interface InputbarToolsState {
 export interface InputbarToolsDispatch {
   /** State setters */
   setFiles: React.Dispatch<React.SetStateAction<FileMetadata[]>>
-  setMentionedModels: React.Dispatch<React.SetStateAction<Model[]>>
   setSelectedKnowledgeBases: React.Dispatch<React.SetStateAction<KnowledgeBase[]>>
 
   /** Parent component actions */
@@ -84,7 +81,6 @@ interface InputbarToolsProviderProps {
   children: React.ReactNode
   initialState?: Partial<{
     files: FileMetadata[]
-    mentionedModels: Model[]
     selectedKnowledgeBases: KnowledgeBase[]
     couldAddImageFile: boolean
     extensions: string[]
@@ -99,7 +95,6 @@ interface InputbarToolsProviderProps {
 export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ children, initialState, actions }) => {
   // Core state
   const [files, setFiles] = useState<FileMetadata[]>(initialState?.files || [])
-  const [mentionedModels, setMentionedModels] = useState<Model[]>(initialState?.mentionedModels || [])
   const [selectedKnowledgeBases, setSelectedKnowledgeBases] = useState<KnowledgeBase[]>(
     initialState?.selectedKnowledgeBases || []
   )
@@ -127,12 +122,11 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
   const stateValue = useMemo<InputbarToolsState>(
     () => ({
       files,
-      mentionedModels,
       selectedKnowledgeBases,
       couldAddImageFile,
       extensions
     }),
-    [files, mentionedModels, selectedKnowledgeBases, couldAddImageFile, extensions]
+    [files, selectedKnowledgeBases, couldAddImageFile, extensions]
   )
 
   // Dispatch Context Value (stable references)
@@ -140,7 +134,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
     () => ({
       // State setters (React guarantees stable references)
       setFiles,
-      setMentionedModels,
       setSelectedKnowledgeBases,
 
       // Stable actions

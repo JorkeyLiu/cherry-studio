@@ -5,6 +5,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { COMPOSER_FLOATING_CONTROL_BAND_PX } from './composerFloatingBand'
+import { COMPOSER_TAIL_INSET_VAR } from './composerOverlayGeometry'
+
 /**
  * Genuine physical bottom gate (renderer-local geometry only): the container's
  * own scroll travel reached within 1px, i.e. `distanceFromBottom(metrics) <= 1`.
@@ -150,7 +153,7 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
 const BottomButton = styled.button<{ $hidden?: boolean }>`
   position: absolute;
   right: 16px;
-  bottom: 12px;
+  bottom: calc(12px + var(${COMPOSER_TAIL_INSET_VAR}, ${COMPOSER_FLOATING_CONTROL_BAND_PX}px));
   z-index: 6;
   width: 32px;
   height: 32px;

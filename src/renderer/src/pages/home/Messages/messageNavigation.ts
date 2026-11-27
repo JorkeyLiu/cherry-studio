@@ -251,9 +251,26 @@ export const resolveUnobscuredReadingBand = (args: {
   containerHeight: number
   obscurer: { top: number; bottom: number } | null
   paddingPx?: number
+  /**
+   * Height (px) of the bottom overlay the band must stay clear of — the
+   * floating composer overlay tail inset. Subtracted from the visible
+   * height only; content geometry still flows through live metrics, so
+   * callers must not subtract it a second time. Defaults to 0 (no
+   * overlay info), keeping every existing caller byte-identical.
+   */
+  bottomInsetPx?: number
 }): UnobscuredReadingBand | null => {
-  const { containerTop, containerHeight, obscurer, paddingPx = SEARCH_MATCH_READING_PADDING_PX } = args
+  const {
+    containerTop,
+    containerHeight,
+    obscurer,
+    paddingPx = SEARCH_MATCH_READING_PADDING_PX,
+    bottomInsetPx = 0
+  } = args
   if (!Number.isFinite(containerTop) || !Number.isFinite(containerHeight) || containerHeight <= 0) return null
+  const inset = Number.isFinite(bottomInsetPx) ? Math.max(0, bottomInsetPx) : 0
+  const visibleHeight = containerHeight - inset
+  if (visibleHeight <= 0) return null
   const containerBottom = containerTop + containerHeight
   let coveredBottom = containerTop
   if (obscurer && Number.isFinite(obscurer.top) && Number.isFinite(obscurer.bottom)) {
@@ -262,7 +279,7 @@ export const resolveUnobscuredReadingBand = (args: {
   }
   const padding = Number.isFinite(paddingPx) ? Math.max(0, paddingPx) : 0
   const top = coveredBottom - containerTop + padding
-  const height = containerHeight - (coveredBottom - containerTop) - padding * 2
+  const height = visibleHeight - (coveredBottom - containerTop) - padding * 2
   if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return null
   return { top, height }
 }

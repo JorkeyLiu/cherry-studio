@@ -8,6 +8,11 @@
   --assistants-width: 275px;
   --assistant-settings-width: 275px;
   --topic-list-width: 275px;
+  --workspace-sidebar-width: 300px;
+  /* Single sidebar toggle resting spot while the panel hides: right of the
+   native traffic lights (never over them). Tests assert the safe behavior,
+   not this coordinate. */
+  --sidebar-toggle-hidden-left: 86px;
   --settings-width: 250px;
 }
 
@@ -23,6 +28,7 @@
     --assistant-settings-width: 275px;
     /* Both home sidebars share the canonical 220px minimum (SIDEBAR_MIN_WIDTH). */
     --topic-list-width: 220px;
+    --workspace-sidebar-width: 220px;
     --settings-width: 210px;
   }
 }

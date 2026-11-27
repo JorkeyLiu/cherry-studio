@@ -15,6 +15,8 @@ interface ResizableHandleProps {
   maxWidth?: number
   /** Side of the panel: 'left' means handle is on the right edge of a left panel; 'right' means handle is on the left edge of a right panel */
   side: 'left' | 'right'
+  /** Optional stable selector for tests and observation (rendered as data-testid). */
+  testId?: string
 }
 
 const HANDLE_WIDTH = 6
@@ -25,7 +27,8 @@ const ResizableHandle = ({
   onResizing,
   minWidth = SIDEBAR_MIN_WIDTH,
   maxWidth = SIDEBAR_MAX_WIDTH,
-  side
+  side,
+  testId
 }: ResizableHandleProps) => {
   const isDragging = useRef(false)
   const startX = useRef(0)
@@ -90,7 +93,7 @@ const ResizableHandle = ({
     }
   }, [])
 
-  return <Handle $isActive={isActive} $side={side} onMouseDown={handleMouseDown} />
+  return <Handle $isActive={isActive} $side={side} onMouseDown={handleMouseDown} data-testid={testId} />
 }
 
 const Handle = styled.div<{ $isActive: boolean; $side: 'left' | 'right' }>`

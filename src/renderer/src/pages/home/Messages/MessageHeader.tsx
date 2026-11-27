@@ -1,3 +1,4 @@
+import DefaultUserAvatar, { isDefaultUserAvatar } from '@renderer/components/Avatar/DefaultUserAvatar'
 import EmojiAvatar from '@renderer/components/Avatar/EmojiAvatar'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import { HStack } from '@renderer/components/Layout'
@@ -136,6 +137,8 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
             <EmojiAvatar onClick={() => UserPopup.show()} size={35} fontSize={20}>
               {avatar}
             </EmojiAvatar>
+          ) : isDefaultUserAvatar(avatar) ? (
+            <DefaultUserAvatar size={35} onClick={() => UserPopup.show()} testId="message-user-default-avatar" />
           ) : (
             <Avatar
               src={avatar}

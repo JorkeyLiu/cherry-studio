@@ -12,10 +12,11 @@ vi.mock('antd', async () => {
   const actual: any = await vi.importActual('antd')
   return {
     ...actual,
-    Popover: ({ children, content, open, onOpenChange }: any) => (
+    Popover: ({ children, content, open, onOpenChange, placement }: any) => (
       <div
         data-testid="mock-popover"
         data-open={String(open)}
+        data-placement={placement}
         onClick={() => onOpenChange?.(!open)}
         onMouseDown={() => onOpenChange?.(!open)}
         onMouseUp={() => onOpenChange?.(!open)}>
@@ -37,6 +38,26 @@ describe('ToolPopover', () => {
     expect(getByText('trigger')).toBeInTheDocument()
     expect(getByText('hello content')).toBeInTheDocument()
     expect(getByTestId('mock-popover').getAttribute('data-open')).toBe('false')
+  })
+
+  it('defaults the popover placement to top (composer-bottom triggers)', () => {
+    const onOpenChange = vi.fn()
+    const { getByTestId } = render(
+      <ToolPopover open={false} onOpenChange={onOpenChange} content={<div>content</div>}>
+        <button>trigger</button>
+      </ToolPopover>
+    )
+    expect(getByTestId('mock-popover').getAttribute('data-placement')).toBe('top')
+  })
+
+  it('passes an explicit bottom placement through (independent model row)', () => {
+    const onOpenChange = vi.fn()
+    const { getByTestId } = render(
+      <ToolPopover open={false} onOpenChange={onOpenChange} content={<div>content</div>} placement="bottom">
+        <button>trigger</button>
+      </ToolPopover>
+    )
+    expect(getByTestId('mock-popover').getAttribute('data-placement')).toBe('bottom')
   })
 
   it('calls onOpenChange(false) on Escape when open', () => {

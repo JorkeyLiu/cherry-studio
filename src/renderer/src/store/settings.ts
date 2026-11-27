@@ -56,6 +56,44 @@ export const normalizeSidebarWidth = (width: unknown): number => {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width))
 }
 
+// Unified workspace sidebar: the single left panel replacing the former
+// assistants + topics dual panels. Expanded width shares the canonical
+// 220–600 clamp; the default is ~300px. Collapse is fully hidden — there is
+// no narrow rail in production.
+export const WORKSPACE_SIDEBAR_DEFAULT_WIDTH = 300
+/** @deprecated the narrow quick rail is removed (collapse hides the panel).
+ *  Inert persisted-compat constant; production budgets no longer count 64px. */
+export const WORKSPACE_SIDEBAR_RAIL_WIDTH = 64
+
+/** Normalize the unified workspace sidebar expanded width. */
+export const normalizeWorkspaceSidebarWidth = (width: unknown): number => {
+  if (typeof width !== 'number' || !Number.isFinite(width)) return WORKSPACE_SIDEBAR_DEFAULT_WIDTH
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width))
+}
+
+/** Legacy dual-panel persisted fields mapped onto the unified workspace state. */
+export interface LegacySidebarPersist {
+  showAssistants?: unknown
+  showTopics?: unknown
+  assistantsWidth?: unknown
+  topicListWidth?: unknown
+}
+
+/**
+ * One-shot legacy mapping for persisted dual-panel state (assistantsWidth /
+ * showAssistants preferred, topicListWidth / showTopics as fallback). Used
+ * by the persist migration; the legacy fields themselves stay inert.
+ */
+export function resolveWorkspaceSidebarFromLegacy(persisted: LegacySidebarPersist): {
+  visible: boolean
+  width: number
+} {
+  const rawVisible = persisted?.showAssistants ?? persisted?.showTopics
+  const visible = typeof rawVisible === 'boolean' ? rawVisible : true
+  const rawWidth = persisted?.assistantsWidth ?? persisted?.topicListWidth
+  return { visible, width: normalizeWorkspaceSidebarWidth(rawWidth) }
+}
+
 // Re-export for backward compatibility
 export { DEFAULT_SIDEBAR_ICONS }
 
@@ -68,8 +106,21 @@ export type UserTheme = {
 }
 
 export interface SettingsState {
+  /** @deprecated dual-panel navigation is unified into the single workspace
+   *  sidebar. Inert persisted field kept for historical data compatibility;
+   *  the persist migration maps it onto `workspaceSidebarVisible`. */
   showAssistants: boolean
+  /** @deprecated dual-panel navigation is unified into the single workspace
+   *  sidebar. Inert persisted field kept for historical data compatibility;
+   *  the persist migration maps it onto `workspaceSidebarVisible`. */
   showTopics: boolean
+  /** Unified workspace sidebar visibility (the single left panel). */
+  workspaceSidebarVisible: boolean
+  /** @deprecated collapse is fully hidden (no narrow rail). Inert persisted
+   *  field kept for historical data compatibility; production no longer reads it. */
+  workspaceSidebarCollapsed: boolean
+  /** Unified workspace sidebar expanded width (resizable). */
+  workspaceSidebarWidth: number
   /** @deprecated the tag-based assistant view switching is removed;
    *  the assistant list always renders in list form. Inert persisted field
    *  kept for historical data compatibility. */
@@ -240,13 +291,20 @@ export interface SettingsState {
   /** @deprecated per-message heading outline retired; the persisted
    *  `showMessageOutline` key stays inert for data compatibility. */
   // Sidebar widths (resizable)
+  /** @deprecated dual-panel widths are unified into `workspaceSidebarWidth`.
+   *  Inert persisted fields kept for historical data compatibility. */
   assistantsWidth: number
+  /** @deprecated dual-panel widths are unified into `workspaceSidebarWidth`.
+   *  Inert persisted fields kept for historical data compatibility. */
   topicListWidth: number
 }
 
 export const initialState: SettingsState = {
   showAssistants: true,
   showTopics: true,
+  workspaceSidebarVisible: true,
+  workspaceSidebarCollapsed: false,
+  workspaceSidebarWidth: WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
   assistantsTabSortType: 'list',
   sendMessageShortcut: 'Enter',
   language: navigator.language as LanguageVarious,
@@ -391,17 +449,39 @@ const settingsSlice = createSlice({
   name: 'settings',
   initialState,
   reducers: {
+    /** @deprecated legacy alias: drives the unified workspace visibility. */
     setShowAssistants: (state, action: PayloadAction<boolean>) => {
       state.showAssistants = action.payload
+      state.workspaceSidebarVisible = action.payload
     },
+    /** @deprecated legacy alias: toggles the unified workspace visibility. */
     toggleShowAssistants: (state) => {
-      state.showAssistants = !state.showAssistants
+      state.workspaceSidebarVisible = !state.workspaceSidebarVisible
+      state.showAssistants = state.workspaceSidebarVisible
     },
+    /** @deprecated legacy alias: drives the unified workspace visibility. */
     setShowTopics: (state, action: PayloadAction<boolean>) => {
       state.showTopics = action.payload
+      state.workspaceSidebarVisible = action.payload
     },
+    /** @deprecated legacy alias: toggles the unified workspace visibility. */
     toggleShowTopics: (state) => {
-      state.showTopics = !state.showTopics
+      state.workspaceSidebarVisible = !state.workspaceSidebarVisible
+      state.showTopics = state.workspaceSidebarVisible
+    },
+    setWorkspaceSidebarVisible: (state, action: PayloadAction<boolean>) => {
+      state.workspaceSidebarVisible = action.payload
+    },
+    toggleWorkspaceSidebarVisible: (state) => {
+      state.workspaceSidebarVisible = !state.workspaceSidebarVisible
+    },
+    /** @deprecated collapse is fully hidden; kept writing the persisted field for compat. */
+    setWorkspaceSidebarCollapsed: (state, action: PayloadAction<boolean>) => {
+      state.workspaceSidebarCollapsed = action.payload
+    },
+    /** @deprecated collapse is fully hidden; kept toggling the persisted field for compat. */
+    toggleWorkspaceSidebarCollapsed: (state) => {
+      state.workspaceSidebarCollapsed = !state.workspaceSidebarCollapsed
     },
     setSendMessageShortcut: (state, action: PayloadAction<SendMessageShortcut>) => {
       state.sendMessageShortcut = action.payload
@@ -655,11 +735,16 @@ const settingsSlice = createSlice({
     setShowMessageOutline: (state, action: PayloadAction<boolean>) => {
       state.showMessageOutline = action.payload
     },
+    /** @deprecated inert width: dual-panel widths are unified. */
     setAssistantsWidth: (state, action: PayloadAction<number>) => {
       state.assistantsWidth = normalizeSidebarWidth(action.payload)
     },
+    /** @deprecated inert width: dual-panel widths are unified. */
     setTopicListWidth: (state, action: PayloadAction<number>) => {
       state.topicListWidth = normalizeSidebarWidth(action.payload)
+    },
+    setWorkspaceSidebarWidth: (state, action: PayloadAction<number>) => {
+      state.workspaceSidebarWidth = normalizeWorkspaceSidebarWidth(action.payload)
     }
   }
 })
@@ -744,6 +829,11 @@ export const {
   setEnableDeveloperMode,
   setAssistantsWidth,
   setTopicListWidth,
+  setWorkspaceSidebarVisible,
+  toggleWorkspaceSidebarVisible,
+  setWorkspaceSidebarCollapsed,
+  toggleWorkspaceSidebarCollapsed,
+  setWorkspaceSidebarWidth,
   setShowMessageOutline,
   // API Server actions
   setApiServerEnabled,

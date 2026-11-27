@@ -12,19 +12,28 @@ import { COMPOSER_FLOATING_CONTROL_BAND_PX } from './composerFloatingBand'
  * by a reversed flex direction.
  *
  * The bottom padding is the flow's tail clearance, not a cosmetic inset: the
- * composer's floating control band paints over the last rows of this content
- * (`#messages` is the band's sibling, so no flow row can clear it from inside),
- * and reserving exactly that band keeps the tail — including the out-of-flow
+ * floating composer overlay paints over the last rows of this content (the
+ * composer lives in its own overlay plane now, no longer in flow), and the
+ * control band paints over the tail too. Reserving the measured composer
+ * height plus exactly that band keeps the tail — including the out-of-flow
  * folded group label — inside the real scrollport instead of underneath the
- * portaled control. The value comes from the control geometry itself
- * (`composerFloatingBand`), never from a second hand-tuned number.
+ * overlay. Both numbers come from the shared geometry modules
+ * (`composerOverlayGeometry` / `composerFloatingBand`), never from a second
+ * hand-tuned number.
  */
 export const ScrollContainer = styled.div`
   display: flex;
   flex-direction: column;
-  padding: 10px 10px ${COMPOSER_FLOATING_CONTROL_BAND_PX}px;
+  // Top safe area: the overlay titlebar paints no flow height, so the flow
+  // clears the band plus the fade tail from inside, both derived from the
+  // --chat-band published on #chat-main (fullscreen-aware). Sides/tail
+  // unchanged (FoldedSection pins side 10px; tail is the floating composer
+  // overlay height plus the existing control band, published as
+  // --composer-tail-inset on the chat canvas; the fallback is the band alone
+  // so the trigger strip is always reserved, never double-counted).
+  padding: calc(var(--chat-band, var(--navbar-height)) + 24px) 10px var(--composer-tail-inset, ${COMPOSER_FLOATING_CONTROL_BAND_PX}px);
   .multi-select-mode & {
-    padding-bottom: 60px;
+    padding-bottom: max(60px, var(--composer-tail-inset, ${COMPOSER_FLOATING_CONTROL_BAND_PX}px));
   }
 `
 
@@ -66,6 +75,12 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   // space belongs to the scrollport (below the flow) rather than being scrolled.
   flex: 1 1 auto;
   min-height: 0;
+  // Anchor/scroll-to-top targets clear the overlay band instead of sliding
+  // under it; always navbar-height (>= band on every platform).
+  scroll-padding-top: var(--navbar-height);
+  // Bottom anchor targets clear the floating composer overlay: same single
+  // source as the tail padding above (measured composer + band).
+  scroll-padding-bottom: var(--composer-tail-inset, ${COMPOSER_FLOATING_CONTROL_BAND_PX}px);
   // Local layer contract: this scroll host stays position:relative WITHOUT
   // its own z-index so it never traps descendants in a stacking context.
   // Sibling overlays (BackToBottom z6, EditModeActionBar z10) still paint

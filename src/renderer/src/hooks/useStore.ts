@@ -15,27 +15,67 @@
  * --------------------------------------------------------------------------
  */
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
-import { setShowAssistants, setShowTopics, toggleShowAssistants, toggleShowTopics } from '@renderer/store/settings'
+import {
+  setWorkspaceSidebarCollapsed,
+  setWorkspaceSidebarVisible,
+  setWorkspaceSidebarWidth,
+  toggleWorkspaceSidebarCollapsed,
+  toggleWorkspaceSidebarVisible
+} from '@renderer/store/settings'
 
-export function useShowAssistants() {
-  const showAssistants = useAppSelector((state) => state.settings.showAssistants)
+/**
+ * Unified workspace sidebar state (the single left panel replacing the
+ * former assistants + topics dual panels). Visibility is the single runtime
+ * truth; `collapsed` and its setters are deprecated inert persist-compat
+ * (no production reader).
+ */
+export function useWorkspaceSidebar() {
+  const visible = useAppSelector((state) => state.settings.workspaceSidebarVisible)
+  /** @deprecated collapse is fully hidden; inert persist-compat. */
+  const collapsed = useAppSelector((state) => state.settings.workspaceSidebarCollapsed)
+  const width = useAppSelector((state) => state.settings.workspaceSidebarWidth)
   const dispatch = useAppDispatch()
 
   return {
-    showAssistants,
-    setShowAssistants: (show: boolean) => dispatch(setShowAssistants(show)),
-    toggleShowAssistants: () => dispatch(toggleShowAssistants())
+    visible,
+    /** @deprecated collapse is fully hidden; inert persist-compat. */
+    collapsed,
+    width,
+    setVisible: (show: boolean) => dispatch(setWorkspaceSidebarVisible(show)),
+    toggleVisible: () => dispatch(toggleWorkspaceSidebarVisible()),
+    /** @deprecated collapse is fully hidden; inert persist-compat. */
+    setCollapsed: (collapse: boolean) => dispatch(setWorkspaceSidebarCollapsed(collapse)),
+    /** @deprecated collapse is fully hidden; inert persist-compat. */
+    toggleCollapsed: () => dispatch(toggleWorkspaceSidebarCollapsed()),
+    setWidth: (nextWidth: number) => dispatch(setWorkspaceSidebarWidth(nextWidth))
   }
 }
 
-export function useShowTopics() {
-  const showTopics = useAppSelector((state) => state.settings.showTopics)
-  const dispatch = useAppDispatch()
+/**
+ * @deprecated legacy alias: the dual panels are unified into the workspace
+ * sidebar. Maps onto the unified visibility so existing callers keep working.
+ */
+export function useShowAssistants() {
+  const { visible, setVisible, toggleVisible } = useWorkspaceSidebar()
 
   return {
-    showTopics,
-    setShowTopics: (show: boolean) => dispatch(setShowTopics(show)),
-    toggleShowTopics: () => dispatch(toggleShowTopics())
+    showAssistants: visible,
+    setShowAssistants: setVisible,
+    toggleShowAssistants: toggleVisible
+  }
+}
+
+/**
+ * @deprecated legacy alias: the dual panels are unified into the workspace
+ * sidebar. Maps onto the unified visibility so existing callers keep working.
+ */
+export function useShowTopics() {
+  const { visible, setVisible, toggleVisible } = useWorkspaceSidebar()
+
+  return {
+    showTopics: visible,
+    setShowTopics: setVisible,
+    toggleShowTopics: toggleVisible
   }
 }
 
