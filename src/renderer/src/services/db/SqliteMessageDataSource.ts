@@ -1351,12 +1351,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       throw new Error('ChatDb API unavailable: context-closure read not exposed')
     }
     const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchContextClosureRequest
-    const result = unwrap(await this.api.fetchContextClosure(wireRequest))
-    return {
-      messages: result.messages as unknown as FetchContextClosureResponse['messages'],
-      blocks: result.blocks as unknown as FetchContextClosureResponse['blocks'],
-      closure: result.closure
-    } as unknown as FetchContextClosureResponse
+    return unwrap(await this.api.fetchContextClosure(wireRequest))
   }
 
   // ============ Authority context-closure resolver (establish/reanchor/move/inherit) ============
