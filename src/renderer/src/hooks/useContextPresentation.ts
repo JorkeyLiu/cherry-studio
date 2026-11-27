@@ -70,28 +70,38 @@ export function useContextPresentation(options: {
   // Accepted member block ids (roster only — membership never comes from the overlay).
   const acceptedMemberBlockIds = useMemo(
     () => (freshClosure ? freshClosure.messages.flatMap((m: { blocks?: readonly string[] }) => m.blocks ?? []) : []),
-
     [freshClosure]
   )
 
+  // Accepted base hydration (level 1): snapshot bodies from the closure's own
+  // blocks only. Depends on the stable blocks input alone, so execution
+  // overlay version bumps never re-hydrate it.
+  const acceptedBase = useMemo(
+    () => (freshClosure ? createSnapshotBlockMap((freshClosure.blocks ?? []) as unknown as never[]) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [freshClosure?.blocks]
+  )
+
   const blockSnapshot = useMemo(() => {
-    if (!freshClosure) {
+    if (!acceptedBase) {
       // Pending: no snapshot from the ordinary store. The shared derivation
       // defaults a missing snapshot to an empty Map; pending lists are empty
       // so no consumer reads through it.
       return undefined
     }
-    const base = createSnapshotBlockMap((freshClosure.blocks ?? []) as never[])
     const overlay = getComposedOverlayBlocks(routeKey, acceptedMemberBlockIds)
-    if (overlay.size === 0) return base
-    const composed = new Map(base)
+    if (overlay.size === 0) return acceptedBase
+    const composed = new Map(acceptedBase)
     for (const [blockId, block] of overlay) {
-      if (base.has(blockId)) {
+      if (acceptedBase.has(blockId)) {
         composed.set(blockId, block)
       }
     }
     return composed
-  }, [freshClosure, topicId, route, acceptedMemberBlockIds, overlayVersion])
+    // overlayVersion is a real memo input: an execution delta must recompose
+    // the snapshot (same cadence as the streaming mirror, no new timer).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acceptedBase, routeKey, acceptedMemberBlockIds, overlayVersion])
 
   const sharedContextInfo = useMemo(
     () => resolveSharedContextInfo(topicMessages, assistant, topicId, freshClosure as never, branchId, blockSnapshot),

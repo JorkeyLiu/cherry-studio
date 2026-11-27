@@ -166,6 +166,46 @@ describe('useContextPresentation', () => {
     unsubscribe()
   })
 
+  it('keeps the accepted base stable across overlay version bumps with no member overlay', () => {
+    const store = makeStore()
+    hoisted.closure = makeClosure(TOPIC, ANCHOR, 'closure-body')
+    hoisted.loadedByTopic.set(TOPIC, topicMessages(TOPIC))
+    const { result } = renderHook(
+      () =>
+        useContextPresentation({
+          topicId: TOPIC,
+          anchorGroupKey: ANCHOR,
+          topicMessages: topicMessages(TOPIC) as any,
+          assistant
+        }),
+      { wrapper: wrapper(store) }
+    )
+    const base = result.current.sharedContextInfo.blockSnapshot
+    // Non-member execution delta: bumps the route version but composes no
+    // member overlay, so the accepted base must not re-hydrate.
+    const handle = registerExecutionOverlay({
+      topicId: TOPIC,
+      route: null,
+      messageId: 'a1',
+      snapshot: () => ({
+        blocks: [
+          { id: 'non-member-block', messageId: 'a1', type: MessageBlockType.MAIN_TEXT, content: 'live-body' } as any
+        ]
+      })
+    })
+    act(() => {
+      handle.notifyDelta()
+    })
+    expect(result.current.sharedContextInfo.blockSnapshot).toBe(base)
+    expect((result.current.sharedContextInfo.blockSnapshot.get('a1-block') as { content?: unknown })?.content).toBe(
+      'closure-body'
+    )
+    act(() => {
+      handle.dispose()
+    })
+    expect(result.current.sharedContextInfo.blockSnapshot).toBe(base)
+  })
+
   it('fail-closed on route switch: no retained projection for another topic', () => {
     const store = makeStore()
     hoisted.closure = makeClosure(TOPIC, ANCHOR, 'closure-body')
