@@ -897,7 +897,7 @@ const MessagesContentInner: React.FC<MessagesContentProps> = ({
   } = useChatRouteStructure()
   // Window-commit co-commit (Goal A): the target route's structure published
   // by the provider owner in the SAME sync batch as its window commit (see
-  // publishCommittedChrome). The
+  // acceptCommittedStructure). The
   // first visible frame of a route switch already hosts the target structure;
   // the scoped hook later accepts the identical projection with no visible
   // change. Never cleared per switch: keys carry topic+route, so a stale entry
@@ -1316,25 +1316,6 @@ const Messages = ({
   // Surface-owned structure: the committed window snapshot and its single
   // write entry live in ChatRouteStructureProvider, shared with the drawer.
   const { committedChrome, acceptCommittedStructure } = useChatRouteStructure()
-  // Window-commit structure co-commit: single thin forwarder into the
-  // provider-owned writer. Every production caller (four deferred commit
-  // sites plus the bootstrap prepare apply below) invokes it only after its
-  // own receipt currency + commit guards pass, so a staged or cancelled
-  // result is never accepted. The owner handles projection, empty-route
-  // clear, rebaseline and debounce/generation bookkeeping; this component
-  // keeps no copy.
-  const publishCommittedChrome = useCallback(
-    (
-      targetTopicId: string,
-      targetBranchId: string | null,
-      structure: FetchMessagesWindowStructure | null,
-      reference?: HistoryReferenceMeta | null,
-      receiptRouteGeneration?: number
-    ): void => {
-      acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)
-    },
-    [acceptCommittedStructure]
-  )
 
   // One-shot deletion-fallback intent (branch subtree removal with active
   // fallback). Consumed exactly once by the deletion effect below with an
@@ -4346,7 +4327,7 @@ const Messages = ({
                 isDeferredRouteWindowReceiptCurrent(() => store.getState(), handoff.receipt) &&
                 handoff.structure !== null
               ) {
-                publishCommittedChrome(
+                acceptCommittedStructure(
                   handoff.topicId,
                   handoff.route,
                   handoff.structure,
@@ -4373,7 +4354,7 @@ const Messages = ({
       displayCount,
       isCurrentNavigation,
       navigationTargetStatus,
-      publishCommittedChrome,
+      acceptCommittedStructure,
       revealNavigationTarget,
       settleNavigationDom,
       viewportDispatch,
@@ -7736,7 +7717,13 @@ const Messages = ({
         return
       }
       const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan, () =>
-        publishCommittedChrome(fb.topicId, fb.routeId, fb.chromeStructure, fb.chromeReference, fb.chromeRouteGeneration)
+        acceptCommittedStructure(
+          fb.topicId,
+          fb.routeId,
+          fb.chromeStructure,
+          fb.chromeReference,
+          fb.chromeRouteGeneration
+        )
       )
       if (hiddenEpoch === null) {
         topHiddenFallbackRef.current = null
@@ -7888,7 +7875,7 @@ const Messages = ({
     commitRouteWindowAtomic,
     failVisibleTransition,
     notifyViewport,
-    publishCommittedChrome,
+    acceptCommittedStructure,
     scrollContainerRef,
     selectMessageForFold,
     waitForProjectionCommit,
@@ -8110,7 +8097,7 @@ const Messages = ({
         // Accept the same receipt's structure AFTER the joint publication is
         // dispatched, so the owner rebaselines catalog/reference from committed
         // store state; still inside onPublish before window/apply.
-        publishCommittedChrome(
+        acceptCommittedStructure(
           topicIdAtStart,
           branchId,
           deferredStructure,
@@ -8414,7 +8401,7 @@ const Messages = ({
       commitRouteWindowAtomic,
       dispatch,
       failVisibleTransition,
-      publishCommittedChrome,
+      acceptCommittedStructure,
       saveDisplayedSnapshot,
       scrollContainerRef,
       stepDividerSearch,
@@ -8589,7 +8576,7 @@ const Messages = ({
               reference: deletionJoint.reference ?? null
             })
           )
-          publishCommittedChrome(
+          acceptCommittedStructure(
             topicIdAtEffect,
             routeAtEffect,
             deletionChromeStructure,
@@ -8673,7 +8660,7 @@ const Messages = ({
     displayCount,
     awaitPlanPlacement,
     failVisibleTransition,
-    publishCommittedChrome,
+    acceptCommittedStructure,
     t,
     topic.id
   ])
@@ -9557,7 +9544,7 @@ const Messages = ({
             reference: topJoint.reference ?? null
           })
         )
-        publishCommittedChrome(
+        acceptCommittedStructure(
           topicIdAtEffect,
           routeAtEffect,
           topChromeStructure,
@@ -10058,7 +10045,7 @@ const Messages = ({
     dispatch,
     failVisibleTransition,
     getLegacyMainSavedPosition,
-    publishCommittedChrome,
+    acceptCommittedStructure,
     readTargetSnapshot,
     referenceRefreshToken,
     saveDisplayedSnapshot,
