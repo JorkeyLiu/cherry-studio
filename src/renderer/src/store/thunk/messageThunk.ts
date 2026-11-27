@@ -3818,9 +3818,8 @@ function scheduleTopicAnchorEstablishment(
  * read-start promise is ever made.
  *
  * Identity is the caller-local contract: `route`/`routeGeneration` bind the
- * addressed route (branch switch or A→B→A excursion is rejected),
- * `publicationGeneration` is the resident applicability generation the joint
- * publication used, and `reference` is the relation that publication installed
+ * addressed route (branch switch or A→B→A excursion is rejected), and
+ * `reference` is the relation that publication installed
  * (the baseline the surface hook rebaselines from). No global cache, no Redux
  * structure field, no persistence.
  */
@@ -3828,7 +3827,6 @@ export interface TopicBootstrapStructureHandoff {
   topicId: string
   route: string | null
   routeGeneration: number
-  publicationGeneration: number
   structure: FetchMessagesWindowStructure
   reference: HistoryReferenceMeta | null
 }
@@ -4181,7 +4179,6 @@ export const loadTopicMessagesThunk =
             topicId,
             route: adoptionRoute,
             routeGeneration: bootstrapRouteGenerationAtStart,
-            publicationGeneration: generation,
             structure: (response as unknown as { structure: FetchMessagesWindowStructure }).structure,
             reference: (response as unknown as { reference?: HistoryReferenceMeta | null }).reference ?? null
           })
