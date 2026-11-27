@@ -690,3 +690,8 @@
 - 启动交接死字段删除（545314d228）：删 TopicBootstrapStructureHandoff.publicationGeneration 死字段，generation 局部变量与 joint publish/deferred receipt 链不变。
 - 验证：最终 9 文件 88/88、`pnpm typecheck` 全 5 lane 通过、hooks 通过；不声称延迟/帧率，全量 renderer/E2E 仍未完成。
 - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
+## 66. 引用源与上下文闭包读取收敛（已实现）
+- 引用源查询合并（81e749e414）：`fetchMessagesWindow` 同事务内 source topic found/name 两次 `getById` 合一次，available/missing `sourceName` 语义与事务/route/window structure/owner 守卫保留。
+- 上下文闭包直返（8c2a126e16）：`fetchContextClosure` 同类型响应直返，删除顶层浅重装和同型断言，`cloneForWire`/unwrap/调用方校验保留。
+- 验证：Main 4 文件 54/54、Renderer 144/144、`pnpm typecheck` 五路、hooks 全过；不声称性能数字，全量 renderer/E2E 未补跑。
+- 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
