@@ -260,11 +260,12 @@ describe('block-only write route threading', () => {
 
   it('source stream single-block save preserves an explicitly pinned main route (null)', async () => {
     const { saveUpdatedBlockToDB } = await import('../messageThunk')
-    storeState.messageBlocks.entities['b-x'] = block('b-x')
-    // Active route is a branch, but the pinned execution route is main-route null.
+    // Single-block saves carry the explicit execution block; Redux is never
+    // consulted. The active route is a branch, but the pinned execution
+    // route is main-route null.
     storeState.topicBranch.activeBranchIdByTopic['topic-1'] = 'br-active'
 
-    await saveUpdatedBlockToDB('b-x', 'm-1', 'topic-1', (() => storeState) as never, 'attempt-1', undefined, null)
+    await saveUpdatedBlockToDB('b-x', 'm-1', 'topic-1', block('b-x'), 'attempt-1', null)
 
     expect(mocks.updateBlocks).toHaveBeenCalledWith([block('b-x')], undefined, 'attempt-1', {
       topicId: 'topic-1',

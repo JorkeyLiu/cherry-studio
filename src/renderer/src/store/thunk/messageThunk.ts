@@ -246,27 +246,26 @@ export const saveUpdatesToDB = async (
 }
 
 // 新增: 辅助函数，用于获取并保存单个更新后的 Block 到数据库
-// Local-first: an explicit local block (execution fact) is preferred; the Redux
-// lookup is only a fallback for legacy callers. DB writes never depend on Redux.
+// Local-first: the caller passes the explicit execution block; DB writes
+// never read Redux. A missing execution block fails closed (skip, never
+// fall back to the Redux mirror).
 export const saveUpdatedBlockToDB = async (
   blockId: string | null,
   messageId: string,
   topicId: string,
-  getState: () => RootState,
+  localBlock: MessageBlock,
   resendAttemptId?: string,
-  localBlock?: MessageBlock,
   branchId?: string | null
 ) => {
   if (!blockId) {
     logger.warn('[DB Save Single Block] Received null/undefined blockId. Skipping save.')
     return
   }
-  const blockToSave = localBlock ?? getState().messageBlocks.entities[blockId]
-  if (blockToSave) {
-    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId, branchId)
-  } else {
-    logger.warn(`[DB Save Single Block] Block ${blockId} not found in state. Cannot save.`)
+  if (!localBlock) {
+    logger.warn(`[DB Save Single Block] Block ${blockId} has no execution block. Skipping save.`)
+    return
   }
+  await saveUpdatesToDB(messageId, topicId, {}, [localBlock], resendAttemptId, branchId)
 }
 
 /**
@@ -753,17 +752,14 @@ const fetchAndProcessAssistantResponseImpl = async (
     blockId: string | null,
     messageId: string,
     execTopicId: string,
-    execGetState: () => RootState,
-    _attemptId?: string,
-    localBlock?: MessageBlock
+    localBlock: MessageBlock
   ): Promise<void> =>
     saveUpdatedBlockToDB(
       blockId,
       messageId,
       execTopicId,
-      execGetState,
+      localBlock,
       resendAttemptId,
-      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined),
       // Pin the source execution route: a background stream never re-resolves
       // the active route at write time, so a branch switch cannot redirect it.
       execRoute
@@ -5025,11 +5021,8 @@ export const setupChannelStream = (
     blockId: string | null,
     messageId: string,
     channelTopicId: string,
-    channelGetState: () => RootState,
-    _attemptId?: string,
-    localBlock?: MessageBlock
-  ): Promise<void> =>
-    saveUpdatedBlockToDB(blockId, messageId, channelTopicId, channelGetState, undefined, localBlock, null)
+    localBlock: MessageBlock
+  ): Promise<void> => saveUpdatedBlockToDB(blockId, messageId, channelTopicId, localBlock, undefined, null)
   const saveUpdatesToDBForChannel = (
     messageId: string,
     channelTopicId: string,

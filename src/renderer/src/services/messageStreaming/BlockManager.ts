@@ -36,9 +36,7 @@ interface BlockManagerDependencies {
     blockId: string | null,
     messageId: string,
     topicId: string,
-    getState: () => RootState,
-    resendAttemptId?: string,
-    localBlock?: MessageBlock
+    localBlock: MessageBlock
   ) => Promise<void>
   saveUpdatesToDB: (
     messageId: string,
@@ -197,13 +195,13 @@ export class BlockManager {
   ) {
     // Local-first: the execution state is updated before any Redux mirror.
     const existing = this.exec.getBlock(blockId)
-    let localAfter: MessageBlock | undefined
+    let localAfter: MessageBlock
     if (existing) {
       localAfter = this.exec.applyBlockPatch(blockId, changes) ?? existing
     } else {
       const stub = { id: blockId, messageId: this.deps.assistantMsgId, type: blockType, ...changes } as MessageBlock
       this.exec.upsertBlock(stub)
-      localAfter = this.exec.getBlock(blockId)
+      localAfter = this.exec.getBlock(blockId) ?? stub
     }
     const isBlockTypeChanged = this._lastBlockType !== null && this._lastBlockType !== blockType
     // Safely narrow existing MessageBlock and incoming changes to THINKING/content-bearing shapes before reading content
@@ -240,16 +238,7 @@ export class BlockManager {
         this.deps.dispatch(withClosureTopics(updateOneBlock({ id: blockId, changes }), this.deps.topicId))
         this.deps.notifyExecutionDelta?.()
       }
-      this.trackSave(
-        this.deps.saveUpdatedBlockToDB(
-          blockId,
-          this.deps.assistantMsgId,
-          this.deps.topicId,
-          this.deps.getState,
-          this.deps.resendAttemptId,
-          localAfter
-        )
-      )
+      this.trackSave(this.deps.saveUpdatedBlockToDB(blockId, this.deps.assistantMsgId, this.deps.topicId, localAfter))
       this._lastBlockType = blockType
     } else {
       this._activeBlockInfo = { id: blockId, type: blockType } // 更新活跃块信息

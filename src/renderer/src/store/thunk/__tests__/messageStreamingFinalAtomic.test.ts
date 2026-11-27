@@ -793,8 +793,8 @@ describe('Detached execution: request-local state completes without Redux inject
     const executionState = new AssistantExecutionState(detachedSnapshot(), [])
     const saveUpdatesForExec = (mid: string, tid: string, mu: any, blocks: any[]) =>
       saveUpdatesToDB(mid, tid, mu, blocks, ATTEMPT)
-    const saveSingleForExec = (bid: string | null, mid: string, tid: string, gs: any, _attempt?: string, local?: any) =>
-      saveUpdatedBlockToDB(bid, mid, tid, gs, ATTEMPT, local ?? (bid ? executionState.getBlock(bid) : undefined))
+    const saveSingleForExec = (bid: string | null, mid: string, tid: string, local: any) =>
+      saveUpdatedBlockToDB(bid, mid, tid, local, ATTEMPT)
     const manager = new BlockManager({
       dispatch: store.dispatch as any,
       getState: store.getState as any,

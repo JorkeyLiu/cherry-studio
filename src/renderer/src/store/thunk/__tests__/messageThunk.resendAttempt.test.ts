@@ -303,7 +303,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     const managerA = new BlockManager({
       dispatch: vi.fn(),
       getState: () => storeState as never,
-      saveUpdatedBlockToDB: (bid, mid, tid, gs) => saveUpdatedBlockToDB(bid, mid, tid, gs, execA.attempt),
+      saveUpdatedBlockToDB: (bid, mid, tid, local) => saveUpdatedBlockToDB(bid, mid, tid, local, execA.attempt),
       saveUpdatesToDB: async () => {},
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
@@ -329,7 +329,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     const managerB = new BlockManager({
       dispatch: vi.fn(),
       getState: () => storeState as never,
-      saveUpdatedBlockToDB: (bid, mid, tid, gs) => saveUpdatedBlockToDB(bid, mid, tid, gs, execB.attempt),
+      saveUpdatedBlockToDB: (bid, mid, tid, local) => saveUpdatedBlockToDB(bid, mid, tid, local, execB.attempt),
       saveUpdatesToDB: async () => {},
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
@@ -520,7 +520,7 @@ describe('F2: success-final awaits quiescence', () => {
     const manager = new BlockManager({
       dispatch: vi.fn(),
       getState: () => storeState as never,
-      saveUpdatedBlockToDB: (bid, mid, tid, gs) => saveUpdatedBlockToDB(bid, mid, tid, gs, attempt),
+      saveUpdatedBlockToDB: (bid, mid, tid, local) => saveUpdatedBlockToDB(bid, mid, tid, local, attempt),
       saveUpdatesToDB: (mid, tid, mu, blocks) => saveUpdatesToDB(mid, tid, mu, blocks, attempt),
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
