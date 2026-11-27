@@ -2,7 +2,6 @@ import { FILE_TYPE } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { getMediaKind } from '@renderer/utils/mediaAttachment'
-import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { documentExts, imageExts } from '@shared/config/constant'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
@@ -344,6 +343,21 @@ const replaceMarkdownLinks = (input: string): string => {
 }
 
 /**
+ * Minimal block facts the preview reads from an EXPLICIT caller-local snapshot:
+ * block type, main-text content, and FILE classification metadata (`type` /
+ * `ext`). The full `MessageBlock` snapshot and the narrowed
+ * conversation-navigation block rows both satisfy it, so the same pure preview
+ * serves both without a renderer-side re-filter.
+ */
+export interface NavigationPreviewBlock {
+  readonly type: string | null
+  readonly content?: unknown
+  readonly file?: { readonly type?: unknown; readonly ext?: unknown } | null
+}
+
+/** Explicit snapshot block lookup keyed by block id. */
+export type NavigationPreviewBlockMap = ReadonlyMap<string, NavigationPreviewBlock>
+/**
  * Build the text-only preview for one user message from a caller-local
  * snapshot block map. Returns '' when nothing previewable remains (caller
  * applies a localized attachment/quote fallback). Never mutates input.
@@ -360,7 +374,7 @@ const replaceMarkdownLinks = (input: string): string => {
  */
 export const summarizeUserMessage = (
   message: Pick<Message, 'blocks'>,
-  blocksById: SnapshotBlockMap,
+  blocksById: NavigationPreviewBlockMap,
   options?: { maxLength?: number; linkLabel?: string }
 ): string => {
   const maxLength = options?.maxLength ?? 280
@@ -402,7 +416,10 @@ export const summarizeUserMessage = (
 }
 
 /** True when the message carries non-text attachment blocks. */
-export const hasNavigableAttachment = (message: Pick<Message, 'blocks'>, blocksById: SnapshotBlockMap): boolean => {
+export const hasNavigableAttachment = (
+  message: Pick<Message, 'blocks'>,
+  blocksById: NavigationPreviewBlockMap
+): boolean => {
   for (const blockId of message.blocks) {
     const block = blocksById.get(blockId)
     if (!block) continue
@@ -599,7 +616,7 @@ export interface AttachmentLabelFormatters {
  */
 export const buildAttachmentLabel = (
   message: Pick<Message, 'blocks'>,
-  blocksById: SnapshotBlockMap,
+  blocksById: NavigationPreviewBlockMap,
   formatters: AttachmentLabelFormatters
 ): string => {
   const labels: string[] = []

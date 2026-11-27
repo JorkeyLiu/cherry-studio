@@ -43,6 +43,9 @@ const COLUMN_MAP = buildColumnMap([
   ['sortOrder', 'sort_order']
 ])
 
+/** Bound per-chunk id count for one `IN (...)` block read (bind-variable safety). */
+const LIST_BY_MESSAGES_CHUNK_SIZE = 200
+
 export class BlocksRepository {
   constructor(private db: BetterSQLite3Database<any>) {}
 
@@ -86,20 +89,30 @@ export class BlocksRepository {
       .map((r) => fromDrizzleResult<MessageBlockData>(r, 'message_blocks', (r as any).id))
   }
 
+  /**
+   * SQLite bind-variable safety: every id in an `IN (...)` list consumes one
+   * bound parameter, so one unbounded read over a long route could approach
+   * the driver's variable limit. Chunk the read and merge per chunk — an
+   * identical result (a message's blocks always land in exactly one chunk,
+   * and each chunk keeps `sort_order, id` order), never a partial read.
+   */
   listByMessages(messageIds: string[]): Map<string, MessageBlockData[]> {
-    if (messageIds.length === 0) return new Map()
-    const rows = this.db
-      .select()
-      .from(messageBlocks)
-      .where(sql`${messageBlocks.messageId} IN ${messageIds}`)
-      .orderBy(asc(messageBlocks.sortOrder), asc(messageBlocks.id))
-      .all()
-      .map((r) => fromDrizzleResult<MessageBlockData>(r, 'message_blocks', (r as any).id))
     const grouped = new Map<string, MessageBlockData[]>()
     for (const id of messageIds) grouped.set(id, [])
-    for (const block of rows) {
-      const arr = grouped.get(block.messageId)
-      if (arr) arr.push(block)
+    if (grouped.size === 0) return grouped
+    for (let start = 0; start < messageIds.length; start += LIST_BY_MESSAGES_CHUNK_SIZE) {
+      const chunk = messageIds.slice(start, start + LIST_BY_MESSAGES_CHUNK_SIZE)
+      const rows = this.db
+        .select()
+        .from(messageBlocks)
+        .where(sql`${messageBlocks.messageId} IN ${chunk}`)
+        .orderBy(asc(messageBlocks.sortOrder), asc(messageBlocks.id))
+        .all()
+        .map((r) => fromDrizzleResult<MessageBlockData>(r, 'message_blocks', (r as any).id))
+      for (const block of rows) {
+        const arr = grouped.get(block.messageId)
+        if (arr) arr.push(block)
+      }
     }
     return grouped
   }

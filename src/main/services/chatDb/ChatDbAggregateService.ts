@@ -175,6 +175,7 @@ import {
   fileReferenceToWire,
   messagesToWire,
   messageToWire,
+  projectConversationNavigationSnapshot,
   projectFileReferences,
   reconstructMessageBlockRelations,
   segmentToWire,
@@ -2828,6 +2829,9 @@ export class ChatDbAggregateService {
    *   listByTopic) with complete message/block relations. No viewport cap,
    *   no hasMore, completeness is 'whole-topic'.
    * - Empty topic (exists, no messages) → empty success with null bounds.
+   * - `projection` selects the payload shape over the same whole-route read:
+   *   absent/'full' returns complete rows; 'conversation-navigation' returns the
+   *   narrowed navigation rows (user blocks read only, see the branch below).
    * - Pure read: never creates/mutates rows, never logs content.
    */
   fetchWholeTopicSnapshot(request: FetchWholeTopicSnapshotRequest): ChatDbResult<FetchWholeTopicSnapshotResponse> {
@@ -2843,6 +2847,37 @@ export class ChatDbAggregateService {
         // anchor plus the owned suffix). Stable IDs, deterministic order.
         const snapshotRoute = this.normalizeBranchId(request.branchId)
         const allMessages = this.resolveRouteMessagesInTx(repos, request.topicId, snapshotRoute).messages
+        const firstMessageId = allMessages.length > 0 ? allMessages[0].id : null
+        const lastMessageId = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
+        // Authority folded membership of the read topic: the pre-anchor
+        // request path filters against this list instead of the renderer
+        // segment catalog, which may be unloaded or stale.
+        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId, snapshotRoute)
+        if (request.projection === 'conversation-navigation') {
+          // Narrow payload over the SAME whole-route completeness: the route
+          // above is untouched, only the serialized row shape is reduced. Blocks
+          // are read for user message ids only (the outline reads no assistant
+          // blocks); the repository read is chunked for bind-variable safety.
+          const userMessageIds = allMessages.filter((message) => message.role === 'user').map((message) => message.id)
+          const userBlocks = repos.blocks.listByMessages(userMessageIds)
+          const navigation = projectConversationNavigationSnapshot(allMessages, userBlocks)
+          return {
+            messages: navigation.messages,
+            blocks: navigation.blocks,
+            snapshot: {
+              completeness: 'whole-topic' as const,
+              topicId: request.topicId,
+              firstMessageId,
+              lastMessageId,
+              returnedCount: allMessages.length,
+              foldedMessageIds: Array.from(foldedMemberIds),
+              // Payload shape declaration: same whole-topic completeness,
+              // narrowed rows. Lets the response contract strictly validate the
+              // projection's own key sets instead of accepting either shape.
+              projection: 'conversation-navigation' as const
+            }
+          }
+        }
         const messageIds = allMessages.map((m) => m.id)
         const blockDataMap = repos.blocks.listByMessages(messageIds)
         const allBlocks: MessageBlockData[] = []
@@ -2852,12 +2887,6 @@ export class ChatDbAggregateService {
         const wireMessages = messagesToWire(allMessages)
         const wireBlocks = blocksToWire(allBlocks)
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
-        const firstMessageId = allMessages.length > 0 ? allMessages[0].id : null
-        const lastMessageId = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
-        // Authority folded membership of the read topic: the pre-anchor
-        // request path filters against this list instead of the renderer
-        // segment catalog, which may be unloaded or stale.
-        const foldedMemberIds = this.resolveFoldedMemberMessageIdsInTx(repos, request.topicId, snapshotRoute)
         return {
           messages: messagesWithBlocks,
           blocks: wireBlocks,

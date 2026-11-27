@@ -15,6 +15,7 @@ import type {
   FetchTopicActivityResponse,
   FetchTopicMessageTimesResponse,
   FetchTopicNamingContextResponse,
+  FetchWholeTopicSnapshotRequest,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   ImportTopicDataResponse,
@@ -535,7 +536,8 @@ export interface MessageDataSource {
    */
   fetchWholeTopicSnapshot?(
     topicId: string,
-    branchId?: BranchRoute
+    branchId?: BranchRoute,
+    projection?: FetchWholeTopicSnapshotRequest['projection']
   ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]

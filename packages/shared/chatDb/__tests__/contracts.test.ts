@@ -4443,6 +4443,312 @@ describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () 
       })
     ).toThrow(ValidationError)
   })
+
+  // -------------------------------------------------------------------------
+  // Explicit payload projection (one whole-route read, narrowed rows)
+  // -------------------------------------------------------------------------
+
+  it('fetch-whole-topic-snapshot: absent projection stays the default full request', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1' })).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', branchId: 'br1' })
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: accepts both declared projection values', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', projection: 'full' })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', {
+        topicId: 't1',
+        branchId: 'br1',
+        projection: 'conversation-navigation'
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: rejects an unknown projection value', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', projection: 'window' } as any)
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', projection: null } as any)
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', projection: 1 } as any)
+    ).toThrow(ValidationError)
+  })
+
+  const navResponse = (value?: { messages?: unknown[]; blocks?: unknown[]; snapshot?: Record<string, unknown> }) => ({
+    ok: true,
+    value: {
+      messages: value?.messages ?? [
+        { id: 'm1', role: 'user', blocks: ['b1', 'b2'], folded: true },
+        { id: 'm2', role: 'assistant' },
+        { id: 'm3', role: 'user', blocks: [] }
+      ],
+      blocks: value?.blocks ?? [
+        { id: 'b1', messageId: 'm1', type: 'main_text', content: 'hello' },
+        { id: 'b2', messageId: 'm1', type: 'file', content: null, file: { type: 'image', ext: 'png' } }
+      ],
+      snapshot: {
+        completeness: 'whole-topic',
+        topicId: 't1',
+        firstMessageId: 'm1',
+        lastMessageId: 'm3',
+        returnedCount: 3,
+        foldedMessageIds: ['m1'],
+        projection: 'conversation-navigation',
+        ...value?.snapshot
+      }
+    }
+  })
+
+  it('fetch-whole-topic-snapshot: accepts a well-formed conversation-navigation result', () => {
+    expect(() => validateChatDbResult('chatdb:fetch-whole-topic-snapshot', navResponse())).not.toThrow()
+    // Skeleton-only roles plus null classification fields are valid narrow rows.
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [
+            { id: 'm0', role: 'system' },
+            { id: 'm1', role: 'user', blocks: ['b1', 'b2'] },
+            { id: 'm2', role: 'assistant' }
+          ],
+          blocks: [
+            { id: 'b1', messageId: 'm1', type: null, content: null },
+            { id: 'b2', messageId: 'm1', type: 'file', content: null, file: { type: null, ext: null } }
+          ],
+          snapshot: { firstMessageId: 'm0', lastMessageId: 'm2', returnedCount: 3 }
+        })
+      )
+    ).not.toThrow()
+    // Empty narrow payload keeps the same whole-topic envelope.
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [],
+          blocks: [],
+          snapshot: {
+            firstMessageId: null,
+            lastMessageId: null,
+            returnedCount: 0,
+            foldedMessageIds: []
+          }
+        })
+      )
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: an undeclared (full) result is unchanged', () => {
+    // Same rows the pre-projection contract accepted: complete message rows and
+    // arbitrary block overflow, no projection marker.
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1', role: 'user', blocks: [], extra: { any: 1 } }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'file', overflow: { path: '/tmp/a.png' } }],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm1',
+            returnedCount: 1,
+            foldedMessageIds: []
+          }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: rejects a declared projection other than conversation-navigation', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', navResponse({ snapshot: { projection: 'full' } }))
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', navResponse({ snapshot: { projection: 'window' } }))
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects a user row without its ordered block ids', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({ messages: [{ id: 'm1', role: 'user' }], blocks: [], snapshot: { returnedCount: 1 } })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1', 'b1'] }],
+          blocks: [],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({ messages: [{ id: 'm1', role: 'user', blocks: [1] }], blocks: [], snapshot: { returnedCount: 1 } })
+      )
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: folded is an absent-or-true marker only', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: [], folded: false }],
+          blocks: [],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects unknown keys in narrow rows', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'], preview: 'x' }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: 'x' }],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: 'x', overflow: {} }],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [
+            { id: 'b1', messageId: 'm1', type: 'file', content: null, file: { type: 'image', ext: 'png', path: '/x' } }
+          ],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects skeleton rows carrying narrow payload keys', () => {
+    // A skeleton user row with its blocks is the well-formed counterpart.
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [
+            { id: 'm1', role: 'user', blocks: ['b1'] },
+            { id: 'm3', role: 'user', blocks: [] }
+          ],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: 'x' }],
+          snapshot: { firstMessageId: 'm1', lastMessageId: 'm3', returnedCount: 2 }
+        })
+      )
+    ).not.toThrow()
+    for (const row of [
+      { id: 'm2', role: 'assistant', blocks: ['b1'] },
+      { id: 'm2b', role: 'assistant', folded: true },
+      { id: 'm2c', role: 'assistant', content: 'x' },
+      { id: 'm2d', role: 'assistant', messageId: 'm2d' },
+      { id: 'm2e', role: 'tool' }
+    ]) {
+      expect(() =>
+        validateChatDbResult(
+          'chatdb:fetch-whole-topic-snapshot',
+          navResponse({
+            messages: [row, { id: 'm3', role: 'user', blocks: [] }],
+            blocks: [],
+            snapshot: { firstMessageId: row.id, lastMessageId: 'm3', returnedCount: 2 }
+          })
+        )
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('fetch-whole-topic-snapshot: rejects file metadata on non-FILE blocks', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: 'x', file: { type: 'image' } }],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects narrow blocks that do not belong to a returned user message', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [
+            { id: 'm1', role: 'user', blocks: [] },
+            { id: 'm2', role: 'assistant' }
+          ],
+          blocks: [{ id: 'b9', messageId: 'm2', type: 'main_text', content: 'x' }],
+          snapshot: { lastMessageId: 'm2', returnedCount: 2 }
+        })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: [] }],
+          blocks: [{ id: 'b9', messageId: 'absent', type: 'main_text', content: 'x' }],
+          snapshot: { lastMessageId: 'm1', returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects narrow block membership/order that contradicts the user row', () => {
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [
+            { id: 'b1', messageId: 'm1', type: 'main_text', content: 'x' },
+            { id: 'b2', messageId: 'm1', type: 'main_text', content: 'y' }
+          ],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult(
+        'chatdb:fetch-whole-topic-snapshot',
+        navResponse({
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1', 'b2'] }],
+          blocks: [
+            { id: 'b2', messageId: 'm1', type: 'main_text', content: 'y' },
+            { id: 'b1', messageId: 'm1', type: 'main_text', content: 'x' }
+          ],
+          snapshot: { returnedCount: 1 }
+        })
+      )
+    ).toThrow(ValidationError)
+  })
 })
 
 describe('topic-data JSON exchange contracts (whole-logical-topic export/import)', () => {

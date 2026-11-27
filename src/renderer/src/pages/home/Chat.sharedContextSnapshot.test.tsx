@@ -27,6 +27,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const hoisted = vi.hoisted(() => ({
   infos: [] as unknown[],
   closureState: { closure: null as any, accept: false },
+  // The conversation outline is gated by the `messageNavigation` setting (off
+  // by default), so its render count is the proof that a disabled navigation
+  // is never mounted — and therefore never asks for a snapshot.
+  navTelemetry: { renders: 0 },
   stableMsgs: [
     {
       id: 'm1',
@@ -192,7 +196,10 @@ vi.mock('./ChatBranchCatalog', () => ({
 }))
 
 vi.mock('./Messages/ConversationNavigation', () => ({
-  default: () => null
+  default: () => {
+    hoisted.navTelemetry.renders += 1
+    return null
+  }
 }))
 
 vi.mock('./Messages/Messages', () => {
@@ -233,6 +240,7 @@ const lastInfo = (): any => hoisted.infos[hoisted.infos.length - 1]
 describe('Chat shared-context snapshot', () => {
   beforeEach(() => {
     hoisted.infos.length = 0
+    hoisted.navTelemetry.renders = 0
     hoisted.closureState.closure = null
     hoisted.closureState.accept = false
     resetExecutionOverlayForTests()
@@ -259,8 +267,10 @@ describe('Chat shared-context snapshot', () => {
         />
       </Provider>
     )
-
     // Pending route: persisted anchor, no closure, content from the snapshot.
+    // The outline is off by default (`messageNavigation: false`), so the whole
+    // navigation component — and with it every snapshot read — never mounts.
+    expect(hoisted.navTelemetry.renders).toBe(0)
     const rendered = hoisted.infos.length
     expect(rendered).toBeGreaterThan(0)
     for (const info of hoisted.infos) {

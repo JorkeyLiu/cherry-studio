@@ -316,6 +316,74 @@ export function reconstructMessageBlockRelations(messages: JsonObject[], blocks:
 }
 
 // ---------------------------------------------------------------------------
+// Conversation-navigation projection
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize ONE whole-route read as the narrow conversation-navigation payload.
+ *
+ * This is the single Main-side projection for that read: the route itself stays
+ * complete (every effective-route message, same authority order), only each
+ * row is narrowed to what the outline consumes.
+ * - Every message (any role) becomes an `{ id, role }` skeleton.
+ * - User messages additionally carry their ordered block ids and, only when
+ *   the persisted row is folded, `folded: true` (absent is the unfolded state).
+ * - Blocks belong to user messages only and carry `{ id, messageId, type,
+ *   content }` plus, for FILE rows, narrowed `file` metadata (`type`/`ext`
+ *   only) — no filenames, paths, ids, urls, or other overflow.
+ *
+ * Folded membership/metadata for the route is serialized by the caller; this
+ * helper only shapes rows. Pure and deterministic.
+ */
+export function projectConversationNavigationSnapshot(
+  messages: MessageData[],
+  blocksByUserMessage: Map<string, MessageBlockData[]>
+): { messages: JsonObject[]; blocks: JsonObject[] } {
+  const wireMessages: JsonObject[] = []
+  const wireBlocks: JsonObject[] = []
+  for (const message of messages) {
+    if (message.role === 'user') {
+      const blockIds: string[] = []
+      for (const block of blocksByUserMessage.get(message.id) ?? []) {
+        blockIds.push(block.id)
+        wireBlocks.push(conversationNavigationBlockToWire(block))
+      }
+      const row: JsonObject = { id: message.id, role: message.role, blocks: blockIds }
+      if (message.overflow.folded === true) row.folded = true
+      wireMessages.push(row)
+    } else {
+      wireMessages.push({ id: message.id, role: message.role })
+    }
+  }
+  return { messages: wireMessages, blocks: wireBlocks }
+}
+
+/**
+ * One narrowed block row for the conversation-navigation projection: type,
+ * text content, and — for FILE blocks — only the attachment classification
+ * metadata. Other overflow (filenames, paths, urls, ids) is never serialized.
+ */
+function conversationNavigationBlockToWire(block: MessageBlockData): JsonObject {
+  const wire: JsonObject = {
+    id: block.id,
+    messageId: block.messageId,
+    type: block.type,
+    content: block.content
+  }
+  if (block.type === 'file') {
+    const file = block.overflow.file
+    if (file !== null && typeof file === 'object' && !Array.isArray(file)) {
+      const source = file as Record<string, unknown>
+      const narrowed: JsonObject = {}
+      if ('type' in source) narrowed.type = (source.type as string | null | undefined) ?? null
+      if ('ext' in source) narrowed.ext = (source.ext as string | null | undefined) ?? null
+      wire.file = narrowed
+    }
+  }
+  return wire
+}
+
+// ---------------------------------------------------------------------------
 // File reference projection
 // ---------------------------------------------------------------------------
 

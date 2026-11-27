@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-13）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
 > **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
-> **最后更新**：2026-11-20
+> **最后更新**：2026-11-27
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，多端同步收敛由 [Personal Multi-Device Sync](../work/multi-device-sync.md)（现状）与 [Sync Connection & Channel ADR](./sync-connection-channel.md)、[Sync Data Convergence ADR](./sync-data-convergence.md)（目标）治理——本文档不改变、不重述这些治理域的边界。
 
@@ -85,13 +85,23 @@
 | `'window'` 能力携带 | Main SQLite 随窗口响应发布 | 随所属窗口响应存活；路由切换/驱逐/删除即失效（恰与窗口同代） | `mutableMessageIds`：精确定义与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-9）唯一治理；本文档仅说明其作为窗口能力携带的生命周期。供 Renderer 对当前 loaded/resident 可解析成员预检与 UI 门禁，窗口外/依赖展开成员由 Main 最终裁决，永不替代 Main 守卫 |
 | `'answer-group'` | Main SQLite 单事务解析（成员集合声明） | 单次响应；变更后必须重新解析 | 回答选择、分支/克隆定位、回答组重排 |
 | `'context-closure'` | Main SQLite 按 renderer 拥有的稳定锚点派生（锚点 turn 至最新，整路由权威） | 单次响应；路由/锚点/语义变更代际任一变化使缓存与请求新鲜度失效并触发后台重验，纯 `latest`/`around`/加载更多视口读取与视口成员/指纹变化永不使有效闭包失效；同路由同锚点的已接受 UI 投影在后台重验期间保留，仅在身份变化或权威无效响应时清除 | 请求上下文构建、锚点建立/重锚定/移动/继承；UI 计数/高亮/分隔线消费同一已接受共享结果（§8/§10 authority-pending 仅限冷路由尚无已接受投影、身份切换或权威无效响应） |
-| `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业（树保留剪贴板改走 `'clipboard-tree'`）；锚点之上触发请求的触发点以上历史前缀（经稳定 ID 裁剪，见 [Context Window Governance](./context-window.md) CW-9） |
+| `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业（树保留剪贴板改走 `'clipboard-tree'`）；锚点之上触发请求的触发点以上历史前缀（经稳定 ID 裁剪，见 [Context Window Governance](./context-window.md) CW-9）；聊天会话导航大纲（经 §5.1 的显式载荷投影 `'conversation-navigation'`，仍是同一整路由完备读取） |
 | `'clipboard-tree'` | Main SQLite 单事务有界读取：源被寻址路由上所选稳定组键的完整根组 + 锚定其上的直接子分支 subtree 各自自有行 | 单次响应；剪贴板调用方持有至粘贴/重放，消费后丢弃，不进入普通 Redux 消息/块驻留投影 | 树保留剪贴板（可选“包含子分支”的 copy/cut）载荷组装；粘贴与 undo/redo 经各自 Main 事务（[Topic Branches ADR](./topic-branches.md) §4.6） |
 | `'naming-context'` | Main SQLite 有界命名读取（命名元数据、精确计数、首条消息、至多 5 条最新消息及其块） | 调用者本地、短生命周期 | 自动命名 |
 | `'topic-activity'` | Main SQLite 有界活跃度读取（精确计数、最新消息 ID/时间戳，无消息/块） | 调用者本地、短生命周期 | 限流检查等只需活跃度的作业 |
 | `'loaded-projection'`（renderer-only） | Renderer 普通 Redux 消息状态 | 随驻留窗口存活；驱逐/删除/代际变化即失效 | 瞬时展示、请求可用性、用量估算（§8 暂定用途）、已加载交集计算 |
 
 隔离规则：`window` 永不满足 `whole-topic`；通用完整标签永不隐式满足 `answer-group` / `context-closure`；已移除的含糊完整性辅助不得重新引入，驻留已加载投影恒为 `'loaded-projection'`，驻留注册的联合完备不是 `'whole-topic'` 能力；消费者必须为所需语义派生并验证同代闭包。
+
+### §5.1 `'whole-topic'` 载荷投影（payload projection）：会话导航
+
+`'whole-topic'` 的合法消费方可以在本次读取请求上声明显式**载荷投影**（payload projection）。它不新增完备性能力（PROJ-12：新读取必须声明 §5 的完备性；本投影声明的是已存在的 `'whole-topic'`），只声明同一次整路由读取的序列化形状：
+
+- `projection: 'full'`（缺省；旧请求形状不变）：完整消息行 + 全部块。导出、知识任务、编辑模式等既有消费方继续拿到这一形状。
+- `projection: 'conversation-navigation'`：同一次整路由完备读取（有效路由上每条消息、权威顺序、分支祖先前缀与引用前缀语义均不变），仅行形状收窄——每条消息为 `{ id, role }` 骨架（**全角色**：最近前驱 user 解析、分支边界映射、上下文行都需要），user 行另带有序块 ID 与持久化 folded 标记（未折叠为键缺省，永不写 `false`），块仅保留导航消费字段 `{ id, messageId, type, content }` 与 FILE 的 `type`/`ext`。
+- 响应以 `snapshot.projection` 声明实际投影；响应契约据此按投影专属闭集校验（未知键、块归属/顺序与 user 行引用不一致一律 fail-closed）。未声明即按完整行处理。
+
+该投影仍是调用者本地一次性读取：不回写普通 Redux、不建立锚点、不携带 `hasMore*`、不发布 `mutableMessageIds`，因此**永不冒充** `'loaded-projection'` / `'window'` / `'context-closure'` 能力；载荷收窄也永不降低整路由完备性（§5 隔离规则同等适用）。
 
 ---
 

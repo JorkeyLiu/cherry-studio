@@ -2,10 +2,9 @@ import { loggerService } from '@logger'
 import { getClosureSemanticToken, subscribeClosureInvalidations } from '@renderer/services/contextClosure'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
-import type { Message } from '@renderer/types/newMessage'
-import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
-import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
+import { loadConversationNavigationSnapshot } from '@renderer/utils/topicSnapshot'
+import type { ConversationNavigationSnapshotBlock, ConversationNavigationSnapshotMessage } from '@shared/chatDb'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -20,6 +19,7 @@ import {
   type AttachmentLabelFormatters,
   buildAttachmentLabel,
   hasNavigableAttachment,
+  type NavigationPreviewBlockMap,
   summarizeUserMessage
 } from './userMessagePreview'
 
@@ -74,8 +74,8 @@ interface ConversationNavigationProps {
  * localized fallback (e.g. `[引用消息]`).
  */
 export const buildConversationNavItems = (
-  messages: Message[],
-  blocksById: SnapshotBlockMap,
+  messages: readonly ConversationNavigationSnapshotMessage[],
+  blocksById: NavigationPreviewBlockMap,
   fallback: string,
   attachment?: string | AttachmentLabelFormatters,
   options?: { maxLength?: number; linkLabel?: string }
@@ -182,8 +182,8 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
   const closureSignal = useSyncExternalStore(subscribeClosureInvalidations, () =>
     getClosureSemanticToken(topicId, activeBranchId)
   )
-  const [messages, setMessages] = useState<Message[]>([])
-  const [blocksById, setBlocksById] = useState<SnapshotBlockMap>(new Map())
+  const [messages, setMessages] = useState<ConversationNavigationSnapshotMessage[]>([])
+  const [blocksById, setBlocksById] = useState<ReadonlyMap<string, ConversationNavigationSnapshotBlock>>(new Map())
   const [snapshotKey, setSnapshotKey] = useState<string>('')
 
   const generationRef = useRef(0)
@@ -223,7 +223,7 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
   const fetchSnapshot = useCallback(
     async (targetTopicId: string, targetBranchId: string | null, targetRouteKey: string, gen: number) => {
       try {
-        const snap = await loadWholeTopicSnapshot(targetTopicId, targetBranchId)
+        const snap = await loadConversationNavigationSnapshot(targetTopicId, targetBranchId)
         if (!mountedRef.current || gen !== generationRef.current) return
         if (targetTopicId !== topicRef.current || targetBranchId !== branchRef.current) return
         // Guarded store: only the still-current route's snapshot is kept, with

@@ -1404,7 +1404,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
    */
   async fetchWholeTopicSnapshot(
     topicId: string,
-    branchId?: string | null
+    branchId?: string | null,
+    projection?: FetchWholeTopicSnapshotRequest['projection']
   ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
@@ -1413,7 +1414,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
     if (!this.api.fetchWholeTopicSnapshot) {
       throw new Error('ChatDb API unavailable: whole-topic snapshot read not exposed')
     }
-    const request: FetchWholeTopicSnapshotRequest = cloneForWire({ topicId, branchId: branchId ?? null })
+    const request: FetchWholeTopicSnapshotRequest = cloneForWire(
+      projection === undefined
+        ? { topicId, branchId: branchId ?? null }
+        : { topicId, branchId: branchId ?? null, projection }
+    )
     const result = unwrap(await this.api.fetchWholeTopicSnapshot(request))
     return {
       messages: result.messages as unknown as Message[],

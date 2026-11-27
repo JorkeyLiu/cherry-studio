@@ -1381,11 +1381,26 @@ export interface DeleteClipboardTreeResponse extends FileCleanupResult {
 // Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
 // ---------------------------------------------------------------------------
 
+/**
+ * Payload projection of one whole-topic snapshot READ.
+ *
+ * Both values carry the SAME whole-route completeness (`'whole-topic'`); they
+ * differ only in how much of each row is serialized:
+ * - `'full'` (default when absent): complete message rows + all blocks.
+ * - `'conversation-navigation'`: every effective-route message as an
+ *   `{ id, role }` skeleton, user rows additionally carry their folded flag
+ *   and ordered block ids, and blocks are narrowed to the navigation-consumed
+ *   fields. Never a loaded projection, window, or context capability.
+ */
+export type FetchWholeTopicSnapshotProjection = 'full' | 'conversation-navigation'
+
 /** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot — additive READ for explicit whole-topic snapshot. */
 export interface FetchWholeTopicSnapshotRequest {
   topicId: string
   /** Route owner: absent/null = main route, non-null = that branch's effective route. */
   branchId?: BranchRouteId
+  /** Payload projection; absent means `'full'` (complete rows). */
+  projection?: FetchWholeTopicSnapshotProjection
 }
 
 /** Typed whole-topic snapshot metadata — distinct from window/answer-group/context-closure completeness. */
@@ -1406,6 +1421,14 @@ export interface FetchWholeTopicSnapshotMeta {
    * this authoritative exclusion set instead of the renderer segment catalog.
    */
   foldedMessageIds: string[]
+  /**
+   * Payload projection this response was serialized as. Absent means `'full'`
+   * (complete message/block rows); present means the narrowed
+   * conversation-navigation payload over the same whole-route completeness.
+   * Declared so the response contract can strictly validate the projection's
+   * own key sets instead of accepting either shape silently.
+   */
+  projection?: 'conversation-navigation'
 }
 
 /** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot */
@@ -1413,6 +1436,31 @@ export interface FetchWholeTopicSnapshotResponse {
   messages: JsonObject[]
   blocks: JsonObject[]
   snapshot: FetchWholeTopicSnapshotMeta
+}
+
+/**
+ * One effective-route message row of the `'conversation-navigation'`
+ * projection: a skeleton for every role (nearest-preceding-user / fork /
+ * context-row resolution need all roles in route order), with user rows
+ * carrying their ordered block ids and — only when folded — `folded: true`
+ * (the persisted unfolded state is an absent key, never `false`).
+ */
+export type ConversationNavigationSnapshotMessage =
+  | { id: string; role: 'user'; blocks: string[]; folded?: true }
+  | { id: string; role: 'assistant' | 'system' }
+
+/**
+ * One block row of the `'conversation-navigation'` projection. Only the facts
+ * the outline consumes are carried: type, main-text content, and — for FILE
+ * rows — the attachment classification metadata (`file.type` / `file.ext`).
+ * Filenames, paths, ids, urls and other overflow are never serialized.
+ */
+export interface ConversationNavigationSnapshotBlock {
+  id: string
+  messageId: string
+  type: string | null
+  content: string | null
+  file?: { type?: string | null; ext?: string | null }
 }
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ import type {
   FetchTopicActivityRequest,
   FetchTopicMessageTimesRequest,
   FetchTopicNamingContextRequest,
+  FetchWholeTopicSnapshotProjection,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
@@ -49,6 +50,7 @@ import type {
   InsertMessageGroupIntent,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
+  JsonObject,
   ListBlocksByFileRequest,
   ListBranchesRequest,
   ListFileRefsByFileRequest,
@@ -5238,16 +5240,162 @@ const FETCH_WHOLE_TOPIC_SNAPSHOT_META_KEYS = new Set([
   'firstMessageId',
   'lastMessageId',
   'returnedCount',
-  'foldedMessageIds'
+  'foldedMessageIds',
+  'projection'
+])
+const FETCH_WHOLE_TOPIC_SNAPSHOT_PROJECTIONS = new Set<FetchWholeTopicSnapshotProjection>([
+  'full',
+  'conversation-navigation'
 ])
 
+// Narrow conversation-navigation payload (same whole-route completeness, only
+// the consumed fields serialized). Validated as a closed set: every row key and
+// every cross-reference must match exactly, so a malformed narrowed payload is
+// rejected rather than silently accepted as a generic object array.
+const CONVERSATION_NAV_ROLES = new Set(['user', 'assistant', 'system'])
+const CONVERSATION_NAV_USER_MESSAGE_KEYS = new Set(['id', 'role', 'blocks', 'folded'])
+const CONVERSATION_NAV_SKELETON_MESSAGE_KEYS = new Set(['id', 'role'])
+const CONVERSATION_NAV_BLOCK_KEYS = new Set(['id', 'messageId', 'type', 'content'])
+const CONVERSATION_NAV_FILE_BLOCK_KEYS = new Set(['id', 'messageId', 'type', 'content', 'file'])
+const CONVERSATION_NAV_FILE_META_KEYS = new Set(['type', 'ext'])
+
+const FETCH_WHOLE_TOPIC_SNAPSHOT_CHANNEL = 'chatdb:fetch-whole-topic-snapshot'
+
+function assertClosedKeySet(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  path: string,
+  description: string
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new ValidationError(
+        `${path}.${key}`,
+        `[${FETCH_WHOLE_TOPIC_SNAPSHOT_CHANNEL}] Unknown key in ${description}: "${key}"`
+      )
+    }
+  }
+}
+
+function validateNullableString(value: unknown, path: string): void {
+  if (value !== null && typeof value !== 'string') {
+    throw new ValidationError(path, 'Expected a string or null')
+  }
+}
+
+/**
+ * Strictly validate the narrowed conversation-navigation payload: skeleton
+ * rows for every role, user rows with ordered block ids plus an optional
+ * `folded: true`, blocks limited to the navigation-consumed fields and
+ * cross-checked against their owning user message.
+ */
+function validateConversationNavigationPayload(messages: JsonObject[], blocks: JsonObject[]): void {
+  const userBlockIds = new Map<string, string[]>()
+  for (let i = 0; i < messages.length; i++) {
+    const path = `result.value.messages[${i}]`
+    const row = messages[i] as Record<string, unknown>
+    validateNonEmptyString(row.id, `${path}.id`)
+    if (typeof row.role !== 'string' || !CONVERSATION_NAV_ROLES.has(row.role)) {
+      throw new ValidationError(`${path}.role`, 'Expected role one of user|assistant|system')
+    }
+    if (row.role === 'user') {
+      assertClosedKeySet(row, CONVERSATION_NAV_USER_MESSAGE_KEYS, path, 'conversation-navigation user message')
+      if (userBlockIds.has(row.id as string)) {
+        throw new ValidationError(`${path}.id`, 'Duplicate conversation-navigation message id')
+      }
+      const ids = row.blocks
+      if (!Array.isArray(ids)) {
+        throw new ValidationError(`${path}.blocks`, 'Expected an ordered block id array')
+      }
+      const seen = new Set<string>()
+      for (let j = 0; j < ids.length; j++) {
+        validateNonEmptyString(ids[j], `${path}.blocks[${j}]`)
+        if (seen.has(ids[j] as string)) {
+          throw new ValidationError(`${path}.blocks[${j}]`, 'Duplicate block id')
+        }
+        seen.add(ids[j] as string)
+      }
+      if ('folded' in row && row.folded !== true) {
+        throw new ValidationError(`${path}.folded`, 'Expected true when present (absent is the unfolded state)')
+      }
+      userBlockIds.set(row.id as string, ids as string[])
+    } else {
+      assertClosedKeySet(row, CONVERSATION_NAV_SKELETON_MESSAGE_KEYS, path, 'conversation-navigation skeleton message')
+    }
+  }
+
+  const blocksByMessage = new Map<string, string[]>()
+  for (let i = 0; i < blocks.length; i++) {
+    const path = `result.value.blocks[${i}]`
+    const row = blocks[i] as Record<string, unknown>
+    const isFile = row.type === 'file'
+    assertClosedKeySet(
+      row,
+      isFile ? CONVERSATION_NAV_FILE_BLOCK_KEYS : CONVERSATION_NAV_BLOCK_KEYS,
+      path,
+      'conversation-navigation block'
+    )
+    validateNonEmptyString(row.id, `${path}.id`)
+    validateNonEmptyString(row.messageId, `${path}.messageId`)
+    validateNullableString(row.type, `${path}.type`)
+    validateNullableString(row.content, `${path}.content`)
+    if (!userBlockIds.has(row.messageId as string)) {
+      throw new ValidationError(
+        `${path}.messageId`,
+        '[chatdb:fetch-whole-topic-snapshot] Navigation blocks may only belong to returned user messages'
+      )
+    }
+    if ('file' in row) {
+      if (!isFile) {
+        throw new ValidationError(`${path}.file`, 'Only FILE blocks may carry narrowed file metadata')
+      }
+      const file = row.file
+      if (file === null || typeof file !== 'object' || Array.isArray(file)) {
+        throw new ValidationError(`${path}.file`, 'Expected a plain object')
+      }
+      const fileObj = file as Record<string, unknown>
+      assertClosedKeySet(fileObj, CONVERSATION_NAV_FILE_META_KEYS, `${path}.file`, 'narrowed file metadata')
+      for (const key of Object.keys(fileObj)) {
+        validateNullableString(fileObj[key], `${path}.file.${key}`)
+      }
+    }
+    const list = blocksByMessage.get(row.messageId as string)
+    if (list) list.push(row.id as string)
+    else blocksByMessage.set(row.messageId as string, [row.id as string])
+  }
+
+  for (const [messageId, ids] of userBlockIds) {
+    const actual = blocksByMessage.get(messageId) ?? []
+    if (actual.length !== ids.length) {
+      throw new ValidationError(
+        'result.value.blocks',
+        `[${FETCH_WHOLE_TOPIC_SNAPSHOT_CHANNEL}] User message ${messageId} must reference exactly its returned blocks`
+      )
+    }
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i] !== actual[i]) {
+        throw new ValidationError(
+          'result.value.blocks',
+          `[${FETCH_WHOLE_TOPIC_SNAPSHOT_CHANNEL}] User message ${messageId} block order must match returned blocks`
+        )
+      }
+    }
+  }
+}
+
 const fetchWholeTopicSnapshotContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'branchId'),
+  allowedKeys: keySet('topicId', 'branchId', 'projection'),
   validate(value: unknown): void {
     validateRequest(value, fetchWholeTopicSnapshotContract.allowedKeys)
     const req = value as FetchWholeTopicSnapshotRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateOptionalBranchId(req.branchId, 'request.branchId')
+    if (req.projection !== undefined && !FETCH_WHOLE_TOPIC_SNAPSHOT_PROJECTIONS.has(req.projection)) {
+      throw new ValidationError(
+        'request.projection',
+        '[chatdb:fetch-whole-topic-snapshot] Expected projection one of full|conversation-navigation'
+      )
+    }
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:fetch-whole-topic-snapshot', { skipValueValidation: true })
@@ -5299,6 +5447,12 @@ const fetchWholeTopicSnapshotContract: ChatDbContract = {
             `[chatdb:fetch-whole-topic-snapshot] Unknown key in snapshot: "${key}"`
           )
         }
+      }
+      if (s.projection !== undefined && s.projection !== 'conversation-navigation') {
+        throw new ValidationError(
+          'result.value.snapshot.projection',
+          '[chatdb:fetch-whole-topic-snapshot] Expected projection "conversation-navigation" when declared'
+        )
       }
       if (s.completeness !== 'whole-topic') {
         throw new ValidationError(
@@ -5364,6 +5518,13 @@ const fetchWholeTopicSnapshotContract: ChatDbContract = {
             '[chatdb:fetch-whole-topic-snapshot] lastMessageId must match last message id'
           )
         }
+      }
+      // Projection-specific strictness: a declared conversation-navigation
+      // payload must match its closed row key sets and cross-references. A full
+      // payload (projection absent) keeps the generic JSON-safety validation it
+      // always had, so export/knowledge snapshots are unchanged.
+      if (s.projection === 'conversation-navigation') {
+        validateConversationNavigationPayload(v.messages as JsonObject[], v.blocks as JsonObject[])
       }
     }
   }

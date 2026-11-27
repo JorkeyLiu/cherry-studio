@@ -20,6 +20,7 @@ import type {
   FetchTopicActivityResponse,
   FetchTopicMessageTimesResponse,
   FetchTopicNamingContextResponse,
+  FetchWholeTopicSnapshotRequest,
   FetchWholeTopicSnapshotResponse,
   ImportTopicDataResponse,
   InheritanceBoundarySnapshot,
@@ -118,16 +119,23 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.resolveContextClosure) throw new Error('resolveContextClosure unavailable')
     return this.ordinarySource.resolveContextClosure(request)
   }
+  /**
+   * Explicit short-lived whole-route snapshot. `projection` is a typed
+   * pass-through to the same Main read: absent/'full' returns complete rows,
+   * 'conversation-navigation' returns the narrowed navigation payload (same
+   * whole-topic completeness). Caller-local only; nothing is dispatched.
+   */
   fetchWholeTopicSnapshot(
     topicId: string,
-    branchId?: string | null
+    branchId?: string | null,
+    projection?: FetchWholeTopicSnapshotRequest['projection']
   ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
   }> {
     if (!this.ordinarySource.fetchWholeTopicSnapshot) throw new Error('fetchWholeTopicSnapshot unavailable')
-    return this.ordinarySource.fetchWholeTopicSnapshot(topicId, branchId)
+    return this.ordinarySource.fetchWholeTopicSnapshot(topicId, branchId, projection)
   }
   fetchClipboardGroups(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse> {
     if (!this.ordinarySource.fetchClipboardGroups) throw new Error('fetchClipboardGroups unavailable')

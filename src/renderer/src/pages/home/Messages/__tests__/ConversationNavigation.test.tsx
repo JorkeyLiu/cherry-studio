@@ -99,7 +99,7 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('@renderer/utils/topicSnapshot', () => ({
-  loadWholeTopicSnapshot: (...args: unknown[]) => mocks.loadWholeTopicSnapshot(...args)
+  loadConversationNavigationSnapshot: (...args: unknown[]) => mocks.loadWholeTopicSnapshot(...args)
 }))
 
 // Branch catalog stub: the outline reads the same relation source the message
@@ -140,7 +140,7 @@ vi.mock('../useBranchTree', () => ({
   requestTopicBranches: vi.fn()
 }))
 
-import ConversationNavigation from '../ConversationNavigation'
+import ConversationNavigation, { buildConversationNavItems } from '../ConversationNavigation'
 import type { ReadingAnchorReport } from '../Messages'
 
 const textBlock = (id: string, messageId: string, content: string) =>
@@ -1557,5 +1557,146 @@ describe('ConversationNavigation group runs and context divider', () => {
       />
     )
     expect(screen.queryByTestId('conversation-navigation')).toBeNull()
+  })
+})
+
+describe('ConversationNavigation narrowed projection equivalence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.setActiveBranchId(null)
+    mocks.setUpdatedAt('t0')
+    branchTree.reset()
+  })
+
+  // 300 turns: the outline only ever draws the user rows, so this exercises both
+  // the projection's every-role skeleton and a long route in one fixture.
+  const TURNS = 300
+  const question = (i: number) => `Question ${i} about the ${i % 2 === 0 ? 'rivers' : 'mountains'}`
+
+  /** The FULL whole-topic snapshot shape the previous consumer read. */
+  const fullFixture = () => {
+    const messages: unknown[] = []
+    const blocks: unknown[] = []
+    for (let i = 0; i < TURNS; i++) {
+      const userId = `u${i}`
+      const assistantId = `a${i}`
+      const userBlockId = `bu${i}`
+      const assistantBlockId = `ba${i}`
+      blocks.push(
+        textBlock(userBlockId, userId, question(i)),
+        textBlock(assistantBlockId, assistantId, `Assistant answer ${i}`)
+      )
+      messages.push(userMsg(userId, [userBlockId]), assistantMsg(assistantId, [assistantBlockId]))
+    }
+    return {
+      messages: messages as never,
+      blocks: blocks as never,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    }
+  }
+
+  /** The SAME route as the narrower `'conversation-navigation'` payload. */
+  const narrowFixture = () => {
+    const messages: unknown[] = []
+    const blocks: unknown[] = []
+    for (let i = 0; i < TURNS; i++) {
+      messages.push({ id: `u${i}`, role: 'user', blocks: [`bu${i}`] }, { id: `a${i}`, role: 'assistant' })
+      blocks.push({ id: `bu${i}`, messageId: `u${i}`, type: MessageBlockType.MAIN_TEXT, content: question(i) })
+    }
+    return {
+      messages: messages as never,
+      blocks: blocks as never,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    }
+  }
+
+  const anchor = (over: Partial<ReadingAnchorReport>): ReadingAnchorReport => ({
+    topicId: 'topic-1',
+    route: null,
+    messageId: null,
+    navigationTargetId: null,
+    ...over
+  })
+
+  it('derives the identical outline from the narrow rows as from the full snapshot', () => {
+    const full = fullFixture()
+    const narrow = narrowFixture()
+    const fullItems = buildConversationNavItems(full.messages, full.blocksById as never, 'Quoted message')
+    const narrowItems = buildConversationNavItems(narrow.messages, narrow.blocksById as never, 'Quoted message')
+    expect(fullItems).toHaveLength(TURNS)
+    // Same entries, same stable ids, same previews — the narrowed payload is a
+    // serialization change, never a navigation change.
+    expect(narrowItems).toEqual(fullItems)
+    expect(narrowItems[0]).toEqual({ id: 'u0', preview: question(0), hasAttachment: false })
+  })
+
+  /** Render one fixture and collect the outline facts the consumers observe. */
+  const observeOutline = async (fixture: ReturnType<typeof fullFixture>) => {
+    mocks.loadWholeTopicSnapshot.mockResolvedValue(fixture)
+    const { container, unmount } = render(
+      <ConversationNavigation
+        topicId="topic-1"
+        onNavigate={mocks.onNavigate}
+        readingAnchor={anchor({ messageId: 'a150', navigationTargetId: 'a150' })}
+        contextBoundaryMessageId="a50"
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u299')
+    const rows = screen.getAllByTestId(/^conversation-nav-item-/)
+    const facts = {
+      fetchArgs: mocks.loadWholeTopicSnapshot.mock.calls[0],
+      ids: rows.map((row) => row.getAttribute('data-message-id')),
+      texts: rows.map((row) => row.textContent),
+      active: rows
+        .filter((row) => row.getAttribute('aria-current') === 'true')
+        .map((row) => row.getAttribute('data-message-id')),
+      contextDividers: screen
+        .queryAllByTestId('conversation-nav-context')
+        .map(
+          (divider) => (divider.previousElementSibling as HTMLElement | null)?.getAttribute('data-message-id') ?? null
+        ),
+      forks: screen
+        .queryAllByTestId('conversation-nav-fork')
+        .map((fork) => (fork.previousElementSibling as HTMLElement | null)?.getAttribute('data-message-id') ?? null)
+    }
+    const nav = container.querySelector('[data-testid="conversation-navigation"]')
+    unmount()
+    return { facts, hasNav: nav !== null }
+  }
+
+  // Branch-catalog stub row: the fork marker reads the same relation source the
+  // message flow uses (children of the viewed level, by anchor).
+  const forkBranch = (anchorMessageId: string): TopicBranchWire => ({
+    id: `br-${anchorMessageId}`,
+    topicId: 'topic-1',
+    parentBranchId: null,
+    anchorMessageId,
+    inheritedBoundary: { kind: 'message', messageId: anchorMessageId },
+    name: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: null
+  })
+  it('renders the same highlight, fork marker and context divider from the narrow payload (300 turns)', async () => {
+    // One fork on the assistant row a10 and one context boundary at a50 are the
+    // two callers that resolve through the all-role skeleton.
+    branchTree.set(new Map([['a10', [forkBranch('a10')]]]) as Map<string, unknown[]>)
+
+    const full = await observeOutline(fullFixture())
+    const narrow = await observeOutline(narrowFixture())
+
+    expect(full.hasNav).toBe(true)
+    expect(narrow.hasNav).toBe(true)
+    // The narrow consumer asks Main for the explicit projection (the harness
+    // delegates the narrow loader onto the same mock).
+    expect(narrow.facts.ids).toEqual(full.facts.ids)
+    expect(narrow.facts.texts).toEqual(full.facts.texts)
+    expect(narrow.facts.active).toEqual(['u150'])
+    expect(narrow.facts.active).toEqual(full.facts.active)
+    // An assistant boundary resolves to the user row that opened its turn (a50
+    // belongs under u49), then the divider sits above that row.
+    expect(narrow.facts.contextDividers).toEqual(['u49'])
+    expect(narrow.facts.contextDividers).toEqual(full.facts.contextDividers)
+    expect(narrow.facts.forks).toEqual(['u10'])
+    expect(narrow.facts.forks).toEqual(full.facts.forks)
   })
 })

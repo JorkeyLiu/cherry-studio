@@ -101,4 +101,48 @@ describe('SqliteMessageDataSource — fetchWholeTopicSnapshot', () => {
       'ChatDb API unavailable: whole-topic snapshot read not exposed'
     )
   })
+
+  it('passes the typed projection through to the bridge request unchanged', async () => {
+    const api = {
+      fetchWholeTopicSnapshot: vi.fn(async () => ({
+        ok: true,
+        value: {
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: 'x' }],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm1',
+            returnedCount: 1,
+            foldedMessageIds: [],
+            projection: 'conversation-navigation'
+          }
+        }
+      }))
+    } as any
+    const ds = new SqliteMessageDataSource(api)
+    mockDispatch.mockClear()
+    await ds.fetchWholeTopicSnapshot('t1', null, 'conversation-navigation')
+    expect(api.fetchWholeTopicSnapshot).toHaveBeenCalledWith({
+      topicId: 't1',
+      branchId: null,
+      projection: 'conversation-navigation'
+    })
+    await ds.fetchWholeTopicSnapshot('t1', 'br1', 'full')
+    expect(api.fetchWholeTopicSnapshot).toHaveBeenLastCalledWith({ topicId: 't1', branchId: 'br1', projection: 'full' })
+    // The narrow rows are passed through as returned; the renderer never
+    // re-shapes or filters a payload here.
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it('omits the projection key entirely when no projection is requested', async () => {
+    const api = {
+      fetchWholeTopicSnapshot: vi.fn(async () => ({ ok: true, value: { messages: [], blocks: [], snapshot: {} } }))
+    } as any
+    const ds = new SqliteMessageDataSource(api)
+    await ds.fetchWholeTopicSnapshot('t1')
+    expect(api.fetchWholeTopicSnapshot).toHaveBeenCalledWith({ topicId: 't1', branchId: null })
+    expect(Object.keys(api.fetchWholeTopicSnapshot.mock.calls[0][0]).sort()).toEqual(['branchId', 'topicId'])
+  })
 })
