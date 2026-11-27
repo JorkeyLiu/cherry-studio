@@ -14,6 +14,13 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import type { Mock } from 'vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// Deterministic prompt tokenizer: 1 char ≈ 1 token. History/draft
+// estimators are injected mocks in this suite, so tokenx only observes
+// prompt strings; the unprompted base assistant still contributes 0.
+vi.mock('tokenx', () => ({
+  estimateTokenCount: (text: string) => text.length
+}))
+
 import { type EstimateDraftFn, type PromptTokenRouteIdentity, usePromptTokenEstimate } from '../usePromptTokenEstimate'
 
 // ---------------------------------------------------------------------------
@@ -307,5 +314,41 @@ describe('usePromptTokenEstimate session path', () => {
     rerender({ includeMedia: false })
     await waitFor(() => expect(messageMock).toHaveBeenCalledTimes(2))
     expect(messageMock.mock.calls[1][1]).toEqual({ includeMedia: false, snapshotBlocks: expect.any(Map) })
+  })
+
+  it('prompt change updates the scalar without re-estimating history', async () => {
+    const m1 = msg('m1')
+    const assistantA = { ...baseAssistant, prompt: '' }
+    const assistantB = { ...baseAssistant, prompt: 'hello' }
+    const { result, rerender } = renderHook(
+      (props: { assistant: Assistant }) =>
+        usePromptTokenEstimate({
+          assistant: props.assistant,
+          tokenEstimationMessages: [m1],
+          blockSnapshot: new Map() as never,
+          text: 't',
+          files: [],
+          routeIdentity: idA,
+          estimateHistoryMessage: messageMock,
+          estimateDraft: draftMock
+        }),
+      { initialProps: { assistant: assistantA } }
+    )
+
+    await waitFor(() => expect(messageMock).toHaveBeenCalledTimes(1))
+    act(() => {
+      messageDeferred[0].resolve(100)
+      draftDeferred[0].resolve(draftTotal(1))
+    })
+    await waitFor(() => expect(result.current).toBe(101))
+
+    rerender({ assistant: assistantB })
+    // History reused (same message), draft re-runs: one draft per pass.
+    await waitFor(() => expect(draftMock).toHaveBeenCalledTimes(2))
+    expect(messageMock).toHaveBeenCalledTimes(1)
+    act(() => {
+      draftDeferred[1].resolve(draftTotal(1))
+    })
+    await waitFor(() => expect(result.current).toBe(106))
   })
 })

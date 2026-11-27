@@ -17,8 +17,15 @@ import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBloc
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Deterministic tokenizer: 1 char ≈ 1 token (prompt + canonical text math).
+// Call log proves tokenizer reuse by count, not by source text. History
+// estimation via the real algorithm also lands here, so tests that assert
+// prompt counts use a stub history estimator (never touches tokenx).
+const tokenxCalls = vi.hoisted(() => [] as string[])
 vi.mock('tokenx', () => ({
-  estimateTokenCount: (text: string) => text.length
+  estimateTokenCount: (text: string) => {
+    tokenxCalls.push(text)
+    return text.length
+  }
 }))
 
 import { createHistoryTokenEstimateSession } from '../historyTokenEstimateSession'
@@ -237,6 +244,102 @@ describe('createHistoryTokenEstimateSession', () => {
     })
     expect(estimateMessage).toHaveBeenCalledTimes(2)
     expect(second - first).toBe(3)
+  })
+
+  describe('prompt scalar cache (single last-value entry)', () => {
+    beforeEach(() => {
+      tokenxCalls.length = 0
+    })
+
+    it('reuses the cached prompt scalar across repeat estimates', async () => {
+      const m1 = makeMsg('u1', [])
+      const estimateMessage = vi.fn(async () => 7)
+      const session = createHistoryTokenEstimateSession({ estimateMessage })
+      const options = { snapshotBlocks: snapOf([]) }
+
+      const first = await session.estimateHistory(makeAssistant('abc'), [m1], options)
+      const second = await session.estimateHistory(makeAssistant('abc'), [m1], options)
+      const third = await session.estimateHistory(makeAssistant('abc'), [m1], options)
+
+      expect(first).toBe(10)
+      expect(second).toBe(10)
+      expect(third).toBe(10)
+      expect(estimateMessage).toHaveBeenCalledTimes(1)
+      expect(tokenxCalls).toEqual(['abc'])
+    })
+
+    it('A→B→A recomputes on every change (single entry, no multi-entry retention)', async () => {
+      const m1 = makeMsg('u1', [])
+      const estimateMessage = vi.fn(async () => 7)
+      const session = createHistoryTokenEstimateSession({ estimateMessage })
+      const options = { snapshotBlocks: snapOf([]) }
+
+      const first = await session.estimateHistory(makeAssistant('aa'), [m1], options)
+      const second = await session.estimateHistory(makeAssistant('bbbb'), [m1], options)
+      const third = await session.estimateHistory(makeAssistant('aa'), [m1], options)
+
+      expect(first).toBe(9)
+      expect(second).toBe(11)
+      expect(third).toBe(9)
+      expect(estimateMessage).toHaveBeenCalledTimes(1)
+      expect(tokenxCalls).toEqual(['aa', 'bbbb', 'aa'])
+    })
+
+    it('empty and missing prompts share one normalized entry', async () => {
+      const m1 = makeMsg('u1', [])
+      const estimateMessage = vi.fn(async () => 7)
+      const session = createHistoryTokenEstimateSession({ estimateMessage })
+      const options = { snapshotBlocks: snapOf([]) }
+      const noPrompt = { id: 'a1', settings: {} } as unknown as Assistant
+
+      const empty = await session.estimateHistory(makeAssistant(''), [m1], options)
+      const missing = await session.estimateHistory(noPrompt, [m1], options)
+
+      expect(empty).toBe(7)
+      expect(missing).toBe(7)
+      expect(estimateMessage).toHaveBeenCalledTimes(1)
+      expect(tokenxCalls).toEqual([''])
+    })
+
+    it('overlapping runs publish their own closed prompt value', async () => {
+      const m1 = makeMsg('u1', [])
+      const options = { snapshotBlocks: snapOf([]) }
+      const gate = deferred<number>()
+      let calls = 0
+      const estimateMessage = vi.fn(() => {
+        calls += 1
+        return calls === 1 ? gate.promise : Promise.resolve(999)
+      })
+      const session = createHistoryTokenEstimateSession({ estimateMessage })
+
+      const runA = session.estimateHistory(makeAssistant('AAA'), [m1], options)
+      const runB = session.estimateHistory(makeAssistant('BBBBB'), [m1], options)
+      gate.resolve(10)
+      await expect(runA).resolves.toBe(13)
+      await expect(runB).resolves.toBe(15)
+      expect(estimateMessage).toHaveBeenCalledTimes(1)
+
+      // The latest run's prompt stays cached: a repeat reuses it.
+      await expect(session.estimateHistory(makeAssistant('BBBBB'), [m1], options)).resolves.toBe(15)
+      expect(tokenxCalls).toEqual(['AAA', 'BBBBB'])
+    })
+
+    it('reset drops the prompt entry; the next run re-estimates', async () => {
+      const m1 = makeMsg('u1', [])
+      const estimateMessage = vi.fn(async () => 7)
+      const session = createHistoryTokenEstimateSession({ estimateMessage })
+      const options = { snapshotBlocks: snapOf([]) }
+
+      await session.estimateHistory(makeAssistant('abc'), [m1], options)
+      await session.estimateHistory(makeAssistant('abc'), [m1], options)
+      expect(tokenxCalls).toEqual(['abc'])
+
+      session.reset()
+      const after = await session.estimateHistory(makeAssistant('abc'), [m1], options)
+      expect(after).toBe(10)
+      expect(tokenxCalls).toEqual(['abc', 'abc'])
+      expect(estimateMessage).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('empty list estimates only the system prompt', async () => {

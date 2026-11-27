@@ -32,17 +32,22 @@ import { estimateMessageUsage } from './TokenService'
  *   synchronous store read), and each per-message estimate runs against a
  *   caller-local closed `SnapshotBlockMap` built from those captured refs —
  *   the mutable global map is never read late in async continuations.
- *   The system prompt is estimated fresh on every call, so a prompt change
- *   never invalidates stable history entries.
+ *   The system prompt text is also closed synchronously per call and its
+ *   token scalar is cached as a single last-value entry: an unchanged
+ *   prompt string reuses the scalar without re-tokenizing, a changed
+ *   prompt recomputes, and a prompt change never invalidates stable
+ *   history entries. Each run adds its own closed prompt scalar after the
+ *   await, so a stale run can never publish another run's prompt value.
  * - Overlap-safe: a stale run's late rejection deletes a cache entry only
  *   when it is still the identical promise object (identity compare), so it
  *   can never remove a newer run's entry. Failed estimates are never cached;
  *   the next run retries.
  *
- * Evidence scope: reuse is proven by per-message estimator call counts in
- * `historyTokenEstimateSession.test.ts`, not by timing claims. Skipping
- * repeat tokenization of unchanged history reduces repeated estimator work;
- * it is not a measured latency improvement (no runtime cost proof exists).
+ * Evidence scope: reuse is proven by per-message estimator call counts and
+ * by prompt tokenizer call counts in `historyTokenEstimateSession.test.ts`,
+ * not by timing claims. Skipping repeat tokenization of unchanged history
+ * and of an unchanged prompt reduces repeated estimator work; it is not a
+ * measured latency improvement (no runtime cost proof exists).
  *
  * This session performs NO message filtering: callers pass the already
  * filtered `tokenEstimationMessages` (the shared `filterContextMessages`
@@ -100,6 +105,13 @@ export function createHistoryTokenEstimateSession(
 ): HistoryTokenEstimateSession {
   const estimateMessage = deps.estimateMessage ?? defaultEstimateHistoryMessage
   const entries = new Map<string, HistoryTokenEntry>()
+  // Single last-value prompt entry: the exact prompt string closed by the
+  // latest run and its estimated scalar. Plain scalars only — no global
+  // cache, timer, or Map. `hasPrompt` distinguishes "never estimated"
+  // from a legitimately empty prompt ('' normalizes undefined).
+  let promptText = ''
+  let promptTokens = 0
+  let hasPrompt = false
 
   const estimateHistory = async (
     assistant: Assistant,
@@ -113,6 +125,20 @@ export function createHistoryTokenEstimateSession(
     // 1. Synchronously capture every entry dependency and (re)use-or-start
     //    each per-message estimate. No await happens before every entry of
     //    this run is closed, so later store mutations cannot leak into it.
+    //    The prompt scalar is closed here too: an unchanged prompt reuses
+    //    the cached scalar, a changed prompt re-estimates synchronously and
+    //    becomes the new single entry. The closed local is added after the
+    //    await, so overlapping runs each publish their own prompt value.
+    const currentPrompt = assistant.prompt || ''
+    let closedPromptTokens: number
+    if (hasPrompt && promptText === currentPrompt) {
+      closedPromptTokens = promptTokens
+    } else {
+      closedPromptTokens = estimateTextTokens(currentPrompt)
+      promptText = currentPrompt
+      promptTokens = closedPromptTokens
+      hasPrompt = true
+    }
     const nextIds = new Set<string>()
     const pending: Promise<number>[] = []
     for (const message of list) {
@@ -163,16 +189,18 @@ export function createHistoryTokenEstimateSession(
       }
     }
 
-    // 3. Await the closed promises, then add the freshly estimated prompt.
+    // 3. Await the closed promises, then add this run's closed prompt scalar.
     const totals = await Promise.all(pending)
     const historyTokens = totals.reduce((sum, tokens) => sum + tokens, 0)
-    return historyTokens + estimateTextTokens(assistant.prompt || '')
+    return historyTokens + closedPromptTokens
   }
 
   const reset = (): void => {
     entries.clear()
+    promptText = ''
+    promptTokens = 0
+    hasPrompt = false
   }
-
   const cacheSize = (): number => entries.size
 
   return { estimateHistory, reset, cacheSize }
