@@ -666,3 +666,9 @@
 - 实测（pinned Node 24.11.1 / pnpm 10.27.0，均为前台原始 exit，值为传入的验证结论、本文档追加时未重跑）：最终聚焦 4 文件 31/31 exit 0；`pnpm typecheck` exit 0；Biome lint/format、ESLint、`git diff --check` exit 0；文件级 oxlint exit 1 为 `messageThunk.ts:2692,3497-3499,4142` 的 5 个既有 `no-unused-vars`。`CI=1 pnpm test:renderer` 跑 15 分钟被工具终止、无最终 exit，记 unverified（日志：session scratch `ccl-renderer-final.log`）。`generationOwnership` 单跑 20s 超时、还原 hunk 后复现，记 baseline candidate / known issue，未在本切片修。
 - 残余：全量 renderer 未完成（最终态证据只有 focused + typecheck + 静态检查）；既有 warning 未清；未跑 E2E（纯私有结构/表达式重构，无 UI 行为变化，无新增资产）。
 - 边界：本文档追加不改任何代码/测试，不运行测试，不 commit（不 push/amend/rebase/reset）。
+## 62. 执行绑定写入与最新窗口模型复用（已实现）
+- latest-edge fallback 复用（b7938f0bdf）：`latest-edge` 兜底直接复用已建 group 模型，避免同 commit 二次分组；guards/空模型路径不变。
+- 执行绑定写入简化（482f0ee72）：删 `ScheduledWriteContext` 按次覆盖，`schedule`/`throttledBlockUpdate` 仅传 `(id, update)`；attempt/barrier/topic/branch/loaded 全部由执行构造绑定，pinned route/quiesce/fail-closed 不变；测试契约从“覆盖”改为“绑定”。
+- 验证：`messageWindow` 6 文件 103/103；scheduler 等 5 文件 46/46；`pnpm typecheck` pass；提交 hooks pass；未跑全量 renderer/E2E，不声称延迟/帧率收益。
+- 残余：全量 renderer 仍未完成；本切片无新增行为风险。
+- 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
