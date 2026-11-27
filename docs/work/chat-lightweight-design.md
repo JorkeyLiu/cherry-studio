@@ -698,8 +698,16 @@
 ## 67. active topic 单 owner runtime 同步（已实现）
 - 范围（最小切片，仅 renderer 装配层）：`useChatContext` 删除 `setActiveTopic` 的 runtime 同步 dispatch（保留 multi-select 与 activeTopic 透传）；`HomePage.tsx` 的 `HomeViewportScope` 成为 runtime active topic 副本的唯一写入方（选中话题 effect 内 `dispatch(setRuntimeActiveTopic(activeTopic))`，与 `useActiveTopic` 同一选中事实）。消息消费者只读，不再发布选中事实。未改 Main/shared/IPC/preload/DB/ADR，未改选中语义与导航门。
 - 结构收益（只声明结构，不声明性能）：选中事实的 runtime 镜像写入方由多处收归一处；`useChatContext` 多实例挂载/重渲染不再重复 dispatch。
-- 观测（单机单轮方向记录，不作 A/B 因果、不作显著性断言）：profile-1 L1→main `runtime/setActiveTopic` 161 条、profile-2 1 条，main→L1 3→0；无 `fetchMessagesWindow` IPC；切换总时 703→757ms / 300→329ms，ScriptDuration 398.6→406ms / 173.1→178ms，Nodes/Listeners 几乎不变。因此只记录结构收敛，无性能提升结论。
+ - 观测（单机单轮方向记录，不作 A/B 因果、不作显著性断言）：profile-1 L1→main 总 actions 161（原始 profile 只保留前 40，均 `runtime/setActiveTopic`；actionLogDelta 161）、profile-2 1 条，main→L1 3→0；无 `fetchMessagesWindow` IPC；切换总时 703→757ms / 300→329ms，ScriptDuration 398.6→406ms / 173.1→178ms，Nodes/Listeners 几乎不变。因此只记录结构收敛，无性能提升结论。
 - 测试：新增 `useChatContext.noRuntimeSync.test.tsx` 2 例（多实例挂载/重渲染永不 dispatch runtime setActiveTopic；multi-select 与透传保留）+ `HomePage.runtimeActiveTopic.test.tsx` 4 例（初挂载恰一次镜像；切换一次同步且滞后消费者不覆盖；同 id 元数据更新镜像最新对象；Tools id 门读镜像副本）。相邻 31 例回归覆盖。
 - 验证（传入的验证结论，本文档追加时未重跑）：新测试 6 + 相邻 31 通过；`pnpm typecheck` 五路 exit 0；fresh `pnpm build` exit 0；关键 E2E 18/19（唯一失败 `page-viewport invalid-anchor` 在 clean HEAD 同失败；loading 探针仍读旧 `loadingByTopic`，实际读用 `pendingWindowReadsByTopic`）；全 renderer 3 个 `Messages.chromeCoCommitWiring` 失败在 clean HEAD 同复现。
 - 下一步：转向 DOM/CPU 热点。
 - 边界：本文档追加不改任何代码/测试；除本节记录的提交外未做任何 git 操作（不 push/amend/rebase/reset）。
+ ## 68. 消息工具栏按需挂载实验（已撤回，不留生产/测试 helper）
+ - 结论：本轮工具栏按需挂载实验已撤回，生产与测试均不留 helper（`Message`/`MessageMenubar` 改动、相关单测调整、E2E spec 改动、`branch-route-setup` 改动及新建 `tests/e2e/utils/message-toolbar.ts` 全部回滚/删除）。
+ - 撤回原因：真实 UI 未闭合且协调负担上升。
+ - 方向记录（不作整体性能因果/显著性声明，非 formal A/B）：cpu-3→cpu-9 单次 DOM 1277→455、总时 631→591ms；测量脚本前后有调整，仅作方向记录。
+ - portal 问题及锁存方案曾尝试，最终随本实验一并撤回。
+ - 保留已提交 2507c3e3e9 / 9d071d239d 不变。
+ - 下次方向：主成本在 React layout-effect，须新的可证假设；别重启工具栏 helper 链。
+ - 边界：本文档追加不改任何代码/测试；除本节记录的提交外未做任何 git 操作（不 push/amend/rebase/reset）。
