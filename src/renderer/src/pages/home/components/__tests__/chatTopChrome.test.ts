@@ -135,13 +135,13 @@ describe('chat top-chrome layout contracts', () => {
     expect(chat).toMatch(/useComposerOverlayHeight/)
     expect(chat).toMatch(/COMPOSER_TAIL_INSET_VAR/)
     expect(chat).toMatch(/COMPOSER_OVERLAY_HEIGHT_VAR/)
-    // Tail padding, back-to-bottom offset and scroll-padding-bottom derive
-    // from the same tail inset; the band alone is the fallback everywhere.
+    // Tail padding and scroll-padding-bottom derive from the same tail inset;
+    // the band alone is the fallback everywhere. BackToBottomButton sits in
+    // the fixed bottom-right corner clear of the centered narrowed composer.
     expect(messagesSharedSrc()).toMatch(/--composer-tail-inset/)
     expect(messagesSharedSrc()).toMatch(/scroll-padding-bottom/)
     expect(messagesSharedSrc()).toMatch(/COMPOSER_FLOATING_CONTROL_BAND_PX/)
-    expect(codeOnly(backToBottomSrc())).toMatch(/COMPOSER_TAIL_INSET_VAR/)
-    expect(codeOnly(backToBottomSrc())).toMatch(/COMPOSER_FLOATING_CONTROL_BAND_PX/)
+    expect(codeOnly(backToBottomSrc())).toMatch(/COMPOSER_OVERLAY_BOTTOM_GAP_PX/)
     // The single window-bottom gap is one owned 12px (plane at bottom:0, only
     // the container padding owns it, measured exactly once into the tail);
     // sides keep the nav-rail constant. Gap is spacing, never the band.
@@ -152,10 +152,10 @@ describe('chat top-chrome layout contracts', () => {
       /border-radius:\s*var\(--list-item-border-radius\)/
     )
     expect(codeOnly(inputbarCoreSrc())).not.toMatch(/box-shadow:/)
-    // Floating surfaces stay solid: plate, model row and textarea share the
-    // theme background, and the right hug-content chip does too. Only the
-    // top titlebar fade stays translucent.
-    expect(codeOnly(inputbarCoreSrc())).toMatch(/background-color:\s*var\(--color-background\)/)
+    // Unified frosted-glass composer island (both capsule and expanded share
+    // the backdrop-filter and directional glass rim; no box-shadow or
+    // legacy opacity token), while the right hug-content chip stays solid.
+    expect(codeOnly(inputbarCoreSrc())).toMatch(/backdrop-filter:/)
     expect(inputbarCoreSrc()).not.toMatch(/color-background-opacity/)
     expect(codeOnly(floatsSrc())).toMatch(/background:\s*var\(--color-background\)/)
     expect(floatsSrc()).not.toMatch(/72%, transparent/)

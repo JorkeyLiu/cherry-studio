@@ -63,3 +63,13 @@ export const resolveTopicSegmentDrawerAnchorLeft = (navigationOn: boolean): numb
   navigationOn
     ? COMPOSER_FLOATING_CONTROL_INSET_PX - TOPIC_SEGMENT_DRAWER_NAV_ALIGN_SHIFT_PX
     : COMPOSER_FLOATING_CONTROL_INSET_PX
+
+/**
+ * Fixed bottom-left left-offset of the drawer anchor inside `ChatCanvas`.
+ * Because the composer is centered and narrowed, the drawer lives at the
+ * canvas bottom-left outside the composer so expanding/collapsing the
+ * composer never moves it: navigation on centers the trigger on
+ * `NAV_RAIL_AXIS_PX`; navigation off aligns it with `INPUTBAR_OUTER_SIDE_PAD_PX`.
+ */
+export const resolveTopicSegmentDrawerCanvasLeft = (navigationOn: boolean): number =>
+  navigationOn ? NAV_RAIL_AXIS_PX - DRAWER_TRIGGER_HALF_PX : INPUTBAR_OUTER_SIDE_PAD_PX

@@ -9,8 +9,9 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { COMPOSER_FLOATING_CONTROL_INSET_PX, COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
-import { resolveTopicSegmentDrawerAnchorLeft } from './navRailGeometry'
+import { COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
+import { COMPOSER_OVERLAY_BOTTOM_GAP_PX } from './composerOverlayGeometry'
+import { resolveTopicSegmentDrawerCanvasLeft } from './navRailGeometry'
 
 interface TopicSegmentDrawerProps {
   topicId: string
@@ -70,7 +71,7 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
   // left by the shared shift so the portaled trigger lands on the rail axis;
   // with navigation off the historical inset (and availability) is preserved.
   const { messageNavigation } = useSettings()
-  const anchorLeft = resolveTopicSegmentDrawerAnchorLeft(messageNavigation)
+  const anchorLeft = resolveTopicSegmentDrawerCanvasLeft(messageNavigation)
   // In-flow measurement anchor: the floating trigger is portaled out of the
   // composer's stacking context, so it is positioned from this anchor's live
   // rect (the same spot the trigger occupied before the portal).
@@ -179,14 +180,14 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 // is what the scroll content reserves as its tail clearance
 // (`composerFloatingBand`). Vertical placement is untouched either way.
 const TriggerAnchor = styled.span<{ $left: number }>`
-   position: absolute;
-   left: ${(props) => props.$left}px;
-   bottom: calc(100% + ${COMPOSER_FLOATING_CONTROL_INSET_PX}px);
-   top: auto;
-   width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-   height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-   pointer-events: none;
- `
+  position: absolute;
+  left: ${(props) => props.$left}px;
+  bottom: ${COMPOSER_OVERLAY_BOTTOM_GAP_PX + 3}px;
+  top: auto;
+  width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  pointer-events: none;
+`
 
 const TriggerWrapper = styled.div<{ $left: number; $top: number }>`
   position: fixed;

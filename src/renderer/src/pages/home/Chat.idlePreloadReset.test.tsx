@@ -191,6 +191,10 @@ vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))
 
+vi.mock('./Messages/TopicSegmentDrawer', () => ({
+  default: () => null
+}))
+
 vi.mock('./Messages/Messages', () => {
   const React = require('react') as typeof ReactModule
   const Stub = ({ ref: _ref, ...props }) => {

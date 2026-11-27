@@ -45,6 +45,7 @@ import {
 import ConversationNavigation from './Messages/ConversationNavigation'
 import { NAV_GUTTER_WIDTH_PX } from './Messages/MessageOutline'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
+import TopicSegmentDrawer from './Messages/TopicSegmentDrawer'
 
 const logger = loggerService.withContext('Chat')
 
@@ -489,6 +490,7 @@ const Chat: FC<Props> = (props) => {
                   onClose={disableContentSearch}
                 />
               )}
+              <TopicSegmentDrawer topicId={props.activeTopic.id} />
               <ComposerPlane ref={composerRef}>
                 <Inputbar
                   assistant={assistant}
@@ -570,6 +572,7 @@ const ComposerPlane = styled.div`
   z-index: 2;
   display: flex;
   flex-direction: column;
+  pointer-events: none;
 `
 
 /**

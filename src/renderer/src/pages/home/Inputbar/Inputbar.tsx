@@ -2,7 +2,7 @@ import { loggerService } from '@logger'
 import { isAutoEnableImageGenerationModel, isGenerateImageModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
-import { useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTextareaResize } from '@renderer/hooks/useTextareaResize'
@@ -30,10 +30,9 @@ import type { Message, MessageInputBaseParams } from '@renderer/types/newMessage
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { FC } from 'react'
-import React, { useCallback, useEffect, useMemo, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
 import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
@@ -143,6 +142,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
   const loading = useTopicLoading(topic)
+  const loadedTopicMessages = useLoadedTopicMessages(topic.id)
+  const [isExpanded, setIsExpanded] = useState(false)
+  const settledTopicIdRef = useRef<string | null>(null)
 
   // --- Token estimation (Inputbar-owned) ---
 
@@ -367,10 +369,20 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   }, [addNewTopic])
 
   useEffect(() => {
-    if (!document.querySelector('.topview-fullscreen-container')) {
-      focusTextarea()
+    if (settledTopicIdRef.current === topic.id) return
+    if (loadedTopicMessages === undefined) {
+      // Wait for SQLite load before settling expanded state so non-empty
+      // topics do not flash expanded on switch.
+      setIsExpanded(false)
+      return
     }
-  }, [topic.id, assistant.knowledge_bases, focusTextarea])
+    settledTopicIdRef.current = topic.id
+    const isEmptyTopic = loadedTopicMessages.length === 0
+    setIsExpanded(isEmptyTopic)
+    if (isEmptyTopic && !document.querySelector('.topview-fullscreen-container')) {
+      requestAnimationFrame(() => focusTextarea())
+    }
+  }, [topic.id, loadedTopicMessages, focusTextarea])
 
   // TODO: Just use assistant.knowledge_bases as selectedKnowledgeBases. context state is overdesigned.
   useEffect(() => {
@@ -448,7 +460,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({
       rightToolbar={rightToolbar}
       modelRow={modelRow}
       topContent={topContent}
-      topRightOverlay={<TopicSegmentDrawer topicId={topic.id} />}
+      expanded={isExpanded}
+      onExpandedChange={setIsExpanded}
     />
   )
 }
