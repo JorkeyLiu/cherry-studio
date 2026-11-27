@@ -307,7 +307,6 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
       saveUpdatesToDB: async () => {},
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
-      resendAttemptId: execA.attempt,
       barrier: execA.barrier,
       executionState: new AssistantExecutionState(
         { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
@@ -333,7 +332,6 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
       saveUpdatesToDB: async () => {},
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
-      resendAttemptId: execB.attempt,
       barrier: execB.barrier,
       executionState: new AssistantExecutionState(
         { id: 'assistant-1', topicId: 'topic-1', role: 'assistant', blocks: [] } as never,
@@ -524,7 +522,6 @@ describe('F2: success-final awaits quiescence', () => {
       saveUpdatesToDB: (mid, tid, mu, blocks) => saveUpdatesToDB(mid, tid, mu, blocks, attempt),
       assistantMsgId: 'assistant-1',
       topicId: 'topic-1',
-      resendAttemptId: attempt,
       barrier,
       executionState: new AssistantExecutionState(assistantMsg, []),
       throttledBlockUpdate: vi.fn(),

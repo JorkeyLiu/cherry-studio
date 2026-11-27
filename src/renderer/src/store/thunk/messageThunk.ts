@@ -851,7 +851,6 @@ const fetchAndProcessAssistantResponseImpl = async (
       saveUpdatesToDB: saveUpdatesToDBForExec,
       assistantMsgId,
       topicId,
-      resendAttemptId,
       barrier: writeBarrier,
       executionState,
       throttledBlockUpdate: (id: string, blockUpdate: any) => writeScheduler.schedule(id, blockUpdate),

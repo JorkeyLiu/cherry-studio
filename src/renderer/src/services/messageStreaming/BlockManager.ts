@@ -42,17 +42,10 @@ interface BlockManagerDependencies {
     messageId: string,
     topicId: string,
     messageUpdates: Partial<any>,
-    blocksToUpdate: MessageBlock[],
-    resendAttemptId?: string
+    blocksToUpdate: MessageBlock[]
   ) => Promise<void>
   assistantMsgId: string
   topicId: string
-  /**
-   * Immutable execution attempt for resend/regenerate (SYNC-DATA-055, F1):
-   * every DB write produced by this execution carries exactly this id.
-   * Absent for ordinary executions (carrier omitted).
-   */
-  resendAttemptId?: string
   /** Execution write barrier for F2 finalization quiescence (optional). */
   barrier?: WriteBarrier
   /**
@@ -288,13 +281,9 @@ export class BlockManager {
 
     // DB streaming writes use the local execution fact, never the Redux entity.
     this.touchedThrottledBlocks.add(newBlock.id)
-    const save = this.deps.saveUpdatesToDB(
-      this.deps.assistantMsgId,
-      this.deps.topicId,
-      { blocks: orderedIds },
-      [localBlock],
-      this.deps.resendAttemptId
-    )
+    const save = this.deps.saveUpdatesToDB(this.deps.assistantMsgId, this.deps.topicId, { blocks: orderedIds }, [
+      localBlock
+    ])
     if (this.deps.barrier && isThenable(save)) {
       await this.deps.barrier.track(save)
     } else {
