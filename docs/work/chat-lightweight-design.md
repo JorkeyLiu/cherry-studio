@@ -711,3 +711,9 @@
  - 保留已提交 2507c3e3e9 / 9d071d239d 不变。
  - 下次方向：主成本在 React layout-effect，须新的可证假设；别重启工具栏 helper 链。
  - 边界：本文档追加不改任何代码/测试；除本节记录的提交外未做任何 git 操作（不 push/amend/rebase/reset）。
+ - final closure（最终验证结论，本文档追加时传入，未重跑，不新建指标文件）：生产/renderer unit/config 输入与 `2507c3e3e9` 完全相同；最终 fresh `pnpm build` exit 0（含 5 类型通道）。
+ - 最终 6 spec 单 run exit 0（8.4m）：ordinary-chat 2 / streaming-responsiveness 2 / true-branch 8 / cross-topic-reference 4 / context-window-contract 2 / page-viewport-resume 2 = 20/20。
+ - 完整 renderer 结果复用 2507（本文档追加时未重跑全量 renderer）；3 个 `Messages.chromeCoCommitWiring` 源文本基线失败已在 clean `1b3ae826be` 同复现，不称全绿。
+ - toolbar 实验无生产/测试 helper 残留；无整体 performance 结论。
+ - pass 日志已清理，failure experiment artifacts 保留在 scratch（不入仓，不新建指标文件）。
+ - 边界：本追加只改本文档 §68；不改任何代码/测试；除本次 conventional signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
