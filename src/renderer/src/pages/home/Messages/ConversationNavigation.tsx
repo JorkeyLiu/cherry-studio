@@ -341,6 +341,30 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({
       unsubscribe()
     }
   }, [topicId, scheduleDebouncedRefetch])
+  // 3b) cross-topic reference invalidation: Main broadcasts
+  // `{ sourceTopicId, targetTopicIds }` when a source topic this target
+  // references changes. Only a target match for THIS topicId schedules the
+  // same coalesced refetch — unrelated targets never refresh. Rename only
+  // moves the divider live title, but the conservative refetch is harmless
+  // there too, so no reason-protocol split is added. The shared debounce
+  // plus the fetch guards keep a stale event from writing under a newer
+  // route (switch clears the timer; completions re-check topic/branch/gen).
+  // A missing bridge (tests without preload) subscribes to nothing.
+  useEffect(() => {
+    if (!topicId) return
+    const subscribe = window.api?.chatDb?.onHistoryReferenceInvalidated
+    if (typeof subscribe !== 'function') return
+    const unsubscribe = subscribe((event) => {
+      try {
+        if (!event || !Array.isArray(event.targetTopicIds)) return
+        if (!event.targetTopicIds.includes(topicId)) return
+        scheduleDebouncedRefetch()
+      } catch {
+        // fail-closed: the next activation pulls.
+      }
+    })
+    return unsubscribe
+  }, [topicId, scheduleDebouncedRefetch])
 
   // 4) fold/context-participation mutation: the semantic token changes only
   // when THIS route's generation (or the global epoch) advances — the same

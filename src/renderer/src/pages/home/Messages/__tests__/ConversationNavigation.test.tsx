@@ -3,7 +3,7 @@ import type { TopicBranchWire } from '@renderer/services/db/types'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * The navigator body: the container's only element child is the hover halo, and
@@ -1698,5 +1698,208 @@ describe('ConversationNavigation narrowed projection equivalence', () => {
     expect(narrow.facts.contextDividers).toEqual(full.facts.contextDividers)
     expect(narrow.facts.forks).toEqual(['u10'])
     expect(narrow.facts.forks).toEqual(full.facts.forks)
+  })
+})
+
+describe('ConversationNavigation history reference invalidation', () => {
+  type InvalidationEvent = { sourceTopicId: string; targetTopicIds: string[] }
+  type InvalidationHandler = (event: InvalidationEvent) => void
+  let handlers: InvalidationHandler[]
+  let subscribeCount: number
+  let unsubscribeCount: number
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.setActiveBranchId(null)
+    mocks.setUpdatedAt('t0')
+    branchTree.reset()
+    handlers = []
+    subscribeCount = 0
+    unsubscribeCount = 0
+    ;(window as unknown as { api?: unknown }).api = {
+      chatDb: {
+        onHistoryReferenceInvalidated: (cb: InvalidationHandler) => {
+          subscribeCount += 1
+          handlers.push(cb)
+          return () => {
+            unsubscribeCount += 1
+            handlers = handlers.filter((h) => h !== cb)
+          }
+        }
+      }
+    }
+  })
+
+  afterEach(() => {
+    delete (window as unknown as { api?: unknown }).api
+  })
+
+  const invalidationSegment = (memberIds: string[]): RouteScopedSegment =>
+    ({
+      id: 's1',
+      name: 's1',
+      sortOrder: 0,
+      memberIds,
+      messageCount: memberIds.length,
+      firstMessageId: memberIds[0] ?? null,
+      headerMessageId: null,
+      headerInRoute: false,
+      headerOwnedByRoute: false,
+      presentationStartMessageId: memberIds[0] ?? null
+    }) as RouteScopedSegment
+
+  it('refetches the active target after the debounce and shows the new row while segments stay intact', async () => {
+    const blocks1 = [textBlock('b1', 'u1', 'First question about rivers')]
+    const blocks2 = [textBlock('b1', 'u1', 'First question about rivers'), textBlock('b2', 'u2', 'Second question')]
+    let calls = 0
+    mocks.loadWholeTopicSnapshot.mockImplementation(async () => {
+      calls += 1
+      return (
+        calls === 1
+          ? {
+              messages: [userMsg('u1', ['b1'])],
+              blocks: blocks1,
+              blocksById: new Map(blocks1.map((b) => [(b as { id: string }).id, b]))
+            }
+          : {
+              messages: [userMsg('u1', ['b1']), userMsg('u2', ['b2'])],
+              blocks: blocks2,
+              blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
+            }
+      ) as never
+    })
+
+    render(
+      <ConversationNavigation
+        topicId="topic-1"
+        onNavigate={mocks.onNavigate}
+        segments={[invalidationSegment(['u1'])]}
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+    // One subscription per mount — StrictMode-style double subscribe would
+    // show up here.
+    expect(subscribeCount).toBe(1)
+    expect(screen.queryAllByTestId('conversation-nav-group-overlay')).toHaveLength(1)
+
+    await act(async () => {
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: ['topic-1'] })
+    })
+    // Debounced (250ms) refetch carries the new row; the segment projection
+    // prop never changed, so its overlay node link is untouched.
+    expect(await screen.findByTestId('conversation-nav-item-u2', {}, { timeout: 5000 })).toBeTruthy()
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenLastCalledWith('topic-1', null)
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+    expect(screen.queryAllByTestId('conversation-nav-group-overlay')).toHaveLength(1)
+  })
+
+  it('ignores events for unrelated targets and malformed payloads', async () => {
+    const blocks = [textBlock('b1', 'u1', 'First question about rivers')]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('u1', ['b1'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: ['other-topic'] })
+    })
+    await act(async () => {
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: [] })
+    })
+    await act(async () => {
+      ;(handlers[0] as unknown as (e: unknown) => void)({ sourceTopicId: 'src-1' })
+    })
+    await new Promise((r) => setTimeout(r, 500))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('conversation-nav-item-u1')).toBeTruthy()
+  })
+
+  it('coalesces rapid consecutive events into a single refetch', async () => {
+    const blocks = [textBlock('b1', 'u1', 'First question about rivers')]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('u1', ['b1'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: ['topic-1'] })
+      handlers[0]({ sourceTopicId: 'src-2', targetTopicIds: ['topic-1'] })
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: ['topic-1'] })
+    })
+    await waitFor(() => expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2), { timeout: 5000 })
+    // Past a second debounce window no further refetch follows.
+    await new Promise((r) => setTimeout(r, 500))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it('never lets a pre-switch event write the new route snapshot', async () => {
+    const blocks1 = [textBlock('b1', 'u1', 'Old topic question')]
+    const blocks2 = [textBlock('b9', 'u9', 'New topic question')]
+    mocks.loadWholeTopicSnapshot.mockImplementation(async (topicId: string) => {
+      if (topicId === 'topic-1') {
+        return {
+          messages: [userMsg('u1', ['b1'])],
+          blocks: blocks1,
+          blocksById: new Map(blocks1.map((b) => [(b as { id: string }).id, b]))
+        } as never
+      }
+      return {
+        messages: [{ ...(userMsg('u9', ['b9']) as unknown as Record<string, unknown>), topicId: 'topic-2' }] as never[],
+        blocks: blocks2,
+        blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
+      } as never
+    })
+
+    const { rerender } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+
+    // Event for the old route arrives, then the route switches before the
+    // 250ms debounce fires: the switch clears the timer, so no refetch for
+    // the old topic follows — only the new route's own load.
+    await act(async () => {
+      handlers[0]({ sourceTopicId: 'src-1', targetTopicIds: ['topic-1'] })
+    })
+    rerender(<ConversationNavigation topicId="topic-2" onNavigate={mocks.onNavigate} />)
+    expect(await screen.findByTestId('conversation-nav-item-u9')).toBeTruthy()
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenLastCalledWith('topic-2', null)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId('conversation-nav-item-u1')).toBeNull()
+  })
+
+  it('unsubscribes on unmount so late events never setState', async () => {
+    const blocks = [textBlock('b1', 'u1', 'First question about rivers')]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('u1', ['b1'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    const { unmount } = render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(subscribeCount).toBe(1)
+    const stale = handlers[0]
+    unmount()
+    expect(unsubscribeCount).toBe(1)
+    expect(handlers).toHaveLength(0)
+    // A late event on the stale closure is a no-op: no fetch, no setState.
+    await act(async () => {
+      stale({ sourceTopicId: 'src-1', targetTopicIds: ['topic-1'] })
+    })
+    await new Promise((r) => setTimeout(r, 500))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
   })
 })
