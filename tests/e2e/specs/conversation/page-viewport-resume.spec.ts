@@ -35,7 +35,8 @@
  * established public test surface): #messages, #home-page,
  * [data-message-id], data-viewport-phase, window.keyv scroll keys, stable
  * sidebar nav testids, ordinary mouse wheel, store.subscribe selection of the
- * canonical loadingByTopic flag, established newMessages/messageBlocks
+ * canonical pendingWindowReadsByTopic window-read busy flag (generation
+ * loadingByTopic kept as diagnostic-only), established newMessages/messageBlocks
  * projection reducers, read-only Main fetchMessagesWindow authority proof.
  * Tolerances follow the repo
  * (12px anchor/offset, 100px bottom); no pixel-exact time/SLA asserts, no
@@ -89,22 +90,26 @@ interface ResumeFrame {
 // internal composed dispatch closure (middlewareAPI.dispatch forwards to the
 // internal `dispatch` variable), NOT to the mutable `store.dispatch`
 // property. Overwriting `window.store.dispatch` therefore observes only
-// external plain-action calls and MISSES thunk-internal
-// setTopicLoading/rebase dispatches, so a zero wrapped-dispatch count never
-// proved "no read" and a nonzero count could false-fail even when the fetch
-// ran. This probe uses store.subscribe (fires synchronously per committed
-// dispatch, including thunk-inner ones) selecting the canonical
-// newMessages.loadingByTopic[topicId] flag. Source contract:
-// loadRouteMessagesThunk (messageThunk.ts) always dispatches
-// newMessages/setTopicLoading {topicId, loading:true} BEFORE the window read
-// and loading:false in finally. Meaning: no false->true edge = no public
-// route-thunk request started for this topic during the window; >=1 edge =
-// request invoked. Publication (rebase/merge/messageIds join,
-// generation/branch identity) is a SEPARATE state fact recorded here only as
-// diagnostic, never as the request gate; kind (around/latest) lives only in
-// the fetchMessagesWindow IPC request and is not named here.
+// external plain-action calls and MISSES thunk-internal dispatches, so a zero
+// wrapped-dispatch count never proved "no read" and a nonzero count could
+// false-fail even when the fetch ran. This probe uses store.subscribe (fires
+// synchronously per committed dispatch, including thunk-inner ones) selecting
+// the canonical pendingWindowReadsByTopic[topicId] window-read busy flag.
+// Source contract: loadRouteMessagesThunk (messageThunk.ts) registers the
+// window read in pendingWindowReadsByTopic BEFORE the window read and clears
+// it in finally, while loadingByTopic stays generation-only
+// (selectIsTopicGenerating; window reads never set it). Meaning: no
+// empty->nonempty window-read edge = no fresh route-thunk window read started
+// for this topic during the window; >=1 edge = fresh route-thunk window
+// request invoked. Generation loading (false->true) is recorded here only as
+// diagnostic, never as the request gate. Publication (rebase/merge/
+// messageIds join, generation/branch identity) is a SEPARATE state fact
+// recorded here only as diagnostic, never as the request gate; kind
+// (around/latest) lives only in the fetchMessagesWindow IPC request and is
+// not named here.
 interface RouteLoadProbeSeed {
   startingLoading: boolean
+  startingWindowBusy: boolean
   startingIdsJoin: string
   startingGen: number
   startingRoute: string | null
@@ -113,6 +118,8 @@ interface RouteLoadProbeSeed {
 interface RouteLoadProbeSnapshot extends RouteLoadProbeSeed {
   loadingTransitions: number
   trueSightings: number
+  windowReadTransitions: number
+  windowBusySightings: number
   idsCommits: number
   details: string[]
 }
@@ -128,20 +135,28 @@ async function installRouteLoadProbe(page: Page, key: string, topicId: string): 
       if (!store || typeof store.subscribe !== 'function' || typeof store.getState !== 'function') {
         throw new Error('store.subscribe unavailable')
       }
-      const sel = (s: unknown): { loading: boolean; join: string; gen: number; route: string | null } => {
+      const sel = (
+        s: unknown
+      ): { loading: boolean; windowBusy: boolean; join: string; gen: number; route: string | null } => {
         const st = s as {
-          messages?: { loadingByTopic?: Record<string, unknown>; messageIdsByTopic?: Record<string, unknown> }
+          messages?: {
+            loadingByTopic?: Record<string, unknown>
+            pendingWindowReadsByTopic?: Record<string, unknown>
+            messageIdsByTopic?: Record<string, unknown>
+          }
           topicBranch?: {
             routeGenerationByTopic?: Record<string, unknown>
             activeBranchIdByTopic?: Record<string, unknown>
           }
         }
         const rawLoading = st?.messages?.loadingByTopic?.[tid]
+        const rawPending = st?.messages?.pendingWindowReadsByTopic?.[tid]
         const ids = st?.messages?.messageIdsByTopic?.[tid]
         const genRaw = st?.topicBranch?.routeGenerationByTopic?.[tid]
         const routeRaw = st?.topicBranch?.activeBranchIdByTopic?.[tid]
         return {
           loading: rawLoading === true,
+          windowBusy: Array.isArray(rawPending) && (rawPending as unknown[]).length > 0,
           join: Array.isArray(ids) ? (ids as string[]).join(',') : '',
           gen: typeof genRaw === 'number' ? genRaw : 0,
           route: typeof routeRaw === 'string' ? routeRaw : routeRaw === null ? null : null
@@ -150,13 +165,17 @@ async function installRouteLoadProbe(page: Page, key: string, topicId: string): 
       const init = sel(store.getState())
       const rec = {
         startingLoading: init.loading,
+        startingWindowBusy: init.windowBusy,
         startingIdsJoin: init.join,
         startingGen: init.gen,
         startingRoute: init.route,
         prevLoading: init.loading,
+        prevWindowBusy: init.windowBusy,
         prevJoin: init.join,
         loadingTransitions: 0,
         trueSightings: 0,
+        windowReadTransitions: 0,
+        windowBusySightings: 0,
         idsCommits: 0,
         details: [] as string[],
         unsub: null as null | (() => void)
@@ -165,11 +184,17 @@ async function installRouteLoadProbe(page: Page, key: string, topicId: string): 
         try {
           const cur = sel(store.getState())
           if (cur.loading) rec.trueSightings += 1
+          if (cur.windowBusy) rec.windowBusySightings += 1
           if (!rec.prevLoading && cur.loading) {
             rec.loadingTransitions += 1
-            if (rec.details.length < 12) rec.details.push('loading:false->true')
+            if (rec.details.length < 12) rec.details.push('loading:false->true(diag)')
           }
           rec.prevLoading = cur.loading
+          if (!rec.prevWindowBusy && cur.windowBusy) {
+            rec.windowReadTransitions += 1
+            if (rec.details.length < 12) rec.details.push('windowRead:empty->nonempty')
+          }
+          rec.prevWindowBusy = cur.windowBusy
           if (cur.join !== rec.prevJoin) {
             rec.idsCommits += 1
             if (rec.details.length < 12)
@@ -185,6 +210,7 @@ async function installRouteLoadProbe(page: Page, key: string, topicId: string): 
       w[k] = rec
       return {
         startingLoading: rec.startingLoading,
+        startingWindowBusy: rec.startingWindowBusy,
         startingIdsJoin: rec.startingIdsJoin,
         startingGen: rec.startingGen,
         startingRoute: rec.startingRoute
@@ -201,11 +227,14 @@ async function readRouteLoadProbe(page: Page, key: string): Promise<RouteLoadPro
         string,
         | {
             startingLoading: boolean
+            startingWindowBusy: boolean
             startingIdsJoin: string
             startingGen: number
             startingRoute: string | null
             loadingTransitions: number
             trueSightings: number
+            windowReadTransitions: number
+            windowBusySightings: number
             idsCommits: number
             details: string[]
           }
@@ -215,21 +244,27 @@ async function readRouteLoadProbe(page: Page, key: string): Promise<RouteLoadPro
     if (!rec)
       return {
         startingLoading: false,
+        startingWindowBusy: false,
         startingIdsJoin: '',
         startingGen: 0,
         startingRoute: null,
         loadingTransitions: -1,
         trueSightings: -1,
+        windowReadTransitions: -1,
+        windowBusySightings: -1,
         idsCommits: -1,
         details: []
       }
     return {
       startingLoading: rec.startingLoading,
+      startingWindowBusy: rec.startingWindowBusy,
       startingIdsJoin: rec.startingIdsJoin,
       startingGen: rec.startingGen,
       startingRoute: rec.startingRoute,
       loadingTransitions: rec.loadingTransitions,
       trueSightings: rec.trueSightings,
+      windowReadTransitions: rec.windowReadTransitions,
+      windowBusySightings: rec.windowBusySightings,
       idsCommits: rec.idsCommits,
       details: [...rec.details]
     }
@@ -245,11 +280,14 @@ async function removeRouteLoadProbe(
     const rec = w[k] as ({ unsub?: () => void } & Record<string, unknown>) | undefined
     let snap: RouteLoadProbeSnapshot = {
       startingLoading: false,
+      startingWindowBusy: false,
       startingIdsJoin: '',
       startingGen: 0,
       startingRoute: null,
       loadingTransitions: -1,
       trueSightings: -1,
+      windowReadTransitions: -1,
+      windowBusySightings: -1,
       idsCommits: -1,
       details: []
     }
@@ -258,11 +296,14 @@ async function removeRouteLoadProbe(
       if (r && typeof r.loadingTransitions === 'number') {
         snap = {
           startingLoading: r.startingLoading,
+          startingWindowBusy: r.startingWindowBusy,
           startingIdsJoin: r.startingIdsJoin,
           startingGen: r.startingGen,
           startingRoute: r.startingRoute,
           loadingTransitions: r.loadingTransitions,
           trueSightings: r.trueSightings,
+          windowReadTransitions: r.windowReadTransitions,
+          windowBusySightings: r.windowBusySightings,
           idsCommits: r.idsCommits,
           details: [...r.details]
         }
@@ -1031,16 +1072,19 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
       // Sampler + subscribe load probe start BEFORE the return while the dialog
       // leg is open, so setup wheel/seed dispatches are excluded by construction.
-      // The probe counts ONLY canonical loadingByTopic false->true edges for
-      // this topic (subscribe fires synchronously per dispatch, including
-      // thunk-inner ones, even when the read resolves immediately). For an
-      // unchanged same-route resume, zero request edges proves in-place with
-      // no route-thunk request effect; kind (around/latest) is IPC-only and
-      // not named here. assertResumeContract waits for visible+stable WHILE
+      // The probe gates ONLY on canonical pendingWindowReadsByTopic
+      // empty->nonempty edges for this topic (subscribe fires synchronously per
+      // dispatch, including thunk-inner ones, even when the read resolves
+      // immediately); generation loadingByTopic false->true is diagnostic-only
+      // (generation-only flag; window reads never set it). For an unchanged
+      // same-route resume, zero window-read edges proves in-place with no fresh
+      // window read; kind (around/latest) is IPC-only and not named here.
+      // assertResumeContract waits for visible+stable WHILE
       // the sampler continues and stops only afterwards (corrected lifetime).
       await startResumeProbe()
       const seed = await installRouteLoadProbe(page, RESUME_PROBE_KEY, topicId)
-      expect(seed.startingLoading, `${label}: seed loading must be false before return`).toBe(false)
+      expect(seed.startingLoading, `${label}: seed generation loading must be false before return`).toBe(false)
+      expect(seed.startingWindowBusy, `${label}: seed window-read busy must be false before return`).toBe(false)
       try {
         await sidebarPage.goToHome()
         await waitForChatReady(page)
@@ -1049,26 +1093,26 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         const wc = await readRouteLoadProbe(page, RESUME_PROBE_KEY)
         test.info().annotations.push({
           type: `resume-${label}-request`,
-          description: `route-thunk request loadingTransitions=${wc.loadingTransitions} trueSightings=${wc.trueSightings} idsCommits(diag)=${wc.idsCommits} startLoading=${seed.startingLoading} startGen=${seed.startingGen} startRoute=${seed.startingRoute ?? 'main'} details=[${wc.details.join('; ')}] (0 transitions = in-place, no route-thunk request)`
+          description: `fresh window read windowReadTransitions=${wc.windowReadTransitions} windowBusySightings=${wc.windowBusySightings} loadingTransitions(diag)=${wc.loadingTransitions} genSightings(diag)=${wc.trueSightings} idsCommits(diag)=${wc.idsCommits} startWindowBusy=${seed.startingWindowBusy} startLoading(diag)=${seed.startingLoading} startGen=${seed.startingGen} startRoute=${seed.startingRoute ?? 'main'} details=[${wc.details.join('; ')}] (0 window-read transitions = in-place, no fresh window read)`
         })
-        if (wc.loadingTransitions !== 0) {
+        if (wc.windowReadTransitions !== 0) {
           const peeked = await peekResumeProbe().catch(() => [] as ResumeFrame[])
           const head = peeked.slice(0, 5).map(describeResumeFrame).join(' | ')
           const tail = peeked.slice(-8).map(describeResumeFrame).join(' | ')
           try {
             // eslint-disable-next-line no-console
             console.log(
-              `[E2E] resume-${label} request-nonzero transitions=${wc.loadingTransitions} trueSightings=${wc.trueSightings} idsCommits=${wc.idsCommits} startLoading=${seed.startingLoading} startGen=${seed.startingGen} details=[${wc.details.join('; ')}] frames=${peeked.length} head=[${head}] tail=[${tail}] expected=${expected.id}@${expected.offset}`
+              `[E2E] resume-${label} window-read-nonzero transitions=${wc.windowReadTransitions} windowBusySightings=${wc.windowBusySightings} loadingTransitions(diag)=${wc.loadingTransitions} idsCommits=${wc.idsCommits} startWindowBusy=${seed.startingWindowBusy} startLoading(diag)=${seed.startingLoading} startGen=${seed.startingGen} details=[${wc.details.join('; ')}] frames=${peeked.length} head=[${head}] tail=[${tail}] expected=${expected.id}@${expected.offset}`
             )
           } catch {}
           test.info().annotations.push({
             type: `resume-${label}-request-frames`,
-            description: `request-nonzero startLoading=${seed.startingLoading} transitions=${wc.loadingTransitions} frames=${peeked.length} head=[${head}] tail=[${tail}]`
+            description: `window-read-nonzero startWindowBusy=${seed.startingWindowBusy} transitions=${wc.windowReadTransitions} frames=${peeked.length} head=[${head}] tail=[${tail}]`
           })
         }
         expect(
-          wc.loadingTransitions,
-          `${label}: unchanged same-route resume must start no route-thunk request (loading false->true = 0)`
+          wc.windowReadTransitions,
+          `${label}: unchanged same-route resume must start no fresh window read (pendingWindowReads empty->nonempty = 0; generation loading is diagnostic-only)`
         ).toBe(0)
       } finally {
         // Completion path always restores both seams even on stabilize timeout.
@@ -1185,7 +1229,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       ).toBeGreaterThan(1)
       await startResumeProbe()
       const mismatchSeed = await installRouteLoadProbe(page, RESUME_PROBE_KEY, topicId)
-      expect(mismatchSeed.startingLoading, 'mismatch: seed loading must be false before return').toBe(false)
+      expect(mismatchSeed.startingLoading, 'mismatch: seed generation loading must be false before return').toBe(false)
+      expect(mismatchSeed.startingWindowBusy, 'mismatch: seed window-read busy must be false before return').toBe(false)
       try {
         await sidebarPage.goToHome()
         await waitForChatReady(page)
@@ -1194,11 +1239,11 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         const mismatchWc = await readRouteLoadProbe(page, RESUME_PROBE_KEY)
         test.info().annotations.push({
           type: 'resume-mismatch-request',
-          description: `route-thunk request loadingTransitions=${mismatchWc.loadingTransitions} trueSightings=${mismatchWc.trueSightings} idsCommits(diag)=${mismatchWc.idsCommits} startLoading=${mismatchSeed.startingLoading} details=[${mismatchWc.details.join('; ')}] (0 transitions = in-place, pre-paint corrected)`
+          description: `fresh window read windowReadTransitions=${mismatchWc.windowReadTransitions} windowBusySightings=${mismatchWc.windowBusySightings} loadingTransitions(diag)=${mismatchWc.loadingTransitions} idsCommits(diag)=${mismatchWc.idsCommits} startWindowBusy=${mismatchSeed.startingWindowBusy} startLoading(diag)=${mismatchSeed.startingLoading} details=[${mismatchWc.details.join('; ')}] (0 window-read transitions = in-place, pre-paint corrected)`
         })
         expect(
-          mismatchWc.loadingTransitions,
-          'mismatch: perturbed same-route resume must start no route-thunk request'
+          mismatchWc.windowReadTransitions,
+          'mismatch: perturbed same-route resume must start no fresh window read (pendingWindowReads empty->nonempty = 0; generation loading is diagnostic-only)'
         ).toBe(0)
       } finally {
         await stopResumeProbe().catch(() => ({ frames: [] }))
@@ -1248,7 +1293,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     await expect(page.locator('#home-page')).toBeVisible({ timeout: 10000 })
     await startResumeProbe()
     const rapidSeed = await installRouteLoadProbe(page, RESUME_PROBE_KEY, topicId)
-    expect(rapidSeed.startingLoading, 'rapid: seed loading must be false before return').toBe(false)
+    expect(rapidSeed.startingLoading, 'rapid: seed generation loading must be false before return').toBe(false)
+    expect(rapidSeed.startingWindowBusy, 'rapid: seed window-read busy must be false before return').toBe(false)
     try {
       await sidebarPage.goToHome()
       await waitForChatReady(page)
@@ -1257,18 +1303,21 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       const rapidWc = await readRouteLoadProbe(page, RESUME_PROBE_KEY)
       test.info().annotations.push({
         type: 'resume-rapid-request',
-        description: `route-thunk request loadingTransitions=${rapidWc.loadingTransitions} trueSightings=${rapidWc.trueSightings} idsCommits(diag)=${rapidWc.idsCommits} startLoading=${rapidSeed.startingLoading} details=[${rapidWc.details.join('; ')}] (0 transitions = in-place)`
+        description: `fresh window read windowReadTransitions=${rapidWc.windowReadTransitions} windowBusySightings=${rapidWc.windowBusySightings} loadingTransitions(diag)=${rapidWc.loadingTransitions} idsCommits(diag)=${rapidWc.idsCommits} startWindowBusy=${rapidSeed.startingWindowBusy} startLoading(diag)=${rapidSeed.startingLoading} details=[${rapidWc.details.join('; ')}] (0 window-read transitions = in-place)`
       })
-      if (rapidWc.loadingTransitions !== 0) {
+      if (rapidWc.windowReadTransitions !== 0) {
         const peeked = await peekResumeProbe().catch(() => [] as ResumeFrame[])
         try {
           // eslint-disable-next-line no-console
           console.log(
-            `[E2E] resume-rapid request-nonzero transitions=${rapidWc.loadingTransitions} trueSightings=${rapidWc.trueSightings} startLoading=${rapidSeed.startingLoading} details=[${rapidWc.details.join('; ')}] frames=${peeked.length} head=[${peeked.slice(0, 5).map(describeResumeFrame).join(' | ')}] tail=[${peeked.slice(-8).map(describeResumeFrame).join(' | ')}]`
+            `[E2E] resume-rapid window-read-nonzero transitions=${rapidWc.windowReadTransitions} windowBusySightings=${rapidWc.windowBusySightings} startWindowBusy=${rapidSeed.startingWindowBusy} startLoading(diag)=${rapidSeed.startingLoading} details=[${rapidWc.details.join('; ')}] frames=${peeked.length} head=[${peeked.slice(0, 5).map(describeResumeFrame).join(' | ')}] tail=[${peeked.slice(-8).map(describeResumeFrame).join(' | ')}]`
           )
         } catch {}
       }
-      expect(rapidWc.loadingTransitions, 'rapid: unchanged same-route resume must start no route-thunk request').toBe(0)
+      expect(
+        rapidWc.windowReadTransitions,
+        'rapid: unchanged same-route resume must start no fresh window read (pendingWindowReads empty->nonempty = 0; generation loading is diagnostic-only)'
+      ).toBe(0)
     } finally {
       await stopResumeProbe().catch(() => ({ frames: [] }))
       const rapidRemoved = await removeRouteLoadProbe(page, RESUME_PROBE_KEY)
@@ -1288,7 +1337,7 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'PAGE VIEWPORT FALLBACK: Main deleteMessage plus validated renderer removeMessages/removeManyBlocks removes the settled live anchor from authority and loaded/DOM while the retained snapshot stays stale on the victim; the disposable loaded projection is then cleared while Chat is hidden (seed rows remain SQLite) so no valid in-place window survives; the return must take the fresh-window fallback branch (>0 canonical route-thunk request loading false->true) and land on the explicit-bottom default with a legal surviving anchor/snapshot (every visible frame distance-from-bottom within BOTTOM_TOL, no inherited scroll) with the victim absent and no stale overlay.'
+        'PAGE VIEWPORT FALLBACK: Main deleteMessage plus validated renderer removeMessages/removeManyBlocks removes the settled live anchor from authority and loaded/DOM while the retained snapshot stays stale on the victim; the disposable loaded projection is then cleared while Chat is hidden (seed rows remain SQLite) so no valid in-place window survives; the return must take the fresh-window fallback branch (>0 fresh route-thunk window read: pendingWindowReadsByTopic empty->nonempty; generation loading is diagnostic-only) and land on the explicit-bottom default with a legal surviving anchor/snapshot (every visible frame distance-from-bottom within BOTTOM_TOL, no inherited scroll) with the victim absent and no stale overlay.'
     })
     const page: Page = mainWindow
     await waitForAppReady(page)
@@ -1819,10 +1868,11 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     // Sampler + subscribe load probe start BEFORE the return while Chat is
     // hidden (same corrected lifetime as test 1: stabilize WHILE sampling,
     // stop only afterwards). Probe installed AFTER the seam setup, so setup
-    // dispatches are excluded; it counts ONLY canonical loadingByTopic
-    // false->true edges for this topic (synchronous subscribe, thunk-inner
-    // safe). Probe records the full anchor/phase/visibility shape so every
-    // visible frame can be proven legal (never the victim).
+    // dispatches are excluded; it gates ONLY on canonical
+    // pendingWindowReadsByTopic empty->nonempty edges for this topic
+    // (synchronous subscribe, thunk-inner safe; generation loadingByTopic is
+    // diagnostic-only). Probe records the full anchor/phase/visibility shape
+    // so every visible frame can be proven legal (never the victim).
     interface FbFrame {
       t: number
       anchorId: string
@@ -1954,7 +2004,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       }
     }, FB_PROBE)
     let fbSeed = await installRouteLoadProbe(page, FB_LOAD_KEY, topicId)
-    expect(fbSeed.startingLoading, 'fallback: seed loading must be false before return').toBe(false)
+    expect(fbSeed.startingLoading, 'fallback: seed generation loading must be false before return').toBe(false)
+    expect(fbSeed.startingWindowBusy, 'fallback: seed window-read busy must be false before return').toBe(false)
     if (fbSeed.startingIdsJoin !== '') {
       // Legitimate hidden reconcile refilled the disposable window after the
       // seam clear: restore the test lazy-load missing-window state with the
@@ -1984,6 +2035,9 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       await removeRouteLoadProbe(page, FB_LOAD_KEY)
       fbSeed = await installRouteLoadProbe(page, FB_LOAD_KEY, topicId)
       expect(fbSeed.startingIdsJoin, 'missing-window state must hold at return after refill re-clear').toBe('')
+      expect(fbSeed.startingWindowBusy, 'missing-window re-seed must observe no pending window read at return').toBe(
+        false
+      )
       test.info().annotations.push({
         type: 'fallback-reclear',
         description: `hidden reconcile refilled ${refilled} ids after seam clear; re-cleared via public reducer to missing-window before return`
@@ -2080,25 +2134,28 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       const fbWc = await readRouteLoadProbe(page, FB_LOAD_KEY)
       test.info().annotations.push({
         type: 'fallback-request',
-        description: `route-thunk request loadingTransitions=${fbWc.loadingTransitions} trueSightings=${fbWc.trueSightings} idsCommits(diag)=${fbWc.idsCommits} startLoading=${fbSeed.startingLoading} startGen=${fbSeed.startingGen} details=[${fbWc.details.join('; ')}] (>0 transitions = fresh-window fallback branch)`
+        description: `fresh route-thunk window read windowReadTransitions=${fbWc.windowReadTransitions} windowBusySightings=${fbWc.windowBusySightings} loadingTransitions(diag)=${fbWc.loadingTransitions} genSightings(diag)=${fbWc.trueSightings} idsCommits(diag)=${fbWc.idsCommits} startWindowBusy=${fbSeed.startingWindowBusy} startLoading(diag)=${fbSeed.startingLoading} startGen=${fbSeed.startingGen} details=[${fbWc.details.join('; ')}] (>0 window-read transitions = fresh-window fallback branch)`
       })
-      if (fbWc.loadingTransitions <= 0) {
+      if (fbWc.windowReadTransitions <= 0) {
         try {
           // eslint-disable-next-line no-console
           console.log(
-            `[E2E] fallback request-zero transitions=${fbWc.loadingTransitions} trueSightings=${fbWc.trueSightings} idsCommits=${fbWc.idsCommits} startLoading=${fbSeed.startingLoading} startGen=${fbSeed.startingGen} details=[${fbWc.details.join('; ')}] frames=${fbFrames.length} head=[${fbFrames.slice(0, 5).map(fbDescribe).join(' | ')}] tail=[${fbFrames.slice(-8).map(fbDescribe).join(' | ')}] victim=${victim!.id}`
+            `[E2E] fallback window-read-zero windowReadTransitions=${fbWc.windowReadTransitions} windowBusySightings=${fbWc.windowBusySightings} loadingTransitions(diag)=${fbWc.loadingTransitions} idsCommits=${fbWc.idsCommits} startWindowBusy=${fbSeed.startingWindowBusy} startLoading(diag)=${fbSeed.startingLoading} startGen=${fbSeed.startingGen} details=[${fbWc.details.join('; ')}] frames=${fbFrames.length} head=[${fbFrames.slice(0, 5).map(fbDescribe).join(' | ')}] tail=[${fbFrames.slice(-8).map(fbDescribe).join(' | ')}] victim=${victim!.id}`
           )
         } catch {}
       }
       // Fallback branch proof: an emptied retained/projection window must take
-      // a fresh route-thunk request — never a silent in-place reuse. Asserts
-      // the canonical loading false->true request edge (not any-thunk, not
-      // publication kind); publication kind (around/latest) is IPC-only and
-      // reported via row identity + request presence. No >0 publish assert
-      // from an unobservable action: the gate is the request edge.
+      // a fresh route-thunk window read — never a silent in-place reuse. Asserts
+      // the canonical pendingWindowReadsByTopic empty->nonempty window-read edge
+      // (not generation loading, not any-thunk, not publication kind);
+      // generation loading (loadingByTopic false->true) is diagnostic-only
+      // (generation-only flag; window reads never set it). Publication kind
+      // (around/latest) is IPC-only and reported via row identity + request
+      // presence. No >0 publish assert from an unobservable action: the gate is
+      // the fresh-window-read request edge, never an ids-commit count.
       expect(
-        fbWc.loadingTransitions,
-        'emptied-window fallback must start a fresh route request (loading false->true>0)'
+        fbWc.windowReadTransitions,
+        'emptied-window fallback must start a fresh route request (pendingWindowReads empty->nonempty>0; generation loading is diagnostic-only)'
       ).toBeGreaterThan(0)
       const after: { id: string; offset: number } | null = await page.evaluate(() => {
         const container = document.querySelector('#messages') as HTMLElement | null
