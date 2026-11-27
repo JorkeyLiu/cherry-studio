@@ -683,3 +683,10 @@
 - 停止边界：窗口侧无同 commit 重复建模；执行侧剩余 `getState` 仅 loaded 门控，quiesce/barrier/原子终态/overlay handoff 为正确性必需，不再为提交删测试专属 export 或零引用 getter。
 - 未声称：不声称性能数字，全量 renderer/E2E 仍未完成。
 - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
+## 65. 上下文与路由交界收敛（已实现）
+- pending 上下文订阅删除（17042d981e）：删 pending 态无消费者 Redux block 订阅/快照重建，pending 不再水合普通 messageBlocks，accepted closure+overlay/receipt/handoff 不变。
+- 路由结构直调（05d836b70e）：删 publishCommittedChrome 纯转发，5 调用直指 acceptCommittedStructure，owner/merge/guards 不变。
+- 两级 memo（7fea54e707）：accepted base map 与 overlay composition 拆两级 memo，base 只随 closure.blocks 变化，流式 overlay version 不再重建权威 base。
+- 启动交接死字段删除（545314d228）：删 TopicBootstrapStructureHandoff.publicationGeneration 死字段，generation 局部变量与 joint publish/deferred receipt 链不变。
+- 验证：最终 9 文件 88/88、`pnpm typecheck` 全 5 lane 通过、hooks 通过；不声称延迟/帧率，全量 renderer/E2E 仍未完成。
+- 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
