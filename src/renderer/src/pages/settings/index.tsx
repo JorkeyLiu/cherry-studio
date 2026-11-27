@@ -14,11 +14,8 @@ export const SettingContainer = styled.div<{ theme?: ThemeMode }>`
   padding: 15px 18px;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   background: ${(props) => (props.theme === 'dark' ? 'transparent' : 'var(--color-background-soft)')};
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
 `
 
 export const SettingTitle = styled.div`

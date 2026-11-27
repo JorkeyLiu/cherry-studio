@@ -192,6 +192,8 @@ export const TaskDialog: FC<TaskDialogProps> = ({ title, children, onClose, widt
         body: {
           flex: 1,
           minHeight: 0,
+          // This shell owns its body sizing instead of the global modal 80vh cap.
+          maxHeight: 'none',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
