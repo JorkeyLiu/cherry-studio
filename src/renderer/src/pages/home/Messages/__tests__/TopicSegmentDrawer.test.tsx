@@ -1,7 +1,6 @@
 import { EVENT_NAMES } from '@renderer/services/EventService'
 import type { RouteScopedSegment } from '@renderer/utils/topicSegmentRoute'
 import { fireEvent, render, screen } from '@testing-library/react'
-import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { emitMock, state, settingsState } = vi.hoisted(() => ({
@@ -9,11 +8,6 @@ const { emitMock, state, settingsState } = vi.hoisted(() => ({
   settingsState: { messageNavigation: false },
   state: {
     routeKey: 'topic-1::main',
-    committedChrome: null,
-    acceptCommittedStructure: vi.fn(),
-    // The drawer lists only the accepted projection; pending (isCurrent false)
-    // is the empty-list case, never a stale route's rows.
-    isCurrent: true,
     segments: [
       {
         id: 'seg-1',
@@ -33,6 +27,7 @@ const { emitMock, state, settingsState } = vi.hoisted(() => ({
         headerMessageId: 'msg-2',
         headerInRoute: true,
         headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-2',
         folded: false
       },
       {
@@ -47,19 +42,15 @@ const { emitMock, state, settingsState } = vi.hoisted(() => ({
         headerMessageId: 'msg-4',
         headerInRoute: true,
         headerOwnedByRoute: true,
+        presentationStartMessageId: 'msg-4',
         folded: false
       }
     ] as Array<RouteScopedSegment & { folded: boolean }>
   }
 }))
 
-// The drawer reads the chat surface's ONE route-structure value (provider
-// mounted by Chat). This test supplies the value the surface would publish, so
-// `routeKey` / `isCurrent` semantics stay part of the fixture instead of a
-// consumer-only stub.
-vi.mock('../../ChatRouteStructure', () => ({
-  ChatRouteStructureProvider: ({ children }: { children: unknown }) => <>{children as ReactNode}</>,
-  useChatRouteStructure: () => state
+vi.mock('@renderer/hooks/useRouteScopedSegments', () => ({
+  useRouteScopedSegments: () => state
 }))
 vi.mock('@renderer/hooks/useSettings', () => ({
   useSettings: () => ({ messageNavigation: settingsState.messageNavigation })
@@ -92,7 +83,6 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
     emitMock.mockClear()
     settingsState.messageNavigation = false
     state.routeKey = 'topic-1::main'
-    state.isCurrent = true
     state.segments = [
       {
         id: 'seg-1',
@@ -128,7 +118,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
   })
 
   it('navigates to the stable head, never the first reachable member', () => {
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     const row = screen.getByText('Segment One')
     // The row carries the stable head id for testability.
     const item = row.closest('[data-testid="topic-segment-drawer-row"]') as HTMLElement | null
@@ -157,7 +147,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         folded: false
       }
     ]
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     fireEvent.click(screen.getByText('Segment Nine'))
     expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-head-unloaded')
   })
@@ -179,7 +169,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         folded: false
       }
     ]
-    const { container } = render(<TopicSegmentDrawer />)
+    const { container } = render(<TopicSegmentDrawer topicId="topic-1" />)
     // A headless residual keeps its members naturally rendered in the rail but
     // gets no navigation entry: the drawer lists nothing.
     expect(screen.queryByText('Segment One')).toBeNull()
@@ -187,7 +177,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
   })
 
   it('shows the route-qualified turn count, never the catalog message count', () => {
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     // The projection carries turn counts: 3 reachable messages form 2 turns.
     expect(screen.getByText('2')).toBeTruthy()
     expect(screen.getByText('1')).toBeTruthy()
@@ -196,7 +186,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
   })
 
   it('renders the projected route order, never re-sorting by catalog sortOrder', () => {
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     const items = screen.getAllByText(/Segment (One|Two)/).map((el) => el.textContent)
     // The hook hands rows over in first-reachable-route-position order; seg-1 has
     // the higher catalog sortOrder and still comes first on this route.
@@ -204,17 +194,15 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
   })
 
   it('hides the trigger and every old row once the projection is empty (route switch pending)', () => {
-    const { rerender } = render(<TopicSegmentDrawer />)
+    const { rerender } = render(<TopicSegmentDrawer topicId="topic-1" />)
     expect(screen.getByText('Segment One')).toBeTruthy()
 
-    // Route switch with the new snapshot pending: the surface publishes
-    // `isCurrent: false` with an empty accepted list, so no old-route row is
-    // reachable to launch a stale navigation. (The component is memoized, so
-    // remounting under the new route key drives the rerender.)
+    // Route switch with the new snapshot pending: the projection derives empty,
+    // so no old-route row is reachable to launch a stale navigation. (The
+    // component is memoized, so a new topicId drives the rerender.)
     state.routeKey = 'topic-2::main'
-    state.isCurrent = false
     state.segments = []
-    rerender(<TopicSegmentDrawer key="topic-2" />)
+    rerender(<TopicSegmentDrawer topicId="topic-2" />)
 
     expect(screen.queryByText('Segment One')).toBeNull()
     expect(screen.queryByTestId('drawer-content')).toBeNull()
@@ -223,12 +211,12 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
 
   it('renders nothing when the projection has no reachable segments', () => {
     state.segments = []
-    const { container } = render(<TopicSegmentDrawer />)
+    const { container } = render(<TopicSegmentDrawer topicId="topic-1" />)
     expect(container.querySelector('[data-testid="drawer-trigger"]')).toBeNull()
   })
 
   it('lists the drawer title above the navigation rows', () => {
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     expect(screen.getByText('topicSegment.navigation.title')).toBeTruthy()
   })
 
@@ -265,7 +253,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         folded: false
       }
     ]
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
 
     // The legacy per-group fold flag is cancelled: it is no longer a
     // presentation state of the navigation row, so a group that still carries
@@ -301,13 +289,13 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
         folded: true
       }
     ]
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     fireEvent.click(screen.getByText('Segment One'))
     expect(emitMock).toHaveBeenCalledWith(EVENT_NAMES.NAVIGATE_TO_MESSAGE, 'msg-offscreen')
   })
 
   it('portals the trigger and its popover above the group-header layer', () => {
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     // The floating trigger carries its own test id so the layer contract can be
     // observed (portaled node, explicit z above the z1000 group header).
     expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
@@ -318,7 +306,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
 
   it('keeps the drawer available with navigation on and click navigation working', () => {
     settingsState.messageNavigation = true
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     // Availability is unchanged while the rail is mounted: same trigger,
     // same rows, same stable-head navigation target.
     expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
@@ -329,7 +317,7 @@ describe('TopicSegmentDrawer route-scoped navigation', () => {
 
   it('keeps the drawer available with navigation off (historical anchor)', () => {
     settingsState.messageNavigation = false
-    render(<TopicSegmentDrawer />)
+    render(<TopicSegmentDrawer topicId="topic-1" />)
     expect(screen.getByTestId('topic-segment-drawer-trigger')).toBeTruthy()
     expect(screen.getByText('Segment Two')).toBeTruthy()
   })

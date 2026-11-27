@@ -248,7 +248,7 @@ const TrashLabel: FC<PropsWithChildren> = ({ children }) => (
 )
 
 const CountBadge: FC<PropsWithChildren> = ({ children }) => (
-  <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[9px] bg-[var(--color-primary)] px-[5px] font-medium text-[11px] text-white leading-none">
+  <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[9px] bg-[var(--color-background-mute)] px-[5px] font-medium text-[11px] text-[var(--color-text-2)] leading-none">
     {children}
   </span>
 )

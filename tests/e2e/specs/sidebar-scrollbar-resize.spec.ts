@@ -6,17 +6,22 @@
  * region must stay inside its own allocated 6px box; no overflowing
  * pseudo-element may extend over the neighboring 6px chat scrollbar.
  *
+ * Unified navigation: the single left workspace sidebar owns the only
+ * resizer (data-testid workspace-sidebar-handle driving
+ * --workspace-sidebar-width); the right topic-list panel is removed.
+ *
  * Deferred runtime: run only after all writers complete a fresh build.
  *   pnpm build && pnpm test:e2e tests/e2e/specs/sidebar-scrollbar-resize.spec.ts
  *
  * Evidence (when run):
  *   - Test 1 proves a physical mouse drag on the chat scrollbar/track leaves
- *     `--topic-list-width` exactly unchanged AND really scrolls vertically
+ *     `--workspace-sidebar-width` exactly unchanged AND really scrolls vertically
  *     (`#messages` scrollTop delta; width unchanged alone is insufficient).
  *     Hit-test also proves the point resolves inside #messages, never to
  *     the handle.
  *   - Test 2 proves a physical mouse drag on the handle itself still resizes
- *     the topic list (`--topic-list-width` delta + Redux persistence).
+ *     the unified left sidebar (`--workspace-sidebar-width` delta + Redux
+ *     persistence to settings.workspaceSidebarWidth).
  *
  * Seams (existing only): shared electron fixture, mock provider seed,
  * window.store (seed/introspection), window.api.chatDb.ensureTopic/
@@ -201,16 +206,23 @@ async function seedOverflowTopic(page: Page, topicId: string): Promise<void> {
   )
 }
 
-async function readTopicListWidth(page: Page): Promise<number> {
+async function readWorkspaceSidebarWidth(page: Page): Promise<number> {
   const raw = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--topic-list-width').trim()
+    getComputedStyle(document.documentElement).getPropertyValue('--workspace-sidebar-width').trim()
   )
-  return parseInt(raw) || 275
+  return parseInt(raw) || 300
 }
 
-/** Bounding box of the topic-list (right-side) resize handle. */
-async function getTopicListHandleBox(page: Page): Promise<{ x: number; y: number; width: number; height: number }> {
+/** Bounding box of the unified workspace (left-side) resize handle. */
+async function getWorkspaceSidebarHandleBox(
+  page: Page
+): Promise<{ x: number; y: number; width: number; height: number }> {
   return page.evaluate(() => {
+    const byTestId = document.querySelector('[data-testid="workspace-sidebar-handle"]')
+    if (byTestId) {
+      const r = byTestId.getBoundingClientRect()
+      return { x: r.x, y: r.y, width: r.width, height: r.height }
+    }
     const messages = document.getElementById('messages')
     if (!messages) throw new Error('#messages not found')
     const mRect = messages.getBoundingClientRect()
@@ -221,13 +233,13 @@ async function getTopicListHandleBox(page: Page): Promise<{ x: number; y: number
       return r.width > 0 && r.width <= 8 && r.height > 100
     })
     if (cands.length === 0) throw new Error('no col-resize handle found')
-    // The topic-list handle sits between chat and the right topic list:
-    // nearest handle to the chat right edge.
+    // The workspace handle sits between the left sidebar and chat:
+    // nearest handle to the chat left edge.
     let best: Element | null = null
     let bestDist = Infinity
     for (const el of cands) {
       const r = el.getBoundingClientRect()
-      const dist = Math.min(Math.abs(r.left - mRect.right), Math.abs(r.right - mRect.right))
+      const dist = Math.min(Math.abs(r.left - mRect.left), Math.abs(r.right - mRect.left))
       if (dist < bestDist) {
         bestDist = dist
         best = el
@@ -254,13 +266,13 @@ test.describe('sidebar scrollbar vs resize handle hit target', () => {
     await waitForChatReady(mainWindow)
   })
 
-  test('physical drag on chat scrollbar/track does not resize topic list', async ({ mainWindow }) => {
+  test('physical drag on chat scrollbar/track does not resize the workspace sidebar', async ({ mainWindow }) => {
     const runtimeErrors: string[] = []
     installRuntimeErrorCapture(mainWindow, runtimeErrors)
     const topicId = `scrollbar-resize-${Date.now()}`
     await seedOverflowTopic(mainWindow, topicId)
 
-    const before = await readTopicListWidth(mainWindow)
+    const before = await readWorkspaceSidebarWidth(mainWindow)
     const pt = await getChatScrollbarPoint(mainWindow)
 
     // Hit-test: the scrollbar point must resolve inside #messages, never to
@@ -286,11 +298,23 @@ test.describe('sidebar scrollbar vs resize handle hit target', () => {
     expect(hit.isHandle, 'scrollbar grab point must not hit the resize handle').toBe(false)
 
     // Normalize to the top so a downward drag has room to scroll; setup only,
-    // the scroll itself must come from the real mouse drag below.
+    // the scroll itself must come from the real mouse drag below. The set is
+    // followed by an explicit settle wait: the seeded topic may restore its
+    // saved scroll position asynchronously, and measuring before it settles
+    // would assert against a stale offset.
     await mainWindow.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
-      if (el) el.scrollTop = 0
+      if (!el) throw new Error('#messages not found')
+      el.scrollTop = 0
     })
+    await mainWindow.waitForFunction(
+      () => {
+        const el = document.getElementById('messages') as HTMLElement | null
+        return el !== null && el.scrollTop === 0
+      },
+      null,
+      { timeout: 5000 }
+    )
     const scrollBefore = await mainWindow.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) throw new Error('#messages not found')
@@ -316,35 +340,36 @@ test.describe('sidebar scrollbar vs resize handle hit target', () => {
       `scrollbar drag must really scroll vertically (before=${scrollBefore} after=${scrollAfter} delta=${scrollDelta})`
     ).toBeGreaterThan(SCROLL_DELTA_MIN)
 
-    const after = await readTopicListWidth(mainWindow)
-    expect(after, 'scrollbar drag must not resize the topic list').toBe(before)
+    const after = await readWorkspaceSidebarWidth(mainWindow)
+    expect(after, 'scrollbar drag must not resize the workspace sidebar').toBe(before)
     assertNoRuntimeErrors(runtimeErrors)
   })
 
-  test('physical drag on the handle still resizes the topic list', async ({ mainWindow }) => {
+  test('physical drag on the handle still resizes the workspace sidebar', async ({ mainWindow }) => {
     const runtimeErrors: string[] = []
     installRuntimeErrorCapture(mainWindow, runtimeErrors)
     const topicId = `handle-resize-${Date.now()}`
     await seedOverflowTopic(mainWindow, topicId)
 
-    const before = await readTopicListWidth(mainWindow)
-    const box = await getTopicListHandleBox(mainWindow)
+    const before = await readWorkspaceSidebarWidth(mainWindow)
+    const box = await getWorkspaceSidebarHandleBox(mainWindow)
     const startX = box.x + box.width / 2
     const startY = box.y + box.height / 2
 
-    // Right-side handle: dragging left widens the topic list.
+    // Left-side handle: dragging right widens the workspace sidebar.
     await mainWindow.mouse.move(startX, startY)
     await mainWindow.mouse.down()
-    await mainWindow.mouse.move(startX - HANDLE_DRAG_PX, startY, { steps: 10 })
+    await mainWindow.mouse.move(startX + HANDLE_DRAG_PX, startY, { steps: 10 })
     await mainWindow.mouse.up()
 
-    const after = await readTopicListWidth(mainWindow)
-    expect(after, `handle drag left by ${HANDLE_DRAG_PX}px must widen the topic list from ${before}px`).toBeGreaterThan(
-      before + HANDLE_DRAG_PX - WIDTH_TOL
-    )
+    const after = await readWorkspaceSidebarWidth(mainWindow)
+    expect(
+      after,
+      `handle drag right by ${HANDLE_DRAG_PX}px must widen the workspace sidebar from ${before}px`
+    ).toBeGreaterThan(before + HANDLE_DRAG_PX - WIDTH_TOL)
 
-    // Persistence: onResizeEnd dispatches settings/setTopicListWidth.
-    const stored = await mainWindow.evaluate(() => (window as any).store.getState().settings?.topicListWidth)
+    // Persistence: onResizeEnd dispatches settings/setWorkspaceSidebarWidth.
+    const stored = await mainWindow.evaluate(() => (window as any).store.getState().settings?.workspaceSidebarWidth)
     expect(stored, 'resized width must persist to settings').toBe(after)
     assertNoRuntimeErrors(runtimeErrors)
   })

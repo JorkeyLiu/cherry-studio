@@ -64,10 +64,10 @@ describe('HomeTabs — single separator without duplicate panel border', () => {
     expect(root.style.borderRight).toBe('')
     expect(root.style.borderLeft).toBe('')
     // Tabs width var should be set
-    expect(root.style.getPropertyValue('--tabs-width')).toContain('var(--assistants-width')
+    expect(root.style.getPropertyValue('--tabs-width')).toContain('var(--workspace-sidebar-width')
   })
 
-  it('right position renders without borderLeft and preserves width var', () => {
+  it('legacy right position is unified: renders the assistant list with the workspace width', () => {
     const { container } = render(
       <HomeTabs
         activeAssistant={mockAssistant}
@@ -80,6 +80,6 @@ describe('HomeTabs — single separator without duplicate panel border', () => {
     const root = container.firstChild as HTMLElement
     expect(root.style.borderLeft).toBe('')
     expect(root.style.borderRight).toBe('')
-    expect(root.style.getPropertyValue('--tabs-width')).toContain('var(--topic-list-width')
+    expect(root.style.getPropertyValue('--tabs-width')).toContain('var(--workspace-sidebar-width')
   })
 })

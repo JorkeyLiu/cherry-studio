@@ -2,7 +2,7 @@ import { loggerService } from '@logger'
 import { isAutoEnableImageGenerationModel, isGenerateImageModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
-import { useMessageOperations, useTopicGenerating } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages, useMessageOperations, useTopicGenerating } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTextareaResize } from '@renderer/hooks/useTextareaResize'
@@ -26,45 +26,29 @@ import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import type { SendRoutePin } from '@renderer/store/thunk/messageThunk'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId, selectRouteGeneration } from '@renderer/store/topicBranch'
-import {
-  type Assistant,
-  type FileMetadata,
-  type KnowledgeBase,
-  type Model,
-  type Topic,
-  TopicType
-} from '@renderer/types'
+import { type Assistant, type FileMetadata, type KnowledgeBase, type Topic, TopicType } from '@renderer/types'
 import type { Message, MessageInputBaseParams } from '@renderer/types/newMessage'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { FC } from 'react'
-import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
 import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import { useSendInFlightGuard } from './hooks/useSendInFlightGuard'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
-import MentionModelsInput from './MentionModelsInput'
 import { getInputbarConfig } from './registry'
 import TokenCount from './TokenCount'
+import MentionModelsButton from './tools/components/MentionModelsButton'
 
 const logger = loggerService.withContext('Inputbar')
 
 const INPUTBAR_DRAFT_CACHE_KEY = 'inputbar-draft'
 const DRAFT_CACHE_TTL = 24 * 60 * 60 * 1000 // 24 hours
-
-const getMentionedModelsCacheKey = (assistantId: string) => `inputbar-mentioned-models-${assistantId}`
-
-const getValidatedCachedModels = (assistantId: string): Model[] => {
-  const cached = CacheService.get<Model[]>(getMentionedModelsCacheKey(assistantId))
-  if (!Array.isArray(cached)) return []
-  return cached.filter((model) => model?.id && model?.name)
-}
 
 interface Props {
   assistant: Assistant
@@ -92,17 +76,14 @@ const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topi
     onTextChange: () => {}
   })
 
-  const [initialMentionedModels] = useState(() => getValidatedCachedModels(initialAssistant.id))
-
   const initialState = useMemo(
     () => ({
       files: [] as FileMetadata[],
-      mentionedModels: initialMentionedModels,
       selectedKnowledgeBases: initialAssistant.knowledge_bases ?? [],
       couldAddImageFile: false,
       extensions: [] as string[]
     }),
-    [initialMentionedModels, initialAssistant.knowledge_bases]
+    [initialAssistant.knowledge_bases]
   )
 
   return (
@@ -134,8 +115,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const scope = topic.type ?? TopicType.Chat
   const config = getInputbarConfig(scope)
 
-  const { files, mentionedModels, selectedKnowledgeBases } = useInputbarToolsState()
-  const { setFiles, setMentionedModels, setSelectedKnowledgeBases, getFilesRevision } = useInputbarToolsDispatch()
+  const { files, selectedKnowledgeBases } = useInputbarToolsState()
+  const { setFiles, setSelectedKnowledgeBases, getFilesRevision } = useInputbarToolsDispatch()
   const { setCouldAddImageFile } = useInputbarToolsInternalDispatch()
 
   const {
@@ -167,6 +148,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
   const generating = useTopicGenerating(topic)
+  const loadedTopicMessages = useLoadedTopicMessages(topic.id)
+  const [isExpanded, setIsExpanded] = useState(false)
+  const settledTopicIdRef = useRef<string | null>(null)
 
   // --- Token estimation (Inputbar-owned) ---
 
@@ -235,15 +219,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     setCouldAddImageFile(canAddImageFile)
   }, [canAddImageFile, setCouldAddImageFile])
 
-  const onUnmount = useEffectEvent((id: string) => {
-    CacheService.set(getMentionedModelsCacheKey(id), mentionedModels, DRAFT_CACHE_TTL)
-  })
-
-  useEffect(() => {
-    return () => onUnmount(assistant.id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant.id])
-
   const placeholderText = t('chat.input.placeholder_without_triggers', {
     key: getSendMessageShortcutLabel(sendMessageShortcut),
     defaultValue: t('chat.input.placeholder', {
@@ -274,12 +249,11 @@ const InputbarInner: FC<InputbarInnerProps> = ({
       const sendAssistant = assistant
       const sendText = text
       const sendFilesSnapshot = files
-      const sendMentionsSnapshot = mentionedModels
       const expectedTextRevision = getTextRevision()
       const expectedFilesRevision = getFilesRevision()
       const parent = spanManagerService.startTrace(
         { topicId: sendTopicId, name: 'sendMessage', inputs: sendText },
-        sendMentionsSnapshot.length > 0 ? sendMentionsSnapshot : sendAssistant.model ? [sendAssistant.model] : []
+        sendAssistant.model ? [sendAssistant.model] : []
       )
       void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: sendTopicId, traceId: parent?.spanContext().traceId })
       try {
@@ -296,9 +270,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({
         }
         if (uploadedFiles) {
           baseUserMessage.files = uploadedFiles
-        }
-        if (sendMentionsSnapshot.length) {
-          baseUserMessage.mentions = sendMentionsSnapshot
         }
         // The optional prompt-token estimate is NOT computed here: it must never
         // delay the authoritative user echo. The send thunk persists and
@@ -338,7 +309,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     assistant,
     topic,
     text,
-    mentionedModels,
     files,
     dispatch,
     setText,
@@ -412,13 +382,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     setTimeoutTimer('addNewTopic', () => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
   }, [addTopic, assistant, setActiveTopic, setModel, setTimeoutTimer])
 
-  const handleRemoveModel = useCallback(
-    (modelToRemove: Model) => {
-      setMentionedModels(mentionedModels.filter((current) => current.id !== modelToRemove.id))
-    },
-    [mentionedModels, setMentionedModels]
-  )
-
   const handleRemoveKnowledgeBase = useCallback(
     (knowledgeBase: KnowledgeBase) => {
       const nextKnowledgeBases = assistant.knowledge_bases?.filter((kb) => kb.id !== knowledgeBase.id)
@@ -455,10 +418,20 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   }, [addNewTopic])
 
   useEffect(() => {
-    if (!document.querySelector('.topview-fullscreen-container')) {
-      focusTextarea()
+    if (settledTopicIdRef.current === topic.id) return
+    if (loadedTopicMessages === undefined) {
+      // Wait for SQLite load before settling expanded state so non-empty
+      // topics do not flash expanded on switch.
+      setIsExpanded(false)
+      return
     }
-  }, [topic.id, assistant.knowledge_bases, mentionedModels, focusTextarea])
+    settledTopicIdRef.current = topic.id
+    const isEmptyTopic = loadedTopicMessages.length === 0
+    setIsExpanded(isEmptyTopic)
+    if (isEmptyTopic && !document.querySelector('.topview-fullscreen-container')) {
+      requestAnimationFrame(() => focusTextarea())
+    }
+  }, [topic.id, loadedTopicMessages, focusTextarea])
 
   // TODO: Just use assistant.knowledge_bases as selectedKnowledgeBases. context state is overdesigned.
   useEffect(() => {
@@ -491,15 +464,18 @@ const InputbarInner: FC<InputbarInnerProps> = ({
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
         />
       )}
-
-      {mentionedModels.length > 0 && (
-        <MentionModelsInput selectedModels={mentionedModels} onRemoveModel={handleRemoveModel} />
-      )}
     </>
   )
 
-  // leftToolbar: 左侧工具栏
-  const leftToolbar = config.showTools ? <InputbarTools scope={scope} assistant={assistant} model={model} /> : null
+  // modelRow: 独立模型行 — 单模型选择器独占输入框顶部一行（图标 +
+  // 当前模型名 + 下拉），不再挤占 28px 工具槽；对应 key 在工具栏中排除。
+  const modelRow = config.showTools ? <MentionModelsButton assistant={assistant} /> : null
+
+  // leftToolbar: 左侧工具栏 — 其余工具（模型选择器已独立成行，此处排除
+  // mention_models，避免重复渲染）。分支选择已移到标题栏左上悬浮控件。
+  const leftToolbar = config.showTools ? (
+    <InputbarTools scope={scope} assistant={assistant} model={model} excludeKeys={['mention_models']} />
+  ) : null
 
   // rightToolbar: 右侧工具栏
   const rightToolbar = (
@@ -531,8 +507,10 @@ const InputbarInner: FC<InputbarInnerProps> = ({
       handleSendMessage={sendMessage}
       leftToolbar={leftToolbar}
       rightToolbar={rightToolbar}
+      modelRow={modelRow}
       topContent={topContent}
-      topRightOverlay={<TopicSegmentDrawer />}
+      expanded={isExpanded}
+      onExpandedChange={setIsExpanded}
     />
   )
 }

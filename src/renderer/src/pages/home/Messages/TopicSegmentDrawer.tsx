@@ -1,3 +1,4 @@
+import { useRouteScopedSegments } from '@renderer/hooks/useRouteScopedSegments'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
@@ -8,9 +9,9 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { useChatRouteStructure } from '../ChatRouteStructure'
-import { COMPOSER_FLOATING_CONTROL_INSET_PX, COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
-import { resolveTopicSegmentDrawerAnchorLeft } from './navRailGeometry'
+import { COMPOSER_FLOATING_CONTROL_SIZE_PX } from './composerFloatingBand'
+import { COMPOSER_OVERLAY_BOTTOM_GAP_PX } from './composerOverlayGeometry'
+import { resolveTopicSegmentDrawerCanvasLeft } from './navRailGeometry'
 
 /**
  * Floating layer contract for this drawer.
@@ -35,10 +36,12 @@ const DRAWER_POPOVER_Z_INDEX = 1005
 type PopoverWithZIndexProps = PopoverProps & { zIndex?: number }
 const ZIndexPopover = Popover as unknown as React.FC<PopoverWithZIndexProps>
 
-const TopicSegmentDrawer: React.FC = () => {
-  // Route-scoped projection of the topic-wide catalog (the chat surface's ONE
-  // structure read, shared with `Messages` through `ChatRouteStructureProvider`):
-  // only the active route's
+interface TopicSegmentDrawerProps {
+  topicId: string
+}
+
+const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
+  // Route-scoped projection of the topic-wide catalog: only the active route's
   // reachable members/counts. A row is listed ONLY when the group's stable head
   // resolves inside the full current route history (`headerInRoute`): a
   // headless residual keeps its members naturally rendered in the rail but gets
@@ -49,7 +52,7 @@ const TopicSegmentDrawer: React.FC = () => {
   // is not loaded (the unified path loads its window, settling on the fold
   // marker when the head is folded). The projected `firstMessageId` stays the
   // window complement only.
-  const { segments, routeKey } = useChatRouteStructure()
+  const { segments, routeKey } = useRouteScopedSegments(topicId)
   const listedSegments = useMemo(() => segments.filter((segment) => segment.headerInRoute !== false), [segments])
   const { t } = useTranslation()
 
@@ -68,7 +71,7 @@ const TopicSegmentDrawer: React.FC = () => {
   // left by the shared shift so the portaled trigger lands on the rail axis;
   // with navigation off the historical inset (and availability) is preserved.
   const { messageNavigation } = useSettings()
-  const anchorLeft = resolveTopicSegmentDrawerAnchorLeft(messageNavigation)
+  const anchorLeft = resolveTopicSegmentDrawerCanvasLeft(messageNavigation)
   // In-flow measurement anchor: the floating trigger is portaled out of the
   // composer's stacking context, so it is positioned from this anchor's live
   // rect (the same spot the trigger occupied before the portal).
@@ -177,14 +180,14 @@ const TopicSegmentDrawer: React.FC = () => {
 // is what the scroll content reserves as its tail clearance
 // (`composerFloatingBand`). Vertical placement is untouched either way.
 const TriggerAnchor = styled.span<{ $left: number }>`
-   position: absolute;
-   left: ${(props) => props.$left}px;
-   bottom: calc(100% + ${COMPOSER_FLOATING_CONTROL_INSET_PX}px);
-   top: auto;
-   width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-   height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
-   pointer-events: none;
- `
+  position: absolute;
+  left: ${(props) => props.$left}px;
+  bottom: ${COMPOSER_OVERLAY_BOTTOM_GAP_PX + 3}px;
+  top: auto;
+  width: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  height: ${COMPOSER_FLOATING_CONTROL_SIZE_PX}px;
+  pointer-events: none;
+`
 
 const TriggerWrapper = styled.div<{ $left: number; $top: number }>`
   position: fixed;

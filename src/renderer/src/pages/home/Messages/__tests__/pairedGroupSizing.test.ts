@@ -116,22 +116,22 @@ describe('resolvePairedWidths — shared pair budget', () => {
     // The nav gutter belongs to the article, not to the app chrome.
     expect(pairedChatColumnMin(minPair, 46)).toBe(minPair + PAIRED_AXIS_FIXED_PX + 46)
     // Policy dominates while the summed chrome stays under it.
-    expect(requiredWindowWidth(960, 275, 275, 0)).toBe(960)
-    expect(requiredWindowWidth(960, 0, 0, chatMin)).toBe(960)
-    // Summed chrome (fixed chrome + sidebars + reading) dominates past policy.
-    expect(requiredWindowWidth(520, 275, 275, chatMin)).toBe(PAIRED_APP_CHROME_PX + 550 + chatMin)
-    // Closing panels lowers the window; an inactive pair resets to policy.
-    expect(requiredWindowWidth(520, 0, 0, 0)).toBe(520)
+    expect(requiredWindowWidth(960, 275, 0)).toBe(960)
+    expect(requiredWindowWidth(960, 0, chatMin)).toBe(960)
+    // Summed chrome (fixed chrome + single sidebar + reading) dominates past policy.
+    expect(requiredWindowWidth(520, 275, chatMin)).toBe(PAIRED_APP_CHROME_PX + 275 + chatMin)
+    // Closing the sidebar lowers the window; an inactive pair resets to policy.
+    expect(requiredWindowWidth(520, 0, 0)).toBe(520)
   })
 
   it('clamps sidebar drags at a fixed window before squeezing chat', () => {
     const chatMin = pairedChatColumnMin(70 + 192 + 10)
     // Wide window: the 600 cap governs, never the raw budget.
-    expect(sidebarDragMax(1400, 275, chatMin)).toBe(600)
+    expect(sidebarDragMax(1400, chatMin)).toBe(600)
     // Narrow window: only the remaining budget is allowed, never past 600.
-    expect(sidebarDragMax(1000, 275, chatMin)).toBe(1000 - PAIRED_APP_CHROME_PX - 275 - chatMin)
-    expect(sidebarDragMax(900, 275, chatMin)).toBeLessThan(600)
-    expect(sidebarDragMax(900, 0, chatMin)).toBeGreaterThan(sidebarDragMax(900, 275, chatMin))
+    expect(sidebarDragMax(1000, chatMin)).toBe(1000 - PAIRED_APP_CHROME_PX - chatMin)
+    expect(sidebarDragMax(900, chatMin)).toBeLessThan(600)
+    expect(sidebarDragMax(900, chatMin, 300)).toBeLessThanOrEqual(300)
   })
 })
 

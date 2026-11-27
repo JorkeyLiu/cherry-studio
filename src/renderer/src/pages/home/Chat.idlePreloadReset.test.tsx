@@ -47,7 +47,7 @@ vi.mock('@renderer/hooks/useSettings', () => ({
 }))
 
 vi.mock('@renderer/hooks/useStore', () => ({
-  useShowTopics: () => ({ showTopics: false })
+  useWorkspaceSidebar: () => ({ visible: true, collapsed: false, width: 300 })
 }))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
@@ -71,6 +71,12 @@ vi.mock('@renderer/hooks/useRouteScopedSegments', () => ({
     routeKey: `${topicId}::main`,
     isCurrent: false
   })
+}))
+
+// Chat publishes the overlay band height from the fullscreen state; this
+// timing oracle pins the non-fullscreen band path without the IPC chain.
+vi.mock('@renderer/hooks/useFullscreen', () => ({
+  useFullscreen: () => false
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
@@ -177,6 +183,10 @@ vi.mock('./components/ChatNavBar', () => ({
   default: () => <div data-testid="chatnavbar-stub" />
 }))
 
+vi.mock('./components/ChatFloatingTools', () => ({
+  default: () => <div data-testid="chatfloatingtools-stub" />
+}))
+
 vi.mock('./Inputbar/Inputbar', () => ({
   default: () => <div data-testid="inputbar-stub" />
 }))
@@ -201,6 +211,10 @@ vi.mock('./ChatBranchCatalog', () => ({
 }))
 
 vi.mock('./Messages/ConversationNavigation', () => ({
+  default: () => null
+}))
+
+vi.mock('./Messages/TopicSegmentDrawer', () => ({
   default: () => null
 }))
 

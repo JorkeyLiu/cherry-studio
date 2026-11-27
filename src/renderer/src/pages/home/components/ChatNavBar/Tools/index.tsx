@@ -10,7 +10,7 @@ const Tools = () => {
   const activeTopicId = useAppSelector((state) => state.runtime.chat.activeTopic?.id)
 
   return (
-    <HStack alignItems="center" gap={8}>
+    <HStack alignItems="center" gap={8} data-testid="navbar-tools-right">
       {activeTopicId && <EditModeToggle />}
       <SettingsButton />
     </HStack>

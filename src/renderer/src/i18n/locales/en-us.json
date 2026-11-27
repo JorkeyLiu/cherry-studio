@@ -1035,6 +1035,7 @@
       "estimated_tokens": {
         "tip": "Estimated tokens"
       },
+      "expand": "Expand input",
       "file_error": "Error processing file",
       "file_not_supported": "Model does not support this file type",
       "file_not_supported_count": "{{count}} files are not supported",

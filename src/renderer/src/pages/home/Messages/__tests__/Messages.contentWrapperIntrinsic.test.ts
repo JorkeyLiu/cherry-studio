@@ -28,15 +28,20 @@ describe('content-wrapper layout contract', () => {
     expect(containerIdx).toBeGreaterThan(-1)
     const slice = src.slice(containerIdx, containerIdx + 4000)
     // Same DOM: exactly one layout-only flex wrapper directly under the
-    // container, holding the app-owned older-paging node + Prompt.
+    // container, holding the app-owned older-paging node (the top prompt no
+    // longer renders here).
     expect(slice).toMatch(/display:\s*'flex'/)
-    // Normal flow: DOM order IS visual order, so the oldest content (Prompt and
-    // the older-paging node) comes first and no direction is reversed.
+    // Normal flow: DOM order IS visual order, so the oldest content (the
+    // older-paging node with the message segments) comes first and no
+    // direction is reversed.
     expect(slice).toMatch(/flexDirection:\s*'column'/)
     expect(slice).not.toMatch(/column-reverse/)
     expect(slice).toMatch(/data-older-paging/)
-    expect(slice).toMatch(/<Prompt/)
-    expect(slice.indexOf('<Prompt')).toBeLessThan(slice.indexOf('data-older-paging'))
+    // The top prompt no longer renders: no Prompt node survives in the
+    // wrapper, and the older-paging node (message segments inside) is the
+    // first content.
+    expect(slice).not.toMatch(/<Prompt/)
+    expect(slice.indexOf('data-older-paging')).toBeLessThan(slice.indexOf('renderMessageSegments'))
     // Top-start alignment: no auto block-start margin pushing short content to
     // the end of the scrollport, and no reversed direction either.
     expect(slice).not.toMatch(/marginBlockStart/)

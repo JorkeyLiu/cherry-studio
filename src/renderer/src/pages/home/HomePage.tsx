@@ -1,9 +1,11 @@
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
+import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { useAssistants } from '@renderer/hooks/useAssistant'
+import { useFullscreen } from '@renderer/hooks/useFullscreen'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
-import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
+import { useWorkspaceSidebar } from '@renderer/hooks/useStore'
 import { useActiveTopic } from '@renderer/hooks/useTopic'
 import { NAV_GUTTER_WIDTH_PX } from '@renderer/pages/home/Messages/MessageOutline'
 import {
@@ -17,12 +19,11 @@ import {
   RouteViewportProvider,
   useRouteViewportCommands
 } from '@renderer/pages/home/Messages/routeViewportContext'
-import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import NavigationService from '@renderer/services/NavigationService'
 import { useAppSelector } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import { setActiveTopic as setRuntimeActiveTopic } from '@renderer/store/runtime'
-import { setAssistantsWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
+import { setWorkspaceSidebarWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { selectDefaultTopic } from '@renderer/utils/sort'
@@ -30,17 +31,20 @@ import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@s
 import { AnimatePresence, motion } from 'motion/react'
 import type { Dispatch, FC, SetStateAction } from 'react'
 import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useDispatch } from 'react-redux'
 import { useLocation, useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
 
 import Chat from './Chat'
-import Navbar from './Navbar'
-import HomeTabs from './Tabs'
+import SidebarToggle from './components/SidebarToggle'
+import WorkspaceSidebar from './components/WorkspaceSidebar'
 
 let _activeAssistant: Assistant
 
-// LOCK-002: navigation always renders on the left, topics always on the right.
+// Unified navigation: a single workspace sidebar on the left (assistant
+// switcher + topics + app entries). The right topic panel and the Home top
+// redundant toolbar are removed; Chat owns the single top bar.
 const HomePage: FC = () => {
   const { assistants } = useAssistants()
 
@@ -104,9 +108,10 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
   const location = useLocation()
   const state = location.state
 
-  const { showAssistants, showTopics, messageNavigation } = useSettings()
-  const { setShowAssistants } = useShowAssistants()
-  const { toggleShowTopics } = useShowTopics()
+  const { messageNavigation } = useSettings()
+  const isFullscreen = useFullscreen()
+  const { t } = useTranslation()
+  const { visible, width, toggleVisible } = useWorkspaceSidebar()
   const dispatch = useDispatch()
 
   // Single-owner runtime mirror: the selected topic is owned here
@@ -116,49 +121,45 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
   useEffect(() => {
     dispatch(setRuntimeActiveTopic(activeTopic))
   }, [dispatch, activeTopic])
-  const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
-  const topicListWidth = useAppSelector((s) => s.settings.topicListWidth)
   const { pairedMinPair, windowWidth } = usePairedReadingMin()
   const lastTopicByAssistantRef = useRef<Record<string, string>>({})
   // Departure-freeze command: synchronously snapshots the DISPLAYED (old)
   // route under its own key. Fail-closed by controller ownership/provenance —
   // dirty/owned states preserve the stored snapshot instead of overwriting it.
   const { freezeDisplayed } = useRouteViewportCommands()
-  // Paired chat floor: independent of sidebars (minPair + the pair-axis chrome,
+  // Paired chat floor: independent of the sidebar (minPair + the pair-axis chrome,
   // plus the nav gutter when the navigator is mounted). Window minimum sums
-  // sidebars + the measured fixed chrome + the chat floor — each counted once.
+  // the sidebar + the measured fixed chrome + the chat floor — each counted once.
   const chatColumnMin =
     pairedMinPair > 0 ? pairedMinPair + PAIRED_AXIS_FIXED_PX + (messageNavigation ? NAV_GUTTER_WIDTH_PX : 0) : 0
-  const leftVisibleWidth = showAssistants ? assistantsWidth : 0
-  const rightVisibleWidth = showTopics ? topicListWidth : 0
+  const sidebarVisibleWidth = visible ? width : 0
   // Live window width (resize-subscribed): the drag clamp is a fixed-window
   // budget, never a render-time snapshot.
   const winW = windowWidth
   // Sidebar drag stops at the remaining chat budget: a fixed window can never be
-  // squeezed below the reading minimum by widening a panel.
-  const leftMaxWidth = winW > 0 ? sidebarDragMax(winW, rightVisibleWidth, chatColumnMin) : SIDEBAR_MAX_WIDTH
+  // squeezed below the reading minimum by widening the panel.
+  const sidebarMaxWidth = winW > 0 ? sidebarDragMax(winW, chatColumnMin) : SIDEBAR_MAX_WIDTH
 
-  const handleLeftResizeEnd = useCallback(
-    (width: number) => {
-      dispatch(setAssistantsWidth(width))
+  const handleSidebarResizeEnd = useCallback(
+    (nextWidth: number) => {
+      dispatch(setWorkspaceSidebarWidth(nextWidth))
     },
     [dispatch]
   )
 
+  // Unified sidebar: collapse is fully hidden (no narrow rail), so both
+  // legacy shortcuts map onto the single visibility toggle.
   useShortcut('toggle_show_assistants', () => {
-    if (!showAssistants) {
-      setShowAssistants(true)
-      requestAnimationFrame(() => {
-        void EventEmitter.emit(EVENT_NAMES.SHOW_ASSISTANTS)
-      })
-      return
-    }
-
-    void EventEmitter.emit(EVENT_NAMES.SHOW_ASSISTANTS)
+    toggleVisible()
+  })
+  useShortcut('toggle_show_topics', () => {
+    toggleVisible()
   })
 
-  useShortcut('toggle_show_topics', () => {
-    toggleShowTopics()
+  // Restored from the removed Home top bar: global search lives on the home
+  // route only (KnowledgePage registers its own dialog-scoped one).
+  useShortcut('search_message', () => {
+    void SearchPopup.show()
   })
 
   const setActiveAssistant = useCallback(
@@ -214,21 +215,21 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
   }, [state])
 
   // Paired minimum owner: the derived floor is pushed to the single native
-  // writer whenever the visible sidebars or the chat floor change. Updates must
+  // writer whenever the visible sidebar or the chat floor change. Updates must
   // NOT reset the floor first: a reset restores the default policy minimum and
-  // grows the window out of the closed-panels (520) mode. Only a true unmount
+  // grows the window out of the closed-sidebar (520) mode. Only a true unmount
   // returns the window to the default policy.
   useEffect(() => {
-    // LOCK-002: topics always render on the right; the window can shrink only
-    // when both side panels are hidden. Paired minimum lifts the floor: the
-    // required width is max(existing policy, measured fixed chrome + visible
-    // sidebars + the derived reading minimum). The chat floor itself stays
-    // independent of sidebars; closing panels lowers the window.
-    const canMinimize = !showAssistants && !showTopics
+    // Unified navigation: the window can shrink only when the single sidebar
+    // is hidden. Paired minimum lifts the floor: the required width is
+    // max(existing policy, measured fixed chrome + visible sidebar + the
+    // derived reading minimum). The chat floor itself stays independent of
+    // the sidebar; hiding the panel lowers the window.
+    const canMinimize = !visible
     const policy = canMinimize ? SECOND_MIN_WINDOW_WIDTH : MIN_WINDOW_WIDTH
-    const required = requiredWindowWidth(policy, leftVisibleWidth, rightVisibleWidth, chatColumnMin)
+    const required = requiredWindowWidth(policy, sidebarVisibleWidth, chatColumnMin)
     void window.api.window.setMinimumSize(Math.ceil(required), MIN_WINDOW_HEIGHT)
-  }, [showAssistants, showTopics, leftVisibleWidth, rightVisibleWidth, chatColumnMin])
+  }, [visible, sidebarVisibleWidth, chatColumnMin])
 
   useEffect(() => {
     return () => {
@@ -237,70 +238,85 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
   }, [])
 
   return (
-    <>
-      <Navbar
-        activeAssistant={activeAssistant}
-        activeTopic={activeTopic}
-        setActiveTopic={setActiveTopic}
-        setActiveAssistant={setActiveAssistant}
-        position="left"
-      />
-      <ContentContainer id="content-container">
-        <AnimatePresence initial={false}>
-          {showAssistants && (
-            <ErrorBoundary>
-              <motion.div
-                initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 'var(--assistants-width, 275px)', opacity: 1 }}
-                exit={{ width: 0, opacity: 0 }}
-                transition={{ duration: 0.3, ease: 'easeInOut' }}
-                style={{ overflow: 'hidden' }}>
-                <HomeTabs
-                  activeAssistant={activeAssistant}
-                  activeTopic={activeTopic}
-                  setActiveAssistant={setActiveAssistant}
-                  setActiveTopic={setActiveTopic}
-                  position="left"
-                />
-              </motion.div>
-            </ErrorBoundary>
-          )}
-        </AnimatePresence>
-        {showAssistants && (
-          <ResizableHandle
-            cssVar="--assistants-width"
-            minWidth={SIDEBAR_MIN_WIDTH}
-            maxWidth={leftMaxWidth}
-            onResizeEnd={handleLeftResizeEnd}
-            side="left"
-          />
+    <ContentContainer id="content-container">
+      <AnimatePresence initial={false}>
+        {visible && (
+          <ErrorBoundary>
+            <motion.div
+              initial={{ width: 0, opacity: 0 }}
+              animate={{
+                width: 'var(--workspace-sidebar-width, 300px)',
+                opacity: 1
+              }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ duration: 0.3, ease: 'easeInOut' }}
+              style={{ overflow: 'hidden' }}>
+              <WorkspaceSidebar
+                activeAssistant={activeAssistant}
+                activeTopic={activeTopic}
+                setActiveAssistant={setActiveAssistant}
+                setActiveTopic={setActiveTopic}
+              />
+            </motion.div>
+          </ErrorBoundary>
         )}
-        <ErrorBoundary>
-          <Chat
-            assistant={activeAssistant}
-            activeTopic={activeTopic}
-            setActiveTopic={setActiveTopic}
-            setActiveAssistant={setActiveAssistant}
-            chatColumnMin={chatColumnMin}
-          />
-        </ErrorBoundary>
-      </ContentContainer>
-    </>
+      </AnimatePresence>
+      {visible && (
+        <ResizableHandle
+          cssVar="--workspace-sidebar-width"
+          minWidth={SIDEBAR_MIN_WIDTH}
+          maxWidth={sidebarMaxWidth}
+          onResizeEnd={handleSidebarResizeEnd}
+          side="left"
+          testId="workspace-sidebar-handle"
+        />
+      )}
+      <ErrorBoundary>
+        <Chat
+          assistant={activeAssistant}
+          activeTopic={activeTopic}
+          setActiveTopic={setActiveTopic}
+          setActiveAssistant={setActiveAssistant}
+          chatColumnMin={chatColumnMin}
+        />
+      </ErrorBoundary>
+      {/* Single sidebar toggle: one control sliding with the panel. Expanded
+          it sits at the sidebar titlebar's right edge (the former collapse
+          slot); hidden it rests right of the native traffic lights. Position
+          derives from the live sidebar width var so it tracks drags, with the
+          same 0.3s ease as the panel — never a second show/hide button.
+          Rendered after Chat on purpose: Electron applies the collected
+          native region vector in order (union drag, subtract no-drag), so the
+          button's no-drag entry must sort after the chat drag entry it
+          floats over. Renderer collection order is version-dependent and is
+          not asserted here; z-index cannot repair a native overlap. Never
+          introduce another drag rect over this button later in the tree. */}
+      <SidebarToggle
+        visible={visible}
+        isFullscreen={isFullscreen}
+        title={t(visible ? 'navbar.hide_sidebar' : 'navbar.show_sidebar')}
+        onToggle={toggleVisible}
+      />
+    </ContentContainer>
   )
 }
 
 const Container = styled.div`
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  max-width: calc(100vw - var(--sidebar-width));
-`
+   display: flex;
+   flex: 1;
+   flex-direction: column;
+   min-height: 0;
+   min-width: 0;
+ `
 
 const ContentContainer = styled.div`
-  display: flex;
-  flex: 1;
-  flex-direction: row;
-  overflow: hidden;
-`
+   position: relative;
+   display: flex;
+   flex: 1;
+   flex-direction: row;
+   min-height: 0;
+   min-width: 0;
+   overflow: hidden;
+ `
 
 export default HomePage

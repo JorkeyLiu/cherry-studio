@@ -1,7 +1,7 @@
 import { styled } from 'styled-components'
 
 const NavbarIcon = styled.div`
-  -webkit-app-region: none;
+  -webkit-app-region: no-drag;
   border-radius: 8px;
   height: 30px;
   padding: 0 7px;

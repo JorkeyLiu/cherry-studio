@@ -8,11 +8,20 @@ import { describe, expect, it } from 'vitest'
 import settingsReducer, {
   initialState,
   normalizeSidebarWidth,
+  normalizeWorkspaceSidebarWidth,
+  resolveWorkspaceSidebarFromLegacy,
   setAssistantsWidth,
   setTopicListWidth,
+  setWorkspaceSidebarCollapsed,
+  setWorkspaceSidebarVisible,
+  setWorkspaceSidebarWidth,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
-  SIDEBAR_MIN_WIDTH
+  SIDEBAR_MIN_WIDTH,
+  toggleWorkspaceSidebarCollapsed,
+  toggleWorkspaceSidebarVisible,
+  WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+  WORKSPACE_SIDEBAR_RAIL_WIDTH
 } from '../settings'
 
 describe('sidebar width bounds', () => {
@@ -38,6 +47,49 @@ describe('sidebar width bounds', () => {
   it('falls back to the default for non-numeric saved widths', () => {
     expect(normalizeSidebarWidth(undefined)).toBe(SIDEBAR_DEFAULT_WIDTH)
     expect(normalizeSidebarWidth(Number.NaN)).toBe(SIDEBAR_DEFAULT_WIDTH)
+  })
+
+  it('unifies new installs on the workspace defaults (rail width is deprecated persist-compat only)', () => {
+    expect(WORKSPACE_SIDEBAR_DEFAULT_WIDTH).toBe(300)
+    // Deprecated inert export kept for persist compatibility: the narrow
+    // rail is removed (collapse fully hides), no production rail branch
+    // may read it. Value intentionally unasserted as a layout contract.
+    expect(WORKSPACE_SIDEBAR_RAIL_WIDTH).toBe(64)
+    expect(initialState.workspaceSidebarVisible).toBe(true)
+    expect(initialState.workspaceSidebarCollapsed).toBe(false)
+    expect(initialState.workspaceSidebarWidth).toBe(300)
+  })
+
+  it('normalizes the unified width with the shared 220–600 clamp', () => {
+    expect(normalizeWorkspaceSidebarWidth(150)).toBe(220)
+    expect(normalizeWorkspaceSidebarWidth(300)).toBe(300)
+    expect(normalizeWorkspaceSidebarWidth(900)).toBe(SIDEBAR_MAX_WIDTH)
+    expect(normalizeWorkspaceSidebarWidth(undefined)).toBe(WORKSPACE_SIDEBAR_DEFAULT_WIDTH)
+    expect(normalizeWorkspaceSidebarWidth(Number.NaN)).toBe(WORKSPACE_SIDEBAR_DEFAULT_WIDTH)
+  })
+
+  it('clamps workspace resize dispatches; visibility toggles, collapse reducers stay inert', () => {
+    expect(settingsReducer(initialState, setWorkspaceSidebarWidth(180)).workspaceSidebarWidth).toBe(220)
+    expect(settingsReducer(initialState, setWorkspaceSidebarWidth(350)).workspaceSidebarWidth).toBe(350)
+    expect(settingsReducer(initialState, setWorkspaceSidebarVisible(false)).workspaceSidebarVisible).toBe(false)
+    expect(settingsReducer(initialState, toggleWorkspaceSidebarVisible()).workspaceSidebarVisible).toBe(false)
+    // Deprecated inert: reducers persist the field for compatibility but no
+    // production branch reads it (visibility is the single runtime truth).
+    expect(settingsReducer(initialState, setWorkspaceSidebarCollapsed(true)).workspaceSidebarCollapsed).toBe(true)
+    expect(settingsReducer(initialState, toggleWorkspaceSidebarCollapsed()).workspaceSidebarCollapsed).toBe(true)
+  })
+
+  it('maps legacy persisted fields onto the unified workspace state', () => {
+    expect(resolveWorkspaceSidebarFromLegacy({ showAssistants: false })).toEqual({
+      visible: false,
+      width: 300
+    })
+    expect(resolveWorkspaceSidebarFromLegacy({ showTopics: false, assistantsWidth: 350 })).toEqual({
+      visible: false,
+      width: 350
+    })
+    expect(resolveWorkspaceSidebarFromLegacy({ topicListWidth: 180 }).width).toBe(220)
+    expect(resolveWorkspaceSidebarFromLegacy({})).toEqual({ visible: true, width: 300 })
   })
 
   it('clamps resize dispatches through both reducers', () => {

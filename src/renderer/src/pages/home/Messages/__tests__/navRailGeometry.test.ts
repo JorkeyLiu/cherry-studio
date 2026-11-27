@@ -9,6 +9,7 @@ import {
   NAV_RAIL_BODY_INLINE_PAD_PX,
   NAV_RAIL_DOT_HALF_PX,
   resolveTopicSegmentDrawerAnchorLeft,
+  resolveTopicSegmentDrawerCanvasLeft,
   TOPIC_SEGMENT_DRAWER_NAV_ALIGN_SHIFT_PX
 } from '../navRailGeometry'
 
@@ -42,5 +43,10 @@ describe('navRailGeometry shared axis', () => {
 
   it('moves the anchor left (toward the rail) while navigation is on', () => {
     expect(resolveTopicSegmentDrawerAnchorLeft(true)).toBeLessThan(resolveTopicSegmentDrawerAnchorLeft(false))
+  })
+
+  it('places the fixed canvas drawer trigger on the rail axis when navigation is on', () => {
+    expect(resolveTopicSegmentDrawerCanvasLeft(true) + DRAWER_TRIGGER_HALF_PX).toBe(NAV_RAIL_AXIS_PX)
+    expect(resolveTopicSegmentDrawerCanvasLeft(false)).toBe(INPUTBAR_OUTER_SIDE_PAD_PX)
   })
 })

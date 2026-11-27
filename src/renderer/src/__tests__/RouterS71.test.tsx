@@ -28,7 +28,6 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('@renderer/databases', () => ({}))
-vi.mock('@renderer/components/app/Sidebar', () => ({ default: () => <div data-testid="sidebar">Sidebar</div> }))
 vi.mock('@renderer/handler/NavigationHandler', () => ({ default: () => null }))
 
 // Mock page modules as simple components with distinct testids

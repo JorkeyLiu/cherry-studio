@@ -59,9 +59,8 @@ const NavbarContainer = styled.div<{ $isFullScreen: boolean }>`
   flex-direction: row;
   min-height: ${({ $isFullScreen }) => (!$isFullScreen && isMac ? 'env(titlebar-area-height)' : 'var(--navbar-height)')};
   max-height: var(--navbar-height);
-  margin-left: ${isMac ? 'calc(var(--sidebar-width) * -1 + 2px)' : 0};
-  padding-left: ${({ $isFullScreen }) =>
-    isMac ? ($isFullScreen ? 'var(--sidebar-width)' : 'env(titlebar-area-x)') : 0};
+  margin-left: 0;
+  padding-left: ${({ $isFullScreen }) => (isMac ? ($isFullScreen ? 0 : 'env(titlebar-area-x)') : 0)};
   -webkit-app-region: drag;
 `
 
@@ -87,7 +86,7 @@ const NavbarCenterContainer = styled.div`
 `
 
 const NavbarRightContainer = styled.div<{ $isFullscreen: boolean }>`
-  min-width: var(--topic-list-width);
+  min-width: 0;
   display: flex;
   align-items: center;
   padding: 0 12px;

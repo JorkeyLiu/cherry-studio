@@ -41,9 +41,11 @@ export const PAIRED_AXIS_FIXED_PX = 47
 
 /**
  * Fixed non-article chrome measured once against the real window: navbar +
- * scroll-container gutters + both resizer handles + the message scrollbar.
- * window = PAIRED_APP_CHROME_PX + sidebars + chat column, so the chat minimum
- * never double-counts these (measured 89px at 1440 and 1790).
+ * scroll-container gutters + the single workspace resizer handle + the
+ * message scrollbar. The 89px budget is kept conservative (it still covers
+ * the retired second handle) so a fixed window is never squeezed below the
+ * reading minimum: window = PAIRED_APP_CHROME_PX + sidebar + chat column,
+ * the chat minimum never double-counts these.
  */
 export const PAIRED_APP_CHROME_PX = 89
 
@@ -120,29 +122,27 @@ export function pairedChatColumnMin(minPair: number, navGutterPx = 0): number {
   return minPair + PAIRED_AXIS_FIXED_PX + (navGutterPx > 0 ? navGutterPx : 0)
 }
 
-/** Required window width: max(existing policy, chrome + sidebars + reading). */
+/** Required window width: max(existing policy, chrome + sidebar + reading). */
 export function requiredWindowWidth(
   policyWidth: number,
-  leftSidebar: number,
-  rightSidebar: number,
+  sidebar: number,
   chatColumnMin: number,
   appChrome = PAIRED_APP_CHROME_PX
 ): number {
-  return Math.max(policyWidth, appChrome + leftSidebar + rightSidebar + chatColumnMin)
+  return Math.max(policyWidth, appChrome + sidebar + chatColumnMin)
 }
 
 /**
  * Sidebar drag clamp in a fixed window: stop before squeezing the chat column.
- * appChrome already counts both resizer handles, so nothing is added twice.
+ * appChrome already counts the single resizer handle, so nothing is added twice.
  */
 export function sidebarDragMax(
   windowWidth: number,
-  otherSidebar: number,
   chatColumnMin: number,
   absoluteMax = 600,
   appChrome = PAIRED_APP_CHROME_PX
 ): number {
-  return Math.min(absoluteMax, windowWidth - appChrome - otherSidebar - chatColumnMin)
+  return Math.min(absoluteMax, windowWidth - appChrome - chatColumnMin)
 }
 
 /** Generic long-bubble cap mirror (browser resolves % against column width). */

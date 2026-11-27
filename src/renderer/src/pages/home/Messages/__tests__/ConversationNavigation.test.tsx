@@ -1322,14 +1322,14 @@ describe('ConversationNavigation fork markers', () => {
    */
   const revealedForkText = (container: HTMLElement): string => {
     const body = outlineBody(container.querySelector('[data-testid="conversation-navigation"]'))
-    // The divider carries no painted text in either state (its one child is
-    // the 1px rule), so the switch mounts and unmounts nothing.
+    // The marker's one child is either the current route's 1px rule or the
+    // available fork's three dots; neither paints the caller's label.
     const collapsed = forkRows()[0]
     expect(collapsed.children).toHaveLength(1)
     expect(collapsed.textContent).toBe('')
     fireEvent.mouseEnter(body)
     const expanded = forkRows()[0]
-    // One textless rule in both states; the title is what names the fork.
+    // The same textless marker stays mounted in both states; title names it.
     expect(expanded.children).toHaveLength(1)
     expect(expanded.textContent).toBe('')
     return expanded.getAttribute('title') ?? ''
@@ -1339,6 +1339,7 @@ describe('ConversationNavigation fork markers', () => {
     seedForkThread()
     const taken = wire('a2', { kind: 'message', messageId: 'u2' }, { id: 'br-taken', name: 'Rivers branch' })
     // The viewed route is main → br-taken, so that is the branch at this fork.
+    mocks.setActiveBranchId('br-taken')
     branchTree.setPath([taken])
     branchTree.set(new Map([['a2', [taken]]]) as Map<string, unknown[]>)
 
@@ -1348,8 +1349,13 @@ describe('ConversationNavigation fork markers', () => {
 
     expect(forkRows()).toHaveLength(1)
     expect(revealedForkText(container)).toBe('Rivers branch')
+    const fork = forkRows()[0]
+    expect(fork.getAttribute('data-fork-state')).toBe('taken')
+    expect(fork.querySelector('[data-fork-line]')?.getAttribute('data-fork-line')).toBe('dashed')
+    expect(fork.querySelectorAll('[data-fork-dot]')).toHaveLength(0)
+    expect(fork.querySelector('[data-fork-endpoint]')).toBeNull()
     // The marker is still a separate row after the message row, not that row.
-    expect(forkRows()[0].previousElementSibling).toBe(row)
+    expect(fork.previousElementSibling).toBe(row)
   })
 
   it('names the sibling the current route travels, never another branch of the same fork', async () => {
@@ -1371,6 +1377,9 @@ describe('ConversationNavigation fork markers', () => {
     const text = revealedForkText(container)
     expect(text).toBe('Beta branch')
     expect(text).not.toBe('Alpha branch')
+    const fork = forkRows()[0]
+    expect(fork.getAttribute('data-fork-state')).toBe('taken')
+    expect(fork.querySelector('[data-fork-line]')?.getAttribute('data-fork-line')).toBe('dashed')
   })
 
   it('falls back to the flow children-here count when the route took no child at the fork', async () => {
@@ -1389,7 +1398,12 @@ describe('ConversationNavigation fork markers', () => {
     expect(forkRows()).toHaveLength(1)
     // The shared label rule, resolved through i18n: one child at this fork.
     expect(revealedForkText(container)).toBe('1 branches here')
-    expect(forkRows()[0].previousElementSibling).toBe(row)
+    const fork = forkRows()[0]
+    expect(fork.getAttribute('data-fork-state')).toBe('available')
+    expect(fork.querySelector('[data-fork-line]')?.getAttribute('data-fork-line')).toBe('dots')
+    expect(fork.querySelectorAll('[data-fork-dot]')).toHaveLength(3)
+    expect(fork.querySelector('[data-fork-endpoint]')).toBeNull()
+    expect(fork.previousElementSibling).toBe(row)
   })
 })
 

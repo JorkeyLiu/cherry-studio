@@ -1,6 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 const LONG_ID = 'a-very-long-model-identifier-that-must-not-push-the-popover-out-of-bounds-2025-01-01'
@@ -43,6 +42,8 @@ const mockProviders = [
   }
 ]
 
+const updateAssistantMock = vi.fn()
+
 vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
   default: ({ model, provider, size }: any) => (
     <div data-testid={`avatar-${model.id}`} data-provider-id={provider?.id} data-size={size} />
@@ -50,6 +51,9 @@ vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
 }))
 vi.mock('@renderer/hooks/useProvider', () => ({
   useProviders: () => ({ providers: mockProviders })
+}))
+vi.mock('@renderer/hooks/useAssistant', () => ({
+  useAssistant: () => ({ updateAssistant: updateAssistantMock })
 }))
 vi.mock('@renderer/services/ModelService', () => ({
   getModelUniqId: (m: any) => `${m.provider}::${m.id}`
@@ -67,24 +71,18 @@ vi.mock('react-i18next', async (importOriginal) => {
 })
 vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }))
 vi.mock('@renderer/pages/home/Inputbar/components/ToolPopover', () => ({
-  default: ({ content }: any) => <div>{content}</div>
+  default: ({ content, children }: any) => (
+    <div>
+      {children}
+      {content}
+    </div>
+  )
 }))
-vi.mock('antd', async () => {
-  const actual = await vi.importActual<any>('antd')
-  return { ...actual, Tooltip: ({ children }: any) => <div>{children}</div> }
-})
-
 import MentionModelsButton from '../MentionModelsButton'
 
-const renderButton = (mentionedModels: any[] = [], setMentionedModels = vi.fn()) =>
-  render(
-    <MentionModelsButton
-      mentionedModels={mentionedModels}
-      setMentionedModels={setMentionedModels}
-      files={[]}
-      setText={vi.fn()}
-    />
-  )
+const assistantWith = (model: any = null) => ({ id: 'assistant-1', name: 'A', model }) as any
+
+const renderButton = (model: any = null) => render(<MentionModelsButton assistant={assistantWith(model)} />)
 
 const rowsFor = (modelId: string) =>
   Array.from(document.querySelectorAll<HTMLElement>(`[data-testid="mention-model-${modelId}"]`))
@@ -101,7 +99,7 @@ const nameLineOf = (row: HTMLElement, name: string): HTMLElement => {
   return nameLine
 }
 
-describe('MentionModelsButton provider-grouped two-line rows', () => {
+describe('MentionModelsButton single-model selector', () => {
   describe('provider group headings', () => {
     it('renders one heading per non-empty provider, in provider order', () => {
       renderButton()
@@ -120,8 +118,8 @@ describe('MentionModelsButton provider-grouped two-line rows', () => {
     })
 
     it('headings are not selectable rows', () => {
-      const setMentionedModels = vi.fn()
-      renderButton([], setMentionedModels)
+      updateAssistantMock.mockClear()
+      renderButton()
       const heading = screen.getByTestId('mention-provider-group-openai')
 
       expect(heading.hasAttribute('data-selected')).toBe(false)
@@ -131,7 +129,7 @@ describe('MentionModelsButton provider-grouped two-line rows', () => {
       expect(getComputedStyle(heading).pointerEvents).toBe('none')
 
       fireEvent.click(heading)
-      expect(setMentionedModels).not.toHaveBeenCalled()
+      expect(updateAssistantMock).not.toHaveBeenCalled()
     })
   })
 
@@ -189,115 +187,19 @@ describe('MentionModelsButton provider-grouped two-line rows', () => {
       expect(avatar.getAttribute('data-provider-id')).toBe('openai')
     })
 
-    it('does not render any clear action row inside the model list', () => {
-      renderButton()
+    it('renders no clear action anywhere in the single-select surface', () => {
+      renderButton({ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' })
+      expect(screen.queryByTestId('mention-clear-all')).toBeNull()
+      expect(screen.queryByText('settings.input.clear.all')).toBeNull()
       const list = screen.getByTestId('mention-model-list')
-      expect(list.querySelector('[data-testid="mention-clear-all"]')).toBeNull()
-      // 列表内不存在承载“清除”文案的可选行（无占位行、无破坏性图标行）
       expect(list.textContent).not.toContain('settings.input.clear.all')
       expect(list.textContent).not.toContain('settings.input.clear.models')
     })
-
-    it('renders no clear action at all while nothing is mentioned', () => {
-      renderButton()
-      expect(screen.queryByTestId('mention-clear-all')).toBeNull()
-      expect(screen.queryByText('settings.input.clear.all')).toBeNull()
-    })
   })
 
-  describe('header clear action', () => {
-    const SELECTED = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' }
-
-    it('sits to the right of the popover title, outside the scrollable list', () => {
-      renderButton([SELECTED])
-      const clear = screen.getByTestId('mention-clear-all')
-      const title = screen.getByText('assistants.presets.edit.model.select.title')
-      const header = title.parentElement as HTMLElement
-      const list = screen.getByTestId('mention-model-list')
-
-      // 与标题同处一行（即弹层头部），并且位于标题右侧
-      expect(header.contains(clear)).toBe(true)
-      expect(title.compareDocumentPosition(clear) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-      // 头部在可滚动列表之外，且排在列表之前
-      expect(list.contains(clear)).toBe(false)
-      expect(header.contains(list)).toBe(false)
-      expect(header.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    })
-
-    it('is a keyboard-accessible native button with the localized short label and clear tooltip', () => {
-      renderButton([SELECTED])
-      const clear = screen.getByTestId('mention-clear-all')
-
-      expect(clear.tagName).toBe('BUTTON')
-      expect(clear.getAttribute('type')).toBe('button')
-      expect(clear.textContent).toBe('settings.input.clear.all')
-      // 提示语义复用既有的“清除@的所有模型”
-      expect(clear.getAttribute('aria-label')).toBe('settings.input.clear.models')
-      // 非阻塞式语义按钮：未使用 disabled/aria-hidden，参与 tab 焦点链
-      expect(clear.hasAttribute('disabled')).toBe(false)
-      expect(clear.getAttribute('tabindex')).not.toBe('-1')
-    })
-
-    it('clears only the mentioned models on click and keeps the popover usable', async () => {
-      const user = userEvent.setup()
-      const setMentionedModels = vi.fn()
-      renderButton([SELECTED], setMentionedModels)
-
-      await user.click(screen.getByTestId('mention-clear-all'))
-
-      expect(setMentionedModels).toHaveBeenCalledTimes(1)
-      expect(setMentionedModels).toHaveBeenCalledWith([])
-      // 列表内容未被替换或关闭：provider 分组、模型行与“添加模型”入口仍在
-      expect(screen.getByTestId('mention-provider-group-openai')).toBeInTheDocument()
-      expect(screen.getByTestId('mention-model-gpt-4o-2024-08-06')).toBeInTheDocument()
-      expect(screen.getByTestId('mention-add-model')).toBeInTheDocument()
-    })
-
-    it('can be activated from the keyboard', async () => {
-      const user = userEvent.setup()
-      const setMentionedModels = vi.fn()
-      renderButton([SELECTED], setMentionedModels)
-
-      await user.tab()
-      expect(screen.getByTestId('mention-clear-all')).toHaveFocus()
-      await user.keyboard('{Enter}')
-
-      expect(setMentionedModels).toHaveBeenCalledWith([])
-    })
-
-    it('appears only while models are mentioned and keeps selection usable after clearing', async () => {
-      const user = userEvent.setup()
-
-      const Harness = () => {
-        const [models, setModels] = useState<any[]>([])
-        return (
-          <MentionModelsButton mentionedModels={models} setMentionedModels={setModels} files={[]} setText={vi.fn()} />
-        )
-      }
-
-      render(<Harness />)
-      expect(screen.queryByTestId('mention-clear-all')).toBeNull()
-
-      await user.click(screen.getByTestId('mention-model-gpt-4o-2024-08-06'))
-      expect(screen.getByTestId('mention-clear-all')).toBeInTheDocument()
-      expect(rowsFor('gpt-4o-2024-08-06')[0].getAttribute('data-selected')).toBe('true')
-
-      await user.click(screen.getByTestId('mention-clear-all'))
-      // 全部选中标记被移除，清空入口随之消失
-      expect(rowsFor('gpt-4o-2024-08-06')[0].getAttribute('data-selected')).toBe('false')
-      expect(document.body.textContent).not.toContain('✓')
-      expect(screen.queryByTestId('mention-clear-all')).toBeNull()
-
-      // 清空后仍可继续选择
-      await user.click(rowsFor('gpt-4o')[0])
-      expect(rowsFor('gpt-4o')[0].getAttribute('data-selected')).toBe('true')
-      expect(screen.getByTestId('mention-clear-all')).toBeInTheDocument()
-    })
-  })
-
-  describe('selection identity is the full {id, provider}', () => {
-    it('marks only the row whose provider+id matches, not a same-name same-id model of another provider', () => {
-      renderButton([{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' }])
+  describe('single current-model selection', () => {
+    it('marks only the row matching the current model {id, provider}', () => {
+      renderButton({ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' })
       const [openaiRow, azureRow] = rowsFor('gpt-4o')
 
       expect(openaiRow.getAttribute('data-provider-id')).toBe('openai')
@@ -316,27 +218,64 @@ describe('MentionModelsButton provider-grouped two-line rows', () => {
       expect(screen.getAllByText('GPT-4o').length).toBeGreaterThanOrEqual(2)
     })
 
-    it('adds the clicked model of a different provider instead of toggling off the same id', async () => {
+    it('persists the clicked model as the single current model', async () => {
       const user = userEvent.setup()
+      updateAssistantMock.mockClear()
+      renderButton()
 
-      const Harness = () => {
-        const [models, setModels] = useState<any[]>([
-          { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' }
-        ])
-        return (
-          <MentionModelsButton mentionedModels={models} setMentionedModels={setModels} files={[]} setText={vi.fn()} />
-        )
-      }
+      await user.click(rowsFor('gpt-4o')[1])
 
-      render(<Harness />)
-      const azureRow = rowsFor('gpt-4o')[1]
-      expect(azureRow.getAttribute('data-provider-id')).toBe('azure')
+      expect(updateAssistantMock).toHaveBeenCalledTimes(1)
+      expect(updateAssistantMock).toHaveBeenCalledWith({
+        model: { id: 'gpt-4o', name: 'GPT-4o', provider: 'azure', group: 'default' }
+      })
+    })
 
-      await user.click(azureRow)
+    describe('compact trigger', () => {
+      it('shows the current model name with avatar and chevron, not the @ icon', () => {
+        renderButton({ id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' })
+        const trigger = within(screen.getByTestId('mention-models-button'))
+        expect(trigger.getByText('GPT-4o')).toBeInTheDocument()
+        expect(trigger.getByTestId('avatar-gpt-4o-2024-08-06')).toBeInTheDocument()
+        expect(trigger.queryByText('@')).toBeNull()
+        expect(screen.queryByText('@')).toBeNull()
+      })
 
-      const rows = rowsFor('gpt-4o')
-      expect(rows).toHaveLength(2)
-      expect(rows.every((row) => row.getAttribute('data-selected') === 'true')).toBe(true)
+      it('truncates the trigger name line for long model names', () => {
+        renderButton({ id: 'gpt-4o', name: 'gpt-4o', provider: 'openai', group: 'default' })
+        const trigger = within(screen.getByTestId('mention-models-button'))
+        const nameLine = trigger.getByText('gpt-4o')
+        expect(nameLine.className).toContain('truncate')
+      })
+
+      it('carries no duplicate tooltip repeating the visible model name', () => {
+        renderButton({ id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' })
+        const button = screen.getByTestId('mention-models-button')
+        // the name is already visible text; neither an antd Tooltip nor a
+        // native title may repeat it on hover
+        expect(button.getAttribute('title')).toBeNull()
+        expect(button.getAttribute('aria-label')).toBe('assistants.presets.edit.model.select.title')
+      })
+
+      it('shows the select placeholder with no avatar when no model is set', () => {
+        renderButton()
+        const trigger = within(screen.getByTestId('mention-models-button'))
+        expect(trigger.getByText('assistants.presets.edit.model.select.title')).toBeInTheDocument()
+        expect(trigger.queryByTestId(/^avatar-/)).toBeNull()
+      })
+    })
+
+    it('selecting another row replaces the current model instead of accumulating', async () => {
+      const user = userEvent.setup()
+      updateAssistantMock.mockClear()
+      renderButton({ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' })
+
+      await user.click(screen.getByTestId('mention-model-gpt-4o-2024-08-06'))
+
+      expect(updateAssistantMock).toHaveBeenCalledTimes(1)
+      expect(updateAssistantMock).toHaveBeenCalledWith({
+        model: { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' }
+      })
     })
   })
 })

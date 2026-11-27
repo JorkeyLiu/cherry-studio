@@ -78,6 +78,9 @@ vi.mock('@renderer/hooks/useSettings', () => ({
 vi.mock('@renderer/hooks/useStore', () => ({
   useShowTopics: () => ({ showTopics: false })
 }))
+vi.mock('@renderer/hooks/useFullscreen', () => ({
+  useFullscreen: () => false
+}))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
   useLoadedTopicMessages: () => hoisted.stableMsgs
@@ -201,6 +204,10 @@ vi.mock('./Messages/ConversationNavigation', () => ({
     hoisted.navTelemetry.renders += 1
     return null
   }
+}))
+
+vi.mock('./Messages/TopicSegmentDrawer', () => ({
+  default: () => null
 }))
 
 vi.mock('./Messages/Messages', () => {

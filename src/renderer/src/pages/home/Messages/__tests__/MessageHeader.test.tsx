@@ -90,6 +90,7 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
   useTopicSegments: () => ({ isMessageInSegment: isMessageInSegmentMock })
 }))
 
+import { UserAvatar } from '@renderer/config/env'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { useLayoutEffect, useRef } from 'react'
@@ -274,7 +275,6 @@ describe('MessageHeader', () => {
     const header = container.querySelector('.message-header') as HTMLElement
     expect(ownRules(header).some((rule) => rule.includes('var(--seg-head-pill-w'))).toBe(false)
   })
-
   it('case-sensitive: "GPT-4o" vs "gpt-4o" still name-only', () => {
     const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
@@ -284,5 +284,52 @@ describe('MessageHeader', () => {
     )
     expect(titleEl).not.toBeNull()
     expect(titleEl?.getAttribute('title')).not.toContain('gpt-4o')
+  })
+
+  it('renders the neutral default avatar for a user message without a custom avatar', () => {
+    const previous = mocks.avatar
+    mocks.avatar = ''
+    try {
+      const message = makeMessage('user')
+      const { container } = render(<MessageHeader assistant={assistant} message={message} topic={topic} />)
+      expect(screen.getByTestId('message-user-default-avatar')).toBeInTheDocument()
+      expect(container.querySelector('img')).toBeNull()
+    } finally {
+      mocks.avatar = previous
+    }
+  })
+
+  it('renders the neutral default avatar for the bundled default asset (user message)', () => {
+    const previous = mocks.avatar
+    mocks.avatar = UserAvatar as unknown as string
+    try {
+      const message = makeMessage('user')
+      const { container } = render(<MessageHeader assistant={assistant} message={message} topic={topic} />)
+      expect(screen.getByTestId('message-user-default-avatar')).toBeInTheDocument()
+      expect(container.querySelector(`img[src="${UserAvatar}"]`)).toBeNull()
+    } finally {
+      mocks.avatar = previous
+    }
+  })
+
+  it('keeps a custom user avatar image on the image path', () => {
+    const message = makeMessage('user')
+    const { container } = render(<MessageHeader assistant={assistant} message={message} topic={topic} />)
+    expect(screen.queryByTestId('message-user-default-avatar')).toBeNull()
+    expect(container.querySelector('img[src="https://avatar.example/1.png"]')).not.toBeNull()
+  })
+
+  it('leaves assistant avatars untouched when the user avatar is the default', () => {
+    const previous = mocks.avatar
+    mocks.avatar = ''
+    try {
+      const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
+      const message = makeMessage('assistant', { model } as any)
+      render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
+      expect(screen.getByTestId('model-avatar')).toBeInTheDocument()
+      expect(screen.queryByTestId('message-user-default-avatar')).toBeNull()
+    } finally {
+      mocks.avatar = previous
+    }
   })
 })

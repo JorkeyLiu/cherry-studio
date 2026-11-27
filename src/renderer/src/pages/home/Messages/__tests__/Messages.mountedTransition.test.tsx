@@ -1239,7 +1239,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     expect(onFirstUpdate).toHaveBeenCalledTimes(1)
   })
 
-  it('renders child components (MessageGroup, Prompt, etc.)', () => {
+  it('renders child components (MessageGroup, etc.; the assistant Prompt moved out of the chat column)', () => {
     const topicA = makeTopic('topic-a')
     const assistant = makeAssistant()
 
@@ -1256,7 +1256,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // Older paging is app-owned: the layout-only wrapper (not an external
     // scroll library) wraps the context menu under the #messages host.
     expect(screen.getByTestId('message-context-menu')).toBeTruthy()
-    expect(screen.getByTestId('prompt')).toBeTruthy()
+    // The assistant-prompt welcome block no longer renders in the chat
+    // column (it moved out of Chat); the mock stays registered but unused.
+    expect(screen.queryByTestId('prompt')).toBeNull()
     expect(document.querySelector('#messages [data-older-paging="app-owned"]')).not.toBeNull()
   })
 

@@ -10,7 +10,9 @@ import {
   buildBranchTreeIndex,
   planBranchPopoverFit
 } from '@renderer/pages/home/Messages/branchSelector/branchTreeModel'
+import { orderBranchTreeIndexByAnchorRanks } from '@renderer/pages/home/Messages/branchSelector/branchTreeOrdering'
 import { BranchTreePanel } from '@renderer/pages/home/Messages/branchSelector/BranchTreePanel'
+import { useBranchAnchorRanks } from '@renderer/pages/home/Messages/branchSelector/useBranchAnchorRanks'
 import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { useAppSelector } from '@renderer/store'
@@ -21,9 +23,6 @@ import { GitBranch } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
-
-import SelectModelButton from '../../SelectModelButton'
-import Tools from '../Tools'
 
 type TopicContentProps = {
   assistant: Assistant
@@ -39,12 +38,10 @@ type TopicContentProps = {
 const UNMEASURED_POPOVER_FIT: BranchPopoverFit = { leftShift: 0, maxWidth: BRANCH_POPOVER_MAX_WIDTH }
 
 /**
- * The chat navbar's own row: model selector, the branch selector entry, the
- * branch path of the viewed route, and the right-hand tool group.
+ * Branch-only row: the branch selector entry plus the branch path of the
+ * viewed route. Rendered in the inputbar's left toolbar (not the top bar).
  *
- * - The branch entry is one icon button immediately left of the path, on the
- *   same 30px/8px-radius shape as the navbar's other tools, so the row reads
- *   model selector, branch entry, branch path, then the right-hand tools. It
+ * - The branch entry is one icon button immediately left of the path. It
  *   is the popover's only trigger; nothing else opens the tree.
  * - The breadcrumb is pure navigation: every segment — the current route
  *   included — switches through the same `requestTopRoute` entry point
@@ -64,10 +61,13 @@ const UNMEASURED_POPOVER_FIT: BranchPopoverFit = { leftShift: 0, maxWidth: BRANC
  * - Row management belongs to the rows themselves: rename edits in place and
  *   delete confirms through a small popconfirm, both DB-first with the catalog
  *   refreshed after the write. The selector stays open across them.
- * - The state lives here because this row is the natural place both the path
- *   and the tool group are rendered from — no global store is involved.
+ * - The state lives here because this row is the natural place the path is
+ *   rendered from — no global store is involved.
+ *
+ * The top-bar model selector and edit/settings tools used to share this row;
+ * they moved to the inputbar @ selector and the chat floating tool group.
  */
-const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
+const TopicContent = ({ activeTopic }: TopicContentProps) => {
   const { t } = useTranslation()
   const viewport = useRouteViewport()
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, activeTopic.id))
@@ -86,6 +86,7 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   // Only this entry's trigger, full-catalog scope and kept-open reaction stay
   // local. Branch names resolve from the live catalog for the rename history.
   const branches = branchTree.branches
+  const anchorRanks = useBranchAnchorRanks(activeTopic.id, branches, open)
   const resolveBeforeName = useCallback(
     (branchId: string): string | null => branches.find((branch) => branch.id === branchId)?.name ?? null,
     [branches]
@@ -155,7 +156,10 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
   const popoverAlign = useMemo(() => branchPopoverAlign(panelFit), [panelFit])
 
   const path = branchTree.path
-  const index = useMemo(() => buildBranchTreeIndex(branches), [branches])
+  const index = useMemo(
+    () => orderBranchTreeIndexByAnchorRanks(buildBranchTreeIndex(branches), branches, anchorRanks),
+    [anchorRanks, branches]
+  )
 
   const topicName = activeTopic.name && activeTopic.name.length > 0 ? activeTopic.name : activeTopic.id
   const segments = useMemo<BranchCrumbSegment[]>(() => {
@@ -228,11 +232,11 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
     />
   )
 
-  return (
-    <div className="flex flex-1 items-center gap-2">
-      {/* Model selector (retained) */}
-      <SelectModelButton assistant={assistant} />
+  // A never-branched topic renders no branch UI here.
+  if (!hasBranches) return null
 
+  return (
+    <div className="flex min-w-0 items-center">
       {/* The branch selector trigger and breadcrumb in a segmented pill group */}
       {hasBranches ? (
         <BranchSegmentedGroup data-testid="branch-segmented-group">
@@ -297,11 +301,6 @@ const TopicContent = ({ assistant, activeTopic }: TopicContentProps) => {
           />
         </BranchSegmentedGroup>
       ) : null}
-
-      {/* Edit / settings share one right-hand tool group. */}
-      <div data-testid="navbar-tools-right" className="ml-auto flex shrink-0 items-center gap-2">
-        <Tools />
-      </div>
     </div>
   )
 }
@@ -315,29 +314,35 @@ const BranchSegmentedGroup = styled.div`
   min-width: 0;
   flex: 1 1 0;
   max-width: 100%;
+  // Non-draggable content row: only the top titlebar band drags; the branch
+  // entry/crumb buttons must never start a window drag.
+  -webkit-app-region: no-drag;
 `
 
 /**
  * The branch tool: left segment of the branch pill group (26px tall, 8px left radius,
- * shared soft background and seam border with the breadcrumb plate). While the
+ * shared solid background and seam border with the breadcrumb plate). While the
  * panel is open it takes the active shape with the accent surface and light glyph.
  */
 const BranchIconButton = styled(Button)`
-  &&& {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 26px;
-    padding: 0 7px;
+   &&& {
+     display: inline-flex;
+     align-items: center;
+     justify-content: center;
+     height: 26px;
+     padding: 0 7px;
+    // Interactive entry inside the draggable chat header: opt out so the
+    // click reaches the button instead of starting a window drag.
+    -webkit-app-region: no-drag;
     border: 1px solid var(--color-border-soft);
-    border-radius: 8px 0 0 8px;
-    background: var(--color-background-soft);
-    color: var(--color-icon);
-    box-shadow: none;
-    transition:
-      background-color 0.2s ease-in-out,
-      color 0.2s ease-in-out,
-      border-color 0.2s ease-in-out;
+     border-radius: 8px 0 0 8px;
+     background: var(--color-background);
+     color: var(--color-icon);
+     box-shadow: none;
+     transition:
+       background-color 0.2s ease-in-out,
+       color 0.2s ease-in-out,
+       border-color 0.2s ease-in-out;
 
     &:hover {
       background: var(--color-hover);

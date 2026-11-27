@@ -4,7 +4,6 @@ import type { CSSProperties, FC } from 'react'
 import { useTranslation } from 'react-i18next'
 import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 
-import Sidebar from './components/app/Sidebar'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { LazyRoute } from './components/LazyRoute'
 import { importSettingsPage } from './components/routeImporters'
@@ -113,7 +112,6 @@ export const AppRoutes: FC = () => {
 const Router: FC = () => {
   return (
     <HashRouter>
-      <Sidebar />
       <AppRoutes />
       <NavigationHandler />
     </HashRouter>

@@ -104,6 +104,7 @@ vi.mock('@renderer/hooks/useShortcuts', () => ({
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
   useMessageOperations: () => ({ pauseMessages: vi.fn() }),
+  useLoadedTopicMessages: () => [],
   useTopicLoading: () => false,
   useTopicGenerating: () => false,
   useTopicWindowReadBusy: () => false
@@ -231,6 +232,9 @@ vi.mock('../AttachmentPreview', () => ({
 }))
 
 vi.mock('../../Messages/TopicSegmentDrawer', () => ({
+  default: () => null
+}))
+vi.mock('../tools/components/MentionModelsButton', () => ({
   default: () => null
 }))
 

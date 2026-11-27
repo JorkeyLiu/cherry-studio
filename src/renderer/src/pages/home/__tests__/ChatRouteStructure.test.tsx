@@ -31,16 +31,12 @@ vi.mock('react-i18next', () => ({
   initReactI18next: { type: '3rdParty', init: vi.fn() }
 }))
 
-// The drawer's layer contract is covered by its own suite; here only the
-// listed route entries matter, so antd's popover is reduced to a passthrough.
-vi.mock('antd', () => ({
-  Popover: ({ content, children, zIndex }: Any) => (
-    <div data-testid="drawer-popover" data-z-index={zIndex}>
-      <div data-testid="drawer-trigger">{children}</div>
-      <div data-testid="drawer-content">{content}</div>
-    </div>
-  )
-}))
+// The drawer is no longer a consumer of this provider: it calls the same
+// scoped hook directly with the topic id (single Chat-canvas mount), and its
+// own suite covers that input contract. Here a probe renders the provider
+// value's selected-only listing exactly per the drawer contract (listed only
+// when `headerInRoute !== false`), so the shared-surface assertions keep a
+// second selected-only consumer without issuing a second structural read.
 
 // This suite owns the shared-surface projection semantics, not the activation
 // read. The provider's activation dispatch is stubbed here so the suite's
@@ -58,7 +54,23 @@ import {
 import { rootReducer } from '@renderer/store'
 
 import { ChatRouteStructureProvider, useChatRouteStructure } from '../ChatRouteStructure'
-import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
+/**
+ * Selected-only listing probe standing in for the drawer: the drawer calls
+ * the same scoped hook directly, so it is no longer mounted here (mounting
+ * the real drawer would issue its own structural read). This renders the
+ * provider value's listing exactly per the drawer contract.
+ */
+function DrawerLikeConsumer() {
+  const route = useChatRouteStructure()
+  const listed = route.segments.filter((s: Any) => s.headerInRoute !== false)
+  return (
+    <>
+      {listed.map((s: Any) => (
+        <div key={s.id}>{s.name}</div>
+      ))}
+    </>
+  )
+}
 
 type Any = any
 
@@ -192,7 +204,7 @@ function Surface({ store, displayedKey }: { store: Any; displayedKey: string }) 
       { topicId: TOPIC } as Any,
       createElement(MessagesLikeConsumer, { displayedKey }),
       createElement(RouteValueProbe),
-      createElement(TopicSegmentDrawer)
+      createElement(DrawerLikeConsumer)
     )
   )
 }

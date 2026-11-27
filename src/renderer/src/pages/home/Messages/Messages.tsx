@@ -188,6 +188,7 @@ import {
   type DividerSwitchInfo,
   ForkDivider
 } from './BranchDividers'
+import { readComposerTailInsetPx } from './composerOverlayGeometry'
 import { decideDividerRestoreSearchStep, type DividerSearchTerminalReason } from './dividerRestoreSearch'
 import {
   buildDividerSearchProgressFromVisible,
@@ -238,7 +239,6 @@ import {
   isRestoreTargetValid,
   shouldCancelStabilizerForKeyDown
 } from './positionStabilizer'
-import Prompt from './Prompt'
 import { ReferenceDivider } from './ReferenceDivider'
 import {
   attemptFirstPosition,
@@ -423,10 +423,15 @@ const planSearchMatchLanding = (args: {
   if (!containerRect || container.clientHeight <= 0) return null
 
   const overlayRect = measureRect(match.overlay)
+  // The floating composer overlay covers the container's bottom strip: read
+  // the published tail inset off the container (same CSS var source as the
+  // tail padding) so a hit landing near the tail centres in the visible band,
+  // never under the composer. Fail-closed 0 keeps the legacy band.
   const band = resolveUnobscuredReadingBand({
     containerTop: containerRect.top,
     containerHeight: container.clientHeight,
-    obscurer: overlayRect ? { top: overlayRect.top, bottom: overlayRect.bottom } : null
+    obscurer: overlayRect ? { top: overlayRect.top, bottom: overlayRect.bottom } : null,
+    bottomInsetPx: readComposerTailInsetPx(container)
   }) ?? { top: 0, height: container.clientHeight }
 
   let matchTopOffset: number | null = null
@@ -742,7 +747,6 @@ const NO_DISPLAY_MESSAGES: Message[] = []
 const NO_DISPLAY_GROUPS: MessageViewportGroup[] = []
 
 interface MessagesContentProps {
-  assistant: Assistant
   topic: Topic
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   handleScrollPosition: () => void
@@ -827,7 +831,6 @@ interface MessagesContentProps {
 }
 
 const MessagesContentInner: React.FC<MessagesContentProps> = ({
-  assistant,
   topic,
   scrollContainerRef,
   handleScrollPosition,
@@ -1242,17 +1245,15 @@ const MessagesContentInner: React.FC<MessagesContentProps> = ({
             // newest at the bottom). The flow starts at the top of the scroll
             // host with its ordinary margins — there is no auto block-start
             // margin pushing a short flow to the host's end, so a new or short
-            // conversation reads top-down with its first content (Prompt) at
-            // the top instead of being dropped to the bottom of an empty
-            // scrollport. The host still takes the available height and owns
-            // the overflow, so long content scrolls exactly as before. That
-            // replaces both the previous reversed direction and the
-            // device-pixel `calc-size` rounding wrapper: growing downward from
-            // a stable top needs no fractional-zoom rounding hack.
+            // conversation reads top-down from the first message instead of
+            // being dropped to the bottom of an empty scrollport. The host
+            // still takes the available height and owns the overflow, so long
+            // content scrolls exactly as before. That replaces both the
+            // previous reversed direction and the device-pixel `calc-size`
+            // rounding wrapper: growing downward from a stable top needs no
+            // fractional-zoom rounding hack.
             flexShrink: 0
           }}>
-          {/* Prompts always render; the persisted showPrompt setting is inert. */}
-          <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
           {/* App-owned browse paging: this wrapper is layout-only (no chrome,
           no observation). Both edges are evaluated from live container
           geometry + committed viewport state on genuine user scroll/input
@@ -10065,7 +10066,6 @@ const Messages = ({
       requestBoundaryPage={requestSelectionBoundaryPage}>
       <AnchorGroupProvider anchorGroupKey={anchorGroupKey}>
         <MessagesContent
-          assistant={assistant}
           topic={topic}
           scrollContainerRef={scrollContainerRef}
           handleScrollPosition={handleScroll}

@@ -8,11 +8,13 @@ import { describe, expect, it } from 'vitest'
 const assistant = { id: 'assistant-1' } as unknown as Assistant
 
 describe('Inputbar tool registry', () => {
-  it('retains ordinary Chat tools: attachment thinking mention_models url_context knowledge generate_image', () => {
+  it('retains ordinary Chat tools incl. the model single-select button (mention_models key)', () => {
     const keys = getAllTools().map((tool) => tool.key)
     expect(keys).toContain('attachment')
     expect(keys).toContain('thinking')
     expect(keys).toContain('new_topic')
+    // The toolbar model entry is a single-model selector (same key,
+    // new single-select semantics): no multi-mention tool remains.
     expect(keys).toContain('mention_models')
     expect(keys).toContain('url_context')
     expect(keys).toContain('knowledge_base')

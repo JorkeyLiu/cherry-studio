@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { COMPOSER_OVERLAY_BOTTOM_GAP_PX } from './composerOverlayGeometry'
+
 /**
  * Genuine physical bottom gate (renderer-local geometry only): the container's
  * own scroll travel reached within 1px, i.e. `distanceFromBottom(metrics) <= 1`.
@@ -150,7 +152,9 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
 const BottomButton = styled.button<{ $hidden?: boolean }>`
   position: absolute;
   right: 16px;
-  bottom: 12px;
+  // Centered vertically with the bottom capsule and bottom-left drawer (27px
+  // centerline), tucked in the right side clearance outside the narrowed composer.
+  bottom: ${COMPOSER_OVERLAY_BOTTOM_GAP_PX - 1}px;
   z-index: 6;
   width: 32px;
   height: 32px;

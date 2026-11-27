@@ -7,25 +7,28 @@ import type { CSSProperties, FC } from 'react'
 import styled from 'styled-components'
 
 import Assistants from './AssistantsTab'
-import Topics from './TopicsTab'
 
 interface Props {
   activeAssistant: Assistant
   activeTopic: Topic
   setActiveAssistant: (assistant: Assistant) => void
   setActiveTopic: (topic: Topic) => void
-  position: 'left' | 'right'
+  /** @deprecated the unified workspace sidebar owns navigation; HomeTabs only
+   *  serves the temporary assistants drawer (always the assistant list). */
+  position?: 'left' | 'right'
   style?: CSSProperties
 }
 
-// LOCK-002: navigation is fixed on the left. The left panel always renders the
-// assistant list; the right panel always renders topics. No tab switching.
-const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant, setActiveTopic, position, style }) => {
+// Unified navigation: the workspace sidebar renders Topics directly in its
+// middle and opens the assistant list as a temporary drawer. HomeTabs keeps
+// the assistant-list rendering for that temporary drawer only; the permanent
+// right topic panel is removed.
+const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant, setActiveTopic, style }) => {
   const { addAssistant } = useAssistants()
   const { assistantDefaults } = useAssistantDefaults()
 
   const tabsWidthStyle = {
-    '--tabs-width': position === 'right' ? 'var(--topic-list-width, 275px)' : 'var(--assistants-width, 275px)'
+    '--tabs-width': 'var(--workspace-sidebar-width, 300px)'
   } as CSSProperties
 
   const onCreateAssistant = async () => {
@@ -43,21 +46,18 @@ const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant,
     setActiveAssistant(assistant)
   }
 
+  void activeTopic
+  void setActiveTopic
+
   return (
-    <Container
-      style={{ ...tabsWidthStyle, ...style }}
-      className={classNames('home-tabs', { right: position === 'right' })}>
+    <Container style={{ ...tabsWidthStyle, ...style }} className={classNames('home-tabs')}>
       <TabContent className="home-tabs-content">
-        {position === 'left' ? (
-          <Assistants
-            activeAssistant={activeAssistant}
-            setActiveAssistant={setActiveAssistant}
-            onCreateAssistant={onCreateAssistant}
-            onCreateDefaultAssistant={onCreateDefaultAssistant}
-          />
-        ) : (
-          <Topics assistant={activeAssistant} activeTopic={activeTopic} setActiveTopic={setActiveTopic} />
-        )}
+        <Assistants
+          activeAssistant={activeAssistant}
+          setActiveAssistant={setActiveAssistant}
+          onCreateAssistant={onCreateAssistant}
+          onCreateDefaultAssistant={onCreateDefaultAssistant}
+        />
       </TabContent>
     </Container>
   )
@@ -66,14 +66,10 @@ const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant,
 const Container = styled.div`
   display: flex;
   flex-direction: column;
-  width: var(--tabs-width, 275px);
+  width: var(--tabs-width, 300px);
   transition: width 0.3s;
   height: calc(100vh - var(--navbar-height));
   position: relative;
-
-  &.right {
-    height: calc(100vh - var(--navbar-height));
-  }
 
   background-color: var(--color-background);
   overflow: hidden;

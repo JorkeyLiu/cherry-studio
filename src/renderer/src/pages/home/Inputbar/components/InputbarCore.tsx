@@ -15,8 +15,9 @@ import { IpcChannel } from '@shared/IpcChannel'
 import { Divider } from 'antd'
 import TextArea from 'antd/es/input/TextArea'
 import type { TextAreaRef } from 'antd/lib/input/TextArea'
+import { motion } from 'motion/react'
 import type { CSSProperties, FC } from 'react'
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
@@ -28,6 +29,7 @@ import {
   useInputbarToolsState
 } from '../context/InputbarToolsProvider'
 import { useFileDragDrop } from '../hooks/useFileDragDrop'
+import { useInputbarIsland } from '../hooks/useInputbarIsland'
 import { usePasteHandler } from '../hooks/usePasteHandler'
 import { getInputbarConfig } from '../registry'
 import SendMessageButton from '../SendMessageButton'
@@ -59,6 +61,9 @@ export interface InputbarCoreProps {
   // Toolbar sections
   leftToolbar?: React.ReactNode
   rightToolbar?: React.ReactNode
+  // Independent model row rendered first inside the composer (current
+  // model selector with model name); the toolbar keeps the 28px tool slots.
+  modelRow?: React.ReactNode
 
   // Preview sections (attachments, mentions, etc.)
   topContent?: React.ReactNode
@@ -68,7 +73,16 @@ export interface InputbarCoreProps {
 
   // Overlay rendered inside InputBarContainer at top-right (absolute positioned)
   topRightOverlay?: React.ReactNode
+
+  // Dual-mode Dynamic Island state (controlled when provided; defaults to expanded)
+  expanded?: boolean
+  onExpandedChange?: (expanded: boolean) => void
 }
+
+const CAPSULE_WIDTH_PX = 124
+const CAPSULE_HOVER_WIDTH_PX = 136
+const CAPSULE_HEIGHT_PX = 30
+const ISLAND_TRANSITION = { duration: 0.18, ease: 'linear' } as const
 
 const TextareaStyle: CSSProperties = {
   paddingLeft: 0,
@@ -91,9 +105,12 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   handleSendMessage,
   leftToolbar,
   rightToolbar,
+  modelRow,
   topContent,
   pinnedContent,
-  topRightOverlay
+  topRightOverlay,
+  expanded,
+  onExpandedChange
 }) => {
   const config = useMemo(() => getInputbarConfig(scope), [scope])
   const { files } = useInputbarToolsState()
@@ -111,6 +128,47 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   const startDragY = useRef<number>(0)
   const startHeight = useRef<number>(0)
   const { setTimeoutTimer } = useTimer()
+  const containerRef = useRef<HTMLDivElement>(null)
+  const islandRef = useRef<HTMLDivElement>(null)
+  const capsuleRef = useRef<HTMLDivElement>(null)
+  const [containerWidthPx, setContainerWidthPx] = useState<number>(0)
+
+  const { isExpanded, isExpandedRef, expandAndFocus, handleIslandBlurCapture } = useInputbarIsland({
+    expanded,
+    onExpandedChange,
+    focusTextarea,
+    resizeTextArea,
+    islandRef,
+    capsuleRef
+  })
+
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const updateWidth = () => {
+      const width = el.clientWidth
+      if (Number.isFinite(width) && width > 0) {
+        setContainerWidthPx((prev) => (prev === width ? prev : width))
+      }
+    }
+    updateWidth()
+    if (typeof ResizeObserver === 'function') {
+      const observer = new ResizeObserver(updateWidth)
+      observer.observe(el)
+      return () => observer.disconnect()
+    }
+    window.addEventListener('resize', updateWidth)
+    return () => window.removeEventListener('resize', updateWidth)
+  }, [])
+
+  const expandedWidthPx = useMemo(() => {
+    if (containerWidthPx <= 0) return null
+    const innerWidth = Math.max(0, containerWidthPx - INPUTBAR_OUTER_SIDE_PAD_PX * 2)
+    if (innerWidth <= 0) return null
+    // Centered narrowed width (~80% of available width), leaving room at
+    // bottom-left for TopicSegmentDrawer even on compact windows.
+    return Math.round(Math.max(Math.min(280, innerWidth), Math.min(innerWidth * 0.8, innerWidth - 72)))
+  }, [containerWidthPx])
 
   const textRef = useRef(text)
   useEffect(() => {
@@ -286,9 +344,9 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         setTimeoutTimer('onQuote', () => resizeTextArea(), 0)
         return next
       })
-      focusTextarea()
+      expandAndFocus()
     },
-    [focusTextarea, resizeTextArea, setText, setTimeoutTimer]
+    [expandAndFocus, resizeTextArea, setText, setTimeoutTimer]
   )
 
   useEffect(() => {
@@ -307,13 +365,14 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
 
   useEffect(() => {
     const onFocus = () => {
+      if (!isExpandedRef.current) return
       if (document.activeElement?.closest('.ant-modal')) return
       const lastFocusedComponent = PasteService.getLastFocusedComponent()
       if (!lastFocusedComponent || lastFocusedComponent === 'inputbar') focusTextarea()
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [focusTextarea])
+  }, [focusTextarea, isExpandedRef])
 
   useEffect(() => {
     PasteService.init()
@@ -347,55 +406,106 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   return (
     <div style={{ width: '100%' }}>
       <Container
+        ref={containerRef}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
         className={classNames('inputbar')}>
         {pinnedContent}
-        <InputBarContainer id="inputbar" className={classNames('inputbar-container', isDragging && 'file-dragging')}>
-          <DragHandle onMouseDown={handleDragStart}>
-            <HolderOutlined style={{ fontSize: 12 }} />
-          </DragHandle>
-          {topRightOverlay}
-          {files.length > 0 && (
-            <AttachmentPreview files={files} setFiles={setFiles} onAttachmentContextMenu={appendTxtContentToInput} />
-          )}
-          {topContent}
-
-          <Textarea
-            ref={textareaRef}
-            value={text}
-            onChange={handleTextareaChange}
-            onKeyDown={handleKeyDown}
-            onPaste={(e) => handlePaste(e.nativeEvent)}
-            onFocus={handleFocus}
-            onBlur={() => setInputFocus(false)}
-            placeholder={isTranslating ? t('chat.input.translating') : placeholder}
-            autoFocus
-            variant="borderless"
-            spellCheck={enableSpellCheck}
-            rows={2}
-            autoSize={height ? false : { minRows: 2, maxRows: 20 }}
-            styles={{ textarea: TextareaStyle }}
-            style={{ fontSize, height, minHeight: '30px' }}
-            disabled={isTranslating || searching}
-            onClick={() => {
-              searching && dispatch(setSearching(false))
+        <InputBarContainer
+          ref={islandRef}
+          id="inputbar"
+          $collapsed={!isExpanded}
+          onBlurCapture={handleIslandBlurCapture}
+          initial={false}
+          animate={{
+            width: isExpanded ? (expandedWidthPx ?? '80%') : CAPSULE_WIDTH_PX,
+            height: isExpanded ? 'auto' : CAPSULE_HEIGHT_PX
+          }}
+          whileHover={!isExpanded ? { width: CAPSULE_HOVER_WIDTH_PX } : undefined}
+          whileTap={!isExpanded ? { scale: 0.96 } : undefined}
+          transition={ISLAND_TRANSITION}
+          className={classNames('inputbar-container', isDragging && 'file-dragging', !isExpanded && 'is-collapsed')}>
+          <ExpandedContent
+            $collapsed={!isExpanded}
+            $widthPx={expandedWidthPx}
+            aria-hidden={!isExpanded}
+            initial={false}
+            animate={{
+              opacity: isExpanded ? 1 : 0
             }}
-          />
+            transition={{
+              duration: isExpanded ? 0.16 : 0.1,
+              delay: isExpanded ? 0.03 : 0,
+              ease: 'linear'
+            }}>
+            <DragHandle onMouseDown={handleDragStart}>
+              <HolderOutlined style={{ fontSize: 12 }} />
+            </DragHandle>
+            {topRightOverlay}
+            {modelRow && <ModelRow data-testid="inputbar-model-row">{modelRow}</ModelRow>}
+            {files.length > 0 && (
+              <AttachmentPreview files={files} setFiles={setFiles} onAttachmentContextMenu={appendTxtContentToInput} />
+            )}
+            {topContent}
 
-          <BottomBar>
-            <LeftSection>
-              {leftToolbar}
-              <Divider type="vertical" style={{ margin: '0 6px' }} />
-              <InputbarSettings />
-            </LeftSection>
-            <RightSection>
-              {rightToolbar}
-              {rightSectionExtras}
-            </RightSection>
-          </BottomBar>
+            <Textarea
+              ref={textareaRef}
+              value={text}
+              onChange={handleTextareaChange}
+              onKeyDown={handleKeyDown}
+              onPaste={(e) => handlePaste(e.nativeEvent)}
+              onFocus={handleFocus}
+              onBlur={() => setInputFocus(false)}
+              placeholder={isTranslating ? t('chat.input.translating') : placeholder}
+              variant="borderless"
+              spellCheck={enableSpellCheck}
+              rows={2}
+              autoSize={height ? false : { minRows: 2, maxRows: 20 }}
+              styles={{ textarea: TextareaStyle }}
+              style={{ fontSize, height, minHeight: '30px' }}
+              disabled={isTranslating || searching}
+              onClick={() => {
+                searching && dispatch(setSearching(false))
+              }}
+            />
+
+            <BottomBar>
+              <LeftSection>
+                {leftToolbar}
+                <Divider type="vertical" style={{ margin: '0 6px' }} />
+                <InputbarSettings />
+              </LeftSection>
+              <RightSection>
+                {rightToolbar}
+                {rightSectionExtras}
+              </RightSection>
+            </BottomBar>
+          </ExpandedContent>
+
+          <CapsuleTrigger
+            ref={capsuleRef}
+            role="button"
+            data-testid="inputbar-capsule"
+            aria-label={t('chat.input.expand', { defaultValue: 'Expand input' })}
+            aria-hidden={isExpanded}
+            tabIndex={isExpanded ? -1 : 0}
+            $visible={!isExpanded}
+            onClick={() => {
+              if (!isExpanded) expandAndFocus()
+            }}
+            initial={false}
+            animate={{
+              opacity: isExpanded ? 0 : 1
+            }}
+            transition={{
+              duration: isExpanded ? 0.08 : 0.14,
+              delay: isExpanded ? 0 : 0.04,
+              ease: 'linear'
+            }}>
+            <CapsuleBar />
+          </CapsuleTrigger>
         </InputBarContainer>
       </Container>
     </div>
@@ -429,20 +539,94 @@ const DragHandle = styled.div`
 const Container = styled.div`
   display: flex;
   flex-direction: column;
+  align-items: center;
   position: relative;
   z-index: 2;
-  padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
+  pointer-events: none;
+  // Single window-bottom gap: 12px between the composer outer box and the
+  // canvas bottom edge (sides keep the nav-rail geometry constant). The
+  // plane itself sits at bottom:0, so this padding is the only owner of the
+  // gap, and the overlay measurement includes it exactly once. Never folded
+  // into the floating-control band: gap is spacing, band is trigger strip.
+  padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px 12px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
 `
 
-const InputBarContainer = styled.div`
-  border: 0.5px solid var(--color-border);
-  transition: all 0.2s ease;
+const InputBarContainer = styled(motion.div)<{ $collapsed?: boolean }>`
+  // Non-draggable content island: only the top titlebar bands drag; the
+  // inputbar (model controls, tools) never does.
+  -webkit-app-region: none;
+  pointer-events: auto;
+  margin: 0 auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border: 0.5px solid transparent;
+  transition:
+    background 0.18s linear,
+    border-color 0.18s linear,
+    border-radius 0.18s linear,
+    padding-top 0.18s linear,
+    backdrop-filter 0.18s linear;
   position: relative;
-  border-radius: 17px;
-  padding-top: 8px;
-  background-color: var(--color-background-opacity);
+  // One plate, one radius: same token as the assistant-switcher panel, so
+  // all four plate corners share one uniform arc; ModelRow/textarea/
+  // BottomBar all live inside this plate, never floating on their own.
+  border-radius: var(--list-item-border-radius);
+  padding-top: ${(props) => (props.$collapsed ? '0' : '6px')};
+  background: ${(props) =>
+    props.$collapsed
+      ? 'linear-gradient(180deg, rgba(34, 34, 36, 0.48) 0%, rgba(24, 24, 26, 0.44) 100%)'
+      : 'linear-gradient(180deg, rgba(34, 34, 36, 0.72) 0%, rgba(24, 24, 26, 0.68) 100%)'};
+  backdrop-filter: ${(props) => (props.$collapsed ? 'blur(18px) saturate(180%)' : 'blur(22px) saturate(180%)')};
+  -webkit-backdrop-filter: ${(props) => (props.$collapsed ? 'blur(18px) saturate(180%)' : 'blur(22px) saturate(180%)')};
+  ${(props) => (props.$collapsed ? 'border-radius: 9999px; cursor: pointer;' : '')}
+  body[theme-mode='light'] & {
+    background: ${(props) =>
+      props.$collapsed
+        ? 'linear-gradient(180deg, rgba(246, 246, 248, 0.66) 0%, rgba(232, 232, 236, 0.56) 100%)'
+        : 'linear-gradient(180deg, rgba(250, 250, 252, 0.78) 0%, rgba(238, 238, 242, 0.72) 100%)'};
+    backdrop-filter: ${(props) => (props.$collapsed ? 'blur(16px) saturate(160%)' : 'blur(22px) saturate(160%)')};
+    -webkit-backdrop-filter: ${(props) => (props.$collapsed ? 'blur(16px) saturate(160%)' : 'blur(22px) saturate(160%)')};
+  }
+  // Unified directional 1px glass rim across both capsule and expanded composer
+  // so the two states feel like one continuous piece of glass (no box-shadow).
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    z-index: 4;
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.16) 0%,
+      rgba(255, 255, 255, 0.05) 48%,
+      rgba(255, 255, 255, 0.015) 100%
+    );
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+  }
+  body[theme-mode='light'] &::after {
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.95) 0%,
+      rgba(0, 0, 0, 0.05) 55%,
+      rgba(0, 0, 0, 0.11) 100%
+    );
+  }
   &.file-dragging {
     border: 2px dashed #2ecc71;
+    &::after {
+      display: none;
+    }
     &::before {
       content: '';
       position: absolute;
@@ -451,14 +635,58 @@ const InputBarContainer = styled.div`
       right: 0;
       bottom: 0;
       background-color: rgba(46, 204, 113, 0.03);
-      border-radius: 14px;
+      border-radius: var(--list-item-border-radius);
       z-index: 5;
       pointer-events: none;
     }
   }
 `
 
+const ExpandedContent = styled(motion.div)<{ $collapsed?: boolean; $widthPx: number | null }>`
+  width: ${(props) => (props.$widthPx ? `${props.$widthPx}px` : '100%')};
+  flex-shrink: 0;
+  pointer-events: ${(props) => (props.$collapsed ? 'none' : 'auto')};
+  visibility: ${(props) => (props.$collapsed ? 'hidden' : 'visible')};
+  transition: visibility 0s linear ${(props) => (props.$collapsed ? '0.15s' : '0s')};
+`
+
+const CapsuleBar = styled.span`
+  display: block;
+  width: 36px;
+  height: 3.5px;
+  border-radius: 9999px;
+  background-color: rgba(255, 255, 255, 0.52);
+  transition: width 0.2s ease, background-color 0.2s ease;
+  body[theme-mode='light'] & {
+    background-color: rgba(0, 0, 0, 0.36);
+  }
+`
+
+const CapsuleTrigger = styled(motion.div)<{ $visible: boolean }>`
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: ${(props) => (props.$visible ? 'auto' : 'none')};
+  cursor: pointer;
+  outline: none;
+  &:hover ${CapsuleBar}, &:focus-visible ${CapsuleBar} {
+    width: 44px;
+    background-color: rgba(255, 255, 255, 0.88);
+  }
+  body[theme-mode='light'] &:hover ${CapsuleBar}, body[theme-mode='light'] &:focus-visible ${CapsuleBar} {
+    background-color: rgba(0, 0, 0, 0.68);
+  }
+`
+
 const Textarea = styled(TextArea)`
+  // Single paint owner: the plate (InputBarContainer) owns the only solid
+  // background. This textarea and its inner .ant-input stay transparent on
+  // all states so no square inner layer intrudes on the plate arcs; text,
+  // resize and selection behavior untouched.
+  background-color: transparent;
   padding: 0;
   border-radius: 0;
   display: flex;
@@ -469,6 +697,14 @@ const Textarea = styled(TextArea)`
   transition: none !important;
   &.ant-input {
     line-height: 1.4;
+    background-color: transparent;
+  }
+  &.ant-input:hover,
+  &.ant-input:focus,
+  &.ant-input:focus-within,
+  textarea.ant-input:hover,
+  textarea.ant-input:focus {
+    background-color: transparent;
   }
   &::-webkit-scrollbar {
     width: 3px;
@@ -479,11 +715,25 @@ const BottomBar = styled.div`
   display: flex;
   flex-direction: row;
   justify-content: space-between;
-  padding: 5px 8px;
-  height: 40px;
+  padding: 3px 8px;
+  height: 34px;
   gap: 16px;
   position: relative;
   z-index: 2;
+  flex-shrink: 0;
+`
+
+// Independent model row: the single-model selector owns this slim row at the
+// composer top (icon + current model name + chevron), clear of the crowded
+// 28px toolbar slots below the textarea.
+const ModelRow = styled.div`
+  // Single paint owner: transparent so the plate shows through; the plate
+  // keeps the only solid background.
+  background-color: transparent;
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 8px;
   flex-shrink: 0;
 `
 

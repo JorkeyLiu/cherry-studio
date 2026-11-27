@@ -33,6 +33,12 @@ export interface InputbarToolsNewProps {
   assistant: Assistant
   /** May be explicitly unconfigured (undefined). */
   model?: Model
+  /**
+   * Tool keys rendered elsewhere (the model selector owns the independent
+   * model row). Excluded from the visible/hidden rows and the context menu
+   * without touching the persisted order or the registry.
+   */
+  excludeKeys?: InputBarToolType[]
 }
 
 interface ToolConfig {
@@ -46,7 +52,8 @@ const DraggablePortal = ({ children, isDragging }: { children: React.ReactNode; 
   return isDragging ? createPortal(children, document.body) : children
 }
 
-const InputbarTools = ({ scope, assistant, model }: InputbarToolsNewProps) => {
+const InputbarTools = ({ scope, assistant, model, excludeKeys }: InputbarToolsNewProps) => {
+  const excludedKeys = useMemo(() => new Set<InputBarToolType>(excludeKeys ?? []), [excludeKeys])
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const toolsContext = useInputbarTools()
@@ -137,8 +144,8 @@ const InputbarTools = ({ scope, assistant, model }: InputbarToolsNewProps) => {
         visible: true
       }))
 
-    return [...explicitlyVisible, ...newTools]
-  }, [toolMetadata, toolOrder.visible, toolOrder.hidden])
+    return [...explicitlyVisible, ...newTools].filter((tool) => !excludedKeys.has(tool.key))
+  }, [toolMetadata, toolOrder.visible, toolOrder.hidden, excludedKeys])
 
   const hiddenTools = useMemo(() => {
     return toolOrder.hidden
@@ -152,8 +159,9 @@ const InputbarTools = ({ scope, assistant, model }: InputbarToolsNewProps) => {
           visible: false
         }
       })
-      .filter(Boolean) as ToolConfig[]
-  }, [toolMetadata, toolOrder.hidden])
+      .filter(Boolean)
+      .filter((tool) => tool !== null && !excludedKeys.has(tool.key)) as ToolConfig[]
+  }, [toolMetadata, toolOrder.hidden, excludedKeys])
 
   const showDivider = useMemo(() => {
     return hiddenTools.length > 0 && visibleTools.length > 0

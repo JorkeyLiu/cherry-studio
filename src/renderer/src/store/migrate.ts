@@ -54,7 +54,11 @@ import { v4 as uuidv4 } from 'uuid'
 import { DEFAULT_TOOL_ORDER } from './inputTools'
 import { initialState as llmInitialState, moveProvider } from './llm'
 import { initialState as notesInitialState } from './note'
-import { initialState as settingsInitialState } from './settings'
+import {
+  initialState as settingsInitialState,
+  normalizeWorkspaceSidebarWidth,
+  resolveWorkspaceSidebarFromLegacy
+} from './settings'
 
 const logger = loggerService.withContext('Migrate')
 
@@ -4901,6 +4905,31 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 230 error', error as Error)
+      return state
+    }
+  },
+  '231': (state: any) => {
+    try {
+      const settings = state?.settings
+      if (settings && typeof settings === 'object') {
+        if (typeof settings.workspaceSidebarVisible !== 'boolean') {
+          const rawVisible = settings.showAssistants ?? settings.showTopics
+          settings.workspaceSidebarVisible = typeof rawVisible === 'boolean' ? rawVisible : true
+        }
+        if (typeof settings.workspaceSidebarCollapsed !== 'boolean') {
+          settings.workspaceSidebarCollapsed = false
+        }
+        if (typeof settings.workspaceSidebarWidth !== 'number') {
+          const resolved = resolveWorkspaceSidebarFromLegacy(settings)
+          settings.workspaceSidebarWidth = resolved.width
+        } else {
+          settings.workspaceSidebarWidth = normalizeWorkspaceSidebarWidth(settings.workspaceSidebarWidth)
+        }
+      }
+      logger.info('migrate 231 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 231 error', error as Error)
       return state
     }
   }

@@ -1,4 +1,4 @@
-import type { FileMetadata, KnowledgeBase, Model } from '@renderer/types'
+import type { FileMetadata, KnowledgeBase } from '@renderer/types'
 import React, { createContext, use, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 /**
@@ -8,8 +8,6 @@ import React, { createContext, use, useCallback, useEffect, useMemo, useRef, use
 export interface InputbarToolsState {
   /** Attached files */
   files: FileMetadata[]
-  /** Models mentioned in the input */
-  mentionedModels: Model[]
   /** Selected knowledge base items */
   selectedKnowledgeBases: KnowledgeBase[]
 
@@ -26,7 +24,6 @@ export interface InputbarToolsState {
 export interface InputbarToolsDispatch {
   // State setters (React guarantees stable references for the raw setters).
   setFiles: React.Dispatch<React.SetStateAction<FileMetadata[]>>
-  setMentionedModels: React.Dispatch<React.SetStateAction<Model[]>>
   setSelectedKnowledgeBases: React.Dispatch<React.SetStateAction<KnowledgeBase[]>>
   // Monotonic files-draft revision, bumped synchronously in wrapped setFiles
   // below (functional-updater compatible). ABA-safe, mirrors the text draft.
@@ -85,7 +82,6 @@ interface InputbarToolsProviderProps {
   children: React.ReactNode
   initialState?: Partial<{
     files: FileMetadata[]
-    mentionedModels: Model[]
     selectedKnowledgeBases: KnowledgeBase[]
     couldAddImageFile: boolean
     extensions: string[]
@@ -99,6 +95,7 @@ interface InputbarToolsProviderProps {
 
 export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ children, initialState, actions }) => {
   // Core state
+  // Core state
   const [files, setFilesRaw] = useState<FileMetadata[]>(initialState?.files || [])
   // Synchronous files-draft revision. Bumped on every setFiles call below,
   // independent of render timing; preserved across functional updates.
@@ -108,7 +105,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
     setFilesRaw(action)
   }, [])
   const getFilesRevision = useCallback(() => filesRevisionRef.current, [])
-  const [mentionedModels, setMentionedModels] = useState<Model[]>(initialState?.mentionedModels || [])
   const [selectedKnowledgeBases, setSelectedKnowledgeBases] = useState<KnowledgeBase[]>(
     initialState?.selectedKnowledgeBases || []
   )
@@ -136,12 +132,11 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
   const stateValue = useMemo<InputbarToolsState>(
     () => ({
       files,
-      mentionedModels,
       selectedKnowledgeBases,
       couldAddImageFile,
       extensions
     }),
-    [files, mentionedModels, selectedKnowledgeBases, couldAddImageFile, extensions]
+    [files, selectedKnowledgeBases, couldAddImageFile, extensions]
   )
 
   // Dispatch Context Value (stable references)
@@ -149,7 +144,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
     () => ({
       // State setters (wrapped setFiles keeps the native Dispatch shape).
       setFiles,
-      setMentionedModels,
       setSelectedKnowledgeBases,
       getFilesRevision,
       // Stable actions
