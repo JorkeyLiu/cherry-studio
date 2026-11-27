@@ -1286,7 +1286,11 @@ const reconcileInternal = (
       if (retainedTail) return reconciled(retainedTail)
     }
     if (!model || retainedIndex === null || retainedIndex >= latestOldest) {
-      return reconciled(createLatestMessageWindow(messages, capacity, cleanAuth))
+      return reconciled(
+        model
+          ? createLatestWindowFromModel(model, capacity, cleanAuth)
+          : createLatestMessageWindow(messages, capacity, cleanAuth)
+      )
     }
     // Retention: the newest-capacity range would evict the held row. Keep the
     // older context the current window already shows (never less than the held
