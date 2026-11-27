@@ -110,6 +110,28 @@ describe('usePromptTokenEstimate session path', () => {
     await waitFor(() => expect(result.current).toBe(125))
   })
 
+  it('pending shape (empty history + empty snapshot) estimates draft only without per-message history', async () => {
+    const { result } = renderHook(() =>
+      usePromptTokenEstimate({
+        assistant: baseAssistant,
+        tokenEstimationMessages: [],
+        blockSnapshot: new Map() as never,
+        text: 'hello',
+        files: [],
+        routeIdentity: idA,
+        estimateHistoryMessage: messageMock,
+        estimateDraft: draftMock
+      })
+    )
+
+    await waitFor(() => expect(draftMock).toHaveBeenCalledTimes(1))
+    expect(messageMock).not.toHaveBeenCalled()
+    act(() => {
+      draftDeferred[0].resolve(draftTotal(5))
+    })
+    await waitFor(() => expect(result.current).toBe(5))
+  })
+
   it('text-only rerun reuses stable history estimates (no repeated tokenization)', async () => {
     const m1 = msg('m1')
     const { result, rerender } = renderHook(

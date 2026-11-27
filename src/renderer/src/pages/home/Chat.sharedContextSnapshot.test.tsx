@@ -5,18 +5,19 @@
  * `messageBlocks` slice + real `selectMessageBlocksByIds` + real
  * `resolveSharedContextInfo` + real `createSnapshotBlockMap`; only the
  * Messages/Inputbar children are stubs that record the shared projection).
- * The first case sits authority-pending (persisted anchor, no closure), so the
- * shared input is the loaded topic's referenced blocks. The second case pins
+ * The first case sits authority-pending (persisted anchor, no closure): the
+ * shared input carries no block snapshot (derivation default empty Map) and
+ * empty context/token lists, never the ordinary store. The second case pins
  * an authoritative closure, so the same real pipeline derives the Inputbar's
  * `tokenEstimationMessages` through the real empty-message filter.
  *
- * Proves the inactive-block isolation claim: committing a block the active
- * input does not reference leaves the recorded shared projection untouched
- * (same identity), while updating a referenced block forms a new snapshot
- * and a new derivation carrying the updated content — and, on the
- * closure-backed route, the real derived Inputbar input change (a message
- * dropping out of `tokenEstimationMessages` when its only text goes blank)
- * with authority metadata (anchor/boundary/counts) untouched.
+ * Proves the isolation claim: ordinary block commits (referenced or not)
+ * never touch the pending shared projection (same identity, empty
+ * snapshot); on the closure-backed route, updating a referenced block forms
+ * a new snapshot and a new derivation carrying the updated content — and the
+ * real derived Inputbar input change (a message dropping out of
+ * `tokenEstimationMessages` when its only text goes blank) with authority
+ * metadata (anchor/boundary/counts) untouched.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import { act, render } from '@testing-library/react'
@@ -246,7 +247,7 @@ describe('Chat shared-context snapshot', () => {
     resetExecutionOverlayForTests()
   })
 
-  it('inactive block commits do not invalidate the shared input; referenced updates form a new snapshot', () => {
+  it('pending route carries no snapshot: ordinary block commits never touch the shared input', () => {
     const store = makeStore()
     store.dispatch(
       messageBlocksSlice.actions.upsertOneBlock({
@@ -267,9 +268,10 @@ describe('Chat shared-context snapshot', () => {
         />
       </Provider>
     )
-    // Pending route: persisted anchor, no closure, content from the snapshot.
-    // The outline is off by default (`messageNavigation: false`), so the whole
-    // navigation component — and with it every snapshot read — never mounts.
+    // Pending route: persisted anchor, no closure — empty lists, default empty
+    // snapshot, never the ordinary store. The outline is off by default
+    // (`messageNavigation: false`), so the whole navigation component — and
+    // with it every snapshot read — never mounts.
     expect(hoisted.navTelemetry.renders).toBe(0)
     const rendered = hoisted.infos.length
     expect(rendered).toBeGreaterThan(0)
@@ -279,7 +281,11 @@ describe('Chat shared-context snapshot', () => {
     const info1 = lastInfo()
     expect(info1.isAuthoritativePending).toBe(true)
     expect(info1.anchorGroupKey).toBe('g0')
-    expect(info1.blockSnapshot.get('b1').content).toBe('hello')
+    expect(info1.uiMessages).toEqual([])
+    expect(info1.tokenEstimationMessages).toEqual([])
+    expect(info1.contextCount).toEqual({ current: 0, max: null })
+    expect(info1.blockSnapshot.size).toBe(0)
+    expect(info1.blockSnapshot.has('b1')).toBe(false)
 
     // An unrelated block commit does not touch the shared input.
     act(() => {
@@ -295,7 +301,8 @@ describe('Chat shared-context snapshot', () => {
     expect(hoisted.infos.length).toBe(rendered)
     expect(lastInfo()).toBe(info1)
 
-    // Updating a referenced block forms a new snapshot and a new derivation.
+    // A referenced block update stays invisible too: pending reads nothing
+    // through the ordinary store.
     act(() => {
       store.dispatch(
         messageBlocksSlice.actions.upsertOneBlock({
@@ -306,11 +313,9 @@ describe('Chat shared-context snapshot', () => {
         } as any)
       )
     })
-    const info2 = lastInfo()
-    expect(info2).not.toBe(info1)
-    expect(info2.blockSnapshot.get('b1').content).toBe('hello updated')
-    expect(info2.isAuthoritativePending).toBe(true)
-    expect(info2.anchorGroupKey).toBe('g0')
+    expect(hoisted.infos.length).toBe(rendered)
+    expect(lastInfo()).toBe(info1)
+    expect(lastInfo().blockSnapshot.size).toBe(0)
   })
 
   it('closure-backed route: referenced patch changes tokenEstimationMessages; unrelated keeps identity; metadata moves same-beat', () => {

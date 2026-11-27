@@ -12,7 +12,8 @@
  * - execution delta: overlay body updates the snapshot and the estimate while
  *   membership stays put;
  * - route switch: the retained projection for another topic never displays
- *   (fail-closed), pending snapshot comes from the new route's loaded blocks.
+ *   (fail-closed); pending carries no block snapshot (derivation default
+ *   empty Map), never the ordinary store.
  */
 import { configureStore } from '@reduxjs/toolkit'
 import {
@@ -28,7 +29,7 @@ import {
   subscribeExecutionOverlay,
   tryHandoffAfterClosure
 } from '@renderer/services/executionOverlayRegistry'
-import messageBlocksReducer from '@renderer/store/messageBlock'
+import messageBlocksReducer, { messageBlocksSlice } from '@renderer/store/messageBlock'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { act, renderHook } from '@testing-library/react'
@@ -191,6 +192,63 @@ describe('useContextPresentation', () => {
     expect(result.current.sharedContextInfo.tokenEstimationMessages).toEqual([])
     expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(false)
     expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 0, max: 0 })
+  })
+
+  it('pending carries no snapshot: ordinary block commits never touch the shared input', () => {
+    const store = makeStore()
+    // Seed the ordinary store with a referenced block: pending must ignore it.
+    store.dispatch(
+      messageBlocksSlice.actions.upsertOneBlock({
+        id: 'a1-block',
+        messageId: 'a1',
+        type: MessageBlockType.MAIN_TEXT,
+        content: 'ordinary-body',
+        status: 'success'
+      } as never)
+    )
+    hoisted.closure = null
+    const { result } = renderHook(
+      () =>
+        useContextPresentation({
+          topicId: TOPIC,
+          anchorGroupKey: ANCHOR,
+          topicMessages: topicMessages(TOPIC) as any,
+          assistant
+        }),
+      { wrapper: wrapper(store) }
+    )
+    // Authority-pending: persisted anchor, no closure — empty lists, default empty snapshot.
+    expect(result.current.sharedContextInfo.isAuthoritativePending).toBe(true)
+    expect(result.current.sharedContextInfo.anchorGroupKey).toBe(ANCHOR)
+    expect(result.current.sharedContextInfo.uiMessages).toEqual([])
+    expect(result.current.sharedContextInfo.tokenEstimationMessages).toEqual([])
+    expect(result.current.sharedContextInfo.contextCount).toEqual({ current: 0, max: null })
+    expect(result.current.sharedContextInfo.blockSnapshot.size).toBe(0)
+    expect(result.current.sharedContextInfo.blockSnapshot.has('a1-block')).toBe(false)
+    const pendingInfo = result.current.sharedContextInfo
+    // Ordinary block commits (referenced or not) never touch the pending input.
+    act(() => {
+      store.dispatch(
+        messageBlocksSlice.actions.upsertOneBlock({
+          id: 'a1-block',
+          messageId: 'a1',
+          type: MessageBlockType.MAIN_TEXT,
+          content: 'ordinary-body-updated',
+          status: 'success'
+        } as never)
+      )
+      store.dispatch(
+        messageBlocksSlice.actions.upsertOneBlock({
+          id: 'unrelated-block',
+          messageId: 'm9',
+          type: MessageBlockType.MAIN_TEXT,
+          content: 'unrelated',
+          status: 'success'
+        } as never)
+      )
+    })
+    expect(result.current.sharedContextInfo).toBe(pendingInfo)
+    expect(result.current.sharedContextInfo.blockSnapshot.size).toBe(0)
   })
 
   it('retires a retained terminal via the accepted response’s own read receipt', () => {

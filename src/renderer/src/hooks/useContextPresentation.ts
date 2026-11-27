@@ -10,13 +10,10 @@ import {
   subscribeExecutionOverlay,
   tryHandoffAfterClosure
 } from '@renderer/services/executionOverlayRegistry'
-import { useAppSelector } from '@renderer/store'
-import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
-import { shallowEqual } from 'react-redux'
 
 /**
  * Chat-scoped context presentation (route B).
@@ -28,7 +25,7 @@ import { shallowEqual } from 'react-redux'
  *   (never from the ordinary `messageBlocks` hydration — that write path is
  *   exited), overlaid with execution bodies for accepted members only;
  * - cold/pending route: authority-pending with no viewport-count authority;
- *   the loaded projection supplies the pending snapshot only;
+ *   pending carries no block snapshot (the derivation default empty Map);
  * - empty/anchorless route: the legitimate bounded fallback.
  *
  * Identity fail-closed: a retained projection for another topic/route/anchor
@@ -77,18 +74,12 @@ export function useContextPresentation(options: {
     [freshClosure]
   )
 
-  // Pending-path loaded snapshot only (no accepted closure): the loaded
-  // topic's referenced blocks. Never used for authority, only to keep the
-  // pending projection's explicit snapshot shape.
-  const pendingBlockIds = useMemo(
-    () => (freshClosure ? [] : topicMessages.flatMap((m) => m.blocks ?? [])),
-    [freshClosure, topicMessages]
-  )
-  const pendingBlocks = useAppSelector((state) => selectMessageBlocksByIds(state, pendingBlockIds), shallowEqual)
-
   const blockSnapshot = useMemo(() => {
     if (!freshClosure) {
-      return createSnapshotBlockMap(pendingBlocks)
+      // Pending: no snapshot from the ordinary store. The shared derivation
+      // defaults a missing snapshot to an empty Map; pending lists are empty
+      // so no consumer reads through it.
+      return undefined
     }
     const base = createSnapshotBlockMap((freshClosure.blocks ?? []) as never[])
     const overlay = getComposedOverlayBlocks(routeKey, acceptedMemberBlockIds)
@@ -100,7 +91,7 @@ export function useContextPresentation(options: {
       }
     }
     return composed
-  }, [freshClosure, pendingBlocks, topicId, route, acceptedMemberBlockIds, overlayVersion])
+  }, [freshClosure, topicId, route, acceptedMemberBlockIds, overlayVersion])
 
   const sharedContextInfo = useMemo(
     () => resolveSharedContextInfo(topicMessages, assistant, topicId, freshClosure as never, branchId, blockSnapshot),
