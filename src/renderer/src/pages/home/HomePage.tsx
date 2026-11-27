@@ -21,6 +21,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import NavigationService from '@renderer/services/NavigationService'
 import { useAppSelector } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
+import { setActiveTopic as setRuntimeActiveTopic } from '@renderer/store/runtime'
 import { setAssistantsWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
@@ -107,6 +108,14 @@ const HomeViewportScope: FC<HomeViewportScopeProps> = ({
   const { setShowAssistants } = useShowAssistants()
   const { toggleShowTopics } = useShowTopics()
   const dispatch = useDispatch()
+
+  // Single-owner runtime mirror: the selected topic is owned here
+  // (useActiveTopic + the local setActiveTopic above). Message consumers only
+  // read multi-select state and never publish selection, so this is the only
+  // writer of the runtime copy the navbar id gate reads.
+  useEffect(() => {
+    dispatch(setRuntimeActiveTopic(activeTopic))
+  }, [dispatch, activeTopic])
   const assistantsWidth = useAppSelector((s) => s.settings.assistantsWidth)
   const topicListWidth = useAppSelector((s) => s.settings.topicListWidth)
   const { pairedMinPair, windowWidth } = usePairedReadingMin()

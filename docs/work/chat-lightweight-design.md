@@ -695,3 +695,11 @@
 - 上下文闭包直返（8c2a126e16）：`fetchContextClosure` 同类型响应直返，删除顶层浅重装和同型断言，`cloneForWire`/unwrap/调用方校验保留。
 - 验证：Main 4 文件 54/54、Renderer 144/144、`pnpm typecheck` 五路、hooks 全过；不声称性能数字，全量 renderer/E2E 未补跑。
 - 边界：本文档追加不改任何代码/测试，不运行测试；除本切片 signoff commit 外未做任何 git 操作（不 push/amend/rebase/reset）。
+## 67. active topic 单 owner runtime 同步（已实现）
+- 范围（最小切片，仅 renderer 装配层）：`useChatContext` 删除 `setActiveTopic` 的 runtime 同步 dispatch（保留 multi-select 与 activeTopic 透传）；`HomePage.tsx` 的 `HomeViewportScope` 成为 runtime active topic 副本的唯一写入方（选中话题 effect 内 `dispatch(setRuntimeActiveTopic(activeTopic))`，与 `useActiveTopic` 同一选中事实）。消息消费者只读，不再发布选中事实。未改 Main/shared/IPC/preload/DB/ADR，未改选中语义与导航门。
+- 结构收益（只声明结构，不声明性能）：选中事实的 runtime 镜像写入方由多处收归一处；`useChatContext` 多实例挂载/重渲染不再重复 dispatch。
+- 观测（单机单轮方向记录，不作 A/B 因果、不作显著性断言）：profile-1 L1→main `runtime/setActiveTopic` 161 条、profile-2 1 条，main→L1 3→0；无 `fetchMessagesWindow` IPC；切换总时 703→757ms / 300→329ms，ScriptDuration 398.6→406ms / 173.1→178ms，Nodes/Listeners 几乎不变。因此只记录结构收敛，无性能提升结论。
+- 测试：新增 `useChatContext.noRuntimeSync.test.tsx` 2 例（多实例挂载/重渲染永不 dispatch runtime setActiveTopic；multi-select 与透传保留）+ `HomePage.runtimeActiveTopic.test.tsx` 4 例（初挂载恰一次镜像；切换一次同步且滞后消费者不覆盖；同 id 元数据更新镜像最新对象；Tools id 门读镜像副本）。相邻 31 例回归覆盖。
+- 验证（传入的验证结论，本文档追加时未重跑）：新测试 6 + 相邻 31 通过；`pnpm typecheck` 五路 exit 0；fresh `pnpm build` exit 0；关键 E2E 18/19（唯一失败 `page-viewport invalid-anchor` 在 clean HEAD 同失败；loading 探针仍读旧 `loadingByTopic`，实际读用 `pendingWindowReadsByTopic`）；全 renderer 3 个 `Messages.chromeCoCommitWiring` 失败在 clean HEAD 同复现。
+- 下一步：转向 DOM/CPU 热点。
+- 边界：本文档追加不改任何代码/测试；除本节记录的提交外未做任何 git 操作（不 push/amend/rebase/reset）。

@@ -1,6 +1,6 @@
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
-import { setActiveTopic, setSelectedMessageIds, toggleMultiSelectMode } from '@renderer/store/runtime'
+import { setSelectedMessageIds, toggleMultiSelectMode } from '@renderer/store/runtime'
 import type { Topic } from '@renderer/types'
 import { useCallback, useEffect, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
@@ -19,10 +19,6 @@ export const useChatContext = (activeTopic: Topic) => {
     })
     return () => unsubscribe()
   }, [dispatch])
-
-  useEffect(() => {
-    dispatch(setActiveTopic(activeTopic))
-  }, [dispatch, activeTopic])
 
   const handleToggleMultiSelectMode = useCallback(
     (value: boolean) => {
