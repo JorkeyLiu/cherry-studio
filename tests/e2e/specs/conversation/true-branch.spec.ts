@@ -60,8 +60,10 @@ import {
   queryChatDbViaElectronWithRetry
 } from '../../fixtures/electron.fixture'
 import { closeElectronWithExactCleanup } from '../../utils/electron-cleanup'
+import { decideRequestedAnchorAcceptance } from '../../utils/requestedAnchorAccept'
 import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../../utils/process-cleanup'
 import { relaunchSameProfile } from '../../utils/restart-electron-profile'
+import { ensureComposerExpanded } from '../../utils/composer'
 import { waitForAppReady } from '../../utils/wait-helpers'
 import {
   activateTopic,
@@ -2767,19 +2769,37 @@ test.describe('Topic-internal branches end-to-end', () => {
         await btn.click({ force: true } as any)
       }
     }
-    const assertSameAnchor = (label: string, before: BbAnchor | null, after: BbAnchor | null): void => {
+    const assertSameAnchor = async (label: string, before: BbAnchor | null, after: BbAnchor | null): Promise<void> => {
+      // Requested-identity acceptance (ADR VIEWPORT-5): the oracle measures
+      // the REQUESTED row (before.id) directly — resident exactly-once +
+      // visible + offset within 12px of the departure offset. `after`
+      // (crossing-first) is a compat non-null content check only; its
+      // identity never decides acceptance, since a neighbour row 1px over
+      // the container top legitimately wins crossing-first while the
+      // requested row itself restores within tolerance.
       expect(before, `${label}: baseline anchor must exist`).not.toBeNull()
       expect(after, `${label}: return anchor must exist`).not.toBeNull()
-      expect(after?.id, `${label}: same message must anchor`).toBe(before?.id)
+      const requestedId = before?.id as string
+      const measured = await page.evaluate((id: string) => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        const nodes = Array.from(document.querySelectorAll(`#messages [data-message-id="${id}"]`))
+        if (!container || nodes.length === 0)
+          return { count: nodes.length, visible: false, offset: null as number | null }
+        const el = nodes[0] as HTMLElement
+        const c = container.getBoundingClientRect()
+        const r = el.getBoundingClientRect()
+        return { count: nodes.length, visible: r.bottom > c.top && r.top < c.bottom, offset: r.top - c.top }
+      }, requestedId)
+      const verdict = decideRequestedAnchorAcceptance(before?.offset ?? 0, measured)
       expect(
-        Math.abs((after?.offset ?? 0) - (before?.offset ?? 0)),
-        `${label}: offset must repeat within 12px`
-      ).toBeLessThanOrEqual(12)
+        verdict.ok,
+        `${label}: requested anchor ${requestedId} must restore within 12px (verdict ${JSON.stringify(verdict)}, measured ${JSON.stringify(measured)}, want ${before?.offset})`
+      ).toBe(true)
     }
     const attachFailure = async (reason: string): Promise<void> => {
       try {
         const dump = await page.evaluate(
-          async ({ tid }: { tid: string }) => {
+          async ({ tid, reason }: { tid: string; reason: string }) => {
             const pick = (b: any) => ({
               id: typeof b?.id === 'string' ? b.id : '',
               anchorMessageId: typeof b?.anchorMessageId === 'string' ? b.anchorMessageId : ''
@@ -2796,11 +2816,43 @@ test.describe('Topic-internal branches end-to-end', () => {
             }
             let dom: unknown = null
             try {
+              const container = document.querySelector('#messages') as HTMLElement | null
               const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
-              const c = (document.querySelector('#messages') as HTMLElement | null)?.getBoundingClientRect() ?? null
+              const c = container?.getBoundingClientRect() ?? null
+              let anchor: { id: string; offset: number } | null = null
+              try {
+                if (container && c) {
+                  const cands = rows.map((row) => {
+                    const r = row.getBoundingClientRect()
+                    return { id: row.getAttribute('data-message-id') ?? '', top: r.top, bottom: r.bottom }
+                  })
+                  const crossing = cands.find((x) => x.id.length > 0 && x.top <= c.top && x.bottom > c.top) ?? null
+                  const picked =
+                    crossing ??
+                    cands.filter((x) => x.id.length > 0 && x.top >= c.top).sort((a, b) => a.top - b.top)[0] ??
+                    null
+                  anchor = picked ? { id: picked.id, offset: Math.round((picked.top - c.top) * 10) / 10 } : null
+                }
+              } catch {
+                anchor = null
+              }
+              let snapshot: unknown = null
+              try {
+                const activeBid = (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null
+                const key = `scroll:topic-${tid}::${activeBid ?? 'main'}`
+                const rawSnap = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
+                snapshot = { key, messageId: rawSnap?.messageId ?? null, anchorId: rawSnap?.anchorId ?? null }
+              } catch {
+                snapshot = null
+              }
               dom = {
                 count: rows.length,
-                ids: rows.map((r) => r.getAttribute('data-message-id')),
+                scrollTop: container ? container.scrollTop : null,
+                scrollHeight: container ? container.scrollHeight : null,
+                clientHeight: container ? container.clientHeight : null,
+                phase: container?.getAttribute('data-viewport-phase') ?? null,
+                anchor,
+                snapshot,
                 tops: rows.slice(0, 8).map((r) => {
                   const rect = r.getBoundingClientRect()
                   return { id: r.getAttribute('data-message-id'), top: c ? rect.top - c.top : rect.top }
@@ -2811,7 +2863,7 @@ test.describe('Topic-internal branches end-to-end', () => {
             }
             return { reason, live, dom }
           },
-          { tid: topicId }
+          { tid: topicId, reason }
         )
         await test.info().attach('user-journey-failure', {
           body: JSON.stringify(dump, null, 2),
@@ -2821,7 +2873,6 @@ test.describe('Topic-internal branches end-to-end', () => {
         // Best-effort only; never masks the original failure.
       }
     }
-
     try {
       // Setup: real main + branch A + exclusive suffixes (fixture prep via API).
       const foundA = await bbWheelUntilVisible(anchorA)
@@ -3048,15 +3099,77 @@ test.describe('Topic-internal branches end-to-end', () => {
       // pre-creation departure anchorMBeforeBCreation (source saves on
       // departure through B search, not the stale pre-search anchorM1).
       await bbTopTo(branchAId)
-      assertSameAnchor('A after B', anchorA1, await bbSettled())
+      await assertSameAnchor('A after B', anchorA1, await bbSettled())
       expect(await bbCount(mainTail), 'A must still exclude the main tail').toBe(0)
       expect(await bbCount(bForeignForOthers), 'A must still exclude the B tail').toBe(0)
       await bbTopTo(null)
-      assertSameAnchor('main after B', anchorMBeforeBCreation, await bbSettled())
+      await assertSameAnchor('main after B', anchorMBeforeBCreation, await bbSettled())
       expect(await bbCount(aForeignForMain), 'main must still exclude the A tail').toBe(0)
       expect(await bbCount(bForeignForOthers), 'main must still exclude the B tail').toBe(0)
       await bbTopTo(branchBId)
-      assertSameAnchor('B return', anchorB1, await bbSettled())
+      // Failure-time B-return forensics: attach requested-anchor geometry
+      // (want/have/phase/window/scroll) ONLY when the strict anchor below
+      // fails. Happy-path timing is unchanged; the oracle below is identity-based (requested row).
+      try {
+        await assertSameAnchor('B return', anchorB1, await bbSettled())
+      } catch (error) {
+        try {
+          const bReturnForensics = await page.evaluate(
+            async ({ tid, bid, requestedId }: { tid: string; bid: string; requestedId: string | null }) => {
+              const container = document.querySelector('#messages') as HTMLElement | null
+              const c = container?.getBoundingClientRect() ?? null
+              const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+              const round2 = (v: number) => Math.round(v * 100) / 100
+              const describe = (id: string | null) => {
+                if (!id) return { id, found: false as const }
+                const el = rows.find((r) => r.getAttribute('data-message-id') === id) ?? null
+                if (!el) return { id, found: false as const }
+                const r = el.getBoundingClientRect()
+                return { id, found: true as const, top: round2(r.top), have: c ? round2(r.top - c.top) : null }
+              }
+              const bexcl = (suffix: string) => {
+                const el = rows.find((r) => (r.getAttribute('data-message-id') ?? '').endsWith(suffix)) ?? null
+                if (!el) return { suffix, found: false as const }
+                const r = el.getBoundingClientRect()
+                return { suffix, found: true as const, top: round2(r.top), have: c ? round2(r.top - c.top) : null }
+              }
+              let snapshot: unknown = null
+              try {
+                const key = `scroll:topic-${tid}::${bid}`
+                const rawSnap = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
+                snapshot = { key, raw: rawSnap ?? null }
+              } catch (e) {
+                snapshot = { error: e instanceof Error ? e.message : String(e) }
+              }
+              return {
+                requestedId,
+                snapshot,
+                container: c
+                  ? {
+                      top: c.top,
+                      scrollTop: container ? container.scrollTop : null,
+                      scrollHeight: container ? container.scrollHeight : null,
+                      clientHeight: container ? container.clientHeight : null,
+                      phase: container?.getAttribute('data-viewport-phase') ?? null
+                    }
+                  : null,
+                requested: describe(requestedId),
+                bexcl00004: bexcl('-msg-bexcl-00004'),
+                bexcl00005: bexcl('-msg-bexcl-00005'),
+                window: { count: rows.length, ids: rows.map((r) => r.getAttribute('data-message-id')) }
+              }
+            },
+            { tid: topicId, bid: branchBId, requestedId: anchorB1?.id ?? null }
+          )
+          await test.info().attach('b-return-forensics', {
+            body: JSON.stringify({ forensics: bReturnForensics }, null, 2),
+            contentType: 'application/json'
+          })
+        } catch {
+          // Best-effort only; never masks the original failure.
+        }
+        throw error
+      }
       expect(await bbCount(mainTail), 'B must exclude the main tail').toBe(0)
       expect(await bbCount(aForeignForMain), 'B must exclude the A tail').toBe(0)
 
@@ -3064,15 +3177,15 @@ test.describe('Topic-internal branches end-to-end', () => {
       // trace. Each route keeps its current stable position (A keeps
       // anchorA1; main keeps anchorMBeforeBCreation; B keeps anchorB1).
       await bbTopTo(null)
-      assertSameAnchor('main pre-transient', anchorMBeforeBCreation, await bbSettled())
+      await assertSameAnchor('main pre-transient', anchorMBeforeBCreation, await bbSettled())
       await bbTopTo(branchAId)
       // No wheel here: immediate departure proves a no-scroll visit leaves no trace.
       await bbTopTo(branchBId)
-      assertSameAnchor('B after transient A', anchorB1, await bbSettled())
+      await assertSameAnchor('B after transient A', anchorB1, await bbSettled())
       await bbTopTo(null)
-      assertSameAnchor('main after transient A', anchorMBeforeBCreation, await bbSettled())
+      await assertSameAnchor('main after transient A', anchorMBeforeBCreation, await bbSettled())
       await bbTopTo(branchAId)
-      assertSameAnchor('A after transient', anchorA1, await bbSettled())
+      await assertSameAnchor('A after transient', anchorA1, await bbSettled())
     } catch (err) {
       await attachFailure(err instanceof Error ? err.message : String(err))
       throw err
@@ -3704,8 +3817,9 @@ test.describe('Ordinary send immediate mutability (no-reload)', () => {
   test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
 
   async function uiSendMessage(page: any, text: string): Promise<void> {
+    // Input-island composer: non-empty topics start collapsed (textarea hidden).
+    await ensureComposerExpanded(page)
     const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-    await textarea.waitFor({ state: 'visible', timeout: 15000 })
     await textarea.click()
     await page.evaluate(
       ({ selector, content }: { selector: string; content: string }) => {
@@ -4107,8 +4221,9 @@ test.describe('Branch-route automatic naming preservation (bounded naming)', () 
   test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
 
   async function uiSendMessageLocal(page: any, text: string): Promise<void> {
+    // Input-island composer: non-empty topics start collapsed (textarea hidden).
+    await ensureComposerExpanded(page)
     const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-    await textarea.waitFor({ state: 'visible', timeout: 15000 })
     await textarea.click()
     await page.evaluate(
       ({ selector, content }: { selector: string; content: string }) => {

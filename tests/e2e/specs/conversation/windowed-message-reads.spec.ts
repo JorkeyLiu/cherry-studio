@@ -55,6 +55,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
+import { ensureComposerExpanded } from '../../utils/composer'
 
 const DISPLAY_LIMIT = 20 // caller-provided limit within 1..100
 const SYNTHETIC_TOTAL = 50 // > DISPLAY_LIMIT to prove bounded window
@@ -211,6 +212,7 @@ async function activateTopicAndWaitForBootstrap(page: any, topicId: string): Pro
  * sendMessage thunk path via React-compatible input events + Enter.
  */
 async function uiSendMessage(page: any, text: string): Promise<void> {
+  await ensureComposerExpanded(page)
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
   await textarea.waitFor({ state: 'visible', timeout: 15000 })
   await textarea.click()

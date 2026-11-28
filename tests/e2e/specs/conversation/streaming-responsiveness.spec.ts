@@ -30,6 +30,13 @@ import {
   SLOW_STREAM_MARKER,
   type MockRequestEntry
 } from '../../fixtures/mock-openai-server'
+import { ensureComposerExpanded } from '../../utils/composer'
+import {
+  parseComposerTailInsetPx,
+  resolveUnobscuredBottom,
+  TAIL_GAP_TOLERANCE_PX,
+  tailGapToUnobscuredBand
+} from '../../utils/unobscuredTailGap'
 import {
   activateTopic,
   letterMessageId,
@@ -47,8 +54,9 @@ const MODEL = 'mock-model'
 
 /** Type text into the real textarea and submit via Enter (production send path). */
 async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
+  // Input-island composer: non-empty topics start collapsed (textarea hidden).
+  await ensureComposerExpanded(page)
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-  await textarea.waitFor({ state: 'visible', timeout: 15000 })
   await textarea.click()
 
   await page.evaluate(
@@ -251,6 +259,8 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     // ═══════════════════════════════════════════════════════════════════
     // 3. INPUT INTERACTION DURING STREAMING
     // ═══════════════════════════════════════════════════════════════════
+    // Composer may have collapsed (outside-canvas pointer collapses the island).
+    await ensureComposerExpanded(page)
     const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
     await textarea.click()
     await setTextareaValue(page, 'interaction-during-stream')
@@ -428,6 +438,7 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     await uiSendMessage(page, `xl continuity probe ${EXTENDED_SLOW_STREAM_MARKER}`)
     const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
     await expect(textarea).toHaveValue('', { timeout: 10000 })
+    await ensureComposerExpanded(page)
     await textarea.click()
     await textarea.pressSequentially(CONTINUITY_DRAFT, { delay: 15 })
     await expect(textarea).toHaveValue(CONTINUITY_DRAFT, { timeout: 5000 })
@@ -544,6 +555,8 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     await expect(page.locator('#messages .message-assistant .markdown').first()).toContainText('leave-a-body-', {
       timeout: 10000
     })
+    // Composer may collapse on route return; expand via production gesture before Stop gate.
+    await ensureComposerExpanded(page)
     await expect(page.getByTestId('stop-generation-button')).toBeVisible({ timeout: 15000 })
 
     // ═══════════════════════════════════════════════════════════════════
@@ -591,7 +604,13 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     const bottomBox = await page.locator('#messages').boundingBox()
     expect(bottomBox).not.toBeNull()
     await page.mouse.move(bottomBox!.x + bottomBox!.width / 2, bottomBox!.y + bottomBox!.height / 2)
-    let bottomState: { atBottom: boolean; hasTail: boolean; bottomEdge: number } | null = null
+    let bottomState: {
+      atBottom: boolean
+      hasTail: boolean
+      bottomEdge: number
+      unobscuredBottom: number
+      visibleTailGap: number
+    } | null = null
     // Convergent wheel-down: a fixed 12-iteration budget proved flaky (the
     // leave/return restore lands the anchor at run-varying offsets, so the
     // distance to the bottom varies). Keep wheeling while the viewport moves
@@ -617,12 +636,28 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
           atBottom: cont.scrollTop >= max - 100,
           hasTail: (last.textContent || '').includes('tail-marker-END'),
           bottomEdge: Math.round(r.bottom - vr.bottom),
+          tailBottom: r.bottom,
+          containerBottom: vr.bottom,
+          rawInset: window.getComputedStyle(cont).getPropertyValue('--composer-tail-inset'),
           scrollTop: cont.scrollTop
         }
       })
       if (!read) continue
-      bottomState = { atBottom: read.atBottom, hasTail: read.hasTail, bottomEdge: read.bottomEdge }
-      if (bottomState.atBottom && bottomState.hasTail && Math.abs(bottomState.bottomEdge) <= 100) break
+      // The floating composer overlay covers the container's bottom strip, so
+      // the tail gap is measured against the unobscured band edge (the same
+      // --composer-tail-inset source production reads off #messages), never
+      // the raw container rect bottom. Fail-closed inset 0 === legacy metric.
+      const unobscuredBottom = resolveUnobscuredBottom(read.containerBottom, parseComposerTailInsetPx(read.rawInset))
+      const visibleTailGap = tailGapToUnobscuredBand(read.tailBottom, unobscuredBottom)
+      bottomState = {
+        atBottom: read.atBottom,
+        hasTail: read.hasTail,
+        bottomEdge: read.bottomEdge,
+        unobscuredBottom,
+        visibleTailGap
+      }
+      if (bottomState.atBottom && bottomState.hasTail && Math.abs(bottomState.visibleTailGap) <= TAIL_GAP_TOLERANCE_PX)
+        break
       if (read.scrollTop === lastScrollTop) {
         settledReads += 1
         if (settledReads >= 2) break
@@ -633,9 +668,9 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     }
     expect(bottomState?.atBottom).toBe(true)
     expect(bottomState?.hasTail).toBe(true)
-    expect(Math.abs(bottomState!.bottomEdge)).toBeLessThanOrEqual(100)
+    expect(Math.abs(bottomState!.visibleTailGap)).toBeLessThanOrEqual(TAIL_GAP_TOLERANCE_PX)
     console.log(
-      `[E2E] Leave-return continuity: anchor=${anchor!.id} drift<=${CONTINUITY_ANCHOR_TOL}px tail bottom edge=${bottomState!.bottomEdge}px`
+      `[E2E] Leave-return continuity: anchor=${anchor!.id} drift<=${CONTINUITY_ANCHOR_TOL}px tail bottom edge=${bottomState!.bottomEdge}px unobscured bottom=${Math.round(bottomState!.unobscuredBottom)}px visible tail gap=${Math.round(bottomState!.visibleTailGap)}px`
     )
   })
 })

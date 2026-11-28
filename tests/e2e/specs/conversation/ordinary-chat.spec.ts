@@ -30,6 +30,7 @@ import {
   test
 } from '../../fixtures/electron.fixture'
 import { cmContent, replaceEditorContent } from '../../utils/message-editor'
+import { ensureComposerExpanded } from '../../utils/composer'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
 // ---------------------------------------------------------------------------
@@ -59,8 +60,9 @@ async function getActiveContext(page: import('@playwright/test').Page) {
  * fill() after the component has been re-rendered (e.g., after a response).
  */
 async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
+  // Input-island composer: non-empty topics start collapsed (textarea hidden).
+  await ensureComposerExpanded(page)
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-  await textarea.waitFor({ state: 'visible', timeout: 15000 })
   await textarea.click()
 
   // Dispatch React-compatible input event via nativeInputValueSetter + input event

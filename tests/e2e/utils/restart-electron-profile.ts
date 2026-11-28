@@ -22,6 +22,7 @@
  *   `os.tmpdir()` keeps resolving inside the owned root.
  */
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
+import { ensureComposerExpanded } from './composer'
 
 // ---------------------------------------------------------------------------
 // Pure launch-surface builders (exported for the focused unit test)
@@ -170,7 +171,7 @@ async function ensureMockProvider(page: Page, mockPort: number): Promise<void> {
 /**
  * Launch a fresh Electron instance against the SAME disposable profile and
  * wait until the main window is usable (Redux ready, mock provider ensured,
- * home + textarea visible). Returns the new app + page.
+ * home + composer usable). Returns the new app + page.
  *
  * The caller must close the returned app before the test ends using
  * `closeElectronWithExactCleanup(userDataDir, ...)` (LOCK-625). On any
@@ -193,7 +194,11 @@ export async function relaunchSameProfile(options: RelaunchSameProfileOptions): 
       ['#chat', '.inputbar-container', '[class*="Inputbar"]', '[class*="Container"]'].join(', '),
       { state: 'visible', timeout: 60000 }
     )
-    await page.waitForSelector('.inputbar textarea, textarea[placeholder]', { state: 'visible', timeout: 30000 })
+    // Same-profile relaunch may restore a non-empty topic, whose input island
+    // starts collapsed (textarea hidden). Expand through the production
+    // trigger so the returned page has a usable composer instead of failing
+    // a bare visibility wait.
+    await ensureComposerExpanded(page)
     return { app, page }
   } catch (error) {
     try {

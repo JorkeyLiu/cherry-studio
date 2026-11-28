@@ -1,5 +1,6 @@
 import type { Locator, Page } from '@playwright/test'
 
+import { ensureComposerExpanded } from '../utils/composer'
 import { BasePage } from './base.page'
 
 /**
@@ -54,6 +55,8 @@ export class ChatPage extends BasePage {
    * Type a message in the input area.
    */
   async typeMessage(message: string): Promise<void> {
+    // Input-island composer: non-empty topics start collapsed (textarea hidden).
+    await ensureComposerExpanded(this.page)
     await this.inputArea.first().fill(message)
   }
 
@@ -61,6 +64,7 @@ export class ChatPage extends BasePage {
    * Clear the input area.
    */
   async clearInput(): Promise<void> {
+    await ensureComposerExpanded(this.page)
     await this.inputArea.first().clear()
   }
 

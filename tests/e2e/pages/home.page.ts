@@ -1,5 +1,6 @@
 import type { Locator, Page } from '@playwright/test'
 
+import { ensureComposerExpanded } from '../utils/composer'
 import { BasePage } from './base.page'
 
 /**
@@ -50,6 +51,8 @@ export class HomePage extends BasePage {
    * Type a message in the input area.
    */
   async typeMessage(message: string): Promise<void> {
+    // Input-island composer: non-empty topics start collapsed (textarea hidden).
+    await ensureComposerExpanded(this.page)
     const input = this.page.locator('.inputbar textarea, textarea[placeholder]')
     await input.first().fill(message)
   }
