@@ -55,6 +55,7 @@ import { findViewportTopAnchorWithOffset } from './domVisibility'
 import {
   declareUserIntentSession,
   displayedRouteKey,
+  type LayoutOperationRef,
   type MeasuredRouteViewportSnapshot,
   type RouteId,
   type RouteRef,
@@ -63,7 +64,6 @@ import {
   type RouteViewportSnapshot,
   type RouteVisualAnchor
 } from './routeViewportController'
-
 export type ViewportPhaseAttr = 'idle' | 'positioning' | 'revealed'
 
 export type SnapshotCapturer = () => MeasuredRouteViewportSnapshot | null
@@ -179,12 +179,14 @@ export interface RouteViewportContextValue {
 
 /**
  * Synchronous layout-settlement callback: absorb one already-committed
- * layout delta (the fold browse driver calls it after every height write).
- * The sole implementation is the message list wiring it to its keeper's
- * `requestHold` — the original holder calls the original owner, nothing is
- * exposed beyond this reason string.
+ * layout delta (the fold browse driver calls it after every height write,
+ * the composer overlay after every measured height frame). The sole
+ * implementation is the message list wiring it to its keeper's `requestHold` —
+ * the original holder calls the original owner, nothing is exposed beyond this
+ * reason string plus the optional layout-operation reference naming the
+ * logical episode the write belongs to.
  */
-export type ViewportLayoutSettler = (reason: string) => void
+export type ViewportLayoutSettler = (reason: string, op?: LayoutOperationRef | null) => void
 
 const RouteViewportContext = createContext<RouteViewportContextValue | null>(null)
 
@@ -426,12 +428,12 @@ export function RouteViewportProvider({
     layoutSettlerRef.current = settler
   }, [])
   // Synchronous layout settlement for JS-driven same-route space changes
-  // (fold browse motion): calls ONLY the holder-registered settler — the
-  // message list's keeper hold. Never notifies, never snapshots, never
-  // touches phase, generations, or ownership.
-  const settleLayout = useCallback((reason: string): void => {
+  // (fold browse motion, composer overlay growth): calls ONLY the
+  // holder-registered settler — the message list's keeper hold. Never
+  // notifies, never snapshots, never touches phase, generations, or ownership.
+  const settleLayout = useCallback((reason: string, op?: LayoutOperationRef | null): void => {
     try {
-      layoutSettlerRef.current?.(reason)
+      layoutSettlerRef.current?.(reason, op)
     } catch {}
   }, [])
 
@@ -769,7 +771,7 @@ export interface ViewportAnchorSample {
 
 export interface StableVisualAnchorMaintainer {
   /** Visual hold plus validated fold-reconciliation snapshot sync (never takeover/release/epoch change). */
-  requestHold: (reason: string) => void
+  requestHold: (reason: string, op?: LayoutOperationRef | null) => void
   /**
    * Publish the transactional pair for a just-published anchor (offset +
    * scrollTop from the same instant). Purely a baseline source: the keeper owns
@@ -2062,16 +2064,19 @@ interface LayoutHoldBaseline {
  *
  * Every app-owned `scrollTop` write records the position the container actually
  * REALIZED, so the scroll observation the browser fires for it is consumed as an
- * app echo instead of being mistaken for user navigation. Best-effort: an
+ * app echo instead of being mistaken for user navigation. Callers pass the
+ * active layout operation when the write belongs to a logical episode, so the
+ * marker carries that episode's identity. Best-effort: an
  * unavailable controller or container never blocks the compensation itself.
  */
 const recordCompensationWrite = (
-  controller: { noteCompensationWrite: (scrollTop: number) => void } | null | undefined,
-  container: HTMLElement
+  controller: { noteCompensationWrite: (scrollTop: number, op?: LayoutOperationRef | null) => void } | null | undefined,
+  container: HTMLElement,
+  op?: LayoutOperationRef | null
 ): void => {
   try {
     if (!controller) return
-    controller.noteCompensationWrite(container.scrollTop)
+    controller.noteCompensationWrite(container.scrollTop, op ?? null)
   } catch {
     // best-effort bookkeeping only
   }
@@ -2079,7 +2084,6 @@ const recordCompensationWrite = (
 
 export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement | null>): StableVisualAnchorMaintainer {
   const viewport = useOptionalRouteViewport()
-  const compensatingRef = useRef<{ expected: number } | null>(null)
   // Layout-space hold baseline for the live anchor row (route + anchor identity
   // provenance). The keeper's OWN observation is always a true pair (offset +
   // scrollTop read in one synchronous block), so it is the preferred baseline;
@@ -2108,7 +2112,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   const bottomPinRef = useRef<{ routeKey: string; scrollTop: number } | null>(null)
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
-  const holdRef = useRef<(reason: string) => void>(() => {})
+  const holdRef = useRef<(reason: string, op?: LayoutOperationRef | null) => void>(() => {})
   // Bounded tab-switch quiet validation (single coalesced rAF, no polling).
   // While a tab-switch intent is armed the keeper compensates the clicked
   // tab offset on every observer trigger; the queued rAF re-proves the tab
@@ -2189,8 +2193,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     // conversation. The session itself is still opened/refreshed/superseding
     // exactly as before (no gate, no timer, no input interception).
     const declare = () => {
+      // The controller's declare cancels any live layout operation with its
+      // echo (the same genuine-input cancellation the operation pilot owns),
+      // so no keeper-side slot is needed here.
       const openedSession = declareUserIntentSession(controller)
-      compensatingRef.current = null
       if (openedSession) notify()
     }
     // Layout-control press (resize handle): same-arbiter LAYOUTCONTROL, not
@@ -2330,37 +2336,17 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   // `controller.userTakeover()` (single writer → `commitSnapshotForRoute`)
   // plus the single validated fold-reconciliation programmatic adopt below
   // (same single-writer discipline). This keeper never takes over, never
-  // releases ownership or bumps the epoch: a no-intent scroll (not a self
-  // echo, no live user session, stable/aligned + clean + active anchor)
-  // holds once via the same visual compensation. The sole anchor-identity
-  // move here is the hidden fold-answer reconciliation (same-group visible
-  // sibling, offset preserved, no epoch/release); only that validated path
-  // may queue its layout-quiet stable snapshot sync. Self compensation
-  // echoes are swallowed by the expected guard so they never recurse.
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    const onScroll = () => {
-      const pending = compensatingRef.current
-      try {
-        if (pending && Math.abs(container.scrollTop - pending.expected) < 0.5) {
-          compensatingRef.current = null
-          return
-        }
-      } catch {
-        compensatingRef.current = null
-        return
-      }
-      compensatingRef.current = null
-      try {
-        holdRef.current('scroll')
-      } catch {}
-    }
-    container.addEventListener('scroll', onScroll, { passive: true })
-    return () => container.removeEventListener('scroll', onScroll)
-    // Stable identity: compensation accounting never depends on the versioned
-    // viewport object (see above).
-  }, [containerRef])
+  // releases ownership or bumps the epoch, and never listens for scroll
+  // itself: Messages owns the only scroll listener and the only
+  // `controller.consumeCompensationEcho()` classification. A no-intent scroll
+  // (not a controller-consumed self echo, no live user session, stable/aligned
+  // + clean + active anchor) holds once via the same visual compensation
+  // through Messages' no-live-session `requestHold('messages-scroll')`. The
+  // sole anchor-identity move here is the hidden fold-answer reconciliation
+  // (same-group visible sibling, offset preserved, no epoch/release); only
+  // that validated path may queue its layout-quiet stable snapshot sync. Self
+  // compensation echoes are consumed by the controller's marker so they never
+  // recurse.
 
   // Window generation drives synchronous re-resolution in the layout phase:
   // same-route pagination/reconcile bumps the controller generation and
@@ -3037,7 +3023,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       if (layoutHoldRef.current !== null) droppedLayoutHoldRef.current = layoutHoldRef.current
       layoutHoldRef.current = null
     }
-    const hold = (reason: string): void => {
+    const hold = (reason: string, op?: LayoutOperationRef | null): void => {
       void reason
       const vp = viewportRef.current
       if (!vp) {
@@ -3059,14 +3045,27 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       // cancel the user's movement — the only reason the previous gate refused
       // every non-armed observation. Continuous paging across fetch flight and
       // any later row growth during the same browse session therefore hold on
-      // the one live anchor, at any observer trigger (layout commit, RO, MO,
-      // scroll), instead of a single generation-bound hold followed by vetoes.
-      // The pagination commit's arm is left to the controller (it publishes the
-      // precommit reading identity as the live anchor); the keeper no longer
-      // needs a per-generation permission to hold it.
+      // the one live anchor, at any admissible trigger (layout commit, RO, MO,
+      // explicit settle), instead of a single generation-bound hold followed by
+      // vetoes. The pagination commit's arm is left to the controller (it
+      // publishes the precommit reading identity as the live anchor); the keeper
+      // no longer needs a per-generation permission to hold it.
       if (!vp.controller.isDomProvenanceClean) {
         layoutHoldRef.current = null
         return
+      }
+      // Layout-operation provenance: an explicit operation must still be the
+      // live episode for this route, otherwise this settle is stale (a user
+      // declare or a newer episode superseded it) and holds nothing. Without
+      // an explicit operation the hold runs under the currently live one, if
+      // any, so programmatic writes carry its identity; ordinary observer
+      // triggers outside any episode keep the legacy operation-less marker.
+      let activeOp: LayoutOperationRef | null = null
+      if (op !== undefined && op !== null) {
+        if (!vp.controller.isCurrentLayoutOperation(op)) return
+        activeOp = op
+      } else {
+        activeOp = vp.controller.getCurrentLayoutOperation()
       }
       // Shared interaction hold: a pending interaction intent (answer tab,
       // message controls, fold controls, …) owns same-route geometry. Hold
@@ -3133,8 +3132,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                 if (Math.abs(survivorDelta) > 1) {
                   try {
                     container.scrollTop += survivorDelta
-                    compensatingRef.current = { expected: container.scrollTop }
-                    recordCompensationWrite(vp.controller, container)
+                    recordCompensationWrite(vp.controller, container, activeOp)
                   } catch {}
                 }
                 try {
@@ -3207,8 +3205,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
                   }
                   try {
                     container.scrollTop += regionDelta
-                    compensatingRef.current = { expected: container.scrollTop }
-                    recordCompensationWrite(vp.controller, container)
+                    recordCompensationWrite(vp.controller, container, activeOp)
                   } catch {}
                 }
                 try {
@@ -3288,8 +3285,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         if (vp.controller.hasActiveUserInteraction() && !ownBottomHeld) return
         try {
           container.scrollTop = bottomTarget
-          compensatingRef.current = { expected: container.scrollTop }
-          recordCompensationWrite(vp.controller, container)
+          recordCompensationWrite(vp.controller, container, activeOp)
           bottomPinRef.current = { routeKey: bottomRouteKey, scrollTop: container.scrollTop }
         } catch {}
         return
@@ -3406,8 +3402,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         const requestedScrollTop = sample.scrollTop + displacement
         container.scrollTop += displacement
         const realizedScrollTop = container.scrollTop
-        compensatingRef.current = { expected: realizedScrollTop }
-        recordCompensationWrite(vp.controller, container)
+        recordCompensationWrite(vp.controller, container, activeOp)
         let realizedOffset: number | null = null
         if (!didRealizeCompensation(requestedScrollTop, realizedScrollTop)) {
           try {
@@ -3431,8 +3426,37 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     // even when observers are unavailable the hold below still runs, so a
     // window-generation notify compensates without RO/MO.
     try {
-      ro = new ResizeObserver(() => {
+      // Last observed content-box per target, scoped to this subscription: the
+      // container observer only forwards resizes whose observed content-box
+      // actually changed size. Composer tail padding alone leaves every
+      // content-box unchanged, so it must not trigger an indirect hold — the
+      // explicit composer settle is that change's only causal entry. Real size
+      // changes (window/sidebar resize, content growth) still hold. Empty or
+      // unreadable entries keep the legacy hold (fail-safe: an unprovable
+      // change still compensates).
+      const lastBox = new Map<Element, { w: number; h: number }>()
+      ro = new ResizeObserver((entries) => {
         rebindContent()
+        let changed = false
+        let provable = false
+        try {
+          if (Array.isArray(entries)) {
+            for (const entry of entries) {
+              const target = entry.target as Element | undefined
+              const rect = entry.contentRect
+              if (!target || !rect || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) continue
+              provable = true
+              const prev = lastBox.get(target)
+              lastBox.set(target, { w: rect.width, h: rect.height })
+              if (!prev || Math.abs(prev.w - rect.width) > 0.5 || Math.abs(prev.h - rect.height) > 0.5) {
+                changed = true
+              }
+            }
+          }
+        } catch {
+          // Unreadable entries fail closed to the legacy hold below.
+        }
+        if (provable && !changed) return
         hold('resize')
       })
       ro.observe(container)
@@ -3472,9 +3496,9 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     // version pin keeps the closure fresh with the committed controller.
   }, [containerRef, viewport, viewportVersion, windowGeneration])
 
-  const requestHold = useCallback((reason: string): void => {
+  const requestHold = useCallback((reason: string, op?: LayoutOperationRef | null): void => {
     try {
-      holdRef.current(reason)
+      holdRef.current(reason, op)
     } catch {}
   }, [])
   // Transactional baseline source (see `ViewportAnchorSample`): validated, then

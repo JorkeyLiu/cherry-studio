@@ -1642,9 +1642,9 @@ const Messages = ({
   useEffect(() => {
     const register = viewportCtxRef.current?.registerLayoutSettler
     if (typeof register !== 'function') return undefined
-    const settler: ViewportLayoutSettler = (reason) => {
+    const settler: ViewportLayoutSettler = (reason, op) => {
       try {
-        anchorMaintainerRef.current.requestHold(reason)
+        anchorMaintainerRef.current.requestHold(reason, op)
       } catch {}
     }
     register(settler)

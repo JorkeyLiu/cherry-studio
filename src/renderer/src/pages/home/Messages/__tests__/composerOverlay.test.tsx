@@ -6,6 +6,7 @@ import { COMPOSER_FLOATING_CONTROL_BAND_PX } from '../composerFloatingBand'
 import {
   COMPOSER_OVERLAY_HEIGHT_VAR,
   COMPOSER_TAIL_INSET_VAR,
+  type ComposerOverlayGeometry,
   readComposerTailInsetPx,
   resolveComposerTailInset,
   useComposerOverlayHeight
@@ -45,14 +46,16 @@ class FakeResizeObserver {
   }
 }
 
-const Probe = ({ onHeight }: { onHeight: (height: number) => void }) => {
+const Probe = ({ onGeometry }: { onGeometry: (geometry: ComposerOverlayGeometry) => void }) => {
   const ref = React.useRef<HTMLDivElement | null>(null)
-  const height = useComposerOverlayHeight(ref)
+  const geometry = useComposerOverlayHeight(ref)
   React.useEffect(() => {
-    onHeight(height)
-  }, [height, onHeight])
+    onGeometry(geometry)
+  }, [geometry, onGeometry])
   return <div ref={ref} data-testid="composer-box" />
 }
+
+const heightsOf = (seen: ComposerOverlayGeometry[]): number[] => seen.map((g) => g.height)
 
 const fireResizeObserved = (): void => {
   const callback = FakeResizeObserver.callbacks[0]
@@ -120,37 +123,127 @@ describe('useComposerOverlayHeight (single ResizeObserver, no scroll/focus/snaps
 
   it('measures the first frame synchronously in the layout phase', () => {
     getBoundingClientRect.mockReturnValue(rectFor(120))
-    const seen: number[] = []
-    render(<Probe onHeight={(height) => seen.push(height)} />)
-    expect(seen[seen.length - 1]).toBe(120)
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    expect(heightsOf(seen)[heightsOf(seen).length - 1]).toBe(120)
     expect(FakeResizeObserver.instances).toHaveLength(1)
     expect(FakeResizeObserver.instances[0].observed.size).toBe(1)
   })
 
   it('follows composer growth (textarea wrap, tool-row show/hide) through the observer', () => {
     getBoundingClientRect.mockReturnValue(rectFor(120))
-    const seen: number[] = []
-    render(<Probe onHeight={(height) => seen.push(height)} />)
-    expect(seen[seen.length - 1]).toBe(120)
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    expect(heightsOf(seen)[heightsOf(seen).length - 1]).toBe(120)
     getBoundingClientRect.mockReturnValue(rectFor(200))
     fireResizeObserved()
-    expect(seen[seen.length - 1]).toBe(200)
+    const heights = heightsOf(seen)
+    expect(heights[heights.length - 1]).toBe(200)
   })
 
   it('ignores same-height reports (no state churn)', () => {
     getBoundingClientRect.mockReturnValue(rectFor(120))
-    const seen: number[] = []
-    render(<Probe onHeight={(height) => seen.push(height)} />)
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
     const calls = seen.length
     fireResizeObserved()
     fireResizeObserved()
     expect(seen.length).toBe(calls)
-    expect(seen[seen.length - 1]).toBe(120)
+    const heights = heightsOf(seen)
+    expect(heights[heights.length - 1]).toBe(120)
+  })
+
+  it('same-height reports never advance the revision; real changes advance it monotonically', () => {
+    getBoundingClientRect.mockReturnValue(rectFor(120))
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    const first = seen[seen.length - 1]
+    expect(first.revision).toBe(1)
+    fireResizeObserved()
+    expect(seen[seen.length - 1].revision).toBe(1)
+    getBoundingClientRect.mockReturnValue(rectFor(200))
+    fireResizeObserved()
+    expect(seen[seen.length - 1].revision).toBe(2)
+    getBoundingClientRect.mockReturnValue(rectFor(180))
+    fireResizeObserved()
+    expect(seen[seen.length - 1].revision).toBe(3)
+    const revisions = seen.map((g) => g.revision)
+    const sorted = [...revisions].sort((a, b) => a - b)
+    expect(revisions).toEqual(sorted)
+  })
+
+  it('a box height transitionrun opens one logical animation; end/cancel closes it', () => {
+    getBoundingClientRect.mockReturnValue(rectFor(120))
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    const box = screen.getByTestId('composer-box')
+    expect(seen[seen.length - 1].transitioning).toBe(false)
+    expect(seen[seen.length - 1].transitionId).toBe(0)
+    act(() => {
+      const run = new Event('transitionrun', { bubbles: true }) as Event & { propertyName?: string }
+      run.propertyName = 'height'
+      box.dispatchEvent(run)
+    })
+    expect(seen[seen.length - 1].transitioning).toBe(true)
+    expect(seen[seen.length - 1].transitionId).toBe(1)
+    act(() => {
+      const end = new Event('transitionend', { bubbles: true }) as Event & { propertyName?: string }
+      end.propertyName = 'height'
+      box.dispatchEvent(end)
+    })
+    expect(seen[seen.length - 1].transitioning).toBe(false)
+    expect(seen[seen.length - 1].transitionId).toBe(1)
+  })
+
+  it('transitioncancel closes the logical animation without a new transition id', () => {
+    getBoundingClientRect.mockReturnValue(rectFor(120))
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    const box = screen.getByTestId('composer-box')
+    act(() => {
+      const run = new Event('transitionrun', { bubbles: true }) as Event & { propertyName?: string }
+      run.propertyName = 'height'
+      box.dispatchEvent(run)
+    })
+    expect(seen[seen.length - 1].transitioning).toBe(true)
+    act(() => {
+      const cancel = new Event('transitioncancel', { bubbles: true }) as Event & { propertyName?: string }
+      cancel.propertyName = 'height'
+      box.dispatchEvent(cancel)
+    })
+    const last = seen[seen.length - 1]
+    expect(last.transitioning).toBe(false)
+    expect(last.transitionId).toBe(1)
+  })
+
+  it('ignores transitions that do not drive the composer border-box height', () => {
+    getBoundingClientRect.mockReturnValue(rectFor(120))
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    const box = screen.getByTestId('composer-box')
+    const calls = seen.length
+    // A non-height property on the box is not a height episode.
+    act(() => {
+      const run = new Event('transitionrun', { bubbles: true }) as Event & { propertyName?: string }
+      run.propertyName = 'opacity'
+      box.dispatchEvent(run)
+    })
+    // A height transition on a CHILD (bubbled) never belongs to the box.
+    act(() => {
+      const child = document.createElement('div')
+      box.append(child)
+      const run = new Event('transitionrun', { bubbles: true }) as Event & { propertyName?: string }
+      run.propertyName = 'height'
+      child.dispatchEvent(run)
+    })
+    expect(seen.length).toBe(calls)
+    expect(seen[seen.length - 1].transitioning).toBe(false)
+    expect(seen[seen.length - 1].transitionId).toBe(0)
   })
 
   it('disconnects the observer exactly once on unmount', () => {
     getBoundingClientRect.mockReturnValue(rectFor(120))
-    const { unmount } = render(<Probe onHeight={() => {}} />)
+    const { unmount } = render(<Probe onGeometry={() => {}} />)
     expect(FakeResizeObserver.instances[0].observed.size).toBe(1)
     unmount()
     expect(FakeResizeObserver.instances[0].observed.size).toBe(0)
@@ -159,20 +252,20 @@ describe('useComposerOverlayHeight (single ResizeObserver, no scroll/focus/snaps
   it('degrades to sync measure plus window resize when ResizeObserver is missing', () => {
     vi.stubGlobal('ResizeObserver', undefined as unknown as typeof ResizeObserver)
     getBoundingClientRect.mockReturnValue(rectFor(96))
-    const seen: number[] = []
-    render(<Probe onHeight={(height) => seen.push(height)} />)
-    expect(seen[seen.length - 1]).toBe(96)
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
+    expect(heightsOf(seen)[heightsOf(seen).length - 1]).toBe(96)
     getBoundingClientRect.mockReturnValue(rectFor(140))
     act(() => {
       window.dispatchEvent(new Event('resize'))
     })
-    expect(seen[seen.length - 1]).toBe(140)
+    expect(heightsOf(seen)[heightsOf(seen).length - 1]).toBe(140)
   })
 
   it('never takes over scrolling: no scrollTo call, scrollTop untouched', () => {
     getBoundingClientRect.mockReturnValue(rectFor(120))
-    const seen: number[] = []
-    render(<Probe onHeight={(height) => seen.push(height)} />)
+    const seen: ComposerOverlayGeometry[] = []
+    render(<Probe onGeometry={(geometry) => seen.push(geometry)} />)
     const box = screen.getByTestId('composer-box')
     // jsdom ships no scrollTo; install an own-property sentinel so any
     // takeover attempt would be observable without touching the prototype.
@@ -181,7 +274,7 @@ describe('useComposerOverlayHeight (single ResizeObserver, no scroll/focus/snaps
     box.scrollTop = 77
     getBoundingClientRect.mockReturnValue(rectFor(200))
     fireResizeObserved()
-    expect(seen[seen.length - 1]).toBe(200)
+    expect(heightsOf(seen)[heightsOf(seen).length - 1]).toBe(200)
     expect(scrollTo).not.toHaveBeenCalled()
     expect(box.scrollTop).toBe(77)
   })

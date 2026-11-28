@@ -781,18 +781,27 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
     keeper.unmount()
   })
 
-  it('no-intent scroll alone triggers the same hold (no generation bump needed)', () => {
+  it('no-intent scroll holds via the Messages bridge requestHold (keeper owns no scroll listener)', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'm2', -60)
     rects.set('m1', { top: -460, height: 400 })
     rects.set('m2', { top: -60, height: 40 })
     rects.set('m3', { top: -20, height: 400 })
     const { container, ref } = buildSurface()
-    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    const maintainer: { current: StableVisualAnchorMaintainer | null } = { current: null }
+    const keeper = renderKeeper(controller, ref, 0, vi.fn(), maintainer)
+    expect(maintainer.current).not.toBeNull()
     expect(container.scrollTop).toBe(0)
+    // The keeper owns no scroll listener: a bare scroll event holds nothing.
     act(() => {
       rects.set('m2', { top: 160, height: 40 })
       container.dispatchEvent(new Event('scroll'))
+    })
+    expect(container.scrollTop).toBe(0)
+    // Messages owns the single scroll listener; with no live session its
+    // handleScroll requests the same keeper hold through this bridge.
+    act(() => {
+      maintainer.current!.requestHold('messages-scroll')
     })
     expect(container.scrollTop).toBe(220)
     expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({

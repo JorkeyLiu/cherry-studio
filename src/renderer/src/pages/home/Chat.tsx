@@ -35,12 +35,16 @@ import Inputbar from './Inputbar/Inputbar'
 import {
   COMPOSER_OVERLAY_HEIGHT_VAR,
   COMPOSER_TAIL_INSET_VAR,
+  type ComposerOverlayLocalState,
   resolveComposerTailInset,
+  stepComposerOverlayOperation,
   useComposerOverlayHeight
 } from './Messages/composerOverlayGeometry'
 import ConversationNavigation from './Messages/ConversationNavigation'
 import { NAV_GUTTER_WIDTH_PX } from './Messages/MessageOutline'
 import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
+import { useOptionalRouteViewportCommands } from './Messages/routeViewportContext'
+import { routeViewportKey } from './Messages/routeViewportController'
 import TopicSegmentDrawer from './Messages/TopicSegmentDrawer'
 
 const logger = loggerService.withContext('Chat')
@@ -68,8 +72,14 @@ const Chat: FC<Props> = (props) => {
   // first measure + ResizeObserver updates; local state only, never Redux).
   // The tail inset (measured height + existing control band) is published as
   // local CSS vars on the canvas below; scroll padding reads the same vars.
-  const composerOverlayHeight = useComposerOverlayHeight(composerRef)
+  // Every measured height frame steps one logical layout operation (animated
+  // frames share it, a non-animated change is one short operation) and settles
+  // it synchronously through the route viewport — the explicit settle is the
+  // only causal entry for composer-padding changes.
+  const composerOverlay = useComposerOverlayHeight(composerRef)
+  const composerOverlayHeight = composerOverlay.height
   const composerTailInset = resolveComposerTailInset(composerOverlayHeight)
+  const viewportCommands = useOptionalRouteViewportCommands()
   // Gutter-strip wheel: the nav gutter below is this row's own padding (only
   // while the navigator is mounted), so a wheel parked over the strip
   // (outside the rail's halo) lands on this host instead of the chat
@@ -156,6 +166,31 @@ const Chat: FC<Props> = (props) => {
   // (anchorKeyForRoute returns the plain topicId for the main route).
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
   const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
+  const composerOperationRef = React.useRef<ComposerOverlayLocalState>({
+    op: null,
+    opTransitionId: 0,
+    lastSettledRevision: 0
+  })
+  React.useLayoutEffect(() => {
+    const commands = viewportCommands
+    if (!commands) return
+    const { controller, settleLayout } = commands
+    if (!controller || typeof settleLayout !== 'function') return
+    try {
+      stepComposerOverlayOperation(
+        {
+          isCurrent: (op) => controller.isCurrentLayoutOperation(op),
+          begin: (source, routeKey) => controller.beginLayoutOperation(source, routeKey),
+          advance: (op, revision) => controller.advanceLayoutOperation(op, revision),
+          end: (op) => controller.endLayoutOperation(op),
+          settle: (reason, op) => settleLayout(reason, op)
+        },
+        routeViewportKey(props.activeTopic.id, activeBranchId),
+        composerOverlay,
+        composerOperationRef.current
+      )
+    } catch {}
+  }, [viewportCommands, composerOverlay, props.activeTopic.id, activeBranchId])
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
   const topicMessages = usePresentationTopicMessages(props.activeTopic.id)
   // Only the shared context derivation crosses this boundary; its explicit

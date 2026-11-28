@@ -98,6 +98,26 @@ export interface RouteRef {
 }
 
 /**
+ * One logical layout operation (current composer-overlay pilot only): a
+ * common identity for one layout episode so native scroll observations are
+ * never classified by sourceless guessing. Monotonic `id` from a single
+ * active slot (begin supersedes the previous operation and invalidates its
+ * echo); `revision` advances per settled frame; `routeKey` is the canonical
+ * route scope an echo may be consumed under. Never copies anchor or bottom
+ * truth — this is provenance identity only, not a transaction system.
+ */
+export interface LayoutOperationRef {
+  /** Monotonic per-controller identity: a newer begin supersedes every older id. */
+  id: number
+  /** Which layout owner started the episode (currently only 'composer-overlay'). */
+  source: string
+  /** Per-operation generation: advances once per settled height frame. */
+  revision: number
+  /** Canonical route scope (`routeViewportKey`) the operation belongs to. */
+  routeKey: string
+}
+
+/**
  * Stable structural scope of an interaction region: the layout owner whose
  * dimensions prove whether the interaction had a real layout effect.
  * - `message`: one message row (edit/footer/action areas, answer tabs).
@@ -400,11 +420,31 @@ export class RouteViewportController {
    * consumed as genuine user input instead. The sequence never repeats a value,
    * so no later declaration can restore a stale marker's meaning. The session
    * itself is never touched, so continued input keeps paging. Cleared by
-   * `request()`, `invalidateAll()`, and by the displayed/rendered invalidations
-   * (`syncDisplayed`/`markRenderedUnknown`): a superseded session's or another
-   * projection's echo never describes the new one.
+   * `request()`, `invalidateAll()`, by genuine `declareUserIntent()`, and by
+   * the displayed/rendered invalidations (`syncDisplayed`/`markRenderedUnknown`):
+   * a superseded session's or another projection's echo never describes the
+   * new one. An operation-carrying marker additionally names its `operationId`
+   * + `routeKey` so consume can reject cross-route / cross-operation staleness
+   * beyond the declare sequence and numeric tolerance.
    */
-  private compensationEcho: { scrollTop: number; declareSeq: number } | null = null
+  private compensationEcho: {
+    scrollTop: number
+    declareSeq: number
+    operationId?: number
+    routeKey?: string
+  } | null = null
+  /**
+   * Single active layout operation (composer-overlay pilot only): one common
+   * identity for one logical layout episode, never a transaction system.
+   * `begin` supersedes (monotonic id, previous echo invalidated), `end`
+   * marks the slot concluded while KEEPING the final write's echo so the
+   * follow-up native scroll still consumes. Cancelled (never begun-over or
+   * explicitly cancelled) reads as no active operation. `ended` operations
+   * are never current again and never advance.
+   */
+  private layoutOperation: LayoutOperationRef | null = null
+  private layoutOperationSeq = 0
+  private layoutOperationEnded = false
   /**
    * Shared route-local interaction intent (same-route in-place geometry hold,
    * not reading-position restoration). One reusable owner arbitrated by the
@@ -839,9 +879,10 @@ export class RouteViewportController {
     // pagination hold: the armed generation belongs to the previous DOM. A
     // pending compensation echo belongs to the previous DOM too — the first
     // scroll observation of the new topic must never be swallowed by a marker
-    // recorded for the old one at the same numeric position.
+    // recorded for the old one at the same numeric position. A live layout
+    // operation belongs to the previous DOM as well: cancel it with its echo.
     this.paginationHoldGeneration = null
-    this.compensationEcho = null
+    this.cancelLayoutOperationLocked()
     this.displayed = { ...displayed }
     this.rendered = null
     if (this.phase === 'terminal' || this.phase === 'stable') {
@@ -865,6 +906,10 @@ export class RouteViewportController {
     if (this.activationRequired) return false
     if (typeof windowId !== 'string' || windowId.length === 0) return false
     this.clearAnswerTabLocked()
+    // Route change invalidates the live layout operation with its echo (same
+    // boundary as syncDisplayed): the previous route's episode belongs to the
+    // previous DOM and must never surface as current for the new route.
+    this.cancelLayoutOperationLocked()
     this.displayed = { ...target }
     this.rendered = { topicId: target.topicId, routeId: target.route, epoch: this.epoch, windowId }
     this.windowGenerationSeq += 1
@@ -887,9 +932,9 @@ export class RouteViewportController {
     // Rendered-unknown invalidates any armed pagination hold with it: there
     // is no committed DOM for the matching layout commit anymore. A pending
     // compensation echo names a scroll of the DOM that just went unknown, so it
-    // is dropped with it.
+    // is dropped with it — as is any live layout operation scoped to that DOM.
     this.paginationHoldGeneration = null
-    this.compensationEcho = null
+    this.cancelLayoutOperationLocked()
     this.rendered = null
   }
 
@@ -910,8 +955,9 @@ export class RouteViewportController {
     // armed generation belongs to the outgoing DOM, never the incoming
     // session (the generation is not bumped here, so this clear is explicit).
     this.paginationHoldGeneration = null
-    // A pending compensation echo belongs to the outgoing DOM/session.
-    this.compensationEcho = null
+    // A pending compensation echo belongs to the outgoing DOM/session — as does
+    // any live layout operation: a new transition supersedes the old episode.
+    this.cancelLayoutOperationLocked()
     // A fresh guarded transaction consumes a pending detached reactivation:
     // the renewed connected lifetime owns its restore BEFORE any geometry is
     // admitted as stable. Single owner: this request is the activation.
@@ -1302,17 +1348,118 @@ export class RouteViewportController {
   }
 
   /**
+   * Begin one logical layout operation: the single active slot takes the new
+   * identity (monotonic id), superseding any previous operation. The previous
+   * operation's echo is invalidated with it — its scroll observation, if it
+   * ever lands, must read as genuine input, never as this operation's echo.
+   * Returns a detached copy; the slot is the truth, never the copy.
+   */
+  beginLayoutOperation(source: string, routeKey: string): LayoutOperationRef {
+    this.layoutOperationSeq += 1
+    this.layoutOperation = { id: this.layoutOperationSeq, source, revision: 0, routeKey }
+    this.layoutOperationEnded = false
+    this.compensationEcho = null
+    return { ...this.layoutOperation }
+  }
+
+  /**
+   * Advance the active operation's revision (one settled frame of the same
+   * logical episode). Current-only: a superseded, ended, or foreign-route
+   * copy is refused and touches nothing. Revisions are non-decreasing within
+   * one operation; a repeated frame re-settles at the same revision.
+   */
+  advanceLayoutOperation(op: LayoutOperationRef, revision: number): boolean {
+    if (!this.isCurrentLayoutOperation(op)) return false
+    if (!Number.isFinite(revision)) return false
+    const active = this.layoutOperation
+    if (active === null || revision < active.revision) return false
+    active.revision = revision
+    return true
+  }
+
+  /**
+   * End the active operation. Current-only like advance. The final write's
+   * echo is KEPT: the browser still delivers the native scroll observation
+   * after the episode, and it must consume as the app echo. The slot reads
+   * as no active operation afterwards (never current, never advanceable).
+   */
+  endLayoutOperation(op: LayoutOperationRef): boolean {
+    if (!this.isCurrentLayoutOperation(op)) return false
+    this.layoutOperationEnded = true
+    return true
+  }
+
+  /** The live operation for the currently displayed route, else null. */
+  getCurrentLayoutOperation(): LayoutOperationRef | null {
+    const active = this.layoutOperation
+    if (active === null || this.layoutOperationEnded) return null
+    // Route-aware like isCurrent: an operation scoped to another route never
+    // surfaces here, so operation-less holds and writes cannot inherit a
+    // foreign identity.
+    if (active.routeKey !== routeViewportKey(this.displayed.topicId, this.displayed.route)) return null
+    return { ...active }
+  }
+
+  /**
+   * The copy names the live slot: same monotonic id, not ended, and scoped to
+   * the currently DISPLAYED route. A stale copy, a copy from a cancelled or
+   * concluded episode, and an operation begun for another route are all
+   * refused — the caller must not settle or write under them.
+   */
+  isCurrentLayoutOperation(op: LayoutOperationRef | null | undefined): boolean {
+    if (!op || typeof op.id !== 'number') return false
+    const active = this.layoutOperation
+    if (active === null || this.layoutOperationEnded) return false
+    if (active.id !== op.id) return false
+    return active.routeKey === routeViewportKey(this.displayed.topicId, this.displayed.route)
+  }
+
+  /** Cancel the active operation and drop its echo (fail-closed, no swallow). */
+  private cancelLayoutOperationLocked(): void {
+    this.layoutOperation = null
+    this.layoutOperationEnded = false
+    this.compensationEcho = null
+  }
+
+  /**
    * Record the position a programmatic compensation write realized
    * (`scrollTop` read back after the write) together with the monotonic
    * user-declaration sequence it happened under. One slot, latest write wins:
    * only the finally realized position can produce a browser scroll
    * observation. Never touches the live user session, ownership, or the
    * projection.
+   *
+   * With `op`, the marker carries that operation's identity + route scope —
+   * but only when the copy is still current: a late write from a superseded,
+   * cancelled, or foreign-route operation records NOTHING (fail-closed, no
+   * swallow), and consumes nothing later. Without `op` (ordinary RO/MO holds
+   * outside any episode) the marker keeps the legacy shape, stamped with the
+   * current displayed route; it still consumes while no newer declaration,
+   * route change, or superseding operation landed.
    */
-  noteCompensationWrite(realizedScrollTop: number): void {
-    this.compensationEcho = Number.isFinite(realizedScrollTop)
-      ? { scrollTop: realizedScrollTop, declareSeq: this.interactionDeclareSeq }
-      : null
+  noteCompensationWrite(realizedScrollTop: number, op?: LayoutOperationRef | null): void {
+    if (!Number.isFinite(realizedScrollTop)) {
+      this.compensationEcho = null
+      return
+    }
+    if (op !== undefined && op !== null) {
+      // A stale operation write must never arm an echo for the live viewport.
+      if (!this.isCurrentLayoutOperation(op)) return
+      this.compensationEcho = {
+        scrollTop: realizedScrollTop,
+        declareSeq: this.interactionDeclareSeq,
+        operationId: op.id,
+        routeKey: op.routeKey
+      }
+      return
+    }
+    const active = this.getCurrentLayoutOperation()
+    this.compensationEcho = {
+      scrollTop: realizedScrollTop,
+      declareSeq: this.interactionDeclareSeq,
+      routeKey: routeViewportKey(this.displayed.topicId, this.displayed.route),
+      ...(active !== null ? { operationId: active.id } : null)
+    }
   }
 
   /**
@@ -1322,6 +1469,13 @@ export class RouteViewportController {
    * scroll — it must never page); false otherwise (a fresh user declaration at
    * any position, no marker, non-finite observation), with the marker cleared
    * either way so a stale echo can never swallow later input.
+   *
+   * Operation provenance adds two fail-closed rejections on top of the legacy
+   * declare-sequence + numeric tolerance: a marker recorded for another route
+   * never swallows this route's scroll, and a marker from a superseded
+   * operation never swallows while a NEWER operation is live. An ended
+   * operation's retained echo still consumes (no live operation contradicts
+   * it) — that is the follow-up native scroll the end kept it for.
    */
   consumeCompensationEcho(observedScrollTop: number): boolean {
     const marker = this.compensationEcho
@@ -1332,6 +1486,17 @@ export class RouteViewportController {
     // not provably app-owned, so it is never suppressed. The sequence is
     // monotonic, so no later declaration can ever restore the recorded value.
     if (marker.declareSeq !== this.interactionDeclareSeq) return false
+    // Route provenance: another route's echo never describes this route.
+    if (typeof marker.routeKey === 'string') {
+      if (marker.routeKey !== routeViewportKey(this.displayed.topicId, this.displayed.route)) return false
+    }
+    // Operation provenance: while a NEWER operation is live, an older
+    // operation's marker is stale. (No live operation — including a normally
+    // ended episode — contradicts the marker, so the retained echo consumes.)
+    if (typeof marker.operationId === 'number') {
+      const active = this.layoutOperation
+      if (active !== null && !this.layoutOperationEnded && active.id !== marker.operationId) return false
+    }
     return Math.abs(observedScrollTop - marker.scrollTop) <= 0.5
   }
 
@@ -1555,6 +1720,10 @@ export class RouteViewportController {
     // Genuine input cancels a pending shared hold: the user's own scroll owns
     // the viewport from here, never the click-captured region geometry.
     this.clearAnswerTabLocked()
+    // Genuine input also cancels any live layout operation with its echo: the
+    // episode's remaining frames must never resume under a stale identity, and
+    // its pending scroll observation (if any) is now user movement.
+    this.cancelLayoutOperationLocked()
     if (this.activeInteractionId === null) {
       this.interactionSeq += 1
       this.activeInteractionId = this.interactionSeq
@@ -2167,9 +2336,10 @@ export class RouteViewportController {
     this.clearAnswerTabLocked()
     // Invalidation (unmount / topic disposal / Activity detach) releases any
     // armed pagination hold with the session it belonged to. `detach()` runs
-    // through here, so the detached lifetime never inherits a stale arm.
+    // through here, so the detached lifetime never inherits a stale arm — nor
+    // a stale layout operation or its echo.
     this.paginationHoldGeneration = null
-    this.compensationEcho = null
+    this.cancelLayoutOperationLocked()
     this.activationSession = false
     this.continuationEpoch = null
     if (!this.ownershipHeld) {
