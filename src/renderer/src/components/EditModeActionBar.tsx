@@ -38,7 +38,7 @@ const EditModeActionBar = () => {
   const totalSelectedMessages = selectedGroups.reduce((sum, g) => sum + g.messages.length, 0)
 
   return (
-    <Container>
+    <Container data-testid="edit-mode-action-bar">
       <ActionBar>
         <SelectionCount>{t('chat.edit.selected', { count: totalSelectedMessages })}</SelectionCount>
         <ActionButtons>
@@ -153,6 +153,10 @@ const ActionBar = styled.div`
   border: 0.5px solid var(--color-border);
   gap: 16px;
   pointer-events: auto;
+  // The bar now lives in the overlay titlebar drag root (see
+  // EditModeActionBarHost): the interactive pill must opt out of window drag
+  // so its buttons receive clicks. No-op anywhere outside a drag root.
+  -webkit-app-region: no-drag;
 `
 
 const ActionButtons = styled.div`

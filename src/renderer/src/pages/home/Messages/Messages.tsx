@@ -197,6 +197,7 @@ import {
   isDividerVisibleViewportOwned,
   planDividerVisibleRebase
 } from './dividerVisibleRebase'
+import EditModeActionBarHost from './EditModeActionBarHost'
 /**
  * Loaded-route tracking uses the tagged `LoadedRouteState` from
  * `messageWindow` (renderer-local, no persistence): `{ route, loadFailed }`.
@@ -245,7 +246,12 @@ import {
   isFirstPlacementAwaitingAttempt,
   resolveTargetProjectionReadiness
 } from './routeFirstPlacement'
-import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
+import {
+  buildRouteVisibleMessages,
+  isRouteVisibleUnionExact,
+  planTopVisibleRebase,
+  resolveTopVisibleOffsetGate
+} from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
 import {
   alignRetainedViewportOnce,
@@ -1220,7 +1226,11 @@ const MessagesContentInner: React.FC<MessagesContentProps> = ({
 
   return (
     <MessagesWrapper>
-      {isEditMode && <EditModeActionBar />}
+      {isEditMode && (
+        <EditModeActionBarHost>
+          <EditModeActionBar />
+        </EditModeActionBarHost>
+      )}
       <MessagesContainer
         id="messages"
         className="messages-container"
@@ -7511,8 +7521,13 @@ const Messages = ({
   // at most one residual recheck frame). No stable commit happens in this
   // layout effect: the quiet callback revalidates mounted/topic/route/epoch/
   // current intent/current rendered window identity + resident anchor, applies
-  // a residual correction when needed, and only then runs the ONE identity-
-  // stable snapshot commit (`commitDisplayedStableWithAnchor`). No timer/
+  // a residual correction when needed, verifies the requested anchor against
+  // the strict subpixel gate (0.05px — a ~0.2px residual already flips strict
+  // crossing-first detection to the neighbor row), and only an `aligned`
+  // anchor runs the ONE identity-stable snapshot commit
+  // (`commitDisplayedStableWithAnchor`). A clamped/unmeasurable window or a
+  // residual beyond the bar after the bounded writes retries hidden under
+  // the SAME epoch instead of committing a drift. No timer/
   // stabilizer loop, no intermediate snapshot write. Post-apply loss of
   // coverage/residency/alignment fails closed into the EXISTING hidden atomic
   // restore under the SAME epoch (rewind aligned → fetch-hold, commit the
@@ -7559,6 +7574,29 @@ const Messages = ({
         return el.getBoundingClientRect().top - live.getBoundingClientRect().top
       } catch {
         return null
+      }
+    }
+    // Strict single-step offset gate for the requested anchor: one synchronous
+    // scroll-metric read paired with the offset measurement, decided by the
+    // shared pure `resolveTopVisibleOffsetGate` (0.05px bar). Only `aligned`
+    // may precede the one WithAnchor commit; `clamped`/`unmeasurable` fall
+    // back to the same-epoch hidden path, never a drifted commit.
+    const measureTopVisibleGate = (target: number, have: number | null) => {
+      try {
+        const metrics = readScrollMetrics(live)
+        return resolveTopVisibleOffsetGate({
+          haveOffset: have,
+          wantOffset: target,
+          scrollTop: metrics.scrollTop,
+          maxScrollTop: maxScrollTop(metrics)
+        })
+      } catch {
+        return resolveTopVisibleOffsetGate({
+          haveOffset: null,
+          wantOffset: target,
+          scrollTop: Number.NaN,
+          maxScrollTop: Number.NaN
+        })
       }
     }
     const dropOrFailVisible = (): void => {
@@ -7779,6 +7817,18 @@ const Messages = ({
         dropOrFailVisible()
         return
       }
+      // Strict pre-commit alignment verification: only a freshly measured
+      // `aligned` anchor may take the one WithAnchor commit. A residual
+      // beyond the bar after the bounded writes above (e.g. a clamped write
+      // that never moved) retries hidden under the same epoch — never a
+      // drifted commit, never a bottom/vicinity/tail fallback.
+      const commitTarget = resolveTarget()
+      const commitGate =
+        commitTarget === null ? null : measureTopVisibleGate(commitTarget.target, measureOffset(commitTarget.el))
+      if (commitGate === null || commitGate.status !== 'aligned') {
+        fallBackToHiddenTop()
+        return
+      }
       const ok = commitDisplayedStableWithAnchor(
         pending.topicId,
         pending.routeId,
@@ -7809,14 +7859,17 @@ const Messages = ({
         return
       }
       const have = measureOffset(first.el)
-      if (have === null) {
+      const firstGate = measureTopVisibleGate(first.target, have)
+      if (firstGate.status !== 'aligned' && firstGate.status !== 'adjustable') {
+        // Clamped or unmeasurable in this small window: the saved offset is
+        // unreachable here, so retry hidden under the same epoch (larger
+        // authoritative scroll range) instead of clamping into a drift.
         fallBackToHiddenTop()
         return
       }
-      const delta = have - first.target
-      if (Math.abs(delta) > 1) {
+      if (firstGate.status === 'adjustable') {
         try {
-          live.scrollTop += delta
+          live.scrollTop += firstGate.delta
         } catch {
           failVisibleTransition(pending.ownerEpoch)
           return
@@ -7842,14 +7895,16 @@ const Messages = ({
           return
         }
         const reHave = measureOffset(current.el)
-        if (reHave === null) {
+        // Closed loop: re-measure after the first write. A clamped write
+        // re-measures unmoved and falls back instead of committing drift.
+        const residualGate = measureTopVisibleGate(current.target, reHave)
+        if (residualGate.status !== 'aligned' && residualGate.status !== 'adjustable') {
           fallBackToHiddenTop()
           return
         }
-        const residual = reHave - current.target
-        if (Math.abs(residual) > 1) {
+        if (residualGate.status === 'adjustable') {
           try {
-            live.scrollTop += residual
+            live.scrollTop += residualGate.delta
           } catch {
             failVisibleTransition(pending.ownerEpoch)
             return

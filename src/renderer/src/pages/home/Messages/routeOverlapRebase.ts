@@ -283,3 +283,59 @@ export const buildRouteVisibleMessages = (
   // displayMessages order is newest-first.
   return nextOldestFirst.toReversed()
 }
+
+/**
+ * Strict subpixel alignment bar for TOP visible restores. A ~0.2px residual
+ * already flips strict crossing-first detection to the neighbor row
+ * (requested anchor at +0.1 have vs -0.1 want while the previous row still
+ * straddles the viewport top), whereas a correct fractional `scrollTop`
+ * write re-measures to ~0 — 0.05px rejects the failure with margin against
+ * float noise on both sides. Only the TOP visible driver uses this bar;
+ * divider/pagination/bottom/first-placement paths keep their 1px contract.
+ */
+export const TOP_VISIBLE_ALIGN_EPS_PX = 0.05
+
+export type TopVisibleOffsetGate =
+  | { status: 'aligned' }
+  | { status: 'adjustable'; delta: number }
+  | { status: 'clamped'; requiredScrollTop: number }
+  | { status: 'unmeasurable' }
+
+/**
+ * Pure single-step offset gate for a TOP visible restore.
+ *
+ * `requiredScrollTop = scrollTop + (haveOffset - wantOffset)` is the scroll
+ * position that would place the requested anchor at its saved offset. Inside
+ * the current range it is a plain write (`adjustable`); beyond either edge
+ * the small visible window cannot reach it (`clamped` — the caller falls
+ * back to the existing same-epoch hidden path whose authoritative window
+ * carries a larger scroll range, never a bottom/vicinity/tail fallback).
+ * Non-finite input is `unmeasurable` (caller falls back, never commits).
+ * Only `aligned` (freshly measured `|have - want| <= EPS`) may precede the
+ * one `WithAnchor` commit.
+ */
+export const resolveTopVisibleOffsetGate = (input: {
+  haveOffset: number | null
+  wantOffset: number | null
+  scrollTop: number
+  maxScrollTop: number
+}): TopVisibleOffsetGate => {
+  const { haveOffset, wantOffset, scrollTop, maxScrollTop } = input
+  if (
+    haveOffset === null ||
+    wantOffset === null ||
+    !Number.isFinite(haveOffset) ||
+    !Number.isFinite(wantOffset) ||
+    !Number.isFinite(scrollTop) ||
+    !Number.isFinite(maxScrollTop)
+  ) {
+    return { status: 'unmeasurable' }
+  }
+  const delta = haveOffset - wantOffset
+  if (Math.abs(delta) <= TOP_VISIBLE_ALIGN_EPS_PX) return { status: 'aligned' }
+  const requiredScrollTop = scrollTop + delta
+  if (requiredScrollTop > maxScrollTop + TOP_VISIBLE_ALIGN_EPS_PX || requiredScrollTop < 0 - TOP_VISIBLE_ALIGN_EPS_PX) {
+    return { status: 'clamped', requiredScrollTop }
+  }
+  return { status: 'adjustable', delta }
+}

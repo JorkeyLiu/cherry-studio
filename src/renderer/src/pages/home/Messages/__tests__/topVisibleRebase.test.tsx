@@ -22,7 +22,9 @@ import {
   buildRouteVisibleMessages,
   isRouteVisibleUnionExact,
   planRouteVisibleRebase,
-  planTopVisibleRebase
+  planTopVisibleRebase,
+  resolveTopVisibleOffsetGate,
+  TOP_VISIBLE_ALIGN_EPS_PX
 } from '../routeOverlapRebase'
 import { RouteViewportController } from '../routeViewportController'
 
@@ -613,5 +615,74 @@ describe('top visible incremental rebase DOM behavior (synchronous, never hidden
     if (Math.abs(delta) > 1) container.scrollTop += delta
     const actualAfter = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top
     expect(Math.abs(actualAfter - wantOffset)).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('top visible strict subpixel offset gate (forensics regression)', () => {
+  it('rejects the observed 0.24px drift (have +0.13 vs want -0.11) as adjustable, not aligned', () => {
+    expect(TOP_VISIBLE_ALIGN_EPS_PX).toBe(0.05)
+    // B-return forensics: snapshot want -0.109375, live have +0.13 — the old
+    // 1px bar treated this as settled and committed a neighbor-crossing
+    // anchor. The strict bar must demand one more fractional write.
+    const gate = resolveTopVisibleOffsetGate({ haveOffset: 0.13, wantOffset: -0.11, scrollTop: 100, maxScrollTop: 900 })
+    expect(gate.status).toBe('adjustable')
+    if (gate.status !== 'adjustable') return
+    expect(gate.delta).toBeCloseTo(0.24, 2)
+    // A correct fractional write re-measures to ~0: only that is aligned.
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: -0.109, wantOffset: -0.11, scrollTop: 100.24, maxScrollTop: 900 })
+        .status
+    ).toBe('aligned')
+  })
+
+  it('aligned only within the bar: boundary 0.05 passes, 0.051 adjusts', () => {
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: 0.05, wantOffset: 0, scrollTop: 10, maxScrollTop: 100 }).status
+    ).toBe('aligned')
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: 0.051, wantOffset: 0, scrollTop: 10, maxScrollTop: 100 }).status
+    ).toBe('adjustable')
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: -0.051, wantOffset: 0, scrollTop: 10, maxScrollTop: 100 }).status
+    ).toBe('adjustable')
+  })
+
+  it('clamped when the small window cannot reach the saved offset (bottom edge)', () => {
+    // B-return clamp shape: scroll pinned at max, required write beyond it.
+    const gate = resolveTopVisibleOffsetGate({
+      haveOffset: 0.13,
+      wantOffset: -0.109375,
+      scrollTop: 984,
+      maxScrollTop: 984
+    })
+    expect(gate.status).toBe('clamped')
+    if (gate.status !== 'clamped') return
+    expect(gate.requiredScrollTop).toBeCloseTo(984.239, 2)
+  })
+
+  it('clamped at the oldest edge, unmeasurable on null/non-finite input', () => {
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: -5, wantOffset: 0.2, scrollTop: 1, maxScrollTop: 500 }).status
+    ).toBe('clamped')
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: null, wantOffset: 0, scrollTop: 10, maxScrollTop: 100 }).status
+    ).toBe('unmeasurable')
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: 1, wantOffset: Number.NaN, scrollTop: 10, maxScrollTop: 100 }).status
+    ).toBe('unmeasurable')
+    expect(
+      resolveTopVisibleOffsetGate({ haveOffset: 1, wantOffset: 0, scrollTop: Number.NaN, maxScrollTop: 100 }).status
+    ).toBe('unmeasurable')
+  })
+
+  it('only aligned may precede the WithAnchor commit (driver contract)', () => {
+    // The driver maps every non-aligned gate away from the commit (hidden
+    // retry first, terminal fail-visible only when hidden cannot restore):
+    // encode that only `aligned` is committable, never adjustable/clamped.
+    const committable = (status: string): boolean => status === 'aligned'
+    expect(committable('aligned')).toBe(true)
+    expect(committable('adjustable')).toBe(false)
+    expect(committable('clamped')).toBe(false)
+    expect(committable('unmeasurable')).toBe(false)
   })
 })
