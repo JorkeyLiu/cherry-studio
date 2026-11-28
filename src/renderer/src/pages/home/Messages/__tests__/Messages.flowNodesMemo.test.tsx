@@ -434,9 +434,9 @@ vi.mock('@renderer/pages/home/Messages/MessageGroup', () => ({
   default: vi.fn(() => <div data-testid="message-group" />)
 }))
 
-vi.mock('@renderer/pages/home/Messages/Prompt', () => ({
-  default: vi.fn(() => <div data-testid="prompt" />)
-}))
+// NOTE: the assistant-prompt block no longer mounts inside Messages
+// (integration baseline), so there is no Prompt stub or prompt assertion.
+// Mount sanity is carried by the message-context-menu assertions below.
 
 vi.mock('@renderer/pages/home/Messages/SelectionBox', () => ({
   default: vi.fn(() => null)
@@ -578,7 +578,6 @@ describe('Messages flow-nodes memo — pure context identity vs real flow change
     // Sanity: the real builders really ran on mount, and the DOM is mounted.
     expect(flowCounts.flowNodes).toBeGreaterThan(0)
     expect(flowCounts.renderPlan).toBeGreaterThan(0)
-    expect(screen.getByTestId('prompt')).toBeInTheDocument()
     expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicA.id)
     expect(screen.queryByTestId('message-group')).not.toBeInTheDocument()
     expect(screen.queryByTestId('context-boundary')).not.toBeInTheDocument()
@@ -597,7 +596,6 @@ describe('Messages flow-nodes memo — pure context identity vs real flow change
     // No redundant rebuild, DOM byte-identical in the asserted structure.
     expect(flowCounts.flowNodes).toBe(flowAfterMount)
     expect(flowCounts.renderPlan).toBe(planAfterMount)
-    expect(screen.getByTestId('prompt')).toBeInTheDocument()
     expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicA.id)
     expect(screen.queryByTestId('message-group')).not.toBeInTheDocument()
     expect(screen.queryByTestId('context-boundary')).not.toBeInTheDocument()
@@ -614,7 +612,6 @@ describe('Messages flow-nodes memo — pure context identity vs real flow change
     )
     expect(flowCounts.renderPlan).toBeGreaterThan(planBeforeScalar)
     expect(flowCounts.flowNodes).toBeGreaterThan(flowBeforeScalar)
-    expect(screen.getByTestId('prompt')).toBeInTheDocument()
     expect(screen.queryByTestId('context-boundary')).not.toBeInTheDocument()
 
     // Positive control A (structure): a topic/route switch MUST rebuild and
@@ -623,7 +620,6 @@ describe('Messages flow-nodes memo — pure context identity vs real flow change
       <Messages assistant={assistant} topic={topicB} setActiveTopic={setActiveTopic} sharedContextInfo={infoB} />
     )
     expect(flowCounts.flowNodes).toBeGreaterThan(flowBeforeScalar)
-    expect(screen.getByTestId('prompt')).toBeInTheDocument()
     expect(screen.getByTestId('message-context-menu')).toHaveAttribute('data-topic-id', topicB.id)
 
     // Return to A: the frame follows the committed route back.

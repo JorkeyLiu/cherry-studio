@@ -38,7 +38,9 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('motion/react', () => {
   const MotionDiv = ({ children, ...rest }: { children?: ReactModule.ReactNode }) => <div {...rest}>{children}</div>
   return {
-    motion: { div: MotionDiv },
+    // `motion.create` (used by Spinner) is an identity wrapper here: the
+    // suite never asserts spinner animation, only that mounting works.
+    motion: { div: MotionDiv, create: (component: unknown) => component },
     AnimatePresence: ({ children }: { children?: ReactModule.ReactNode }) => <>{children}</>
   }
 })
@@ -69,7 +71,17 @@ vi.mock('@renderer/hooks/useSettings', () => ({
 
 vi.mock('@renderer/hooks/useStore', () => ({
   useShowAssistants: () => ({ showAssistants: false, setShowAssistants: vi.fn() }),
-  useShowTopics: () => ({ showTopics: false, toggleShowTopics: vi.fn() })
+  useShowTopics: () => ({ showTopics: false, toggleShowTopics: vi.fn() }),
+  // Merged HomePage reads the workspace sidebar slot; the collapsed sidebar
+  // is irrelevant to the activeTopic-mirror claim, so it stays hidden.
+  useWorkspaceSidebar: () => ({ visible: false, width: 0, toggleVisible: vi.fn() })
+}))
+
+// Merged HomePage calls useFullscreen; the window state is irrelevant to the
+// activeTopic-mirror claim, so it stays non-fullscreen (house pattern from
+// the Chat suites).
+vi.mock('@renderer/hooks/useFullscreen', () => ({
+  useFullscreen: () => false
 }))
 
 vi.mock('@renderer/hooks/useShortcuts', () => ({

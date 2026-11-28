@@ -18,11 +18,13 @@ import { describe, expect, it } from 'vitest'
  *   no `listSegments`, no second IPC, no store-catalog join), and a missing
  *   structure fails closed with no publish and no independent backfill;
  * - every atomic commit entry invokes its joint `onPublish` (blocks + rebase
- *   with mutable ids/cleared reference + chrome, synchronously inside the
- *   commit, AFTER the stale guards and BEFORE `window/apply`), so the first
- *   visible frame already hosts the target route's groups and structure;
- * - `publishCommittedChrome` is now a thin forwarding seam into the provider's
- *   single owner; `Messages` keeps neither local committed state nor a second
+ *   with mutable ids/cleared reference + provider-owned chrome accept,
+ *   synchronously inside the commit, AFTER the stale guards and BEFORE
+ *   `window/apply`), so the first visible frame already hosts the target
+ *   route's groups and structure;
+ * - chrome acceptance is a direct call into the provider's single owner
+ *   (`acceptCommittedStructure` from `useChatRouteStructure` — no wrapper
+ *   seam); `Messages` keeps neither local committed state nor a second
  *   projection writer (the real hook/provider suite proves acceptance itself).
  *
  * The derivation itself (structure → committed chrome, hook equivalence,
@@ -40,8 +42,6 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     return source.slice(start, end)
   }
 
-  const publishSlice = (): string =>
-    sliceOf('const publishCommittedChrome = useCallback(', 'const commitRouteWindowAtomic = useCallback(')
   const windowCommitSlice = (): string =>
     sliceOf('const commitRouteWindowAtomic = useCallback(', 'const commitDividerVisibleAtomic = useCallback(')
   const dividerCommitSlice = (): string =>
@@ -50,13 +50,17 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     sliceOf('const commitTopVisibleAtomic = useCallback(', 'const endDividerSearchTerminal = useCallback(')
 
   it('forwards to the provider-owned writer without a second projection or local state', () => {
-    const slice = publishSlice()
-    expect(slice).toContain(
-      'acceptCommittedStructure(targetTopicId, targetBranchId, structure, reference, receiptRouteGeneration)'
-    )
-    expect(slice).not.toContain('projectCommittedChromeFromStructure')
-    expect(slice).not.toContain('setCommittedChrome')
+    // The thin `publishCommittedChrome` wrapper seam is gone: every pipeline
+    // invokes the provider-owned writer directly, so there is no local
+    // committed state and no second projection writer anywhere in Messages.
+    expect(source).not.toContain('publishCommittedChrome')
+    expect(source).not.toContain('projectCommittedChromeFromStructure')
+    expect(source).not.toContain('setCommittedChrome')
     expect(source).not.toContain('const [committedChrome, setCommittedChrome]')
+    expect(source).toContain('const { committedChrome, acceptCommittedStructure } = useChatRouteStructure()')
+    // Divider + top + deletion joint publishes, the top hidden-fallback
+    // commit, and the prepared-handoff accept: five direct writer call sites.
+    expect((source.match(/acceptCommittedStructure\(/g) ?? []).length).toBeGreaterThanOrEqual(5)
   })
 
   it('no independent chrome fetch: no fetchRouteChromeWires, no listSegments, no wires join', () => {
@@ -107,10 +111,11 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     expect(source).toContain("throw new Error('route structure missing in bundled window response')")
     // Acceptance happens after the joint publication dispatch (live getState
     // rebaseline) but still inside the same sync onPublish before window/apply.
+    // The provider-owned writer is invoked directly (no wrapper seam).
     expect(source).toMatch(/const publishDeferredProjection = \(unionMessages\?: readonly Message\[\]\): void/)
     const batch = sliceOf('const publishDeferredProjection = (', 'if (restoreEpoch === null)')
     const publishIdx = batch.indexOf(
-      'publishCommittedChrome(\n          topicIdAtStart,\n          branchId,\n          deferredStructure,\n          deferredReference,\n          deferredReceipt?.routeGeneration\n        )'
+      'acceptCommittedStructure(\n          topicIdAtStart,\n          branchId,\n          deferredStructure,\n          deferredReference,\n          deferredReceipt?.routeGeneration\n        )'
     )
     const rebaseIdx = batch.indexOf('rebaseRouteMessages')
     expect(publishIdx).toBeGreaterThanOrEqual(0)
@@ -137,7 +142,7 @@ describe('Messages chrome co-commit wiring (structural)', () => {
     expect(source).toContain('if (!topJoint.structure) {')
     expect(source).toContain('const topChromeStructure = topJoint.structure')
     expect(source).toContain(
-      'publishCommittedChrome(\n          topicIdAtEffect,\n          routeAtEffect,\n          topChromeStructure,\n          topJoint.reference,\n          topReceipt?.routeGeneration\n        )'
+      'acceptCommittedStructure(\n          topicIdAtEffect,\n          routeAtEffect,\n          topChromeStructure,\n          topJoint.reference,\n          topReceipt?.routeGeneration\n        )'
     )
     expect(source).toContain('mutableMessageIds: [...topJoint.mutableMessageIds]')
     expect(source).toContain('reference: topJoint.reference ?? null')
