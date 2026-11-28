@@ -417,6 +417,21 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           ref={islandRef}
           id="inputbar"
           $collapsed={!isExpanded}
+          role={isExpanded ? undefined : 'button'}
+          tabIndex={isExpanded ? -1 : 0}
+          aria-expanded={isExpanded ? undefined : false}
+          aria-label={isExpanded ? undefined : t('chat.input.expand', { defaultValue: 'Expand input' })}
+          onClick={() => {
+            if (!isExpanded) expandAndFocus()
+          }}
+          onKeyDown={(event) => {
+            if (isExpanded) return
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+            event.preventDefault()
+            event.stopPropagation()
+            expandAndFocus()
+          }}
           onBlurCapture={handleIslandBlurCapture}
           initial={false}
           animate={{
@@ -431,6 +446,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
             $collapsed={!isExpanded}
             $widthPx={expandedWidthPx}
             aria-hidden={!isExpanded}
+            inert={!isExpanded}
             initial={false}
             animate={{
               opacity: isExpanded ? 1 : 0
@@ -486,15 +502,9 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
 
           <CapsuleTrigger
             ref={capsuleRef}
-            role="button"
             data-testid="inputbar-capsule"
-            aria-label={t('chat.input.expand', { defaultValue: 'Expand input' })}
-            aria-hidden={isExpanded}
-            tabIndex={isExpanded ? -1 : 0}
-            $visible={!isExpanded}
-            onClick={() => {
-              if (!isExpanded) expandAndFocus()
-            }}
+            aria-hidden={true}
+            tabIndex={-1}
             initial={false}
             animate={{
               opacity: isExpanded ? 0 : 1
@@ -551,13 +561,29 @@ const Container = styled.div`
   padding: 0 ${INPUTBAR_OUTER_SIDE_PAD_PX}px 12px ${INPUTBAR_OUTER_SIDE_PAD_PX}px;
 `
 
+const CapsuleBar = styled.span`
+  display: block;
+  width: 36px;
+  height: 3.5px;
+  border-radius: 9999px;
+  background-color: rgba(255, 255, 255, 0.52);
+  transition: width 0.2s ease, background-color 0.2s ease;
+  body[theme-mode='light'] & {
+    background-color: rgba(0, 0, 0, 0.36);
+  }
+`
+
 const InputBarContainer = styled(motion.div)<{ $collapsed?: boolean }>`
   // Non-draggable content island: only the top titlebar bands drag; the
   // inputbar (model controls, tools) never does.
   -webkit-app-region: none;
   pointer-events: auto;
   margin: 0 auto;
-  overflow: hidden;
+  // overflow:clip (not hidden): clips to the rounded plate exactly like
+  // hidden, but the box is never a scroll container, so no scrollTop state
+  // can exist to shift the absolutely-positioned capsule after rapid
+  // expand/collapse reversals. Supported by the Electron/Chromium runtime.
+  overflow: clip;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -581,6 +607,19 @@ const InputBarContainer = styled(motion.div)<{ $collapsed?: boolean }>`
   backdrop-filter: ${(props) => (props.$collapsed ? 'blur(18px) saturate(180%)' : 'blur(22px) saturate(180%)')};
   -webkit-backdrop-filter: ${(props) => (props.$collapsed ? 'blur(18px) saturate(180%)' : 'blur(22px) saturate(180%)')};
   ${(props) => (props.$collapsed ? 'border-radius: 9999px; cursor: pointer;' : '')}
+  // Collapsed capsule affordance lives on the container (the single
+  // interactive target): hover or keyboard focus widens the purely visual
+  // capsule bar; the bar widening is the focus indicator, so no outline ring.
+  &:hover ${CapsuleBar}, &:focus-visible ${CapsuleBar} {
+    width: 44px;
+    background-color: rgba(255, 255, 255, 0.88);
+  }
+  body[theme-mode='light'] &:hover ${CapsuleBar}, body[theme-mode='light'] &:focus-visible ${CapsuleBar} {
+    background-color: rgba(0, 0, 0, 0.68);
+  }
+  &:focus-visible {
+    outline: none;
+  }
   body[theme-mode='light'] & {
     background: ${(props) =>
       props.$collapsed
@@ -650,35 +689,18 @@ const ExpandedContent = styled(motion.div)<{ $collapsed?: boolean; $widthPx: num
   transition: visibility 0s linear ${(props) => (props.$collapsed ? '0.15s' : '0s')};
 `
 
-const CapsuleBar = styled.span`
-  display: block;
-  width: 36px;
-  height: 3.5px;
-  border-radius: 9999px;
-  background-color: rgba(255, 255, 255, 0.52);
-  transition: width 0.2s ease, background-color 0.2s ease;
-  body[theme-mode='light'] & {
-    background-color: rgba(0, 0, 0, 0.36);
-  }
-`
-
-const CapsuleTrigger = styled(motion.div)<{ $visible: boolean }>`
+const CapsuleTrigger = styled(motion.div)`
+  // Purely visual overlay: Motion-driven opacity crossfade only, never an
+  // interactive target (no role, no focus, no pointer events). The container
+  // owns click/keyboard/hover/focus. Absolutely positioned against the
+  // non-scrollable container, so no scroll offset can shift it.
   position: absolute;
   inset: 0;
   border-radius: 9999px;
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: ${(props) => (props.$visible ? 'auto' : 'none')};
-  cursor: pointer;
-  outline: none;
-  &:hover ${CapsuleBar}, &:focus-visible ${CapsuleBar} {
-    width: 44px;
-    background-color: rgba(255, 255, 255, 0.88);
-  }
-  body[theme-mode='light'] &:hover ${CapsuleBar}, body[theme-mode='light'] &:focus-visible ${CapsuleBar} {
-    background-color: rgba(0, 0, 0, 0.68);
-  }
+  pointer-events: none;
 `
 
 const Textarea = styled(TextArea)`

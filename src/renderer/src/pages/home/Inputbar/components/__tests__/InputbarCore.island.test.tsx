@@ -161,6 +161,16 @@ function StatefulIslandHarness({
 
 beforeEach(() => {
   ;(window as any).electron = { ipcRenderer: { on: vi.fn(() => vi.fn()) } }
+  // jsdom lacks PointerEvent; motion's keyboard-press synthesis (whileTap +
+  // focus) constructs one on Enter keydown. Shim it so focused-container
+  // keyboard tests exercise the production path instead of throwing.
+  if (typeof (window as any).PointerEvent === 'undefined') {
+    ;(window as any).PointerEvent = class extends MouseEvent {
+      constructor(type: string, params?: MouseEventInit) {
+        super(type, params)
+      }
+    }
+  }
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
     cb(0)
     return 1
@@ -189,8 +199,8 @@ describe('InputbarCore Dynamic Island dual-mode behavior', () => {
     fireEvent.pointerDown(screen.getByTestId('outside-canvas'))
     expect(island.classList.contains('is-collapsed')).toBe(true)
 
-    // Clicking the capsule expands again and preserves draft text.
-    fireEvent.click(screen.getByTestId('inputbar-capsule'))
+    // Clicking the container edge expands again and preserves draft text.
+    fireEvent.click(island)
     expect(island.classList.contains('is-collapsed')).toBe(false)
     expect(focusSpy).toHaveBeenCalledTimes(1)
     expect((document.querySelector('#inputbar textarea') as HTMLTextAreaElement).value).toBe('keep my draft')
@@ -279,5 +289,121 @@ describe('InputbarCore Dynamic Island dual-mode behavior', () => {
       window.dispatchEvent(new Event('focus'))
     })
     expect(focusSpy).not.toHaveBeenCalled()
+  })
+
+  it('collapsed container is the single interactive target; capsule is purely visual', () => {
+    const focusSpy = vi.fn()
+    render(<StatefulIslandHarness initialExpanded={false} focusSpy={focusSpy} />)
+    const island = document.getElementById('inputbar')!
+    expect(island.getAttribute('role')).toBe('button')
+    expect(island.tabIndex).toBe(0)
+    // Root-cause guard: the container clips without becoming a scroll
+    // container, so no scrollTop state can shift the absolute capsule.
+    expect(getComputedStyle(island).overflow).toBe('clip')
+    expect(island.getAttribute('aria-expanded')).toBe('false')
+
+    const capsule = screen.getByTestId('inputbar-capsule')
+    expect(capsule.hasAttribute('role')).toBe(false)
+    // -1 keeps the purely visual overlay out of the Tab order.
+    expect(capsule.getAttribute('tabindex')).toBe('-1')
+    expect(capsule.getAttribute('aria-hidden')).toBe('true')
+
+    fireEvent.click(island)
+    expect(island.classList.contains('is-collapsed')).toBe(false)
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('expands via focused-container Enter/Space without modifiers', () => {
+    const focusSpy = vi.fn()
+    render(<StatefulIslandHarness initialExpanded={false} focusSpy={focusSpy} />)
+    const island = document.getElementById('inputbar')!
+    island.focus()
+
+    // Container handler preventDefaults, so dispatch returns false.
+    expect(fireEvent.keyDown(island, { key: 'Enter' })).toBe(false)
+    expect(island.classList.contains('is-collapsed')).toBe(false)
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(island.classList.contains('is-collapsed')).toBe(true)
+
+    island.focus()
+    expect(fireEvent.keyDown(island, { key: ' ' })).toBe(false)
+    expect(island.classList.contains('is-collapsed')).toBe(false)
+    expect(focusSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('expanded container drops its button semantics and textarea clicks do not re-expand', () => {
+    const focusSpy = vi.fn()
+    render(<StatefulIslandHarness initialExpanded={true} focusSpy={focusSpy} />)
+    const island = document.getElementById('inputbar')!
+    expect(island.hasAttribute('role')).toBe(false)
+    expect(island.tabIndex).toBe(-1)
+    expect(island.hasAttribute('aria-expanded')).toBe(false)
+
+    fireEvent.click(document.querySelector('#inputbar textarea') as HTMLTextAreaElement)
+    expect(focusSpy).not.toHaveBeenCalled()
+    expect(island.classList.contains('is-collapsed')).toBe(false)
+  })
+
+  it('collapsed expanded-content is inert so hidden controls stay out of Tab order', () => {
+    render(<StatefulIslandHarness initialExpanded={false} />)
+    const island = document.getElementById('inputbar')!
+    const content = island.firstElementChild as HTMLElement | null
+    expect(content?.hasAttribute('inert')).toBe(true)
+  })
+
+  it('re-expands from the container across rapid expand/collapse reversals', () => {
+    const focusSpy = vi.fn()
+    render(<StatefulIslandHarness initialExpanded={false} initialText="rapid draft" focusSpy={focusSpy} />)
+    const island = document.getElementById('inputbar')!
+    const capsule = screen.getByTestId('inputbar-capsule')
+    const outside = screen.getByTestId('outside-canvas')
+    expect(island.classList.contains('is-collapsed')).toBe(true)
+
+    // jsdom runs no layout frames, so motion animations never visibly settle
+    // here: back-to-back expand/collapse is the faithful model of interrupting
+    // the expand animation with an outside pointerdown. This covers rapid
+    // state reversal, not animation timing.
+    for (let round = 1; round <= 3; round++) {
+      if (round > 1) {
+        // The previous round ended expanded; collapse to restore this
+        // round's collapsed start (a user dismissing the composer again).
+        fireEvent.pointerDown(outside)
+        expect(island.classList.contains('is-collapsed')).toBe(true)
+      }
+      const focusedBefore = focusSpy.mock.calls.length
+
+      // Expand through the container itself (the single interactive target).
+      fireEvent.click(island)
+      expect(island.classList.contains('is-collapsed')).toBe(false)
+
+      // Immediately collapse via outside pointerdown, without waiting.
+      fireEvent.pointerDown(outside)
+      expect(island.classList.contains('is-collapsed')).toBe(true)
+      // (No opacity assertion here: with the Motion crossfade restored,
+      // animated opacity needs real frames to settle, which jsdom never
+      // runs. The crossfade mechanism is guarded by the transition config,
+      // not by a mid-animation computed value.)
+
+      // Re-expand through the container again: every round must recover and
+      // focus. (Targeting the container element is the jsdom-faithful
+      // equivalent of clicking a container region: there is no
+      // layout/hit-testing here. A click dispatched on the capsule overlay
+      // would bubble to the container handler, which models the production
+      // pointer-events:none pass-through.)
+      fireEvent.click(island)
+      expect(island.classList.contains('is-collapsed')).toBe(false)
+      expect(focusSpy.mock.calls.length).toBe(focusedBefore + 2)
+
+      // The capsule is never the interactive entry, in any round.
+      expect(capsule.hasAttribute('role')).toBe(false)
+      expect(capsule.getAttribute('tabindex')).toBe('-1')
+      expect(capsule.getAttribute('aria-hidden')).toBe('true')
+    }
+
+    expect((document.querySelector('#inputbar textarea') as HTMLTextAreaElement).value).toBe('rapid draft')
   })
 })

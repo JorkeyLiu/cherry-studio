@@ -712,6 +712,40 @@ export const buildContainerCapturer = (
     }
   }
 }
+/**
+ * Interaction-session end gate (pure, focused-test entry): the capture
+ * effect's `scrollend` / pointer-up end entries close the controller's live
+ * user-interaction session, and ONLY an actual close (true→false transition)
+ * earns one closing keeper hold (`interaction-end`) before the projection
+ * notify — the bottom semantic's closing pin through late layout/stream
+ * growth. A genuine scroll-away already owns a row anchor via takeover, so
+ * the hold can never pull it back; a pointer-up while adopted scrolls are
+ * still open (no close) holds and notifies nothing.
+ */
+export const INTERACTION_END_HOLD_REASON = 'interaction-end'
+export interface InteractionEndHoldDeps {
+  endSession: () => boolean
+  requestHold: (reason: string) => void
+  notify: () => void
+}
+export const runInteractionEndHold = (deps: InteractionEndHoldDeps): boolean => {
+  let ended = false
+  try {
+    ended = deps.endSession()
+  } catch {
+    return false
+  }
+  if (ended !== true) return false
+  try {
+    deps.requestHold(INTERACTION_END_HOLD_REASON)
+  } catch {
+    // Best-effort hold only: the session already ended, still notify below.
+  }
+  try {
+    deps.notify()
+  } catch {}
+  return true
+}
 
 // --- Persistent stable anchoring ------------------------------------------------
 
@@ -2173,12 +2207,20 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     }
     const endOnScrollEnd = () => {
       try {
-        if (controller.noteInteractionScrollEnd()) notify()
+        runInteractionEndHold({
+          endSession: () => controller.noteInteractionScrollEnd(),
+          requestHold: (reason) => holdRef.current(reason),
+          notify
+        })
       } catch {}
     }
     const cancelWhenIdle = () => {
       try {
-        if (controller.noteInteractionPointerEnd()) notify()
+        runInteractionEndHold({
+          endSession: () => controller.noteInteractionPointerEnd(),
+          requestHold: (reason) => holdRef.current(reason),
+          notify
+        })
       } catch {}
     }
     container.addEventListener('wheel', declare, { capture: true, passive: true })

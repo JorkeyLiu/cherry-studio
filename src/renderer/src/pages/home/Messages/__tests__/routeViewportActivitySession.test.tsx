@@ -15,12 +15,14 @@ import { act, render, screen } from '@testing-library/react'
 import { Activity, useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { shouldTopPipelineRefuseDividerIntent } from '../routeViewportActivation'
+import { shouldTopPipelineRefuseDividerIntent, shouldUseRetainedAnchorOverride } from '../routeViewportActivation'
 import {
   buildContainerCapturer,
+  INTERACTION_END_HOLD_REASON,
   isCaptureContainerHidden,
   readRouteSnapshot,
   RouteViewportProvider,
+  runInteractionEndHold,
   useRouteViewport,
   writeRouteSnapshot
 } from '../routeViewportContext'
@@ -598,5 +600,127 @@ describe('TOP pipeline never consumes divider intent (narrow kind isolation)', (
     const wouldEnter = c.isActivationRequired || c.currentPhase !== 'terminal'
     expect(wouldEnter).toBe(false)
     expect(c.currentEpoch).toBe(first.epoch)
+  })
+})
+
+describe('interaction-end hold (session close earns one closing pin)', () => {
+  it('scrollend ending a live session requests one interaction-end hold then notifies', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    c.declareUserIntent()
+    const holds: string[] = []
+    let notified = 0
+    const out = runInteractionEndHold({
+      endSession: () => c.noteInteractionScrollEnd(),
+      requestHold: (reason) => {
+        holds.push(reason)
+      },
+      notify: () => {
+        notified += 1
+      }
+    })
+    expect(out).toBe(true)
+    expect(holds).toEqual([INTERACTION_END_HOLD_REASON])
+    expect(notified).toBe(1)
+    expect(c.hasActiveUserInteraction()).toBe(false)
+  })
+  it('pointerup while adopted scrolls are still open ends nothing: no hold, no notify', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    c.declareUserIntent()
+    const taken = c.userTakeover({
+      messageId: 'mA',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false,
+      atPhysicalBottom: false
+    })
+    expect(taken.taken).toBe(true)
+    expect(c.noteInteractionPointerEnd()).toBe(false)
+    const holds: string[] = []
+    let notified = 0
+    const out = runInteractionEndHold({
+      endSession: () => c.noteInteractionPointerEnd(),
+      requestHold: (reason) => {
+        holds.push(reason)
+      },
+      notify: () => {
+        notified += 1
+      }
+    })
+    expect(out).toBe(false)
+    expect(holds).toEqual([])
+    expect(notified).toBe(0)
+    expect(c.hasActiveUserInteraction()).toBe(true)
+  })
+  it('end entry with no live session holds and notifies nothing', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const holds: string[] = []
+    let notified = 0
+    const out = runInteractionEndHold({
+      endSession: () => c.noteInteractionScrollEnd(),
+      requestHold: (reason) => {
+        holds.push(reason)
+      },
+      notify: () => {
+        notified += 1
+      }
+    })
+    expect(out).toBe(false)
+    expect(holds).toEqual([])
+    expect(notified).toBe(0)
+  })
+  it('a throwing endSession fails closed without hold or notify', () => {
+    const holds: string[] = []
+    let notified = 0
+    const out = runInteractionEndHold({
+      endSession: () => {
+        throw new Error('closed')
+      },
+      requestHold: (reason) => {
+        holds.push(reason)
+      },
+      notify: () => {
+        notified += 1
+      }
+    })
+    expect(out).toBe(false)
+    expect(holds).toEqual([])
+    expect(notified).toBe(0)
+  })
+})
+
+describe('retained-anchor override refuses saved bottom intent (pure)', () => {
+  const sameRoute = {
+    retainedLive: { kind: 'message', messageId: 'm1', offset: -12 },
+    displayed: { topicId: 't1', route: 'b1' },
+    targetTopicId: 't1',
+    targetRoute: 'b1'
+  } as const
+
+  it('same-route live row anchor still overrides a non-bottom snapshot', () => {
+    expect(shouldUseRetainedAnchorOverride({ ...sameRoute, saved: { isAtBottom: false } })).toBe(true)
+    expect(shouldUseRetainedAnchorOverride({ ...sameRoute, saved: null })).toBe(true)
+  })
+
+  it('saved bottom intent refuses the row override even for the same route', () => {
+    expect(shouldUseRetainedAnchorOverride({ ...sameRoute, saved: { isAtBottom: true } })).toBe(false)
+  })
+
+  it('foreign live anchor never overrides, with or without bottom intent', () => {
+    const foreign = { ...sameRoute, displayed: { topicId: 't1', route: 'main' } }
+    expect(shouldUseRetainedAnchorOverride({ ...foreign, saved: { isAtBottom: false } })).toBe(false)
+    expect(shouldUseRetainedAnchorOverride({ ...foreign, saved: { isAtBottom: true } })).toBe(false)
+  })
+
+  it('null/divider live anchors never override', () => {
+    expect(shouldUseRetainedAnchorOverride({ ...sameRoute, retainedLive: null, saved: { isAtBottom: false } })).toBe(
+      false
+    )
+    expect(
+      shouldUseRetainedAnchorOverride({
+        ...sameRoute,
+        retainedLive: { kind: 'divider', dividerKey: 'm1::main', offset: 150 },
+        saved: { isAtBottom: false }
+      })
+    ).toBe(false)
   })
 })

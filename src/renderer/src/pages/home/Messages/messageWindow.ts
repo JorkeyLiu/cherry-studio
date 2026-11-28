@@ -6,6 +6,7 @@ import {
   type MessageViewportGroup,
   type MessageViewportGroupModel
 } from './messageGroups'
+import { isSavedBottomIntent } from './routeViewportController'
 
 /**
  * Renderer-local bounded viewport capacity calibration default (Phase 4 B-06).
@@ -1872,12 +1873,13 @@ export function canonicalSavedAnchorId(saved: RouteWindowSavedPosition): string 
 /**
  * Top-selector window choice (pure, production path): which windowed read the
  * NEW route needs from its own saved browsing position.
- * - valid canonical anchor (`messageId`, legacy `anchorId` fallback) → around it,
- *   even when `isAtBottom` is true: the exact messageId + intra-row offset is
- *   the route-local stable viewport (VIEWPORT-5) and outranks bottom vicinity.
- * - otherwise (`null`/anchorless snapshot) → latest; `isAtBottom` only selects
- *   here (bottom vicinity; caller restores bottom naturally).
- * - otherwise → latest (deterministic tail + route-local default below).
+ * - Saved bottom intent (`isAtBottom`, the user's explicit bottom intent)
+ *   selects `latest` first and outranks any saved row anchor: the restore
+ *   resolves to the physical bottom, never the row.
+ * - Otherwise a valid canonical anchor (`messageId`, legacy `anchorId`
+ *   fallback) selects around it.
+ * - Otherwise (`null`/anchorless snapshot) → `latest` (deterministic tail +
+ *   route-local default below).
  * Never reads the OLD route's snapshot; never overwrites any snapshot here.
  * An around read that fails typed NOT_FOUND means the saved snapshot is
  * invalid for this route (deleted/out-of-route): the caller must take the
@@ -1889,6 +1891,9 @@ export function canonicalSavedAnchorId(saved: RouteWindowSavedPosition): string 
 export function chooseRouteWindowRequest(
   saved: RouteWindowSavedPosition
 ): { kind: 'latest' } | { kind: 'around'; anchorMessageId: string } {
+  if (isSavedBottomIntent(saved)) {
+    return { kind: 'latest' }
+  }
   const anchor = canonicalSavedAnchorId(saved)
   if (anchor) {
     return { kind: 'around', anchorMessageId: anchor }
@@ -1919,15 +1924,22 @@ export interface TopRestoreAnchorDecision {
 }
 
 /**
- * Pure top-restore anchor decision: valid saved anchors never degrade to
- * vicinity/tail/raw. Only the invalid-snapshot (NOT_FOUND) and no-snapshot
- * paths take the deterministic route-local default (`null` anchor → tail).
+ * Pure top-restore anchor decision: a saved bottom intent (the user's
+ * explicit bottom intent) resolves to `null` (physical bottom) and outranks
+ * any saved row anchor. Otherwise valid saved anchors never degrade to
+ * vicinity/tail/raw. Only the bottom-intent, invalid-snapshot (NOT_FOUND),
+ * and no-snapshot paths take the deterministic route-local default
+ * (`null` anchor → tail).
  */
 export function decideTopRestoreAnchor(input: {
   canonicalAnchor: string | null
   snapshotInvalidForRoute: boolean
   loadedIds: ReadonlySet<string>
+  savedIsAtBottom: boolean
 }): TopRestoreAnchorDecision {
+  if (input.savedIsAtBottom) {
+    return { routeSavedRowAnchor: null, snapshotInvalidForRoute: input.snapshotInvalidForRoute, mustFailVisible: false }
+  }
   if (input.snapshotInvalidForRoute || !input.canonicalAnchor) {
     return { routeSavedRowAnchor: null, snapshotInvalidForRoute: input.snapshotInvalidForRoute, mustFailVisible: false }
   }
@@ -1941,9 +1953,9 @@ export function decideTopRestoreAnchor(input: {
  * Pure stable-commit gate: a valid requested anchor commits only when it is
  * covered/resident (projection + connected DOM) — quiet/alignment is owned by
  * the caller's stabilizer. Terminal defaults, anchorless bottom restores, and
- * anchorless defaults carry no anchor requirement. `isAtBottom` never waives a
- * valid requested anchor: exact messageId + intra-row offset outranks bottom
- * vicinity (VIEWPORT-5).
+ * anchorless defaults carry no anchor requirement. A saved bottom intent
+ * never reaches this gate with a requested anchor: the anchor decision above
+ * already resolves it to `null`, so no waiver happens here.
  */
 export function isTopStableCommittable(input: {
   isAtBottom: boolean
@@ -1959,14 +1971,14 @@ export function isTopStableCommittable(input: {
 
 /**
  * Pure top first-position plan (route-local stable viewport, VIEWPORT-5):
- * a resolved saved-row anchor always selects `message` with the saved
- * intra-row offset — even when `isAtBottom` is true. `isAtBottom` selects
- * `bottom` only when no anchor is available; invalid snapshots
- * (typed NOT_FOUND: deleted/out-of-route) take the deterministic
- * route-local default `bottom` on the latest window — stale anchor, raw
- * scrollTop, and `isAtBottom` values are ignored; anchorless raw scrollTop
- * is a same-route local fallback only; anchorless no-snapshot takes the
- * deterministic route-local default `bottom` (never outgoing geometry,
+ * a saved bottom intent (the user's explicit bottom intent) selects `bottom`
+ * first and outranks any resolved saved-row anchor. Otherwise a resolved
+ * saved-row anchor selects `message` with the saved intra-row offset.
+ * Invalid snapshots (typed NOT_FOUND: deleted/out-of-route) take the
+ * deterministic route-local default `bottom` on the latest window — stale
+ * anchor, raw scrollTop, and `isAtBottom` values are ignored; anchorless raw
+ * scrollTop is a same-route local fallback only; anchorless no-snapshot takes
+ * the deterministic route-local default `bottom` (never outgoing geometry,
  * never `none` for the invalid path).
  */
 export function chooseTopFirstPositionPlan(input: {
@@ -1979,6 +1991,7 @@ export function chooseTopFirstPositionPlan(input: {
   | { kind: 'message'; messageId: string; wantOffset: number | null; fallbackScrollTop: null }
   | { kind: 'scrollTop'; scrollTop: number } {
   if (input.snapshotInvalidForRoute) return { kind: 'bottom' }
+  if (isSavedBottomIntent(input.saved)) return { kind: 'bottom' }
   if (input.routeSavedRowAnchor) {
     const wantOffset =
       typeof input.saved?.intraRowOffset === 'number' && Number.isFinite(input.saved.intraRowOffset)
@@ -1986,7 +1999,6 @@ export function chooseTopFirstPositionPlan(input: {
         : null
     return { kind: 'message', messageId: input.routeSavedRowAnchor, wantOffset, fallbackScrollTop: null }
   }
-  if (input.saved?.isAtBottom) return { kind: 'bottom' }
   const canonicalAnchor = canonicalSavedAnchorId(input.saved)
   const sameRouteScrollTop =
     input.saved && typeof input.saved.scrollTop === 'number' && Number.isFinite(input.saved.scrollTop)

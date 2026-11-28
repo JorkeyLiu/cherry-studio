@@ -1240,3 +1240,247 @@ describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', ()
     expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
   })
 })
+
+describe('top-restore saved bottom intent outranks the saved row anchor', () => {
+  it('saved row + isAtBottom resolves to null (physical bottom), never the row', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toBeNull()
+  })
+  it('saved row without bottom still resolves to the row anchor', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
+    })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+  })
+  it('saved bottom intent outranks a retained row anchor for the same target', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const first = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
+    })
+    expect(c.appliedWindow(first.epoch)).toBe(true)
+    expect(c.firstPositioned(first.epoch, 'placed')).toBe(true)
+    expect(c.revealed(first.epoch)).toBe(true)
+    const committed = c.commitStable(first.epoch, {
+      messageId: 'm1',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false
+    })
+    expect(committed.committed).toBe(true)
+    // The stable row anchor is retained live for b1; a new top request
+    // carrying an explicit bottom intent resolves to null anyway.
+    c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toBeNull()
+  })
+  it('divider intent is unaffected (keeps its clicked offset)', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    c.request({ kind: 'divider', topicId: 't1', targetRoute: 'b1', dividerKey: 'm1::main', clickOffset: 150 })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'divider', dividerKey: 'm1::main', offset: 150 })
+  })
+})
+
+describe('commitStable saved-bottom forcing (explicit commit context + session source)', () => {
+  const driveToAligned = (c: RouteViewportController, epoch: number, topicId: string, route: string | null): void => {
+    c.applyTransitionWindow(epoch, { topicId, route }, wid('25'))
+    c.firstPositioned(epoch, 'placed')
+    expect(c.revealed(epoch)).toBe(true)
+  }
+
+  it('top + preserved bottom intent + bottom measurement forces null/null/true with a null anchor', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -50, isAtBottom: true },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toEqual({
+      scrollTop: -50,
+      messageId: null,
+      intraRowOffset: null,
+      isAtBottom: true
+    })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toBeNull()
+  })
+
+  it('top + preserved bottom intent without a bottom measurement still commits the row', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -400, isAtBottom: false },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', intraRowOffset: -12, isAtBottom: false })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+  })
+
+  it('top without the flag still commits the row even when the measurement is at the bottom (no global priority)', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -50, isAtBottom: true },
+      wid('25')
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', isAtBottom: true })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+  })
+
+  it('divider restores ignore the flag and keep the measured row', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'divider',
+      topicId: 't1',
+      targetRoute: 'b1',
+      dividerKey: 'm1::main',
+      clickOffset: 150
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -50, isAtBottom: true },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', isAtBottom: true })
+  })
+
+  it('generic bootstrap restore + session saved-bottom + explicit context + bottom measurement forces null/null/true', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'generic',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -8, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -8, isAtBottom: true },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toEqual({
+      scrollTop: -8,
+      messageId: null,
+      intraRowOffset: null,
+      isAtBottom: true
+    })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toBeNull()
+  })
+
+  it('generic without explicit context keeps the measured row (no impersonation)', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'generic',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -8, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -8, isAtBottom: true },
+      wid('25')
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', isAtBottom: true })
+  })
+
+  it('generic without session saved-bottom never forces even with the flag (pending explicit isolation)', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({ kind: 'generic', topicId: 't1', targetRoute: 'b1', saved: null })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -8, isAtBottom: true },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', isAtBottom: true })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+  })
+
+  it('generic with session saved row (non-bottom) never forces even with the flag + bottom measurement', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'generic',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -8, isAtBottom: true },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', intraRowOffset: -12, isAtBottom: true })
+  })
+
+  it('generic restore with saved-bottom but non-bottom measurement keeps the row', () => {
+    const c = new RouteViewportController(displayed('t1', null))
+    const { epoch } = c.request({
+      kind: 'generic',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: true }
+    })
+    driveToAligned(c, epoch, 't1', 'b1')
+    const out = c.commitStable(
+      epoch,
+      { messageId: 'm1', intraRowOffset: -12, scrollTop: -400, isAtBottom: false },
+      wid('25'),
+      { savedBottomIntent: true }
+    )
+    expect(out.committed).toBe(true)
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'm1', intraRowOffset: -12, isAtBottom: false })
+  })
+})

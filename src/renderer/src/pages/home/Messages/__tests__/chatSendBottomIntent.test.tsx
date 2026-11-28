@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { runMessageNavigationTransaction } from '../messageNavigation'
 import type { SendBottomIntentDeps } from '../Messages'
-import { runSendBottomIntent, shouldHandleSendMessageForTopic } from '../Messages'
+import { runSendBottomIntent, shouldHandleSendMessageForTopic, shouldSkipScrollForCompensationEcho } from '../Messages'
 import type { MessageWindow } from '../messageWindow'
 import { RouteViewportContext, type RouteViewportContextValue, useStableVisualAnchor } from '../routeViewportContext'
 import { RouteViewportController } from '../routeViewportController'
@@ -848,5 +848,35 @@ describe('send bottom keeper adoption (mounted keeper holds bottom, never the ol
     })
     expect(container.scrollTop).toBe(100)
     keeper.unmount()
+  })
+})
+
+describe('compensation-echo scroll gate (echo is programmatic, genuine scroll still takes over)', () => {
+  it('valid echo skips takeover/pagination; no echo keeps the genuine path', () => {
+    expect(shouldSkipScrollForCompensationEcho(true)).toBe(true)
+    expect(shouldSkipScrollForCompensationEcho(false)).toBe(false)
+  })
+
+  it('realized compensation write consumes once as an echo', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    controller.noteCompensationWrite(100)
+    // No fresh input since the write: the observed write position is the app echo.
+    const echo = controller.consumeCompensationEcho(100)
+    expect(echo).toBe(true)
+    expect(shouldSkipScrollForCompensationEcho(echo)).toBe(true)
+    // One-shot: a second observation at the same position is genuine input (or nothing).
+    const second = controller.consumeCompensationEcho(100)
+    expect(second).toBe(false)
+    expect(shouldSkipScrollForCompensationEcho(second)).toBe(false)
+  })
+
+  it('gesture coalesced with compensation is never swallowed; live session still takes over', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    controller.noteCompensationWrite(100)
+    controller.declareUserIntent()
+    const echo = controller.consumeCompensationEcho(100)
+    expect(echo).toBe(false)
+    expect(shouldSkipScrollForCompensationEcho(echo)).toBe(false)
+    expect(controller.hasActiveUserInteraction()).toBe(true)
   })
 })

@@ -63,6 +63,16 @@ export interface RouteViewportSnapshot {
 export interface MeasuredRouteViewportSnapshot extends RouteViewportSnapshot {
   scrollTop: number
 }
+/**
+ * Saved bottom intent (single predicate for the top-restore unification):
+ * a persisted `isAtBottom` is the user's explicit bottom intent. It resolves
+ * to the physical bottom (latest read / null anchor / bottom plan) and
+ * outranks any saved row anchor. The 50px vicinity only classifies this
+ * intent when recorded; it is never the restore coordinate. Passive content
+ * growth never creates this intent.
+ */
+export const isSavedBottomIntent = (saved: { isAtBottom: boolean } | null | undefined): boolean =>
+  saved?.isAtBottom === true
 
 export type RouteVisualAnchor =
   | { kind: 'message'; messageId: string; offset: number }
@@ -76,7 +86,7 @@ export interface RouteTransitionRequest {
   dividerKey?: string
   /** Divider intent only: clicked row's screen offset to preserve. */
   clickOffset?: number | null
-  /** Top intent only: target route's own stable snapshot (null = no history). */
+  /** Top + bootstrap-generic restore only: target route's own stable snapshot (null = no history). */
   saved?: RouteViewportSnapshot | null
   /** Top intent only: saved snapshot proven invalid for this route (NOT_FOUND). */
   snapshotInvalid?: boolean
@@ -232,6 +242,8 @@ export interface RouteViewportIntent {
   kind: RouteViewportIntentKind
   topicId: string
   targetRoute: RouteId
+  /** Session-carried restore source: top or bootstrap-generic restore only (null = no restore source). */
+  saved?: RouteViewportSnapshot | null
 }
 
 export interface StableCommit {
@@ -942,7 +954,10 @@ export class RouteViewportController {
     }
     this.epoch += 1
     this.phase = 'fetch-hold'
-    this.intent = { kind: req.kind, topicId: req.topicId, targetRoute: req.targetRoute }
+    this.intent =
+      req.kind === 'top' || req.kind === 'generic'
+        ? { kind: req.kind, topicId: req.topicId, targetRoute: req.targetRoute, saved: req.saved ?? null }
+        : { kind: req.kind, topicId: req.topicId, targetRoute: req.targetRoute }
     this.ownershipHeld = true
     this.terminalReason = null
     // request() starts the TARGET session but never claims rendered: the DOM
@@ -990,7 +1005,12 @@ export class RouteViewportController {
     if (req.kind === 'divider') {
       next = fresh ?? retained
     } else if (retained?.kind === 'message') {
-      next = retained
+      // Saved bottom intent outranks a retained row anchor: an explicit
+      // bottom intent resolves to the unified fresh decision (null for a
+      // top/generic-restore bottom-intent request), never a stale row.
+      // Pending explicit navigation carries no saved source, so it never
+      // takes this branch.
+      next = (req.kind === 'top' || req.kind === 'generic') && isSavedBottomIntent(req.saved) ? fresh : retained
     } else if (fresh !== null) {
       next = fresh
     } else {
@@ -1021,6 +1041,9 @@ export class RouteViewportController {
     }
     if (req.kind === 'top') {
       if (req.snapshotInvalid) return null
+      // Saved bottom intent outranks the saved row anchor: an explicit
+      // bottom intent resolves to null (physical bottom), never the row.
+      if (isSavedBottomIntent(req.saved)) return null
       const saved = req.saved
       if (saved && typeof saved.messageId === 'string' && saved.messageId.length > 0) {
         const offset = isFiniteOffset(saved.intraRowOffset) ? saved.intraRowOffset : 0
@@ -1366,11 +1389,24 @@ export class RouteViewportController {
    * displayed route (if not yet), enter `stable`, release ownership exactly
    * once. Only from `aligned`. A programmatic restore needs no user input to
    * be stable — currency + alignment + quiet (verified by the caller) suffice.
+   *
+   * `opts.savedBottomIntent` (top / bootstrap-generic restore only): the
+   * target's preserved saved-bottom intent is threaded explicitly to this
+   * final commit — never read from cleared session state. When set AND the
+   * session carries the same saved-bottom source (`intent.saved.isAtBottom`)
+   * AND the final measurement is at the bottom, the persisted snapshot is
+   * forced to `{messageId:null,intraRowOffset:null,isAtBottom:true}` with a
+   * null anchor commit. Without the flag a bottom measurement still commits
+   * its row: no global `isAtBottom` priority, and divider/search/user-scroll
+   * commits are untouched. A generic session without the session-carried
+   * saved-bottom source never forces, even with the flag (no arbitrary
+   * generic widening; explicit pending navigation carries no saved source).
    */
   commitStable(
     epoch: number,
     measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
-    windowId?: string
+    windowId?: string,
+    opts?: { savedBottomIntent?: boolean }
   ): { committed: boolean; commit: StableCommit | null; didRelease: boolean } {
     if (!this.checkSession(epoch)) return { committed: false, commit: null, didRelease: false }
     if (this.phase !== 'aligned') return { committed: false, commit: null, didRelease: false }
@@ -1387,6 +1423,26 @@ export class RouteViewportController {
     if (typeof windowId === 'string' && windowId.length > 0 && cur.windowId !== windowId) {
       return { committed: false, commit: null, didRelease: false }
     }
+    // Restore saved-bottom forcing (explicit commit context + session source):
+    // the target's preserved bottom intent outranks the measured row — but
+    // only for a top or bootstrap-generic restore session whose session
+    // source is itself saved-bottom, whose explicit commit flag is set, and
+    // whose final measurement is actually at the bottom. Every other commit
+    // (divider/search/user-scroll, non-bottom, no flag, or generic without
+    // the saved-bottom session source) keeps the measured identity untouched.
+    const forceBottomSnapshot =
+      (intent.kind === 'top' || intent.kind === 'generic') &&
+      isSavedBottomIntent(intent.saved) &&
+      opts?.savedBottomIntent === true &&
+      measured.isAtBottom === true
+    const effective = forceBottomSnapshot
+      ? {
+          messageId: null as string | null,
+          intraRowOffset: null as number | null,
+          scrollTop: measured.scrollTop,
+          isAtBottom: true
+        }
+      : measured
     // Valid unresolved top anchor must never commit a fallback: the caller
     // proves residency before calling; a null identity with a live requested
     // anchor means unresolved → refuse.
@@ -1394,10 +1450,10 @@ export class RouteViewportController {
       return { committed: false, commit: null, didRelease: false }
     }
     const snapshot: MeasuredRouteViewportSnapshot = {
-      scrollTop: measured.scrollTop,
-      messageId: measured.messageId,
-      intraRowOffset: measured.intraRowOffset,
-      isAtBottom: measured.isAtBottom
+      scrollTop: effective.scrollTop,
+      messageId: effective.messageId,
+      intraRowOffset: effective.intraRowOffset,
+      isAtBottom: effective.isAtBottom
     }
     this.displayed = { topicId: intent.topicId, route: intent.targetRoute }
     const commitRoute: RouteRef = { topicId: intent.topicId, route: intent.targetRoute }

@@ -1,11 +1,17 @@
 /**
  * Top-selector exclusive-anchor restore contract (pure decisions).
  *
- * - Canonical saved `messageId` wins; legacy `anchorId` fills.
+ * - Saved bottom intent (`isAtBottom`, the user's explicit bottom intent)
+ *   outranks any saved row anchor: restore resolves to physical bottom
+ *   (`latest` window read, `null` anchor, `bottom` plan).
+ * - Non-bottom snapshots: canonical saved `messageId` wins; legacy
+ *   `anchorId` fills.
  * - Valid exclusive anchors never degrade to vicinity/tail/raw.
  * - Typed NOT_FOUND → invalid-snapshot terminal default (may replace stale
  *   only after stable default); transport stays fail-visible/preserve.
  * - Stable commit requires coverage for valid anchors; defaults/bottom pass.
+ * - Search/divider/branch arrivals are unaffected: they carry their own
+ *   explicit anchors or anchorless defaults, never a bottom-intent snapshot.
  */
 import {
   canonicalSavedAnchorId,
@@ -45,7 +51,7 @@ describe('canonicalSavedAnchorId + chooseRouteWindowRequest', () => {
     })
   })
 
-  it('valid anchor selects around even when isAtBottom (exact viewport outranks bottom)', () => {
+  it('saved bottom intent outranks any saved row anchor (restores to latest)', () => {
     expect(
       chooseRouteWindowRequest({
         scrollTop: -8,
@@ -54,13 +60,9 @@ describe('canonicalSavedAnchorId + chooseRouteWindowRequest', () => {
         intraRowOffset: -51,
         isAtBottom: true
       })
-    ).toEqual({
-      kind: 'around',
-      anchorMessageId: 'bexcl-00006'
-    })
+    ).toEqual({ kind: 'latest' })
     expect(chooseRouteWindowRequest({ scrollTop: 0, anchorId: 'a', messageId: 'm', isAtBottom: true })).toEqual({
-      kind: 'around',
-      anchorMessageId: 'm'
+      kind: 'latest'
     })
   })
 
@@ -90,11 +92,22 @@ describe('isTopRestoreNotFoundError', () => {
 })
 
 describe('decideTopRestoreAnchor', () => {
+  it('saved bottom intent resolves to null anchor even with a resident row anchor', () => {
+    const d = decideTopRestoreAnchor({
+      canonicalAnchor: 'main-excl-3',
+      snapshotInvalidForRoute: false,
+      loadedIds: new Set(['fork', 'main-excl-3']),
+      savedIsAtBottom: true
+    })
+    expect(d).toEqual({ routeSavedRowAnchor: null, snapshotInvalidForRoute: false, mustFailVisible: false })
+  })
+
   it('valid resident anchor restores exactly it (no vicinity/tail)', () => {
     const d = decideTopRestoreAnchor({
       canonicalAnchor: 'main-excl-3',
       snapshotInvalidForRoute: false,
-      loadedIds: new Set(['fork', 'main-excl-3'])
+      loadedIds: new Set(['fork', 'main-excl-3']),
+      savedIsAtBottom: false
     })
     expect(d).toEqual({ routeSavedRowAnchor: 'main-excl-3', snapshotInvalidForRoute: false, mustFailVisible: false })
   })
@@ -103,7 +116,8 @@ describe('decideTopRestoreAnchor', () => {
     const d = decideTopRestoreAnchor({
       canonicalAnchor: 'main-excl-3',
       snapshotInvalidForRoute: false,
-      loadedIds: new Set(['fork', 'other'])
+      loadedIds: new Set(['fork', 'other']),
+      savedIsAtBottom: false
     })
     expect(d.mustFailVisible).toBe(true)
     expect(d.routeSavedRowAnchor).toBeNull()
@@ -113,7 +127,8 @@ describe('decideTopRestoreAnchor', () => {
     const d = decideTopRestoreAnchor({
       canonicalAnchor: 'stale-id',
       snapshotInvalidForRoute: true,
-      loadedIds: new Set(['fork', 'tail'])
+      loadedIds: new Set(['fork', 'tail']),
+      savedIsAtBottom: false
     })
     expect(d.routeSavedRowAnchor).toBeNull()
     expect(d.snapshotInvalidForRoute).toBe(true)
@@ -124,7 +139,8 @@ describe('decideTopRestoreAnchor', () => {
     const d = decideTopRestoreAnchor({
       canonicalAnchor: null,
       snapshotInvalidForRoute: false,
-      loadedIds: new Set(['a'])
+      loadedIds: new Set(['a']),
+      savedIsAtBottom: false
     })
     expect(d.routeSavedRowAnchor).toBeNull()
     expect(d.mustFailVisible).toBe(false)
@@ -162,7 +178,7 @@ describe('isTopStableCommittable', () => {
     ).toBe(false)
   })
 
-  it('valid anchor with isAtBottom still requires coverage (no bottom bypass)', () => {
+  it('requested anchor still requires coverage even with isAtBottom (unreachable after anchor decision, defense in depth)', () => {
     expect(
       isTopStableCommittable({
         isAtBottom: true,
@@ -223,11 +239,21 @@ describe('isTopStableCommittable', () => {
   })
 })
 
-describe('chooseTopFirstPositionPlan (anchor outranks isAtBottom)', () => {
-  it('anchor + isAtBottom selects message with the saved intra-row offset', () => {
+describe('chooseTopFirstPositionPlan (saved bottom intent outranks row anchor)', () => {
+  it('row + isAtBottom selects bottom, ignoring the saved intra-row offset', () => {
     expect(
       chooseTopFirstPositionPlan({
         saved: { scrollTop: -8, anchorId: null, messageId: 'bexcl-00006', intraRowOffset: -51, isAtBottom: true },
+        snapshotInvalidForRoute: false,
+        routeSavedRowAnchor: 'bexcl-00006'
+      })
+    ).toEqual({ kind: 'bottom' })
+  })
+
+  it('row + non-bottom selects message with the saved intra-row offset', () => {
+    expect(
+      chooseTopFirstPositionPlan({
+        saved: { scrollTop: -8, anchorId: null, messageId: 'bexcl-00006', intraRowOffset: -51, isAtBottom: false },
         snapshotInvalidForRoute: false,
         routeSavedRowAnchor: 'bexcl-00006'
       })
@@ -285,7 +311,8 @@ describe('chooseTopFirstPositionPlan (anchor outranks isAtBottom)', () => {
     const d = decideTopRestoreAnchor({
       canonicalAnchor: 'valid-but-absent',
       snapshotInvalidForRoute: false,
-      loadedIds: new Set(['other'])
+      loadedIds: new Set(['other']),
+      savedIsAtBottom: false
     })
     expect(d.mustFailVisible).toBe(true)
     expect(d.routeSavedRowAnchor).toBeNull()
@@ -336,7 +363,8 @@ describe('continuous top-route sequence: branch anchor survives shared crossing-
     const branchDecision = decideTopRestoreAnchor({
       canonicalAnchor: 'bexcl02',
       snapshotInvalidForRoute: false,
-      loadedIds: branchLoaded
+      loadedIds: branchLoaded,
+      savedIsAtBottom: false
     })
     expect(branchDecision.routeSavedRowAnchor).toBe('bexcl02')
     expect(branchDecision.mustFailVisible).toBe(false)
@@ -399,7 +427,8 @@ describe('continuous top-route sequence: branch anchor survives shared crossing-
     const backDecision = decideTopRestoreAnchor({
       canonicalAnchor: 'bexcl02',
       snapshotInvalidForRoute: false,
-      loadedIds: branchLoaded
+      loadedIds: branchLoaded,
+      savedIsAtBottom: false
     })
     expect(backDecision.routeSavedRowAnchor).toBe('bexcl02')
     const backPlan = chooseTopFirstPositionPlan({
@@ -467,7 +496,8 @@ describe('no-scroll A→B→A→B→A with distinct exclusive IDs (decision leve
       const d = decideTopRestoreAnchor({
         canonicalAnchor: canonical,
         snapshotInvalidForRoute: false,
-        loadedIds: loaded
+        loadedIds: loaded,
+        savedIsAtBottom: false
       })
       expect(d.mustFailVisible).toBe(false)
       arrivals.push(d.routeSavedRowAnchor)
@@ -490,5 +520,15 @@ describe('no-scroll A→B→A→B→A with distinct exclusive IDs (decision leve
     // Opposite exclusive IDs are never resident on the wrong route.
     expect(mainLoaded.has(branchExclusive)).toBe(false)
     expect(branchLoaded.has(mainExclusive)).toBe(false)
+  })
+})
+
+describe('isSavedBottomIntent (single bottom-intent predicate)', () => {
+  it('classifies only an explicit true bottom flag as bottom intent', async () => {
+    const { isSavedBottomIntent } = await import('@renderer/pages/home/Messages/routeViewportController')
+    expect(isSavedBottomIntent({ isAtBottom: true })).toBe(true)
+    expect(isSavedBottomIntent({ isAtBottom: false })).toBe(false)
+    expect(isSavedBottomIntent(null)).toBe(false)
+    expect(isSavedBottomIntent(undefined)).toBe(false)
   })
 })

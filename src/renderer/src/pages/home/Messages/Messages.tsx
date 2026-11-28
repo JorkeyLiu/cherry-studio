@@ -12,7 +12,8 @@ import { resolveChromeAuthoritySegment, useRetainedRouteSegments } from '@render
 import useScrollPosition, {
   commitSnapshotForRoute,
   normalizeSaved,
-  routeScrollKey
+  routeScrollKey,
+  type SavedScrollPosition
 } from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -258,7 +259,8 @@ import {
   isBootstrapRestoreAnchorCommittable,
   shouldContinueRetainedViewport,
   shouldRestoreRetainedWindowInPlace,
-  shouldTopPipelineRefuseDividerIntent
+  shouldTopPipelineRefuseDividerIntent,
+  shouldUseRetainedAnchorOverride
 } from './routeViewportActivation'
 import {
   buildContainerCapturer,
@@ -275,6 +277,7 @@ import {
 import {
   declareUserIntentSession,
   displayedRouteKey,
+  isSavedBottomIntent,
   RouteViewportController,
   type RouteViewportSnapshot
 } from './routeViewportController'
@@ -305,6 +308,28 @@ interface PrepareNavigationStructureHandoff extends DeferredNavigationStructureH
   topicId: string
   route: string | null
   sessionEpoch: number
+}
+
+/**
+ * Bootstrap restore session source (renderer-local pure normalizer, no global
+ * state): narrow the decision-time `SavedScrollPosition` to the controller
+ * session snapshot shape. Null in = null out (no history); a finite scrollTop
+ * is preserved, otherwise omitted (never fabricated). `messageId` falls back
+ * to the legacy `anchorId` alias; undefined collapses to null so the
+ * controller snapshot type holds.
+ */
+const toBootstrapSessionSaved = (saved: SavedScrollPosition | null | undefined): RouteViewportSnapshot | null => {
+  if (!saved) return null
+  const snapshot: RouteViewportSnapshot = {
+    messageId: saved.messageId ?? saved.anchorId ?? null,
+    intraRowOffset:
+      typeof saved.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset) ? saved.intraRowOffset : null,
+    isAtBottom: saved.isAtBottom === true
+  }
+  if (typeof saved.scrollTop === 'number' && Number.isFinite(saved.scrollTop)) {
+    snapshot.scrollTop = saved.scrollTop
+  }
+  return snapshot
 }
 
 /**
@@ -491,6 +516,15 @@ export const shouldHandleSendMessageForTopic = (
   if (!payload || typeof payload.topicId !== 'string' || payload.topicId.length === 0) return true
   return payload.topicId === currentTopicId
 }
+/**
+ * Post-scroll compensation-echo gate (pure, focused-test entry): the
+ * controller's own compensation receipt (`consumeCompensationEcho === true`)
+ * is programmatic movement in the same family as the existing
+ * `suppressUserWriteRef` / `programmaticOwned` programmatic scrolls — it must
+ * return before any user-takeover capture/adopt or edge pagination. A false
+ * echo keeps the genuine user scroll path unchanged.
+ */
+export const shouldSkipScrollForCompensationEcho = (compensationEcho: boolean): boolean => compensationEcho === true
 
 /**
  * Explicit send-to-bottom intent (SEND_MESSAGE) dependencies (focused-test
@@ -2032,9 +2066,19 @@ const Messages = ({
   // pre-paint layout effect cannot consume its exactly-once placement on the
   // stale (pre-navigation) projection.
   const beginBootstrapFetch = useCallback(
-    (topicIdAtStart: string, routeAtStart: string | null) => {
+    (topicIdAtStart: string, routeAtStart: string | null, saved?: RouteViewportSnapshot | null) => {
       tearDownViewportTransition()
-      const epoch = controller.request({ kind: 'generic', topicId: topicIdAtStart, targetRoute: routeAtStart }).epoch
+      // Ordinary topic bootstrap restore threads the decision-time saved
+      // position as the session-carried restore source (never a live re-read:
+      // the target snapshot may be overwritten mid-flight). Pending explicit
+      // navigation passes no saved source, so it can never masquerade as a
+      // saved restore at the final commit.
+      const epoch = controller.request({
+        kind: 'generic',
+        topicId: topicIdAtStart,
+        targetRoute: routeAtStart,
+        saved: saved ?? null
+      }).epoch
       notifyViewport()
       return epoch
     },
@@ -2234,7 +2278,7 @@ const Messages = ({
   // in the SAME bounded effect. Divider-owned sessions refuse there so a
   // generic activation never overwrites an explicit divider continuation.
   const commitDisplayedStable = useCallback(
-    (tid: string, route: string | null, epoch: number): boolean => {
+    (tid: string, route: string | null, epoch: number, opts?: { savedBottomIntent?: boolean }): boolean => {
       if (unmountedRef.current) {
         return false
       }
@@ -2252,12 +2296,17 @@ const Messages = ({
       if (!measured) {
         return false
       }
-      const { commit } = controller.commitStable(epoch, {
-        messageId: measured.messageId ?? null,
-        intraRowOffset: measured.intraRowOffset ?? null,
-        scrollTop: measured.scrollTop,
-        isAtBottom: measured.isAtBottom
-      })
+      const { commit } = controller.commitStable(
+        epoch,
+        {
+          messageId: measured.messageId ?? null,
+          intraRowOffset: measured.intraRowOffset ?? null,
+          scrollTop: measured.scrollTop,
+          isAtBottom: measured.isAtBottom
+        },
+        undefined,
+        opts
+      )
       if (!commit) {
         return false
       }
@@ -2300,7 +2349,14 @@ const Messages = ({
   // user input to become stable. Top-selector path only; the divider path
   // keeps its own capture commit untouched.
   const commitDisplayedStableWithAnchor = useCallback(
-    (tid: string, route: string | null, epoch: number, anchorId: string, wantOffset: number | null): boolean => {
+    (
+      tid: string,
+      route: string | null,
+      epoch: number,
+      anchorId: string,
+      wantOffset: number | null,
+      opts?: { savedBottomIntent?: boolean }
+    ): boolean => {
       if (unmountedRef.current) {
         return false
       }
@@ -2329,28 +2385,42 @@ const Messages = ({
       } catch {
         atBottom = false
       }
-      const { commit } = controller.commitStable(epoch, {
-        messageId: anchorId,
-        intraRowOffset: wantOffset,
-        scrollTop,
-        isAtBottom: atBottom
-      })
+      const { commit } = controller.commitStable(
+        epoch,
+        {
+          messageId: anchorId,
+          intraRowOffset: wantOffset,
+          scrollTop,
+          isAtBottom: atBottom
+        },
+        undefined,
+        opts
+      )
       if (!commit) {
         return false
       }
       // The transition owner already placed the anchor at `wantOffset` with this
       // exact `scrollTop`: publish the pair so the keeper's first post-release
       // observation holds layout growth against the committed position.
-      publishAnchorSample({ topicId: tid, route }, { messageId: anchorId, intraRowOffset: wantOffset, scrollTop })
+      // Persist the COMMITTED snapshot (not the requested identity): a forced
+      // bottom commit stores null/null/true, never the row.
+      publishAnchorSample(
+        { topicId: tid, route },
+        {
+          messageId: commit.snapshot.messageId,
+          intraRowOffset: commit.snapshot.intraRowOffset,
+          scrollTop: commit.snapshot.scrollTop
+        }
+      )
       let stored = false
       try {
         stored = commitSnapshotForRoute(commit.routeKey, {
-          scrollTop,
-          anchorId,
-          messageId: anchorId,
-          intraRowOffset: wantOffset,
-          rawScrollTop: scrollTop,
-          isAtBottom: atBottom
+          scrollTop: commit.snapshot.scrollTop,
+          anchorId: commit.snapshot.messageId,
+          messageId: commit.snapshot.messageId,
+          intraRowOffset: commit.snapshot.intraRowOffset,
+          rawScrollTop: commit.snapshot.scrollTop,
+          isAtBottom: commit.snapshot.isAtBottom
         })
       } catch {
         stored = false
@@ -5108,12 +5178,16 @@ const Messages = ({
    */
   useEffect(() => {
     const pendingAtEffect = getPendingNavigate()
+    // Decision-time saved source (single read): the bootstrap session and the
+    // final stable commit reuse THIS object, never a live re-read that a
+    // mid-flight write may have overwritten.
+    const savedAtDecision = savedRestoreHandledRef.current ? null : getSavedPosition()
     const decision = resolveBootstrapDecision({
       phase: bootstrapPhaseRef.current,
       isTopicReadBusy,
       topicId: topic.id,
       pending: pendingAtEffect,
-      savedPosition: savedRestoreHandledRef.current ? null : getSavedPosition(),
+      savedPosition: savedAtDecision,
       savedRestoreHandled: savedRestoreHandledRef.current
     })
 
@@ -5328,13 +5402,10 @@ const Messages = ({
     // reveal lands precisely; the transaction scroll afterwards converges.
     // Same-route fallback only: the target's own saved scrollTop, never
     // outgoing geometry. No snapshot → deterministic default below.
-    const savedForPlan = (() => {
-      try {
-        return getSavedPosition()
-      } catch {
-        return null
-      }
-    })()
+    // Decision-time saved source only (never a live re-read): the restore
+    // session, the first-position plan offsets, and the final stable commit
+    // below all reuse the same object decided above.
+    const savedForPlan = savedAtDecision
     const restorePlan: ViewportFirstPositionPlan =
       decision.intent.kind === 'bottom'
         ? { kind: 'bottom' }
@@ -5353,8 +5424,11 @@ const Messages = ({
             ? { kind: 'scrollTop', scrollTop: decision.intent.scrollTop }
             : { kind: 'bottom' }
     // Fetch-hold only (see pending path above): the restore plan is
-    // committed after the navigation completes, same session.
-    const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, routeRef.current)
+    // committed after the navigation completes, same session. The session
+    // carries the decision-time saved source (normalized to the controller
+    // snapshot shape); the pending path above carries none, so explicit
+    // search/jump can never masquerade as a saved restore.
+    const bootstrapRestoreEpoch = beginBootstrapFetch(topic.id, routeRef.current, toBootstrapSessionSaved(savedForPlan))
     // Immutable requested restore target: the identity + finite desired
     // offset captured from the plan BEFORE the async navigate. The
     // completion below must align + verify THIS row's geometry and commit
@@ -5513,12 +5587,18 @@ const Messages = ({
             }
             controller.revealed(bootstrapRestoreEpoch)
             notifyViewport()
+            // Final bootstrap restore commit: thread the SAME decision-time
+            // saved-bottom source as explicit commit context. The controller
+            // additionally verifies the session-carried source, so an explicit
+            // pending navigation (no saved source) can never force bottom here.
+            const restoreBottomIntent = isSavedBottomIntent(savedForPlan)
             const anchoredCommitted = commitDisplayedStableWithAnchor(
               topic.id,
               routeRef.current,
               bootstrapRestoreEpoch,
               requestedRestoreId,
-              requestedRestoreOffset
+              requestedRestoreOffset,
+              { savedBottomIntent: restoreBottomIntent }
             )
             if (!anchoredCommitted && controller.isSessionCurrent(bootstrapRestoreEpoch)) {
               failVisibleTransition(bootstrapRestoreEpoch)
@@ -5527,7 +5607,9 @@ const Messages = ({
           }
           controller.revealed(bootstrapRestoreEpoch)
           notifyViewport()
-          commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
+          commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch, {
+            savedBottomIntent: isSavedBottomIntent(savedForPlan)
+          })
         } else {
           failVisibleTransition(bootstrapRestoreEpoch)
         }
@@ -6651,6 +6733,13 @@ const Messages = ({
     } catch {
       compensationEcho = false
     }
+    // Programmatic echo early return: the controller's own receipt is app
+    // movement in the same family as suppressUserWriteRef/programmaticOwned
+    // programmatic scrolls — never capture/adopt a takeover and never page
+    // from it, even with a live gesture session (the session itself is
+    // untouched, so continued genuine input still takes over/pages). Genuine
+    // user scrolls (echo false) keep the existing path below unchanged.
+    if (shouldSkipScrollForCompensationEcho(compensationEcho)) return
     if (!suppressUserWriteRef.current) {
       const liveToken = controller.activeInteractionToken
       if (liveToken !== null) {
@@ -8730,11 +8819,12 @@ const Messages = ({
   // paths that bypass the selector, then holds fetch-gap ownership so the
   // still-visible outgoing viewport can never write under the incoming key.
   // Never overwrite the NEW route's snapshot here. The target window is read
-  // per the NEW route's own saved browsing position: valid canonical anchor
-  // (messageId, legacy anchorId fallback) → around it even when isAtBottom;
-  // no usable anchor → deterministic route-local default (latest + tail
-  // below, bottom when isAtBottom). Never a bottom jump when an anchor is
-  // unless the saved position is at bottom, never outgoing raw scrollTop,
+  // per the NEW route's own saved browsing position: a saved bottom intent
+  // (`isAtBottom`, the user's explicit bottom intent) outranks any saved row
+  // anchor → deterministic route-local default (latest + tail below,
+  // resolving to the physical bottom); otherwise a valid canonical anchor
+  // (messageId, legacy anchorId fallback) → around it. Never a bottom jump
+  // when a non-bottom anchor is saved, never outgoing raw scrollTop,
   // never a topic transition. Divider-initiated switches claim
   // loadedRouteRef first and never enter this path.
   //
@@ -8815,12 +8905,16 @@ const Messages = ({
       return
     }
     const retainedLiveForPre = controller.getAnchorFor({ topicId: tidForPre, route: routeForPre })
-    const useRetainedForPre =
-      retainedLiveForPre !== null &&
-      retainedLiveForPre.kind === 'message' &&
-      controller.displayedRoute.topicId === tidForPre &&
-      controller.displayedRoute.route === routeForPre
-    if (useRetainedForPre && retainedLiveForPre.kind === 'message') {
+    // Saved bottom intent refuses the row override (physical bottom, never a
+    // row); otherwise same-route provenance only, as the fetch path below.
+    const useRetainedForPre = shouldUseRetainedAnchorOverride({
+      retainedLive: retainedLiveForPre,
+      displayed: controller.displayedRoute,
+      targetTopicId: tidForPre,
+      targetRoute: routeForPre,
+      saved: savedForPre
+    })
+    if (useRetainedForPre && retainedLiveForPre?.kind === 'message') {
       savedForPre = {
         scrollTop: typeof savedForPre?.scrollTop === 'number' ? savedForPre.scrollTop : 0,
         anchorId: retainedLiveForPre.messageId,
@@ -8830,7 +8924,10 @@ const Messages = ({
         isAtBottom: false
       }
     }
-    const anchorForPre = canonicalSavedAnchorId(savedForPre)
+    // Saved bottom intent resolves to null (physical bottom) and outranks
+    // the saved row anchor: the pre-paint continuation below takes the
+    // anchorless bottom lane instead of the row lane (same as in-place).
+    const anchorForPre = isSavedBottomIntent(savedForPre) ? null : canonicalSavedAnchorId(savedForPre)
     const wantOffsetForPre =
       typeof savedForPre?.intraRowOffset === 'number' && Number.isFinite(savedForPre.intraRowOffset)
         ? savedForPre.intraRowOffset
@@ -8928,8 +9025,12 @@ const Messages = ({
       return
     }
     const preCommitted = anchorForPre
-      ? commitDisplayedStableWithAnchor(tidForPre, routeForPre, preEpoch, anchorForPre, wantOffsetForPre)
-      : commitDisplayedStable(tidForPre, routeForPre, preEpoch)
+      ? commitDisplayedStableWithAnchor(tidForPre, routeForPre, preEpoch, anchorForPre, wantOffsetForPre, {
+          savedBottomIntent: isSavedBottomIntent(savedForPre)
+        })
+      : commitDisplayedStable(tidForPre, routeForPre, preEpoch, {
+          savedBottomIntent: isSavedBottomIntent(savedForPre)
+        })
     if (!preCommitted && controller.isSessionCurrent(preEpoch)) {
       failVisibleTransition(preEpoch)
     }
@@ -9082,12 +9183,16 @@ const Messages = ({
     // requesting A) returns null and the target's own persisted snapshot
     // wins. Never infer route from displayed alone.
     const retainedLiveAnchor = controller.getAnchorFor({ topicId: topicIdAtEffect, route: routeAtEffect })
-    const useRetainedAnchor =
-      retainedLiveAnchor !== null &&
-      retainedLiveAnchor.kind === 'message' &&
-      controller.displayedRoute.topicId === topicIdAtEffect &&
-      controller.displayedRoute.route === routeAtEffect
-    if (useRetainedAnchor && retainedLiveAnchor.kind === 'message') {
+    // Saved bottom intent refuses the row override (physical bottom, never a
+    // row); otherwise same-route provenance only, as the pre-paint site above.
+    const useRetainedAnchor = shouldUseRetainedAnchorOverride({
+      retainedLive: retainedLiveAnchor,
+      displayed: controller.displayedRoute,
+      targetTopicId: topicIdAtEffect,
+      targetRoute: routeAtEffect,
+      saved
+    })
+    if (useRetainedAnchor && retainedLiveAnchor?.kind === 'message') {
       saved = {
         scrollTop: typeof saved?.scrollTop === 'number' ? saved.scrollTop : 0,
         anchorId: retainedLiveAnchor.messageId,
@@ -9148,7 +9253,10 @@ const Messages = ({
         const retainedIds = new Set((retainedWindow?.displayMessages ?? []).map((m) => m.id))
         const loadedList = messagesRef.current
         const loadedIds = new Set(loadedList.map((m) => m.id))
-        const anchorForInPlace = canonicalSavedAnchorId(saved)
+        // Saved bottom intent resolves to null (physical bottom) and outranks
+        // the saved row anchor: the in-place path below takes the anchorless
+        // bottom lane instead of the row lane.
+        const anchorForInPlace = isSavedBottomIntent(saved) ? null : canonicalSavedAnchorId(saved)
         const displayedAtEffect = controller.displayedRoute
         const domResidentForInPlace = anchorForInPlace ? getMessageRowById(anchorForInPlace) !== null : true
         const inPlaceEligible = shouldRestoreRetainedWindowInPlace({
@@ -9355,7 +9463,8 @@ const Messages = ({
                     routeAtEffect,
                     inPlaceRestoreEpoch,
                     anchorForInPlace,
-                    identityOffset
+                    identityOffset,
+                    { savedBottomIntent: isSavedBottomIntent(saved) }
                   )
                   if (!inPlaceCommitted) {
                     if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
@@ -9385,7 +9494,10 @@ const Messages = ({
                   const inPlaceBottomCommitted = commitDisplayedStable(
                     topicIdAtEffect,
                     routeAtEffect,
-                    inPlaceRestoreEpoch
+                    inPlaceRestoreEpoch,
+                    {
+                      savedBottomIntent: isSavedBottomIntent(saved)
+                    }
                   )
                   if (!inPlaceBottomCommitted) {
                     if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
@@ -9438,10 +9550,13 @@ const Messages = ({
     void (async () => {
       // Exclusive-anchor restore contract (route-local stable viewport):
       // - Canonical saved anchor is `messageId` (legacy `anchorId` fallback).
-      // - Valid anchor → around it; the returned window/projection must
-      //   contain it before any placement/stable commit. A delayed
-      //   projection/DOM commit is awaited (bounded); never an immediate
-      //   vicinity/tail/raw fallback.
+      // - Saved bottom intent (`isAtBottom`: the user's explicit bottom
+      //   intent) outranks any saved anchor → latest read resolving to the
+      //   physical bottom; otherwise a valid anchor → around it. The
+      //   returned window/projection must contain the requested anchor
+      //   before any placement/stable commit. A delayed projection/DOM
+      //   commit is awaited (bounded); never an immediate vicinity/tail/raw
+      //   fallback.
       // - Typed NOT_FOUND/out-of-route/deleted → saved snapshot invalid for
       //   this route: explicit route-local terminal default (latest). Only
       //   after that default is placed/stable may it replace the stale
@@ -9618,8 +9733,10 @@ const Messages = ({
         // Requested-anchor coverage gate: a valid saved anchor must be in
         // both the returned window and the rebased projection. Partial
         // windows are valid only when they cover the anchor; full route
-        // materialization is never required.
-        if (canonicalAnchor && !snapshotInvalidForRoute) {
+        // materialization is never required. A saved bottom intent skips
+        // this gate: the restore resolves to the physical bottom (latest
+        // read), never the row, so anchor coverage is not required.
+        if (canonicalAnchor && !snapshotInvalidForRoute && !isSavedBottomIntent(saved)) {
           const windowIds = new Set(
             (topReceipt.response.messages ?? []).map((m) => (m as unknown as { id: string }).id)
           )
@@ -9633,13 +9750,15 @@ const Messages = ({
           }
         }
         // Route-saved-row-anchor (pure decision helper): canonical messageId
-        // with legacy anchorId alias; contextAnchor never feeds this. Valid
-        // snapshots never fall to vicinity/tail/raw. Empty routes atomically
-        // clear (no old-route residual).
+        // with legacy anchorId alias; contextAnchor never feeds this. A saved
+        // bottom intent resolves to null (physical bottom) and outranks the
+        // row anchor; otherwise valid snapshots never fall to vicinity/tail/
+        // raw. Empty routes atomically clear (no old-route residual).
         const anchorDecision = decideTopRestoreAnchor({
           canonicalAnchor,
           snapshotInvalidForRoute,
-          loadedIds
+          loadedIds,
+          savedIsAtBottom: isSavedBottomIntent(saved)
         })
         if (anchorDecision.mustFailVisible) {
           loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
@@ -9647,7 +9766,7 @@ const Messages = ({
           return
         }
         const routeSavedRowAnchor = anchorDecision.routeSavedRowAnchor
-        if (canonicalAnchor && !snapshotInvalidForRoute && !routeSavedRowAnchor) {
+        if (canonicalAnchor && !snapshotInvalidForRoute && !routeSavedRowAnchor && !isSavedBottomIntent(saved)) {
           loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
           failVisibleTransition(fetchEpoch)
           return
@@ -9811,13 +9930,14 @@ const Messages = ({
           // lives ONLY in that layout effect; the async continuation below
           // runs the bounded stabilizer for post-reveal drift (message
           // restores) or simply releases (bottom/same-route-raw restores).
-          // Route-local plans only: valid saved message → message + intra-row
-          // offset (even when isAtBottom) with NO missing-row fallback (a
-          // missing row with a valid anchor fails visible and preserves the
-          // snapshot — intermediate raw geometry never poses as stable);
-          // invalid snapshot → deterministic route-local default (`bottom` on
-          // the latest window, placed pre-paint then committable after
-          // stable); no usable
+          // Route-local plans only: saved bottom intent (the user's explicit
+          // bottom intent) → bottom, outranking any saved row anchor;
+          // otherwise a valid saved message → message + intra-row offset
+          // with NO missing-row fallback (a missing row with a valid anchor
+          // fails visible and preserves the snapshot — intermediate raw
+          // geometry never poses as stable); invalid snapshot →
+          // deterministic route-local default (`bottom` on the latest window,
+          // placed pre-paint then committable after stable); no usable
           // anchor + isAtBottom → bottom; raw-only legacy snapshot
           // (no anchor) → same-route scrollTop; no snapshot → deterministic
           // route-local default (`bottom`). Never outgoing geometry.
@@ -9844,11 +9964,12 @@ const Messages = ({
         }
         // Route-local restore, post-reveal only (never first placement):
         // message → fold-reveal when hidden + bounded stabilizer for late
-        // layout drift (even when isAtBottom: exact anchor + offset outranks
-        // bottom vicinity); anchorless isAtBottom → already at bottom
-        // pre-paint, nothing more; same-route raw scrollTop → already set
-        // deterministic bottom default (including the invalid-snapshot
-        // path) → already at bottom pre-paint.
+        // layout drift (a saved bottom intent never takes this lane: it
+        // resolves to the anchorless bottom plan upstream); anchorless
+        // isAtBottom → already at bottom pre-paint, nothing more;
+        // same-route raw scrollTop → already set; deterministic bottom
+        // default (including the invalid-snapshot path) → already at bottom
+        // pre-paint.
         // Target validity is the restore epoch (topic/route/mounted/epoch),
         // never `canHandleUserViewportScroll` (the programmatic token below
         // closes that gate by design and would self-cancel).
@@ -9868,10 +9989,12 @@ const Messages = ({
           })
         // Stable-commit gate (pure helper): a valid requested anchor must be
         // covered/resident and post-alignment quiet (stabilizer below) before
-        // it may become the route snapshot — even when isAtBottom. Terminal
+        // it may become the route snapshot. A saved bottom intent never
+        // presents a requested anchor (resolved to null upstream), so the
+        // gate's anchor branch only serves non-bottom restores. Terminal
         // defaults (invalid snapshot) and anchorless bottom restores carry no
         // anchor requirement; an unmet valid anchor fails visible and
-        // valid anchor fails visible and preserves the prior snapshot.
+        // preserves the prior snapshot.
         const isTopAnchorCommittable = (): boolean => {
           let projectionContains = false
           try {
@@ -10065,10 +10188,13 @@ const Messages = ({
                   routeAtEffect,
                   topRestoreEpoch,
                   routeSavedRowAnchor,
-                  identityOffset
+                  identityOffset,
+                  { savedBottomIntent: isSavedBottomIntent(saved) }
                 )
               } else {
-                topCommitted = commitDisplayedStable(topicIdAtEffect, routeAtEffect, topRestoreEpoch)
+                topCommitted = commitDisplayedStable(topicIdAtEffect, routeAtEffect, topRestoreEpoch, {
+                  savedBottomIntent: isSavedBottomIntent(saved)
+                })
               }
               // Bounded rejection: a CURRENT owner's rejected stable commit
               // must not stay hidden (fail-visible preserving snapshot/release

@@ -17,7 +17,14 @@
  */
 
 import { distanceFromBottom, type FlowScrollMetrics, maxScrollTop, readScrollMetrics } from './flowScrollGeometry'
-import type { RouteId, RouteViewportController, RouteViewportSnapshot } from './routeViewportController'
+import {
+  isSavedBottomIntent,
+  type RouteId,
+  type RouteRef,
+  type RouteViewportController,
+  type RouteViewportSnapshot,
+  type RouteVisualAnchor
+} from './routeViewportController'
 
 /**
  * TOP-pipeline intent isolation (narrow, TOP-specific): true only when a
@@ -245,6 +252,32 @@ export const shouldContinueRetainedViewport = (input: RetainedContinuationInput)
   if (!shouldRestoreRetainedWindowInPlace(input)) return false
   if (input.canonicalAnchor) return input.wantOffsetFinite
   return input.isAtBottom
+}
+
+/**
+ * Rapid-return retained-anchor override (pure, TOP-only): the live anchor is
+ * observable for the incoming target solely when its provenance already
+ * equals the target (proven same-route) — a foreign live anchor never
+ * overrides the target's own persisted snapshot. A saved bottom intent
+ * (`isAtBottom`: the user's explicit bottom intent) always refuses the row
+ * override: bottom intent resolves to the physical bottom, never a row.
+ */
+export interface RetainedAnchorOverrideInput {
+  retainedLive: RouteVisualAnchor | null
+  displayed: RouteRef
+  targetTopicId: string
+  targetRoute: RouteId
+  saved: { isAtBottom: boolean } | null | undefined
+}
+
+export const shouldUseRetainedAnchorOverride = (input: RetainedAnchorOverrideInput): boolean => {
+  if (isSavedBottomIntent(input.saved)) return false
+  return (
+    input.retainedLive !== null &&
+    input.retainedLive.kind === 'message' &&
+    input.displayed.topicId === input.targetTopicId &&
+    input.displayed.route === input.targetRoute
+  )
 }
 
 /**
